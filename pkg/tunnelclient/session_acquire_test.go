@@ -43,6 +43,9 @@ func (s *closeCountingSession) GoAwayReceived() <-chan struct{} { return nil }
 // is sent leaves it open; the request's release then closes it.
 func TestAcquireCurrentHoldsSessionAcrossReplacement(t *testing.T) {
 	ls1, ls2 := newCloseCountingSession(), newCloseCountingSession()
+	// setCurrent starts a watch goroutine per session; ending the sessions
+	// at cleanup lets them return.
+	t.Cleanup(func() { close(ls1.done); close(ls2.done) })
 	s1, s2 := &session{ls: ls1}, &session{ls: ls2}
 	c := &client{cfg: Config{Endpoint: "https://hub.example.com"}, tunnels: map[*tunnelEntry]struct{}{}}
 	c.setCurrent(s1)
