@@ -136,6 +136,16 @@ func ConfigResolutionFrom(ctx context.Context) bool {
 	return v
 }
 
+// WithoutResolution returns ctx with any WithConfigResolution and
+// WithDispatchResult marks masked, for a writer whose writes are never
+// config resolution whatever its caller's context carries (UpdateAgentConfig:
+// held config edits are requested values, so a change they commit is
+// metadata_changed, never configured).
+func WithoutResolution(ctx context.Context) context.Context {
+	ctx = context.WithValue(ctx, configResolutionKey{}, false)
+	return context.WithValue(ctx, dispatchResultKey{}, nil)
+}
+
 // Start-outcome annotations of a status write (design 2.4a step 3).
 const (
 	// StartOutcomeRestartFailed: recordRestartStopped, after a confirmed

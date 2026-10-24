@@ -28,6 +28,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/lifecycleevents"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	tc "github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetryemit"
@@ -251,5 +252,36 @@ func TestLifecycleHeldConfig_PayloadCarriesNoRawConfig(t *testing.T) {
 		for _, banned := range []string{heldSecret, "API_TOKEN", "user:u1", `"env"`, "pending"} {
 			assert.NotContains(t, p, banned, "event %d carries %q", r.TransitionRevision, banned)
 		}
+	}
+}
+
+// TestLifecycleHeldConfig_MarkedContextNeverConfigured: "never configured"
+// is structural (upmerge2 r1 O1). A caller context carrying a
+// config-resolution mark or a sync dispatch result does not make the fold a
+// config-resolution write: it is still exactly one metadata_changed.
+func TestLifecycleHeldConfig_MarkedContextNeverConfigured(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		mark func(context.Context) context.Context
+	}{
+		{"WithConfigResolution", lifecycleevents.WithConfigResolution},
+		{"WithDispatchResult", func(ctx context.Context) context.Context {
+			return lifecycleevents.WithDispatchResult(ctx, lifecycleevents.DispatchResult{BrokerEvidence: true})
+		}},
+		{"both", func(ctx context.Context) context.Context {
+			return lifecycleevents.WithDispatchResult(lifecycleevents.WithConfigResolution(ctx), lifecycleevents.DispatchResult{BrokerEvidence: true})
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f, a := newHeldFixture(t, "held-marked")
+			ctx := tt.mark(context.Background())
+			before := heldStateOf(t, f, a.ID)
+			_, err := f.cs.UpdateAgentConfig(ctx, a.ID, heldVersion(t, f, a.ID), heldApplied("m-b"), nil)
+			require.NoError(t, err)
+			assert.Equal(t, before.rows+1, heldStateOf(t, f, a.ID).rows, "exactly one event")
+			evs := f.events(a.ID)
+			assert.Zero(t, countTransitions(evs, tc.TransitionConfigured), "a marked context must not make it configured: %s", lcFull(evs))
+			assert.Equal(t, 1, countTransitions(evs, tc.TransitionMetadataChanged), lcFull(evs))
+		})
 	}
 }

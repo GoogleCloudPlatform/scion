@@ -38,6 +38,10 @@ var lifecycleCloudHandler *logging.ResilientCloudHandler
 // enabled, for the lifecycle counters and gauges.
 var lifecycleMeterProvider metric.MeterProvider
 
+// newLifecycleCloudSink builds the Cloud Logging lifecycle sink; a test seam,
+// replaced only by tests (with a t.Cleanup restore).
+var newLifecycleCloudSink = telemetryemit.NewCloudLoggingSink
+
 // lifecycleSinkEnvironment gathers the sink selection inputs (design
 // section 22 item 4).
 func lifecycleSinkEnvironment(cfg *config.GlobalConfig, devAuth bool) lifecycleevents.SinkEnvironment {
@@ -76,7 +80,7 @@ func wireLifecycleEventsSink(hubSrv *hub.Server, cfg *config.GlobalConfig, devAu
 	var sink telemetryemit.Sink
 	switch lifecycleevents.SelectSinkKind(lifecycleSinkEnvironment(cfg, devAuth)) {
 	case telemetryemit.SinkKindCloudLogging:
-		sink = telemetryemit.NewCloudLoggingSink(lifecycleCloudHandler.Client(), lifecycleCloudHandler.CircuitOpen)
+		sink = newLifecycleCloudSink(lifecycleCloudHandler.Client(), lifecycleCloudHandler.CircuitOpen)
 	case telemetryemit.SinkKindStdout:
 		sink = telemetryemit.NewStdoutSink(os.Stdout)
 	}

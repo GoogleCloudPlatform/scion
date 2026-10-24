@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
+	"github.com/GoogleCloudPlatform/scion/pkg/lifecycleevents"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/agentsort"
 )
@@ -2170,7 +2171,11 @@ func (s *AgentStore) UpdateAgentConfig(ctx context.Context, agentID string, expe
 	}
 	var affected int
 	if obs := s.lifecycle.load(); obs != nil {
-		affected, err = s.observedAgentWrite(ctx, obs, uid, store.AgentWriteUpdate, store.AgentWriteHints{},
+		// Never config resolution, whatever the caller's context carries:
+		// a held edit is a requested value (metadata_changed, never
+		// configured; WP1 upmerge-2 ruling A).
+		octx := lifecycleevents.WithoutResolution(ctx)
+		affected, err = s.observedAgentWrite(octx, obs, uid, store.AgentWriteUpdate, store.AgentWriteHints{},
 			func(c *ent.Client) (int, error) { return write(c.Agent) })
 	} else {
 		affected, err = write(s.client.Agent)
