@@ -49,14 +49,22 @@ type settleHookStore struct {
 	releaseErr   error
 	countWrites  atomic.Bool
 	statusWrites atomic.Int32
+	// brokerDefID, when set, limits the hooks to the settle's broker
+	// release: the project release beside it has the same shape.
+	brokerDefID string
+	// failNextGetAgent, while set, makes the next armed read of agentID
+	// fail once (the settle's re-read after its release).
+	failNextGetAgent atomic.Bool
 }
 
 func (h *settleHookStore) ReleaseReservationIfAgent(ctx context.Context, limitDefID, agentID string, cond store.AgentReleaseCond) (bool, error) {
-	// The settle's call is the only conditional release with neither
-	// NoStartKindClaim nor NotCounted (the observed-phase release,
-	// releaseSlotIfIdle and the sweep all set at least one), so a mutant that
-	// changes the settle's queued-stop condition still reaches the hooks.
-	if !h.fault.Active() || agentID != h.agentID || cond.NoStartKindClaim || cond.NotCounted {
+	// The settle's broker and project calls are the only conditional
+	// releases with neither NoStartKindClaim nor NotCounted (the
+	// observed-phase release, releaseSlotIfIdle and the sweep all set at
+	// least one), so a mutant that changes the settle's queued-stop condition
+	// still reaches the hooks; brokerDefID selects the broker one.
+	if !h.fault.Active() || agentID != h.agentID || cond.NoStartKindClaim || cond.NotCounted ||
+		(h.brokerDefID != "" && limitDefID != h.brokerDefID) {
 		return h.Store.ReleaseReservationIfAgent(ctx, limitDefID, agentID, cond)
 	}
 	if h.releaseErr != nil {
@@ -72,6 +80,13 @@ func (h *settleHookStore) ReleaseReservationIfAgent(ctx context.Context, limitDe
 		f()
 	}
 	return released, err
+}
+
+func (h *settleHookStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if h.fault.Active() && id == h.agentID && h.failNextGetAgent.CompareAndSwap(true, false) {
+		return nil, errProbeFault
+	}
+	return h.Store.GetAgent(ctx, id)
 }
 
 func (h *settleHookStore) UpdateAgentStatus(ctx context.Context, id string, su store.AgentStatusUpdate) error {
@@ -108,6 +123,7 @@ func newSettleFixture(t *testing.T, slug string) *settleFixture {
 	slot := seedSlot(t, f.s, f.brokerID, a.ID)
 	at := queueStop(t, f, a, "")
 	hook.agentID = a.ID
+	hook.brokerDefID = brokerLimitDefID(t, f.s)
 	return &settleFixture{
 		reconcileFixture: f, hook: hook, fault: fault, disp: d, agent: getAgent(t, f.s, a.ID),
 		intentAt: at, slot: slot, backstops: backstopCounter(t, f.srv),

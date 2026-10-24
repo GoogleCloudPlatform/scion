@@ -237,10 +237,12 @@ func (d *swappableStartDispatcher) DispatchAgentStart(ctx context.Context, agent
 	return d.quotaLifecycleDispatcher.DispatchAgentStart(ctx, agent, task, resume)
 }
 
-// ptone/scion#1978: the per-project agent reservation lasts as long as the
-// agent exists. Releasing the broker slot (stop, suspend, failed-start
-// rollback) must not release it; delete releases both.
-func TestProjectQuota_KeptAcrossBrokerReleases_ReleasedOnDelete(t *testing.T) {
+// ptone/scion#6033: the per-project agent reservation follows the same
+// lifecycle as the broker one. Stop and suspend release both; a start
+// reserves both again; a failed start rolls back both, since it created
+// them; delete releases both. (Before ptone/scion#6033 the project
+// reservation lasted as long as the agent, ptone/scion#1978.)
+func TestProjectQuota_FollowsBrokerLifecycle(t *testing.T) {
 	disp := &swappableStartDispatcher{}
 	srv, s, project := setupCreateAgentServer(t, disp)
 	srv.SetDispatcher(disp)
@@ -252,7 +254,7 @@ func TestProjectQuota_KeptAcrossBrokerReleases_ReleasedOnDelete(t *testing.T) {
 	require.NoError(t, err)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
-		Name: "project-quota-keep", ProjectID: project.ID,
+		Name: "project-quota-lifecycle", ProjectID: project.ID,
 	})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	var created CreateAgentResponse
@@ -269,22 +271,25 @@ func TestProjectQuota_KeptAcrossBrokerReleases_ReleasedOnDelete(t *testing.T) {
 
 	post("stop")
 	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, id), "stop releases the broker slot")
-	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, id), "stop keeps the project reservation")
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, id), "stop releases the project slot")
 
 	post("start")
 	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, id))
-	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, id))
+	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, id), "start reserves the project slot again")
 
 	post("suspend")
 	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, id))
-	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, id), "suspend keeps the project reservation")
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, id), "suspend releases the project slot")
 
 	disp.failStart = true
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+id+"/start", nil)
 	require.GreaterOrEqual(t, rec.Code, 500, rec.Body.String())
 	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, id), "failed start rolls back the new broker slot")
-	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, id), "rollback keeps the project reservation")
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, id), "failed start rolls back the new project slot")
 
+	disp.failStart = false
+	post("start")
+	require.True(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, id))
 	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+id, nil)
 	require.Less(t, rec.Code, 300, rec.Body.String())
 	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, id))
