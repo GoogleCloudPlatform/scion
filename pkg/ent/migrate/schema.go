@@ -187,6 +187,7 @@ var (
 		{Name: "task_summary", Type: field.TypeString, Nullable: true},
 		{Name: "message", Type: field.TypeString, Nullable: true},
 		{Name: "applied_config", Type: field.TypeString, Nullable: true, Size: 2147483647},
+		{Name: "pending_config", Type: field.TypeString, Nullable: true, Size: 2147483647},
 		{Name: "harness_config", Type: field.TypeString, Nullable: true},
 		{Name: "ancestry", Type: field.TypeJSON, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
@@ -252,7 +253,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[92]},
+				Columns:    []*schema.Column{AgentsColumns[93]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -271,22 +272,22 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[92]},
+				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[93]},
 			},
 			{
 				Name:    "agent_project_id_owner_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[92], AgentsColumns[8]},
+				Columns: []*schema.Column{AgentsColumns[93], AgentsColumns[8]},
 			},
 			{
 				Name:    "agent_project_id_created_by",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[92], AgentsColumns[7]},
+				Columns: []*schema.Column{AgentsColumns[93], AgentsColumns[7]},
 			},
 			{
 				Name:    "agent_launch_deadline",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[59]},
+				Columns: []*schema.Column{AgentsColumns[60]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "launch_state = 'active'",
 				},
@@ -294,17 +295,17 @@ var (
 			{
 				Name:    "agent_launch_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[50]},
+				Columns: []*schema.Column{AgentsColumns[51]},
 			},
 			{
 				Name:    "agent_runtime_broker_id_run_intent",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[27], AgentsColumns[78]},
+				Columns: []*schema.Column{AgentsColumns[27], AgentsColumns[79]},
 			},
 			{
 				Name:    "agent_start_claim_state_start_claim_lease_until",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[83], AgentsColumns[87]},
+				Columns: []*schema.Column{AgentsColumns[84], AgentsColumns[88]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "start_claim_id IS NOT NULL",
 				},
@@ -2059,6 +2060,8 @@ var (
 		{Name: "acknowledged", Type: field.TypeBool, Default: false},
 		{Name: "dispatch_attempts", Type: field.TypeInt, Default: 0},
 		{Name: "dispatch_outcome", Type: field.TypeString, Default: ""},
+		{Name: "dispatch_reason", Type: field.TypeString, Default: ""},
+		{Name: "next_attempt_at", Type: field.TypeTime, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 	}
 	// NotificationsTable holds the schema information for the "notifications" table.
@@ -2080,7 +2083,7 @@ var (
 			{
 				Name:    "notification_subscriber_type_created",
 				Unique:  false,
-				Columns: []*schema.Column{NotificationsColumns[4], NotificationsColumns[12]},
+				Columns: []*schema.Column{NotificationsColumns[4], NotificationsColumns[14]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "dispatched = false",
 				},
@@ -2353,6 +2356,7 @@ var (
 		{Name: "started_at", Type: field.TypeTime},
 		{Name: "last_seen", Type: field.TypeTime},
 		{Name: "draining", Type: field.TypeBool, Default: false},
+		{Name: "features", Type: field.TypeString, Nullable: true, Size: 2147483647},
 	}
 	// RelayInstancesTable holds the schema information for the "relay_instances" table.
 	RelayInstancesTable = &schema.Table{

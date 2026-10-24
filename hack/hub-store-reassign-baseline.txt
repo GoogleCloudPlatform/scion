@@ -98,7 +98,7 @@ pkg/hub/project_clone_default_broker_test.go | 1
 pkg/hub/project_owner_grant_test.go | 2
 pkg/hub/project_profile_default_sa_test.go | 2
 pkg/hub/provider_localpath_test.go | 1
-pkg/hub/provisioned_start_test.go | 2
+pkg/hub/provisioned_start_test.go | 1
 pkg/hub/pty_conduit_test.go | 2
 pkg/hub/publish_guard_test.go | 4
 pkg/hub/queued_stop_delete_test.go | 1
@@ -119,7 +119,7 @@ pkg/hub/scheduled_authority_test.go | 3
 pkg/hub/scheduled_message_authority_test.go | 1
 pkg/hub/start_claim_reaper_test.go | 2
 pkg/hub/start_claim_test.go | 4
-pkg/hub/start_claim_wiring_test.go | 8
+pkg/hub/start_claim_wiring_test.go | 7
 pkg/hub/start_final_read_delete_won_test.go | 6
 pkg/hub/store_fault_helpers_test.go | 2
 pkg/hub/user_delete_data_test.go | 14

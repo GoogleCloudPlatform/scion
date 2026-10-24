@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -293,8 +294,8 @@ func deepCopyScionConfig(cfg *api.ScionConfig) *api.ScionConfig {
 // sets template ID, hash, and hub access scopes from the resolved template.
 //
 // It returns an error only when the project workspace path could not be
-// resolved because workspace storage did not respond (wraps
-// errWorkspaceContentTimeout). Creating the agent anyway would leave
+// resolved because workspace storage is unavailable (wraps
+// errWorkspaceStorageUnavailable). Creating the agent anyway would leave
 // Workspace empty, and the broker would fall back to the legacy local
 // project path: the agent would run against the wrong workspace. Every other
 // failure here stays best-effort.
@@ -323,16 +324,41 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	// verbatim -- the broker will resolve it against its own project root.
 	// Empty-per-agent projects are skipped: Workspace stays empty and the
 	// broker provisions a private per-agent directory (design #2703 §2.1).
-	if syncsHubProjectWorkspace(project) {
+	if mountsHubProjectWorkspace(project) {
 		existingWorkspace := agent.AppliedConfig.Workspace
 		if existingWorkspace == "" {
-			workspacePath, err := s.hubManagedProjectPath(project.Slug)
-			if err != nil {
-				if errors.Is(err, errWorkspaceContentTimeout) {
+			resolved, err := s.projectWorkspaceResolved(project)
+			switch {
+			case err != nil:
+				if errors.Is(err, errWorkspaceStorageUnavailable) {
 					return err
 				}
-			} else {
-				agent.AppliedConfig.Workspace = workspacePath
+			case s.remoteBrokerWithoutProjectPath(ctx, project, agent.RuntimeBrokerID):
+				// A remote broker with no local path for the project
+				// resolves the workspace itself: on the hub's shared
+				// storage through its own mount of the share (its
+				// workspace backend places the agent on the project's
+				// leaf); for a non-git project on a local-backend hub in
+				// its own project directory, populated by the CLI
+				// workspace bootstrap (the linked non-git exception). The hub's path
+				// need not exist on that broker, so it is not recorded;
+				// later dispatches are built from this row.
+			default:
+				// On a shared backend the workspace leaf is created here
+				// if missing (the same O_NOFOLLOW EnsureLeaf the brokers
+				// use), so the co-located broker given this path finds
+				// it. The hub used to create its own copy at project
+				// create.
+				if resolved.Backend.Shared() {
+					root, openErr := resolved.Open(true)
+					if openErr != nil {
+						s.projectsLogger().Warn("failed to create the project workspace on shared storage",
+							"project_id", project.ID, "error", openErr)
+						return fmt.Errorf("project workspace: %w", errWorkspaceStorageUnavailable)
+					}
+					_ = root.Close()
+				}
+				agent.AppliedConfig.Workspace = resolved.HostPath
 			}
 		}
 	}
@@ -349,6 +375,16 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 
 	s.resolveDerivedConfig(ctx, agent, project, resolvedTemplate)
 	return nil
+}
+
+// remoteBrokerWithoutProjectPath reports whether brokerID names a remote
+// (non-embedded) runtime broker that has no local path for project.
+func (s *Server) remoteBrokerWithoutProjectPath(ctx context.Context, project *store.Project, brokerID string) bool {
+	if brokerID == "" || s.isEmbeddedBroker(brokerID) {
+		return false
+	}
+	provider, err := s.store.GetProjectProvider(ctx, project.ID, brokerID)
+	return err != nil || provider.LocalPath == ""
 }
 
 // projectCloneSource returns the URL and branch to clone a git-anchored
@@ -425,8 +461,8 @@ func sharedWorkspaceCloneConfig(project *store.Project) *api.GitCloneConfig {
 //     item 2), so a harness-type-only template leaves the slot to the hub
 //     default.
 //
-// It returns populateAgentConfig's error: non-nil only on a workspace storage
-// timeout (errWorkspaceContentTimeout). Callers must not create the agent then.
+// It returns populateAgentConfig's error: non-nil only when workspace
+// storage is unavailable (errWorkspaceStorageUnavailable). Callers must not create the agent then.
 func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) error {
 	// Harness-config resolution: request (already on AppliedConfig.HarnessConfig
 	// from the explicit-inputs setup) > project annotation > template default.

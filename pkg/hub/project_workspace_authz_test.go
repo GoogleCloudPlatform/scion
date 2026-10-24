@@ -62,10 +62,6 @@ func TestProjectWorkspaceAuthz_NonMemberDenied(t *testing.T) {
 			map[string]string{"content": "OWNED"}},
 		{"delete file", http.MethodDelete, base + "/workspace/files/DOOMED.md", nil},
 		{"pull", http.MethodPost, base + "/workspace/pull", nil},
-		{"sync status", http.MethodGet, base + "/sync/status", nil},
-		{"cache status", http.MethodGet, base + "/workspace/cache/status", nil},
-		{"cache refresh", http.MethodPost, base + "/workspace/cache/refresh", nil},
-		{"cache notify", http.MethodPost, base + "/workspace/cache/notify", nil},
 	}
 
 	for _, tc := range cases {

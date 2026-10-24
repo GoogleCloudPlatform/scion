@@ -424,12 +424,8 @@ func TestAgentDelegation_ChainCodesForRowShapesHandlersNeverWrite(t *testing.T) 
 // or canViewAgentEnv, so the delegated arm in those two helpers covers
 // every site.
 func TestAgentEnvVisibility_DecidedOnlyByTheHelpers(t *testing.T) {
-	// pkgmove:scan-covers pkg/hub/apierr
+	// pkgmove:scan-covers guardScanSubdirs
 	// scanned through guardScanSubdirs; guards ResponseView and redactAppliedConfigEnvForResponse call sites.
-	// pkgmove:scan-covers pkg/hub/internal/principal
-	// scanned through guardScanSubdirs; guards ResponseView and redactAppliedConfigEnvForResponse call sites.
-	// pkgmove:scan-covers pkg/hub/maintenance
-	// scanned through guardScanSubdirs once it exists; guards ResponseView and redactAppliedConfigEnvForResponse call sites.
 	files, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	fset := token.NewFileSet()
@@ -440,7 +436,7 @@ func TestAgentEnvVisibility_DecidedOnlyByTheHelpers(t *testing.T) {
 		}
 		src, err := os.ReadFile(name)
 		require.NoError(t, err)
-		if !strings.Contains(string(src), "redactAppliedConfigEnvForResponse") && !strings.Contains(string(src), "ResponseView(") {
+		if !strings.Contains(string(src), "redactAppliedConfigEnvForResponse") && !strings.Contains(string(src), "redactAgentConfigsForResponse") && !strings.Contains(string(src), "ResponseView(") {
 			continue
 		}
 		file, err := parser.ParseFile(fset, name, src, 0)
@@ -460,10 +456,16 @@ func TestAgentEnvVisibility_DecidedOnlyByTheHelpers(t *testing.T) {
 			switch fn {
 			case "ResponseView":
 				t.Errorf("%s: ResponseView called outside agent_env_redaction.go", fset.Position(call.Pos()))
-			case "redactAppliedConfigEnvForResponse":
+			case "redactAppliedConfigEnvForResponse", "redactAgentConfigsForResponse":
+				// The access decision is the last argument: (applied, canAttach)
+				// or (applied, pending, canAttach).
 				sites++
-				require.Len(t, call.Args, 2)
-				inner, ok := call.Args[1].(*ast.CallExpr)
+				want := 2
+				if fn == "redactAgentConfigsForResponse" {
+					want = 3
+				}
+				require.Len(t, call.Args, want)
+				inner, ok := call.Args[want-1].(*ast.CallExpr)
 				helper := ""
 				if ok {
 					switch f := inner.Fun.(type) {
@@ -505,6 +507,7 @@ var storeResponseRedactionCallers = map[string][]string{
 // visibility input.
 func assertStoreResponseRedactionChain(t *testing.T) {
 	t.Helper()
+	// scan-coverage:exempt reads pkg/store only; the pkg/hub sites are scanned through guardScanSubdirs above.
 	files, err := filepath.Glob(filepath.Join("..", "store", "*.go"))
 	require.NoError(t, err)
 	fset := token.NewFileSet()

@@ -544,7 +544,6 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	dispatcher := s.GetDispatcher()
 	stopRunID := agent.RunID
 	if dispatcher != nil && agent.RuntimeBrokerID != "" {
-		s.syncWorkspaceOnStop(ctx, agent)
 		// As for stop: warn about, and record, work in an ephemeral
 		// workspace that the suspend discards (ptone/scion#3819).
 		s.checkEphemeralWorkspaceBeforeStop(ctx, dispatcher, agent, true)
@@ -701,7 +700,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		// success.
 		if deleteStopNoop(agent) {
 			respAgent := *agent
-			respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+			respAgent.AppliedConfig, respAgent.PendingConfig = redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
 			respAgent.Deletion = deletionViewForCaller(agent, time.Now(), callerSeesDeletionDetail(ctx))
 			writeJSON(w, http.StatusOK, &respAgent)
 			return
@@ -880,13 +879,10 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		s.clearExposedPortsForAgent(ctx, agent.ID)
 		stopRunID = agent.RunID
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
-			// The response waits on the workspace sync-back, the ephemeral
-			// workspace check and the stop dispatch: extend this request's
+			// The response waits on the ephemeral workspace check and the
+			// stop dispatch: extend this request's
 			// write deadline to cover them (ptone/scion#4178).
 			extendWriteDeadline(ctx, w, s.config.WriteTimeout, stopWriteBudget())
-			// Before stopping, sync workspace back for hub-managed projects on remote brokers.
-			// This is best-effort: failures are logged but don't block the stop.
-			s.syncWorkspaceOnStop(ctx, agent)
 			// Warn (never block) when an ephemeral workspace holds work
 			// the stop is about to discard (ptone/scion#3819).
 			s.checkEphemeralWorkspaceBeforeStop(ctx, dispatcher, agent, true)
@@ -953,7 +949,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			}
 		}
 		respAgent := *agent
-		respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+		respAgent.AppliedConfig, respAgent.PendingConfig = redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
 		writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent, Warnings: dispatchWarns.Warnings()})
 		return
 	case api.AgentActionRestart:
@@ -1290,7 +1286,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				return
 			}
 			respAgent := *current
-			respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(current.AppliedConfig, canViewAgentEnv(ctx, s, current))
+			respAgent.AppliedConfig, respAgent.PendingConfig = redactAgentConfigsForResponse(current.AppliedConfig, current.PendingConfig, canViewAgentEnv(ctx, s, current))
 			respAgent.Deletion = deletionViewForCaller(current, time.Now(), callerSeesDeletionDetail(ctx))
 			writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent, Warnings: dispatchWarns.Warnings()})
 			return
@@ -1359,7 +1355,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	s.events.PublishAgentStatus(ctx, agent)
 
 	respAgent := *agent
-	respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+	respAgent.AppliedConfig, respAgent.PendingConfig = redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
 	respAgent.Deletion = deletionViewForCaller(agent, time.Now(), callerSeesDeletionDetail(ctx))
 	writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent, Warnings: dispatchWarns.Warnings()})
 }
@@ -1428,7 +1424,7 @@ func (s *Server) queueOfflineStop(ctx context.Context, w http.ResponseWriter, ag
 	s.wakeBrokerDrain(ctx, agent.RuntimeBrokerID)
 
 	respAgent := *agent
-	respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+	respAgent.AppliedConfig, respAgent.PendingConfig = redactAgentConfigsForResponse(agent.AppliedConfig, agent.PendingConfig, canViewAgentEnv(ctx, s, agent))
 	writeJSON(w, http.StatusAccepted, agentLifecycleResponse{Agent: &respAgent, Warnings: []string{offlineStopMessage}})
 }
 
@@ -1808,7 +1804,6 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 				// Each agent collects its own warnings, reported on its
 				// result as a single stop reports them on its response.
 				opCtx, agentWarns := withDispatchWarnings(opCtx)
-				s.syncWorkspaceOnStop(opCtx, agent)
 				// As for a single stop: warn about, and record, work in an
 				// ephemeral workspace that the stop discards
 				// (ptone/scion#3819, ptone/scion#4246). The check runs

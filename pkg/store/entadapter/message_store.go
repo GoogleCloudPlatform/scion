@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -51,6 +53,10 @@ type MessageStore struct {
 	// publisher, when non-nil, is notified after each successful CreateMessage.
 	// See MessagePublisher.
 	publisher MessagePublisher
+	// pendingLogger receives the entered-pending line for a row that took the
+	// schema default dispatch_state (ptone/scion#4827). Nil means
+	// slog.Default(). Tests set it to capture the line.
+	pendingLogger *slog.Logger
 }
 
 // NewMessageStore creates a new Ent-backed MessageStore.
@@ -182,6 +188,9 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 	if msg.Type == "" {
 		create.SetType("instruction")
 	}
+	// An empty DispatchState takes the schema default ("pending"); that row is
+	// logged below once it is persisted.
+	defaulted := msg.DispatchState == ""
 	if msg.DispatchState != "" {
 		create.SetDispatchState(msg.DispatchState)
 	}
@@ -204,6 +213,9 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 	msg.CreatedAt = created.Created
 	msg.Type = created.Type
 	msg.DispatchState = created.DispatchState
+	if defaulted && created.DispatchState == store.MessageDispatchPending {
+		s.logDefaultedPending(msg)
+	}
 
 	// Design-in: announce the new message for LISTEN/NOTIFY subscribers.
 	// Best-effort — a publish failure must not fail the write that succeeded.
@@ -273,23 +285,24 @@ func encodeCursor(created time.Time, id string) string {
 // decodeCursor is the inverse of encodeCursor. It returns the created timestamp and UUID
 // embedded in the cursor, or an error if the cursor is malformed.
 func decodeCursor(cursor string) (time.Time, uuid.UUID, error) {
-	// Every failure wraps store.ErrInvalidInput: a malformed cursor is caller
-	// error, which the hub maps to HTTP 400 rather than 500.
+	// Every failure wraps store.ErrInvalidCursor (and so store.ErrInvalidInput):
+	// a malformed cursor is caller error, which the hub maps to HTTP 400
+	// invalid_cursor rather than 500.
 	raw, err := base64.URLEncoding.DecodeString(cursor)
 	if err != nil {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: base64 decode: %w", store.ErrInvalidInput, err)
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: base64 decode: %w", store.ErrInvalidCursor, err)
 	}
 	parts := strings.SplitN(string(raw), ",", 2)
 	if len(parts) != 2 {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: expected 'timestamp,id' format", store.ErrInvalidInput)
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: expected 'timestamp,id' format", store.ErrInvalidCursor)
 	}
 	ts, err := time.Parse(time.RFC3339Nano, parts[0])
 	if err != nil {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: parse timestamp: %w", store.ErrInvalidInput, err)
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: parse timestamp: %w", store.ErrInvalidCursor, err)
 	}
 	id, err := uuid.Parse(parts[1])
 	if err != nil {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: parse id: %w", store.ErrInvalidInput, err)
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: parse id: %w", store.ErrInvalidCursor, err)
 	}
 	return ts, id, nil
 }
@@ -306,23 +319,24 @@ func encodeListCursor(created time.Time, id, binding string) string {
 }
 
 func decodeListCursor(cursor, binding string) (time.Time, uuid.UUID, error) {
-	// Every failure wraps store.ErrInvalidInput: a malformed or mismatched
-	// cursor is caller error, which the hub maps to HTTP 400 rather than 500.
+	// Every failure wraps store.ErrInvalidCursor (and so store.ErrInvalidInput):
+	// a malformed or mismatched cursor is caller error, which the hub maps to
+	// HTTP 400 invalid_cursor rather than 500.
 	raw, err := base64.URLEncoding.DecodeString(cursor)
 	if err != nil {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: base64 decode: %w", store.ErrInvalidInput, err)
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: base64 decode: %w", store.ErrInvalidCursor, err)
 	}
 	parts := strings.SplitN(string(raw), ",", 3)
 	if len(parts) < 2 || (binding == "" && len(parts) != 2) || (binding != "" && (len(parts) != 3 || parts[2] != binding)) {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: cursor does not match this list", store.ErrInvalidInput)
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: cursor does not match this list", store.ErrInvalidCursor)
 	}
 	ts, err := time.Parse(time.RFC3339Nano, parts[0])
 	if err != nil {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: parse timestamp: %w", store.ErrInvalidInput, err)
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: parse timestamp: %w", store.ErrInvalidCursor, err)
 	}
 	id, err := uuid.Parse(parts[1])
 	if err != nil {
-		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: parse id: %w", store.ErrInvalidInput, err)
+		return time.Time{}, uuid.UUID{}, fmt.Errorf("%w: parse id: %w", store.ErrInvalidCursor, err)
 	}
 	return ts, id, nil
 }
@@ -654,4 +668,22 @@ func (s *MessageStore) CountUnreachableUnbackfilledMessages(ctx context.Context)
 		return 0, mapError(err)
 	}
 	return count, nil
+}
+
+// logDefaultedPending writes the entered-pending line for a row whose writer
+// left DispatchState empty, so the schema default "pending" applied
+// (ptone/scion#4827). Only identifiers and routing fields are logged: never
+// the body, metadata or attachments.
+func (s *MessageStore) logDefaultedPending(msg *store.Message) {
+	log := s.pendingLogger
+	if log == nil {
+		log = slog.Default()
+	}
+	log.Warn(store.MessageEnteredPendingLogMsg,
+		"message_id", msg.ID,
+		"sender", msg.Sender,
+		"recipient", msg.Recipient,
+		"type", messages.LogType(msg.Type),
+		"creation_path", store.MessagePendingPathStoreDefault,
+	)
 }

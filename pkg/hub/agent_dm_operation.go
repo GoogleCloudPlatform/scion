@@ -534,6 +534,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		s.messageLog.Error("agent DM: failed to persist message", "error", err)
 		return nil, persistFailedDMError()
 	}
+	s.logMessageEnteredPending(pendingPathAgentDM, storeMsg)
 
 	// 8. (cont.) Record the admitted artifact references for the web chat.
 	recordedRefs := s.recordMessageArtifacts(ctx, msgID, artifactRefs)
@@ -662,24 +663,33 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// Dispatch outcome determines the final message state:
 	//   - Success → CAS pending→dispatched (AC-1)
 	//   - Definite failure → persist failed state, return non-2xx (AC-2)
-	//   - Ambiguous (context cancelled) → leave pending, return ambiguous (AC-4)
+	//   - Ambiguous (dispatch deadline) → leave pending, return ambiguous (AC-4)
+	//
+	// The dispatch runs on dispatchContext: detached from the caller's
+	// cancellation, so a caller that goes away (a client that disconnects,
+	// a sender agent being deleted) cannot abort a dispatch whose row is
+	// already persisted and strand that row in pending (ptone/scion#4827).
+	// The caller's deadline still applies, and agentDMDispatchTimeout caps
+	// the dispatch, so only a deadline can leave a row ambiguous.
+	dctx, dcancel := dispatchContext(ctx, agentDMDispatchTimeout)
+	defer dcancel()
 	var dispatchErr error
 	if isManagedAgentRuntime(input.TargetAgent.Runtime) {
 		// D4: managed runtimes stay unconverted — a managed agent may not
 		// have the scion CLI to fetch with. Unchanged: input.Msg, full body.
-		dispatchErr = s.managedAgentMessage(ctx, input.TargetAgent, input.Msg, input.Urgent || input.Interrupt)
+		dispatchErr = s.managedAgentMessage(dctx, input.TargetAgent, input.Msg, input.Urgent || input.Interrupt)
 	} else if dispatcher := s.GetDispatcher(); dispatcher != nil && input.TargetAgent.RuntimeBrokerID != "" {
-		retryCtx, retryCancel := context.WithTimeout(withDispatchMessageID(ctx, msgID), 30*time.Second)
-		dispatchErr = dispatchWithBrokerRetry(retryCtx, nil, dispatcher, input.TargetAgent, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
-		retryCancel()
+		dispatchErr = dispatchWithBrokerRetry(withDispatchMessageID(dctx, msgID), nil, dispatcher, input.TargetAgent, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
 	}
 
 	// 12. Finalize dispatch state (#1689).
 	if dispatchErr != nil {
 		if isAmbiguousDispatchError(dispatchErr) {
 			// Ambiguous: dispatch may have succeeded but confirmation was
-			// lost (e.g. context cancelled mid-flight). Leave the row in
-			// pending state for inspection; return ambiguous outcome (AC-4).
+			// lost (a dispatch deadline expired mid-flight; the caller's
+			// cancellation no longer reaches the dispatch, see dispatchContext).
+			// Leave the row in pending state for inspection; return
+			// ambiguous outcome (AC-4).
 			s.messageLog.Warn("agent DM: dispatch ambiguous (message persisted as pending)",
 				"sender_id", input.SenderAgent.ID,
 				"target_agent_id", input.TargetAgent.ID,

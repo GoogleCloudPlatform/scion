@@ -347,6 +347,10 @@ export class ScionLoginPage extends LitElement {
 
   private async fetchProviders(): Promise<void> {
     try {
+      // The sign-in bootstrap runs before a session exists, so it stays a
+      // plain request (the browser's default credentials mode) rather than
+      // the helper, whose 401 handling would redirect back to this page.
+      // eslint-disable-next-line no-restricted-globals -- sign-in bootstrap, no session yet
       const resp = await fetch('/auth/providers');
       if (resp.ok) {
         const data = (await resp.json()) as {
