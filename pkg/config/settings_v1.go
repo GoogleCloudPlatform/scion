@@ -2019,6 +2019,8 @@ type V1ServerRelayConfig struct {
 	// PublicURL is the relay's own public URL, recorded as its
 	// relay_instances.public_endpoint.
 	PublicURL string `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
+	// Singleton asserts a non-HA singleton relay (required on Cloud Run).
+	Singleton bool `json:"singleton,omitempty" yaml:"singleton,omitempty" koanf:"singleton"`
 }
 
 // V1ServerHubConduitStreamAuthzMax holds
@@ -4476,7 +4478,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 	}
 
 	if r := v1.Relay; r != nil {
-		gc.Relay = RelayServerConfig{HubInternalURL: r.HubInternalURL, PublicURL: r.PublicURL}
+		gc.Relay = RelayServerConfig{HubInternalURL: r.HubInternalURL, PublicURL: r.PublicURL, Singleton: r.Singleton}
 	}
 
 	// Broker config
@@ -4886,7 +4888,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	v1.Hub = v1Hub
 	if r := gc.Relay; !r.IsZero() {
-		v1.Relay = &V1ServerRelayConfig{HubInternalURL: r.HubInternalURL, PublicURL: r.PublicURL}
+		v1.Relay = &V1ServerRelayConfig{HubInternalURL: r.HubInternalURL, PublicURL: r.PublicURL, Singleton: r.Singleton}
 	}
 
 	// Broker config

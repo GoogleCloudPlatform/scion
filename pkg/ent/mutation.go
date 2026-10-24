@@ -68556,6 +68556,7 @@ type RelayInstanceMutation struct {
 	started_at        *time.Time
 	last_seen         *time.Time
 	draining          *bool
+	features          *string
 	clearedFields     map[string]struct{}
 	sessions          map[string]struct{}
 	removedsessions   map[string]struct{}
@@ -68918,6 +68919,55 @@ func (m *RelayInstanceMutation) ResetDraining() {
 	m.draining = nil
 }
 
+// SetFeatures sets the "features" field.
+func (m *RelayInstanceMutation) SetFeatures(s string) {
+	m.features = &s
+}
+
+// Features returns the value of the "features" field in the mutation.
+func (m *RelayInstanceMutation) Features() (r string, exists bool) {
+	v := m.features
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldFeatures returns the old "features" field's value of the RelayInstance entity.
+// If the RelayInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RelayInstanceMutation) OldFeatures(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldFeatures is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldFeatures requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldFeatures: %w", err)
+	}
+	return oldValue.Features, nil
+}
+
+// ClearFeatures clears the value of the "features" field.
+func (m *RelayInstanceMutation) ClearFeatures() {
+	m.features = nil
+	m.clearedFields[relayinstance.FieldFeatures] = struct{}{}
+}
+
+// FeaturesCleared returns if the "features" field was cleared in this mutation.
+func (m *RelayInstanceMutation) FeaturesCleared() bool {
+	_, ok := m.clearedFields[relayinstance.FieldFeatures]
+	return ok
+}
+
+// ResetFeatures resets all changes to the "features" field.
+func (m *RelayInstanceMutation) ResetFeatures() {
+	m.features = nil
+	delete(m.clearedFields, relayinstance.FieldFeatures)
+}
+
 // AddSessionIDs adds the "sessions" edge to the ConduitSession entity by ids.
 func (m *RelayInstanceMutation) AddSessionIDs(ids ...string) {
 	if m.sessions == nil {
@@ -69006,7 +69056,7 @@ func (m *RelayInstanceMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RelayInstanceMutation) Fields() []string {
-	fields := make([]string, 0, 6)
+	fields := make([]string, 0, 7)
 	if m.generation != nil {
 		fields = append(fields, relayinstance.FieldGeneration)
 	}
@@ -69024,6 +69074,9 @@ func (m *RelayInstanceMutation) Fields() []string {
 	}
 	if m.draining != nil {
 		fields = append(fields, relayinstance.FieldDraining)
+	}
+	if m.features != nil {
+		fields = append(fields, relayinstance.FieldFeatures)
 	}
 	return fields
 }
@@ -69045,6 +69098,8 @@ func (m *RelayInstanceMutation) Field(name string) (ent.Value, bool) {
 		return m.LastSeen()
 	case relayinstance.FieldDraining:
 		return m.Draining()
+	case relayinstance.FieldFeatures:
+		return m.Features()
 	}
 	return nil, false
 }
@@ -69066,6 +69121,8 @@ func (m *RelayInstanceMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldLastSeen(ctx)
 	case relayinstance.FieldDraining:
 		return m.OldDraining(ctx)
+	case relayinstance.FieldFeatures:
+		return m.OldFeatures(ctx)
 	}
 	return nil, fmt.Errorf("unknown RelayInstance field %s", name)
 }
@@ -69117,6 +69174,13 @@ func (m *RelayInstanceMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetDraining(v)
 		return nil
+	case relayinstance.FieldFeatures:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetFeatures(v)
+		return nil
 	}
 	return fmt.Errorf("unknown RelayInstance field %s", name)
 }
@@ -69165,6 +69229,9 @@ func (m *RelayInstanceMutation) ClearedFields() []string {
 	if m.FieldCleared(relayinstance.FieldPublicEndpoint) {
 		fields = append(fields, relayinstance.FieldPublicEndpoint)
 	}
+	if m.FieldCleared(relayinstance.FieldFeatures) {
+		fields = append(fields, relayinstance.FieldFeatures)
+	}
 	return fields
 }
 
@@ -69181,6 +69248,9 @@ func (m *RelayInstanceMutation) ClearField(name string) error {
 	switch name {
 	case relayinstance.FieldPublicEndpoint:
 		m.ClearPublicEndpoint()
+		return nil
+	case relayinstance.FieldFeatures:
+		m.ClearFeatures()
 		return nil
 	}
 	return fmt.Errorf("unknown RelayInstance nullable field %s", name)
@@ -69207,6 +69277,9 @@ func (m *RelayInstanceMutation) ResetField(name string) error {
 		return nil
 	case relayinstance.FieldDraining:
 		m.ResetDraining()
+		return nil
+	case relayinstance.FieldFeatures:
+		m.ResetFeatures()
 		return nil
 	}
 	return fmt.Errorf("unknown RelayInstance field %s", name)

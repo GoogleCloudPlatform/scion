@@ -2354,6 +2354,7 @@ var (
 		{Name: "started_at", Type: field.TypeTime},
 		{Name: "last_seen", Type: field.TypeTime},
 		{Name: "draining", Type: field.TypeBool, Default: false},
+		{Name: "features", Type: field.TypeString, Nullable: true, Size: 2147483647},
 	}
 	// RelayInstancesTable holds the schema information for the "relay_instances" table.
 	RelayInstancesTable = &schema.Table{
