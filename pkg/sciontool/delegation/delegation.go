@@ -561,6 +561,9 @@ func refreshMargin(ttl time.Duration) time.Duration {
 // minRefreshMargin. The credential then lapses, and the next request
 // exchanges on demand. An idle grant is not re-exchanged.
 func (h *Helper) scheduleLocked(id string, g *grant, prev *hub.DelegatedCredential) {
+	// A timer armed for an earlier credential (an on-demand exchange can
+	// replace one before its timer fires) never outlives this decision.
+	g.stopTimerLocked()
 	now := h.clk.Now()
 	if h.idle(g, now) {
 		return
