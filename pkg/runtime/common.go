@@ -714,6 +714,10 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// (ptone/scion#3155), never template or user env.
 			continue
 		}
+		if parts[0] == MetadataInterceptionEnvVar {
+			// Runtime-owned: set below from config.MetadataInterception.
+			continue
+		}
 		if len(parts) == 2 {
 			addArg("-e", fmt.Sprintf("%s=%s", parts[0], parts[1]))
 		} else if !util.IsAgentRefusedHostEnvName(e) {
@@ -737,7 +741,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		if s.Type != "environment" && s.Type != "" {
 			continue
 		}
-		if _, collides := envKeys[s.Target]; collides || s.Target == SupplementalGIDsEnvVar {
+		if _, collides := envKeys[s.Target]; collides || s.Target == SupplementalGIDsEnvVar || s.Target == MetadataInterceptionEnvVar {
 			continue
 		}
 		addArg("-e", fmt.Sprintf("%s=%s", s.Target, s.Value))
@@ -841,9 +845,20 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 	}
 
-	// Add NET_ADMIN capability for iptables-based metadata server interception
+	// Add NET_ADMIN capability for iptables-based metadata server interception,
+	// and tell sciontool whether that interception is required. The marker
+	// always comes from config.MetadataInterception, never from config.Env, a
+	// secret or the template fallback (all of which skip this key), so it
+	// cannot disagree with the capability. The Apple runtime drops --cap-add
+	// (stripUnsupportedAppleFlags), so it never reports the interception as
+	// required.
 	if config.MetadataInterception {
 		addArg("--cap-add", "NET_ADMIN")
+	}
+	if config.MetadataInterception && config.RuntimeName != appleContainerRuntimeName {
+		addArg("-e", MetadataInterceptionEnvVar+"="+MetadataInterceptionRequired)
+	} else {
+		addArg("-e", MetadataInterceptionEnvVar+"="+MetadataInterceptionOff)
 	}
 
 	// Add extra /etc/hosts entries (e.g. for host.docker.internal on Linux)
@@ -2038,6 +2053,20 @@ func nfsOwnerIDs(uid, gid int) (int, int) {
 // fsGroup). Mirrored in
 // pkg/sciontool/suppgroups (EnvVar) (ptone/scion#3155).
 const SupplementalGIDsEnvVar = "SCION_SUPPLEMENTAL_GIDS"
+
+// MetadataInterceptionEnvVar tells sciontool inside a Docker/Podman agent
+// whether the in-container GCP metadata interception is required
+// (MetadataInterceptionRequired) or not (MetadataInterceptionOff). It is set
+// only by buildCommonRunArgs, from RunConfig.MetadataInterception, the same
+// field that grants NET_ADMIN; template, user and secret values are dropped.
+// Mirrored in pkg/sciontool/metadata (InterceptionEnvVar).
+const MetadataInterceptionEnvVar = "SCION_METADATA_INTERCEPTION"
+
+// Values of MetadataInterceptionEnvVar.
+const (
+	MetadataInterceptionRequired = "required"
+	MetadataInterceptionOff      = "off"
+)
 
 // sharedDirGroups returns the guarded nfs shared-dir leaf groups for config,
 // or nil when the agent mounts no nfs shared dir.

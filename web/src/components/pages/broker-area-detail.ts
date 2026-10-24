@@ -173,7 +173,7 @@ export class ScionPageBrokerAreaDetail extends LitElement {
     const canReadHealth = hasAnyPermission(status, [HEALTH_READ_PERMISSION]);
     if (!canReadHealth) return;
     try {
-      const res = await fetch('/api/v1/admin/health/summary', { credentials: 'include' });
+      const res = await apiFetch('/api/v1/admin/health/summary', { authErrors: 'caller' });
       // A 401/403, or any other failure, leaves the Health tab hidden.
       if (!res.ok) return;
       const body = (await res.json()) as {

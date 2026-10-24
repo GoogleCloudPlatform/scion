@@ -57,8 +57,8 @@ func captureSecretEnvSlog(t *testing.T) *bytes.Buffer {
 
 func TestScrubServerSecretEnv_UnsetsNamesAndKeepsSecret(t *testing.T) {
 	isolateServerSecretEnv(t)
-	if strings.Join(serverSecretEnvNames, ",") != "SCION_SERVER_SESSION_SECRET,SESSION_SECRET,SCION_SERVER_HUB_CONDUIT_PEERSECRET,SCION_SERVER_HUB_CONDUIT_PEER_SECRET" {
-		t.Fatalf("serverSecretEnvNames = %v, want both session secret and both peer secret spellings", serverSecretEnvNames)
+	if strings.Join(serverSecretEnvNames, ",") != "SCION_SERVER_SESSION_SECRET,SESSION_SECRET,SCION_SERVER_HUB_CONDUIT_PEERSECRET,SCION_SERVER_HUB_CONDUIT_PEER_SECRET,SCION_SERVER_KEYRING_FILE,SCION_SERVER_KEYRINGFILE" {
+		t.Fatalf("serverSecretEnvNames = %v, want both session secret, both peer secret and both keyring file spellings", serverSecretEnvNames)
 	}
 	for _, name := range serverSecretEnvNames {
 		t.Setenv(name, "value-of-"+name)
@@ -374,7 +374,8 @@ func TestRunServerStart_ScrubsServerSecretEnvBeforeChildProcesses(t *testing.T) 
 		"validateHostedBasic",
 		"validateHostedHAPreflight",
 		"secret.NewBackend",
-		"initPluginManager",
+		"loadServerKeyring",
+		"initPluginManagerFn",
 		"initHubServerFn",
 		"startConduit",
 		"initWebServer",
@@ -388,5 +389,17 @@ func TestRunServerStart_ScrubsServerSecretEnvBeforeChildProcesses(t *testing.T) 
 		if pos < scrub {
 			t.Errorf("%s runs before scrubServerSecretEnv", later)
 		}
+	}
+	// The keyring file is read before the first step that can start a
+	// child (TestRunServerStart_ScrubsSecretEnvBeforeFirstChild observes
+	// the same order at run time).
+	if kr, pm := first["loadServerKeyring"], first["initPluginManagerFn"]; kr == 0 || pm == 0 || kr > pm {
+		t.Error("loadServerKeyring must run before initPluginManagerFn")
+	}
+	// The relay role returns from runServerStart before the keyring load,
+	// so it never reads the keyring (TestRunRelayRoleNeverLoadsKeyring
+	// drives runRelayRole itself).
+	if relay, kr := first["runRelayRole"], first["loadServerKeyring"]; relay == 0 || kr == 0 || relay > kr {
+		t.Error("runRelayRole must be reached before loadServerKeyring")
 	}
 }

@@ -319,6 +319,9 @@ func (e *agentKeysEventSpy) PublishDMPromotedEvent(_ context.Context, _ string, 
 func (e *agentKeysEventSpy) PublishChatScheduledEvent(_ context.Context, _ string, _ ChatScheduledEvent) {
 	e.record("PublishChatScheduledEvent")
 }
+func (e *agentKeysEventSpy) PublishChatStarsChanged(_ context.Context, _ string) {
+	e.record("PublishChatStarsChanged")
+}
 func (e *agentKeysEventSpy) PublishRaw(_ string, _ interface{}) {
 	e.record("PublishRaw")
 }

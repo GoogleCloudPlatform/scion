@@ -18,10 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 // CopyDir recursively copies a directory tree, attempting to preserve permissions.
@@ -228,7 +225,7 @@ func RemoveAllSafe(root string) error {
 // multi-second timeout while macOS tries to resolve the nonexistent
 // container-internal path.
 //
-// This function uses syscall.Unlinkat with a parent directory fd to avoid
+// On unix this function uses unlinkat(2) with a parent directory fd to avoid
 // full path resolution. It also tries an atomic rename-over as a second
 // strategy. Debug timing is included to diagnose which approach works.
 func removeSymlinkSafe(path string) {
@@ -239,10 +236,9 @@ func removeSymlinkSafe(path string) {
 	// Strategy 1: unlinkat with parent directory fd.
 	// This avoids full path resolution — the kernel operates directly on
 	// the directory entry via the fd, without resolving the symlink target.
-	dirFD, err := syscall.Open(dir, syscall.O_RDONLY, 0)
-	if err == nil {
-		err = unix.Unlinkat(dirFD, name, 0)
-		_ = syscall.Close(dirFD)
+	// Only unix has it; elsewhere attempted is false and the next strategy
+	// runs.
+	if attempted, err := unlinkAt(dir, name); attempted {
 		if err == nil {
 			elapsed := time.Since(start)
 			if elapsed > 100*time.Millisecond {

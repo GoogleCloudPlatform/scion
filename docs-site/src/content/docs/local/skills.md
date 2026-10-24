@@ -104,6 +104,7 @@ The error uses code `skill_resolution_failed`. Its message names the skill refer
 | `timeout` | 504 | GitHub did not respond before the deadline. |
 | `upstream_unavailable`, `unreachable` | 502 | GitHub returned repeated server errors, or could not be reached. |
 | `install_failed` | 500 | The skill resolved, but its files could not be downloaded, verified or installed. The message gives a short reason, such as `download failed with status 404`; a failure on the broker's own filesystem is reported as `install failed on the broker`. |
+| `unsupported_skill_content` | 500 | A `gh://` skill cannot be installed as it is in the repository: its directory contains a git submodule, has more than 1000 files or a path that would leave the skill directory, or GitHub truncated its listing. Retrying does not help; change the skill. |
 | any other cause | 500 | An internal failure while resolving the skill. |
 
 For `scion create` (which only provisions), a provisioning failure for any other reason is reported as a warning on the created agent.
@@ -145,6 +146,8 @@ The `@version` suffix accepts:
 ### GitHub skill URIs (`gh://`)
 
 The `gh://` scheme retrieves skill files directly from a GitHub repository. It works out-of-the-box for public repositories, and supports secure private repository resolution.
+
+A `gh://` skill contains every regular file under the skill directory, including files in subdirectories such as `scripts/` or `references/`. Scion reads the directory with one GitHub git trees API call per resolution. A file that is executable in the repository is installed executable (`0755`); every other file is installed `0644`. Setuid, setgid and sticky bits are never applied. Symlinks in the skill directory are skipped. Resolution fails with an error, before any file is downloaded, when the skill directory contains a git submodule, has more than 1000 files, or has a path that would leave the skill directory, or when GitHub truncates the listing because the directory has too many entries. These failures carry the error code `unsupported_skill_content`.
 
 If GitHub rejects the credential sent with a skill file download at install time (`401`, `403` or `404`, for example because the token expired or was revoked), as can happen when the skill's resolution was cached or done by the Hub, Scion retries that file once without credentials. Hash checks apply to the result as usual. A fresh resolution with a rejected token still fails.
 
@@ -393,12 +396,12 @@ In addition to managing injected skills via the CLI, the Scion Web Dashboard all
 6. Scion adds all checked skills as individual URI references in a single atomic update.
 
 :::note[Security & Privacy]
-Before performing discovery or logging requests, Scion's API automatically strips any embedded userinfo or credentials from the URL, preventing sensitive tokens or usernames from appearing in system logs.
+Before performing discovery or logging requests (`POST /api/v1/skills/discover-directory`), Scion's API strips embedded userinfo, fragments, and all query parameters except `?token=<SECRET_NAME>` (where `<SECRET_NAME>` matches `[A-Z][A-Z0-9_]*`, a `token` value that is not such a name is refused with `400`), preventing sensitive tokens, query strings, or usernames from appearing in candidate URIs or system logs.
 :::
 
 ## Platform skills
 
-Beyond skills you publish, **platform skills** are injected automatically at provisioning — a set of skills embedded in the Scion binary and injected into every agent. They provide baseline capabilities without any Hub or template setup.
+Beyond skills you publish, **platform skills** are injected automatically at provisioning — a set of skills embedded in the Scion binary and injected into every agent (including `scion-web-serving` and its `references/web-apps.md`, which the agent instructions preamble points to for serving web apps and files over port forwarding). They provide baseline capabilities without any Hub or template setup.
 
 Platform skills honor an optional `inject_when` frontmatter condition in `SKILL.md`, which gates injection on the agent's environment:
 

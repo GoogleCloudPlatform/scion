@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -51,6 +53,10 @@ type MessageStore struct {
 	// publisher, when non-nil, is notified after each successful CreateMessage.
 	// See MessagePublisher.
 	publisher MessagePublisher
+	// pendingLogger receives the entered-pending line for a row that took the
+	// schema default dispatch_state (ptone/scion#4827). Nil means
+	// slog.Default(). Tests set it to capture the line.
+	pendingLogger *slog.Logger
 }
 
 // NewMessageStore creates a new Ent-backed MessageStore.
@@ -95,6 +101,8 @@ func entMessageToStore(e *ent.Message) *store.Message {
 		CreatedAt:             e.Created,
 		SenderProjectID:       senderProjectID,
 		RecipientProjectID:    recipientProjectID,
+		AuthorizingUserID:     derefString(e.AuthorizingUserID),
+		DelegationGrantID:     derefString(e.DelegationGrantID),
 		DispatchState:         e.DispatchState,
 		DispatchedAt:          e.DispatchedAt,
 		DispatchFailureReason: e.DispatchFailureReason,
@@ -169,9 +177,20 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 		}
 		create.SetRecipientProjectID(rpid)
 	}
+	// Delegated-send attribution (.design/agent-delegation.md §14.5). An
+	// empty value persists as NULL.
+	if msg.AuthorizingUserID != "" {
+		create.SetAuthorizingUserID(msg.AuthorizingUserID)
+	}
+	if msg.DelegationGrantID != "" {
+		create.SetDelegationGrantID(msg.DelegationGrantID)
+	}
 	if msg.Type == "" {
 		create.SetType("instruction")
 	}
+	// An empty DispatchState takes the schema default ("pending"); that row is
+	// logged below once it is persisted.
+	defaulted := msg.DispatchState == ""
 	if msg.DispatchState != "" {
 		create.SetDispatchState(msg.DispatchState)
 	}
@@ -194,6 +213,9 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 	msg.CreatedAt = created.Created
 	msg.Type = created.Type
 	msg.DispatchState = created.DispatchState
+	if defaulted && created.DispatchState == store.MessageDispatchPending {
+		s.logDefaultedPending(msg)
+	}
 
 	// Design-in: announce the new message for LISTEN/NOTIFY subscribers.
 	// Best-effort — a publish failure must not fail the write that succeeded.
@@ -646,4 +668,22 @@ func (s *MessageStore) CountUnreachableUnbackfilledMessages(ctx context.Context)
 		return 0, mapError(err)
 	}
 	return count, nil
+}
+
+// logDefaultedPending writes the entered-pending line for a row whose writer
+// left DispatchState empty, so the schema default "pending" applied
+// (ptone/scion#4827). Only identifiers and routing fields are logged: never
+// the body, metadata or attachments.
+func (s *MessageStore) logDefaultedPending(msg *store.Message) {
+	log := s.pendingLogger
+	if log == nil {
+		log = slog.Default()
+	}
+	log.Warn(store.MessageEnteredPendingLogMsg,
+		"message_id", msg.ID,
+		"sender", msg.Sender,
+		"recipient", msg.Recipient,
+		"type", messages.LogType(msg.Type),
+		"creation_path", store.MessagePendingPathStoreDefault,
+	)
 }
