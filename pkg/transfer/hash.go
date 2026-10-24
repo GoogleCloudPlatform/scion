@@ -49,7 +49,7 @@ var gitBlobHashPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 //
 // It is used to tell apart the two hash formats that flow through skill
 // resolution: "sha256:<hex64>" digests produced by this package, and bare git
-// blob object IDs supplied verbatim by GitHub's Contents API.
+// blob object IDs supplied verbatim by GitHub's git trees API.
 func IsGitBlobHash(s string) bool {
 	return gitBlobHashPattern.MatchString(s)
 }
@@ -57,8 +57,8 @@ func IsGitBlobHash(s string) bool {
 // GitBlobHashBytes computes the git blob object ID of data, i.e.
 // SHA-1("blob <len>\x00" + data), returned as bare lowercase hex.
 //
-// This is the value GitHub's Contents API reports in the "sha" field of a
-// file entry. Computing it locally lets a caller verify content fetched from
+// This is the value GitHub's git trees and Contents APIs report in the
+// "sha" field of a file entry. Computing it locally lets a caller verify content fetched from
 // GitHub against metadata GitHub already published, without the metadata
 // producer having to download the content itself.
 //

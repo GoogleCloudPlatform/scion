@@ -1033,7 +1033,7 @@ func verifyInstalledSkillHash(dir string, skill ResolvedSkill) error {
 //     local GitHubSkillResolver, which downloads content during resolution.
 //   - a bare git blob object ID (40 hex chars) — produced by the Hub's gh://
 //     resolution cache, which copies the "sha" field straight out of GitHub's
-//     Contents API and so never sees the file bytes.
+//     git trees API and so never sees the file bytes.
 //
 // An empty expected hash means the resolver published no per-file digest; the
 // file is still hashed as sha256 so the resolution record has a usable value,
