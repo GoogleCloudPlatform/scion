@@ -71,9 +71,17 @@ type projectRelinkError struct {
 	// PartialCopy is set when a copy for the current ID could not be removed
 	// after a failure; the earlier directory is intact.
 	PartialCopy bool
+	// Unrecorded is set when a git project's config directory records no
+	// workspace_path outside the single-user scope (unrecordedAllowed), so it
+	// is not carried over and nothing was changed.
+	Unrecorded bool
 }
 
 func (e *projectRelinkError) Error() string {
+	if e.Unrecorded {
+		return "the workspace's project-id marker names an earlier ID of this agent's Hub project, but that project's config directory records no workspace path, " +
+			"so the agent was not switched to the current ID and nothing was changed; start the agent fresh"
+	}
 	if e.PartialCopy {
 		return "the workspace's project-id marker names an earlier ID of this agent's Hub project, and the project config directory could not be moved to the current ID: " +
 			e.Reason + "; the earlier directory is unchanged, but a partial copy remains for the current ID; remove it by hand"
@@ -108,13 +116,45 @@ func (e *projectRelinkError) Error() string {
 //   - the project config directory <slug>__<old id8> holds this agent's
 //     state directory (.scion/agents/<agentName>), with no symlinked
 //     component below project-configs (projectConfigPathContained);
-//   - the earlier project config directory's .scion/settings.yaml records
+//   - the earlier project config directory's .scion settings file (the
+//     first of settings.yaml, settings.yml and settings.json present, as
+//     the config loader picks it; readRecordedWorkspacePath) records
 //     workspace_path naming this workspace (compared exactly after
 //     filepath.Clean, without resolving symlinks). A missing or different
-//     value means no move; nothing else stands in for it.
-//   - the workspace's .scion is a marker file. A git project (a .scion
-//     directory with a project-id file) is never re-linked, whether or not
-//     its config records workspace_path, and still fails the identity check.
+//     value means no move, and nothing else stands in for it;
+//   - the workspace's .scion is a marker file, or it is a git project (a
+//     .scion directory with a project-id file) and the git rule below holds.
+//
+// Git rule (ptone/scion#4476, a targeted fix). A git project is re-linked
+// only when the recorded ID is one of previousIDs, the earlier IDs the Hub
+// sends for this project (today only the ID a git-backed project had before
+// project IDs became random; see util.LegacyGitProjectID for how the Hub
+// derives it and the trust assumption it relies on). previousIDs is used
+// only when it has at most maxPreviousProjectIDs entries, each a canonical
+// UUID other than hubProjectID; otherwise it is ignored as a whole. The
+// project-id file must be a regular file holding the recorded ID
+// (readGitProjectIDNoFollow). All other rules above apply unchanged,
+// including the workspace_path rule, with one exception: when the earlier
+// config of a git project under this rule records no workspace_path at all
+// (set up before configs recorded it), it is carried over only when
+// unrecordedAllowed is set and the dispatch carries a non-empty projectSlug
+// (which then equals the recorded slug; the workspace's own slug never
+// stands in for it). The caller sets unrecordedAllowed only for a
+// workstation-mode broker serving a dispatch bound to its co-located hub
+// (Server.unrecordedRelinkAllowed). Otherwise the start is refused with a
+// projectRelinkError (Unrecorded), and nothing is moved or rewritten.
+// Without a matching previousIDs entry (an older Hub sends none) a git
+// project is not re-linked and still fails the identity check.
+//
+// What carries over: the whole <slug>__<old id8> directory, including the
+// agent's home under .scion/agents/<agentName>, and with it any credentials
+// the harness left there. This needs the workspace's project-id to name the
+// earlier ID, which holds when the old workspace survived, or when a
+// workload in the shared workspace wrote that file. The agent name is no
+// barrier, as the creator picks it. The broker records no trustworthy owner
+// of that directory to compare against (SCION_CREATOR was considered and
+// rejected: a display name, not unique, not authenticated, set in the
+// container environment); see util.LegacyGitProjectID.
 //
 // It then moves <slug>__<old id8> to <slug>__<new id8> and rewrites the
 // marker to hubProjectID. It refuses, with a projectRelinkError and both
@@ -131,14 +171,20 @@ func (e *projectRelinkError) Error() string {
 // (the broker stopped in between, or the rewrite and the undo both failed),
 // the earlier directory is absent and the current one holds the agent's
 // state. If the current directory passes the same checks (agent state,
-// containment, recorded workspace_path), only the marker is rewritten.
-func (s *Server) relinkSharedProjectIdentity(ctx context.Context, projectPath, projectSlug, hubProjectID, agentName string) error {
+// containment, recorded workspace_path, and for a git project the git rule),
+// only the marker is rewritten; a git project whose current directory
+// records no workspace_path is handled the same way (carried only when
+// unrecordedAllowed is set, refused otherwise).
+func (s *Server) relinkSharedProjectIdentity(ctx context.Context, projectPath, projectSlug, hubProjectID, agentName string, previousIDs []string, unrecordedAllowed bool) error {
 	if projectPath == "" || agentName == "" || !isCanonicalUUID(hubProjectID) {
 		return nil
 	}
 	if agentName != filepath.Base(agentName) || agentName == "." || agentName == ".." {
 		return nil
 	}
+	// The unrecorded carry also needs the slug from the dispatch: with none,
+	// only the workspace's own record would name the project.
+	unrecordedAllowed = unrecordedAllowed && projectSlug != ""
 	abs, err := filepath.Abs(projectPath)
 	if err != nil {
 		return nil
@@ -165,8 +211,22 @@ func (s *Server) relinkSharedProjectIdentity(ctx context.Context, projectPath, p
 		log.Info("project re-link: not carrying the agent over to the current project ID", "reason", reason)
 		return nil
 	}
+	// A hub-managed workspace is named by its slug; without the dispatch's
+	// slug nothing is carried over (no other slug stands in for it).
+	if projectSlug == "" && isHubManagedProjectPath(workspace) {
+		return skip("the dispatch names no project slug for a hub-managed workspace")
+	}
+	// gitListed: a git project whose recorded ID the Hub names as an
+	// earlier ID of this project (the git rule above).
+	gitListed := false
 	if ident.Marker == nil {
-		return skip("the workspace is a git project (a .scion directory), which is never re-linked")
+		if !previousProjectIDListed(previousIDs, ident.ID, hubProjectID) {
+			return skip("the workspace is a git project (a .scion directory) and the Hub names no matching earlier project ID")
+		}
+		if id, err := readGitProjectIDNoFollow(ident.ScionPath); err != nil || id != ident.ID {
+			return skip("the git project's project-id is not a regular file holding the recorded ID")
+		}
+		gitListed = true
 	}
 	if !isCanonicalUUID(ident.ID) {
 		return skip("the marker's project ID is not a canonical UUID")
@@ -192,7 +252,7 @@ func (s *Server) relinkSharedProjectIdentity(ctx context.Context, projectPath, p
 		return skip("a project config directory is not directly under the project-configs directory")
 	}
 	if _, err := os.Lstat(oldRoot); errors.Is(err, fs.ErrNotExist) {
-		return s.finishInterruptedRelink(log, ident, slug, hubProjectID, globalDir, newRoot, workspace, agentName)
+		return s.finishInterruptedRelink(log, ident, slug, hubProjectID, globalDir, newRoot, workspace, agentName, gitListed, unrecordedAllowed)
 	}
 	if !projectConfigPathContained(globalDir, oldRoot) {
 		return skip("no project config directory for the earlier ID")
@@ -201,7 +261,13 @@ func (s *Server) relinkSharedProjectIdentity(ctx context.Context, projectPath, p
 		return skip("the earlier project config directory holds no state of this agent")
 	}
 	if !workspacePathRecordedFor(filepath.Join(oldRoot, config.DotScion), workspace) {
-		return skip("the earlier project config directory does not record this workspace")
+		if !gitListed || !workspacePathUnrecorded(filepath.Join(oldRoot, config.DotScion)) {
+			return skip("the earlier project config directory does not record this workspace")
+		}
+		if !unrecordedAllowed {
+			log.Warn("project re-link: the earlier project config directory records no workspace path; not moving", "old", oldRoot)
+			return &projectRelinkError{Path: oldRoot, Unrecorded: true}
+		}
 	}
 	log.Info("project re-link: the marker names an earlier ID of this project; moving the project config directory", "old", oldRoot, "new", newRoot)
 	if _, err := os.Lstat(newRoot); !errors.Is(err, fs.ErrNotExist) {
@@ -249,11 +315,21 @@ func (s *Server) relinkSharedProjectIdentity(ctx context.Context, projectPath, p
 // finishInterruptedRelink rewrites the marker to hubProjectID when the
 // earlier project config directory is absent and newRoot, the current one,
 // holds this agent's state with no symlinked component and records this
-// workspace: a move that completed without its marker rewrite. Otherwise it
-// changes nothing.
-func (s *Server) finishInterruptedRelink(log *slog.Logger, ident *config.WorkspaceIdentity, slug, hubProjectID, globalDir, newRoot, workspace, agentName string) error {
-	if !projectConfigPathContained(globalDir, filepath.Join(newRoot, config.DotScion, "agents", agentName)) ||
-		!workspacePathRecordedFor(filepath.Join(newRoot, config.DotScion), workspace) {
+// workspace: a move that completed without its marker rewrite. A git
+// project under the git rule whose current directory records no
+// workspace_path is finished only when unrecordedAllowed is set; otherwise
+// it returns a projectRelinkError (Unrecorded) and changes nothing. In
+// every other case it changes nothing.
+func (s *Server) finishInterruptedRelink(log *slog.Logger, ident *config.WorkspaceIdentity, slug, hubProjectID, globalDir, newRoot, workspace, agentName string, gitListed, unrecordedAllowed bool) error {
+	newConfig := filepath.Join(newRoot, config.DotScion)
+	contained := projectConfigPathContained(globalDir, filepath.Join(newConfig, "agents", agentName))
+	recorded := workspacePathRecordedFor(newConfig, workspace)
+	unrecorded := !recorded && gitListed && workspacePathUnrecorded(newConfig)
+	if contained && unrecorded && !unrecordedAllowed {
+		log.Warn("project re-link: the current project config directory records no workspace path; not rewriting the project-id", "new", newRoot)
+		return &projectRelinkError{Path: newRoot, Unrecorded: true}
+	}
+	if !contained || (!recorded && !unrecorded) {
 		log.Info("project re-link: not carrying the agent over to the current project ID", "reason", "no project config directory for the earlier ID")
 		return nil
 	}
@@ -267,29 +343,117 @@ func (s *Server) finishInterruptedRelink(log *slog.Logger, ident *config.Workspa
 	return nil
 }
 
-// workspacePathRecordedFor reports whether configDir/settings.yaml is a
-// regular file whose top-level workspace_path names workspace. The recorded
-// path must be absolute, and the two paths are compared exactly after
-// filepath.Clean, with no symlink resolution: a workspace recorded or
-// dispatched through a symlink does not match. Any read or parse error is a
-// mismatch.
-func workspacePathRecordedFor(configDir, workspace string) bool {
-	settingsPath := filepath.Join(configDir, "settings.yaml")
-	info, err := os.Lstat(settingsPath)
-	if err != nil || !info.Mode().IsRegular() {
+// maxPreviousProjectIDs bounds the previousIDs list relinkSharedProjectIdentity
+// uses; a longer list is ignored as a whole.
+const maxPreviousProjectIDs = 4
+
+// previousProjectIDListed reports whether id is in previousIDs, a list that is
+// used only when it has at most maxPreviousProjectIDs entries, each a
+// canonical UUID other than hubProjectID. Any other list counts as empty.
+func previousProjectIDListed(previousIDs []string, id, hubProjectID string) bool {
+	if len(previousIDs) == 0 || len(previousIDs) > maxPreviousProjectIDs {
 		return false
 	}
-	data, err := os.ReadFile(settingsPath)
+	listed := false
+	for _, p := range previousIDs {
+		if !isCanonicalUUID(p) || p == hubProjectID {
+			return false
+		}
+		if p == id {
+			listed = true
+		}
+	}
+	return listed
+}
+
+// readGitProjectIDNoFollow returns the project ID in scionDir's project-id
+// file. scionDir must be a directory and project-id a regular file, both
+// checked with Lstat in this helper (a symbolic link is refused), and the
+// file is read through an os.Root opened on scionDir.
+func readGitProjectIDNoFollow(scionDir string) (string, error) {
+	if info, err := os.Lstat(scionDir); err != nil {
+		return "", err
+	} else if !info.IsDir() {
+		return "", fmt.Errorf("%s is not a directory", config.DotScion)
+	}
+	root, err := os.OpenRoot(scionDir)
 	if err != nil {
+		return "", err
+	}
+	defer func() { _ = root.Close() }()
+	if info, err := root.Lstat(projectkeys.ProjectIDFile); err != nil {
+		return "", err
+	} else if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("the project-id file is not a regular file")
+	}
+	data, err := root.ReadFile(projectkeys.ProjectIDFile)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+// projectSettingsNames are the project settings file names, in the order
+// the config loader picks the first one present (config.GetSettingsPath).
+var projectSettingsNames = []string{"settings.yaml", "settings.yml", "settings.json"}
+
+// readRecordedWorkspacePath reads the top-level workspace_path of
+// configDir's settings file: the first of projectSettingsNames that exists
+// (checked with Lstat, so a symbolic link counts as present). recorded
+// reports a non-empty value. ok is false, and nothing is to be trusted,
+// when that file is not a regular file, cannot be read or parsed (YAML, which
+// also covers JSON), or a name cannot be checked. With no settings file at
+// all, ok is true and recorded false.
+func readRecordedWorkspacePath(configDir string) (value string, recorded, ok bool) {
+	for _, name := range projectSettingsNames {
+		settingsPath := filepath.Join(configDir, name)
+		info, err := os.Lstat(settingsPath)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil || !info.Mode().IsRegular() {
+			return "", false, false
+		}
+		data, err := os.ReadFile(settingsPath)
+		if err != nil {
+			return "", false, false
+		}
+		var doc struct {
+			WorkspacePath *string `yaml:"workspace_path"`
+		}
+		if err := yaml.Unmarshal(data, &doc); err != nil {
+			return "", false, false
+		}
+		if doc.WorkspacePath == nil || *doc.WorkspacePath == "" {
+			return "", false, true
+		}
+		return *doc.WorkspacePath, true, true
+	}
+	return "", false, true
+}
+
+// workspacePathUnrecorded reports whether configDir records no
+// workspace_path: it has no settings file, or its settings file (see
+// readRecordedWorkspacePath) is a regular file that parses and has no
+// top-level workspace_path. Anything that cannot be checked does not count
+// as unrecorded.
+func workspacePathUnrecorded(configDir string) bool {
+	_, recorded, ok := readRecordedWorkspacePath(configDir)
+	return ok && !recorded
+}
+
+// workspacePathRecordedFor reports whether configDir's settings file (see
+// readRecordedWorkspacePath) is a regular file whose top-level
+// workspace_path names workspace. The recorded path must be absolute, and
+// the two paths are compared exactly after filepath.Clean, with no symlink
+// resolution: a workspace recorded or dispatched through a symlink does not
+// match. Any read or parse error is a mismatch.
+func workspacePathRecordedFor(configDir, workspace string) bool {
+	v, recorded, ok := readRecordedWorkspacePath(configDir)
+	if !ok || !recorded || !filepath.IsAbs(v) {
 		return false
 	}
-	var doc struct {
-		WorkspacePath string `yaml:"workspace_path"`
-	}
-	if err := yaml.Unmarshal(data, &doc); err != nil || doc.WorkspacePath == "" || !filepath.IsAbs(doc.WorkspacePath) {
-		return false
-	}
-	return filepath.IsAbs(workspace) && filepath.Clean(doc.WorkspacePath) == filepath.Clean(workspace)
+	return filepath.IsAbs(workspace) && filepath.Clean(v) == filepath.Clean(workspace)
 }
 
 // relinkWorkspaceLocks holds a lock per workspace path (cleaned and
@@ -376,8 +540,8 @@ func writeWorkspaceIdentityNoFollow(ident *config.WorkspaceIdentity, slug, proje
 	var dirRel, targetRel string
 	var data []byte
 	if ident.Marker == nil {
-		// Relink never passes a directory identity since the git gate in
-		// relinkSharedProjectIdentity; this branch is kept as defence in depth.
+		// A git project's project-id file, written only under the git rule
+		// in relinkSharedProjectIdentity.
 		dirRel = filepath.Join(base, filepath.Base(ident.ScionPath))
 		targetRel = filepath.Join(dirRel, projectkeys.ProjectIDFile)
 		data = []byte(projectID + "\n")
@@ -499,10 +663,50 @@ func directlyUnderProjectConfigs(dir string) bool {
 	return filepath.Dir(clean) == root && base != "." && base != ".." && !strings.ContainsAny(base, "/\\\x00")
 }
 
+// relinkSharedProjectIdentityChecked runs relinkSharedProjectIdentity under
+// the workspace lock on projectPath and inside withCheckedWorkspaceConfig,
+// so that for a hub-managed workspace the .scion entry is checked against
+// the broker's record before the re-link, the re-link's marker or
+// project-id rewrite is validated as a broker change, and the result is
+// recorded. The workspace lock is taken before the re-link's own lock
+// (lockRelinkWorkspace); nothing takes them in the other order.
+//
+// lockErr reports that the workspace lock could not be taken (nothing ran);
+// checkErr, a *workspaceConfigChangedError, that the entry was not in the
+// recorded state before (the re-link did not run) or changed in a way the
+// broker does not make; relinkErr is relinkSharedProjectIdentity's error.
+// When both checkErr and relinkErr are set, the callers return checkErr and
+// log relinkErr.
+func (s *Server) relinkSharedProjectIdentityChecked(ctx context.Context, projectPath, projectSlug, hubProjectID, agentName string, previousIDs []string, unrecordedAllowed bool) (lockErr, checkErr, relinkErr error) {
+	if projectPath == "" {
+		return nil, nil, s.relinkSharedProjectIdentity(ctx, projectPath, projectSlug, hubProjectID, agentName, previousIDs, unrecordedAllowed)
+	}
+	lockErr = s.withWorkspaceLock(ctx, func() {
+		checkErr = s.withCheckedWorkspaceConfig(projectPath, hubProjectID, projectSlug, func() {
+			relinkErr = s.relinkSharedProjectIdentity(ctx, projectPath, projectSlug, hubProjectID, agentName, previousIDs, unrecordedAllowed)
+		})
+	}, projectPath)
+	return lockErr, checkErr, relinkErr
+}
+
 // projectRelinkStartContextError wraps a relinkSharedProjectIdentity
 // failure as a 409 startContextError.
 func projectRelinkStartContextError(err error) *startContextError {
 	return &startContextError{Status: http.StatusConflict, Message: err.Error(), OriginalErr: err}
+}
+
+// unrecordedRelinkAllowed reports whether relinkSharedProjectIdentity may
+// carry a git project whose earlier config records no workspace_path: only
+// when this broker runs in a workstation-mode server
+// (ServerConfig.WorkstationMode) and the dispatch r is bound to its
+// co-located hub (dispatchFromColocatedHub, with the connection
+// resolveHubConnection picks for r). Without a request, or when either
+// cannot be established, it is false.
+func (s *Server) unrecordedRelinkAllowed(ctx context.Context, r *http.Request) bool {
+	if s == nil || !s.config.WorkstationMode || r == nil {
+		return false
+	}
+	return s.dispatchFromColocatedHub(ctx, r, s.resolveHubConnection(r))
 }
 
 // moveProjectConfigDir moves the directory oldRoot to newRoot, which must not

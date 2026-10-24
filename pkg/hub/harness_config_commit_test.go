@@ -585,7 +585,7 @@ func TestProjectCloneHarnessConfigs_ReDerivesFromCopiedFiles(t *testing.T) {
 				require.NoError(t, err)
 			}
 			srcHC.Files = []store.TemplateFile{{Path: "config.yaml", Size: int64(len(deriveFullYAML)), Hash: commitFileHash(deriveFullYAML)}}
-			srcHC.ContentHash = computeContentHash(srcHC.Files)
+			srcHC.ContentHash = defaultContentHash(srcHC.Files)
 			require.NoError(t, s.CreateHarnessConfig(ctx, srcHC))
 
 			clone := &store.Project{ID: api.NewUUID()}
@@ -652,7 +652,7 @@ func TestHarnessConfigBootstrap_RetriesOnceOnConflict(t *testing.T) {
 	require.NoError(t, p.Update(ctx, rec, filepath.Join(dir, deriveHCName)))
 
 	got := globalHC(t, s, deriveHCName)
-	assert.Equal(t, computeContentHash(rec.Files), got.ContentHash)
+	assert.Equal(t, defaultContentHash(rec.Files), got.ContentHash)
 	assertDerivedFrom(t, got, deriveFullYAML)
 }
 

@@ -149,6 +149,16 @@ const SCROLL_TOP_THRESHOLD = 100;
 /** Threshold in pixels from bottom to consider "pinned to bottom". */
 const SCROLL_BOTTOM_THRESHOLD = 80;
 
+/** How far, in pixels, `el` is scrolled up from its bottom. */
+function distanceFromBottom(el: HTMLElement): number {
+  return el.scrollHeight - el.scrollTop - el.clientHeight;
+}
+
+/** Whether a view `distFromBottom` pixels up from the bottom counts as at the bottom. */
+function isNearBottom(distFromBottom: number): boolean {
+  return distFromBottom < SCROLL_BOTTOM_THRESHOLD;
+}
+
 /**
  * Whether the reader is pinned to the bottom after a scroll event. Near
  * the bottom always pins. Further up, the pin drops only when the reader
@@ -164,7 +174,7 @@ export function pinnedAfterScroll(
   movedUp: boolean,
   steered: boolean
 ): boolean {
-  if (distFromBottom < SCROLL_BOTTOM_THRESHOLD) return true;
+  if (isNearBottom(distFromBottom)) return true;
   return wasPinned && !movedUp && !steered;
 }
 
@@ -805,6 +815,12 @@ export class ScionChatThread extends LitElement {
 
   /** True while the open-time anchor to the unread divider is still in effect. */
   private _unreadAnchorActive = false;
+
+  /** True from `scrollToUnreadDivider` until its deferred first anchor write.
+   *  A 'scroll' event dispatched in that gap was queued by an earlier write
+   *  (the bottom pin while the history rendered), not by the user reacting to
+   *  the anchor, so it must not cancel the anchor before it is applied. */
+  private _unreadAnchorPending = false;
 
   /** Message count captured when the anchor was applied, to tell a late layout
    *  shift of existing content (re-apply) apart from a new message arriving
@@ -3807,14 +3823,17 @@ export class ScionChatThread extends LitElement {
     // scroll landing in the very same frame as our write is still detected:
     // `_applyingUnreadAnchor` is true for that whole frame, but the resulting
     // scrollTop then disagrees with the value we just wrote.
+    // Before the first anchor write there is nothing to take over from: a
+    // scroll event then is the one the history render's bottom pin queued.
     if (
       this._unreadAnchorActive &&
+      !this._unreadAnchorPending &&
       (!this._applyingUnreadAnchor || el.scrollTop !== this._unreadAnchorWrittenScrollTop)
     ) {
       this.deactivateUnreadAnchor();
     }
 
-    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const distFromBottom = distanceFromBottom(el);
     // With no earlier position to compare against, any distance counts as
     // the reader having moved away, as before.
     const sameScroller = this._lastScrollEl === el;
@@ -4537,6 +4556,7 @@ export class ScionChatThread extends LitElement {
    */
   private scrollToUnreadDivider(): void {
     this._unreadAnchorActive = true;
+    this._unreadAnchorPending = true;
     this._unreadAnchorMessageCount = this.messages.length;
     // Captured as a local, not stored back onto `this`: `fetchId` only bumps
     // on a thread switch, so if this open is superseded before this deferred
@@ -4545,18 +4565,44 @@ export class ScionChatThread extends LitElement {
     // fires, making the two indistinguishable. A local closure variable
     // keeps each open's token fixed to the value it had when scheduled.
     const openToken = this.fetchId;
-    void this.updateComplete.then(() => {
-      // One more frame past updateComplete: images, attachments and markdown
-      // inside already-rendered rows can still change height after Lit has
-      // committed the DOM, and reading geometry too early re-introduces the
-      // jump-to-bottom-then-up flash this anchor exists to avoid.
-      this._unreadAnchorInitialRaf = requestAnimationFrame(() => {
-        this._unreadAnchorInitialRaf = null;
-        if (!this._unreadAnchorActive || this.fetchId !== openToken) return;
-        this.applyUnreadAnchor();
-        this.observeUnreadAnchorLayout(openToken);
+    void this.updateComplete
+      .then(() => {
+        // One more frame past updateComplete: images, attachments and markdown
+        // inside already-rendered rows can still change height after Lit has
+        // committed the DOM, and reading geometry too early re-introduces the
+        // jump-to-bottom-then-up flash this anchor exists to avoid.
+        this._unreadAnchorInitialRaf = requestAnimationFrame(() => {
+          this._unreadAnchorInitialRaf = null;
+          if (!this._unreadAnchorActive || this.fetchId !== openToken) return;
+          // This callback runs later, outside the promise chain, so the .catch
+          // below never sees its throws. Stand the anchor down here too, and
+          // set the bottom pin from where the view really is: applyUnreadAnchor
+          // sets the pin before its scrollTop write, off when the divider is
+          // above the tail, so a throw from that write could leave a view still
+          // at the bottom unpinned, while a throw after it (the guard frame
+          // request) leaves the view at the divider, which must stay unpinned.
+          // Rethrow so the error still reaches the console.
+          try {
+            this._unreadAnchorPending = false;
+            this.applyUnreadAnchor();
+            this.observeUnreadAnchorLayout(openToken);
+          } catch (err) {
+            if (this.fetchId === openToken) {
+              this.deactivateUnreadAnchor();
+              const scrollEl = this.shadowRoot?.querySelector<HTMLElement>('.messages-scroll');
+              if (scrollEl) this.pinnedToBottom = isNearBottom(distanceFromBottom(scrollEl));
+            }
+            throw err;
+          }
+        });
+      })
+      .catch(() => {
+        // A render that throws rejects updateComplete, and a synchronous throw
+        // from requestAnimationFrame itself lands here too. Either way the
+        // first write never comes: stand the anchor down rather than leave the
+        // bottom pins off.
+        if (this.fetchId === openToken) this.deactivateUnreadAnchor();
       });
-    });
   }
 
   /**
@@ -4650,6 +4696,7 @@ export class ScionChatThread extends LitElement {
   /** Stop correcting the unread-divider anchor and tear down its watchers. */
   private deactivateUnreadAnchor(): void {
     this._unreadAnchorActive = false;
+    this._unreadAnchorPending = false;
     this._applyingUnreadAnchor = false;
     if (this._unreadAnchorResizeObserver) {
       this._unreadAnchorResizeObserver.disconnect();

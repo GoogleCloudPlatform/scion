@@ -32,7 +32,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -828,7 +827,8 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 		})
 	}
 
-	// S2: Verify bundle hash
+	// S2: Verify bundle hash. Skill hashes are transfer.ComputeContentHashV1
+	// (they are pinned; see the hub's computeSkillContentHash).
 	if skill.Hash != "" {
 		var transferFiles []transfer.FileInfo
 		for _, fe := range fileEntries {
@@ -837,7 +837,7 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 				Hash: fe.Hash,
 			})
 		}
-		bundleHash := transfer.ComputeContentHash(transferFiles)
+		bundleHash := transfer.ComputeContentHashV1(transferFiles)
 		if bundleHash != skill.Hash {
 			msg := fmt.Sprintf("bundle hash mismatch for skill %q: expected %s, got %s",
 				skill.URI, skill.Hash, bundleHash)
@@ -930,14 +930,39 @@ func skillFileModes(skill ResolvedSkill) map[string]os.FileMode {
 }
 
 // skillCacheKey is the skill cache entry name for skill. The bundle hash
-// does not cover file modes, so a skill with an executable file is keyed
-// by templatecache.EntryKey over the hash and its executable paths: an
-// entry cached before modes were carried (every file 0644) is then never
-// served for it (ptone/scion#5657). A skill with no executable file keeps
-// the bare bundle hash, so its existing entries stay valid. Both forms are
-// canonical "sha256:<hex64>" names.
+// (transfer.ComputeContentHashV1, which skills keep; see the hub's
+// computeSkillContentHash) does not cover file modes, so a skill with an
+// executable file is keyed by a hash derived from the bundle hash and its
+// sorted executable paths: an entry cached before modes were carried
+// (every file 0644) is then never served for it (ptone/scion#5657). A
+// skill with no executable file keeps the bare bundle hash, so its
+// existing entries stay valid. Both forms are canonical "sha256:<hex64>"
+// names.
+//
+// Templates and harness-configs key their cache entries with
+// templatecache.EntryKey, the v2 content hash of their files
+// (ptone/scion#5658). Skills keep this scheme until the skill hash moves
+// to v2 with a pin migration; the derivation is unchanged from
+// ptone/scion#5657, so its entries stay valid.
 func skillCacheKey(skill ResolvedSkill) string {
-	return templatecache.EntryKey(skill.Hash, skillFileModes(skill))
+	var exec []string
+	for p, m := range skillFileModes(skill) {
+		if m&0o111 != 0 {
+			exec = append(exec, p)
+		}
+	}
+	if len(exec) == 0 {
+		return skill.Hash
+	}
+	slices.Sort(exec)
+	var b strings.Builder
+	b.WriteString("scion-cache-entry-v1\x00")
+	b.WriteString(skill.Hash)
+	for _, p := range exec {
+		b.WriteString("\x00x:")
+		b.WriteString(p)
+	}
+	return transfer.HashBytes([]byte(b.String()))
 }
 
 // applySkillFileModes sets each file of skill under dir to its normalised
