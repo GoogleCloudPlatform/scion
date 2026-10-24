@@ -64,16 +64,39 @@ type harness struct {
 	http   *http.Client
 }
 
+// maxSocketPath is the longest unix socket path a client can connect to on
+// Linux (sun_path is 108 bytes, including the terminating NUL).
+const maxSocketPath = 107
+
+// shortTempDir returns a new temporary directory whose path stays short:
+// t.TempDir embeds the test name, and a socket path under it can exceed
+// maxSocketPath when TMPDIR is itself long.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	d, err := os.MkdirTemp("", "dg")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(d) })
+	return d
+}
+
+// requireDialablePath fails the test at once when path is too long for a
+// client to connect to, instead of failing later with "invalid argument".
+func requireDialablePath(t *testing.T, path string) {
+	t.Helper()
+	require.LessOrEqual(t, len(path), maxSocketPath, "socket path too long to dial: %s", path)
+}
+
 func newHarness(t *testing.T, configure ...func(f *fakeHub, cfg *Config)) *harness {
 	t.Helper()
 	testutil.ScrubHubEnv(t)
-	home := t.TempDir()
+	home := shortTempDir(t)
 	t.Cleanup(hub.SetTokenHome(home))
 
 	clk := clock.NewFake(testStart)
 	fh := newFakeHub(t, clk)
 	client := hub.NewClientWithConfig(fh.srv.URL, fh.currentJWT(), testAgentID)
 	sock := filepath.Join(home, ".scion", SocketName)
+	requireDialablePath(t, sock)
 	cfg := Config{Client: client, SocketPath: sock, Clock: clk}
 	for _, fn := range configure {
 		fn(fh, &cfg)

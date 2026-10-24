@@ -18,6 +18,7 @@ package delegation
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -65,7 +66,8 @@ func TestFlow31_SocketModeAndOwner(t *testing.T) {
 }
 
 func TestSocket_RefusesPeerOfAnotherUser(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "s", SocketName)
+	path := filepath.Join(shortTempDir(t), "s", SocketName)
+	requireDialablePath(t, path)
 	ln, err := listenSocket(socketConfig{path: path})
 	require.NoError(t, err)
 	pl, ok := ln.(*peerListener)
@@ -85,6 +87,15 @@ func TestSocket_RefusesPeerOfAnotherUser(t *testing.T) {
 		}},
 	}
 	defer hc.CloseIdleConnections()
+	// The connection itself succeeds (the path is dialable) and is then
+	// closed by the listener without a byte, so the refusal is the peer
+	// check and not a failed dial.
+	raw, err := net.Dial("unix", path)
+	require.NoError(t, err)
+	require.NoError(t, raw.SetReadDeadline(time.Now().Add(5*time.Second)))
+	_, err = raw.Read(make([]byte, 1))
+	assert.ErrorIs(t, err, io.EOF, "the listener closes a connection from a user that is not allowed")
+	_ = raw.Close()
 	resp, err := hc.Get("http://delegation/api/v1/agents")
 	if err == nil {
 		_ = resp.Body.Close()
@@ -99,7 +110,8 @@ func TestSocket_RefusesPeerOfAnotherUser(t *testing.T) {
 }
 
 func TestSocket_ReplacesStaleAndRemovesOnClose(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "s", SocketName)
+	path := filepath.Join(shortTempDir(t), "s", SocketName)
+	requireDialablePath(t, path)
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
 	stale, err := net.Listen("unix", path)
 	require.NoError(t, err)
@@ -120,7 +132,7 @@ func TestSocket_ReplacesStaleAndRemovesOnClose(t *testing.T) {
 
 func TestSocket_RefusesNonSocketAndSymlinkedDirectory(t *testing.T) {
 	t.Run("regular file at the socket path", func(t *testing.T) {
-		path := filepath.Join(t.TempDir(), SocketName)
+		path := filepath.Join(shortTempDir(t), SocketName)
 		require.NoError(t, os.WriteFile(path, []byte("keep"), 0o600))
 		h := New(Config{Client: newFakeClientForSocketTests(t), SocketPath: path})
 		require.Error(t, h.Start())
@@ -130,7 +142,7 @@ func TestSocket_RefusesNonSocketAndSymlinkedDirectory(t *testing.T) {
 	})
 
 	t.Run("symlinked socket directory", func(t *testing.T) {
-		base := t.TempDir()
+		base := shortTempDir(t)
 		realDir := filepath.Join(base, "real")
 		require.NoError(t, os.Mkdir(realDir, 0o700))
 		link := filepath.Join(base, "link")
