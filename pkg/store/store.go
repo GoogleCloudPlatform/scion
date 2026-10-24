@@ -1701,10 +1701,11 @@ type RuntimeBrokerStore interface {
 	// RefreshRuntimeBrokerState is the heartbeat's write. It reads the
 	// broker, calls refresh on that copy and, when refresh reports a
 	// change, writes only Capabilities, WorkspaceStorage, DefaultProfile,
-	// Health and Profiles, as a compare-and-set on the row's version. A
-	// concurrent write between the read and the write makes it retry with
-	// a fresh read, so refresh may run more than once and must change only
-	// those fields; changes it makes to any other field are not stored.
+	// Health, Profiles and Version (the broker's build token), as a
+	// compare-and-set on the row's lock version. A concurrent write
+	// between the read and the write makes it retry with a fresh read, so
+	// refresh may run more than once and must change only those fields;
+	// changes it makes to any other field are not stored.
 	// Every other column keeps whatever a concurrent writer stored. On a
 	// flat row Profiles and DefaultProfile are stored empty, as
 	// UpdateRuntimeBroker does. Returns ErrNotFound if the broker doesn't

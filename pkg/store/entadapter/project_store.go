@@ -1062,6 +1062,7 @@ func (s *ProjectStore) RefreshRuntimeBrokerState(ctx context.Context, id string,
 			SetDefaultProfile(defaultProfile).
 			SetHealth(marshalRawJSON(b.Health)).
 			SetRuntimes(marshalRawJSON(profiles)).
+			SetVersion(b.Version).
 			SetUpdated(time.Now()).
 			AddLockVersion(1).
 			Save(ctx)
