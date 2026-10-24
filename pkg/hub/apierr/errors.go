@@ -138,6 +138,12 @@ const (
 	// deleteBlocksStart).
 	ErrCodeDeleteInProgress = "delete_in_progress"
 
+	// ErrCodeEncryptionPolicyMismatch is returned (409) when the database
+	// encryption policy refuses a secret payload write from this hub's
+	// encryption keyring (ptone/scion#1530 §6). Nothing was written; there
+	// is no unencrypted fallback.
+	ErrCodeEncryptionPolicyMismatch = "encryption_policy_mismatch"
+
 	// ErrCodeStartOutcomeUnknown is returned (504) by a create or env
 	// submit whose synchronous dispatch to the runtime broker ended without
 	// an answer (the dispatch deadline, or no response to a sent request).
@@ -418,6 +424,10 @@ func WriteErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusConflict
 		code = ErrCodeDeleteInProgress
 		message = DeleteInProgressMessage
+	case errors.Is(err, store.ErrEncryptionPolicyMismatch):
+		statusCode = http.StatusConflict
+		code = ErrCodeEncryptionPolicyMismatch
+		message = "The database encryption policy refused this write: this hub's encryption keyring does not match it. Nothing was stored."
 	case errors.Is(err, store.ErrVersionConflict):
 		statusCode = http.StatusConflict
 		code = ErrCodeVersionConflict

@@ -246,7 +246,8 @@ func tcpHeader(port string) grant.StreamHeader {
 	return grant.StreamHeader{Kind: grant.StreamKindTCP, Params: map[string]string{grant.ParamHost: "127.0.0.1", grant.ParamPort: port}}
 }
 
-var testGrantEncryptionKey = secret.DeriveLocalEncryptionKey("test-shared-secret")
+// testGrantCipher is the legacy-mode cipher over a synthetic shared secret.
+var testGrantCipher = secret.NewLegacyValueCipher("test-shared-secret")
 
 func assertNoKeyMaterial(t *testing.T, s string, ring *grant.KeyRing) {
 	t.Helper()
