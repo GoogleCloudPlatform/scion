@@ -577,6 +577,17 @@ func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agen
 		TargetBrokerID:        moveTargetID(move),
 		TransferMode:          moveTransferMode(move),
 	}
+	// A reincarnation starts the agent, so it is admitted like a start
+	// (ptone/scion#6033): reserve its project slot, and unless it moves its
+	// broker slot, with the cap check, before anything is claimed. Both
+	// reserves are idempotent for a slot the agent already holds. A move's
+	// target broker slot is checked when the worker moves the reservation.
+	capHold, err := s.reserveReincarnationCapacity(ctx, agent, move)
+	if err != nil {
+		writeQuotaReserveError(w, store.LimitMaxAgentsPerProject, err)
+		return
+	}
+
 	// The claim, the reincarnation record, the authority re-record, the
 	// reincarnate-claim hooks and the audit record commit in one
 	// transaction (reincarnateClaimTx), so a failure at any step leaves the
@@ -585,6 +596,9 @@ func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agen
 	// unconfirmed: a start whose outcome is unknown may still create a
 	// container this reincarnation would then compete with.
 	if err := s.reincarnateClaimTx(ctx, agent, rec, auth, saAssignment, auditActorFromContext(ctx)); err != nil {
+		// Undo the capacity this request reserved, conditionally: a start
+		// or a concurrent reincarnation that now owns the agent keeps it.
+		s.rollbackReincarnationCapacity(ctx, agent, capHold)
 		var held *store.ClaimHeldError
 		if errors.Is(err, store.ErrVersionConflict) {
 			Conflict(w, "agent was concurrently modified; retry")
@@ -639,7 +653,7 @@ func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agen
 	// this exact claim instant, not rec.RequestedAt — the store stamps that
 	// a few ms later inside CreateAgentReincarnation, after the gate in the
 	// three delivery paths could already have started deferring messages.
-	go s.runReincarnationWorker(context.Background(), agent.ID, rec.ID, rec.PreviousAppliedConfig, fresh, handoff, claimedAt, requestedBy, &plan, targetGeneration, admittedDeletionClaim, move)
+	go s.runReincarnationWorker(context.Background(), agent.ID, rec.ID, rec.PreviousAppliedConfig, fresh, handoff, claimedAt, requestedBy, &plan, targetGeneration, admittedDeletionClaim, move, capHold)
 
 	writeJSON(w, http.StatusAccepted, ReincarnateAgentResponse{
 		AgentID:        agent.ID,

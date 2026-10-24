@@ -187,12 +187,16 @@ func (e *ReservationScopeConflictError) Error() string {
 func (e *ReservationScopeConflictError) Unwrap() error { return ErrReservationScopeConflict }
 
 // QuotaExceededError is the store.ErrQuotaExceeded refusal of Reserve,
-// naming the exhausted scope. It unwraps to store.ErrQuotaExceeded, so
-// errors.Is callers are unchanged, and its message is that sentinel's.
+// naming the exhausted scope, the active count it found there and the
+// effective limit it compared that count against. It unwraps to
+// store.ErrQuotaExceeded, so errors.Is callers are unchanged, and its message
+// is that sentinel's.
 type QuotaExceededError struct {
 	Limit     string
 	ScopeType string
 	ScopeID   string
+	Count     int64
+	Max       int64
 }
 
 func (e *QuotaExceededError) Error() string { return store.ErrQuotaExceeded.Error() }
@@ -271,8 +275,26 @@ func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID
 		return false, fmt.Errorf("quota: resolve effective limit for %q: %w", limitName, err)
 	}
 
-	// 3. Unlimited — no enforcement.
+	// 3. Unlimited — no enforcement. A limit counted across subjects
+	// (countsAcrossSubjects) still records the resource, without a lock or a
+	// cap check: its total is shared by every subject in the scope, so a
+	// subject whose own cap is unlimited must still be in it, or a capped
+	// subject in the same scope would be admitted against an undercount
+	// (ptone/scion#6033). The unique active (limit, resource) index makes the
+	// record idempotent. An unlocked record racing a capped admission
+	// serializes as the capped admission first: it saw a total below its cap,
+	// and an unlimited subject may exceed any cap.
 	if effectiveLimit <= 0 {
+		if countsAcrossSubjects(limitName) {
+			return qs.recordUnchecked(ctx, limitName, &store.UsageReservation{
+				LimitDefinitionID: limitDef.ID,
+				SubjectID:         subjectID,
+				ScopeType:         scopeType,
+				ScopeID:           scopeID,
+				ResourceID:        resourceID,
+				Reserved:          1,
+			})
+		}
 		return false, nil
 	}
 
@@ -337,8 +359,9 @@ func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID
 		return false, fmt.Errorf("quota: check existing reservation for %q: %w", limitName, err)
 	}
 
-	// 5. Count active reservations.
-	count, err := qs.store.CountActiveReservations(ctx, limitDef.ID, subjectID, scopeType, scopeID)
+	// 5. Count active reservations: across every subject in the scope for a
+	// limit counted that way (countsAcrossSubjects), else the subject's own.
+	count, err := qs.countActive(ctx, limitName, limitDef.ID, subjectID, scopeType, scopeID)
 	if err != nil {
 		return false, fmt.Errorf("quota: count active reservations for %q: %w", limitName, err)
 	}
@@ -354,7 +377,7 @@ func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID
 				"limit", limitName, "scope_type", scopeType, "scope_id", scopeID,
 				"count", count, "effective_limit", effectiveLimit)
 		} else {
-			return false, &QuotaExceededError{Limit: limitName, ScopeType: scopeType, ScopeID: scopeID}
+			return false, &QuotaExceededError{Limit: limitName, ScopeType: scopeType, ScopeID: scopeID, Count: count, Max: effectiveLimit}
 		}
 	}
 
@@ -374,6 +397,45 @@ func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID
 		return false, fmt.Errorf("quota: create reservation for %q: %w", limitName, err)
 	}
 
+	return true, nil
+}
+
+// countsAcrossSubjects reports whether limitName's cap is compared against
+// the active count of its whole scope, every subject included, rather than
+// the requesting subject's own count. max_agents_per_project is: its scope is
+// one project, and every creator's agents share that project's total, while
+// the cap compared against it is still resolved for the subject (the agent's
+// creator), so per-user and per-group raises keep working (ptone/scion#6033).
+// The broker and group limits use subject == scope, and
+// max_projects_per_user is per user, so they keep the per-subject count.
+func countsAcrossSubjects(limitName string) bool {
+	return limitName == store.LimitMaxAgentsPerProject
+}
+
+// countActive is Reserve's count of active reservations: the scope-wide
+// total for a limit counted across subjects, through the grouped per-scope
+// count, else the subject's own count in the scope.
+func (qs *QuotaService) countActive(ctx context.Context, limitName, limitDefID, subjectID, scopeType, scopeID string) (int64, error) {
+	if !countsAcrossSubjects(limitName) {
+		return qs.store.CountActiveReservations(ctx, limitDefID, subjectID, scopeType, scopeID)
+	}
+	counts, err := qs.store.CountActiveReservationsByScope(ctx, limitDefID, scopeType)
+	if err != nil {
+		return 0, err
+	}
+	return counts[scopeID], nil
+}
+
+// recordUnchecked records reservation without a cap check or a lock. created
+// is false when the resource already holds an active reservation for the
+// limit (the unique active index refuses a second one).
+func (qs *QuotaService) recordUnchecked(ctx context.Context, limitName string, reservation *store.UsageReservation) (bool, error) {
+	if _, err := qs.store.CreateUsageReservation(ctx, reservation); err != nil {
+		if errors.Is(err, store.ErrActiveReservationExists) {
+			return false, nil
+		}
+		return false, fmt.Errorf("quota: record reservation for %q: %w", limitName, err)
+	}
 	return true, nil
 }
 

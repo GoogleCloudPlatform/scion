@@ -899,6 +899,27 @@ func quotaExceededMessage(limitName string) string {
 	return "quota exceeded: " + limitName
 }
 
+// quotaRefusal returns the message and details of a request refused at a
+// quota. The limit is the one the error names (a *QuotaExceededError), else
+// limitName. A project agent limit names the project, its count and limit,
+// and how to free a slot (ptone/scion#6033); every other limit keeps
+// quotaExceededMessage and quotaExceededDetails.
+func quotaRefusal(limitName string, err error) (string, map[string]interface{}) {
+	var exceeded *QuotaExceededError
+	if !errors.As(err, &exceeded) {
+		return quotaExceededMessage(limitName), quotaExceededDetails(err)
+	}
+	if exceeded.Limit == store.LimitMaxAgentsPerProject && exceeded.ScopeType == store.QuotaScopeProject {
+		return fmt.Sprintf("%s (project %s: %d of %d agents in use); stop or delete an agent in this project to free a slot",
+				quotaExceededMessage(exceeded.Limit), exceeded.ScopeID, exceeded.Count, exceeded.Max),
+			map[string]interface{}{"projectId": exceeded.ScopeID, "count": exceeded.Count, "limit": exceeded.Max}
+	}
+	if exceeded.Limit != "" {
+		limitName = exceeded.Limit
+	}
+	return quotaExceededMessage(limitName), quotaExceededDetails(err)
+}
+
 // reserveQuotaHTTP is checkAndReserveQuota that also reports whether this
 // call created a new reservation (see QuotaService.Reserve). created is
 // only meaningful when ok is true.
@@ -926,8 +947,8 @@ func writeQuotaReserveError(w http.ResponseWriter, limitName string, err error) 
 			fmt.Sprintf("agent %s already holds capacity on Runtime Broker %s; it cannot be admitted on %s",
 				conflict.ResourceID, conflict.HeldScopeID, conflict.RequestedScopeID), nil)
 	case errors.Is(err, store.ErrQuotaExceeded):
-		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
-			quotaExceededMessage(limitName), quotaExceededDetails(err))
+		message, details := quotaRefusal(limitName, err)
+		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded, message, details)
 	case errors.Is(err, ErrQuotaLockContention):
 		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
 			"quota check temporarily unavailable, please retry", nil)
@@ -962,7 +983,7 @@ func (s *Server) releaseAgentQuotas(ctx context.Context, resourceID, runtimeBrok
 	if runtimeBrokerID != "" {
 		s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, resourceID)
 	}
-	s.quotaService.Release(ctx, "max_agents_per_project", resourceID)
+	s.quotaService.Release(ctx, store.LimitMaxAgentsPerProject, resourceID)
 }
 
 // Budgets for best-effort cleanup that must outlive the request that
@@ -2334,7 +2355,7 @@ func (s *Server) createAgentInProject(
 			return
 		}
 	}
-	if !s.checkAndReserveQuota(ctx, w, "max_agents_per_project", createdBy, "project", projectID, agent.ID) {
+	if !s.checkAndReserveQuota(ctx, w, store.LimitMaxAgentsPerProject, createdBy, store.QuotaScopeProject, projectID, agent.ID) {
 		s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
 		return
 	}

@@ -76,6 +76,10 @@ const (
 	// backstopSiteSettle: settleQueuedStops' re-assert after a start
 	// superseded the queued stop during the release.
 	backstopSiteSettle = "settle"
+	// backstopSiteReincarnate: the reincarnation worker's re-assert after
+	// its stopping write, for a concurrent reincarnate request whose
+	// rollback released the rows this reincarnation relies on.
+	backstopSiteReincarnate = "reincarnate"
 )
 
 // OTelQuotaCapacityMetrics counts capacity repairs:

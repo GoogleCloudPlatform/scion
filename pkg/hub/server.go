@@ -5330,9 +5330,11 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	agent.ContainerStatus = "stopped"
 	agent.Activity = ""
 	// A suspended agent has no running container: release its
-	// max_agents_per_broker reservation (ptone/scion#1963), mirroring
+	// max_agents_per_broker reservation (ptone/scion#1963) and its
+	// max_agents_per_project one (ptone/scion#6033), mirroring
 	// suspendAgent's HTTP-path behavior.
 	s.releaseBrokerQuota(ctx, agent)
+	s.releaseProjectQuota(ctx, agent)
 	releaseClaim()
 	s.events.PublishAgentStatus(ctx, agent)
 	return true
@@ -6510,11 +6512,13 @@ func (s *Server) registerSchedulerHandlers() {
 	s.scheduler.RegisterRecurringSingleton("notification-orphan-gc", 60, store.LockNotificationOrphanGC, s.notificationOrphanGCHandler())
 	// Hourly: delete hub-instance registry rows 24 h after their last write.
 	s.registerHubInstancePrune(s.scheduler)
-	// Reconcile stale max_agents_per_broker reservations (ptone/scion#1963):
-	// runs immediately at tick 0 (startup) and then hourly, fixing rows left
-	// with released_at IS NULL by the pre-fix stop/suspend paths (or any
-	// future drift) without a separate one-shot migration.
-	s.scheduler.RegisterRecurringSingleton("broker-quota-reconcile", 60, store.LockBrokerQuotaReconcile, s.ReconcileStaleBrokerQuotaReservations)
+	// Reconcile stale max_agents_per_broker reservations (ptone/scion#1963),
+	// then max_agents_per_project ones (ptone/scion#6033): runs immediately
+	// at tick 0 (startup) and then hourly, fixing rows left with
+	// released_at IS NULL by the pre-fix stop/suspend paths (or any future
+	// drift) and backfilling agents that hold capacity, without a separate
+	// one-shot migration.
+	s.scheduler.RegisterRecurringSingleton("broker-quota-reconcile", 60, store.LockBrokerQuotaReconcile, s.reconcileQuotaReservations)
 	s.scheduler.RegisterRecurringSingleton("reincarnation-sweep", 5, store.LockReincarnationSweep, s.reincarnationSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("start-claim-reaper", 1, store.LockStartClaimReaper, s.startClaimReaperHandler())
 	go func() {

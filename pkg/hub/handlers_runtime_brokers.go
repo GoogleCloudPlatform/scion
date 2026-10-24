@@ -1782,6 +1782,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			// reservation alone too.
 			if !reportOfOtherRun(agentHB.RunID, agent.RunID) {
 				s.reconcileBrokerQuotaOnPhaseChange(ctx, agent, agent.Phase, statusUpdate.Phase)
+				s.reconcileProjectQuotaOnPhaseChange(ctx, agent, agent.Phase, statusUpdate.Phase)
 			}
 
 			// Update the agent's status

@@ -571,6 +571,7 @@ func (s *Server) reconcileMissingAgents(ctx context.Context, brokerID string, pr
 			"previous_activity", a.Activity, "missing_since", firstSeen[a.ID], "last_seen", a.LastSeen,
 			"exit_reason", updated.ExitReason)
 		s.reconcileBrokerQuotaOnPhaseChange(ctx, updated, a.Phase, updated.Phase)
+		s.reconcileProjectQuotaOnPhaseChange(ctx, updated, a.Phase, updated.Phase)
 		s.events.PublishAgentStatus(ctx, updated)
 		if updated.Phase == string(state.PhaseHalted) {
 			// This write halted the agent; the CAS would otherwise have
@@ -652,5 +653,6 @@ func (s *Server) reconcileExecAgentNotFound(ctx context.Context, observed *store
 		"previous_activity", observed.Activity, "last_seen", observed.LastSeen,
 		"exit_reason", updated.ExitReason)
 	s.reconcileBrokerQuotaOnPhaseChange(ctx, updated, string(state.PhaseRunning), updated.Phase)
+	s.reconcileProjectQuotaOnPhaseChange(ctx, updated, string(state.PhaseRunning), updated.Phase)
 	s.events.PublishAgentStatus(ctx, updated)
 }

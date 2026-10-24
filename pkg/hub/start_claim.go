@@ -341,6 +341,7 @@ func (r *startClaimRun) releaseSlotIfIdle() {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.ctx), 10*time.Second)
 	defer cancel()
 	r.s.releaseSlotIfIdleOn(ctx, r.agent, r.broker)
+	r.s.releaseProjectSlotIfIdle(ctx, r.agent)
 }
 
 // claimedDispatch runs a start under its claim's context. fence reports
@@ -955,16 +956,16 @@ var errStartedStatusWrite = errors.New("agent started but its status could not b
 // not unconfirmed.
 var errStartRunNotBegun = errors.New("start not sent: its run could not be begun")
 
-// startQuotaError is a start refused because the broker is at capacity (or
-// the capacity check failed); nothing was dispatched.
+// startQuotaError is a start refused because the broker or project agent
+// limit is full (or the capacity check failed); nothing was dispatched.
 type startQuotaError struct{ err error }
 
-func (e *startQuotaError) Error() string { return "start refused by broker capacity: " + e.err.Error() }
+func (e *startQuotaError) Error() string { return "start refused by capacity: " + e.err.Error() }
 func (e *startQuotaError) Unwrap() error { return e.err }
 
-// reserveStartCapacity takes the broker capacity hold a start needs: it
-// reserves max_agents_per_broker (idempotent for an agent that already
-// holds it) and marks an agent in an uncounted phase starting for the
+// reserveStartCapacity takes the capacity hold a start needs: it reserves
+// max_agents_per_broker and max_agents_per_project (each idempotent for an
+// agent that already holds it) and marks an agent in an uncounted phase starting for the
 // dispatch (beginStartDispatch). The caller must hold a lifecycle op. A
 // capacity refusal is a startQuotaError; a failed starting write wraps
 // errStartingWrite (and store.ErrDeleteInProgress when a delete now holds
@@ -980,9 +981,10 @@ func (s *Server) reserveStartCapacity(ctx context.Context, agent *store.Agent) (
 	return sd, nil
 }
 
-// writeStartQuotaError writes the answer for a start refused by broker
-// capacity, as the create path's quota check does, and reports whether it
-// did.
+// writeStartQuotaError writes the answer for a start refused by capacity, as
+// the create path's quota check does, and reports whether it did. The limit
+// named in the answer is the one the error carries; max_agents_per_broker is
+// only the fallback.
 func writeStartQuotaError(w http.ResponseWriter, err error) bool {
 	var qe *startQuotaError
 	if !errors.As(err, &qe) {

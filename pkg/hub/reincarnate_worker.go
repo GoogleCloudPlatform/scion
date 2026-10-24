@@ -536,7 +536,7 @@ func (s *Server) advanceListedRecord(ctx context.Context, rec *store.AgentReinca
 // carries a Phase or Activity while a migration is in flight, so the
 // worker is the sole writer of §3.9's "migrating to generation N+1" for
 // both self and non-self migrations.
-func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnationID string, previous, fresh *store.AgentAppliedConfig, handoff string, migrationStart time.Time, requestedBy string, plan *ReincarnationPlan, toGeneration int, admittedDeletionClaim int64, move *reincarnationMove) {
+func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnationID string, previous, fresh *store.AgentAppliedConfig, handoff string, migrationStart time.Time, requestedBy string, plan *ReincarnationPlan, toGeneration int, admittedDeletionClaim int64, move *reincarnationMove, capHold *reincarnationCapacity) {
 	defer func() {
 		if p := recover(); p != nil {
 			s.agentLifecycleLog.Error("reincarnation worker panicked",
@@ -642,6 +642,21 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStopping, "failed to record stopping state: "+err.Error(), recovery(store.AgentReincarnationStateStopping))
 		return
 	}
+	// Capacity backstop (ptone/scion#6033): the agent reads stopping, a
+	// counted phase, from here on. Until this write it read its prior phase,
+	// so a concurrent reincarnate request that lost the claim could
+	// conditionally roll back the reservations this reincarnation relies on
+	// (a reincarnation is not a start-kind claim). Re-assert them without the
+	// cap check, as the restart backstop does; a row written here is owned
+	// by this reincarnation. A move's broker slot moves later
+	// (moveBrokerQuota), so only its project slot is re-asserted.
+	owned := capHold.owned()
+	if id := s.reassertProjectReservation(ctx, agent, backstopSiteReincarnate); id != "" {
+		owned.projectReservationID = id
+	}
+	if move == nil && s.reassertBrokerReservationAt(ctx, agent, backstopSiteReincarnate) {
+		owned.brokerReservationID = s.activeReservationID(ctx, store.LimitMaxAgentsPerBroker, agent.ID, store.QuotaScopeBroker, agent.RuntimeBrokerID)
+	}
 
 	// A stop failure is fatal, checked BEFORE any config write. The broker
 	// itself already treats "already stopped" and "not found" as success
@@ -656,6 +671,19 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStopping, "stop failed: "+err.Error(), recovery(store.AgentReincarnationStateStopping))
 		return
 	}
+	// The old container is gone. From here until a start is sent with an
+	// unknown outcome or succeeds, a failure leaves no container, so once
+	// the failure is recorded (the deferred call runs after the fail
+	// helpers, which write phase error) the capacity this reincarnation
+	// holds is released conditionally (releaseFailedReincarnationCapacity).
+	// On success the agent runs, holds capacity, and the conditional
+	// releases would keep everything anyway.
+	releaseCapacityOnExit := true
+	defer func() {
+		if releaseCapacityOnExit {
+			s.releaseFailedReincarnationCapacity(ctx, agentID, move != nil, owned)
+		}
+	}()
 	if move != nil {
 		// The source's exposed ports die with its container.
 		s.clearExposedPortsForAgent(ctx, agentID)
@@ -866,12 +894,17 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 			// at gen N+1, so row, disk and any container agree.
 			s.agentLifecycleLog.Info("reincarnation failed: start outcome ambiguous, a container may exist; not re-rendering the previous config",
 				"agent_id", agentID, "reincarnation_id", reincarnationID, "from_state", store.AgentReincarnationStateStarting, "cause", errMsg)
+			// A container may run: keep the capacity; the sweep releases
+			// it once the agent is seen idle.
+			releaseCapacityOnExit = false
 			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStarting, errMsg, nil)
 			return
 		}
 		failAfterProvision(store.AgentReincarnationStateStarting, errMsg)
 		return
 	}
+	// The start was accepted: the agent holds capacity.
+	releaseCapacityOnExit = false
 	// Take the start echo, image included: this is the runtime-resolved
 	// image. The record's NewAppliedConfig and the completion write below
 	// both persist fresh.

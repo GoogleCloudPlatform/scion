@@ -247,6 +247,7 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 	// or a write that released quota itself).
 	if answer.Changed {
 		s.releaseSlotIfIdle(ctx, agentID)
+		s.releaseProjectSlotIfIdle(ctx, agentID)
 	}
 
 	if answer.HTTPStatus != 0 {

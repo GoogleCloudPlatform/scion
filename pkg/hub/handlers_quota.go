@@ -729,6 +729,13 @@ func (s *Server) getUsageSummary(w http.ResponseWriter, r *http.Request) {
 		var listErr error
 		if def.Name == store.LimitMaxAgentsPerBroker {
 			count, listErr = s.countBrokerScopedActiveReservations(ctx, def.ID)
+		} else if def.Name == store.LimitMaxAgentsPerProject {
+			// Project reservations are stored at store.QuotaScopeProject,
+			// one scope per project, never at store.QuotaScopeSystem: sum
+			// every project's (ptone/scion#6033).
+			var reservations []*store.UsageReservation
+			reservations, listErr = s.store.ListActiveReservationsByScopeType(ctx, def.ID, store.QuotaScopeProject)
+			count = len(reservations)
 		} else {
 			var reservations []*store.UsageReservation
 			reservations, listErr = s.store.ListActiveReservations(ctx, def.ID, store.QuotaScopeSystem, "")
@@ -771,6 +778,10 @@ func (s *Server) getUsageByLimit(w http.ResponseWriter, r *http.Request, limitID
 	var reservations, unlisted []*store.UsageReservation
 	if def.Name == store.LimitMaxAgentsPerBroker {
 		reservations, unlisted, err = s.brokerScopedActiveReservations(ctx, def.ID)
+	} else if def.Name == store.LimitMaxAgentsPerProject {
+		// Every project's reservations, as getUsageSummary counts them
+		// (ptone/scion#6033).
+		reservations, err = s.store.ListActiveReservationsByScopeType(ctx, def.ID, store.QuotaScopeProject)
 	} else {
 		reservations, err = s.store.ListActiveReservations(ctx, limitID, store.QuotaScopeSystem, "")
 	}
