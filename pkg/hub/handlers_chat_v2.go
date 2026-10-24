@@ -3938,17 +3938,30 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 	}
 
 	// The agent supplies the default thread name and the thread's default
-	// agent slug.
+	// agent slug. Only a live agent's DM is promoted. The lookup error and
+	// the refusal of a missing or soft-deleted agent are answered as
+	// handleAddParticipant answers them: 404 "agent not found", or the
+	// lookup error itself.
 	agent, agentErr := s.store.GetAgent(ctx, agentID)
+	if agentErr != nil {
+		if errors.Is(agentErr, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "agent not found", nil)
+			return
+		}
+		writeErrorFromErr(w, agentErr, "")
+		return
+	}
+	if agent == nil || !agent.DeletedAt.IsZero() {
+		writeError(w, http.StatusNotFound, "not_found", "agent not found", nil)
+		return
+	}
 
 	// Default thread name: use agent's display name, or title-case slug
 	if body.Name == "" {
-		if agentErr == nil && agent != nil {
-			if agent.Name != "" {
-				body.Name = agent.Name
-			} else if agent.Slug != "" {
-				body.Name = titleCase(agent.Slug)
-			}
+		if agent.Name != "" {
+			body.Name = agent.Name
+		} else if agent.Slug != "" {
+			body.Name = titleCase(agent.Slug)
 		}
 		if body.Name == "" {
 			body.Name = "Promoted Thread"
@@ -3995,9 +4008,9 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 
 	// 11. Build topic struct. The default agent is stored as the agent
 	// slug, as group create does (setGroupDefaultAgent); the ID is the
-	// fallback when the slug cannot be read.
+	// fallback when the agent has no slug.
 	defaultAgent := agentID
-	if agentErr == nil && agent != nil && agent.Slug != "" {
+	if agent.Slug != "" {
 		defaultAgent = agent.Slug
 	}
 	topicID := uuid.New().String()
