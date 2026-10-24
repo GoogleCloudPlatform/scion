@@ -489,10 +489,15 @@ func TestHubDelivery_Step10Admission(t *testing.T) {
 			wantReason: "migration-provenance delegation supplies no delivery authority", wantCause: DenyCauseCeilingOrphaned,
 		},
 		{
+			// The test server enables dev authority by default, so the row
+			// turns it off itself.
 			name: "dev_local_dev_auth_off",
-			setup: single("dev-off", DevUserID, func(e *store.DelegationEdge) {
-				e.SourceCredentialKind = store.SourceCredentialDevLocal
-			}),
+			setup: func(t *testing.T, f *goldenFixture) (*AuthzService, *hubDeliveryIdentity, Resource) {
+				f.authz.setDevLocalAuthorityEnabled(false)
+				return single("dev-off", DevUserID, func(e *store.DelegationEdge) {
+					e.SourceCredentialKind = store.SourceCredentialDevLocal
+				})(t, f)
+			},
 			wantReason: "delegation ceiling: " + reasonDevLocalDisabled, wantCause: DenyCauseCeilingSourceNotAllowed,
 		},
 		{

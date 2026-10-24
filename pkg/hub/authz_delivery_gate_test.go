@@ -465,9 +465,17 @@ func TestDeliveryGate_Part2ValidInternalDeliveryAdmitted(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, AncestryIsHubAttested(h), "the credential itself attests nothing")
 
+	// The golden env var is as_needed, and only an always env var is a
+	// progeny sharing source (ListProgenyEnvVars), so the env_var target is
+	// an always env var of the same owner, opted in.
+	alwaysEnvVarID := tid("dg-valid-delivery-always-envvar")
+	require.NoError(t, f.store.CreateEnvVar(context.Background(), &store.EnvVar{
+		ID: alwaysEnvVarID, Key: "dg_valid_delivery_always", Value: "v", Scope: "user", ScopeID: f.projectOwnerID,
+		AllowProgeny: true, InjectionMode: store.InjectionModeAlways, CreatedBy: f.projectOwnerID,
+	}))
 	targets := map[string]Resource{
 		"secret.deliver":  {Type: "secret", ID: f.secretID},
-		"env_var.deliver": {Type: "env_var", ID: f.envVarID},
+		"env_var.deliver": {Type: "env_var", ID: alwaysEnvVarID},
 	}
 	for perm, res := range targets {
 		t.Run(perm, func(t *testing.T) {
