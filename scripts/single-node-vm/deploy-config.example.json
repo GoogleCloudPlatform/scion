@@ -12,7 +12,7 @@
   },
   "admin_email": "",
   "hub_sa_minting": true,
-  "update_policy": "auto",
+  "update_policy": "notify",
   "release_channel": "",
   "gke_target": {
     "name": "",
