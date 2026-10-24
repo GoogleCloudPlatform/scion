@@ -167,8 +167,10 @@ calls, and never a token the browser can see or reuse directly.
   request (see [Token-Request Authority](/scion/hosted/ha/permissions/#token-request-authority)).
   The principal recorded as the source of the agent's assignment must still
   hold `gcp_service_account.assign` on the account and, in
-  `gcp_iam_check_mode: enforce`, still pass the `actAs` check. If it no
-  longer does, the link fails like any other unavailable object.
+  `gcp_iam_check_mode: enforce`, still pass the `actAs` check, and an
+  access constraint on the sending agent applies as it does to the agent's
+  token request. If any of these fails, the link fails like any other
+  unavailable object.
 - **Size limits and previews**: objects up to 10 MiB can be opened. PNG,
   JPEG, GIF and WebP objects preview as images; other text — including SVG,
   which is always shown as source rather than rendered — previews inline up

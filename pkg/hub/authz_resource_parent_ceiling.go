@@ -564,10 +564,14 @@ func (a *AuthzService) parentCeilingMissingEdge(ctx context.Context, agent Agent
 // token-scope and grant steps of Decide do not apply. The caller's record
 // checks stand in for them: the agent's applied identity is in assign mode
 // for exactly this account, and the account passes the same admissibility
-// rule as the token mint (resolveCurrentSA). Step 10 is Decide's own
-// (applyResourceParentCeiling): the chain check of recorded state, then
-// the account's parent ceiling. The decision is always audited, allow or
-// deny, as Decide audits a step-10 parent-ceiling decision.
+// rule as the token mint (resolveCurrentSA). Decide's access constraints
+// (step 7c) apply to the agent as they do on the mint, so a constraint that
+// removes the permission from the agent (or a group it belongs to) refuses
+// the proxy's use too (storedAgentAccessConstraintDeny). Step 10 is
+// Decide's own (applyResourceParentCeiling): the chain check of recorded
+// state, then the account's parent ceiling. The decision is always
+// audited, allow or deny, as Decide audits a step-10 parent-ceiling
+// decision.
 func (a *AuthzService) decideStoredAgentServiceAccountUse(ctx context.Context, agent *store.Agent, sa *store.GCPServiceAccount) Decision {
 	if a == nil || agent == nil || sa == nil {
 		return Decision{Allowed: false, Reason: "invalid stored-agent use request", DeniedBy: DeniedByDelegationCeiling, DenyCause: DenyCauseCeilingError}
@@ -583,8 +587,10 @@ func (a *AuthzService) decideStoredAgentServiceAccountUse(ctx context.Context, a
 		AlwaysAudit: true,
 	}
 	decision := Decision{Allowed: true, Reason: "stored agent record names the account in assign mode"}
-	m, ok := ResourceParentCeilingFor(gcpServiceAccountUsePermission)
-	if !ok {
+	m, hasCeiling := ResourceParentCeilingFor(gcpServiceAccountUsePermission)
+	if denied, deny := a.storedAgentAccessConstraintDeny(maskAuthzInputs(ctx), ident, request); deny {
+		decision = denied
+	} else if !hasCeiling {
 		decision = parentCeilingDenyDecision(decision, DenyCauseCeilingError, "no parent ceiling for the permission", ParentProof{})
 	} else {
 		decision = a.applyResourceParentCeiling(maskAuthzInputs(ctx), m, ident, request.Resource, decision)
@@ -594,6 +600,49 @@ func (a *AuthzService) decideStoredAgentServiceAccountUse(ctx context.Context, a
 		a.emitDecisionAudit(ctx, request, decision)
 	}
 	return decision
+}
+
+// storedAgentAccessConstraintDeny is Decide's step 7c for a stored agent
+// with no credential on the request: it loads the access constraints that
+// apply to the agent's principal closure (the agent and the groups it
+// belongs to) in the resource's scope, and denies when one of them removes
+// request.Permission. deny is false when no constraint removes it. As in
+// Decide, a closure or constraint load failure denies with
+// resolution_error, and a constraint deny has no DeniedBy or DenyCause.
+// ctx must be masked (maskAuthzInputs): the request that reaches here
+// carries another principal's credential, so no memo of it may be read.
+func (a *AuthzService) storedAgentAccessConstraintDeny(ctx context.Context, ident Identity, request AuthzRequest) (Decision, bool) {
+	principals, err := a.inputsFor(ctx, ident).Principals()
+	if err != nil {
+		a.logger.Warn("stored-agent use: failed to resolve authorization principals (fail-closed)",
+			"principal_id", ident.ID(), "error", err)
+		return Decision{Allowed: false, Reason: "principal resolution error (fail-closed)", DenyCause: DenyCauseResolutionError}, true
+	}
+	closure := make(map[string]struct{}, len(principals))
+	for _, p := range principals {
+		closure[p.Type+":"+p.ID] = struct{}{}
+	}
+	resourceCtx := ResourceContext{
+		ResourceType: request.Resource.Type,
+		ResourceID:   request.Resource.ID,
+		OwnerID:      request.Resource.OwnerID,
+		ProjectID:    projectIDForResource(request.Resource),
+		Ancestry:     request.Resource.Ancestry,
+	}
+	restrictions, err := a.accessConstraintRestrictions(ctx, closure, resourceCtx)
+	if err != nil {
+		a.logger.Warn("stored-agent use: failed to load access constraints (fail-closed)", "error", err)
+		return Decision{Allowed: false, Reason: "restriction removed permission: access_constraint_error - restriction has no check function (fail closed)", DenyCause: DenyCauseResolutionError}, true
+	}
+	for _, r := range restrictions {
+		if r.Check == nil {
+			return Decision{Allowed: false, Reason: "restriction removed permission: " + r.Kind + " - restriction has no check function (fail closed)"}, true
+		}
+		if !r.Check(request.Permission) {
+			return Decision{Allowed: false, Reason: "restriction removed permission: " + r.Kind + " - permission removed by " + r.Kind}, true
+		}
+	}
+	return Decision{}, false
 }
 
 // parentProofReason appends the parent proof to an allow reason.

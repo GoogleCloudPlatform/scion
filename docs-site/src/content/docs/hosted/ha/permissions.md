@@ -186,6 +186,8 @@ If the source has lost `gcp_service_account.assign` on the account (for example,
 
 An agent whose own delegation chain has an unrecorded hop (an agent from before delegation provenance was recorded) is refused, even when its service account assignment has been recorded again since. Adopt its delegation (see [Delegation provenance adoption](/scion/reference/delegation-provenance-adoption/)) or recreate the agent. An agent with no delegation record of its own is admitted only before the Hub's delegation-edge backfill has completed; after it, or when a parent agent in its chain has no delegation record (for example, because the parent was deleted), the request is refused. Recreate the agent from a live principal.
 
+An [access constraint](#monotonic-restrictions-accessconstraints) on the agent also applies: a constraint whose maximum permissions do not include `gcp_service_account.use` refuses the token request.
+
 The same rule applies when the Hub fetches a `gs://` link from chat with the sending agent's service account (see [gs:// links in chat](/scion/hosted/single-node/hub-server/#gs-links-in-chat)). A refused fetch looks like any other unavailable object.
 
 If the Hub cannot save the result of a service account verification (on registration, minting or an explicit verify), the request fails with `500` instead of reporting success. On registration the account record already exists, so re-run verification on it (`scion project service-accounts verify <id>`, or `POST .../gcp-service-accounts/<id>/verify`) rather than registering it again.

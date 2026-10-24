@@ -173,6 +173,56 @@ func TestGCSLink_SAUse_RefusedUnrecorded(t *testing.T) {
 	}
 }
 
+// TestGCSLink_SAUse_AccessConstraint: an access constraint on the sending
+// agent applies to the proxy's use decision as it does to the agent's own
+// token request (Decide's step 7c). A constraint whose maximum permissions
+// keep gcp_service_account.use admits the fetch; one that leaves it out
+// refuses the fetch before any token is minted.
+func TestGCSLink_SAUse_AccessConstraint(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		maximum  []string
+		admitted bool
+	}{
+		{"constraint keeps use", []string{"agent.read", "gcp_service_account.use"}, true},
+		{"constraint removes use", []string{"agent.read"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newGCSFixture(t)
+			seed := "use-ac-keep"
+			if !tc.admitted {
+				seed = "use-ac-remove"
+			}
+			sc := newGCSUseScenario(t, f, seed)
+			subjectType, subjectID := "agent", sc.agent.ID
+			_, err := f.store.CreateAccessConstraint(context.Background(), &store.AccessConstraint{
+				Name:                 seed + "-boundary",
+				SubjectKind:          store.ConstraintSubjectPrincipal,
+				SubjectPrincipalType: &subjectType,
+				SubjectPrincipalID:   &subjectID,
+				ScopeType:            "system",
+				MaximumPermissions:   tc.maximum,
+				Purpose:              "stored-agent use decision test",
+				CreatedBy:            sc.viewer.ID,
+			})
+			require.NoError(t, err)
+
+			if tc.admitted {
+				requireGCSFetchAllowed(t, f, sc.fetch(t, f), sc.sa)
+				d := sc.useDecision(t, f)
+				require.True(t, d.Allowed, "cause=%q reason=%q", d.DenyCause, d.Reason)
+				return
+			}
+			requireGCSUniformDeny(t, f, sc.fetch(t, f), GCSLinkReasonSAUseNotAuthorized)
+			d := sc.useDecision(t, f)
+			require.False(t, d.Allowed, "reason %q", d.Reason)
+			assert.Empty(t, d.DenyCause, "reason %q", d.Reason)
+			assert.Equal(t, "restriction removed permission: access_constraint - permission removed by access_constraint", d.Reason)
+			assert.Nil(t, d.parentProof, "the constraint denies before step 10")
+		})
+	}
+}
+
 // TestGCSLink_SAUse_ActAsEnforceMode: in enforce mode the recorded source,
 // never the agent or the viewer, must pass actAs on the account; a denial
 // refuses the fetch before any token is minted.
