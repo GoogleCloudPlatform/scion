@@ -50,10 +50,14 @@ func TestServerEnvTable_CanonicalOverrides(t *testing.T) {
 	assert.Equal(t, []serverEnvCanonicalOverride{
 		{Path: "server.hub.public_url", Env: "HUB_ENDPOINT"},
 		{Path: "server.broker", Env: "RUNTIMEBROKER", Subtree: true},
+		{Path: "server.keyring_file", Env: "KEYRING_FILE"},
+		{Path: "server.keyring_file_allow_world_readable", Env: "KEYRING_FILE_ALLOW_WORLD_READABLE"},
 	}, serverEnvCanonicalOverrides)
 
 	for path, want := range map[string]string{
 		"server.hub.public_url":                          "SCION_SERVER_HUB_ENDPOINT",
+		"server.keyring_file":                            "SCION_SERVER_KEYRING_FILE",
+		"server.keyring_file_allow_world_readable":       "SCION_SERVER_KEYRING_FILE_ALLOW_WORLD_READABLE",
 		"server.broker.port":                             "SCION_SERVER_RUNTIMEBROKER_PORT",
 		"server.broker.hub_endpoint":                     "SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT",
 		"server.broker.broker_id":                        "SCION_SERVER_RUNTIMEBROKER_BROKERID",

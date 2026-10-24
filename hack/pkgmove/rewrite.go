@@ -291,6 +291,7 @@ func (a *analysis) safetyFindings() {
 	a.loggingFindings()
 	a.testdataFindings()
 	a.sourceScanFindings()
+	a.outsideRefFindings()
 	a.scanLinknames()
 	a.reflectionFindings()
 	// Staying var initialisers that use moved code. Calls run moved code
@@ -1430,10 +1431,7 @@ func isIdentByte(c byte) bool {
 }
 
 func shorten(s string) string {
-	if len(s) > 60 {
-		return s[:57] + "..."
-	}
-	return s
+	return truncateUTF8(s, 60)
 }
 
 // typeNameFindings lists every moved named type: its reflect-visible name
@@ -1886,6 +1884,15 @@ func (a *analysis) sourceScanFindings() {
 		"filepath.WalkDir": true, "filepath.Walk": true, "parser.ParseDir": true, "packages.Load": true,
 		"fs.WalkDir": true, "fs.Glob": true, "fs.ReadDir": true,
 	}
+	// targetSub is the target relative to the source directory, the form of
+	// a guardScanSubdirs entry ("" when the target is not below it). The list
+	// itself is read on first use.
+	targetSub := ""
+	if r, err := filepath.Rel(a.cfg.SrcDir, a.cfg.DstDir); err == nil && r != "." && !strings.HasPrefix(r, "..") {
+		targetSub = filepath.ToSlash(r)
+	}
+	var subdirs scanSubdirs
+	subdirsLoaded := false
 	for _, f := range a.files {
 		if !f.IsTest {
 			continue
@@ -1920,10 +1927,28 @@ func (a *analysis) sourceScanFindings() {
 		enum := strings.Join(dedupStrings(sortedCopy(calls)), ", ")
 		target := a.rel(a.cfg.DstDir)
 		var others, notes []string
-		cleared := false
+		// The first covering marker with a reason clears the file, unless a
+		// guardScanSubdirs marker in it misses the target: that marker's
+		// site reads only the listed directories, so another site's claim
+		// (say pkg/hub/... at a recursive walk) does not cover it.
+		clearMsg, clearPos, listMiss := "", "", ""
 		for _, m := range scanCoversMarkers(a.fset, f.AST, f.Src) {
 			pos := a.posOf(m.pos)
-			if !m.covers(target) {
+			via := ""
+			if m.list {
+				if !subdirsLoaded {
+					subdirs = a.guardScanSubdirsList()
+					subdirsLoaded = true
+				}
+				if why := subdirs.missing(targetSub); why != "" {
+					notes = append(notes, fmt.Sprintf("marker at %s claims the %s entries, but %s", pos, guardScanSubdirsName, why))
+					if listMiss == "" {
+						listMiss = pos
+					}
+					continue
+				}
+				via = fmt.Sprintf(", through the %s entry %q declared at %s", guardScanSubdirsName, targetSub, subdirs.pos)
+			} else if !m.covers(target) {
 				others = append(others, fmt.Sprintf("%q at %s", m.text, pos))
 				continue
 			}
@@ -1931,14 +1956,18 @@ func (a *analysis) sourceScanFindings() {
 				notes = append(notes, fmt.Sprintf("marker at %s has no reason line", pos))
 				continue
 			}
-			a.plan.add(levelInfo, "source-scanning test declares coverage of the target", a.rel(f.Path),
-				"source-scanning test declares coverage of %s (marker at %s; reason: %q); %s test enumerates files (%s) - the marker is a claim, not a proof: verify the test really scans %s",
-				target, pos, m.reason, side, enum, target)
-			cleared = true
-			break
+			if clearMsg == "" {
+				clearPos = pos
+				clearMsg = fmt.Sprintf("source-scanning test declares coverage of %s (marker at %s%s; reason: %q); %s test enumerates files (%s) - the marker is a claim, not a proof: verify the test really scans %s",
+					target, pos, via, m.reason, side, enum, target)
+			}
 		}
-		if cleared {
+		if clearMsg != "" && listMiss == "" {
+			a.plan.add(levelInfo, "source-scanning test declares coverage of the target", a.rel(f.Path), "%s", clearMsg)
 			continue
+		}
+		if clearMsg != "" {
+			notes = append(notes, fmt.Sprintf("the marker at %s does not clear the file while the %s marker at %s misses the target", clearPos, guardScanSubdirsName, listMiss))
 		}
 		if len(others) > 0 {
 			notes = append(notes, fmt.Sprintf("its pkgmove:scan-covers markers do not cover %s (or are malformed): %s", target, strings.Join(others, ", ")))
@@ -1958,14 +1987,24 @@ func (a *analysis) sourceScanFindings() {
 //
 //	// pkgmove:scan-covers pkg/hub/sub
 //	// pkgmove:scan-covers pkg/hub/...
+//	// pkgmove:scan-covers guardScanSubdirs
 //
 // The marker must be a whole comment line written exactly as above (one
 // space after the slashes; "//pkgmove:" is directive syntax, which gofmt
 // moves within doc comments), with one directory, relative to the module root. A trailing "/..." covers the directory and
-// every directory below it. The next comment line must state the reason; a
-// marker without one clears nothing. The reason is echoed in the report but
-// not interpreted.
+// every directory below it. The word guardScanSubdirs instead claims every
+// entry of the source package's guardScanSubdirs list (see
+// guardScanSubdirsList): the marker covers the target if, and only if, the
+// target relative to the source directory is in that list. The next comment
+// line must state the reason; a marker without one clears nothing. The
+// reason is echoed in the report but not interpreted.
 const scanCoversPrefix = "pkgmove:scan-covers"
+
+// guardScanSubdirsName is both the scan-covers marker word and the name of
+// the []string var, declared in a test file of the source package, that
+// lists the subdirectories (relative to the source directory) its
+// source-scanning guard tests read through shared helpers.
+const guardScanSubdirsName = "guardScanSubdirs"
 
 type scanCoversMarker struct {
 	pos       token.Pos
@@ -1973,6 +2012,7 @@ type scanCoversMarker struct {
 	reason    string // the following comment line, "" when there is none
 	dir       string // cleaned module-relative directory, "" when malformed
 	recursive bool
+	list      bool // "guardScanSubdirs": covers the entries of that list (dir is "")
 }
 
 // scanCoversMarkers returns the scan-covers markers of a file in source order.
@@ -1992,7 +2032,11 @@ func scanCoversMarkers(fset *token.FileSet, file *ast.File, src []byte) []scanCo
 			}
 			m := scanCoversMarker{pos: c.Pos(), text: c.Text}
 			if len(fields) == 2 && strings.HasPrefix(c.Text, "// "+scanCoversPrefix) && startsLine(src, fset.Position(c.Pos()).Offset) {
-				m.dir, m.recursive = parseScanCoversDir(fields[1])
+				if fields[1] == guardScanSubdirsName {
+					m.list = true
+				} else {
+					m.dir, m.recursive = parseScanCoversDir(fields[1])
+				}
 			}
 			if i+1 < len(cg.List) {
 				next := cg.List[i+1]
@@ -2056,4 +2100,102 @@ func (m scanCoversMarker) covers(target string) bool {
 	default:
 		return strings.HasPrefix(target, m.dir+"/")
 	}
+}
+
+// scanSubdirs is the guardScanSubdirs list of the source package.
+type scanSubdirs struct {
+	entries map[string]bool // cleaned entries, relative to the source directory
+	pos     string          // file:line of the declaration
+	err     string          // why the list cannot be used, "" when it can
+}
+
+// missing returns "" when the list holds sub, and otherwise why a
+// guardScanSubdirs marker does not cover it.
+func (l scanSubdirs) missing(sub string) string {
+	switch {
+	case l.err != "":
+		return l.err
+	case sub == "":
+		return "the target is not below the source directory"
+	case !l.entries[sub]:
+		return fmt.Sprintf("the list (declared at %s) does not include %s: add %q to %s", l.pos, sub, sub, guardScanSubdirsName)
+	}
+	return ""
+}
+
+// guardScanSubdirsList reads the guardScanSubdirs list of the source
+// package: a package-level var declared in one of its test files (build
+// constrained ones included) as a []string composite literal of string
+// literals, each a slash-separated directory relative to the source
+// directory. Anything else (no declaration, several, an element that is not
+// a string literal or a malformed directory) makes every guardScanSubdirs
+// marker cover nothing; err says why.
+func (a *analysis) guardScanSubdirsList() scanSubdirs {
+	var decls []*ast.ValueSpec
+	var poss []string
+	for _, f := range a.files {
+		if !f.IsTest || f.XTest {
+			continue
+		}
+		for _, d := range f.AST.Decls {
+			gd, ok := d.(*ast.GenDecl)
+			if !ok || gd.Tok != token.VAR {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs := spec.(*ast.ValueSpec)
+				for _, n := range vs.Names {
+					if n.Name == guardScanSubdirsName {
+						decls = append(decls, vs)
+						poss = append(poss, a.posOf(n.Pos()))
+					}
+				}
+			}
+		}
+	}
+	switch len(decls) {
+	case 0:
+		return scanSubdirs{err: fmt.Sprintf("no test file of %s declares %s", a.rel(a.cfg.SrcDir), guardScanSubdirsName)}
+	case 1:
+	default:
+		return scanSubdirs{err: fmt.Sprintf("%s is declared more than once (%s)", guardScanSubdirsName, strings.Join(poss, ", "))}
+	}
+	l := scanSubdirs{entries: map[string]bool{}, pos: poss[0]}
+	vs := decls[0]
+	var lit *ast.CompositeLit
+	if len(vs.Names) == 1 && len(vs.Values) == 1 {
+		lit, _ = ast.Unparen(vs.Values[0]).(*ast.CompositeLit)
+	}
+	if at, ok := typeExpr(lit).(*ast.ArrayType); !ok || at.Len != nil || !isIdent(at.Elt, "string") {
+		l.err = fmt.Sprintf("%s at %s is not a []string literal", guardScanSubdirsName, l.pos)
+		return l
+	}
+	for _, e := range lit.Elts {
+		bl, ok := e.(*ast.BasicLit)
+		var v string
+		if ok && bl.Kind == token.STRING {
+			v, _ = strconv.Unquote(bl.Value)
+		}
+		dir, recursive := parseScanCoversDir(v)
+		if dir == "" || dir == "." || recursive {
+			l.err = fmt.Sprintf("%s entry at %s is not a string literal naming a subdirectory", guardScanSubdirsName, a.posOf(e.Pos()))
+			return l
+		}
+		l.entries[dir] = true
+	}
+	return l
+}
+
+// typeExpr returns the type of a composite literal, nil for none.
+func typeExpr(lit *ast.CompositeLit) ast.Expr {
+	if lit == nil {
+		return nil
+	}
+	return lit.Type
+}
+
+// isIdent reports whether e is the identifier name.
+func isIdent(e ast.Expr, name string) bool {
+	id, ok := e.(*ast.Ident)
+	return ok && id.Name == name
 }

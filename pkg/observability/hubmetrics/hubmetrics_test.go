@@ -251,3 +251,26 @@ func TestLoggingExporter_DelegatesAggregation(t *testing.T) {
 		t.Errorf("expected nil aggregation, got %v", got)
 	}
 }
+
+// TestNewResource_ServiceName: service.name defaults to scion-hub, and a
+// separate relay process sets scion-relay with WithServiceName.
+func TestNewResource_ServiceName(t *testing.T) {
+	for want, opts := range map[string][]Option{
+		"scion-hub":   {WithInstanceID("i-1")},
+		"scion-relay": {WithServiceName("scion-relay"), WithInstanceID("i-1")},
+	} {
+		res, err := NewResource(context.Background(), opts...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := ""
+		for _, kv := range res.Attributes() {
+			if string(kv.Key) == "service.name" {
+				got = kv.Value.AsString()
+			}
+		}
+		if got != want {
+			t.Errorf("service.name = %q, want %q", got, want)
+		}
+	}
+}

@@ -417,7 +417,7 @@ func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 				SchemaVersion:  "1",
 			}
 			envK := config.LoadEnvKoanf()
-			if envOverrides := opsettings.DetectEnvOverrides(envK); len(envOverrides) > 0 {
+			if envOverrides := withoutNeverAPIWritableKeys(opsettings.DetectEnvOverrides(envK)); len(envOverrides) > 0 {
 				sort.Strings(envOverrides)
 				resp.EnvOverrides = envOverrides
 			}
@@ -443,7 +443,7 @@ func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 	// Env overrides — detect SCION_SERVER_* env vars so the admin UI can
 	// show env-pinned fields in file mode too (H1), with their values.
 	envK := config.LoadEnvKoanf()
-	if envOverrides := opsettings.DetectEnvOverrides(envK); len(envOverrides) > 0 {
+	if envOverrides := withoutNeverAPIWritableKeys(opsettings.DetectEnvOverrides(envK)); len(envOverrides) > 0 {
 		sort.Strings(envOverrides)
 		resp.EnvOverrides = envOverrides
 	}
@@ -486,7 +486,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// Gate-protected keys (server.hub.class always; federation while the
 	// test admin tier is on) are refused before anything is decoded.
 	// An empty relay-peer secret is ignored; any other value is refused.
-	rawBody = dropEmptyPeerSecret(rawBody)
+	rawBody = dropEmptySecretSettings(rawBody)
 	if s.rejectGateProtectedSettingsKeys(w, rawBody) {
 		return
 	}

@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 )
 
@@ -46,6 +47,11 @@ type SharedDirHostPath struct {
 	Path string
 	// Backend is "local" or "nfs".
 	Backend string
+	// Resolved is the layout authority's answer for the same directory
+	// (pkg/projectfs). Host processes write below Path only through
+	// Resolved.Open, never with path-based os calls: agents mount the dir
+	// read-write, so a component below it may be a planted symlink.
+	Resolved projectfs.Resolved
 }
 
 // ResolveSharedDirHostPath resolves the host directory that agents on this
@@ -94,9 +100,15 @@ func ResolveSharedDirHostPath(gs *config.VersionedSettings, home, slug, projectI
 	backend, source, _ := gs.ResolveSharedDirStorageBackend("", name)
 	switch backend {
 	case "", "local":
+		mount := projectfs.SharedDirMount(api.SharedDir{Name: name}, "")
+		path := config.SharedDirHostPath(home, slug, projectID, name)
 		return SharedDirHostPath{
-			Path:    config.SharedDirHostPath(home, slug, projectID, name),
+			Path:    path,
 			Backend: "local",
+			Resolved: projectfs.Resolved{
+				Backend: projectfs.BackendLocal, HostPath: path,
+				Target: mount.Target, Kind: mount.Kind, Name: mount.Name,
+			},
 		}, nil
 	case "nfs":
 	default:
@@ -172,7 +184,19 @@ func ResolveSharedDirHostPath(gs *config.VersionedSettings, home, slug, projectI
 		return SharedDirHostPath{}, fmt.Errorf("%w: shared dir %q resolves through a symlink to %q, want %q",
 			ErrSharedDirStorageUnavailable, name, got, want)
 	}
-	return SharedDirHostPath{Path: got, Backend: "nfs"}, nil
+	layout, err := config.NFSLayout(sdCfg.NFS)
+	if err != nil {
+		return SharedDirHostPath{}, fmt.Errorf("%w: %v", ErrSharedDirStorageUnavailable, err)
+	}
+	resolved, err := layout.Resolve(projectfs.Project{ID: projectID}, "", projectfs.SharedDirMount(api.SharedDir{Name: name}, ""))
+	if err != nil {
+		return SharedDirHostPath{}, fmt.Errorf("%w: %v", ErrSharedDirStorageUnavailable, err)
+	}
+	if resolved.RelPath != sd.ServerRelativePath {
+		return SharedDirHostPath{}, fmt.Errorf("%w: shared dir %q: layout authority and backend disagree (%q, %q)",
+			ErrSharedDirStorageUnavailable, name, resolved.RelPath, sd.ServerRelativePath)
+	}
+	return SharedDirHostPath{Path: got, Backend: "nfs", Resolved: resolved}, nil
 }
 
 // LoadSharedDirStorageSettings loads the global settings

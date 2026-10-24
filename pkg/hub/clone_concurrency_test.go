@@ -179,7 +179,7 @@ func TestTemplateClone_ConcurrentSameName_GlobalScope_ExactlyOneWinner(t *testin
 		Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive,
 		StoragePath: sourcePath, StorageBucket: "test-bucket", Files: files,
 	}
-	source.ContentHash = computeContentHash(source.Files)
+	source.ContentHash = defaultContentHash(source.Files)
 	require.NoError(t, s.CreateTemplate(ctx, source))
 
 	assertExactlyOneWinner(t, cloneRaceGoroutines, func(idx int) int {
@@ -219,7 +219,7 @@ func TestTemplateClone_ConcurrentSameName_ProjectScope_ExactlyOneWinner(t *testi
 		Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive,
 		StoragePath: sourcePath, StorageBucket: "test-bucket", Files: files,
 	}
-	source.ContentHash = computeContentHash(source.Files)
+	source.ContentHash = defaultContentHash(source.Files)
 	require.NoError(t, s.CreateTemplate(ctx, source))
 
 	token, _, _, err := srv.userTokenService.GenerateTokenPair(alice.ID, alice.Email, alice.DisplayName, alice.Role, ClientTypeWeb)
@@ -273,7 +273,7 @@ func TestTemplateClone_ConcurrentSameName_UserScope_SameOwner_ExactlyOneWinner(t
 		Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive,
 		StoragePath: sourcePath, StorageBucket: "test-bucket", Files: files,
 	}
-	source.ContentHash = computeContentHash(source.Files)
+	source.ContentHash = defaultContentHash(source.Files)
 	require.NoError(t, s.CreateTemplate(ctx, source))
 
 	token, _, _, err := srv.userTokenService.GenerateTokenPair(alice.ID, alice.Email, alice.DisplayName, alice.Role, ClientTypeWeb)
@@ -317,7 +317,7 @@ func TestHarnessConfigClone_ConcurrentSameName_GlobalScope_ExactlyOneWinner(t *t
 		Scope: store.HarnessConfigScopeGlobal, Status: store.HarnessConfigStatusActive,
 		StoragePath: sourcePath, StorageBucket: "test-bucket", Files: files,
 	}
-	source.ContentHash = computeContentHash(source.Files)
+	source.ContentHash = defaultContentHash(source.Files)
 	require.NoError(t, s.CreateHarnessConfig(ctx, source))
 
 	assertExactlyOneWinner(t, cloneRaceGoroutines, func(idx int) int {
@@ -358,7 +358,7 @@ func TestHarnessConfigClone_ConcurrentSameName_ProjectScope_ExactlyOneWinner(t *
 		Scope: store.HarnessConfigScopeGlobal, Status: store.HarnessConfigStatusActive,
 		StoragePath: sourcePath, StorageBucket: "test-bucket", Files: files,
 	}
-	source.ContentHash = computeContentHash(source.Files)
+	source.ContentHash = defaultContentHash(source.Files)
 	require.NoError(t, s.CreateHarnessConfig(ctx, source))
 
 	token, _, _, err := srv.userTokenService.GenerateTokenPair(alice.ID, alice.Email, alice.DisplayName, alice.Role, ClientTypeWeb)
@@ -465,7 +465,7 @@ func TestTemplateClone_ConcurrentLegacyAndCanonicalScope_OneCanonicalWinnerNoOrp
 		Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive,
 		StoragePath: sourcePath, StorageBucket: "test-bucket", Files: files,
 	}
-	source.ContentHash = computeContentHash(source.Files)
+	source.ContentHash = defaultContentHash(source.Files)
 	require.NoError(t, s.CreateTemplate(ctx, source))
 
 	token, _, _, err := srv.userTokenService.GenerateTokenPair(alice.ID, alice.Email, alice.DisplayName, alice.Role, ClientTypeWeb)
@@ -523,7 +523,7 @@ func TestHarnessConfigClone_ConcurrentLegacyAndCanonicalScope_OneCanonicalWinner
 		Scope: store.HarnessConfigScopeGlobal, Status: store.HarnessConfigStatusActive,
 		StoragePath: sourcePath, StorageBucket: "test-bucket", Files: files,
 	}
-	source.ContentHash = computeContentHash(source.Files)
+	source.ContentHash = defaultContentHash(source.Files)
 	require.NoError(t, s.CreateHarnessConfig(ctx, source))
 
 	token, _, _, err := srv.userTokenService.GenerateTokenPair(alice.ID, alice.Email, alice.DisplayName, alice.Role, ClientTypeWeb)

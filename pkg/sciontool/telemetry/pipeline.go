@@ -72,6 +72,7 @@ type Pipeline struct {
 	retryConfig      RetryConfig
 	usageDeriver     atomic.Pointer[UsageDeriver]
 	analytics        analyticsState // agent.usage outbox + drainer (analytics_drainer.go)
+	health           healthEmitter  // telemetry.health events (health.go)
 	sessionUsageSink atomic.Pointer[SessionUsageSink]
 	intakeMu         sync.Mutex
 	intakeClosed     bool
@@ -373,6 +374,12 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	p.running = true
 	p.deliveryState.Store("running")
 	p.startDiagnosticSnapshots(ctx)
+	var gcpExporter *GCPExporter
+	if p.exporter != nil {
+		gcpExporter = p.exporter.gcpExporter
+	}
+	p.startHealth(ctx, gcpExporter, p.analytics.handles())
+	// After startHealth, so the first snapshot shows this run's analytics.
 	p.logDeliverySnapshot(true)
 
 	// Start metric flush goroutine for batching exports to Cloud Monitoring.
@@ -419,12 +426,16 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 	// final increment entirely. This also runs ahead of every early-return
 	// branch further down in Stop, so a slow or incomplete pipeline shutdown
 	// never skips it.
+	// Stop periodic health snapshots first, so none observes the deriver
+	// between its release and captureFinalUsage below.
+	p.stopHealthLoop()
 	if deriver := p.usageDeriver.Swap(nil); deriver != nil {
 		deriverCtx, cancel := context.WithTimeout(ctx, usageDeriverFlushTimeout)
 		if err := deriver.Shutdown(deriverCtx); err != nil {
 			log.Error("Usage deriver shutdown error: %v", err)
 		}
 		cancel()
+		p.captureFinalUsage(deriver)
 	}
 
 	var errs []error
@@ -512,6 +523,7 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 	if residualPending != 0 || residualDirty != 0 || p.metricPendingEntries+p.metricDirtyEntries != 0 {
 		forcedRecords := p.metricPendingRecords + p.metricDirtyRecords
 		p.metricDiagnostics.terminal(forcedRecords, terminalCanceled, 0)
+		p.recordFinalResidual(forcedRecords)
 		log.Error("Telemetry metric shutdown residual: %d pending streams, %d newer dirty streams, %d terminal unconfirmed admitted points", residualPending, residualDirty, forcedRecords)
 		errs = append(errs, fmt.Errorf("metric shutdown residual: pending=%d dirty=%d", residualPending, residualDirty))
 	}
@@ -530,6 +542,13 @@ func (p *Pipeline) Stop(ctx context.Context) error {
 
 	// Final bounded analytics drain while the exporter is still open.
 	p.analytics.stop(ctx)
+	// Final health snapshot: after the final metric flush and analytics
+	// drain (it reports their outcome), before the exporter closes. A stop
+	// that already has errors is reported as degraded (set again below).
+	if len(errs) > 0 {
+		p.deliveryState.Store("degraded")
+	}
+	p.emitFinalHealth(ctx)
 
 	// Shutdown exporter to flush any buffered spans
 	if p.exporter != nil {
@@ -725,10 +744,9 @@ func (p *Pipeline) handleSpans(ctx context.Context, resourceSpans []*tracepb.Res
 	// context; this count is not a network-attempt guarantee.
 	if p.exporter != nil {
 		p.spanDiagnostics.queued.Add(int64(spanCount))
-		err := retryExport(ctx, p.retryConfig, "spans", func() error {
-			p.spanDiagnostics.attempts.Add(1)
+		err := retryExport(ctx, p.retryConfig, "spans", p.spanDiagnostics.countedAttempt(func() error {
 			return p.exporter.ExportProtoSpans(ctx, filtered)
-		})
+		}))
 		if err != nil {
 			p.spanDiagnostics.failed.Add(1)
 			reason, rejected := terminalExportReason(err)
@@ -1117,6 +1135,7 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) bool {
 		remaining = p.metricPendingAdmissions[0].at.Add(metricMaxAge).Sub(p.now())
 	}
 	p.metricPendingAttempts++
+	retry := p.metricPendingAttempts > 1
 	p.metricStateMu.Unlock()
 	if remaining <= 0 {
 		p.metricStateMu.Lock()
@@ -1127,6 +1146,9 @@ func (p *Pipeline) flushMetricBuffer(ctx context.Context, force bool) bool {
 	}
 	attemptCtx, cancel := context.WithTimeout(ctx, remaining)
 	p.metricDiagnostics.attempts.Add(1)
+	if retry {
+		p.metricDiagnostics.retries.Add(1)
+	}
 	err := p.exporter.ExportProtoMetrics(attemptCtx, batch)
 	cancel()
 	p.metricStateMu.Lock()
@@ -1276,10 +1298,9 @@ func (p *Pipeline) handleLogs(ctx context.Context, resourceLogs []*logspb.Resour
 	// handleSpans for the rationale on intentional double-retry layering.
 	if p.exporter != nil {
 		p.logDiagnostics.queued.Add(int64(logCount))
-		err := retryExport(ctx, p.retryConfig, "logs", func() error {
-			p.logDiagnostics.attempts.Add(1)
+		err := retryExport(ctx, p.retryConfig, "logs", p.logDiagnostics.countedAttempt(func() error {
 			return p.exporter.ExportProtoLogs(ctx, processed)
-		})
+		}))
 		if err != nil {
 			p.logDiagnostics.failed.Add(1)
 			reason, rejected := terminalExportReason(err)

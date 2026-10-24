@@ -267,11 +267,10 @@ func (s *Server) authorizeAgentMessage(
 	}
 
 	// An agent delegated credential is decided before every ancestor,
-	// owner or system-plane allow and pierces no message mode. No grant can
-	// carry agent.message yet, so it is refused
+	// owner or system-plane allow and pierces no message mode
 	// (.design/agent-delegation.md §12.3).
 	if isDelegatedAgentIdentity(senderIdentity) {
-		return false, messageReasonSenderNotPermitted, nil
+		return s.authorizeDelegatedAgentMessage(ctx, senderIdentity, targetAgent)
 	}
 
 	// ---- D8: system-plane messages bypass all mode checks ----
@@ -311,6 +310,65 @@ func (s *Server) authorizeAgentMessage(
 	default:
 		return false, fmt.Sprintf("identity type %q may not send messages", senderIdentity.Type()), nil
 	}
+}
+
+// authorizeDelegatedAgentMessage is the messaging decision for an agent
+// delegated credential. The target must be the agent routeGuard admitted
+// for agent.action.message, so mention, group and other fan-out targets
+// are refused. Then two independent checks must both allow:
+//
+//   - the delegated decision procedure decides agent.message on the target
+//     through Decide (the issuer's authority, bounded by the grant);
+//   - the actor agent's own send is evaluated exactly as an agent send
+//     (evaluateAgentMessageForSender over the actor's stored record): both
+//     message modes, the same-project mode matrix or every cross-project
+//     gate (the hub setting, the sender's hub mode, the target's mode, the
+//     destination's inbound policy and the origin checks), and the actor's
+//     standing.
+//
+// The issuer's ancestry or ownership never pierces a mode
+// (.design/agent-delegation.md §12.3). The reasons it returns are messaging
+// reasons and never the delegated decision's reason (§11.4). The typed
+// decision of the agent-send evaluation is returned, so a refusal has the
+// same code and shape as for the agent's own send.
+func (s *Server) authorizeDelegatedAgentMessage(ctx context.Context, sender Identity, target *store.Agent) (bool, string, *MessageDecision) {
+	if !delegatedRequestAdmittedFor(ctx, opAgentActionMessage, target) {
+		return false, messageReasonSenderNotPermitted, nil
+	}
+	decision := s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(sender),
+		Credential: credentialContextForIdentity(sender),
+		Resource:   agentResource(target),
+		Action:     ActionMessage,
+		Permission: "agent.message",
+	})
+	if !decision.Allowed {
+		return false, messageReasonSenderNotPermitted, nil
+	}
+	actor := s.delegatedActorAgent(ctx, sender)
+	if actor == nil {
+		return false, messageReasonSenderNotPermitted, nil
+	}
+	d := s.evaluateAgentMessageForSender(ctx, &storedAgentIdentity{agent: actor}, actor, target)
+	return d.Allowed, d.Reason, &d
+}
+
+// delegatedActorAgent returns the stored record of a delegated sender's
+// actor agent: the row the authentication middleware loaded for the
+// request, or a store read. It returns nil when the record cannot be read.
+func (s *Server) delegatedActorAgent(ctx context.Context, sender Identity) *store.Agent {
+	d, ok := sender.(*DelegatedAgentIdentity)
+	if !ok || d == nil {
+		return nil
+	}
+	if st := delegatedStateFromContext(ctx); st != nil && st.identity == d && st.agent != nil && st.agent.ID == d.ID() {
+		return st.agent
+	}
+	agent, err := s.store.GetAgent(ctx, d.ID())
+	if err != nil || agent == nil || agent.ID != d.ID() {
+		return nil
+	}
+	return agent
 }
 
 // authorizeUserToAgent implements the user-sender path of the messaging

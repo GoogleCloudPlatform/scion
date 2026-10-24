@@ -29,12 +29,14 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // TestAgentDelegationHandlerBranches_MatchCatalog pins the handlers'
-// explicit delegated branches (admitDelegatedHandler calls) against the
+// explicit delegated branches (admitDelegatedHandler and
+// admitDelegatedAgentHandler calls) against the
 // catalog and the admission table: the set of operations named in those
 // calls equals the set of catalog operations that admit the delegated
 // principal and credential, which equals the set of admission table
@@ -78,8 +80,8 @@ func TestAgentDelegationHandlerBranches_MatchCatalog(t *testing.T) {
 					}
 				}
 			case *ast.CallExpr:
-				if fn, ok := node.Fun.(*ast.Ident); ok && fn.Name == "admitDelegatedHandler" {
-					require.Len(t, node.Args, 4, "%s: admitDelegatedHandler takes four arguments", fset.Position(node.Pos()))
+				if fn, ok := node.Fun.(*ast.Ident); ok && (fn.Name == "admitDelegatedHandler" || fn.Name == "admitDelegatedAgentHandler") {
+					require.Len(t, node.Args, 4, "%s: %s takes four arguments", fset.Position(node.Pos()), fn.Name)
 					branches = append(branches, branch{where: fset.Position(node.Pos()).String(), arg: node.Args[2]})
 				}
 			}
@@ -178,6 +180,22 @@ func TestResolveDelegatedRoute_OnlyOnItsMuxPatterns(t *testing.T) {
 	assert.Nil(t, agentRoute)
 	assert.Equal(t, projectResourceRouteID, route.RouteID)
 
+	// The project form of an agent sub-route records the project, resolved
+	// from its {uuid}__{slug} form, with the agent segment as given.
+	pid := "11111111-2222-3333-4444-555555555555"
+	route, agentRoute, ok = resolveDelegatedRoute(RouteMetadata{RouteID: "projects.byId"}, http.MethodPost, "/api/v1/projects/"+pid+"__p-slug/agents/a-slug/message")
+	require.True(t, ok)
+	require.NotNil(t, agentRoute)
+	assert.Equal(t, delegatedRouteID(ProjectAgentRouteActionMessage), route.RouteID)
+	assert.Equal(t, opAgentActionMessage, route.OperationID)
+	assert.Equal(t, delegatedRouteTarget{Type: "agent", ID: "a-slug", ProjectID: pid}, route.Target)
+
+	route, _, ok = resolveDelegatedRoute(RouteMetadata{RouteID: "agents.byId"}, http.MethodGet, "/api/v1/agents/a-1/pty")
+	require.True(t, ok)
+	assert.Equal(t, delegatedRouteID(AgentRoutePTY), route.RouteID)
+	assert.Equal(t, opAgentAttach, route.OperationID)
+	assert.Equal(t, delegatedRouteTarget{Type: "agent", ID: "a-1"}, route.Target)
+
 	_, _, ok = resolveDelegatedRoute(RouteMetadata{RouteID: "projects.list"}, http.MethodGet, "/api/v1/projects/p-1")
 	assert.False(t, ok)
 	_, _, ok = resolveDelegatedRoute(RouteMetadata{RouteID: "agents.list"}, http.MethodGet, "/api/v1/agents/a-1")
@@ -241,6 +259,9 @@ func TestAdmitDelegatedHandler_DeniesUnlessAdmittedForThisOperationAndTarget(t *
 		{"target of another type with the same ID", delegated, []ctxFn{withEntry(agentEntry), withTarget("project", "a-1")}, opAgentRead, agentRes, false},
 		{"target with another ID", delegated, []ctxFn{withEntry(agentEntry), withTarget("agent", "a-2")}, opAgentRead, agentRes, false},
 		{"empty resource ID", delegated, []ctxFn{withEntry(agentEntry), withTarget("agent", "a-1")}, opAgentRead, Resource{Type: "agent"}, false},
+		{"project-form target", delegated, []ctxFn{withEntry(agentEntry), func(ctx context.Context) context.Context {
+			return contextWithDelegatedTarget(ctx, delegatedRouteTarget{Type: "agent", ID: "a-1", ProjectID: "p-1"})
+		}}, opAgentRead, agentRes, false},
 		{"non-delegated caller without any admission", NewAuthenticatedUser("u-1", "u@example.com", "U", "member", "web"), nil, opAgentRead, agentRes, true},
 	}
 	for _, tc := range cases {
@@ -252,6 +273,75 @@ func TestAdmitDelegatedHandler_DeniesUnlessAdmittedForThisOperationAndTarget(t *
 			req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/a-1", nil).WithContext(ctx)
 			rec := httptest.NewRecorder()
 			got := admitDelegatedHandler(rec, req, tc.op, tc.resource)
+			assert.Equal(t, tc.allowed, got)
+			if tc.allowed {
+				assert.Equal(t, http.StatusOK, rec.Code, "nothing written on the allow path")
+				assert.Empty(t, rec.Body.String())
+				return
+			}
+			require.Equal(t, http.StatusForbidden, rec.Code)
+			var body struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
+			assert.Equal(t, agentDelegationCodeCredentialNotAdmitted, body.Error.Code)
+		})
+	}
+}
+
+// TestAdmitDelegatedAgentHandler_DeniesUnlessTheRouteNamesTheAgent: the
+// agent handler branch lets a delegated caller through only when routeGuard
+// admitted exactly the handler's operation on a route that names the loaded
+// agent: by ID, or by slug inside the agent's project on the project form.
+// Every other shape answers 403 credential_not_admitted, and a
+// non-delegated caller is never affected.
+func TestAdmitDelegatedAgentHandler_DeniesUnlessTheRouteNamesTheAgent(t *testing.T) {
+	byID, ok := agentDelegationAdmissionFor(http.MethodPost, delegatedRouteID(AgentRouteActionMessage))
+	require.True(t, ok)
+	projectForm, ok := agentDelegationAdmissionFor(http.MethodPost, delegatedRouteID(ProjectAgentRouteActionMessage))
+	require.True(t, ok)
+	pty, ok := agentDelegationAdmissionFor(http.MethodGet, delegatedRouteID(AgentRoutePTY))
+	require.True(t, ok)
+	agent := &store.Agent{ID: "a-1", Slug: "a-slug", ProjectID: "p-1"}
+	delegated := adtTestIdentity("agent-x", "project-x")
+
+	cases := []struct {
+		name     string
+		identity Identity
+		entry    *agentDelegationAdmission
+		target   *delegatedRouteTarget
+		op       authzop.OperationID
+		agent    *store.Agent
+		allowed  bool
+	}{
+		{"by ID", delegated, &byID, &delegatedRouteTarget{Type: "agent", ID: "a-1"}, opAgentActionMessage, agent, true},
+		{"project form by slug", delegated, &projectForm, &delegatedRouteTarget{Type: "agent", ID: "a-slug", ProjectID: "p-1"}, opAgentActionMessage, agent, true},
+		{"project form by ID", delegated, &projectForm, &delegatedRouteTarget{Type: "agent", ID: "a-1", ProjectID: "p-1"}, opAgentActionMessage, agent, true},
+		{"attach handshake", delegated, &pty, &delegatedRouteTarget{Type: "agent", ID: "a-1"}, opAgentAttach, agent, true},
+		{"by-ID route names the slug", delegated, &byID, &delegatedRouteTarget{Type: "agent", ID: "a-slug"}, opAgentActionMessage, agent, false},
+		{"project form in another project", delegated, &projectForm, &delegatedRouteTarget{Type: "agent", ID: "a-slug", ProjectID: "p-2"}, opAgentActionMessage, agent, false},
+		{"another agent", delegated, &byID, &delegatedRouteTarget{Type: "agent", ID: "a-2"}, opAgentActionMessage, agent, false},
+		{"admitted for another operation", delegated, &pty, &delegatedRouteTarget{Type: "agent", ID: "a-1"}, opAgentActionMessage, agent, false},
+		{"no admission entry", delegated, nil, &delegatedRouteTarget{Type: "agent", ID: "a-1"}, opAgentActionMessage, agent, false},
+		{"no route target", delegated, &byID, nil, opAgentActionMessage, agent, false},
+		{"project target", delegated, &byID, &delegatedRouteTarget{Type: "project", ID: "a-1"}, opAgentActionMessage, agent, false},
+		{"nil agent", delegated, &byID, &delegatedRouteTarget{Type: "agent", ID: "a-1"}, opAgentActionMessage, nil, false},
+		{"non-delegated caller without any admission", NewAuthenticatedUser("u-1", "u@example.com", "U", "member", "web"), nil, nil, opAgentActionMessage, agent, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := contextWithIdentity(context.Background(), tc.identity)
+			if tc.entry != nil {
+				ctx = contextWithDelegatedAdmission(ctx, *tc.entry)
+			}
+			if tc.target != nil {
+				ctx = contextWithDelegatedTarget(ctx, *tc.target)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/a-1/message", nil).WithContext(ctx)
+			rec := httptest.NewRecorder()
+			got := admitDelegatedAgentHandler(rec, req, tc.op, tc.agent)
 			assert.Equal(t, tc.allowed, got)
 			if tc.allowed {
 				assert.Equal(t, http.StatusOK, rec.Code, "nothing written on the allow path")

@@ -112,7 +112,7 @@ func TestV2_Reconfigure_WaitsForPreviousHandlers(t *testing.T) {
 	// A handler in flight under the first config. Released at the latest
 	// before b.Close, which would otherwise wait for it.
 	var once sync.Once
-	acquired := b.acquireGen()
+	_, acquired := b.acquireGen()
 	release := func() { once.Do(acquired) }
 	defer release()
 	require.NoError(t, b.Configure(validPollConfig(t, tgSrv)))
@@ -386,7 +386,7 @@ func TestV2_Reconfigure_TwiceDuringOneHandler(t *testing.T) {
 	firstStore := b.store
 
 	var once sync.Once
-	acquired := b.acquireGen()
+	_, acquired := b.acquireGen()
 	release := func() { once.Do(acquired) }
 	defer release()
 
@@ -582,9 +582,9 @@ func TestV2_Reconfigure_PollToPollPolledHandlerCompletes(t *testing.T) {
 	// A group setup waiting for its default agent: the callback below saves
 	// the group link after a getChat call, which the gate holds.
 	const chatID = int64(-500)
-	b.callbacks.mu.Lock()
-	b.callbacks.pendingSetups[chatID] = &pendingSetup{projectID: "proj-1", projectSlug: "proj-one", createdAt: time.Now()}
-	b.callbacks.mu.Unlock()
+	b.gen.callbacks.mu.Lock()
+	b.gen.callbacks.pendingSetups[chatID] = &pendingSetup{projectID: "proj-1", projectSlug: "proj-one", createdAt: time.Now()}
+	b.gen.callbacks.mu.Unlock()
 
 	g.pending.Store(&Update{UpdateID: 8, CallbackQuery: &CallbackQuery{
 		ID:      "cb-1",
@@ -684,7 +684,7 @@ func TestV2_Reconfigure_WarnsWhileWaitingForHandlers(t *testing.T) {
 	oldStore := b.store
 
 	var once sync.Once
-	acquired := b.acquireGen()
+	_, acquired := b.acquireGen()
 	release := func() { once.Do(acquired) }
 	defer release()
 
