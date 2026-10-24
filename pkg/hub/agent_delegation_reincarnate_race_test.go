@@ -131,7 +131,8 @@ func (w *issuanceClaimWorld) agent(t *testing.T) *store.Agent {
 }
 
 // issue runs the issuance transaction for snap, as handleCreateAgentDelegation
-// does after its checks, and returns the grant it tried to write.
+// does after its checks, attributed to the issuer as the issuance request
+// would be, and returns the grant it tried to write.
 func (w *issuanceClaimWorld) issue(snap store.Agent) (*store.AgentDelegationGrant, error) {
 	ctx := context.Background()
 	now := time.Now().UTC()
@@ -143,7 +144,7 @@ func (w *issuanceClaimWorld) issue(snap store.Agent) (*store.AgentDelegationGran
 		Created: now, IssuanceAuditID: uuid.NewString(),
 	}
 	err := w.srv.store.WithTx(ctx, func(tx store.Store) error {
-		return writeAgentDelegationGrantTx(ctx, tx, &snap, grant, AuditActor{}, now)
+		return writeAgentDelegationGrantTx(ctx, tx, &snap, grant, AuditActor{PrincipalKind: "user", PrincipalID: w.issuer.ID}, now)
 	})
 	return grant, err
 }
