@@ -147,10 +147,19 @@ func TestNeverAPIWritable_EnvOverridesHideHubGCPProjectID(t *testing.T) {
 	assert.NotContains(t, fileRR.Body.String(), config.HubGCPProjectIDKey)
 	assert.NotContains(t, fileRR.Body.String(), envSentinel)
 
-	db, _, ops := newSQLiteHubInMode(t, false, nil)
+	// DB mode: newSQLiteHubInMode's settings use an empty env koanf, so
+	// build them again over the same store from the real environment;
+	// otherwise env_overrides would be empty and the check vacuous.
+	db, st, _ := newSQLiteHubInMode(t, false, nil)
+	ops := NewOperationalSettings(st, emptyKoanf(), config.LoadEnvKoanf())
+	_, err := ops.Refresh(t.Context())
+	require.NoError(t, err)
+	require.Contains(t, ops.EnvOverriddenKeys(), config.HubGCPProjectIDKey,
+		"control: the DB-mode settings see the environment variable")
 	dbRR := httptest.NewRecorder()
 	db.handleGetServerConfigDB(dbRR, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
 	require.Equal(t, http.StatusOK, dbRR.Code, dbRR.Body.String())
+	assert.Contains(t, dbRR.Body.String(), `"server.log_level"`, "control: env overrides are listed")
 	assert.NotContains(t, dbRR.Body.String(), config.HubGCPProjectIDKey)
 	assert.NotContains(t, dbRR.Body.String(), envSentinel)
 
