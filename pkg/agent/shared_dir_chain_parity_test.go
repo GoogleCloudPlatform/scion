@@ -21,6 +21,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -139,6 +140,16 @@ func TestSharedDirChainsParity(t *testing.T) {
 			}
 			assert.Equal(t, rel(fa.mountRoot, volumes[0].Source), rel(fp.mountRoot, got.Path),
 				"both chains must resolve the same directory")
+			// The plugin result carries the layout authority's own answer
+			// (Resolved). It must name the same directory as Path: the
+			// invariant upstream #4092's dropped NFS-vs-Layout cross-check
+			// enforced, now pinned here.
+			assert.Equal(t, projectfs.BackendNFS, got.Resolved.Backend)
+			assert.Equal(t, filepath.Join(got.Resolved.HostBase, got.Resolved.RelPath), got.Resolved.HostPath,
+				"Resolved is internally consistent")
+			resolvedReal, err := filepath.EvalSymlinks(got.Resolved.HostPath)
+			require.NoError(t, err)
+			assert.Equal(t, got.Path, resolvedReal, "Resolved.HostPath and Path name the same directory")
 		})
 	}
 }
