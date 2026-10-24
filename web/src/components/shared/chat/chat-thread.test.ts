@@ -3935,44 +3935,61 @@ describe('scion-chat-thread unread-divider open anchor', () => {
     }
   });
 
-  it('stands the anchor down when its first write throws inside the frame callback', async () => {
+  it('stands the anchor down and re-pins the bottom when its first write throws inside the frame callback', async () => {
     mockEndpoints('m1');
     globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
     const el = mountThread();
     await vi.waitFor(() => expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull());
-    await vi.waitFor(() =>
-      expect(scrollContainer(el).scrollTop).toBe(DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX)
-    );
+    const container = scrollContainer(el);
+    await vi.waitFor(() => expect(container.scrollTop).toBe(DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX));
 
     type Internal = {
       _unreadAnchorActive: boolean;
       _unreadAnchorPending: boolean;
+      pinnedToBottom: boolean;
       scrollToUnreadDivider(): void;
-      applyUnreadAnchor(): void;
     };
     const internal = el as unknown as Internal;
     const { callbacks, restore } = installRafStub();
-    const applySpy = vi.spyOn(internal, 'applyUnreadAnchor').mockImplementation(() => {
-      throw new Error('layout read failed');
-    });
+    const stubbedRaf = globalThis.requestAnimationFrame;
     try {
       internal.scrollToUnreadDivider();
       await vi.waitFor(() => expect(callbacks.size).toBeGreaterThan(0));
       expect(internal._unreadAnchorActive).toBe(true);
 
+      // The anchor write turns the bottom pin off (the divider is above the
+      // tail), then its guard-clearing requestAnimationFrame throws.
+      globalThis.requestAnimationFrame = (() => {
+        throw new Error('frame request failed');
+      }) as typeof requestAnimationFrame;
       // The frame callback runs outside the updateComplete promise chain, so
       // its throw escapes to the caller instead of reaching the .catch.
       for (const [handle, cb] of [...callbacks]) {
         callbacks.delete(handle);
-        expect(() => cb(0)).toThrow('layout read failed');
+        expect(() => cb(0)).toThrow('frame request failed');
       }
+      globalThis.requestAnimationFrame = stubbedRaf;
 
       expect(internal._unreadAnchorActive).toBe(false);
       expect(internal._unreadAnchorPending).toBe(false);
     } finally {
-      applySpy.mockRestore();
       restore();
     }
+
+    // With the anchor gone, a message arriving afterwards keeps the view
+    // stuck to the bottom.
+    emitChatMessage({
+      threadId: CONVERSATION_KEY,
+      id: 'm4',
+      msg: 'new incoming',
+      sender: 'them@example.com',
+      createdAt: '2026-01-01T00:03:00Z',
+    });
+    await vi.waitFor(() =>
+      expect(el.shadowRoot?.querySelectorAll('scion-chat-message').length).toBe(4)
+    );
+    await vi.waitFor(() => expect(container.scrollTop).toBe(SCROLL_HEIGHT));
+    expect(internal.pinnedToBottom).toBe(true);
   });
 
   it("a failed render of a superseded open leaves the next open's anchor alone", async () => {

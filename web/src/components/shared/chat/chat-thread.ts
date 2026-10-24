@@ -4564,15 +4564,21 @@ export class ScionChatThread extends LitElement {
         this._unreadAnchorInitialRaf = requestAnimationFrame(() => {
           this._unreadAnchorInitialRaf = null;
           if (!this._unreadAnchorActive || this.fetchId !== openToken) return;
-          // This callback runs in its own task, outside the promise chain, so
-          // the .catch below never sees its throws. Stand the anchor down here
-          // too, then rethrow so the error still reaches the console.
+          // This callback runs later, outside the promise chain, so the .catch
+          // below never sees its throws. Stand the anchor down here too, and
+          // put the bottom pin back: applyUnreadAnchor may already have
+          // turned it off, and without the anchor nothing would correct it
+          // until the reader scrolls. Rethrow so the error still reaches the
+          // console.
           try {
             this._unreadAnchorPending = false;
             this.applyUnreadAnchor();
             this.observeUnreadAnchorLayout(openToken);
           } catch (err) {
-            if (this.fetchId === openToken) this.deactivateUnreadAnchor();
+            if (this.fetchId === openToken) {
+              this.deactivateUnreadAnchor();
+              this.pinnedToBottom = true;
+            }
             throw err;
           }
         });
