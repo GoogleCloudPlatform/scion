@@ -626,7 +626,7 @@ func (t *Transport) doJSONVia(ctx context.Context, send func(context.Context, *h
 }
 
 // DecodeResponse reads and decodes a JSON response body.
-// If the response indicates an error (status >= 400), it returns an APIError.
+// A non-2xx response returns an APIError.
 // A 204 No Content returns (nil, nil).
 func DecodeResponse[T any](resp *http.Response) (*T, error) {
 	return decode[T](resp, false)
@@ -649,7 +649,7 @@ func DecodeRequired[T any](resp *http.Response) (*T, error) {
 func decode[T any](resp *http.Response, required bool) (*T, error) {
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode >= 400 {
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return nil, ParseErrorResponse(resp)
 	}
 
