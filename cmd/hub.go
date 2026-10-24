@@ -702,12 +702,17 @@ func hubClientAndAuthSourceForEndpoint(settings *config.Settings, endpoint strin
 	// This checks SCION_DEV_TOKEN env var and ~/.scion/dev-token file. A
 	// dev token is valid only on the local workstation server that wrote
 	// it, so it is sent only to a loopback hub (as scopeDevAuth reports).
-	if !authConfigured && isLocalhostEndpoint(endpoint) {
-		opts = append(opts, hubclient.WithAutoDevAuth())
-		// WithAutoDevAuth sends no Hub credential when it finds no dev
-		// token; transport auth (hubclient.New) may still add one.
+	if !authConfigured {
+		// The source names what is actually sent: dev only when the
+		// development credential is sent; otherwise the transport
+		// credential hubclient.New may add, or nothing.
+		devSent := false
+		if isLocalhostEndpoint(endpoint) {
+			opts = append(opts, hubclient.WithAutoDevAuth())
+			devSent = apiclient.ResolveDevToken() != ""
+		}
 		switch {
-		case apiclient.ResolveDevToken() != "":
+		case devSent:
 			source = hubAuthSourceDev
 		case transportAuthActive():
 			source = hubAuthSourceTransport
@@ -1956,8 +1961,8 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 	//
 	// The clone-url label is always https, whatever scheme the remote uses
 	// (ptone/scion#2862). Agents and shared-workspace init clone from it
-	// with the hub/broker token, and token auth only works over HTTPS:
-	// util.authenticatedCloneURL injects the token only for https URLs, and
+	// with the hub/broker token, and token auth only works over HTTPS: the
+	// host-scoped credential helper supplies the token for https URLs only, and
 	// the broker's git credential helper supplies GITHUB_TOKEN for HTTP(S)
 	// clones only (see hubCloneTransportNote). An ssh:// or git:// label
 	// would clone without credentials, or stall on an SSH host-key prompt.

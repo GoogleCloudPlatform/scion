@@ -51,6 +51,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubencryptionmigration"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubencryptionpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubsetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationconfig"
@@ -197,6 +199,8 @@ func checkColumn(t, c string) error {
 			group.Table:                         group.ValidColumn,
 			groupmembership.Table:               groupmembership.ValidColumn,
 			harnessconfig.Table:                 harnessconfig.ValidColumn,
+			hubencryptionmigration.Table:        hubencryptionmigration.ValidColumn,
+			hubencryptionpolicy.Table:           hubencryptionpolicy.ValidColumn,
 			hubinstance.Table:                   hubinstance.ValidColumn,
 			hubsetting.Table:                    hubsetting.ValidColumn,
 			integrationconfig.Table:             integrationconfig.ValidColumn,

@@ -175,6 +175,16 @@ func (Agent) Fields() []ent.Field {
 			Optional().
 			Nillable(),
 
+		// pending_config holds the agent's pending config edits
+		// (store.AgentPendingConfig, ptone/scion#3976) as a JSON document:
+		// edits the hub stored instead of applying, folded into
+		// applied_config at the next start or reincarnation. NULL means no
+		// pending edits. A column of its own, not a key of applied_config,
+		// because a reincarnation rebuilds applied_config wholesale.
+		field.Text("pending_config").
+			Optional().
+			Nillable(),
+
 		// harness_config is a queryable shadow of applied_config's
 		// "harnessConfig" key, kept in sync by every write to applied_config
 		// (CreateAgent/UpdateAgent — see agent_store.go's harnessConfigOf

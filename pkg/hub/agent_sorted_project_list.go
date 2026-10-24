@@ -336,7 +336,7 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 	if p.cursor != "" {
 		decoded, err := store.DecodeAgentCursor(p.cursor, p.sort, p.dir, binding)
 		if err != nil {
-			BadRequest(w, "invalid cursor")
+			writeInvalidCursor(w)
 			return
 		}
 		cur = &decoded
@@ -550,7 +550,7 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 	s.enrichAgents(ctx, plainAgents)
 	for i := range agents {
 		agents[i].Agent = plainAgents[i]
-		agents[i].AppliedConfig = redactAppliedConfigEnvForResponse(plainAgents[i].AppliedConfig, s.envViewAllowed(ctx, identity, &plainAgents[i], agents[i].Cap))
+		agents[i].AppliedConfig, agents[i].PendingConfig = redactAgentConfigsForResponse(plainAgents[i].AppliedConfig, plainAgents[i].PendingConfig, s.envViewAllowed(ctx, identity, &plainAgents[i], agents[i].Cap))
 	}
 
 	// A complete response IS the whole set: a race drop (missing row,

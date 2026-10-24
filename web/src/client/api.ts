@@ -21,7 +21,7 @@
  * `scion:access-denied` CustomEvent on the window when a 403 response is
  * received, allowing the app shell to display a toast notification.
  *
- * Every request from web/src/client goes through apiFetch(); ESLint
+ * Every request from web/src goes through apiFetch(); ESLint
  * (web/eslint.config.mjs) refuses a direct fetch() there except at the few
  * commented exceptions (ptone/scion#353). A caller with its own handling
  * of 401 and 403 passes `authErrors: 'caller'`.
@@ -29,6 +29,7 @@
 
 import { dispatchTeardown } from '../utils/auth.js';
 import { recordHubDateHeader } from '../shared/hub-clock.js';
+import { loadPage } from './navigation.js';
 
 /** Detail payload for the scion:access-denied custom event. */
 export interface AccessDeniedDetail {
@@ -142,7 +143,7 @@ export async function apiFetch(path: string, options?: ApiFetchOptions): Promise
       // active terminals survive the transition (acceptance criterion 4).
       dispatchAuthExpiredTeardown();
       const returnTo = encodeURIComponent(window.location.pathname);
-      window.location.href = `/login?error=session_expired&returnTo=${returnTo}`;
+      loadPage(`/login?error=session_expired&returnTo=${returnTo}`);
     }
     return response;
   }

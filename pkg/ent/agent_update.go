@@ -679,6 +679,26 @@ func (_u *AgentUpdate) ClearEffectiveConfig() *AgentUpdate {
 	return _u
 }
 
+// SetPendingConfig sets the "pending_config" field.
+func (_u *AgentUpdate) SetPendingConfig(v string) *AgentUpdate {
+	_u.mutation.SetPendingConfig(v)
+	return _u
+}
+
+// SetNillablePendingConfig sets the "pending_config" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillablePendingConfig(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetPendingConfig(*v)
+	}
+	return _u
+}
+
+// ClearPendingConfig clears the value of the "pending_config" field.
+func (_u *AgentUpdate) ClearPendingConfig() *AgentUpdate {
+	_u.mutation.ClearPendingConfig()
+	return _u
+}
+
 // SetHarnessConfig sets the "harness_config" field.
 func (_u *AgentUpdate) SetHarnessConfig(v string) *AgentUpdate {
 	_u.mutation.SetHarnessConfig(v)
@@ -2171,6 +2191,12 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.EffectiveConfigCleared() {
 		_spec.ClearField(agent.FieldEffectiveConfig, field.TypeString)
 	}
+	if value, ok := _u.mutation.PendingConfig(); ok {
+		_spec.SetField(agent.FieldPendingConfig, field.TypeString, value)
+	}
+	if _u.mutation.PendingConfigCleared() {
+		_spec.ClearField(agent.FieldPendingConfig, field.TypeString)
+	}
 	if value, ok := _u.mutation.HarnessConfig(); ok {
 		_spec.SetField(agent.FieldHarnessConfig, field.TypeString, value)
 	}
@@ -3363,6 +3389,26 @@ func (_u *AgentUpdateOne) SetNillableEffectiveConfig(v *string) *AgentUpdateOne 
 // ClearEffectiveConfig clears the value of the "effective_config" field.
 func (_u *AgentUpdateOne) ClearEffectiveConfig() *AgentUpdateOne {
 	_u.mutation.ClearEffectiveConfig()
+	return _u
+}
+
+// SetPendingConfig sets the "pending_config" field.
+func (_u *AgentUpdateOne) SetPendingConfig(v string) *AgentUpdateOne {
+	_u.mutation.SetPendingConfig(v)
+	return _u
+}
+
+// SetNillablePendingConfig sets the "pending_config" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillablePendingConfig(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetPendingConfig(*v)
+	}
+	return _u
+}
+
+// ClearPendingConfig clears the value of the "pending_config" field.
+func (_u *AgentUpdateOne) ClearPendingConfig() *AgentUpdateOne {
+	_u.mutation.ClearPendingConfig()
 	return _u
 }
 
@@ -4887,6 +4933,12 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.EffectiveConfigCleared() {
 		_spec.ClearField(agent.FieldEffectiveConfig, field.TypeString)
+	}
+	if value, ok := _u.mutation.PendingConfig(); ok {
+		_spec.SetField(agent.FieldPendingConfig, field.TypeString, value)
+	}
+	if _u.mutation.PendingConfigCleared() {
+		_spec.ClearField(agent.FieldPendingConfig, field.TypeString)
 	}
 	if value, ok := _u.mutation.HarnessConfig(); ok {
 		_spec.SetField(agent.FieldHarnessConfig, field.TypeString, value)

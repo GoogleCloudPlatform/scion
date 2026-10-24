@@ -26,6 +26,7 @@ import {
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchMembershipChanged } from '../../utils/membership-events.js';
+import { loadPage } from '../../client/navigation.js';
 import type { HarnessConfig } from '../../shared/types.js';
 import '../shared/dir-browser.js';
 
@@ -1556,7 +1557,7 @@ export class ScionPageOnboarding extends LitElement {
         <div
           class="ws-card"
           @click=${() => {
-            window.location.href = '/projects/new';
+            loadPage('/projects/new');
           }}
         >
           <sl-icon name="git"></sl-icon>
@@ -1872,7 +1873,7 @@ export class ScionPageOnboarding extends LitElement {
           variant="primary"
           size="large"
           @click=${() => {
-            window.location.href = '/';
+            loadPage('/');
           }}
         >
           Go to Dashboard

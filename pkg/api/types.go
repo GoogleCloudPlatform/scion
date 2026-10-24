@@ -566,7 +566,7 @@ type ScionConfig struct {
 	// branch in ProvisionAgent): both cases mount from a Volumes-derived path
 	// rather than GetAgent's managed <agentDir>/workspace recovery. RepoRoot
 	// resolution, not this flag, is what tells the two cases apart — see
-	// pkg/agent's readProvisionedWorktreeRepoRoot. That value is deliberately
+	// pkg/agent's repository root record (readRepoRootRecord). That value is deliberately
 	// not a field on ScionConfig (populated by unmarshaling templates, hub
 	// inline config, and --config files) nor on AgentInfo (persisted in
 	// agentHome, which the container can write) — see
@@ -758,6 +758,11 @@ type AgentInfo struct {
 	// agent. They are also included in Warnings; this field lets the broker
 	// relay just these to the hub without leaking its other local warnings.
 	HubOnlyEnvWarnings []string `json:"hubOnlyEnvWarnings,omitempty"`
+	// RelayedWarnings carries start warnings meant for the user that the
+	// broker relays to the hub alongside HubOnlyEnvWarnings, for example a GCP
+	// metadata mode that is not enforced under the agent's network mode. They
+	// are also included in Warnings.
+	RelayedWarnings []string `json:"relayedWarnings,omitempty"`
 
 	// ExplicitImage and ExplicitImagePullPolicy record the image /
 	// kubernetes.imagePullPolicy that the INLINE config (--config), not a
@@ -913,8 +918,7 @@ const (
 
 	// EnvKindSecretInjected is a value produced at dispatch time that
 	// exists in no store. Delivery channel is TBD (P3b).
-	// Examples: GITHUB_TOKEN from GitHub App, SCION_DEV_TOKEN,
-	// SCION_GIT_CLONE_URL.
+	// Examples: GITHUB_TOKEN from GitHub App, SCION_GIT_CLONE_URL.
 	EnvKindSecretInjected EnvKind = "secret-injected"
 
 	// EnvKindSecretBootstrap is a credential that bootstraps the secret
@@ -1166,18 +1170,18 @@ type provisionedWorktreeRepoRootContextKey struct{}
 // ContextWithGitClone / ContextWithSharedWorkspace: broker-local, never on
 // the wire.
 //
-// pkg/agent/run.go's Start consumes it (ProvisionedWorktreeRepoRootFromContext)
-// to set RunConfig.RepoRoot directly, skipping detectRepoRoot's "an explicit
-// workspace skips git detection" rule — that rule exists for a user's own
-// --workspace override and must not swallow the broker's own
-// provisioning. This doc is the canonical statement of that rationale; other
+// pkg/agent/run.go's Start consumes it (ProvisionedWorktreeRepoRootFromContext,
+// via resolveStartRepoRoot) to set RunConfig.RepoRoot directly, rather than
+// from the agent directory's recorded repository root — a broker-provisioned
+// worktree is authoritative for this dispatch. This doc is the canonical
+// statement of that rationale; other
 // call sites point back here.
 //
 // The value is never a ScionConfig field (populated by unmarshaling
 // templates, hub inline config, and --config files) or an AgentInfo field
 // (agent-info.json lives in agentHome, which the container can write). The
 // broker persists it in a broker-owned file under agentDir instead — see
-// pkg/agent's writeProvisionedWorktreeRepoRoot/readProvisionedWorktreeRepoRoot
+// pkg/agent's repository root record (writeRepoRootRecord/readRepoRootRecord)
 // — and run.go independently validates it against the real filesystem
 // (provision.ValidateWorktreeForBase) before trusting it either way.
 func ContextWithProvisionedWorktreeRepoRoot(ctx context.Context, repoRoot string) context.Context {
@@ -1500,6 +1504,17 @@ type StartOptions struct {
 	// or target already exists. Like KubernetesBlockIdentity it is never
 	// persisted, so it is recomputed on every dispatch.
 	HostCredentialFiles bool
+
+	// ColocatedHubDevToken is the workstation server's dev token, offered by
+	// the runtime broker for an agent that has no hub-issued token. The
+	// broker sets it only when the dispatch is bound to the hub co-located
+	// in its own process (the binding HostCredentialFiles also requires) and
+	// TrustedHubEndpoint is set. The agent manager uses it as the agent's
+	// hub token only in BrokerMode, and only when the agent's final hub
+	// endpoint, after the agent config and config env overrides, still
+	// equals TrustedHubEndpoint; otherwise it is dropped. Like
+	// HostCredentialFiles it is never persisted.
+	ColocatedHubDevToken string `json:"-"`
 
 	// RerenderKeys are the provision-rendered config keys
 	// (RerenderableConfigKeys) whose files this start renders again before

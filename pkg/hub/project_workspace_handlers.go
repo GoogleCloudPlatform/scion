@@ -104,48 +104,19 @@ func isCloudRunInstance() bool {
 	return cloudrunenv.IsInstance()
 }
 
-// workspaceWriteBlocked returns true when workspace writes should be rejected
-// with 503 Service Unavailable. This happens when the hub is running on Cloud
-// Run (K_SERVICE is set) and no durable storage backend is configured.
-//
-// Uses an allowlist of known-durable backends rather than a blocklist, so that
-// an unrecognized backend value fails closed (blocked) rather than silently
-// writing to ephemeral storage.
+// workspaceWriteBlocked reports whether writes to the hub's own workspace
+// layout must be refused with 503: on a Cloud Run Service, unless the
+// workspace Layout is a durable (shared) backend. An unbuildable Layout
+// (for example a volume backend without a volume name, ptone/scion#1073)
+// and an unrecognized backend fail closed. Self-hosted hubs and Cloud Run
+// Instances (Tier 0, ephemeral by design; see cloudRunRequiresDurableWrites)
+// are never blocked.
 func (s *Server) workspaceWriteBlocked() bool {
-	// Not on Cloud Run (K_SERVICE) and not on a Cloud Run Instance
-	// → writes are fine (self-hosted with local disk)
-	if !isCloudRunEnv() && !isCloudRunInstance() {
+	if !cloudRunRequiresDurableWrites() {
 		return false
 	}
-
-	// Cloud Run Instance (single-node hosted tier, Tier 0): writes are
-	// permitted to ephemeral storage. This is a deliberate, documented
-	// decision -- the tier is ephemeral by design (workspaces are lost on
-	// redeploy) and the UI banner (below) makes this visible to users.
-	// Without this explicit check, writes happen to work because K_SERVICE
-	// is not set on Instances, but that is an accident that would break the
-	// first time someone makes isCloudRunEnv() aware of Instances.
-	// See design doc section 5.2 and section 4.6.
-	if isCloudRunInstance() {
-		return false
-	}
-
-	// On Cloud Run Services — only allow writes if a known durable backend
-	// is configured
-	wsCfg := s.config.WorkspaceStorageConfig
-	if wsCfg != nil {
-		switch wsCfg.Backend {
-		case "nfs":
-			return false // Known durable backend → writes allowed
-		case "cloudrun-volume", "gke-shared-volume":
-			// A volume backend without a volume name has no mount point:
-			// hubManagedProjectPath falls back to the ephemeral local path,
-			// so it is not durable and writes are blocked (ptone/scion#1073).
-			return workspaceMountRoot(wsCfg) == ""
-		}
-	}
-	// No config, empty backend, "local", or unrecognized → block writes
-	return true
+	layout, err := s.workspaceLayout()
+	return err != nil || !layout.Backend.Durable()
 }
 
 // errSharedDirWritesUnavailable is returned when a shared-dir write is
@@ -169,10 +140,12 @@ func (g writeGate) refuse(w http.ResponseWriter) bool {
 	return true
 }
 
-// workspaceWriteGate gates writes to a project workspace on the workspace
-// storage backend (workspaceWriteBlocked).
-func (s *Server) workspaceWriteGate() writeGate {
-	if s.workspaceWriteBlocked() {
+// workspaceWriteGate gates writes to a project workspace on the backend the
+// workspace actually resolved to: on a Cloud Run
+// Service a workspace on instance-local disk is refused, including a linked
+// project's co-located broker path.
+func (s *Server) workspaceWriteGate(resolved projectfs.Resolved) writeGate {
+	if cloudRunRequiresDurableWrites() && !resolved.Backend.Durable() {
 		return writeGate{code: "workspace_writes_unavailable", message: errWorkspaceWritesUnavailable}
 	}
 	return writeGate{}
@@ -211,6 +184,9 @@ type ProjectWorkspaceListResponse struct {
 	TotalSize  int64                  `json:"totalSize"`
 	TotalCount int                    `json:"totalCount"`
 	HasMore    bool                   `json:"hasMore,omitempty"`
+	// MigrationNotice is the Files-tab banner while legacy workspace trees
+	// await the project storage migration (ptone/scion#5819); nil when there is none.
+	MigrationNotice *WorkspaceMigrationNotice `json:"migrationNotice,omitempty"`
 }
 
 // SharedDirListResponse extends the workspace list response with provider metadata.
@@ -413,82 +389,108 @@ func openConfinedBase(base string, createIfMissing bool) (*os.Root, error) {
 	return os.OpenRoot(base)
 }
 
-// resolveProjectWorkspacePath determines the filesystem path of a project's
-// workspace as the hub serves it (file API, archive, resource import). For
-// hub-managed and shared-workspace projects, this is the hub-managed workspace
-// directory. For linked projects it is the co-located broker's local path when
-// there is one, and otherwise the hub's cached copy of the remote workspace.
+// resolveProjectWorkspace determines where a project's workspace lives as
+// the hub serves it (file API, archive, resource import).
 //
-// Empty-per-agent projects (design #2703) also resolve to the hub project
-// directory here, although their agents never mount it: each agent gets a
-// private, broker-local directory. This is intentionally left unguarded in
-// P1; the web UI hides the Files tab for this mode (P5).
-func (s *Server) resolveProjectWorkspacePath(ctx context.Context, project *store.Project) (string, error) {
-	// Hub-managed projects (no git remote) always have a managed workspace
-	if project.GitRemote == "" {
-		path, err := s.hubManagedProjectPath(project.Slug)
+//   - Hub-managed and shared-workspace projects resolve through the layout
+//     authority (projectWorkspaceResolved): the same projects/<uuid>/workspace
+//     tree agents mount on a shared backend, ~/.scion/projects/<slug> on the
+//     local backend. An empty-per-agent project has no project-scoped
+//     workspace and gets errWorkspaceNoMount (409).
+//   - Linked projects resolve to the co-located (embedded) broker's local
+//     path when there is one. A linked project served only by remote brokers
+//     has no workspace the hub can reach and gets a conflict error; there is
+//     no hub-side copy.
+//
+// Errors are safe to show to clients (no filesystem paths). A storage
+// misconfiguration wraps errWorkspaceStorageUnavailable (503).
+func (s *Server) resolveProjectWorkspace(ctx context.Context, project *store.Project) (projectfs.Resolved, error) {
+	// A project whose workspace lives on its remote brokers
+	// (workspaceOnRemoteBrokers) has no workspace the hub can reach unless the
+	// co-located broker serves it: 409, and the hub never creates its own copy.
+	if s.workspaceOnRemoteBrokers(project) {
+		embedded, err := s.hasEmbeddedProvider(ctx, project)
 		if err != nil {
-			return "", projectPathResolveError(err, "failed to resolve project path")
+			return projectfs.Resolved{}, fmt.Errorf("failed to resolve project providers")
 		}
-		return path, nil
+		if !embedded {
+			return projectfs.Resolved{}, errLinkedWorkspaceRemote
+		}
+	}
+	res, err := s.projectWorkspaceResolved(project)
+	switch {
+	case err == nil:
+		return res, nil
+	case errors.Is(err, projectfs.ErrNoMount):
+		return projectfs.Resolved{}, errWorkspaceNoMount
+	case errors.Is(err, errWorkspaceStorageUnavailable):
+		s.projectsLogger().Warn("workspace storage is misconfigured; not resolving project workspace",
+			"project_id", project.ID, "error", err)
+		return projectfs.Resolved{}, fmt.Errorf("failed to resolve project path: %w", errWorkspaceStorageUnavailable)
+	case !errors.Is(err, errNotHubWorkspace):
+		return projectfs.Resolved{}, errors.New("failed to resolve project path")
 	}
 
-	// Shared-workspace git projects have a managed workspace on the hub
-	if project.IsSharedWorkspace() {
-		path, err := s.hubManagedProjectPath(project.Slug)
-		if err != nil {
-			return "", projectPathResolveError(err, "failed to resolve project path")
-		}
-		return path, nil
-	}
-
-	// Linked projects: check if there's a co-located broker with a local path
+	// Linked projects: only a co-located broker's local path is reachable.
 	providers, err := s.store.GetProjectProviders(ctx, project.ID)
 	if err != nil {
-		return "", fmt.Errorf("failed to resolve project providers")
+		return projectfs.Resolved{}, fmt.Errorf("failed to resolve project providers")
 	}
 
 	// Git projects with no providers have no accessible workspace — the workspace
 	// lives on broker machines and no broker has registered for this project yet.
 	if len(providers) == 0 {
-		return "", fmt.Errorf("workspace is not available for git-anchored projects without a registered provider")
+		return projectfs.Resolved{}, fmt.Errorf("workspace is not available for git-anchored projects without a registered provider")
 	}
 
-	// Check for co-located (embedded) broker with a local path
 	for _, p := range providers {
 		if s.isEmbeddedBroker(p.BrokerID) && p.LocalPath != "" {
-			// Co-located broker: serve from local filesystem directly
-			return p.LocalPath, nil
+			return projectfs.Resolved{
+				Backend:  projectfs.BackendLocal,
+				HostPath: p.LocalPath,
+				Target:   projectfs.DefaultContainerWorkspace,
+				Kind:     projectfs.KindWorkspace,
+				Name:     "workspace",
+			}, nil
 		}
 	}
 
-	// Remote linked project: serve from the hub's cached copy.
-	// The cache is populated via cache/refresh or cache/notify endpoints.
-	cachePath, err := s.hubManagedProjectPath(project.Slug)
+	return projectfs.Resolved{}, errLinkedWorkspaceRemote
+}
+
+// sharedBaseMissing reports whether resolved is on a shared backend whose
+// host base (the share's mount point) does not exist on this host: the
+// storage is unavailable, which must not read as an empty workspace.
+func sharedBaseMissing(resolved projectfs.Resolved) bool {
+	if !resolved.Backend.Shared() || resolved.HostBase == "" {
+		return false
+	}
+	_, err := os.Stat(resolved.HostBase)
+	return errors.Is(err, fs.ErrNotExist)
+}
+
+// hasEmbeddedProvider reports whether the co-located (embedded) broker
+// provides project.
+func (s *Server) hasEmbeddedProvider(ctx context.Context, project *store.Project) (bool, error) {
+	providers, err := s.store.GetProjectProviders(ctx, project.ID)
 	if err != nil {
-		return "", projectPathResolveError(err, "failed to resolve project cache path")
+		return false, err
 	}
-
-	// If cache doesn't exist yet, return the path anyway (MkdirAll will create it).
-	// The client should trigger a cache/refresh to populate it.
-	if !s.hasProjectCache(project.Slug) {
-		slog.Debug("linked project cache not yet populated",
-			"project_id", project.ID, "slug", project.Slug)
+	for _, p := range providers {
+		if s.isEmbeddedBroker(p.BrokerID) {
+			return true, nil
+		}
 	}
-
-	return cachePath, nil
+	return false, nil
 }
 
-// projectPathResolveError returns a generic error for a failed project path
-// resolution. Callers show its text to clients, so it does not include the
-// filesystem path. A workspace storage timeout is still wrapped
-// (errWorkspaceContentTimeout) so callers can map it to 503.
-func projectPathResolveError(err error, msg string) error {
-	if errors.Is(err, errWorkspaceContentTimeout) {
-		return fmt.Errorf("%s: %w", msg, errWorkspaceContentTimeout)
-	}
-	return errors.New(msg)
-}
+// errWorkspaceNoMount is returned for a project without a project-scoped
+// workspace (empty-per-agent: each agent has its own private directory).
+var errWorkspaceNoMount = errors.New("this project has no shared workspace: each agent gets its own private workspace directory")
+
+// errLinkedWorkspaceRemote is returned for a linked project whose workspace
+// lives only on remote brokers, which the hub cannot reach.
+var errLinkedWorkspaceRemote = errors.New("workspace is not available: this linked project's workspace lives on remote runtime brokers without shared storage")
 
 // notAccessible responds to a path that os.Root refused to resolve.
 //
@@ -510,14 +512,13 @@ func notAccessible(w http.ResponseWriter, what string, path string, err error) {
 //   - POST (filePath="")  → upload files
 //   - DELETE (filePath!="") → delete file
 //
-// For empty-per-agent projects (design #2703) this serves the hub project
-// directory, which their agents do not see (see resolveProjectWorkspacePath).
-// Unguarded in P1; the web UI hides the Files tab for this mode (P5).
+// An empty-per-agent project has no shared workspace and gets 409
+// (see resolveProjectWorkspace).
 func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, project *store.Project, filePath string) {
 	ctx := r.Context()
 
-	// Resolve workspace path — supports hub-managed, shared-workspace, and linked projects
-	workspacePath, err := s.resolveProjectWorkspacePath(ctx, project)
+	// Resolve workspace — supports hub-managed, shared-workspace, and linked projects
+	resolved, err := s.resolveProjectWorkspace(ctx, project)
 	if err != nil {
 		if !writeWorkspaceStorageUnavailable(w, err) {
 			Conflict(w, err.Error())
@@ -525,16 +526,32 @@ func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	var notice *WorkspaceMigrationNotice
+	if r.Method == http.MethodGet && filePath == "" {
+		notice = s.workspaceMigrationNotice(ctx, project)
+	}
+
 	// Every verb below operates through this Root and never on a path joined
-	// onto workspacePath. Uploads and writes may still materialize the
-	// workspace on first use, as they always have; reads and deletes no
-	// longer do.
+	// onto the workspace path. Uploads and writes may still materialize the
+	// workspace on first use, as they always have; reads and deletes do not.
+	// Writes are refused before anything is created when the write gate is
+	// closed.
 	createIfMissing := r.Method == http.MethodPost || r.Method == http.MethodPut
-	root, err := openConfinedBase(workspacePath, createIfMissing)
+	gate := s.workspaceWriteGate(resolved)
+	if createIfMissing && gate.refuse(w) {
+		return
+	}
+	root, err := resolved.Open(createIfMissing)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if sharedBaseMissing(resolved) {
+			// The share is not mounted: storage unavailable, not an empty
+			// workspace.
+			writeWorkspaceStorageUnavailable(w, errWorkspaceStorageUnavailable)
+			return
+		}
+		if errors.Is(err, fs.ErrNotExist) {
 			if r.Method == http.MethodGet && filePath == "" {
-				writeJSON(w, http.StatusOK, ProjectWorkspaceListResponse{Files: []ProjectWorkspaceFile{}})
+				writeJSON(w, http.StatusOK, ProjectWorkspaceListResponse{Files: []ProjectWorkspaceFile{}, MigrationNotice: notice})
 				return
 			}
 			NotFound(w, "File")
@@ -549,15 +566,15 @@ func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, 
 
 	switch {
 	case r.Method == http.MethodGet && filePath == "":
-		s.handleProjectWorkspaceList(w, r, root)
+		s.handleProjectWorkspaceList(w, r, root, notice)
 	case r.Method == http.MethodGet && filePath != "":
 		s.handleProjectWorkspaceDownload(w, r, root, filePath)
 	case r.Method == http.MethodPost && filePath == "":
-		s.handleProjectWorkspaceUpload(w, r, root, s.workspaceWriteGate())
+		s.handleProjectWorkspaceUpload(w, r, root, gate)
 	case r.Method == http.MethodPut && filePath != "":
-		s.handleProjectWorkspaceWrite(w, r, root, filePath, s.workspaceWriteGate())
+		s.handleProjectWorkspaceWrite(w, r, root, filePath, gate)
 	case r.Method == http.MethodDelete && filePath != "":
-		s.handleProjectWorkspaceDelete(w, root, filePath, s.workspaceWriteGate())
+		s.handleProjectWorkspaceDelete(w, root, filePath, gate)
 	default:
 		if filePath == "" {
 			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
@@ -571,7 +588,7 @@ func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, 
 // Accepts optional query parameters:
 //   - q:     filter pattern (regex or fuzzy fallback, case-insensitive)
 //   - limit: max results (default 500, cap 2000)
-func (s *Server) handleProjectWorkspaceList(w http.ResponseWriter, r *http.Request, root *os.Root) {
+func (s *Server) handleProjectWorkspaceList(w http.ResponseWriter, r *http.Request, root *os.Root, notice *WorkspaceMigrationNotice) {
 	query := r.URL.Query().Get("q")
 	limit := intQueryParam(r, "limit", 500, 2000)
 
@@ -581,7 +598,13 @@ func (s *Server) handleProjectWorkspaceList(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	writeJSON(w, http.StatusOK, ProjectWorkspaceListResponse(result))
+	writeJSON(w, http.StatusOK, ProjectWorkspaceListResponse{
+		Files:           result.Files,
+		TotalSize:       result.TotalSize,
+		TotalCount:      result.TotalCount,
+		HasMore:         result.HasMore,
+		MigrationNotice: notice,
+	})
 }
 
 // handleSharedDirFileList lists files in a shared directory, adding provider metadata
@@ -882,8 +905,8 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Resolve workspace path — supports hub-managed, shared-workspace, and linked projects
-	workspacePath, err := s.resolveProjectWorkspacePath(ctx, project)
+	// Resolve workspace — supports hub-managed, shared-workspace, and linked projects
+	resolved, err := s.resolveProjectWorkspace(ctx, project)
 	if err != nil {
 		if !writeWorkspaceStorageUnavailable(w, err) {
 			Conflict(w, err.Error())
@@ -893,9 +916,13 @@ func (s *Server) handleProjectWorkspaceArchive(w http.ResponseWriter, r *http.Re
 
 	// Archiving never creates the workspace — an archive of nothing is just
 	// "not found".
-	root, err := openConfinedBase(workspacePath, false)
+	root, err := resolved.Open(false)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if sharedBaseMissing(resolved) {
+			writeWorkspaceStorageUnavailable(w, errWorkspaceStorageUnavailable)
+			return
+		}
+		if errors.Is(err, fs.ErrNotExist) {
 			NotFound(w, "Workspace")
 			return
 		}
@@ -1526,7 +1553,7 @@ func resolveHubProjectSharedDirPath(project *store.Project, dirName string) (str
 	if err != nil {
 		return "", err
 	}
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	if err != nil {
 		return "", err
 	}
@@ -1614,23 +1641,47 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	workspacePath, err := s.hubManagedProjectPath(project.Slug)
+	resolved, err := s.resolveProjectWorkspace(ctx, project)
 	if err != nil {
 		if !writeWorkspaceStorageUnavailable(w, err) {
 			InternalError(w)
 		}
 		return
 	}
+	// The workspace can be agent-writable: confirm through the confined
+	// open (the anchored O_NOFOLLOW walk on a shared backend; no symlinked
+	// base locally) that it resolves to the project's own directory before
+	// git runs in it. git's own safe.directory check stays in force.
+	root, err := resolved.Open(false)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			Conflict(w, "The shared workspace has not been provisioned yet")
+			return
+		}
+		slog.WarnContext(ctx, "shared workspace pull: workspace not accessible",
+			"project_id", project.ID, "error", err)
+		BadRequest(w, "Workspace not accessible")
+		return
+	}
+	_ = root.Close()
+	workspacePath := resolved.HostPath
 
 	token := s.resolveCloneToken(ctx, project)
 
-	pullResult, err := util.PullSharedWorkspace(workspacePath, token)
+	// Pull from the project's clone URL as the hub knows it, not from the
+	// remote configured in the workspace, which agents can change.
+	cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
+	pullResult, err := util.PullSharedWorkspace(workspacePath, cloneURL, token)
 	if err != nil {
 		slog.Warn("shared workspace pull failed",
 			"project_id", project.ID, "error", err.Error())
 
+		// git's text can name host paths (and the safe.directory guidance
+		// does): the response carries fixed text by kind, and the detail
+		// stays in the log.
 		statusCode := http.StatusConflict
 		errorCode := ErrCodePullFailed
+		message := "git pull failed in the shared workspace"
 		var details map[string]interface{}
 		var gitErr *util.GitError
 		if errors.As(err, &gitErr) {
@@ -1640,11 +1691,17 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 			switch gitErr.Kind {
 			case util.GitErrAuth:
 				statusCode = http.StatusUnauthorized
+				message = "git pull failed: the repository did not accept the project's git credential"
 			case util.GitErrNetwork:
 				statusCode = http.StatusBadGateway
+				message = "git pull failed: the repository could not be reached"
+			case util.GitErrNotFound:
+				message = "git pull failed: repository or branch not found"
+			case util.GitErrNonFastForward:
+				message = "git pull failed: the workspace has local commits that diverge from the remote"
 			}
 		}
-		writeError(w, statusCode, errorCode, err.Error(), details)
+		writeError(w, statusCode, errorCode, message, details)
 		return
 	}
 
@@ -1694,8 +1751,7 @@ func cleanEmptyDirs(root *os.Root, targetDir string) {
 // project workspace. Membership in this set is what routes a request through
 // handleProjectWorkspaceRoutes, and therefore through its authorization gate.
 func isProjectWorkspaceSubPath(subPath string) bool {
-	return subPath == "sync/status" ||
-		subPath == "workspace" ||
+	return subPath == "workspace" ||
 		strings.HasPrefix(subPath, "workspace/")
 }
 
@@ -1741,18 +1797,6 @@ func (s *Server) handleProjectWorkspaceRoutes(w http.ResponseWriter, r *http.Req
 	}
 
 	switch {
-	case subPath == "sync/status":
-		s.handleProjectSyncStatus(w, r, project)
-
-	case subPath == "workspace/cache/refresh":
-		s.handleProjectCacheRefresh(w, r, project)
-
-	case subPath == "workspace/cache/status":
-		s.handleProjectCacheStatus(w, r, project)
-
-	case subPath == "workspace/cache/notify":
-		s.handleProjectCacheNotify(w, r, project)
-
 	case subPath == "workspace/pull":
 		s.handleProjectWorkspacePull(w, r, project)
 
