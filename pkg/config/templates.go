@@ -251,10 +251,7 @@ func FindTemplateWithContext(ctx context.Context, name string) (*Template, error
 
 	// 1. Check if name is an absolute path
 	if filepath.IsAbs(name) {
-		if info, err := os.Stat(name); err == nil && info.IsDir() {
-			return &Template{Name: templateNameFromDir(name), Path: name}, nil
-		}
-		return nil, fmt.Errorf("template path %s not found or not a directory", name)
+		return TemplateFromDir(name)
 	}
 
 	// 2. Check project-local templates
@@ -308,6 +305,17 @@ func FindTemplateInScope(name, scope string) *Template {
 	}
 
 	return nil
+}
+
+// TemplateFromDir returns the template stored in dir, an absolute directory
+// path. The directory must exist. The template's name is derived from the
+// directory's base name with templateNameFromDir, so it is "" for a
+// content-addressed cache directory.
+func TemplateFromDir(dir string) (*Template, error) {
+	if info, err := os.Stat(dir); err == nil && info.IsDir() {
+		return &Template{Name: templateNameFromDir(dir), Path: dir}, nil
+	}
+	return nil, fmt.Errorf("template path %s not found or not a directory", dir)
 }
 
 // templateNameFromDir derives a template name from a template directory path.
