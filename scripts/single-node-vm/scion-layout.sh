@@ -321,8 +321,9 @@ cmd_as_owner() {
 # ---------------------------------------------------------------------------
 
 # link_bin -- make <bin-link> a symlink to <root>/current/scion (atomic
-# rename over whatever was there). <bin-link>'s directory is root's, so
-# this is the one write root makes; the link is root-owned.
+# rename over whatever was there). <bin-link>'s directory is root's, and
+# the link is root-owned. Besides the input copies in $TMPDIR
+# (stage_inputs), this is root's only write after the handover.
 link_bin() {
   local want="$INSTALL_ROOT/current/scion"
   if [[ -L "$BIN_LINK" && "$(readlink "$BIN_LINK")" == "$want" ]]; then

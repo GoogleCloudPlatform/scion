@@ -1558,17 +1558,29 @@ test_layout_owner_step_gets_readable_input_copy() {
 }
 
 test_layout_unreadable_input_has_clear_error() {
-  _layout_new_host
-  mkdir -p "$(dirname "$LH_ROOT")"
-  mkdir -m 0755 "$LH_ROOT" "$LH_ROOT/releases" "$LH_ROOT/snapshots"
-  LAYOUT_OUT="$(SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" SCION_INSTALL_OWNER="" \
-    bash "$LAYOUT_SH" __as-owner nightly-20261023 "${LH_DIR}/does-not-exist" 2>&1)"
-  LAYOUT_RC=$?
-  assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "an unreadable input must fail"
-  assert_contains "$LAYOUT_OUT" "could not copy" "a read failure must be reported as such"
-  assert_not_contains "$LAYOUT_OUT" "incomplete" "a read failure must not be reported as an incomplete copy"
-  assert_eq "" "$(ls -A "$LH_ROOT/releases")" "nothing may be left in releases/"
-  rm -rf "$LH_DIR"
+  local input case_name
+  for case_name in mode-000 missing; do
+    _layout_new_host
+    mkdir -p "$(dirname "$LH_ROOT")"
+    mkdir -m 0755 "$LH_ROOT" "$LH_ROOT/releases" "$LH_ROOT/snapshots"
+    input="${LH_DIR}/input"
+    if [[ "$case_name" == mode-000 ]]; then
+      # The case the message names: a file the owner step cannot read.
+      # (This runs unprivileged; as root, a 000 file would still be readable.)
+      _fake_scion "$input" "nightly-20261023"
+      chmod 000 "$input"
+      assert_false "$([[ -r "$input" ]] && echo true || echo false)" "setup: the 000 input must be unreadable to the test user"
+    fi
+    LAYOUT_OUT="$(SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" SCION_INSTALL_OWNER="" \
+      bash "$LAYOUT_SH" __as-owner nightly-20261023 "$input" 2>&1)"
+    LAYOUT_RC=$?
+    assert_true "$([[ "$LAYOUT_RC" -ne 0 ]] && echo true || echo false)" "an unreadable (${case_name}) input must fail"
+    assert_contains "$LAYOUT_OUT" "could not copy" "a ${case_name} read failure must be reported as such"
+    assert_not_contains "$LAYOUT_OUT" "incomplete" "a ${case_name} read failure must not be reported as an incomplete copy"
+    assert_eq "" "$(ls -A "$LH_ROOT/releases")" "${case_name}: nothing may be left in releases/"
+    chmod 0644 "$input" 2>/dev/null || true
+    rm -rf "$LH_DIR"
+  done
 }
 
 # A fresh handover that failed partway (<root> still root's, snapshots/
