@@ -33,7 +33,7 @@ type HealthAnswer = { uptime?: string; scionVersion?: string } | 'down' | number
  */
 function stubHealthz(answers: HealthAnswer[]): ReturnType<typeof vi.fn> {
   let i = 0;
-  const fn = vi.fn((input: string | URL | Request) => {
+  const fn = vi.fn((input: string | URL | Request, _init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     if (!url.endsWith('/healthz')) return Promise.resolve(json({}, 404));
     const a = answers[Math.min(i, answers.length - 1)];
@@ -141,5 +141,27 @@ describe('waitForHubRestart', () => {
     stubHealthz([{ uptime: '10m0s' }, { uptime: '1s', scionVersion: 'abc123' }]);
     const result = await run({}, 10_000);
     expect(result?.ok).toBe(true);
+  });
+
+  it('stops polling and resolves aborted when the signal aborts', async () => {
+    const fetch = stubHealthz(['down']);
+    const ctrl = new AbortController();
+    const result = start({ signal: ctrl.signal });
+    await vi.advanceTimersByTimeAsync(3_000);
+    const callsBefore = fetch.mock.calls.length;
+    expect(callsBefore).toBeGreaterThan(0);
+    ctrl.abort();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(result()).toEqual({ ok: false, observed: null, aborted: true });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetch.mock.calls.length).toBe(callsBefore);
+  });
+
+  it('passes the signal to fetch', async () => {
+    const fetch = stubHealthz([{ uptime: '1s' }]);
+    const ctrl = new AbortController();
+    await run({ signal: ctrl.signal }, 1_000);
+    const init = fetch.mock.calls[0][1] as RequestInit | undefined;
+    expect(init?.signal).toBe(ctrl.signal);
   });
 });

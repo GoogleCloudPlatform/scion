@@ -35,6 +35,8 @@ export interface WaitForHubRestartOptions {
   expectVersion?: string | undefined;
   /** Overall deadline in milliseconds. Default 300000 (5 minutes). */
   timeoutMs?: number;
+  /** Stops the wait (for example when the page is left). */
+  signal?: AbortSignal;
 }
 
 /** The last /healthz answer seen while waiting. */
@@ -50,6 +52,8 @@ export type HubRestartResult =
       ok: false;
       /** The last /healthz answer, or null when the hub never answered. */
       observed: HubHealthObservation | null;
+      /** Set when the wait was stopped through the signal, not timed out. */
+      aborted?: true;
     };
 
 const INITIAL_DELAY_MS = 500;
@@ -90,8 +94,23 @@ export function parseGoUptimeSeconds(uptime: string | undefined): number | null 
   return matched ? total : null;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+/** Sleeps for ms, or until the signal aborts. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 /**
@@ -99,21 +118,28 @@ function sleep(ms: number): Promise<void> {
  * {@link FRESH_UPTIME_SECONDS}) and, when expectVersion is given, with that
  * scionVersion. Network errors and non-2xx answers mean the hub is still
  * down and polling continues. Resolves with ok=false on timeout, carrying
- * the last answer so the caller can say what it saw.
+ * the last answer so the caller can say what it saw. When the signal
+ * aborts, resolves at once with ok=false and aborted=true.
  */
 export async function waitForHubRestart(
   options: WaitForHubRestartOptions = {}
 ): Promise<HubRestartResult> {
-  const { expectVersion, timeoutMs = DEFAULT_RESTART_TIMEOUT_MS } = options;
+  const { expectVersion, timeoutMs = DEFAULT_RESTART_TIMEOUT_MS, signal } = options;
   const deadline = Date.now() + timeoutMs;
   let observed: HubHealthObservation | null = null;
 
-  await sleep(INITIAL_DELAY_MS);
+  const aborted = (): HubRestartResult => ({ ok: false, observed, aborted: true });
+
+  await sleep(INITIAL_DELAY_MS, signal);
 
   let interval = FIRST_INTERVAL_MS;
   while (Date.now() < deadline) {
+    if (signal?.aborted) return aborted();
     try {
-      const res = await apiFetch('/healthz', { authErrors: 'caller' });
+      const res = await apiFetch('/healthz', {
+        authErrors: 'caller',
+        ...(signal ? { signal } : {}),
+      });
       if (res.ok) {
         const data = (await res.json()) as { uptime?: string; scionVersion?: string };
         const seen: HubHealthObservation = {
@@ -131,8 +157,9 @@ export async function waitForHubRestart(
     } catch {
       // Hub still down: keep polling.
     }
-    await sleep(interval);
+    if (signal?.aborted) return aborted();
+    await sleep(interval, signal);
     interval = Math.min(interval * 1.5, MAX_INTERVAL_MS);
   }
-  return { ok: false, observed };
+  return signal?.aborted ? aborted() : { ok: false, observed };
 }

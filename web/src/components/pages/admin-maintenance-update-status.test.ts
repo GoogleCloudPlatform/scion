@@ -69,13 +69,15 @@ const OPS = [
 
 interface Options {
   /** Body of GET update-status, or an HTTP status to fail with. */
-  status?: Json | number | (() => Json);
+  status?: Json | number | (() => Json | number);
   /** Body of GET update-available. */
   updateAvailable?: Json;
   /** Response to POST update-binary/run. */
   run?: { status: number; body: Json };
-  /** Operations list; may change between calls. */
-  operations?: () => Json[];
+  /** Operations list; may change between calls. 'down' rejects the fetch. */
+  operations?: () => Json[] | 'down';
+  /** Body of POST check-updates, or an HTTP status to fail with. */
+  checkUpdates?: Json | number;
 }
 
 function json(body: unknown, status = 200): Promise<Response> {
@@ -99,11 +101,12 @@ function handler(opts: Options) {
     const path = pathOf(input);
     const method = (init?.method ?? 'GET').toUpperCase();
     if (path === '/api/v1/admin/maintenance/update-status') {
-      const s = opts.status ?? updateStatus();
+      const raw = opts.status ?? updateStatus();
+      const s = typeof raw === 'function' ? raw() : raw;
       if (typeof s === 'number') {
         return json({ error: { code: 'internal_error', message: 'status unavailable' } }, s);
       }
-      return json(typeof s === 'function' ? s() : s);
+      return json(s);
     }
     if (path === '/api/v1/admin/maintenance/update-available') {
       return json(opts.updateAvailable ?? { update_available: false });
@@ -113,8 +116,17 @@ function handler(opts: Options) {
       const r = opts.run ?? { status: 200, body: { runId: 'run-1', status: 'running' } };
       return json(r.body, r.status);
     }
+    if (path === '/api/v1/admin/maintenance/check-updates') {
+      const c = opts.checkUpdates ?? {};
+      if (typeof c === 'number') {
+        return json({ error: { code: 'internal_error', message: 'check failed' } }, c);
+      }
+      return json(c);
+    }
     if (path === '/api/v1/admin/maintenance/operations') {
-      return json({ migrations: [], operations: opts.operations ? opts.operations() : OPS });
+      const ops = opts.operations ? opts.operations() : OPS;
+      if (ops === 'down') return Promise.reject(new TypeError('Failed to fetch'));
+      return json({ migrations: [], operations: ops });
     }
     if (path === '/api/v1/admin/maintenance') {
       return json({ enabled: false });
@@ -197,6 +209,12 @@ function findButton(scope: ParentNode, text: string): HTMLElement | undefined {
   return Array.from(scope.querySelectorAll<HTMLElement>('sl-button')).find(
     (b) => b.textContent?.trim() === text
   );
+}
+
+function confirmUpdate(e: Page): void {
+  root(e)
+    .querySelector<HTMLElement>('sl-dialog[label="Update Hub"] sl-button.confirm-update')!
+    .click();
 }
 
 function statusFetchCount(): number {
@@ -334,15 +352,48 @@ describe('Apply update', () => {
     expect(el.updateConfirmTarget).toBeNull();
   });
 
-  it('runs the update-binary card with latest:<channel> when no tag is known', async () => {
-    el = await mount();
-    const card = opCard(el, 'Update Binary');
-    findButton(card!, 'Run')!.click();
+  async function runCard(e: Page): Promise<void> {
+    findButton(opCard(e, 'Update Binary')!, 'Run')!.click();
+    await settle(e);
+  }
+
+  it('resolves the card target to the checked tag before posting', async () => {
+    el = await mount({
+      checkUpdates: {
+        tier: 'binary',
+        update_available: true,
+        current_version: 'nightly-20261022',
+        latest_version: 'nightly-20261023',
+        channel: 'nightly',
+      },
+    });
+    await runCard(el);
+    expect(el.updateConfirmTarget).toBe('nightly-20261023');
+    confirmUpdate(el);
     await settle(el);
+    expect(runBodies).toEqual([{ params: { target_version: 'nightly-20261023', pin: 'latest' } }]);
+  });
+
+  it('does not open the dialog when the check says the hub is up to date', async () => {
+    el = await mount({
+      checkUpdates: {
+        tier: 'binary',
+        update_available: false,
+        current_version: 'nightly-20261022',
+        latest_version: 'nightly-20261022',
+        channel: 'nightly',
+      },
+    });
+    await runCard(el);
+    expect(el.updateConfirmTarget).toBeNull();
+    expect(showToast).toHaveBeenCalledWith('Already up to date (nightly-20261022).', 'success');
+  });
+
+  it('falls back to latest:<channel> when the check gives no tag', async () => {
+    el = await mount({ checkUpdates: 500 });
+    await runCard(el);
     expect(el.updateConfirmTarget).toBe('latest:nightly');
-    root(el)
-      .querySelector<HTMLElement>('sl-dialog[label="Update Hub"] sl-button.confirm-update')!
-      .click();
+    confirmUpdate(el);
     await settle(el);
     expect(runBodies).toEqual([{ params: { target_version: 'latest:nightly', pin: 'latest' } }]);
   });
@@ -388,147 +439,222 @@ describe('Apply update', () => {
 });
 
 describe('Reconnect after an update restart', () => {
-  const restartingOps = (): Json[] => [
-    op('update-binary', 'Update Binary', {
-      id: 'run-1',
-      status: 'restarting',
-      startedAt: '2026-10-24T00:00:00Z',
-    }),
+  const idle = (): Json[] => [op('update-binary', 'Update Binary')];
+  const withRun = (status: string, id = 'run-1'): Json[] => [
+    op('update-binary', 'Update Binary', { id, status, startedAt: '2026-10-24T00:00:00Z' }),
   ];
+  const PENDING = {
+    runId: 'run-1',
+    from: 'nightly-20261022',
+    to: 'nightly-20261023',
+    at: '2026-10-24T00:00:00Z',
+  };
+  const verified = (runId: string): Json =>
+    updateStatus({
+      current: {
+        version: 'nightly-20261023',
+        channel: 'nightly',
+        commit: 'f00',
+        isGitBuild: false,
+      },
+      lastUpdate: {
+        runId,
+        from: 'nightly-20261022',
+        to: 'nightly-20261023',
+        status: 'verified',
+        at: '2026-10-24T00:01:00Z',
+      },
+    });
 
-  it('renders a restarting run as in progress', async () => {
+  /** Mounts with mutable operations/status and starts an update to target. */
+  async function startUpdate(
+    target: string
+  ): Promise<{ setOps(o: Json[] | 'down'): void; setStatus(s: Json | number): void }> {
+    let ops: Json[] | 'down' = idle();
+    let status: Json | number = updateStatus();
+    el = await mount({ operations: () => ops, status: () => status });
+    el.updateConfirmTarget = target;
+    await settle(el);
+    ops = withRun('running');
+    confirmUpdate(el);
+    await settle(el);
+    return {
+      setOps: (o) => (ops = o),
+      setStatus: (s) => (status = s),
+    };
+  }
+
+  function waitArgs(): { expectVersion?: string; signal?: AbortSignal } | undefined {
+    return vi.mocked(waitForHubRestart).mock.calls[0]?.[0];
+  }
+
+  it('starts the wait after two failed polls while the run is running', async () => {
     vi.mocked(waitForHubRestart).mockReturnValue(new Promise(() => {}));
-    el = await mount({ operations: restartingOps });
+    const hub = await startUpdate('nightly-20261023');
+    const statusLoads = statusFetchCount();
+
+    hub.setOps('down');
+    await el!.loadData(true);
+    await settle(el!);
+    // One failure may be a blip: no wait yet.
+    expect(waitForHubRestart).not.toHaveBeenCalled();
+
+    await el!.loadData(true);
+    await settle(el!);
+    expect(waitForHubRestart).toHaveBeenCalledTimes(1);
+    expect(waitArgs()?.expectVersion).toBe('nightly-20261023');
+    // The header keeps the last known status during the wait.
+    expect(statusFetchCount()).toBe(statusLoads);
+    expect(versionSection(el!).querySelector('.update-status-error')).toBeNull();
+    expect(versionSection(el!).querySelector('.current-version')?.textContent).toBe(
+      'nightly-20261022'
+    );
+    expect(versionSection(el!).querySelector('.update-reconnecting')?.textContent).toContain(
+      'nightly-20261023'
+    );
+  });
+
+  it('shows the journalctl alert when the hub does not come back after failed polls', async () => {
+    vi.mocked(waitForHubRestart).mockResolvedValue({ ok: false, observed: null });
+    const hub = await startUpdate('nightly-20261023');
+    hub.setOps('down');
+    await el!.loadData(true);
+    await el!.loadData(true);
+    await settle(el!);
+
+    const alert = versionSection(el!).querySelector('sl-alert.update-reconnect-error');
+    expect(alert).not.toBeNull();
+    expect(alert!.textContent).toContain('Hub did not come back on nightly-20261023');
+    expect(alert!.textContent).toContain('journalctl -u scion-hub');
+  });
+
+  it('waits at once when a poll sees restarting, then reports the matching lastUpdate', async () => {
+    let hub: Awaited<ReturnType<typeof startUpdate>> | null = null;
+    vi.mocked(waitForHubRestart).mockImplementation(() => {
+      // The hub restarts on the target and settles the run on boot.
+      hub!.setOps(withRun('completed'));
+      hub!.setStatus(verified('run-1'));
+      return Promise.resolve({
+        ok: true,
+        observed: { version: 'nightly-20261023', uptime: '3s', uptimeSeconds: 3 },
+      });
+    });
+    hub = await startUpdate('nightly-20261023');
+    hub.setOps(withRun('restarting'));
+    await el!.loadData(true);
+    await settle(el!);
+
+    expect(waitForHubRestart).toHaveBeenCalledTimes(1);
+    expect(waitArgs()?.expectVersion).toBe('nightly-20261023');
+    expect(versionSection(el!).querySelector('.current-version')?.textContent).toBe(
+      'nightly-20261023'
+    );
+    expect(
+      versionSection(el!).querySelector('.last-update .status-badge')?.textContent?.trim()
+    ).toBe('verified');
+    expect(showToast).toHaveBeenCalledWith(
+      'Hub updated to nightly-20261023 (verified).',
+      'success'
+    );
+  });
+
+  it('does not report a lastUpdate that belongs to another run', async () => {
+    let hub: Awaited<ReturnType<typeof startUpdate>> | null = null;
+    vi.mocked(waitForHubRestart).mockImplementation(() => {
+      hub!.setOps(withRun('completed'));
+      hub!.setStatus(verified('run-0'));
+      return Promise.resolve({
+        ok: true,
+        observed: { version: 'nightly-20261023', uptime: '3s', uptimeSeconds: 3 },
+      });
+    });
+    hub = await startUpdate('nightly-20261023');
+    hub.setOps(withRun('restarting'));
+    await el!.loadData(true);
+    await settle(el!);
+
+    const toasts = vi.mocked(showToast).mock.calls.map((c) => String(c[0]));
+    expect(toasts).toContain('Hub restarted; the update result is not recorded yet.');
+    expect(toasts.some((t) => t.includes('(verified)'))).toBe(false);
+  });
+
+  it('reports the result when the restart happened between two polls', async () => {
+    const hub = await startUpdate('nightly-20261023');
+    hub.setOps(withRun('completed'));
+    hub.setStatus(verified('run-1'));
+    await el!.loadData(true);
+    await settle(el!);
+
+    expect(waitForHubRestart).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      'Hub updated to nightly-20261023 (verified).',
+      'success'
+    );
+  });
+
+  it('resolves a latest:<channel> run from pendingUpdate without touching the header', async () => {
+    vi.mocked(waitForHubRestart).mockReturnValue(new Promise(() => {}));
+    const hub = await startUpdate('latest:nightly');
+    hub.setStatus(updateStatus({ pendingUpdate: PENDING }));
+    hub.setOps(withRun('restarting'));
+    await el!.loadData(true);
+    await settle(el!);
+
+    expect(waitArgs()?.expectVersion).toBe('nightly-20261023');
+  });
+
+  it('keeps the header when the pendingUpdate peek fails', async () => {
+    vi.mocked(waitForHubRestart).mockReturnValue(new Promise(() => {}));
+    const hub = await startUpdate('latest:nightly');
+    hub.setStatus(502);
+    hub.setOps('down');
+    await el!.loadData(true);
+    await el!.loadData(true);
+    await settle(el!);
+
+    expect(waitForHubRestart).toHaveBeenCalledTimes(1);
+    expect(waitArgs()?.expectVersion).toBeUndefined();
+    expect(versionSection(el!).querySelector('.update-status-error')).toBeNull();
+    expect(cardTitles(el!)).toEqual(['Update Binary']);
+  });
+
+  it('follows a restarting run after a page reload when pendingUpdate names it', async () => {
+    vi.mocked(waitForHubRestart).mockReturnValue(new Promise(() => {}));
+    el = await mount({
+      operations: () => withRun('restarting'),
+      status: updateStatus({ pendingUpdate: PENDING }),
+    });
+    expect(waitForHubRestart).toHaveBeenCalledTimes(1);
+    expect(waitArgs()?.expectVersion).toBe('nightly-20261023');
+  });
+
+  it('shows a stale restarting run as in progress without waiting', async () => {
+    el = await mount({ operations: () => withRun('restarting') });
+    expect(waitForHubRestart).not.toHaveBeenCalled();
     const card = opCard(el, 'Update Binary');
     expect(findButton(card!, 'Restarting...')).toBeDefined();
     expect(findButton(card!, 'Run')).toBeUndefined();
     expect(card!.querySelector('.status-badge.restarting')).not.toBeNull();
   });
 
-  it('waits for the target version, then reloads update-status and reports the result', async () => {
-    let ops: Json[] = [op('update-binary', 'Update Binary')];
-    let status = updateStatus();
-    vi.mocked(waitForHubRestart).mockImplementation(() => {
-      // The hub restarts on the target and settles the run on boot.
-      ops = [
-        op('update-binary', 'Update Binary', { id: 'run-1', status: 'completed', startedAt: '' }),
-      ];
-      status = updateStatus({
-        current: {
-          version: 'nightly-20261023',
-          channel: 'nightly',
-          commit: 'f00',
-          isGitBuild: false,
-        },
-        lastUpdate: {
-          runId: 'run-1',
-          from: 'nightly-20261022',
-          to: 'nightly-20261023',
-          status: 'verified',
-          at: '2026-10-24T00:01:00Z',
-        },
-      });
-      return Promise.resolve({
-        ok: true,
-        observed: { version: 'nightly-20261023', uptime: '3s', uptimeSeconds: 3 },
-      });
-    });
-    el = await mount({ operations: () => ops, status: () => status });
-    el.updateConfirmTarget = 'nightly-20261023';
-    await settle(el);
-    root(el)
-      .querySelector<HTMLElement>('sl-dialog[label="Update Hub"] sl-button.confirm-update')!
-      .click();
-    await settle(el);
-    const statusLoadsBefore = statusFetchCount();
-
-    // The run reaches restarting; the next poll switches to the health wait.
-    ops = restartingOps();
-    await el.loadData(true);
-    await settle(el);
-
-    expect(waitForHubRestart).toHaveBeenCalledTimes(1);
-    expect(waitForHubRestart).toHaveBeenCalledWith({ expectVersion: 'nightly-20261023' });
-    expect(statusFetchCount()).toBeGreaterThan(statusLoadsBefore);
-    expect(versionSection(el).querySelector('.current-version')?.textContent).toBe(
-      'nightly-20261023'
-    );
-    expect(
-      versionSection(el).querySelector('.last-update .status-badge')?.textContent?.trim()
-    ).toBe('verified');
-    expect(vi.mocked(showToast).mock.calls.some((c) => String(c[0]).includes('verified'))).toBe(
-      true
-    );
-  });
-
-  it('uses pendingUpdate.to as the expected version after a page reload', async () => {
-    vi.mocked(waitForHubRestart).mockResolvedValue({ ok: false, observed: null });
+  it('does not follow a restarting run that pendingUpdate does not name', async () => {
     el = await mount({
-      operations: restartingOps,
-      status: updateStatus({
-        pendingUpdate: {
-          runId: 'run-1',
-          from: 'nightly-20261022',
-          to: 'nightly-20261023',
-          at: '2026-10-24T00:00:00Z',
-        },
-      }),
+      operations: () => withRun('restarting', 'run-7'),
+      status: updateStatus({ pendingUpdate: PENDING }),
     });
-    expect(waitForHubRestart).toHaveBeenCalledTimes(1);
-    expect(waitForHubRestart).toHaveBeenCalledWith({ expectVersion: 'nightly-20261023' });
+    expect(waitForHubRestart).not.toHaveBeenCalled();
   });
 
-  it('resolves a latest:<channel> run to pendingUpdate.to before waiting', async () => {
+  it('aborts the wait when the page is left', async () => {
     vi.mocked(waitForHubRestart).mockReturnValue(new Promise(() => {}));
-    let ops: Json[] = [op('update-binary', 'Update Binary')];
-    let status = updateStatus();
-    el = await mount({ operations: () => ops, status: () => status });
-    el.updateConfirmTarget = 'latest:nightly';
-    await settle(el);
-    root(el)
-      .querySelector<HTMLElement>('sl-dialog[label="Update Hub"] sl-button.confirm-update')!
-      .click();
-    await settle(el);
-
-    status = updateStatus({
-      pendingUpdate: {
-        runId: 'run-1',
-        from: 'nightly-20261022',
-        to: 'nightly-20261023',
-        at: '2026-10-24T00:00:00Z',
-      },
-    });
-    ops = restartingOps();
-    await el.loadData(true);
-    await settle(el);
-
-    expect(waitForHubRestart).toHaveBeenCalledWith({ expectVersion: 'nightly-20261023' });
-    expect(versionSection(el).querySelector('.update-reconnecting')?.textContent).toContain(
-      'nightly-20261023'
-    );
-  });
-
-  it('tells the admin to check journalctl when the hub does not come back', async () => {
-    vi.mocked(waitForHubRestart).mockResolvedValue({
-      ok: false,
-      observed: { version: 'nightly-20261022', uptime: '3s', uptimeSeconds: 3 },
-    });
-    let ops: Json[] = [op('update-binary', 'Update Binary')];
-    el = await mount({ operations: () => ops });
-    el.updateConfirmTarget = 'nightly-20261023';
-    await settle(el);
-    root(el)
-      .querySelector<HTMLElement>('sl-dialog[label="Update Hub"] sl-button.confirm-update')!
-      .click();
-    await settle(el);
-    ops = restartingOps();
-    await el.loadData(true);
-    await settle(el);
-
-    const alert = versionSection(el).querySelector('sl-alert.update-reconnect-error');
-    expect(alert).not.toBeNull();
-    expect(alert!.textContent).toContain('Hub did not come back on nightly-20261023');
-    expect(alert!.textContent).toContain('journalctl -u scion-hub');
+    const hub = await startUpdate('nightly-20261023');
+    hub.setOps(withRun('restarting'));
+    await el!.loadData(true);
+    await settle(el!);
+    const signal = waitArgs()?.signal;
+    expect(signal?.aborted).toBe(false);
+    el!.remove();
+    expect(signal?.aborted).toBe(true);
   });
 });
 

@@ -216,6 +216,20 @@ export function describeUpdateRunError(code: string, message: string, target: st
   }
 }
 
+/**
+ * An update-binary run this page follows through the hub restart: one it
+ * started, or one the hub's pendingUpdate names.
+ */
+interface TrackedUpdate {
+  runId: string;
+  /** What was asked for: a tag, or latest:<channel>. */
+  target: string;
+  /** The tag the hub must come back on; null when not known. */
+  expectVersion: string | null;
+  /** Last run status seen by a successful poll. */
+  lastStatus: string;
+}
+
 /** Maintenance mode state from GET and PUT /api/v1/admin/maintenance. */
 interface MaintenanceStateResponse {
   enabled: boolean;
@@ -374,6 +388,12 @@ function resetAuthFailureLine(f: ResetAuthAllFailure): string {
  */
 const RESTART_HUB_TIMEOUT_MS = 60_000;
 
+/**
+ * Failed list polls in a row, while an update run is in progress, after
+ * which the page treats the hub as restarting and waits on /healthz.
+ */
+const FAILED_POLLS_BEFORE_RECONNECT = 2;
+
 @customElement('scion-page-admin-maintenance')
 export class ScionPageAdminMaintenance extends LitElement {
   /** Re-renders absolute times when the display timezone changes. */
@@ -492,12 +512,15 @@ export class ScionPageAdminMaintenance extends LitElement {
   @state()
   private updateConfirmTarget: string | null = null;
 
-  /**
-   * Target of the update run this page started, for the reconnect version
-   * check. Null when unknown (for example `latest:<channel>` targets).
-   */
+  /** The update run followed through the restart (null: none). */
   @state()
-  private updateExpectVersion: string | null = null;
+  private trackedUpdate: TrackedUpdate | null = null;
+
+  /** Stops a hub restart wait when the page is left. */
+  private restartWaitAbort: AbortController | null = null;
+
+  /** Consecutive failed list polls while the tracked update is in progress. */
+  private failedPollsWhileUpdating = 0;
 
   /** True while waiting for the hub to come back after an update restart. */
   @state()
@@ -1116,6 +1139,15 @@ export class ScionPageAdminMaintenance extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopPolling();
+    this.restartWaitAbort?.abort();
+    this.restartWaitAbort = null;
+  }
+
+  /** A fresh abort signal for a hub restart wait, aborted on disconnect. */
+  private newRestartWaitSignal(): AbortSignal {
+    this.restartWaitAbort?.abort();
+    this.restartWaitAbort = new AbortController();
+    return this.restartWaitAbort.signal;
   }
 
   private async fetchMaintenanceState(): Promise<void> {
@@ -1181,6 +1213,7 @@ export class ScionPageAdminMaintenance extends LitElement {
       }
       this.updateStatus = data;
       this.updateStatusError = null;
+      this.adoptPendingUpdate();
     } catch (err) {
       this.updateStatus = null;
       this.updateStatusError = err instanceof Error ? err.message : 'Failed to load update status';
@@ -1188,21 +1221,37 @@ export class ScionPageAdminMaintenance extends LitElement {
   }
 
   /**
-   * The target for the update-binary operation card: the notified or
-   * checked release tag when one is known, otherwise the latest release
-   * in the effective channel, which the hub resolves.
+   * Opens the update dialog from the update-binary operation card. The
+   * target is the notified or checked release tag when one is known;
+   * otherwise check-updates resolves the latest tag in the hub's channel,
+   * so the page knows which version the hub must come back on. Only when
+   * that fails is latest:<channel> posted, for the hub to resolve.
    */
-  private updateCardTarget(): string | null {
+  private async openUpdateFromCard(): Promise<void> {
     const notified = this.updateAvailable?.update_available
       ? this.updateAvailable.update?.version
       : undefined;
-    if (notified) return notified;
-    const checked = this.updateCheckResult;
-    if (checked?.tier === 'binary' && checked.update_available && checked.latest_version) {
-      return checked.latest_version;
+    if (notified) {
+      this.openUpdateConfirm(notified);
+      return;
+    }
+    let checked = this.updateCheckResult;
+    if (checked?.tier !== 'binary') {
+      await this.checkForUpdates();
+      checked = this.updateCheckResult;
+    }
+    if (checked?.tier === 'binary') {
+      if (!checked.update_available) {
+        showToast(`Already up to date (${checked.current_version}).`, 'success');
+        return;
+      }
+      if (checked.latest_version) {
+        this.openUpdateConfirm(checked.latest_version);
+        return;
+      }
     }
     const channel = this.updateStatus?.channel.effective;
-    return channel ? `latest:${channel}` : null;
+    this.openUpdateConfirm(channel ? `latest:${channel}` : null);
   }
 
   private openUpdateConfirm(target: string | null): void {
@@ -1238,6 +1287,7 @@ export class ScionPageAdminMaintenance extends LitElement {
         const info = await parseApiError(response, `HTTP ${response.status}`);
         throw new Error(describeUpdateRunError(info.code, info.message, target));
       }
+      const started = (await response.json().catch(() => ({}))) as { runId?: string };
 
       showToast(
         `Update to ${target} started. The hub will restart when it is installed.`,
@@ -1246,10 +1296,14 @@ export class ScionPageAdminMaintenance extends LitElement {
       this.updateConfirmTarget = null;
       this.updateAvailable = null;
       this.updateReconnectError = null;
-      this.updateExpectVersion = target.startsWith('latest:') ? null : target;
+      this.trackedUpdate = {
+        runId: started.runId ?? '',
+        target,
+        expectVersion: target.startsWith('latest:') ? null : target,
+        lastStatus: 'running',
+      };
 
-      // Reload operations and poll the run; a restarting run switches to
-      // waiting for the hub (see loadData).
+      // Reload operations and poll the run (see trackUpdateRun).
       await this.loadData();
       this.startPolling();
     } catch (err) {
@@ -1261,45 +1315,129 @@ export class ScionPageAdminMaintenance extends LitElement {
   }
 
   /**
-   * Waits for the hub to restart after an update run reached `restarting`,
-   * then reloads update-status to show the verified result.
+   * Follows a restarting update-binary run the page did not start, only
+   * when the hub's pendingUpdate names it. A restarting run without one
+   * (for example one boot reconciliation did not settle) is shown as in
+   * progress but not waited for.
+   */
+  private adoptPendingUpdate(): void {
+    if (this.trackedUpdate) return;
+    const pending = this.updateStatus?.pendingUpdate;
+    const run = this.updateBinaryRun();
+    if (!pending?.runId || run?.status !== 'restarting' || run.id !== pending.runId) return;
+    this.trackedUpdate = {
+      runId: run.id,
+      target: pending.to,
+      expectVersion: pending.to || null,
+      lastStatus: 'restarting',
+    };
+    void this.reconnectAfterUpdate();
+  }
+
+  private updateBinaryRun(): MaintenanceRun | undefined {
+    return this.operations.find((op) => op.key === 'update-binary')?.lastRun;
+  }
+
+  /**
+   * Called after each successful list load: follows the tracked run's
+   * status. restarting switches to the hub restart wait; a finished run
+   * (the restart came and went between polls, or the run failed before
+   * it) reports its result.
+   */
+  private trackUpdateRun(): void {
+    const tracked = this.trackedUpdate;
+    const run = this.updateBinaryRun();
+    if (!tracked) {
+      this.adoptPendingUpdate();
+      return;
+    }
+    if (!run || (tracked.runId && run.id !== tracked.runId)) return;
+    if (!tracked.runId) tracked.runId = run.id;
+    tracked.lastStatus = run.status;
+    if (run.status === 'restarting') {
+      void this.reconnectAfterUpdate();
+    } else if (!isRunInProgress(run.status) && !this.updateReconnecting) {
+      this.trackedUpdate = null;
+      void this.fetchUpdateStatus().then(() => this.reportUpdateResult(tracked, run.status));
+    }
+  }
+
+  /**
+   * Reads pendingUpdate without touching the page state: the hub may be
+   * going down, and a failure must not replace the header with an error.
+   */
+  private async peekPendingUpdate(): Promise<PendingUpdate | null> {
+    try {
+      const res = await apiFetch('/api/v1/admin/maintenance/update-status', {
+        authErrors: 'caller',
+      });
+      if (!res.ok) return null;
+      const data: unknown = await res.json();
+      return isUpdateStatus(data) ? data.pendingUpdate : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Waits for the hub to restart after the tracked update run reached
+   * restarting (or a poll failed while it was in progress), then reloads
+   * update-status and reports this run's result.
    */
   private async reconnectAfterUpdate(): Promise<void> {
-    if (this.updateReconnecting) return;
+    const tracked = this.trackedUpdate;
+    if (this.updateReconnecting || !tracked) return;
     this.updateReconnecting = true;
     this.updateReconnectError = null;
     this.stopPolling();
+    const signal = this.newRestartWaitSignal();
     try {
-      // For a latest:<channel> run, or a page opened mid-update, the
-      // concrete target is only in pendingUpdate, written before the restart.
-      if (!this.updateExpectVersion) {
-        await this.fetchUpdateStatus();
-        this.updateExpectVersion = this.updateStatus?.pendingUpdate?.to ?? null;
+      if (!tracked.expectVersion) {
+        // latest:<channel>: the hub writes the concrete tag to pendingUpdate
+        // just before it restarts; it may still answer.
+        const pending = await this.peekPendingUpdate();
+        if (pending && pending.runId === tracked.runId && pending.to) {
+          this.trackedUpdate = { ...tracked, expectVersion: pending.to };
+        }
       }
-      const expectVersion = this.updateExpectVersion ?? undefined;
-      const result = await waitForHubRestart({ expectVersion });
+      const expectVersion = this.trackedUpdate?.expectVersion ?? undefined;
+      const result = await waitForHubRestart({ expectVersion, signal });
+      if (!result.ok && result.aborted) return;
+      this.trackedUpdate = null;
       if (!result.ok) {
         this.updateReconnectError =
           `Hub did not come back on ${expectVersion ?? 'the new version'}. ` +
           'Check journalctl -u scion-hub';
         return;
       }
-      this.updateExpectVersion = null;
       await this.fetchUpdateStatus();
       await this.loadData(true);
-      const last = this.updateStatus?.lastUpdate;
-      if (last?.status === 'verified') {
+      this.reportUpdateResult(tracked, 'restarted');
+    } finally {
+      if (!signal.aborted) this.updateReconnecting = false;
+    }
+  }
+
+  /**
+   * Reports the outcome of a tracked run from lastUpdate, but only when
+   * lastUpdate belongs to that run; an older result is never reported as
+   * this run's.
+   */
+  private reportUpdateResult(tracked: TrackedUpdate, runStatus: string): void {
+    const last = this.updateStatus?.lastUpdate;
+    if (last && tracked.runId && last.runId === tracked.runId) {
+      if (last.status === 'verified') {
         showToast(`Hub updated to ${last.to} (verified).`, 'success');
-      } else if (last) {
+      } else {
         showToast(
           `Update to ${last.to} ${LAST_UPDATE_LABELS[last.status] ?? last.status}.`,
           'warning'
         );
-      } else {
-        showToast('Hub restarted.', 'success');
       }
-    } finally {
-      this.updateReconnecting = false;
+    } else if (runStatus === 'failed') {
+      showToast(`Update to ${tracked.target} failed. See the run log.`, 'warning');
+    } else {
+      showToast('Hub restarted; the update result is not recorded yet.', 'warning');
     }
   }
 
@@ -1350,20 +1488,9 @@ export class ScionPageAdminMaintenance extends LitElement {
         this.unitStatus = newUnitStatus;
       }
 
-      // An update run that reached restarting is waited for through
-      // /healthz rather than by polling the list.
-      const updateRun = this.operations.find((op) => op.key === 'update-binary')?.lastRun;
-      if (updateRun?.status === 'restarting') {
-        this.stopPolling();
-        void this.reconnectAfterUpdate();
-        return;
-      }
-      if (this.updateExpectVersion && updateRun && !isRunInProgress(updateRun.status)) {
-        // The run this page started finished without a restart (for
-        // example it failed); show the hub's view of the result.
-        this.updateExpectVersion = null;
-        void this.fetchUpdateStatus();
-      }
+      this.failedPollsWhileUpdating = 0;
+      this.trackUpdateRun();
+      if (this.updateReconnecting && this.trackedUpdate) return;
 
       // Start polling if any migration or operation run is active.
       const hasRunning =
@@ -1376,6 +1503,18 @@ export class ScionPageAdminMaintenance extends LitElement {
       }
     } catch (err) {
       console.error('Failed to load maintenance operations:', err);
+      // The hub stops answering when it restarts; usually the poll never
+      // sees the brief restarting status, only failures. One failure may be
+      // a blip during the download; a second in a row starts the wait.
+      if (isPolling && this.trackedUpdate && isRunInProgress(this.trackedUpdate.lastStatus)) {
+        this.failedPollsWhileUpdating++;
+        if (
+          this.trackedUpdate.lastStatus === 'restarting' ||
+          this.failedPollsWhileUpdating >= FAILED_POLLS_BEFORE_RECONNECT
+        ) {
+          void this.reconnectAfterUpdate();
+        }
+      }
       if (!isPolling) {
         this.error = err instanceof Error ? err.message : 'Failed to load maintenance operations';
       }
@@ -1725,8 +1864,8 @@ export class ScionPageAdminMaintenance extends LitElement {
                 <sl-spinner></sl-spinner>
                 <span>
                   Waiting for the hub to
-                  restart${this.updateExpectVersion
-                    ? html` on ${this.updateExpectVersion}`
+                  restart${this.trackedUpdate?.expectVersion
+                    ? html` on ${this.trackedUpdate.expectVersion}`
                     : nothing}...
                 </span>
               </div>
@@ -2230,7 +2369,11 @@ export class ScionPageAdminMaintenance extends LitElement {
 
     // Wait for /healthz to answer with a fresh uptime, confirming the
     // process actually restarted.
-    const result = await waitForHubRestart({ timeoutMs: RESTART_HUB_TIMEOUT_MS });
+    const result = await waitForHubRestart({
+      timeoutMs: RESTART_HUB_TIMEOUT_MS,
+      signal: this.newRestartWaitSignal(),
+    });
+    if (!result.ok && result.aborted) return;
     if (result.ok) {
       showToast('Server restarted successfully.', 'success');
     } else if (result.observed) {
@@ -2461,7 +2604,7 @@ export class ScionPageAdminMaintenance extends LitElement {
                   size="small"
                   @click=${() =>
                     op.key === 'update-binary'
-                      ? this.openUpdateConfirm(this.updateCardTarget())
+                      ? void this.openUpdateFromCard()
                       : this.openRunDialog(op.key, 'operation')}
                 >
                   <sl-icon slot="prefix" name="play-circle"></sl-icon>
