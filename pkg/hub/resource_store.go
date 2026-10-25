@@ -245,7 +245,11 @@ func (rs *ResourceStore) collectFiles(dir string) (*collectedDir, error) {
 		return nil, fmt.Errorf("open collected dir: %w", err)
 	}
 	at, err := root.Stat(".")
-	if err != nil || !os.SameFile(before, at) {
+	if err != nil {
+		_ = root.Close()
+		return nil, fmt.Errorf("stat collected dir: %w", err)
+	}
+	if !os.SameFile(before, at) {
 		_ = root.Close()
 		return nil, fmt.Errorf("%s %w", dir, errCollectedDirChanged)
 	}
@@ -266,7 +270,10 @@ func (rs *ResourceStore) checkWithin(got os.FileInfo, dir string) error {
 		return fmt.Errorf("%s: %w", rs.withinPath, err)
 	}
 	want, err := rs.within.root.Lstat(filepath.FromSlash(rs.withinPath))
-	if err != nil || !os.SameFile(want, got) {
+	if err != nil {
+		return fmt.Errorf("lstat %s within root: %w", rs.withinPath, err)
+	}
+	if !os.SameFile(want, got) {
 		return fmt.Errorf("%s %w", dir, errCollectedDirChanged)
 	}
 	return nil

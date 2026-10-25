@@ -167,7 +167,7 @@ func checkEntryPathJoinSource(fset *token.FileSet, path string, src any, excepti
 		return nil, err
 	}
 	aliases := importAliases(f)
-	base := path[strings.LastIndex(path, "/")+1:]
+	base := path[strings.LastIndexAny(path, `/\`)+1:]
 	var problems []string
 	for _, decl := range f.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
