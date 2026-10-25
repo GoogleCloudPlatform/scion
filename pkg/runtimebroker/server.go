@@ -3230,7 +3230,7 @@ func isHealthPath(path string) bool {
 func writeBrokerAuthUnavailable(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusServiceUnavailable)
-	_, _ = fmt.Fprint(w, `{"error":{"code":"broker_auth_unavailable","message":"no hub keys are loaded; only health endpoints are served until registration completes"}}`)
+	_, _ = fmt.Fprint(w, `{"error":{"code":"broker_auth_unavailable","message":"no hub keys are loaded; only health endpoints are served until keys are loaded"}}`)
 }
 
 // loadBrokerMiddleware returns the middleware in place now, or nil.

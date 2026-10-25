@@ -17,7 +17,8 @@ package runtimebroker
 // testServerConfig is DefaultServerConfig with broker auth disabled, for
 // tests that exercise handlers without hub keys. DefaultServerConfig enables
 // broker auth, and a broker with auth enabled and no keys serves only its
-// health endpoints. Tests of the auth path set BrokerAuthEnabled again.
+// health endpoints. Use it only where a test serves HTTP from a server with
+// no hub keys; tests of the auth path use DefaultServerConfig.
 func testServerConfig() ServerConfig {
 	cfg := DefaultServerConfig()
 	cfg.BrokerAuthEnabled = false

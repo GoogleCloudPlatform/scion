@@ -45,11 +45,12 @@ func newNoKeysServer(t *testing.T) *Server {
 }
 
 type noKeysRequest struct {
-	name   string
-	method string
-	path   string
-	body   string
-	origin string
+	name    string
+	method  string
+	path    string
+	body    string
+	origin  string
+	upgrade bool // send WebSocket upgrade headers
 }
 
 // noKeysRefusedRequests are the API calls the broker must refuse while no
@@ -58,6 +59,7 @@ var noKeysRefusedRequests = []noKeysRequest{
 	{name: "agent create", method: http.MethodPost, path: "/api/v1/agents", body: `{"name":"a1"}`},
 	{name: "agent list", method: http.MethodGet, path: "/api/v1/agents"},
 	{name: "agent stop", method: http.MethodPost, path: "/api/v1/agents/a1/stop"},
+	{name: "agent attach websocket upgrade", method: http.MethodGet, path: "/api/v1/agents/a1/attach", upgrade: true},
 	{name: "agent delete", method: http.MethodDelete, path: "/api/v1/agents/a1"},
 	{name: "workspace apply", method: http.MethodPost, path: "/api/v1/workspace/apply", body: `{}`},
 	{name: "image pull", method: http.MethodPost, path: "/api/v1/images/pull", body: `{}`},
@@ -71,6 +73,12 @@ func serveNoKeys(h http.Handler, rq noKeysRequest, prefix string) *httptest.Resp
 	req := httptest.NewRequest(rq.method, prefix+rq.path, strings.NewReader(rq.body))
 	if rq.body != "" {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if rq.upgrade {
+		req.Header.Set("Connection", "Upgrade")
+		req.Header.Set("Upgrade", "websocket")
+		req.Header.Set("Sec-WebSocket-Version", "13")
+		req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
 	}
 	if rq.origin != "" {
 		req.Header.Set("Origin", rq.origin)

@@ -284,6 +284,15 @@ func TestWorkstation_PutServerConfig_ClearsFromPresence(t *testing.T) {
 			fileKeys: []string{"server.broker.cors.enabled"},
 		},
 		{
+			// The mirror case: an explicit false equals the default (off),
+			// so nothing is written and no block is created.
+			name:     "broker CORS off without a cors block is a no-op",
+			body:     `{"server":{"broker":{"cors":{"enabled":false}}}}`,
+			absent:   [][]string{{"server", "broker", "cors"}},
+			want:     map[string]interface{}{"server.broker.broker_id": "b-123"},
+			fileKeys: nil,
+		},
+		{
 			name: "null on the broker block keeps the hub-owned identity",
 			body: `{"server":{"broker":null}}`,
 			absent: [][]string{
