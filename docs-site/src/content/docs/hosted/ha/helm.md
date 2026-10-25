@@ -409,17 +409,32 @@ serves all replicas. A set CA replaces the system roots, and a private CA
 requires it. cert-manager fills `ca.crt` only for some issuers; for others,
 point `caSecret` at a Secret holding the CA.
 
-The hub reads the CA bundle and `serverName` once at startup, so changing them
-needs a rolling restart (`kubectl rollout restart deployment/<release>-scion-hub`).
-To rotate the CA without breaking the hop between nodes: add the new CA to the
-bundle and restart, then issue leaf certificates from the new CA, then remove
-the old CA from the bundle and restart again.
+The hub reads the CA bundle and `serverName` once at startup. Changing
+`serverName`, `caSecret` or `caKey` through `helm upgrade` already rolls the
+pods, because the settings checksum or the pod spec changes. A change to a
+Secret's CONTENT does not: after replacing the CA bundle inside an existing
+Secret, run `kubectl rollout restart deployment/<fullname>`. (`<fullname>` is the
+chart's full name, `<release>-scion-hub` unless the release name already
+contains `scion-hub` or `fullnameOverride` is set.)
+
+To rotate the CA without breaking the hop between nodes, keep both CAs trusted
+while the leaf certificates move:
+
+1. With the default `caSecret` (empty, so `existingSecret`), cert-manager owns
+   `ca.crt` and replaces it along with the leaf, so it cannot hold two CAs. For
+   the overlap window, point `caSecret` at a Secret you manage that holds both
+   the old and the new CA, and run `helm upgrade` (this rolls the pods).
+2. Issue the leaf certificates from the new CA. The hub picks up the new
+   certificate and key without a restart.
+3. Remove the old CA, either by pointing `caSecret` back or by editing your
+   Secret. A `caSecret` change through `helm upgrade` rolls the pods; an edit to
+   the Secret's content needs `kubectl rollout restart deployment/<fullname>`.
 
 ```yaml
 conduit:
   internalTls:
     enabled: true
-    existingSecret: scion-relay-tls   # issued for scion-hub-relay.<namespace>.svc
+    existingSecret: scion-relay-tls   # issued for <fullname>-relay.<namespace>.svc
 ```
 
 A relay listener that is not bound to loopback and has no TLS fails the render,
