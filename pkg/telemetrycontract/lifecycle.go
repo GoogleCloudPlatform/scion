@@ -131,6 +131,38 @@ func IsSnapshotTransition(v string) bool { return snapshotTransitions[v] }
 // LifecycleEvent is one agent.lifecycle event: an authoritative transition
 // of one agent, committed by the Hub. (producer_namespace, event_id) is the
 // primary key; (agent_id, transition_revision) orders an agent's events.
+//
+// Run attribution (WP1 attribution design v2.8; schema_version 1 is
+// unchanged):
+//
+// On a lifecycle event, an absent launch_id means the run attribution is
+// unknown or unverified: the producer could not prove which launch the
+// transition belongs to. It does NOT mean zero usage, that no run existed,
+// or a launch-to-generation mapping, and it does not open or close a
+// matched usage interval. Consumers must not join usage to such an event
+// by launch, must not pair launch-less events by adjacency, and must not
+// infer a launch from neighbouring events. On a closure without launch_id,
+// incarnation_id and segment_metadata_revision describe an unattributed
+// segment; they also must not be used to infer the launch. The transition
+// itself is real and counts in coverage accounting. Usage that cannot be
+// attributed stays in totals and in coverage accounting as unmatched; it
+// is never treated as zero and never dropped.
+//
+// A closing event without launch_id can follow an earlier started that
+// named a run. The producer then could not prove the pairing at close
+// time, for example after a run-mismatch delete. This does not retract the
+// earlier event, and it is not zero usage. Do not infer the run from the
+// earlier event or from incarnation_id and segment_metadata_revision. The
+// matched interval is simply not available.
+//
+// A segment whose stored identity is malformed (only reachable through
+// corruption or an unsupported writer) is discarded without a closing
+// event. The stream marks the loss with one resynced event
+// (cause=unobserved_change, gap=true, no launch_id), and the
+// lifecycle_attribution_stale_total diagnostic and a log line record it
+// too. That resynced signals incomplete transition history. It is not a
+// replacement terminal, a proven run mapping, a matched interval or
+// evidence of zero usage.
 type LifecycleEvent struct {
 	Envelope
 	Transition         string `json:"transition"`

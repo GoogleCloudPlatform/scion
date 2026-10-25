@@ -383,7 +383,7 @@ func TestAttribution_T25HintClosureUntrusted(t *testing.T) {
 		UntrustedOpenRun: "X1", UntrustedOpenRunGeneration: "1", UntrustedOpenRunRev: 2}
 	f := Facts{Op: store.AgentWriteLaunch, HasBefore: true, BeforeLive: true, HasAfter: true,
 		BeforePhase: "running", AfterPhase: "error", BeforeRunID: "X1", AfterRunID: "X1", BeforeGeneration: 1, AfterGeneration: 1,
-		Hint: Hint{Kind: HintLaunchEnd, EndReason: store.LaunchEndReasonFailed, ErrorCode: "launch_error"},
+		Hint:   Hint{Kind: HintLaunchEnd, EndReason: store.LaunchEndReasonFailed, ErrorCode: "launch_error"},
 		Cursor: CursorFacts{Exists: true, FingerprintMatches: true, OpenRun: "X1", Run: cur.RunState()}}
 	pre := PrepareAttribution(&f, cur)
 	plan := Derive(f)
