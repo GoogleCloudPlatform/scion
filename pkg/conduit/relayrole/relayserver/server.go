@@ -102,9 +102,15 @@ type Config struct {
 	PeerAuth relay.PeerAuth
 	// HTTPClient makes the hub and relay-peer calls (nil: default).
 	HTTPClient *http.Client
-	// WSDialer dials stream hops to other relays (nil: gorilla defaults;
-	// relay.NewHopWSDialer for TLS on the internal hop).
+	// WSDialer dials stream hops to other relays (nil: gorilla defaults,
+	// or relay.NewHopWSDialer(HopTLS)).
 	WSDialer *websocket.Dialer
+	// HopTLS is the TLS client configuration of the hub and relay-peer
+	// calls (relay.NewHopClientTLS: the operator CA and server name; nil:
+	// the system roots). It applies to the clients HTTPClient and WSDialer
+	// leave nil, which otherwise keep their defaults. Verification is
+	// never skipped.
+	HopTLS *tls.Config
 	// Registry is the conduit registry store. Required.
 	Registry registry.Store
 	// Experiment reads hub.conduit. Required.
@@ -171,6 +177,9 @@ func (c *Config) validate() error {
 	}
 	if c.ExperimentPollPeriod <= 0 {
 		c.ExperimentPollPeriod = DefaultExperimentPollPeriod
+	}
+	if c.HopTLS != nil && c.WSDialer == nil {
+		c.WSDialer = relay.NewHopWSDialer(c.HopTLS)
 	}
 	if c.StartupDeadline <= 0 {
 		c.StartupDeadline = DefaultStartupDeadline
@@ -247,8 +256,16 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		return nil, err
 	}
 	log := cfg.Logger.With("subsystem", "relay")
+	// With HopTLS the hub and relay-peer clients verify peers with it, and
+	// keep the defaults they have without it otherwise (an untimed hub
+	// client; the relay's 10s client).
+	hubHTTP, relayHTTP := cfg.HTTPClient, cfg.HTTPClient
+	if cfg.HTTPClient == nil && cfg.HopTLS != nil {
+		hubHTTP = relay.NewHopHTTPClient(cfg.HopTLS)
+		relayHTTP = &http.Client{Timeout: 10 * time.Second, Transport: relay.NewHopTransport(cfg.HopTLS)}
+	}
 	role, err := relayrole.New(relayrole.Config{
-		Hub:             &relay.HubClient{BaseURL: cfg.HubInternalURL, HTTP: cfg.HTTPClient, Auth: cfg.PeerAuth},
+		Hub:             &relay.HubClient{BaseURL: cfg.HubInternalURL, HTTP: hubHTTP, Auth: cfg.PeerAuth},
 		RecheckInterval: cfg.RecheckInterval,
 		Clock:           cfg.Clock,
 		Events:          cfg.Events,
@@ -322,7 +339,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		},
 		Refresh:         role.Refresh,
 		PeerAuth:        cfg.PeerAuth,
-		HTTPClient:      cfg.HTTPClient,
+		HTTPClient:      relayHTTP,
 		WSDialer:        cfg.WSDialer,
 		ReconnectWindow: cfg.ReconnectWindow,
 		LifetimeCap:     cfg.LifetimeCap,

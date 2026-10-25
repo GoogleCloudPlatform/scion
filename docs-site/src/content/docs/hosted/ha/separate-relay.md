@@ -46,10 +46,11 @@ Proxy ingress needs HMAC relay-peer authentication (`server.hub.conduit.peer_aut
 
 A relay reads its own configuration file, never the hub's. It needs:
 
-- `server.relay.hub_internal_url`: the hub internal API, reachable only inside the cluster or VPC.
+- `server.relay.hub_internal_url`: the hub internal API, reachable only inside the cluster or VPC. It must be `https://` unless its host is loopback.
 - `server.relay.public_url`: the URL dialers reach this relay at.
 - `server.hub.conduit.peer_secret`: the same secret the hubs use.
 - `server.hub.conduit.internal_listen`, and `internal_advertise` where the bound address is not reachable: the relay internal API that the hubs and other relays call.
+- `server.hub.conduit.internal_tls_cert_file` and `internal_tls_key_file`, unless `internal_listen` is a loopback address, and `internal_tls_ca_file` for a private or internal CA (on the hubs too). The relay and the hubs refuse a plaintext internal hop to a host that is not loopback; see [TLS on the internal hop](/scion/reference/server-config/#conduit-serverhubconduit).
 - `database.url`: a relay-scoped database role.
 
 The relay serves conduit sessions on `server.hub.host` and `server.hub.port`. It serves no hub API, web UI or Runtime Broker there.
