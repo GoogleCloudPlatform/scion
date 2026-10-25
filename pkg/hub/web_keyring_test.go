@@ -67,7 +67,12 @@ type krEntry struct {
 func krKeyring(t *testing.T, active string, entries ...krEntry) *keyring.Keyring {
 	t.Helper()
 	keys := make([]any, 0, len(entries))
+	// Every generation reads ID-less values (phase 4: with emit legacy the
+	// active generation must be a legacy reader, and replicas mid-rollout
+	// need compatible reader lists). Session cookies ignore this list.
+	reads := make([]any, 0, len(entries))
 	for _, e := range entries {
+		reads = append(reads, e.id)
 		m := map[string]any{"id": e.id, "secret": e.secret, "sign_until": nil, "verify_until": nil}
 		if e.signUntil != nil {
 			m["sign_until"] = e.signUntil.Format(time.RFC3339)
@@ -79,7 +84,7 @@ func krKeyring(t *testing.T, active string, entries ...krEntry) *keyring.Keyring
 		"schema":   1,
 		"revision": "test-rev-1",
 		"signing": map[string]any{
-			"active": active, "emit": "legacy", "keys": keys, "legacy_read_ids": []any{"legacy"},
+			"active": active, "emit": "legacy", "keys": keys, "legacy_read_ids": reads,
 		},
 		"encryption": map[string]any{
 			"active": "legacy", "write_format": "v1",
@@ -457,6 +462,16 @@ func TestNew_KeyringModeRefusesExplicitSigningKeys(t *testing.T) {
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), krLegacySecret)
 	assert.NotContains(t, err.Error(), "some-other-secret")
+	// The same mismatch with a secret of equal length, so the comparison
+	// runs over every byte instead of stopping at the length check.
+	sameLength := base
+	sameLength.SharedSigningSecret = "test-only-wrong0-session-secret"
+	require.Len(t, sameLength.SharedSigningSecret, len(krLegacySecret))
+	err = validateKeyringConfig(sameLength)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SharedSigningSecret")
+	assert.NotContains(t, err.Error(), krLegacySecret)
+	assert.NotContains(t, err.Error(), sameLength.SharedSigningSecret)
 
 	// Legacy mode: explicit keys are allowed (precedence unchanged).
 	legacy := ServerConfig{Keyring: keyring.Legacy("s"), AgentTokenConfig: AgentTokenConfig{SigningKey: []byte("k")}}
