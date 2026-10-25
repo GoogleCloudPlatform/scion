@@ -17,7 +17,6 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -866,29 +865,13 @@ func TestProjectQuota_AgentWithoutCreatorIsRecorded(t *testing.T) {
 	}
 }
 
-// The empty-subject case on the create path: with a project cap set, a
-// create attributed to no creator (a caller that is neither a user nor an
-// agent leaves createdBy empty) succeeds, and its project reservation is
-// recorded under the project ID.
+// The empty-subject case: a project reservation requested with no subject
+// (an agent with no recorded creator) is recorded under the project ID when
+// a project cap is set. A create attributed to no creator is refused later by
+// the agent create write (its delegation edge needs a creator), so this is
+// pinned at the QuotaService; TestProjectQuota_AgentWithoutCreatorIsRecorded
+// pins the start path.
 func TestProjectQuota_CreateWithoutCreatorRecordedUnderProject(t *testing.T) {
-	t.Run("create-handler", func(t *testing.T) {
-		srv, s, project := setupCreateAgentServer(t, &quotaLifecycleDispatcher{})
-		setProjectAgentCeiling(t, s, 2)
-		admin := NewAuthenticatedUser(DevUserID, "dev@example.com", "Dev", "admin", "cli")
-		body, err := json.Marshal(CreateAgentRequest{Name: "pq-create-nocreator", ProjectID: project.ID})
-		require.NoError(t, err)
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", bytes.NewReader(body)).WithContext(contextWithIdentityAndUser(admin))
-		rec := httptest.NewRecorder()
-
-		srv.createAgentInProject(rec, req, CreateAgentRequest{Name: "pq-create-nocreator", ProjectID: project.ID}, project.ID, "", "", nil, "", "")
-
-		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-		var created CreateAgentResponse
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
-		held := activeReservation(t, s, projectLimitDefID(t, s), created.Agent.ID)
-		require.NotNil(t, held, "the create recorded a project reservation")
-		assert.Equal(t, project.ID, held.SubjectID, "recorded under the project ID")
-	})
 	t.Run("reserve", func(t *testing.T) {
 		srv, s := testServer(t)
 		setProjectAgentCeiling(t, s, 2)

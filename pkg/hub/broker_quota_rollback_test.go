@@ -240,7 +240,7 @@ func (d *swappableStartDispatcher) DispatchAgentStart(ctx context.Context, agent
 // ptone/scion#6033: the per-project agent reservation follows the same
 // lifecycle as the broker one. Stop and suspend release both; a start
 // reserves both again; a failed start rolls back both, since it created
-// them; delete releases both. (Before ptone/scion#6033 the project
+// them; delete releases both from an agent that holds them. (Before ptone/scion#6033 the project
 // reservation lasted as long as the agent, ptone/scion#1978.)
 func TestProjectQuota_FollowsBrokerLifecycle(t *testing.T) {
 	disp := &swappableStartDispatcher{}
@@ -287,13 +287,27 @@ func TestProjectQuota_FollowsBrokerLifecycle(t *testing.T) {
 	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, id), "failed start rolls back the new broker slot")
 	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, id), "failed start rolls back the new project slot")
 
-	disp.failStart = false
-	post("start")
-	require.True(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, id))
+	// The failed start's outcome is unknown, so its start claim stays
+	// unconfirmed and a further start is refused until it settles. The
+	// agent can still be deleted.
 	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+id, nil)
 	require.Less(t, rec.Code, 300, rec.Body.String())
 	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, id))
-	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, id), "delete releases the project reservation")
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, id))
+
+	// Delete releases a project reservation the agent still holds.
+	disp.failStart = false
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "project-quota-lifecycle-delete", ProjectID: project.ID,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var held CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &held))
+	require.True(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, held.Agent.ID))
+	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+held.Agent.ID, nil)
+	require.Less(t, rec.Code, 300, rec.Body.String())
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, held.Agent.ID))
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, held.Agent.ID), "delete releases the project reservation")
 }
 
 // ptone/scion#1978: a restart holds the agent's broker reservation across
