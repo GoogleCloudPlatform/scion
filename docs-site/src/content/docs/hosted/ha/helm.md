@@ -403,9 +403,11 @@ listener. When you enable it, the chart:
 - sets `POD_IP`, so each node advertises `https://<pod IP>:<port>`, and declares
   the port on the pod only, never on the Service.
 
-Every node verifies its peers against the CA and `serverName` (default
-`<fullname>-relay.<namespace>.svc`), so one certificate whose SAN is that name
-serves all replicas. A set CA replaces the system roots, and a private CA
+Every node verifies its peers against the CA and `serverName`, so one
+certificate whose SAN is that name serves all replicas. The default is
+`<fullname>-relay.<namespace>.svc`, usually `<release>-scion-hub-relay.<namespace>.svc`:
+issue the certificate for that name, or set `conduit.internalTls.serverName` to
+the name your certificate carries. A set CA replaces the system roots, and a private CA
 requires it. cert-manager fills `ca.crt` only for some issuers; for others,
 point `caSecret` at a Secret holding the CA.
 
@@ -440,6 +442,11 @@ conduit:
     enabled: true
     existingSecret: scion-relay-tls   # issued for <fullname>-relay.<namespace>.svc
 ```
+
+**Rolling back.** Hub releases before the one that adds relay TLS ignore the
+`internal_tls_*` settings and would serve this listener in plaintext. If you roll
+the hub image back below that release, roll the chart back with it, or set
+`conduit.internalTls.enabled: false` first.
 
 A relay listener that is not bound to loopback and has no TLS fails the render,
 including one set through `config.extra`. `conduit.internalTls` is refused

@@ -4530,10 +4530,25 @@ hub releases, not before them.
 {{- $key := trim (toString (dig "internal_tls_key_file" "" $conduit)) }}
 {{- $listen := trim (toString (dig "internal_listen" "" $conduit)) }}
 {{- if $listen }}
-{{- $host := regexReplaceAll ":[0-9]*$" $listen "" }}
-{{- $loopback := or (eq $host "localhost") (eq $host "[::1]") (regexMatch "^127\\.[0-9]+\\.[0-9]+\\.[0-9]+$" $host) }}
+{{- /*
+Loopback, as the hub's CheckRelayInternalListen reads it: host:port with a
+port of 1-65535, and a host of localhost, [::1] or a valid 127.x.y.z (octets
+0-255, no leading zeros). The chart is stricter than the hub on other loopback
+spellings (LOCALHOST, an expanded ::1, ::ffff:127.0.0.1), which it treats as
+not loopback.
+*/}}
+{{- $loopback := false }}
+{{- $m := regexFindAll "^(.*):([0-9]+)$" $listen 1 }}
+{{- if $m }}
+{{- $host := regexReplaceAll "^(.*):([0-9]+)$" $listen "${1}" }}
+{{- $portStr := regexReplaceAll "^(.*):([0-9]+)$" $listen "${2}" }}
+{{- $oct := "(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])" }}
+{{- $portOk := and (regexMatch "^[1-9][0-9]{0,4}$" $portStr) (le (int $portStr) 65535) }}
+{{- $hostOk := or (eq $host "localhost") (eq $host "[::1]") (regexMatch (printf "^127\\.%s\\.%s\\.%s$" $oct $oct $oct) $host) }}
+{{- $loopback = and $portOk $hostOk }}
+{{- end }}
 {{- if and (not $loopback) (not (and $cert $key)) }}
-{{- fail (printf "server.hub.conduit.internal_listen is %s, which is not a loopback address, and internal_tls_cert_file and internal_tls_key_file are not both set. The relay hop between hub nodes must serve TLS: set conduit.internalTls (enabled, existingSecret), or bind internal_listen to loopback." (include "scion-hub.diagValue" $listen)) }}
+{{- fail (printf "server.hub.conduit.internal_listen is %s, which is not a loopback address (localhost, [::1] or 127.x.y.z, with a port of 1-65535), and internal_tls_cert_file and internal_tls_key_file are not both set. The relay hop between hub nodes must serve TLS: set conduit.internalTls (enabled, existingSecret), or bind internal_listen to loopback." (include "scion-hub.diagValue" $listen)) }}
 {{- end }}
 {{- end }}
 {{- if and (or $cert $key) (not (and $cert $key)) }}
