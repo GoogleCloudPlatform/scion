@@ -81,3 +81,23 @@ func TestCheckHubTransport_MessageNamesFixAndRedacts(t *testing.T) {
 		}
 	}
 }
+
+// A URL that does not parse and holds an '@' is not echoed: the masked form
+// would show only what follows the '@', which can look like a loopback
+// host. A parsed URL names its real host separately.
+func TestCheckHubTransport_MessageDoesNotShowMisleadingHost(t *testing.T) {
+	err := CheckHubTransport(`http://evil.example\@127.0.0.1`)
+	if err == nil {
+		t.Fatal("want a refusal")
+	}
+	if strings.Contains(err.Error(), "127.0.0.1") {
+		t.Errorf("message %q shows the text after '@' as if it were the host", err)
+	}
+	err = CheckHubTransport("http://127.0.0.1@evil.example:8080")
+	if err == nil {
+		t.Fatal("want a refusal")
+	}
+	if !strings.Contains(err.Error(), `host "evil.example"`) {
+		t.Errorf("message %q does not name the parsed host", err)
+	}
+}
