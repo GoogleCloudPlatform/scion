@@ -89,8 +89,16 @@ func (a *HMACAuth) ApplyAuth(req *http.Request) error {
 // gave an unsized reader, ContentLength 0 or -1, or a Transfer-Encoding),
 // and the signed hash covers exactly the bytes sent. An empty body becomes
 // http.NoBody. A read error is returned instead of signing without the body.
+//
+// A body that is already sized and rewindable (ContentLength > 0, no
+// Transfer-Encoding, GetBody set, as http.NewRequest gives a bytes-backed
+// body) is left as it is: it is sent with its Content-Length, and
+// BuildCanonicalString hashes it; net/http reports a length mismatch.
 func sizeRequestBody(req *http.Request) error {
 	if req.Body == nil || req.Body == http.NoBody {
+		return nil
+	}
+	if req.ContentLength > 0 && len(req.TransferEncoding) == 0 && req.GetBody != nil {
 		return nil
 	}
 	body, err := io.ReadAll(req.Body)

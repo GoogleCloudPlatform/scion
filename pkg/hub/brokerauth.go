@@ -1158,11 +1158,6 @@ func (s *BrokerAuthService) ValidateBrokerSignatureWithRotation(ctx context.Cont
 		return nil, err
 	}
 
-	// A signed body must declare its length.
-	if err := apiclient.CheckSignedBodyFraming(r); err != nil {
-		return nil, err
-	}
-
 	// Get all active secrets for this broker
 	secrets, err := s.store.GetActiveSecrets(ctx, brokerID)
 	if err != nil {
@@ -1209,6 +1204,11 @@ func (s *BrokerAuthService) validateWithSecret(ctx context.Context, r *http.Requ
 	nonce := r.Header.Get(HeaderNonce)
 	if nonce == "" {
 		return nil, errBrokerAuthMissingNonce
+	}
+
+	// A signed body must declare its length (before the nonce is recorded).
+	if err := apiclient.CheckSignedBodyFraming(r); err != nil {
+		return nil, err
 	}
 
 	// Parse and validate timestamp

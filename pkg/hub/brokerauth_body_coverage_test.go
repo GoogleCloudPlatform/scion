@@ -199,3 +199,47 @@ func TestValidateBrokerSignature_RefusesUnsizedBody(t *testing.T) {
 		})
 	}
 }
+
+// A request refused for its framing does not use up its nonce: the
+// correctly sized request with the same signature headers still verifies.
+func TestValidateBrokerSignature_FramingRefusalLeavesNonceUnused(t *testing.T) {
+	validators := map[string]func(*BrokerAuthService) func(context.Context, *http.Request) (BrokerIdentity, error){
+		"ValidateBrokerSignature": func(s *BrokerAuthService) func(context.Context, *http.Request) (BrokerIdentity, error) {
+			return s.ValidateBrokerSignature
+		},
+		"ValidateBrokerSignatureWithRotation": func(s *BrokerAuthService) func(context.Context, *http.Request) (BrokerIdentity, error) {
+			return s.ValidateBrokerSignatureWithRotation
+		},
+	}
+	for name, pick := range validators {
+		t.Run(name, func(t *testing.T) {
+			svc, s := setupTestBrokerAuthService(t)
+			if !svc.config.EnableNonceCache {
+				t.Fatal("precondition: the nonce cache must be on")
+			}
+			validate := pick(svc)
+			auth := seedBodyCoverageBroker(t, s)
+			const body = `{"status":"online"}`
+			const url = "http://hub.test/api/v1/runtime-brokers/x/heartbeat"
+			sized := signBodyCoverage(t, auth, http.MethodPost, url, body)
+
+			unsized := httptest.NewRequest(http.MethodPost, url, nil)
+			unsized.Header = sized.Header.Clone()
+			unsized.Body = io.NopCloser(&streamBody{strings.NewReader(body)})
+			unsized.ContentLength = -1
+			unsized.TransferEncoding = []string{"chunked"}
+			if _, err := validate(context.Background(), unsized); !errors.Is(err, apiclient.ErrUnsizedSignedBody) {
+				t.Fatalf("unsized: err = %v, want ErrUnsizedSignedBody", err)
+			}
+			if _, err := validate(context.Background(), sized); err != nil {
+				t.Fatalf("sized request with the same nonce: %v", err)
+			}
+			// The nonce is recorded once the request verifies.
+			again := httptest.NewRequest(http.MethodPost, url, strings.NewReader(body))
+			again.Header = sized.Header.Clone()
+			if _, err := validate(context.Background(), again); !errors.Is(err, errBrokerAuthReplay) {
+				t.Fatalf("replay: err = %v, want errBrokerAuthReplay", err)
+			}
+		})
+	}
+}

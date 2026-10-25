@@ -354,3 +354,33 @@ func TestCheckSignedBodyFraming_OverHTTP(t *testing.T) {
 		t.Fatalf("signed body: err %v body %q", got.err, got.body)
 	}
 }
+
+// A sized, rewindable body is signed without another copy: the signer
+// leaves it to BuildCanonicalString, which still hashes it.
+func TestSizeRequestBody_KeepsSizedRewindableBody(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "http://broker.test/api/v1/agents", strings.NewReader(goldenBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, getBody := req.Body, req.GetBody
+	if err := sizeRequestBody(req); err != nil {
+		t.Fatal(err)
+	}
+	if req.Body != body || req.ContentLength != int64(len(goldenBody)) {
+		t.Fatalf("sized body was replaced: Body %T ContentLength %d", req.Body, req.ContentLength)
+	}
+	if req.GetBody == nil || getBody == nil {
+		t.Fatal("GetBody lost")
+	}
+	secret := []byte(goldenSecret)
+	if err := (&HMACAuth{BrokerID: "broker-1", SecretKey: secret}).ApplyAuth(req); err != nil {
+		t.Fatal(err)
+	}
+	if !verify(t, req, secret) {
+		t.Fatal("does not verify")
+	}
+	swapped := asServerRequest(req, strings.NewReader(strings.ToUpper(goldenBody)), int64(len(goldenBody)), nil)
+	if verify(t, swapped, secret) {
+		t.Fatal("a swapped body verifies")
+	}
+}
