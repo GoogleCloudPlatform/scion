@@ -74,8 +74,9 @@ output except in these documented cases:
   it, so a verbose line (`--- PASS`, a passing test's t.Log line or an
   `=== RUN` line) is printed after the partial line; a glued `=== RUN`
   is missed, so the next lines count for the previous test.
-- In a test that does not fail, a direct print shaped like a t.Log line
-  (`    name.go:N: ...`) is dropped, and so is an 8-space indented direct
+- A direct print shaped like a t.Log line (`    name.go:N: ...`) is
+  dropped in a test that does not fail and moved into the test's
+  `--- FAIL` block in one that fails; so is an 8-space indented direct
   print right after a t.Log line.
 
 See `run_skip_summary` in [`lib.sh`](lib.sh); `make

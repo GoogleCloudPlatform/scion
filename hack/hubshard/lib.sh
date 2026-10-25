@@ -70,9 +70,10 @@ build_hubshard() {
 #     it, so a verbose line (--- PASS, a passing test's t.Log line or an
 #     === RUN line) is printed after the partial line, and a glued
 #     === RUN is missed, so the next lines count for the previous test.
-#   - In a test that does not fail, a direct print shaped like a t.Log
-#     line ("    name.go:N: ...") is dropped, and so is an 8-space
-#     indented direct print right after a t.Log line.
+#   - A direct print shaped like a t.Log line ("    name.go:N: ...") is
+#     dropped in a test that does not fail and moved into the test's
+#     --- FAIL block in one that fails; so is an 8-space indented direct
+#     print right after a t.Log line.
 #
 # The summary lists, sorted, one line per top-level test that skipped or
 # has a skipped subtest, with the skip message and its file:line, then
@@ -121,11 +122,15 @@ function parent(name) {
 	return ""
 }
 # held appends an item to test name: a log line, or "\001" child at the
-# point where subtest child started.
+# point where subtest child started. The marker of a child goes to every
+# started test its name extends (for t.Run("a/b") next to t.Run("a"),
+# both the parent and its subtest a); expand uses the one that is the
+# parent of the child in the result lines.
 function held(name, item) { items[name, ++nitems[name]] = item }
 # expand prints the failed result line i of the block, the held items of
 # its test, and its failed subtests at their start markers; paused (or
-# unmarked) failed subtests follow, in result order.
+# unmarked) failed subtests follow, in result order. bp[j] is the parent
+# of result line j.
 function expand(i,    name, ind, k, item, c, j) {
 	emit(bl[i])
 	name = bn[i]
@@ -138,17 +143,23 @@ function expand(i,    name, ind, k, item, c, j) {
 			continue
 		}
 		c = substr(item, 2)
-		if (c in failed && !(c in paused) && !(c in done)) expand(failed[c])
+		if (!(c in failed) || (c in paused) || (c in done)) continue
+		if (bp[failed[c]] == name) expand(failed[c])
 	}
 	for (j = 1; j <= nb; j++)
 		if (bp[j] == name && bs[j] == "FAIL" && !(bn[j] in done)) expand(j)
 }
 # finish prints the held block of result lines and forgets its tests.
-function finish(    i, k, name) {
+# The result lines are in pre-order, indented 4 spaces per level, so
+# the parent of a line is the nearest line above it one level up.
+function finish(    i, k, name, d) {
 	for (i = 1; i <= nb; i++) {
-		bp[i] = parent(bn[i])
+		d = length(bind[i]) / 4
+		level[d] = i
+		bp[i] = (d > 0 && ((d - 1) in level)) ? bn[level[d - 1]] : ""
 		if (bs[i] == "FAIL") failed[bn[i]] = i
 	}
+	for (d in level) delete level[d]
 	for (i = 1; i <= nb; i++)
 		if (bs[i] == "FAIL" && !(bp[i] in failed) && !(bn[i] in done)) expand(i)
 	for (i = 1; i <= nb; i++) {
@@ -170,10 +181,8 @@ nb && !/^ +--- (PASS|FAIL|SKIP): / { finish() }
 	if ($2 == "RUN") {
 		seen[cur] = 1
 		p = parent(cur)
-		if (p != "") {
-			held(p, "\001" cur)
-			delete last[p]
-		}
+		if (p != "") delete last[p]
+		for (; p != ""; p = parent(p)) held(p, "\001" cur)
 	} else if ($2 == "PAUSE") {
 		paused[cur] = 1
 	}
@@ -182,7 +191,6 @@ nb && !/^ +--- (PASS|FAIL|SKIP): / { finish() }
 /^ *--- (PASS|FAIL|SKIP): / {
 	name = $3
 	ind = substr($0, 1, match($0, /[^ ]/) - 1)
-	if (ind == "" && nb) finish()
 	bl[++nb] = $0
 	bn[nb] = name
 	bs[nb] = substr($2, 1, 4)

@@ -101,7 +101,8 @@ check "no skips" 0
 
 # 2. Skips with reasons: a top-level skip, a skip without a message, and
 # skips inside subtests, which count once for their top-level test. The
-# summary is sorted, not in run order.
+# summary is sorted, not in run order. TestS logs, runs a subtest whose
+# name has a slash, then skips with no message: no reason.
 echo 'stderr line' >"$tmp/stderr.txt"
 cat >"$tmp/verbose.txt" <<'EOF'
 === RUN   TestZed
@@ -128,14 +129,20 @@ cat >"$tmp/verbose.txt" <<'EOF'
     b_test.go:5: some log first
     b_test.go:6:
 --- SKIP: TestB (0.00s)
+=== RUN   TestS
+    s_test.go:3: setup
+=== RUN   TestS/x/y
+--- SKIP: TestS (0.00s)
+    --- PASS: TestS/x/y (0.00s)
 PASS
 EOF
 cat >"$tmp/want.txt" <<'EOF'
 PASS
-== skipped tests: 4
+== skipped tests: 5
   TestB: (b_test.go:6)
   TestC: subtest TestC/two: no docker (c_test.go:13)
   TestM: subtest TestM/a: skip a (m_test.go:20) (and 1 more skipped subtests)
+  TestS: (no reason)
   TestZed: needs postgres (z_test.go:10)
 EOF
 check "skips with reasons" 0
@@ -256,7 +263,33 @@ if ! diff -u "$tmp/verbose.txt" "$tmp/out" >"$tmp/diff"; then
 	cat "$tmp/diff" >&2
 fi
 
-# 8. Scenarios from a real test binary. scenario.test prints the
+# 8. A documented limit, pinned: in a test that fails, a direct print
+# shaped like a t.Log line moves into the test's --- FAIL block (without
+# -test.v it comes first, at 4 spaces). Recorded from the toy binary of
+# testdata/skip-summary (TestLogShapedFail).
+: >"$tmp/stderr.txt"
+cat >"$tmp/verbose.txt" <<'EOF'
+=== RUN   TestLogShapedFail
+=== RUN   TestLogShapedFail/s
+    fake.go:1: direct print
+    toy_test.go:180: a log
+    toy_test.go:181: s fails
+--- FAIL: TestLogShapedFail (0.00s)
+    --- FAIL: TestLogShapedFail/s (0.00s)
+FAIL
+EOF
+cat >"$tmp/want.txt" <<'EOF'
+--- FAIL: TestLogShapedFail (0.00s)
+    --- FAIL: TestLogShapedFail/s (0.00s)
+        fake.go:1: direct print
+        toy_test.go:180: a log
+        toy_test.go:181: s fails
+FAIL
+== skipped tests: none
+EOF
+check "documented limit: log-shaped print in a failing test" 1
+
+# 9. Scenarios from a real test binary. scenario.test prints the
 # scenario's verbose.txt with -test.v, else its plain.txt, and exits with
 # its rc. run_binary is taken from shard.sh as is.
 scenario="$tmp/scenario.test"
@@ -316,7 +349,7 @@ for src in hack/hubshard/testdata/skip-summary/*/; do
 	fi
 	n=$((n + 1))
 done
-[ "$n" -ge 14 ] || fail "found $n scenarios under hack/hubshard/testdata/skip-summary, want at least 14"
+[ "$n" -ge 16 ] || fail "found $n scenarios under hack/hubshard/testdata/skip-summary, want at least 16"
 
 if [ "$fails" -ne 0 ]; then
 	echo "hubshard skip summary selftest: $fails failure(s)" >&2
