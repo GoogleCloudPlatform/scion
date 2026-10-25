@@ -264,6 +264,11 @@ func (s *Server) authorizeRuntimeProjectItem(ctx context.Context, key string, fa
 //     principal does not type-check) is authorized by the progeny
 //     relationship check alone (CheckProgenyAccess).
 //
+// The chain verdict stops at its first failing clause, so a recorded hop
+// below an unrecorded one is still enforced: when that recorded hop fails,
+// the chain is refused here, not sent to the progeny rule
+// (userSecretChain.unrecorded).
+//
 // Source liveness then applies to both.
 func (s *Server) authorizeRuntimeUserItem(ctx context.Context, ident AgentIdentity, facts *TargetFacts, key string) ItemResult {
 	cand := Candidate{

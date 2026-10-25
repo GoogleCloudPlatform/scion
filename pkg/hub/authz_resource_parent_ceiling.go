@@ -464,6 +464,14 @@ type userSecretChain struct {
 	// recorded provenance: no active edge, more than one, the migration
 	// sentinel, an unrecorded ceiling or unknown provenance version, or an
 	// edge whose recorded principal does not type-check.
+	//
+	// The walk stops at the first failing clause, so in a chain that mixes
+	// recorded and unrecorded hops every recorded hop below the first
+	// unrecorded one is still enforced: S3b, S3c and S3d run on it before
+	// the walk reaches the unrecorded hop, and a deny there leaves
+	// unrecorded false. Only a hop without recorded provenance sets it, and
+	// the callers (check 8 and the agent secret list) never deny on such a
+	// hop alone: they apply the progeny rule instead.
 	unrecorded bool
 }
 
@@ -517,8 +525,11 @@ func secretParentStep(explain *[]DecisionStep, step, detail string) {
 //     internal (ceiling_provenance_stale for another parent, otherwise
 //     ceiling_resource_missing); S4b the terminal user's access constraints
 //     allow secret.use on it (ceiling_delegator_lacks_permission); S7 its
-//     author is its owner; S8 the terminal user is its author and the head
-//     of the stored ancestry (both ceiling_source_not_allowed).
+//     recorded creator (CreatedBy) is its owner; S8 the terminal user is
+//     its recorded creator and the head of the stored ancestry (both
+//     ceiling_source_not_allowed). CreatedBy is attribution, not proof of
+//     authorship: the agent write path records the scope owner as the
+//     creator of a user-scope secret an agent writes.
 //
 // Any lookup error denies with ceiling_error. It never returns Allowed on an
 // error, writes nothing and emits no audit record. The stored agent row is
