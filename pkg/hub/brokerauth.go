@@ -16,7 +16,6 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -24,7 +23,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -32,6 +30,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -980,6 +979,11 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 		return nil, errBrokerAuthMissingNonce
 	}
 
+	// A signed body must declare its length (before the nonce is recorded).
+	if err := apiclient.CheckSignedBodyFraming(r); err != nil {
+		return nil, err
+	}
+
 	// Parse and validate timestamp
 	ts, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil {
@@ -1047,57 +1051,11 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 }
 
 // buildCanonicalString builds the canonical string for HMAC signing.
-// Format: METHOD\nPATH\nQUERY\nTIMESTAMP\nNONCE\nSIGNED_HEADERS\nBODY_HASH
+// It delegates to apiclient.BuildCanonicalString, the single implementation
+// shared with the signer and the broker verifiers, so the two sides cannot
+// drift apart.
 func (s *BrokerAuthService) buildCanonicalString(r *http.Request, timestamp, nonce string) []byte {
-	var buf bytes.Buffer
-
-	// HTTP method
-	buf.WriteString(r.Method)
-	buf.WriteByte('\n')
-
-	// Request path
-	buf.WriteString(r.URL.Path)
-	buf.WriteByte('\n')
-
-	// Query string (sorted)
-	buf.WriteString(r.URL.RawQuery)
-	buf.WriteByte('\n')
-
-	// Timestamp
-	buf.WriteString(timestamp)
-	buf.WriteByte('\n')
-
-	// Nonce
-	buf.WriteString(nonce)
-	buf.WriteByte('\n')
-
-	// Signed headers (if specified)
-	signedHeaders := r.Header.Get(HeaderSignedHeaders)
-	if signedHeaders != "" {
-		// Headers are listed as semicolon-separated names
-		headerNames := strings.Split(signedHeaders, ";")
-		for _, name := range headerNames {
-			name = strings.TrimSpace(name)
-			value := r.Header.Get(name)
-			buf.WriteString(strings.ToLower(name))
-			buf.WriteByte(':')
-			buf.WriteString(strings.TrimSpace(value))
-			buf.WriteByte('\n')
-		}
-	}
-
-	// Body hash (SHA-256 of request body)
-	if r.Body != nil && r.ContentLength > 0 {
-		// We need to read and restore the body
-		bodyBytes, err := io.ReadAll(r.Body)
-		if err == nil {
-			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-			bodyHash := sha256.Sum256(bodyBytes)
-			buf.WriteString(base64.StdEncoding.EncodeToString(bodyHash[:]))
-		}
-	}
-
-	return buf.Bytes()
+	return apiclient.BuildCanonicalString(r, timestamp, nonce)
 }
 
 // SignRequest signs an outgoing HTTP request with HMAC.
@@ -1197,6 +1155,11 @@ func (s *BrokerAuthService) ValidateBrokerSignatureWithRotation(ctx context.Cont
 		return nil, errBrokerAuthMissingBrokerID
 	}
 	if err := s.admitBroker(ctx, brokerID); err != nil {
+		return nil, err
+	}
+
+	// A signed body must declare its length.
+	if err := apiclient.CheckSignedBodyFraming(r); err != nil {
 		return nil, err
 	}
 
