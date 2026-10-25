@@ -234,7 +234,12 @@ func TestHubConduitRelayModeAndPeerSecret(t *testing.T) {
 
 func TestRelayServerConfigValidate(t *testing.T) {
 	assert.NoError(t, RelayServerConfig{}.Validate())
-	assert.NoError(t, RelayServerConfig{HubInternalURL: "http://hub:9811", PublicURL: "https://relay.example.com/"}.Validate())
+	assert.NoError(t, RelayServerConfig{HubInternalURL: "https://hub:9811", PublicURL: "https://relay.example.com/"}.Validate())
+	assert.NoError(t, RelayServerConfig{HubInternalURL: "http://127.0.0.1:9811"}.Validate(), "loopback plaintext is allowed")
+	err := RelayServerConfig{HubInternalURL: "http://hub-internal.scion.svc:9811"}.Validate()
+	assert.ErrorIs(t, err, ErrPlaintextNonLoopback, "plaintext to a network host is refused")
+	assert.ErrorContains(t, err, "server.relay.hub_internal_url")
+	assert.NotContains(t, err.Error(), "hub-internal.scion.svc", "the error names the key only")
 	for _, c := range []RelayServerConfig{
 		{HubInternalURL: "hub:9811"},
 		{HubInternalURL: "ftp://hub"},
