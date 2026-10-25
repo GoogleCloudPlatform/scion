@@ -262,7 +262,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	hubHTTP, relayHTTP := cfg.HTTPClient, cfg.HTTPClient
 	if cfg.HTTPClient == nil && cfg.HopTLS != nil {
 		hubHTTP = relay.NewHopHTTPClient(cfg.HopTLS)
-		relayHTTP = &http.Client{Timeout: 10 * time.Second, Transport: relay.NewHopTransport(cfg.HopTLS)}
+		relayHTTP = relay.NewHopHTTPClientWithTimeout(cfg.HopTLS, 10*time.Second)
 	}
 	role, err := relayrole.New(relayrole.Config{
 		Hub:             &relay.HubClient{BaseURL: cfg.HubInternalURL, HTTP: hubHTTP, Auth: cfg.PeerAuth},

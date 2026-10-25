@@ -205,8 +205,9 @@ type Config struct {
 	// PeerAuth authenticates internal API calls in both directions.
 	// Required for InternalHandler and for the self-check probe.
 	PeerAuth PeerAuth
-	// HTTPClient performs the self-check probe (default: a client with a
-	// 10s timeout).
+	// HTTPClient performs the self-check probe and this relay's calls to
+	// other relays (default: NewHopHTTPClientWithTimeout(nil, 10s), the
+	// system roots and no redirects).
 	HTTPClient *http.Client
 	// WSDialer dials internal stream hops to other relays (nil: gorilla
 	// defaults). With TLS on the internal hop it carries the hop client
@@ -433,7 +434,7 @@ func New(cfg Config) (*Relay, error) {
 		cfg.Logger = slog.Default()
 	}
 	if cfg.HTTPClient == nil {
-		cfg.HTTPClient = &http.Client{Timeout: 10 * time.Second}
+		cfg.HTTPClient = NewHopHTTPClientWithTimeout(nil, 10*time.Second)
 	}
 	return &Relay{
 		cfg:      cfg,

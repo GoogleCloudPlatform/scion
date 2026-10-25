@@ -232,7 +232,7 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 	if opts.HopTLS != nil {
 		hopWS = relay.NewHopWSDialer(opts.HopTLS)
 		if opts.HTTPClient == nil {
-			relayHTTPClient = &http.Client{Timeout: 10 * time.Second, Transport: relay.NewHopTransport(opts.HopTLS)}
+			relayHTTPClient = relay.NewHopHTTPClientWithTimeout(opts.HopTLS, 10*time.Second)
 			peerHTTP = relay.NewHopHTTPClient(opts.HopTLS)
 		}
 	}

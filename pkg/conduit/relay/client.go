@@ -86,8 +86,10 @@ func isDialFailure(err error) bool {
 // PeerClient calls other relays' internal APIs. It is the injectable seam
 // for tests (two relays over httptest).
 type PeerClient struct {
-	// HTTP performs internal RPCs and probes. Its Timeout must be zero or
-	// above the RPC cap; per-call deadlines come from the context.
+	// HTTP performs internal RPCs and probes (nil: a hop client with the
+	// system roots). Build it with NewHopHTTPClient so it follows no
+	// redirect. Its Timeout must be zero or above the RPC cap; per-call
+	// deadlines come from the context.
 	HTTP *http.Client
 	// WS dials internal stream WebSockets (nil: gorilla defaults).
 	WS *websocket.Dialer
@@ -120,7 +122,7 @@ func (c *PeerClient) httpClient() *http.Client {
 	if c.HTTP != nil {
 		return c.HTTP
 	}
-	return http.DefaultClient
+	return defaultHopHTTPClient
 }
 
 // checkHopEndpoint applies the relay internal hop transport rule
@@ -133,6 +135,25 @@ func checkHopEndpoint(endpoint string) error {
 		return fmt.Errorf("conduit relay: refusing the internal hop: %w", err)
 	}
 	return nil
+}
+
+// hopWebSocketURL turns an internal API URL into its WebSocket URL:
+// https becomes wss and http becomes ws, whatever the case of the scheme
+// (checkHopEndpoint accepts an upper-case scheme, as net/url does).
+func hopWebSocketURL(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("conduit relay: internal stream URL: %w", err)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https", "wss":
+		u.Scheme = "wss"
+	case "http", "ws":
+		u.Scheme = "ws"
+	default:
+		return "", fmt.Errorf("conduit relay: internal stream URL has scheme %q", u.Scheme)
+	}
+	return u.String(), nil
 }
 
 func (c *PeerClient) sign(req *http.Request) error {
@@ -428,7 +449,10 @@ func (s *RemoteSession) openHop(ctx context.Context, open *conduitv1.StreamOpen)
 	want := s.want
 	want.Capability = string(kind)
 	u := s.sessionURL("stream")
-	wsURL := "ws" + strings.TrimPrefix(u, "http")
+	wsURL, err := hopWebSocketURL(u)
+	if err != nil {
+		return nil, err
+	}
 	sign := func(ctx context.Context) (http.Header, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		if err != nil {

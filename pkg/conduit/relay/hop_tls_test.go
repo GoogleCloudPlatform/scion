@@ -272,3 +272,37 @@ func TestHopServerTLSReloadsRotatedCertificate(t *testing.T) {
 		t.Fatal("a pair that does not load replaced the current certificate")
 	}
 }
+
+// TestHopUpperCaseSchemeEndpoint: an endpoint whose scheme is upper case
+// (accepted by the hop rule, as net/url lower-cases it) still opens stream
+// hops, over wss for HTTPS:// and ws for HTTP://.
+func TestHopUpperCaseSchemeEndpoint(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	roundTrip := func(t *testing.T, rs *relay.RemoteSession) {
+		t.Helper()
+		st, err := rs.OpenStream(ctx, &conduitv1.StreamOpen{Kind: conduitv1.StreamKind_STREAM_KIND_PTY})
+		if err != nil {
+			t.Fatalf("OpenStream: %v", err)
+		}
+		go func() {
+			_, _ = st.Write([]byte("upper"))
+			_ = st.(interface{ CloseWrite() error }).CloseWrite()
+		}()
+		got, err := readAllWithin(t, st, "echo")
+		if err != nil || string(got) != "upper" {
+			t.Fatalf("echo = %q, %v", got, err)
+		}
+		_ = st.Close()
+	}
+	t.Run("HTTPS", func(t *testing.T) {
+		p, _ := newTLSPair(t, echoConfig())
+		ep := "HTTPS://" + strings.TrimPrefix(p.a.Internal.URL, "https://")
+		roundTrip(t, relay.NewRemoteSession(p.b.Peers, ep, p.rec, p.want))
+	})
+	t.Run("HTTP", func(t *testing.T) {
+		p := newPair(t, echoConfig())
+		ep := "HTTP://" + strings.TrimPrefix(p.a.Internal.URL, "http://")
+		roundTrip(t, relay.NewRemoteSession(p.b.Peers, ep, p.rec, p.want))
+	})
+}

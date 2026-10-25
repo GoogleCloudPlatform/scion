@@ -19,9 +19,11 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -188,5 +190,101 @@ func TestHopTLSConfigsNeverSkipVerification(t *testing.T) {
 	// The scan must have covered the hop sources, or it proves nothing.
 	if scanned < 20 {
 		t.Fatalf("scanned %d source files; the globs no longer match the relay hop sources", scanned)
+	}
+}
+
+// redirectingPeer answers every request with status, redirecting to
+// location, and counts the requests it received.
+func redirectingPeer(t *testing.T, status int, location string) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Redirect(w, r, location, status)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+// recordingHopClient is a hop client (NewHopHTTPClient) whose dials are
+// recorded and made for real.
+func recordingHopClient(t *testing.T) (*http.Client, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var addrs []string
+	c := relay.NewHopHTTPClient(nil)
+	c.Transport.(*http.Transport).DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		mu.Lock()
+		addrs = append(addrs, addr)
+		mu.Unlock()
+		return (&net.Dialer{}).DialContext(ctx, network, addr)
+	}
+	return c, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), addrs...)
+	}
+}
+
+// TestHopClientsFollowNoRedirect: a peer, hub internal API or loopback
+// terminator that answers 3xx does not move a hop request elsewhere: the
+// redirect target, here plaintext to a non-loopback host, is never
+// dialed, for the self probe, drain, session RPC and hub call, with 307
+// and 308 (which would re-send the body) as well as 302.
+func TestHopClientsFollowNoRedirect(t *testing.T) {
+	for _, status := range []int{http.StatusFound, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			peer, hits := redirectingPeer(t, status, "http://192.0.2.10:9/elsewhere")
+			hc, dialed := recordingHopClient(t)
+			pc := &relay.PeerClient{HTTP: hc, Auth: testPeerAuth(t, "relay-b")}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			if _, err := pc.Probe(ctx, peer.URL, "relay-a", 1); err == nil {
+				t.Error("Probe through a redirect succeeded")
+			}
+			if _, err := pc.Drain(ctx, peer.URL, "relay-a", 1, "relay-b", time.Second); err == nil {
+				t.Error("Drain through a redirect succeeded")
+			}
+			rec := registry.SessionRecord{SessionID: "s1", RelayInstanceID: "relay-a", RelayGeneration: 1}
+			rs := relay.NewRemoteSession(pc, peer.URL, rec, registry.Want{ProjectID: "p1"})
+			if _, err := rs.Call(ctx, &conduitv1.RpcRequest{RequestId: "r1", Method: "POST", Body: []byte("secret body")}); err == nil {
+				t.Error("Call through a redirect succeeded")
+			}
+			hub := &relay.HubClient{BaseURL: peer.URL, HTTP: hc, Auth: testPeerAuth(t, "relay-a")}
+			if err := hub.Call(ctx, "/internal/v1/hub/admit", map[string]string{"k": "v"}, nil); err == nil {
+				t.Error("HubClient.Call through a redirect succeeded")
+			}
+
+			if n := hits.Load(); n != 4 {
+				t.Errorf("the peer received %d requests, want 4 (one per call)", n)
+			}
+			for _, a := range dialed() {
+				if a == "192.0.2.10:9" {
+					t.Fatalf("a hop client dialed the redirect target %s", a)
+				}
+			}
+		})
+	}
+}
+
+// TestHopDefaultClientsFollowNoRedirect: the clients PeerClient and
+// HubClient use when none is set follow no redirect either.
+func TestHopDefaultClientsFollowNoRedirect(t *testing.T) {
+	var targetHits atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(target.Close)
+	peer, _ := redirectingPeer(t, http.StatusTemporaryRedirect, target.URL+"/x")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pc := &relay.PeerClient{Auth: testPeerAuth(t, "relay-b")}
+	_, _ = pc.Probe(ctx, peer.URL, "relay-a", 1)
+	hub := &relay.HubClient{BaseURL: peer.URL, Auth: testPeerAuth(t, "relay-a")}
+	_ = hub.Call(ctx, "/internal/v1/hub/admit", map[string]string{"k": "v"}, nil)
+	if n := targetHits.Load(); n != 0 {
+		t.Fatalf("the redirect target received %d requests through the default hop clients; want none", n)
 	}
 }

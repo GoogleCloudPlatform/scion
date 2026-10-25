@@ -165,10 +165,34 @@ func NewHopClientTLS(caFile, serverName string) (*tls.Config, error) {
 }
 
 // NewHopHTTPClient returns an HTTP client for relay internal hop requests
-// (PeerClient.HTTP, HubClient.HTTP) that uses tlsConfig for https.
+// (PeerClient.HTTP, HubClient.HTTP) that uses tlsConfig for https and never
+// follows a redirect (NewHopHTTPClientWithTimeout with no timeout).
 func NewHopHTTPClient(tlsConfig *tls.Config) *http.Client {
-	return &http.Client{Transport: NewHopTransport(tlsConfig)}
+	return NewHopHTTPClientWithTimeout(tlsConfig, 0)
 }
+
+// NewHopHTTPClientWithTimeout is the one constructor of relay internal hop
+// HTTP clients: tlsConfig for https (nil: the system roots), timeout as
+// http.Client.Timeout (0: none), and no redirects. A hop request is
+// checked against the internal hop rule (config.CheckRelayTransport) only
+// at its first URL; following a redirect would re-send its relay-peer
+// headers, and on 307 or 308 its body, to wherever the redirect points,
+// plaintext included. No internal API redirects, so a 3xx is returned to
+// the caller as the answer, which treats it as a failure.
+func NewHopHTTPClientWithTimeout(tlsConfig *tls.Config, timeout time.Duration) *http.Client {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	if tlsConfig != nil {
+		t.TLSClientConfig = tlsConfig.Clone()
+	}
+	return &http.Client{Transport: t, Timeout: timeout, CheckRedirect: refuseHopRedirect}
+}
+
+// refuseHopRedirect is the CheckRedirect of every hop HTTP client.
+func refuseHopRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+// defaultHopHTTPClient is the hop client PeerClient and HubClient use when
+// none is set: the system roots, no timeout, no redirects.
+var defaultHopHTTPClient = NewHopHTTPClientWithTimeout(nil, 0)
 
 // NewHopTransport returns a clone of http.DefaultTransport that uses
 // tlsConfig for https.
