@@ -47,7 +47,14 @@ var ErrPlaintextNonLoopback = errors.New("unencrypted connection to a non-loopba
 func CheckHubTransport(rawURL string) error {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil || u.Host == "" {
-		return fmt.Errorf("%w: %s is not a valid URL with a host; use an https:// URL", ErrPlaintextNonLoopback, RedactURL(rawURL))
+		// A URL that does not parse is not echoed when it holds an '@':
+		// RedactURL would mask only the part before the last '@', and what
+		// is left (for example "@127.0.0.1") would read as the host.
+		shown := RedactURL(rawURL)
+		if strings.Contains(rawURL, "@") {
+			shown = "the URL (not shown: it contains '@')"
+		}
+		return fmt.Errorf("%w: %s is not a valid URL with a host; use an https:// URL", ErrPlaintextNonLoopback, shown)
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "https", "wss":
@@ -56,7 +63,7 @@ func CheckHubTransport(rawURL string) error {
 		if IsLoopbackHost(strings.ToLower(u.Hostname())) {
 			return nil
 		}
-		return fmt.Errorf("%w: %s uses %s to %s, which is not a loopback address, so broker credentials and agent secrets "+
+		return fmt.Errorf("%w: %s uses %s to host %q, which is not a loopback address, so broker credentials and agent secrets "+
 			"would cross the network unencrypted; use an https:// URL (a TLS-terminating proxy in front of the hub), "+
 			"or a loopback address such as an SSH port forward to http://127.0.0.1:<port>",
 			ErrPlaintextNonLoopback, RedactURL(rawURL), strings.ToLower(u.Scheme), u.Hostname())
