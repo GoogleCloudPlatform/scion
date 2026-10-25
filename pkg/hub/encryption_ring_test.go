@@ -128,7 +128,8 @@ func snapRows(t *testing.T, st store.Store, keys ...string) map[string]rowSnap {
 	return out
 }
 
-func signingKeyBytes(srv *Server) map[string][]byte {
+func signingKeyBytes(t *testing.T, srv *Server) map[string][]byte {
+	t.Helper()
 	// The download key is held by srv.downloadKeys (capability_keys.go).
 	// These test servers run without a keyring file, so it is the fixed
 	// legacy key resolved from the signing-key backup, and the active key
@@ -139,11 +140,17 @@ func signingKeyBytes(srv *Server) map[string][]byte {
 			download = append([]byte{}, k.Bytes()...)
 		}
 	}
-	return map[string][]byte{
+	keys := map[string][]byte{
 		SecretKeyAgentSigningKey:    append([]byte{}, srv.agentTokenService.config.SigningKey...),
 		SecretKeyUserSigningKey:     append([]byte{}, srv.userTokenService.config.SigningKey...),
 		SecretKeyDownloadSigningKey: download,
 	}
+	// Every signing key is 32 bytes. A missing key must fail here rather than
+	// compare equal to another missing key in the callers' round-trip checks.
+	for name, key := range keys {
+		require.Len(t, key, 32, "%s", name)
+	}
+	return keys
 }
 
 func readyz(t *testing.T, srv *Server) (int, string) {
@@ -190,7 +197,7 @@ func TestEncryptionRing_SigningBackupRoundTrip(t *testing.T) {
 	st := encStore(t)
 	c := v2Cipher(t, "k2", "k2")
 	srv1 := encServer(t, st, c, true)
-	before := signingKeyBytes(srv1)
+	before := signingKeyBytes(t, srv1)
 	rows := snapRows(t, st, encSigningKeys...)
 	for k, r := range rows {
 		assert.True(t, strings.HasPrefix(r.value, "enc:v2:k2:"), "%s backup is not enc:v2:k2", k)
@@ -198,7 +205,7 @@ func TestEncryptionRing_SigningBackupRoundTrip(t *testing.T) {
 	assert.Empty(t, srv1.EncryptionAudit().Unreadable)
 
 	srv2 := encServer(t, st, c, true)
-	after := signingKeyBytes(srv2)
+	after := signingKeyBytes(t, srv2)
 	for k, b := range before {
 		assert.True(t, bytes.Equal(b, after[k]), "%s changed across restart", k)
 	}
@@ -352,7 +359,7 @@ func TestRestartMixedFormatDatabase(t *testing.T) {
 	var seeded map[string]rowSnap
 	for i := range 2 {
 		srv := encServer(t, st, ring, false)
-		got := signingKeyBytes(srv)
+		got := signingKeyBytes(t, srv)
 		for key, raw := range want {
 			assert.True(t, bytes.Equal(raw, got[key]), "restart %d: %s differs", i, key)
 		}
@@ -384,7 +391,7 @@ func TestCiphertextReplacementKeepsIdentities(t *testing.T) {
 	oldRing := ciphertest.Cipher(t, ciphertest.Ring{Active: keyring.LegacyID, IDs: []string{keyring.LegacyID},
 		WriteFormat: keyring.WriteV1, V1Readers: []string{keyring.LegacyID}})
 	srv1 := encServer(t, st, oldRing, true)
-	keysBefore := signingKeyBytes(srv1)
+	keysBefore := signingKeyBytes(t, srv1)
 	ringBefore, _, err := srv1.conduitGrantKeySet().store.Load(ctx)
 	if errors.Is(err, store.ErrNotFound) {
 		_, err = srv1.conduitGrantKeySet().signer(ctx)
@@ -438,7 +445,7 @@ func TestCiphertextReplacementKeepsIdentities(t *testing.T) {
 	}
 
 	srv2 := encServer(t, st, newRing, true)
-	keysAfter := signingKeyBytes(srv2)
+	keysAfter := signingKeyBytes(t, srv2)
 	for k, b := range keysBefore {
 		assert.True(t, bytes.Equal(b, keysAfter[k]), "%s changed across rewrap", k)
 	}
