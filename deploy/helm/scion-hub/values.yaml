@@ -774,9 +774,10 @@ workspaceStorage:
 # A non-loopback relay listener without TLS is refused at render, whether it
 # comes from here or from config.extra.
 #
-# The relay wiring is also refused for a hub image older than the first release
-# that honours the internal_tls_* settings, since an older hub would serve the
-# hop in plaintext. The image tag is image.tag, else the chart's appVersion. A
+# The relay wiring, and a non-loopback relay listener set through config.extra,
+# are also refused for a hub image older than the first release that honours
+# the internal_tls_* settings, since an older hub would serve the hop in
+# plaintext. The image tag is image.tag, else the chart's appVersion. A
 # digest, or a tag that is not a version (for example latest), cannot be
 # checked: it is allowed, NOTES.txt warns, and the Deployment is annotated
 # scion.io/relay-tls-image-check: unverified. Refused together with
