@@ -75,8 +75,7 @@ func TestStartServesInternalTLS(t *testing.T) {
 	cfg := testConfig(t, w, newFakeExperiment(expAnswer{on: true}))
 	cfg.InternalListen = "0.0.0.0:0" // allowed: the listener serves TLS
 	cfg.InternalTLS = srvTLS
-	cfg.HTTPClient = relay.NewHopHTTPClient(cliTLS)
-	cfg.WSDialer = relay.NewHopWSDialer(cliTLS)
+	cfg.HopTLS = cliTLS
 	cfg.RequireSelfCheck = true
 	startServer(t, cfg)
 	relays, err := w.Store.ListRelays(context.Background())
