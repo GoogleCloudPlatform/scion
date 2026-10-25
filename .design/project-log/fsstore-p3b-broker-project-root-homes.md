@@ -105,6 +105,35 @@ The project-storage migration's Cloud Run homes step moves existing
 (a running agent's are reported deferred and move on a later run); it is the
 only code that builds the legacy path.
 
+## Merge with upstream main after the one-storage-block change landed
+
+This branch was built on the earlier commits of the one-storage-block change;
+upstream main now carries that change as a single commit, with later fixes.
+The branch merged main (167a60d4) with a merge commit, not a rebase. The
+merge was computed against the one-storage-block head this branch was built
+on, so every line of that change comes from main and only this branch's own
+work is applied on top: the diff from main to the merge lists exactly the 43
+files of this branch's own range.
+
+Four files needed a manual resolution, each keeping both sides:
+
+- `pkg/agent/provision.go`: the agent-files guard keeps main's sharer-key
+  worktree root and adds the legacy agent state dir as an extra root.
+- `pkg/agent/run.go`: main recomposes the repository root through
+  `composeRepoRoot` (with the fail-closed record intersection). A workspace
+  the backend placed on the shared tree now goes through the new
+  `composeSharedRepoRoot` (`pkg/agent/repo_root_layout.go`), which takes the
+  candidate root from the shared layout and keeps the same intersection.
+- `pkg/runtimebroker/handlers.go`: main's ownership marking and test hook
+  stay around the bootstrap-outcome download call.
+- `pkg/runtimebroker/start_context.go`: main's release-proof path update
+  stays, followed by the shared project root resolution.
+
+Checks at the merged head: gofmt on every changed Go file, the pkg/hub
+scan-coverage guard, a duplicate top-level identifier scan of pkg/hub in the
+default, no_sqlite and integration tag sets, `go vet` and the unit tests of
+the touched non-hub packages. pkg/hub and ./cmd are compiled only in the gate.
+
 ## Verification
 
 - `pkg/projectfs`, `pkg/config`, `pkg/agent`, `pkg/runtime`,
