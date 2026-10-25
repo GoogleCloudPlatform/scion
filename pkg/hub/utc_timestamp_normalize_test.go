@@ -731,7 +731,7 @@ func TestUTCTimestampNormalize_StartupCheckRunsInBackground(t *testing.T) {
 // parses strictly and compares lexically. The normalizer must leave it
 // byte-identical, while it still rewrites the other webchat time columns.
 func TestUTCTimestampNormalize_LeavesStarTimesFixedWidth(t *testing.T) {
-	wcs, s, db := newEntWebChatStore(t)
+	wcs, s, db := hubNewEntWebChatStore(t)
 	ctx := context.Background()
 	proj := normProject(t, s, "norm-stars")
 	topicID := tid("norm-star-topic")
@@ -750,7 +750,7 @@ func TestUTCTimestampNormalize_LeavesStarTimesFixedWidth(t *testing.T) {
 			ID: ids[i], ProjectID: proj.ID, Sender: "user:alice", Recipient: "chat",
 			Msg: fmt.Sprintf("star %d", i), Type: "chat", Channel: "web", ThreadID: topicID, CreatedAt: normBase,
 		}))
-		_, changed, err := wcs.AddMessageStar(ctx, "u1", StarTarget{MessageID: ids[i], ProjectID: proj.ID, Selector: sel})
+		_, changed, err := wcs.(MessageStarStore).AddMessageStar(ctx, "u1", StarTarget{MessageID: ids[i], ProjectID: proj.ID, Selector: sel})
 		require.NoError(t, err)
 		require.True(t, changed)
 		execOne(t, db, "UPDATE webchat_message_star SET starred_at = ? WHERE message_id = ?", sqliteStarTime(at), ids[i])
