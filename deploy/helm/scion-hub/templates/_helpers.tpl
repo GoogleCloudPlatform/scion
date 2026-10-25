@@ -4546,9 +4546,10 @@ The chart is deliberately stricter than the hub in these cases:
   which it treats as not loopback;
 - port 0;
 - a port written with a sign or a leading zero (for example :+9443, :09443).
+- an empty bracketed host ([]:port).
 */}}
 {{- if ne $listenRaw $listen }}
-{{- fail (printf "server.hub.conduit.internal_listen is %s, with leading or trailing whitespace. The hub reads the value as written and refuses it at startup; remove the whitespace." (include "scion-hub.diagValue" $listenRaw)) }}
+{{- fail (printf "server.hub.conduit.internal_listen is %s, with leading or trailing whitespace, which the hub cannot use as written (it fails validation or the bind at startup); remove the whitespace." (include "scion-hub.diagValue" $listenRaw)) }}
 {{- end }}
 {{- $hostPort := "^(|\\[[^\\[\\]]+\\]|[^:\\[\\]]+):([1-9][0-9]{0,4})$" }}
 {{- $portStr := regexReplaceAll $hostPort $listen "${2}" }}
