@@ -215,7 +215,10 @@ func buildCanonicalString(r *http.Request, timestamp, nonce string) ([]byte, err
 	// Body hash (SHA-256 of request body), whenever there is a body.
 	if r.Body != nil && r.Body != http.NoBody {
 		// Read the body and restore it for the handler.
+		// The original body is closed once buffered; the request carries
+		// the buffered copy from here on.
 		bodyBytes, err := io.ReadAll(r.Body)
+		_ = r.Body.Close()
 		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		if err != nil {
 			return buf.Bytes(), fmt.Errorf("failed to read request body for signing: %w", err)

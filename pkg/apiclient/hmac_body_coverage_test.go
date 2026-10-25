@@ -451,3 +451,55 @@ func TestBuildCanonicalString_ReadErrorWritesMarkerOnly(t *testing.T) {
 		}
 	}
 }
+
+// closeTracker records whether the caller's body was closed.
+type closeTracker struct {
+	io.Reader
+	closed bool
+}
+
+func (c *closeTracker) Close() error { c.closed = true; return nil }
+
+// The caller's original body is closed once the signer has buffered it,
+// on success and on a read error, on the sized rewindable path too.
+func TestHMACAuth_ApplyAuth_ClosesOriginalBody(t *testing.T) {
+	auth := &HMACAuth{BrokerID: "broker-1", SecretKey: []byte(goldenSecret)}
+	cases := []struct {
+		name    string
+		reader  io.Reader
+		cl      int64
+		getBody bool
+		wantErr bool
+	}{
+		{"sized rewindable", strings.NewReader(goldenBody), int64(len(goldenBody)), true, false},
+		{"sized rewindable read error", &failingSizedBody{}, 100, true, true},
+		{"unsized", &unsizedReader{strings.NewReader(goldenBody)}, -1, false, false},
+		{"unsized read error", errReader{}, -1, false, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, "http://broker.test/api/v1/agents", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			orig := &closeTracker{Reader: c.reader}
+			req.Body = orig
+			req.ContentLength = c.cl
+			if c.getBody {
+				req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(strings.NewReader(goldenBody)), nil }
+			}
+			err = auth.ApplyAuth(req)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, c.wantErr)
+			}
+			if !orig.closed {
+				t.Fatal("the original body was not closed")
+			}
+			if !c.wantErr {
+				if b, _ := io.ReadAll(req.Body); string(b) != goldenBody {
+					t.Fatalf("buffered body %q", b)
+				}
+			}
+		})
+	}
+}
