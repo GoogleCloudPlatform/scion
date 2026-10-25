@@ -108,7 +108,8 @@ func (b *LocalBackend) fetchValue(ctx context.Context, meta SecretMeta) FetchRes
 	if err != nil {
 		return FetchResult{Err: err}
 	}
-	return FetchResult{Value: sv.Value}
+	// The stored ref verbatim, as Resolve reports it.
+	return FetchResult{Value: sv.Value, Ref: s.SecretRef}
 }
 
 func (b *LocalBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *SecretMeta, error) {

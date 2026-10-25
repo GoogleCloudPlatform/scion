@@ -172,7 +172,16 @@ type ResolveOpts struct {
 // doc comments for the shared contract).
 type FetchResult struct {
 	Value string
-	Err   error
+	// Ref is the external reference the value was read from, in the form
+	// Resolve reports as SecretMeta.SecretRef for the same record, so a
+	// caller that delivers fetched values hands brokers the same reference
+	// Resolve did. On the GCP backend it is the Secret Manager resource path
+	// (projects/<project>/secrets/<name>, never the stored "gcpsm:" form),
+	// including the computed name for a record with no stored gcpsm ref; on
+	// the local backend it is the record's stored ref (normally empty).
+	// Empty when Err is set.
+	Ref string
+	Err error
 }
 
 // SecretBackend defines the interface for secret storage operations.
