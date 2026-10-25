@@ -764,3 +764,98 @@ func TestBinaryUpdate_RestartFailureSudoInstallSaysNoRollback(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// ctxAwareDeactivator is a fakeInstaller that can roll back, and whose
+// Deactivate fails like a real ctx-honouring rollback (a sudo command, a
+// store write) would when its context is already done.
+type ctxAwareDeactivator struct {
+	fakeInstaller
+	deactivated bool
+	sawDeadline time.Duration // time left on the rollback ctx
+	sawValue    any
+	restartErr  error
+}
+
+type testCtxKey struct{}
+
+func (f *ctxAwareDeactivator) Restart(context.Context) error {
+	f.calls = append(f.calls, "restart")
+	return f.restartErr
+}
+
+func (f *ctxAwareDeactivator) Deactivate(ctx context.Context) error {
+	f.calls = append(f.calls, "deactivate")
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if dl, ok := ctx.Deadline(); ok {
+		f.sawDeadline = time.Until(dl)
+	}
+	f.sawValue = ctx.Value(testCtxKey{})
+	f.deactivated = true
+	return nil
+}
+
+func TestBinaryUpdate_RollbackRunsWhenRunCtxIsCancelled(t *testing.T) {
+	requireLinux(t)
+
+	t.Run("undoActivation with an already-cancelled parent", func(t *testing.T) {
+		inst := &ctxAwareDeactivator{}
+		e := newTestExecutor(newFakeGitHub(t), inst, "nightly-20261022")
+		parent, cancel := context.WithCancel(context.WithValue(context.Background(), testCtxKey{}, "trace-1"))
+		cancel()
+		err := e.undoActivation(parent, &bytes.Buffer{}, "nightly-20261023", errors.New("hook failed"))
+		if err == nil || !strings.Contains(err.Error(), "rolled back, nothing changed") {
+			t.Fatalf("err = %v, want a completed rollback", err)
+		}
+		if !inst.deactivated {
+			t.Fatal("rollback did not run on a cancelled parent ctx")
+		}
+		if inst.sawDeadline <= 0 || inst.sawDeadline > e.installTimeout {
+			t.Fatalf("rollback ctx deadline in %v, want bounded by installTimeout %v", inst.sawDeadline, e.installTimeout)
+		}
+		if inst.sawValue != "trace-1" {
+			t.Fatalf("rollback ctx lost the parent's values: %v", inst.sawValue)
+		}
+	})
+
+	t.Run("hook fails after the run ctx is cancelled", func(t *testing.T) {
+		gh := newFakeGitHub(t)
+		gh.addRelease("nightly-20261023", "2026-10-23T04:00:00Z", "nightly-20261023")
+		inst := &ctxAwareDeactivator{}
+		e := newTestExecutor(gh, inst, "nightly-20261022")
+		runCtx, cancelRun := context.WithCancel(context.Background())
+		defer cancelRun()
+		err := e.RunWithBeforeRestart(runCtx, &bytes.Buffer{}, map[string]string{"target_version": "nightly-20261023"},
+			func(ctx context.Context, _ PendingRestart) error {
+				cancelRun() // the run is cancelled (shutdown, run deadline) during the hook
+				return ctx.Err()
+			})
+		if err == nil || !strings.Contains(err.Error(), "rolled back, nothing changed") || !inst.deactivated {
+			t.Fatalf("err = %v, deactivated = %v; want the rollback to complete", err, inst.deactivated)
+		}
+		for _, c := range inst.calls {
+			if c == "restart" {
+				t.Fatal("restarted after the hook failed")
+			}
+		}
+	})
+
+	t.Run("restart fails with the run ctx past its deadline", func(t *testing.T) {
+		gh := newFakeGitHub(t)
+		gh.addRelease("nightly-20261023", "2026-10-23T04:00:00Z", "nightly-20261023")
+		inst := &ctxAwareDeactivator{}
+		e := newTestExecutor(gh, inst, "nightly-20261022")
+		runCtx, cancelRun := context.WithCancel(context.Background())
+		defer cancelRun()
+		inst.restartErr = errors.New("restart timed out")
+		err := e.RunWithBeforeRestart(runCtx, &bytes.Buffer{}, map[string]string{"target_version": "nightly-20261023"},
+			func(context.Context, PendingRestart) error {
+				cancelRun() // expires before Restart runs
+				return nil
+			})
+		if err == nil || !strings.Contains(err.Error(), "rolled back, nothing changed") || !inst.deactivated {
+			t.Fatalf("err = %v, deactivated = %v; want the rollback to complete", err, inst.deactivated)
+		}
+	})
+}
