@@ -794,3 +794,28 @@ func TestLifecycleAttribution_EchoShapes(t *testing.T) {
 		assert.Equal(t, none, effectiveOf(rst))
 	})
 }
+
+// TestLifecycleAttribution_T18cSameStoredTimestamp documents the stamp's
+// non-detection (attribution design 7.1): an older binary's update that
+// persists exactly the stamp's instant is not detected as stale. The event
+// output is then governed only by the run and generation checks of 4.1: an
+// unobserved run change still normalises to held/UNATTRIBUTED.
+func TestLifecycleAttribution_T18cSameStoredTimestamp(t *testing.T) {
+	f, a := stoppedAgent(t)
+	c, err := f.cs.client.AgentLifecycleCursor.Get(context.Background(), uuid.MustParse(a.ID))
+	require.NoError(t, err)
+	_, err = f.cs.client.AgentLifecycleCursor.UpdateOneID(c.ID).SetMetadataDigest(c.MetadataDigest).
+		SetUpdatedAt(*c.AttributionStamp).Save(context.Background())
+	require.NoError(t, err)
+	f.metaEdit(a.ID, "m-18c")
+	assert.Zero(t, f.counters.Get(telemetryemit.MetricAttributionStale, telemetryemit.AttributionStaleStamp), "not detected")
+	assert.Equal(t, store.AttributionClear, attrCursor(t, f, a.ID).State)
+
+	_, err = f.cs.client.Agent.UpdateOneID(uuid.MustParse(a.ID)).SetRunID("Z9").Save(context.Background())
+	require.NoError(t, err)
+	f.metaEdit(a.ID, "m-18c-2")
+	att := attrCursor(t, f, a.ID)
+	assert.Equal(t, store.AttributionHeld, att.State, "the run check still catches the unobserved change")
+	assert.Equal(t, "Z9", att.LastRun)
+	assert.Empty(t, f.events(a.ID)[len(f.events(a.ID))-1].LaunchID)
+}
