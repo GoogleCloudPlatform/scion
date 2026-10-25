@@ -281,7 +281,7 @@ func TestProjectQuota_ObservedExitFreesSlot(t *testing.T) {
 	})
 }
 
-// R-3 (2c): a stopped report while a start-kind claim is held keeps the
+// A stopped report while a start-kind claim is held keeps the
 // project row: the start in flight owns the slot. Once the claim clears,
 // the claim-finish release frees it.
 func TestProjectQuota_StoppedReportUnderStartClaimKeepsSlot(t *testing.T) {
@@ -301,7 +301,7 @@ func TestProjectQuota_StoppedReportUnderStartClaimKeepsSlot(t *testing.T) {
 	assert.False(t, hasProjectRow(t, s, a.ID), "freed when the claim cleared")
 }
 
-// R-3 (2d): a stopped report for a run the row no longer has keeps the
+// A stopped report for a run the row no longer has keeps the
 // project row (ExpectedRunID).
 func TestProjectQuota_StoppedReportOfOldRunKeepsSlot(t *testing.T) {
 	srv, s := testServer(t)
@@ -324,7 +324,7 @@ func TestProjectQuota_StoppedReportOfOldRunKeepsSlot(t *testing.T) {
 
 // --- Admission -------------------------------------------------------------
 
-// C1: resuming a suspended agent re-checks the project limit; at a full
+// Resuming a suspended agent re-checks the project limit; at a full
 // project it is refused with the project message and nothing is dispatched.
 func TestProjectQuota_ResumeAtFullProjectRefused(t *testing.T) {
 	srv, s := testServer(t)
@@ -351,7 +351,7 @@ func TestProjectQuota_ResumeAtFullProjectRefused(t *testing.T) {
 	assert.True(t, hasProjectRow(t, s, cand.ID))
 }
 
-// C1: restarting a stopped agent at a full project is refused before
+// Restarting a stopped agent at a full project is refused before
 // anything happens: no stop or start dispatch, phase and run intent
 // unchanged.
 func TestProjectQuota_RestartStoppedAtFullProjectRefused(t *testing.T) {
@@ -392,7 +392,7 @@ func TestProjectQuota_RestartRunningAtFullProjectSucceeds(t *testing.T) {
 	assert.EqualValues(t, 1, projectRowCount(t, s, project.ID))
 }
 
-// C1: a DM wake of a suspended agent at a full project is refused with the
+// A DM wake of a suspended agent at a full project is refused with the
 // project message and no resume dispatch.
 func TestProjectQuota_WakeAtFullProjectRefused(t *testing.T) {
 	srv, s := testServer(t)
@@ -413,7 +413,7 @@ func TestProjectQuota_WakeAtFullProjectRefused(t *testing.T) {
 	assert.False(t, hasProjectRow(t, s, target.ID))
 }
 
-// P2: the project total is shared by every creator. With a cap of 1, one
+// The project total is shared by every creator. With a cap of 1, one
 // creator's running agent refuses another creator's create and resume;
 // once it stops, the other creator's resume is admitted.
 func TestProjectQuota_TotalIsSharedByEveryCreator(t *testing.T) {
@@ -438,7 +438,7 @@ func TestProjectQuota_TotalIsSharedByEveryCreator(t *testing.T) {
 	assert.True(t, hasProjectRow(t, s, b.ID))
 }
 
-// R-CAP (7b): the shared total is compared against the creator's own
+// The shared total is compared against the creator's own
 // resolved cap, so two creators with different caps get different answers
 // at the same total. An agent created by another agent is judged on that
 // agent's cap (the default here), not on a user's raise.
@@ -480,7 +480,7 @@ func TestProjectQuota_CreatorCapDecidesAtSameTotal(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
-// R-CAP (7c): a user who resumes another user's agent is judged on the
+// A user who resumes another user's agent is judged on the
 // agent creator's cap, not on their own. The dev user (no binding) resumes
 // A's agent (A's cap 10) at a total of 5 and is admitted; resuming B's agent
 // (B on the default 5) at a total of 6 is refused.
@@ -504,7 +504,7 @@ func TestProjectQuota_OtherUserResumeJudgedOnCreatorCap(t *testing.T) {
 	assertProjectQuotaExceeded(t, rec, project.ID, 6, 5)
 }
 
-// RQ2-1 (7d): an agent whose creator has no cap is still recorded, so it
+// An agent whose creator has no cap is still recorded, so it
 // counts in the shared total a capped creator is checked against.
 func TestProjectQuota_UncappedCreatorStillCounted(t *testing.T) {
 	srv, s := testServer(t)
@@ -566,7 +566,7 @@ func TestProjectQuota_StartRollbackAndOrder(t *testing.T) {
 	})
 }
 
-// RQ-2 (3b): a restart of a stopped agent whose start leg has an unknown
+// A restart of a stopped agent whose start leg has an unknown
 // outcome keeps the project row its hold created, as it keeps the broker
 // row; the reaper's release then frees both once nothing is seen running.
 func TestProjectQuota_AmbiguousRestartKeepsProjectRow(t *testing.T) {
@@ -587,7 +587,7 @@ func TestProjectQuota_AmbiguousRestartKeepsProjectRow(t *testing.T) {
 	assert.False(t, hasProjectRow(t, f.s, a.ID), "the project slot frees at the reaper's release")
 }
 
-// --- Idle releases at the claim-end sites (R-2) ------------------------------
+// --- Idle releases at the claim-end sites -----------------------------------
 
 // Every claim-end site frees an idle agent's project slot, beside the
 // broker slot: the launch report, the reaper's unconfirmed release, the
@@ -664,7 +664,7 @@ func TestProjectQuota_IdleReleaseAtClaimEndSites(t *testing.T) {
 	})
 }
 
-// RQ-5, RQ2-3, CN3-5 (10c): the idle release keeps a stop_queued agent's
+// The idle release keeps a stop_queued agent's
 // project row (NotCounted). The row is seeded before the claim, and the
 // claim ends with a released outcome, so the claim-finish release runs;
 // control C, the same row without stop_queued, is released by it.
@@ -698,7 +698,7 @@ func TestProjectQuota_IdleReleaseKeepsStopQueuedAgent(t *testing.T) {
 	}
 }
 
-// --- Restart backstops (L6) --------------------------------------------------
+// --- Restart backstops -------------------------------------------------------
 
 // A project row released by an unguarded path during a restart is restored
 // by the re-assert after the stop leg (start_dispatch reassertReservation)
@@ -801,7 +801,7 @@ func TestProjectQuota_ScheduledReconcileRunsProjectPass(t *testing.T) {
 	assert.True(t, hasProjectRow(t, s, a.ID), "the project pass backfilled the running agent")
 }
 
-// --- Admin usage (L3) --------------------------------------------------------
+// --- Admin usage -------------------------------------------------------------
 
 // The admin usage summary and detail count project reservations at their
 // real scope.
@@ -871,7 +871,7 @@ func TestProjectQuota_AgentWithoutCreatorIsRecorded(t *testing.T) {
 // the agent create write (its delegation edge needs a creator), so this is
 // pinned at the QuotaService; TestProjectQuota_AgentWithoutCreatorIsRecorded
 // pins the start path.
-func TestProjectQuota_CreateWithoutCreatorRecordedUnderProject(t *testing.T) {
+func TestProjectQuota_ReserveWithoutCreatorRecordedUnderProject(t *testing.T) {
 	t.Run("reserve", func(t *testing.T) {
 		srv, s := testServer(t)
 		setProjectAgentCeiling(t, s, 2)
@@ -883,4 +883,57 @@ func TestProjectQuota_CreateWithoutCreatorRecordedUnderProject(t *testing.T) {
 		require.NotNil(t, held)
 		assert.Equal(t, projectID, held.SubjectID)
 	})
+}
+
+// The project total counts only that project's active reservations, every
+// creator included: rows of another project and a released row do not count.
+func TestProjectQuota_CountIsPerProject(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	setProjectAgentCeiling(t, s, 2)
+	defID := projectLimitDefID(t, s)
+	projectP, projectQ := tid("proj-count-p"), tid("proj-count-q")
+	record := func(project, subject, resource string) {
+		t.Helper()
+		_, err := s.CreateUsageReservation(ctx, &store.UsageReservation{
+			LimitDefinitionID: defID, SubjectID: subject, ScopeType: store.QuotaScopeProject,
+			ScopeID: project, ResourceID: resource, Reserved: 1,
+		})
+		require.NoError(t, err)
+	}
+	// Project P: one active row of creator A, and one released row of creator B.
+	record(projectP, tid("user-a"), tid("agent-count-p1"))
+	record(projectP, tid("user-b"), tid("agent-count-p2"))
+	require.NoError(t, s.ReleaseReservation(ctx, defID, tid("agent-count-p2")))
+	// Project Q: three active rows, over P's cap on their own.
+	for _, r := range []string{"q1", "q2", "q3"} {
+		record(projectQ, tid("user-q"), tid("agent-count-"+r))
+	}
+
+	created, err := srv.quotaService.Reserve(ctx, store.LimitMaxAgentsPerProject, tid("user-c"), store.QuotaScopeProject, projectP, tid("agent-count-p3"))
+	require.NoError(t, err, "P holds one active row: Q's rows and P's released row do not count")
+	assert.True(t, created)
+
+	_, err = srv.quotaService.Reserve(ctx, store.LimitMaxAgentsPerProject, tid("user-d"), store.QuotaScopeProject, projectP, tid("agent-count-p4"))
+	var exceeded *QuotaExceededError
+	require.ErrorAs(t, err, &exceeded, "P is now full with two active rows of two creators")
+	assert.EqualValues(t, 2, exceeded.Count)
+	assert.EqualValues(t, 2, exceeded.Max)
+	assert.Equal(t, projectP, exceeded.ScopeID)
+}
+
+// An exec answered agent_not_found marks a running agent's container missing
+// (phase error) and frees its project slot with the broker slot.
+func TestProjectQuota_ExecAgentNotFoundFreesSlot(t *testing.T) {
+	srv, s := testServer(t)
+	broker, project := newQuotaTestBrokerAndProject(t, s, "pq-exec-missing")
+	a := newCreatorAgent(t, s, broker, project, "pq-exec-missing", state.PhaseRunning, tid("user-a"))
+	seedSlot(t, s, broker.ID, a.ID)
+	seedProjectRow(t, s, a)
+
+	srv.reconcileExecAgentNotFound(context.Background(), getAgent(t, s, a.ID), time.Now())
+
+	require.Equal(t, string(state.PhaseError), getAgent(t, s, a.ID).Phase, "marked missing")
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID))
+	assert.False(t, hasProjectRow(t, s, a.ID), "the project slot is freed with the broker slot")
 }

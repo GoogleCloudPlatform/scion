@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -76,7 +77,12 @@ func TestProjectQuota_TwoHubReplicasPostgres_OneAdmission(t *testing.T) {
 		c, err := qsA.Reserve(ctx, store.LimitMaxAgentsPerProject, tid("user-a"), store.QuotaScopeProject, projectID, tid("agent-pg-a"))
 		first <- result{c, err}
 	}()
-	<-parked
+	select {
+	case <-parked:
+	case <-time.After(30 * time.Second):
+		close(release)
+		t.Fatal("replica A's admission did not reach its count")
+	}
 	require.EqualValues(t, 1, hookA.locksHeld.Load(), "replica A holds the advisory lock inside its count")
 
 	createdB, errB := qsB.Reserve(ctx, store.LimitMaxAgentsPerProject, tid("user-b"), store.QuotaScopeProject, projectID, tid("agent-pg-b"))

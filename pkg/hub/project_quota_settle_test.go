@@ -78,7 +78,7 @@ func TestProjectQuota_QueuedStopSettle_StartClaimKeepsSlot(t *testing.T) {
 	assert.True(t, hasProjectRow(t, sf.s, sf.agent.ID), "the start keeps its project slot")
 }
 
-// C-2 (9b): the settle's two backstop re-asserts restore a project row as
+// The settle's two backstop re-asserts restore a project row as
 // they restore the broker row: after a failed re-read, and after a start
 // superseded the queued stop during the release.
 func TestProjectQuota_SettleBackstopsRestoreRow(t *testing.T) {

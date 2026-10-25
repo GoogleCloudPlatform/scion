@@ -121,7 +121,7 @@ func TestProjectQuota_ReserveCountsUnderTheScopeLocks(t *testing.T) {
 }
 
 // T-race-admit: two admissions with one slot left, for different creators
-// (the P2 case) and for one creator. The first is held inside its count
+// (the project total is shared) and for one creator. The first is held inside its count
 // until the second has entered Reserve; exactly one is admitted, the other
 // is refused at the project total, and one row exists.
 func TestProjectQuota_ConcurrentAdmissionsOneSlot(t *testing.T) {

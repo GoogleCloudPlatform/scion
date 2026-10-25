@@ -191,7 +191,7 @@ func TestProjectQuota_ReincarnateRunningAtFullProjectAdmitted(t *testing.T) {
 	assert.True(t, hasProjectRow(t, s, a.ID))
 }
 
-// 16 (RQ-4): a claim that fails after the handler created both slots for a
+// A claim that fails after the handler created both slots for a
 // stopped agent (a version conflict) rolls both back.
 func TestProjectQuota_ReincarnateClaimConflictRollsBack(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
@@ -217,7 +217,7 @@ func TestProjectQuota_ReincarnateClaimConflictRollsBack(t *testing.T) {
 	assert.False(t, hasProjectRow(t, s, a.ID), "the created project slot is rolled back")
 }
 
-// 16a (CN-1): when the claim fails because a start holds the agent, the
+// When the claim fails because a start holds the agent, the
 // conditional rollback leaves the rows to that start; once its claim is
 // released with the agent idle, the claim-finish release frees them.
 func TestProjectQuota_ReincarnateClaimHeldLeavesRowsToTheStart(t *testing.T) {
@@ -237,7 +237,7 @@ func TestProjectQuota_ReincarnateClaimHeldLeavesRowsToTheStart(t *testing.T) {
 	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID))
 }
 
-// 16b (R-1(d), CN-2, CN3-2): after the stop step succeeded, a failure that
+// After the stop step succeeded, a failure that
 // leaves no container releases the rows the reincarnation created,
 // including one its own re-assert wrote; a stop-step failure releases
 // nothing; rows the agent held before are left to the normal rules.
@@ -304,7 +304,7 @@ func TestProjectQuota_ReincarnateFailureReleasesOwnedRows(t *testing.T) {
 	})
 }
 
-// 16c (RQ2-2, RQ3-1): two reincarnate requests X and Y on one stopped agent.
+// Two reincarnate requests X and Y on one stopped agent.
 // Y claims while X waits right before its claim, so X's claim fails with a
 // version conflict and X rolls back the rows it created, which Y relies on.
 // Y's worker re-asserts them after its stopping write. The order is fixed
@@ -328,7 +328,8 @@ func TestProjectQuota_ConcurrentReincarnateWinnerKeepsRows(t *testing.T) {
 
 	yParked := make(chan struct{})
 	releaseY := make(chan struct{})
-	var parkOnce sync.Once
+	var parkOnce, releaseYOnce sync.Once
+	openY := func() { releaseYOnce.Do(func() { close(releaseY) }) }
 	hook.onStopping = func() {
 		parkOnce.Do(func() {
 			close(yParked)
@@ -342,6 +343,9 @@ func TestProjectQuota_ConcurrentReincarnateWinnerKeepsRows(t *testing.T) {
 		yCode.Store(int32(reincarnateAsDev(t, srv, a.ID, ReincarnateAgentRequest{}).Code))
 	}
 	t.Cleanup(func() {
+		// Open both parking points, so a failed assertion never leaves Y's
+		// worker blocked and the settle wait cannot hang.
+		openY()
 		releaseStopOnce.Do(func() { close(releaseStop) })
 		waitForReincarnationSettled(t, s, a.ID)
 	})
@@ -361,7 +365,7 @@ func TestProjectQuota_ConcurrentReincarnateWinnerKeepsRows(t *testing.T) {
 	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID), "control: X released the broker row")
 	assert.False(t, hasProjectRow(t, s, a.ID), "control: X released the project row")
 
-	close(releaseY)
+	openY()
 	select {
 	case <-stopEntered:
 	case <-time.After(5 * time.Second):
@@ -387,7 +391,7 @@ func TestProjectQuota_ReincarnateMoveAtFullProjectRefused(t *testing.T) {
 	assert.False(t, hasProjectRow(t, f.s, f.agent.ID))
 }
 
-// 20 (R-L5 condition): a move whose target filled after the request was
+// A move whose target filled after the request was
 // accepted is refused when the worker moves the reservation
 // (moveBrokerQuota's existing cap check), and afterwards the stopped agent
 // holds no broker row (neither source nor target) and no project row.
