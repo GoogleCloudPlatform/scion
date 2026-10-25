@@ -17,7 +17,6 @@ package runtimebroker
 import (
 	"bytes"
 	"encoding/base64"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -205,31 +204,38 @@ func TestBrokerAuthBodyLimit_SmallAndEmptySignedRequestsVerify(t *testing.T) {
 	}
 }
 
-// A body of unknown length (ContentLength < 0) is not hashed by the
-// verifier, but the cap still bounds what the handler can read.
-func TestBrokerAuthBodyLimit_UnknownLengthBodyBounded(t *testing.T) {
+// A signed request of unknown length (ContentLength < 0) carrying an
+// over-cap body is refused before any of it is read and the handler does not
+// run. The cap installs its reader for such a body
+// (TestLimitSignedRequestBody_ReadsBoundedAtCap in pkg/apiclient covers that
+// reader directly); the refusal itself comes from the signed-body framing
+// check that follows the cap, so this test guards the composition of the
+// two, not the cap alone.
+func TestBrokerAuthBodyLimit_UnknownLengthBodyNotRead(t *testing.T) {
 	for name, wrap := range bodyLimitMiddlewares(false) {
 		t.Run(name, func(t *testing.T) {
 			body := &countingBody{size: 4 * apiclient.MaxSignedRequestBodyBytes}
-			var readErr error
+			nextCalled := false
 			h := wrap(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				_, readErr = io.Copy(io.Discard, r.Body)
+				nextCalled = true
+				_, _ = io.Copy(io.Discard, r.Body)
 			}))
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", nil)
 			req.ContentLength = -1
 			signBodyLimitRequest(req)
 			req.Body = body
 
-			h.ServeHTTP(httptest.NewRecorder(), req)
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
 
-			var mbe *http.MaxBytesError
-			if body.read > apiclient.MaxSignedRequestBodyBytes+1 {
-				t.Errorf("read %d body bytes, want at most %d", body.read, apiclient.MaxSignedRequestBodyBytes+1)
+			if rr.Code != http.StatusUnauthorized {
+				t.Errorf("status = %d, want 401; body %s", rr.Code, rr.Body.String())
 			}
-			// A test may run against a verifier that refuses an unknown
-			// length outright; then the handler never reads.
-			if readErr != nil && !errors.As(readErr, &mbe) {
-				t.Errorf("handler read error = %v, want a MaxBytesError", readErr)
+			if body.read != 0 {
+				t.Errorf("read %d body bytes, want 0", body.read)
+			}
+			if nextCalled {
+				t.Error("next handler called for a body of unknown length")
 			}
 		})
 	}
