@@ -87,9 +87,10 @@ func isDialFailure(err error) bool {
 // for tests (two relays over httptest).
 type PeerClient struct {
 	// HTTP performs internal RPCs and probes (nil: a hop client with the
-	// system roots). Build it with NewHopHTTPClient so it follows no
-	// redirect. Its Timeout must be zero or above the RPC cap; per-call
-	// deadlines come from the context.
+	// system roots). Whatever it is, it is used without redirects
+	// (hopClientWithoutRedirects); build it with NewHopHTTPClient. Its
+	// Timeout must be zero or above the RPC cap; per-call deadlines come
+	// from the context.
 	HTTP *http.Client
 	// WS dials internal stream WebSockets (nil: gorilla defaults).
 	WS *websocket.Dialer
@@ -120,7 +121,7 @@ func (c *PeerClient) closeWait() time.Duration {
 
 func (c *PeerClient) httpClient() *http.Client {
 	if c.HTTP != nil {
-		return c.HTTP
+		return hopClientWithoutRedirects(c.HTTP)
 	}
 	return defaultHopHTTPClient
 }

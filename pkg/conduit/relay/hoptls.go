@@ -180,15 +180,23 @@ func NewHopHTTPClient(tlsConfig *tls.Config) *http.Client {
 // plaintext included. No internal API redirects, so a 3xx is returned to
 // the caller as the answer, which treats it as a failure.
 func NewHopHTTPClientWithTimeout(tlsConfig *tls.Config, timeout time.Duration) *http.Client {
-	t := http.DefaultTransport.(*http.Transport).Clone()
-	if tlsConfig != nil {
-		t.TLSClientConfig = tlsConfig.Clone()
-	}
-	return &http.Client{Transport: t, Timeout: timeout, CheckRedirect: refuseHopRedirect}
+	return &http.Client{Transport: NewHopTransport(tlsConfig), Timeout: timeout, CheckRedirect: refuseHopRedirect}
 }
 
 // refuseHopRedirect is the CheckRedirect of every hop HTTP client.
 func refuseHopRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+// hopClientWithoutRedirects returns c as every hop request must use it: a
+// shallow copy whose CheckRedirect refuses every redirect, so an injected
+// client (PeerClient.HTTP, HubClient.HTTP, Config.HTTPClient, and the hub
+// and relay server options that feed them) cannot follow a redirect past
+// the internal hop rule either. The caller's client is never modified; its
+// transport, timeout and cookie jar are kept.
+func hopClientWithoutRedirects(c *http.Client) *http.Client {
+	cc := *c
+	cc.CheckRedirect = refuseHopRedirect
+	return &cc
+}
 
 // defaultHopHTTPClient is the hop client PeerClient and HubClient use when
 // none is set: the system roots, no timeout, no redirects.
@@ -198,7 +206,9 @@ var defaultHopHTTPClient = NewHopHTTPClientWithTimeout(nil, 0)
 // tlsConfig for https.
 func NewHopTransport(tlsConfig *tls.Config) *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone()
-	t.TLSClientConfig = tlsConfig.Clone()
+	if tlsConfig != nil {
+		t.TLSClientConfig = tlsConfig.Clone()
+	}
 	return t
 }
 

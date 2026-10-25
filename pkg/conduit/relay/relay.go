@@ -207,7 +207,8 @@ type Config struct {
 	PeerAuth PeerAuth
 	// HTTPClient performs the self-check probe and this relay's calls to
 	// other relays (default: NewHopHTTPClientWithTimeout(nil, 10s), the
-	// system roots and no redirects).
+	// system roots). A given client is used without redirects
+	// (hopClientWithoutRedirects); it is not modified.
 	HTTPClient *http.Client
 	// WSDialer dials internal stream hops to other relays (nil: gorilla
 	// defaults). With TLS on the internal hop it carries the hop client
@@ -435,6 +436,8 @@ func New(cfg Config) (*Relay, error) {
 	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = NewHopHTTPClientWithTimeout(nil, 10*time.Second)
+	} else {
+		cfg.HTTPClient = hopClientWithoutRedirects(cfg.HTTPClient)
 	}
 	return &Relay{
 		cfg:      cfg,

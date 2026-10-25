@@ -88,8 +88,9 @@ func (e *HubRefusal) Error() string {
 type HubClient struct {
 	// BaseURL is server.relay.hub_internal_url.
 	BaseURL string
-	// HTTP performs the calls (nil: a hop client with the system roots that
-	// follows no redirect, NewHopHTTPClientWithTimeout).
+	// HTTP performs the calls (nil: a hop client with the system roots,
+	// NewHopHTTPClientWithTimeout). Whatever it is, it is used without
+	// redirects (hopClientWithoutRedirects).
 	HTTP *http.Client
 	// Auth signs every call. Required.
 	Auth PeerAuth
@@ -149,9 +150,9 @@ func (c *HubClient) post(ctx context.Context, path string, body []byte) ([]byte,
 	if err := c.Auth.Sign(req); err != nil {
 		return nil, err
 	}
-	hc := c.HTTP
-	if hc == nil {
-		hc = defaultHopHTTPClient
+	hc := defaultHopHTTPClient
+	if c.HTTP != nil {
+		hc = hopClientWithoutRedirects(c.HTTP)
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
