@@ -113,6 +113,12 @@ type ServerConfigResponse struct {
 	// on this node. Present in both file-mode and DB-mode responses so the
 	// admin UI can show env-pinned fields regardless of settings tier.
 	EnvOverrides []string `json:"env_overrides,omitempty"`
+
+	// EnvValues maps each key in EnvOverrides to the value the environment
+	// gives it on this node (masked like the rest of the body; withheld when
+	// it cannot be shown safely) and whether the hub runs with that value.
+	// Additive: EnvOverrides is unchanged.
+	EnvValues map[string]EnvKeyValue `json:"env_values,omitempty"`
 }
 
 // ServerConfigUpdateRequest is the payload for updating settings.
@@ -377,7 +383,7 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 
 // handleGetServerConfig reads and returns the global settings.yaml.
 func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
-	resp, err := buildServerConfigFileResponse()
+	resp, err := buildServerConfigFileResponse(s.config.StartupServerSettings)
 	if err != nil {
 		var ue *serverConfigReadError
 		if errors.As(err, &ue) {
@@ -392,8 +398,10 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 
 // buildServerConfigFileResponse builds the file-mode GET
 // /api/v1/admin/server-config body (sensitive fields masked). The file-mode
-// PUT also uses it as the reference view for echo detection.
-func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
+// PUT also uses it as the reference view for echo detection. startup is
+// ServerConfig.StartupServerSettings (nil when unset), which env_values
+// compares environment values with for the keys start-up overrides.
+func buildServerConfigFileResponse(startup *config.V1ServerConfig) (*ServerConfigResponse, error) {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		return nil, &serverConfigReadError{"Failed to resolve settings directory", err}
@@ -415,6 +423,7 @@ func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 				sort.Strings(envOverrides)
 				resp.EnvOverrides = envOverrides
 			}
+			resp.EnvValues = fileTierEnvValues(envK, resp.EnvOverrides, startup, nil)
 			return &resp, nil
 		}
 		return nil, &serverConfigReadError{"Failed to read settings file", err}
@@ -425,73 +434,26 @@ func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 		return nil, &serverConfigReadError{"Failed to parse settings file", err}
 	}
 
+	// The stored values, for env_values' saved_differs (taken before the
+	// view below hides or masks anything; never returned).
+	stored := fileStoredValues(&vs)
+
 	// Mask sensitive fields before sending to the client
-	resp := ServerConfigResponse{
-		ScionVersion:         version.Short(),
-		ScionCommit:          version.GetCommit(),
-		ScionBuildTime:       version.GetBuildTime(),
-		SettingsTier:         "file",
-		SchemaVersion:        vs.SchemaVersion,
-		ActiveProfile:        vs.ActiveProfile,
-		DefaultTemplate:      vs.DefaultTemplate,
-		DefaultHarnessConfig: vs.DefaultHarnessConfig,
-		ImageRegistry:        vs.ImageRegistry,
-		WorkspacePath:        vs.WorkspacePath,
-		Server:               vs.Server,
-		Telemetry:            vs.Telemetry,
-		Runtimes:             vs.Runtimes,
-		HarnessConfigs:       vs.HarnessConfigs,
-		Profiles:             vs.Profiles,
-		DefaultMaxTurns:      vs.DefaultMaxTurns,
-		DefaultMaxModelCalls: vs.DefaultMaxModelCalls,
-		DefaultMaxDuration:   vs.DefaultMaxDuration,
-		DefaultResources:     vs.DefaultResources,
-		DefaultModel:         vs.DefaultModel,
-		DefaultThinkingLevel: vs.DefaultThinkingLevel,
-		DefaultMaxAgentRole:  vs.DefaultMaxAgentRole,
-		DefaultAgentRole:     vs.DefaultAgentRole,
-		DefaultRuntimeBroker: vs.DefaultRuntimeBroker,
-		DefaultTimezone:      vs.DefaultTimezone,
-		AutoInjectGcloudADC:  vs.AutoInjectGcloudADC,
-		AutoExposePorts:      vs.AutoExposePorts,
-		Quotas:               vs.Quotas,
-		AgentSecrets:         vs.AgentSecrets,
-
-		DefaultGCPIdentityMode:             vs.DefaultGCPIdentityMode,
-		DefaultGCPIdentityServiceAccountID: vs.DefaultGCPIdentityServiceAccountID,
-	}
-
-	// Populate top-level federation field from the server config.
-	if vs.Server != nil && vs.Server.Federation != nil {
-		resp.Federation = vs.Server.Federation
-	}
-	// server.hub.class, server.hub.test_identities and
-	// server.hub.gcp_project_id are never API-writable, so they are not
-	// shown either: a client that echoes this body back must not send them.
-	if resp.Server != nil && resp.Server.Hub != nil {
-		resp.Server.Hub.HubClass = ""
-		resp.Server.Hub.TestIdentities = nil
-		resp.Server.Hub.GCPProjectID = ""
-		// Nor is the relay-peer secret, which is never returned.
-		if c := resp.Server.Hub.Conduit; c != nil {
-			c.PeerSecret = ""
-		}
-	}
-	// Likewise the proxy driver settings (WS2).
-	hideNeverAPIWritableProxyKeys(resp.Server)
-	// And the server keyring file path (ptone/scion#1530).
-	if resp.Server != nil {
-		resp.Server.KeyringFile = ""
-		resp.Server.KeyringFileAllowWorldReadable = false
-	}
+	resp := serverConfigResponseFromSettings(&vs)
+	resp.ScionVersion = version.Short()
+	resp.ScionCommit = version.GetCommit()
+	resp.ScionBuildTime = version.GetBuildTime()
+	resp.SettingsTier = "file"
+	hideNeverShownServerKeys(resp.Server)
 
 	// Env overrides — detect SCION_SERVER_* env vars so the admin UI can
-	// show env-pinned fields in file mode too (H1).
+	// show env-pinned fields in file mode too (H1), with their values.
 	envK := config.LoadEnvKoanf()
 	if envOverrides := withoutNeverAPIWritableKeys(opsettings.DetectEnvOverrides(envK)); len(envOverrides) > 0 {
 		sort.Strings(envOverrides)
 		resp.EnvOverrides = envOverrides
 	}
+	resp.EnvValues = fileTierEnvValues(envK, resp.EnvOverrides, startup, stored)
 
 	maskSensitiveFields(&resp)
 	return &resp, nil
@@ -569,7 +531,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// dotted "server.hub.x" key) is rejected with 422 before anything is
 	// written, unless it echoes the GET view (ptone/scion#3463). A key
 	// inside server.broker.instances was already decoded strictly above.
-	if rejectUnknownFileConfigKeys(w, rawBody) {
+	if rejectUnknownFileConfigKeys(w, rawBody, s.config.StartupServerSettings) {
 		return
 	}
 	if rejectInvalidThinkingLevel(w, req.DefaultThinkingLevel) {

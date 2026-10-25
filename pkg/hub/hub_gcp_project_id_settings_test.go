@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -166,4 +167,49 @@ func TestNeverAPIWritable_EnvOverridesHideHubGCPProjectID(t *testing.T) {
 	assert.Equal(t, []string{"server.log_level"}, withoutNeverAPIWritableKeys([]string{
 		config.HubGCPProjectIDKey, "server.log_level",
 	}))
+}
+
+// envValuesOf decodes a server-config GET body's env_values map.
+func envValuesOf(t *testing.T, body []byte) map[string]json.RawMessage {
+	t.Helper()
+	var resp struct {
+		EnvValues map[string]json.RawMessage `json:"env_values"`
+	}
+	require.NoError(t, json.Unmarshal(body, &resp), string(body))
+	return resp.EnvValues
+}
+
+// TestNeverAPIWritable_EnvValuesHideHubGCPProjectID: GET's env_values (the
+// value each env-overridden key has in the environment) never carries
+// server.hub.gcp_project_id, in file and DB mode, while another env-set key
+// does appear (positive control), and the environment value is nowhere in
+// the body.
+func TestNeverAPIWritable_EnvValuesHideHubGCPProjectID(t *testing.T) {
+	const envSentinel = "hub-project-env-values-sentinel"
+	t.Setenv("SCION_SERVER_HUB_GCPPROJECTID", envSentinel)
+	t.Setenv("SCION_SERVER_LOGLEVEL", "warn")
+	require.Contains(t, opsettings.DetectEnvOverrides(config.LoadEnvKoanf()), config.HubGCPProjectIDKey,
+		"control: the environment variable sets server.hub.gcp_project_id")
+
+	writeHubGCPProjectSettings(t)
+	srv := &Server{}
+	fileRR := httptest.NewRecorder()
+	srv.handleGetServerConfig(fileRR)
+	require.Equal(t, http.StatusOK, fileRR.Code, fileRR.Body.String())
+	fileValues := envValuesOf(t, fileRR.Body.Bytes())
+	assert.Contains(t, fileValues, "server.log_level", "control: env_values lists another env-set key")
+	assert.NotContains(t, fileValues, config.HubGCPProjectIDKey)
+	assert.NotContains(t, fileRR.Body.String(), envSentinel)
+
+	db, st, _ := newSQLiteHubInMode(t, false, nil)
+	ops := NewOperationalSettings(st, emptyKoanf(), config.LoadEnvKoanf())
+	_, err := ops.Refresh(t.Context())
+	require.NoError(t, err)
+	dbRR := httptest.NewRecorder()
+	db.handleGetServerConfigDB(dbRR, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+	require.Equal(t, http.StatusOK, dbRR.Code, dbRR.Body.String())
+	dbValues := envValuesOf(t, dbRR.Body.Bytes())
+	assert.Contains(t, dbValues, "server.log_level", "control: env_values lists another env-set key")
+	assert.NotContains(t, dbValues, config.HubGCPProjectIDKey)
+	assert.NotContains(t, dbRR.Body.String(), envSentinel)
 }
