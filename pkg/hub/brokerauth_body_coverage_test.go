@@ -243,3 +243,70 @@ func TestValidateBrokerSignature_FramingRefusalLeavesNonceUnused(t *testing.T) {
 		})
 	}
 }
+
+// failingBody returns a few bytes and then a read error.
+type failingBody struct{ sent bool }
+
+func (f *failingBody) Read(p []byte) (int, error) {
+	if !f.sent {
+		f.sent = true
+		return copy(p, `{"part`), nil
+	}
+	return 0, io.ErrUnexpectedEOF
+}
+
+// Every hub signing path (broker HTTP transport, control channel, conduit)
+// signs through hmacBrokerSigner, which uses apiclient.HMACAuth.ApplyAuth.
+// A body that cannot be read is never signed, so no hub signature covers the
+// unreadable-body marker, and a request whose body read fails on the
+// verifier never matches a hub signature.
+func TestHMACBrokerSigner_NeverSignsUnreadableBody(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	auth := seedBodyCoverageBroker(t, s)
+	signer := &hmacBrokerSigner{store: s}
+	const url = "http://broker.test/api/v1/agents/a1/start"
+
+	cases := map[string]func(*http.Request){
+		"sized rewindable": func(r *http.Request) {
+			r.ContentLength = 100
+			r.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(&failingBody{}), nil }
+		},
+		"unsized": func(r *http.Request) { r.ContentLength = -1 },
+	}
+	for name, shape := range cases {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, url, nil)
+			req.Body = io.NopCloser(&failingBody{})
+			shape(req)
+			if err := signer.Sign(context.Background(), req, auth.BrokerID); err == nil {
+				t.Fatal("hub signer signed a request whose body could not be read")
+			}
+			if req.Header.Get(HeaderSignature) != "" {
+				t.Fatal("a signature was set")
+			}
+		})
+	}
+
+	// A real hub signature, over no body or over a body, does not verify a
+	// request whose body read fails on the verifier.
+	for _, body := range []string{"", `{"a":1}`} {
+		var rd io.Reader
+		if body != "" {
+			rd = strings.NewReader(body)
+		}
+		signed, err := http.NewRequest(http.MethodPost, url, rd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := signer.Sign(context.Background(), signed, auth.BrokerID); err != nil {
+			t.Fatal(err)
+		}
+		failing := httptest.NewRequest(http.MethodPost, url, nil)
+		failing.Header = signed.Header.Clone()
+		failing.Body = io.NopCloser(&failingBody{})
+		failing.ContentLength = 100
+		if _, err := svc.ValidateBrokerSignature(context.Background(), failing); !errors.Is(err, errBrokerAuthInvalidSignature) {
+			t.Fatalf("body %q: err = %v, want invalid signature", body, err)
+		}
+	}
+}

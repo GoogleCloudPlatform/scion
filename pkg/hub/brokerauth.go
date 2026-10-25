@@ -1058,33 +1058,6 @@ func (s *BrokerAuthService) buildCanonicalString(r *http.Request, timestamp, non
 	return apiclient.BuildCanonicalString(r, timestamp, nonce)
 }
 
-// SignRequest signs an outgoing HTTP request with HMAC.
-// Used by Runtime Brokers when calling the Hub API.
-func (s *BrokerAuthService) SignRequest(r *http.Request, brokerID string, secret []byte) error {
-	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
-
-	// Generate nonce
-	nonceBytes := make([]byte, 16)
-	if _, err := rand.Read(nonceBytes); err != nil {
-		return fmt.Errorf("failed to generate nonce: %w", err)
-	}
-	nonce := base64.URLEncoding.EncodeToString(nonceBytes)
-
-	// Set headers
-	r.Header.Set(HeaderBrokerID, brokerID)
-	r.Header.Set(HeaderTimestamp, timestamp)
-	r.Header.Set(HeaderNonce, nonce)
-
-	// Build canonical string and compute signature
-	canonicalString := s.buildCanonicalString(r, timestamp, nonce)
-	sig := computeHMAC(secret, canonicalString)
-	sigB64 := base64.StdEncoding.EncodeToString(sig)
-
-	r.Header.Set(HeaderSignature, sigB64)
-
-	return nil
-}
-
 // =============================================================================
 // Secret Rotation
 // =============================================================================
