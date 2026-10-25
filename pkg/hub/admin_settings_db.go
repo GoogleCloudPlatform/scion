@@ -189,6 +189,10 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 		}
 	}
 
+	// The settings.yaml values, for env_values' saved_differs (taken before
+	// the response below shares and changes vs.Server; never returned).
+	fileStored := fileStoredValues(&vs)
+
 	// Start with file-based response for Layer-0 fields.
 	resp := ServerConfigDBResponse{
 		ServerConfigResponse: ServerConfigResponse{
@@ -226,22 +230,10 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	iam := s.currentGCPIAMSettings()
 	resp.Server.Hub.GCPIAMCheckMode = iam.CheckMode
 	resp.Server.Hub.GCPIAMDenyUnknownPolicy = iam.denyUnknownPolicy()
-	// server.hub.class and server.hub.test_identities are never
-	// API-writable, so they are not shown either: a client that echoes
-	// this body back must not send them.
-	resp.Server.Hub.HubClass = ""
-	resp.Server.Hub.TestIdentities = nil
-	// Nor is the relay-peer secret, which is never returned.
-	if c := resp.Server.Hub.Conduit; c != nil {
-		c.PeerSecret = ""
-	}
-	// Likewise the proxy driver settings (WS2).
-	hideNeverAPIWritableProxyKeys(resp.Server)
-	// And the server keyring file path (ptone/scion#1530).
-	if resp.Server != nil {
-		resp.Server.KeyringFile = ""
-		resp.Server.KeyringFileAllowWorldReadable = false
-	}
+	// The keys GET never returns: the hub class, test identities, the
+	// relay-peer secret, the proxy driver settings (WS2) and the server
+	// keyring file path (ptone/scion#1530).
+	hideNeverShownServerKeys(resp.Server)
 
 	// Build section metadata from the cache.
 	resp.SectionMeta = s.buildSectionMetadata(ctx, ops)
@@ -269,6 +261,12 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	// (ptone/scion#5113): the overlay-level set, read-only.
 	if overlay, _, _ := s.profileRefs.target(); overlay != nil {
 		resp.RetainedBuiltinProfiles, resp.RetainedBuiltinRuntimes = overlay.RetainedState()
+	}
+
+	// The environment values of the overridden keys and whether each is in
+	// effect, compared with the unmasked view built above.
+	if ops.envKoanf != nil {
+		resp.EnvValues = s.dbTierEnvValues(ops.envKoanf, resp.EnvOverrides, &resp.ServerConfigResponse, dbStoredValues(fileStored, ops))
 	}
 
 	// Mask sensitive fields — same logic as file mode.
@@ -530,6 +528,12 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 
 		var superseded []SupersededKey
 		for key, bootstrapVal := range bootstrapMap {
+			if koanfPath := opsettings.KoanfPathFromSectionKey(sec.Name, key); startupOnlyLayer1Keys[koanfPath] != nil {
+				// The hub does not apply the saved value of this key, so it
+				// supersedes nothing: the startup value stays in effect
+				// (ptone/scion#6000).
+				continue
+			}
 			if sec.Name == "endpoints" && key == "public_url" && publicURLPinned {
 				// An operator setting pins the endpoint on this node, so
 				// the database value does not supersede it; the field's
