@@ -319,7 +319,9 @@ func TestHopRelayInjectedClientFollowsNoRedirect(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(target.Close)
+	var peerHits atomic.Int32
 	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		peerHits.Add(1)
 		http.Redirect(w, r, target.URL+"/x", http.StatusTemporaryRedirect)
 	}))
 	t.Cleanup(peer.Close)
@@ -330,6 +332,10 @@ func TestHopRelayInjectedClientFollowsNoRedirect(t *testing.T) {
 	defer cancel()
 	if _, err := n.Relay.PeerClient().Probe(ctx, peer.URL, "relay-x", 1); err == nil {
 		t.Fatal("Probe through a redirect succeeded")
+	}
+	// The peer must have answered the probe, or the test proves nothing.
+	if got := peerHits.Load(); got != 1 {
+		t.Fatalf("the redirecting peer received %d requests, want 1", got)
 	}
 	if got := targetHits.Load(); got != 0 {
 		t.Fatalf("the redirect target received %d requests through relay.New's client; want none", got)

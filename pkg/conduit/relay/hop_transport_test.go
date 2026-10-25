@@ -211,16 +211,18 @@ func hopSources(t *testing.T) map[string]string {
 }
 
 // TestHopSourcesBuildHTTPClientsThroughTheHelper: no relay internal hop
-// source builds an HTTP client inline or uses http.DefaultClient; every
-// hop client comes from NewHopHTTPClientWithTimeout (hoptls.go), which
-// follows no redirect. A call site that goes back to &http.Client{...}
-// fails here.
+// source builds an HTTP client inline or uses the default client, directly
+// or through the package helpers; every hop client comes from
+// NewHopHTTPClientWithTimeout (hoptls.go), which follows no redirect. A
+// call site that goes back to &http.Client{...}, new(http.Client),
+// http.DefaultClient or http.Get/Post/Head/PostForm fails here.
 func TestHopSourcesBuildHTTPClientsThroughTheHelper(t *testing.T) {
 	for f, src := range hopSources(t) {
 		if filepath.Base(f) == "hoptls.go" && strings.Contains(f, filepath.Join("conduit", "relay")) {
 			continue
 		}
-		for _, banned := range []string{"http.Client{", "http.DefaultClient"} {
+		for _, banned := range []string{"http.Client{", "new(http.Client)", "http.DefaultClient",
+			"http.Get(", "http.Post(", "http.Head(", "http.PostForm("} {
 			if strings.Contains(src, banned) {
 				t.Errorf("%s uses %s: build relay hop HTTP clients with relay.NewHopHTTPClientWithTimeout", f, banned)
 			}
@@ -312,13 +314,17 @@ func TestHopDefaultClientsFollowNoRedirect(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(target.Close)
-	peer, _ := redirectingPeer(t, http.StatusTemporaryRedirect, target.URL+"/x")
+	peer, hits := redirectingPeer(t, http.StatusTemporaryRedirect, target.URL+"/x")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	pc := &relay.PeerClient{Auth: testPeerAuth(t, "relay-b")}
 	_, _ = pc.Probe(ctx, peer.URL, "relay-a", 1)
 	hub := &relay.HubClient{BaseURL: peer.URL, Auth: testPeerAuth(t, "relay-a")}
 	_ = hub.Call(ctx, "/internal/v1/hub/admit", map[string]string{"k": "v"}, nil)
+	// The peer must have answered both calls, or the test proves nothing.
+	if n := hits.Load(); n != 2 {
+		t.Fatalf("the redirecting peer received %d requests, want 2", n)
+	}
 	if n := targetHits.Load(); n != 0 {
 		t.Fatalf("the redirect target received %d requests through the default hop clients; want none", n)
 	}
