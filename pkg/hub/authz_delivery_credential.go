@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -70,6 +71,48 @@ type hubDeliveryIdentity struct {
 	// source for stage-2 ancestry attestation and the progeny candidate,
 	// instead of this type's own (always non-attested) identity.
 	evidence *storedAgentIdentity
+	// admission, when set, memoizes the step-10 admission walk per
+	// permission for the life of this credential (hubDeliveryAdmission).
+	// It is hub-internal state, not request data. Only launch selection
+	// sets it (deliverySelector.mint), on a credential it mints for one
+	// start or restart and then drops; a credential without it re-runs the
+	// walk on every decision.
+	admission *hubDeliveryAdmissionMemo
+}
+
+// hubDeliveryAdmissionMemo holds the outcome of hubDeliveryAdmission's
+// chain walk and provenance-root admission, per permission, for one
+// delivery credential. The outcome depends only on the bound agent, the
+// credential's project and the permission, not on the item, so every
+// item a launch selection decides under one permission shares it. An
+// allow and a deny (including a fail-closed lookup error) are both kept,
+// so a selection judges every item against one reading of the chain.
+type hubDeliveryAdmissionMemo struct {
+	mu       sync.Mutex
+	outcomes map[string]hubDeliveryAdmissionOutcome
+}
+
+type hubDeliveryAdmissionOutcome struct {
+	ok     bool
+	reason string
+	cause  DenyCause
+}
+
+func newHubDeliveryAdmissionMemo() *hubDeliveryAdmissionMemo {
+	return &hubDeliveryAdmissionMemo{outcomes: make(map[string]hubDeliveryAdmissionOutcome)}
+}
+
+func (m *hubDeliveryAdmissionMemo) load(permissionID string) (hubDeliveryAdmissionOutcome, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	o, ok := m.outcomes[permissionID]
+	return o, ok
+}
+
+func (m *hubDeliveryAdmissionMemo) save(permissionID string, o hubDeliveryAdmissionOutcome) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.outcomes[permissionID] = o
 }
 
 // Compile-time interface assertion.
@@ -271,20 +314,63 @@ func (a *AuthzService) hubDeliveryAdmission(
 		return deny("delivery resource is in a different project", DenyCauseCeilingProvenanceMissing)
 	}
 
-	if ok, reason, c := a.hubDeliveryChainWalk(ctx, agentID, h.projectID, permissionID, explain); !ok {
-		if cause != nil {
-			*cause = c
+	// The walk and the root admission do not depend on the resource, so a
+	// credential carrying a memo (launch selection) runs them once per
+	// permission. An explained decision always runs them, so its trace
+	// carries every step.
+	memo := h.admission
+	if explain != nil {
+		memo = nil
+	}
+	var o hubDeliveryAdmissionOutcome
+	cached := false
+	if memo != nil {
+		o, cached = memo.load(permissionID)
+	}
+	if !cached {
+		o = a.hubDeliveryChainAdmission(ctx, h, permissionID, agentID, explain)
+		if memo != nil {
+			memo.save(permissionID, o)
 		}
-		return false, reason, nil
+	}
+	if !o.ok {
+		if cause != nil {
+			*cause = o.cause
+		}
+		return false, o.reason, nil
+	}
+	return true, o.reason, nil
+}
+
+// hubDeliveryChainAdmission runs hubDeliveryChainWalk and then
+// ResolveProvenanceRoot for the target, as described on
+// hubDeliveryAdmission, and returns the outcome.
+func (a *AuthzService) hubDeliveryChainAdmission(
+	ctx context.Context,
+	h *hubDeliveryIdentity,
+	permissionID string,
+	agentID string,
+	explain *[]DecisionStep,
+) hubDeliveryAdmissionOutcome {
+	addStep := func(step, detail string) {
+		if explain != nil {
+			*explain = append(*explain, DecisionStep{Step: step, Detail: detail})
+		}
+	}
+
+	if ok, reason, c := a.hubDeliveryChainWalk(ctx, agentID, h.projectID, permissionID, explain); !ok {
+		return hubDeliveryAdmissionOutcome{reason: reason, cause: c}
 	}
 
 	root, err := a.ResolveProvenanceRoot(ctx, agentID, ResolveProvenanceOptions{PermissionID: permissionID})
 	if err != nil {
 		c := DenyCauseForProvenanceError(err)
+		reason := "delivery provenance root denied: " + err.Error()
 		if c == DenyCauseCeilingError {
-			return deny("delivery ceiling check failed (fail-closed): "+err.Error(), c)
+			reason = "delivery ceiling check failed (fail-closed): " + err.Error()
 		}
-		return deny("delivery provenance root denied: "+err.Error(), c)
+		addStep("delegation_ceiling_delivery_denied", reason)
+		return hubDeliveryAdmissionOutcome{reason: reason, cause: c}
 	}
 	// ResolveProvenanceRoot evaluates admission against the stored agent's
 	// project, the scope of the target's own edge (root.Edge.ScopeID). The
@@ -292,7 +378,7 @@ func (a *AuthzService) hubDeliveryAdmission(
 	// shows what was evaluated even if the two ever differed.
 	addStep("delegation_ceiling_delivery_root",
 		fmt.Sprintf("root user %s admitted to project %s for %s", root.RootUser.ID, root.Edge.ScopeID, permissionID))
-	return true, "delivery ceiling passed", nil
+	return hubDeliveryAdmissionOutcome{ok: true, reason: "delivery ceiling passed"}
 }
 
 // hdDelegatorLiveness is one hop's delegator state, as seen by

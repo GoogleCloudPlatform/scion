@@ -73,10 +73,11 @@ func newDeliverySelector(authz *AuthzService, agent *store.Agent, purpose Materi
 	return &deliverySelector{authz: authz, agent: agent, purpose: purpose}
 }
 
-// mint builds the delivery credential from the stored agent, once. It fails
-// when there is no authorization service, when the stored agent is missing,
-// deleted or has no project, or when the stored agent's project differs
-// from the copy being started.
+// mint builds the delivery credential from the stored agent, once, with an
+// admission memo so the items of this selection share one admission walk
+// per permission. It fails when there is no authorization service, when
+// the stored agent is missing, deleted or has no project, or when the
+// stored agent's project differs from the copy being started.
 func (s *deliverySelector) mint(ctx context.Context) error {
 	if s.ident != nil {
 		return nil
@@ -94,6 +95,10 @@ func (s *deliverySelector) mint(ctx context.Context) error {
 	if h.projectID != s.agent.ProjectID {
 		return fmt.Errorf("material delivery: agent %s project changed", s.agent.ID)
 	}
+	// One selection judges all its items against one admission walk per
+	// permission (hubDeliveryAdmissionMemo); the credential, and so the
+	// memo, is dropped with the selector.
+	h.admission = newHubDeliveryAdmissionMemo()
 	s.ident = h
 	return nil
 }
@@ -222,8 +227,14 @@ type secretDeliveryCandidate struct {
 //   - owner user-scope secrets are listed by metadata and kept, and progeny
 //     secrets keep the agent's own progeny decision, as resolveSecrets;
 //   - values are fetched only for the kept secrets, by recorded metadata,
-//     after every authorization; an item whose fetch fails is skipped, as
+//     after every authorization, and not for a scope the test-admin
+//     restriction withholds; an item whose fetch fails is skipped, as
 //     Resolve skipped it;
+//   - each delivered secret's Ref is the external reference the backend
+//     read its value from (FetchResult.Ref), in the form Resolve reported:
+//     for Secret Manager, the projects/<p>/secrets/<name> resource path
+//     brokers mount, including the computed name for a record with no
+//     stored ref;
 //   - precedence: a higher scope's secret replaces a lower scope's secret
 //     of the same name, a progeny secret fills only names no scope set,
 //     then the highest scope wins per type and target.
@@ -296,27 +307,51 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 		return nil, nil
 	}
 
-	metas := make([]secret.SecretMeta, len(kept))
-	for i, c := range kept {
-		metas[i] = c.meta
+	// The test-admin scope restriction is decided before the fetch, so no
+	// value is read for a scope it withholds. A withheld item is still
+	// placed in precedence below, without a value: as when it was fetched
+	// and dropped afterwards, it outranks a lower-scope item of the same
+	// name or target, and the restriction then drops it. The one
+	// difference is fail-closed: a withheld item whose value could not
+	// have been read still outranks that lower-scope item.
+	restricted, allowedScopes, testAdminRoot := d.testAdminRootScopes(ctx, agent)
+	withheld := func(scope string) bool { return restricted && !allowedScopes[scope] }
+
+	metas := make([]secret.SecretMeta, 0, len(kept))
+	for _, c := range kept {
+		if withheld(c.meta.Scope) {
+			continue
+		}
+		metas = append(metas, c.meta)
 	}
-	values, err := d.secretBackend.FetchValues(ctx, metas)
-	if err != nil {
-		return nil, err
+	var values map[string]secret.FetchResult
+	if len(metas) > 0 {
+		var err error
+		values, err = d.secretBackend.FetchValues(ctx, metas)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	merged := make(map[string]secret.SecretWithValue)
 	for _, c := range kept {
-		r, ok := values[c.meta.ID]
-		if !ok || r.Err != nil {
-			continue
+		sv := secret.SecretWithValue{SecretMeta: c.meta}
+		if !withheld(c.meta.Scope) {
+			r, ok := values[c.meta.ID]
+			if !ok || r.Err != nil {
+				continue
+			}
+			sv.Value = r.Value
+			// The backend's external reference for the value it read, in
+			// the form Resolve reported (for Secret Manager, the resource
+			// path brokers mount, never the stored "gcpsm:" form).
+			sv.SecretRef = r.Ref
 		}
 		if c.progeny {
 			if _, exists := merged[c.meta.Name]; exists {
 				continue
 			}
 		}
-		sv := secret.SecretWithValue{SecretMeta: c.meta, Value: r.Value}
 		if sv.SecretType == "" {
 			sv.SecretType = store.SecretTypeEnvironment
 		}
@@ -335,10 +370,15 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 		resolved = append(resolved, merged[n])
 	}
 	resolved = secret.DeduplicateByTarget(resolved)
-	resolved = d.restrictTestAdminRootedSecrets(ctx, agent, resolved)
+	resolved = d.applyTestAdminSecretScopes(ctx, agent, resolved, restricted, allowedScopes, testAdminRoot)
 
 	result := make([]ResolvedSecret, 0, len(resolved))
 	for _, sv := range resolved {
+		// applyTestAdminSecretScopes has dropped every withheld item; this
+		// keeps an unfetched one from ever being delivered.
+		if withheld(sv.Scope) {
+			continue
+		}
 		if (sv.SecretType == store.SecretTypeEnvironment || sv.SecretType == "") && secret.IsReservedEnvTarget(sv.Target) {
 			continue
 		}

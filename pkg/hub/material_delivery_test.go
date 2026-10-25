@@ -948,7 +948,7 @@ func TestDeliveryProbe_AuthorizesStoredAgent(t *testing.T) {
 }
 
 // =============================================================================
-// Exposure of the step-10 trace (review carry-forward G6)
+// Exposure of the step-10 trace
 // =============================================================================
 
 // TestDeliveryAuthzRequest_NeverExplains pins that launch selection never
@@ -1009,4 +1009,453 @@ func TestMaterialDeliveryResource_Shape(t *testing.T) {
 	assert.False(t, ok, "user scope has no association grant")
 	assert.Equal(t, MaterialKindSecret, envVarDeliveryKind(store.EnvVar{Secret: true}))
 	assert.Equal(t, MaterialKindEnvVar, envVarDeliveryKind(store.EnvVar{}))
+}
+
+// =============================================================================
+// Secret reference format and selection cost
+// =============================================================================
+
+// TestDispatchDelivery_GCPSecretRefMatchesResolve: with the GCP Secret
+// Manager backend, start and restart selection hands the broker the same
+// secrets, field for field, that the Resolve path (still used at create)
+// does. In particular Ref is the bare Secret Manager resource path, which
+// a Kubernetes broker mounts as <ref>/versions/latest, for a record with a
+// stored gcpsm: ref, with no stored ref (legacy), and with a stored ref that
+// lacks the gcpsm: prefix; the last two resolve by the computed name.
+func TestDispatchDelivery_GCPSecretRefMatchesResolve(t *testing.T) {
+	m := newLDFixture(t, "gcp-ref", ldOptions{})
+	ctx := context.Background()
+	const smProject = "md-gcp-project"
+	smPrefix := "projects/" + smProject + "/secrets/"
+	gcp := secret.NewGCPBackendWithClient(m.store, newCopyForwardMockSMClient(), smProject, m.hubID)
+	m.d.SetSecretBackend(gcp)
+
+	// set stores a file secret through the GCP backend and returns its
+	// record as written, with the gcpsm: ref Set records.
+	set := func(name, scope string) *store.Secret {
+		_, meta, err := gcp.Set(ctx, &secret.SetSecretInput{
+			Name: name, Value: "v-" + name, SecretType: store.SecretTypeFile, Target: "/etc/md/" + strings.ToLower(name),
+			Scope: scope, ScopeID: m.scopeID(scope), InjectionMode: store.InjectionModeAlways, CreatedBy: m.projectOwnerID,
+		})
+		require.NoError(t, err)
+		require.True(t, strings.HasPrefix(meta.SecretRef, "gcpsm:"+smPrefix), "stored ref %q", meta.SecretRef)
+		rec, err := m.store.GetSecret(ctx, name, scope, m.scopeID(scope))
+		require.NoError(t, err)
+		return rec
+	}
+	repoint := func(rec *store.Secret, ref string) {
+		applied, err := m.store.UpdateSecretRefIfMatches(ctx, rec.Key, rec.Scope, rec.ScopeID, rec.SecretRef, rec.Version, ref)
+		require.NoError(t, err)
+		require.True(t, applied)
+	}
+	project := set("MD_GCP_PREFIXED", store.ScopeProject)
+	hub := set("MD_GCP_LEGACY_EMPTY", store.ScopeHub)
+	repoint(hub, "")
+	broker := set("MD_GCP_UNPREFIXED", store.ScopeRuntimeBroker)
+	repoint(broker, smPrefix+"unprefixed-ref")
+	user := set("MD_GCP_USER", store.ScopeUser)
+
+	// Set places each value under the computed (hub-prefixed) name, so the
+	// expected Ref is the original stored ref without its prefix in every
+	// case: directly for a gcpsm: ref, by the computed name otherwise.
+	want := map[string]string{}
+	for _, rec := range []*store.Secret{project, hub, broker, user} {
+		want[rec.Key] = strings.TrimPrefix(rec.SecretRef, "gcpsm:")
+	}
+
+	got, err := m.d.selectDeliverySecrets(ctx, newDeliverySelector(m.authz, m.agent, PurposeRestart), m.agent)
+	require.NoError(t, err)
+	old, _, err := m.d.resolveSecrets(ctx, m.agent)
+	require.NoError(t, err)
+	require.Len(t, got, len(want))
+	assert.ElementsMatch(t, old, got, "start/restart selection delivers what Resolve delivered: Name, Type, Target, Value, Source and Ref")
+	for _, s := range got {
+		assert.Equal(t, want[s.Name], s.Ref, "ref of %s", s.Name)
+		assert.False(t, strings.HasPrefix(s.Ref, "gcpsm:"), "ref of %s is the stored form %q", s.Name, s.Ref)
+		assert.Equal(t, store.SecretTypeFile, s.Type, s.Name)
+		assert.Equal(t, "v-"+s.Name, s.Value, s.Name)
+	}
+
+	// End to end: the restart request to the broker carries the same refs.
+	require.NoError(t, m.d.DispatchAgentRestart(ctx, m.agent))
+	require.True(t, m.client.restartCalled)
+	sent := map[string]string{}
+	for _, s := range m.client.lastRestartExtras.ResolvedSecrets {
+		sent[s.Name] = s.Ref
+	}
+	for name, ref := range want {
+		assert.Equal(t, ref, sent[name], "restart ref of %s", name)
+	}
+}
+
+// TestDeliverySelector_AdmissionWalkOncePerPermission: within one
+// selection, the step-10 admission walk runs once per permission and its
+// outcome is shared by every item decided under that permission; a
+// decision with Explain set always runs the walk, so its trace is whole.
+func TestDeliverySelector_AdmissionWalkOncePerPermission(t *testing.T) {
+	m := newLDFixture(t, "memo", ldOptions{})
+	ctx := context.Background()
+	var metas []secret.SecretMeta
+	for _, scope := range []string{store.ScopeProject, store.ScopeHub, store.ScopeRuntimeBroker} {
+		metas = append(metas, m.secret(t, "MD_MEMO_"+strings.ToUpper(scope), "v", store.SecretTypeEnvironment, scope, m.scopeID(scope)))
+	}
+	ev := m.env(t, "MD_MEMO_ENV", "e", store.ScopeProject, m.agent.ProjectID, false)
+
+	var log []string
+	hdWithStore(t, m.authz, &ldOrderStore{Store: m.store, target: m.agent.ID, log: &log})
+	edgeReads := func(run func()) int {
+		log = log[:0]
+		run()
+		n := 0
+		for _, e := range log {
+			if e == "edges" {
+				n++
+			}
+		}
+		return n
+	}
+	resFor := func(sm secret.SecretMeta) Resource {
+		grant, ok := grantForDeliveryScope(sm.Scope)
+		require.True(t, ok)
+		return materialDeliveryResource(MaterialKindSecret, materialRecordSecret, sm.ID, sm.Name, sm.Scope, m.scopeID(sm.Scope), m.agent.ID, grant, PurposeRestart)
+	}
+
+	// Control: a credential without a memo walks for every item.
+	plain := edgeReads(func() {
+		h := hdIdentity(t, m.authz, m.agent.ID)
+		require.Nil(t, h.admission)
+		for _, sm := range metas {
+			d := decidePerm(m.authz, h, resFor(sm), ActionDeliver, "secret.deliver", false)
+			require.True(t, d.Allowed, "%s: %s", sm.Name, d.Reason)
+		}
+	})
+
+	sel := newDeliverySelector(m.authz, m.agent, PurposeRestart)
+	memo := edgeReads(func() {
+		for _, sm := range metas {
+			ok, err := sel.authorize(ctx, MaterialKindSecret, materialRecordSecret, sm.ID, sm.Name, sm.Scope, m.scopeID(sm.Scope))
+			require.NoError(t, err)
+			require.True(t, ok, sm.Name)
+		}
+	})
+	require.Greater(t, plain, 0, "the admission walk reads delegation edges")
+	assert.Less(t, memo, plain, "the selection walked once, not once per item")
+
+	require.NotNil(t, sel.ident)
+	require.NotNil(t, sel.ident.admission, "a selection's credential carries a memo")
+	o, ok := sel.ident.admission.load("secret.deliver")
+	require.True(t, ok)
+	assert.True(t, o.ok)
+	_, ok = sel.ident.admission.load("env_var.deliver")
+	assert.False(t, ok, "each permission has its own walk")
+	allowed, err := sel.authorize(ctx, MaterialKindEnvVar, materialRecordEnvVar, ev.ID, ev.Key, store.ScopeProject, m.agent.ProjectID)
+	require.NoError(t, err)
+	assert.True(t, allowed)
+	_, ok = sel.ident.admission.load("env_var.deliver")
+	assert.True(t, ok)
+
+	// Explain bypasses the memo: the trace still carries the walk's steps.
+	d := decidePerm(m.authz, sel.ident, resFor(metas[0]), ActionDeliver, "secret.deliver", true)
+	require.True(t, d.Allowed, d.Reason)
+	assert.True(t, hasDecisionStep(d.ExplainTrace, "delegation_ceiling_delivery_root"), "trace: %+v", d.ExplainTrace)
+}
+
+// TestDispatchDelivery_TestAdminWithheldScopeNotFetched: for an agent
+// rooted at an admin-kind test identity, launch selection reads no value
+// for a scope the test-admin restriction withholds. Here the agent's owner
+// is not its root, so its owner-scope secret is withheld: never fetched
+// and never delivered. The control (owner is the root) is fetched and
+// delivered.
+func TestDispatchDelivery_TestAdminWithheldScopeNotFetched(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	ctx := context.Background()
+	issuer := taUser(t, s, "md-ta-iss", store.SystemRoleSuperAdmin)
+	root := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin).Identity.ID
+	projectID := tid("md-ta-project")
+	taProject(t, s, projectID, root)
+
+	const hubID = "md-ta-hub"
+	backend := secret.NewLocalBackend(s, hubID, "test-secret")
+	rec := &ldRecordingSecretBackend{SecretBackend: backend}
+	d := NewHTTPAgentDispatcherWithClient(s, &mockRuntimeBrokerClient{}, false, slog.Default())
+	d.SetHubID(hubID)
+	d.SetAuthzService(srv.authzService)
+	d.SetSecretBackend(rec)
+
+	// Owner-scope secrets need no delivery decision, so the agent need not
+	// be stored and no credential is minted.
+	agentOwnedBy := func(owner string) *store.Agent {
+		id := generateID()
+		return &store.Agent{ID: id, Slug: "md-ta-" + id[:8], Name: "md-ta-" + id[:8], ProjectID: projectID,
+			OwnerID: owner, CreatedBy: root, Ancestry: []string{root}, AppliedConfig: &store.AgentAppliedConfig{}}
+	}
+	userSecret := func(owner, name string) secret.SecretMeta {
+		_, meta, err := backend.Set(ctx, &secret.SetSecretInput{
+			Name: name, Value: "v-" + name, SecretType: store.SecretTypeEnvironment, Target: name,
+			Scope: store.ScopeUser, ScopeID: owner, InjectionMode: store.InjectionModeAlways, CreatedBy: owner,
+		})
+		require.NoError(t, err)
+		return *meta
+	}
+	own := userSecret(root, "MD_TA_ROOT_OWNED")
+	other := userSecret(issuer.ID, "MD_TA_ISSUER_OWNED")
+
+	got, err := d.selectDeliverySecrets(ctx, newDeliverySelector(srv.authzService, agentOwnedBy(root), PurposeRestart), agentOwnedBy(root))
+	require.NoError(t, err)
+	require.Len(t, got, 1, "control: the root's own user scope is allowed")
+	assert.Equal(t, "v-MD_TA_ROOT_OWNED", got[0].Value)
+	require.Len(t, rec.fetched, 1)
+	assert.Equal(t, own.ID, rec.fetched[0].ID)
+
+	rec.fetched = nil
+	withheldAgent := agentOwnedBy(issuer.ID)
+	got, err = d.selectDeliverySecrets(ctx, newDeliverySelector(srv.authzService, withheldAgent, PurposeRestart), withheldAgent)
+	require.NoError(t, err)
+	assert.Empty(t, got, "a withheld scope delivers nothing")
+	for _, meta := range rec.fetched {
+		assert.NotEqual(t, other.ID, meta.ID, "a withheld secret's value was fetched")
+	}
+}
+
+// =============================================================================
+// Defensive branches of launch selection
+// =============================================================================
+
+// ldListFaultStore injects single store faults for launch selection's
+// list reads and the probe's stored-agent lookup.
+type ldListFaultStore struct {
+	store.Store
+	listEnvErr            error
+	listProgenyEnvErr     error
+	listProgenySecretsErr error
+	getAgentErr           error
+}
+
+func (s *ldListFaultStore) ListEnvVars(ctx context.Context, filter store.EnvVarFilter) ([]store.EnvVar, error) {
+	if s.listEnvErr != nil {
+		return nil, s.listEnvErr
+	}
+	return s.Store.ListEnvVars(ctx, filter)
+}
+
+func (s *ldListFaultStore) ListProgenyEnvVars(ctx context.Context, ancestorIDs []string) ([]store.EnvVar, error) {
+	if s.listProgenyEnvErr != nil {
+		return nil, s.listProgenyEnvErr
+	}
+	return s.Store.ListProgenyEnvVars(ctx, ancestorIDs)
+}
+
+func (s *ldListFaultStore) ListProgenySecrets(ctx context.Context, ancestorIDs []string) ([]store.Secret, error) {
+	if s.listProgenySecretsErr != nil {
+		return nil, s.listProgenySecretsErr
+	}
+	return s.Store.ListProgenySecrets(ctx, ancestorIDs)
+}
+
+func (s *ldListFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if s.getAgentErr != nil {
+		return nil, s.getAgentErr
+	}
+	return s.Store.GetAgent(ctx, id)
+}
+
+// ldFaultSecretBackend injects single secret backend faults: a list error,
+// a whole-call fetch error, one item's fetch error, or one item missing
+// from the fetch result. It records the metadata it was asked to fetch.
+type ldFaultSecretBackend struct {
+	secret.SecretBackend
+	listErr   error
+	fetchErr  error
+	itemErrID string
+	dropID    string
+	fetched   []secret.SecretMeta
+}
+
+func (b *ldFaultSecretBackend) List(ctx context.Context, filter secret.Filter) ([]secret.SecretMeta, error) {
+	if b.listErr != nil {
+		return nil, b.listErr
+	}
+	return b.SecretBackend.List(ctx, filter)
+}
+
+func (b *ldFaultSecretBackend) FetchValues(ctx context.Context, metas []secret.SecretMeta) (map[string]secret.FetchResult, error) {
+	b.fetched = append(b.fetched, metas...)
+	if b.fetchErr != nil {
+		return nil, b.fetchErr
+	}
+	out, err := b.SecretBackend.FetchValues(ctx, metas)
+	if err != nil {
+		return nil, err
+	}
+	if b.itemErrID != "" {
+		out[b.itemErrID] = secret.FetchResult{Err: errors.New("injected item fetch failure")}
+	}
+	if b.dropID != "" {
+		delete(out, b.dropID)
+	}
+	return out, nil
+}
+
+// TestDeliverySelection_DefensiveBranches: each row injects exactly one
+// fault into launch selection and checks it fails closed: a read error is
+// the selection's error, a failed or missing item is not delivered, an
+// internal secret is neither delivered nor fetched, and the credential is
+// not minted for a missing target, a changed project or a user-scope item.
+func TestDeliverySelection_DefensiveBranches(t *testing.T) {
+	ctx := context.Background()
+	injected := errors.New("injected fault")
+	restartSel := func(m *ldFixture, a *store.Agent) *deliverySelector {
+		return newDeliverySelector(m.authz, a, PurposeRestart)
+	}
+	withProgenyAncestry := func(m *ldFixture) *store.Agent {
+		a := *m.agent
+		a.Ancestry = []string{m.agent.OwnerID, tid("md-df-parent-agent")}
+		return &a
+	}
+
+	t.Run("env_list_error", func(t *testing.T) {
+		m := newLDFixture(t, "df-envlist", ldOptions{})
+		m.d.store = &ldListFaultStore{Store: m.store, listEnvErr: injected}
+		_, _, err := m.d.selectDeliveryEnv(ctx, restartSel(m, m.agent), m.agent)
+		assert.ErrorIs(t, err, injected)
+	})
+	t.Run("progeny_env_list_error", func(t *testing.T) {
+		m := newLDFixture(t, "df-progenyenv", ldOptions{})
+		m.d.store = &ldListFaultStore{Store: m.store, listProgenyEnvErr: injected}
+		a := withProgenyAncestry(m)
+		_, _, err := m.d.selectDeliveryEnv(ctx, restartSel(m, a), a)
+		assert.ErrorIs(t, err, injected)
+	})
+	t.Run("nil_agent_selects_nothing", func(t *testing.T) {
+		m := newLDFixture(t, "df-nilagent", ldOptions{})
+		env, plain, err := m.d.selectDeliveryEnv(ctx, restartSel(m, nil), nil)
+		require.NoError(t, err)
+		assert.Empty(t, env)
+		assert.Empty(t, plain)
+		secrets, err := m.d.selectDeliverySecrets(ctx, restartSel(m, nil), nil)
+		require.NoError(t, err)
+		assert.Empty(t, secrets)
+	})
+	t.Run("no_secret_backend_selects_nothing", func(t *testing.T) {
+		m := newLDFixture(t, "df-nobackend", ldOptions{})
+		m.secret(t, "MD_DF_NOBACKEND", "v", store.SecretTypeEnvironment, store.ScopeProject, m.agent.ProjectID)
+		m.d.secretBackend = nil
+		secrets, err := m.d.selectDeliverySecrets(ctx, restartSel(m, m.agent), m.agent)
+		require.NoError(t, err)
+		assert.Empty(t, secrets)
+	})
+	t.Run("secret_list_error", func(t *testing.T) {
+		m := newLDFixture(t, "df-secretlist", ldOptions{})
+		m.d.SetSecretBackend(&ldFaultSecretBackend{SecretBackend: m.backend, listErr: injected})
+		_, err := m.d.selectDeliverySecrets(ctx, restartSel(m, m.agent), m.agent)
+		assert.ErrorIs(t, err, injected)
+	})
+	t.Run("progeny_secret_list_error", func(t *testing.T) {
+		m := newLDFixture(t, "df-progenysecret", ldOptions{})
+		m.d.store = &ldListFaultStore{Store: m.store, listProgenySecretsErr: injected}
+		a := withProgenyAncestry(m)
+		_, err := m.d.selectDeliverySecrets(ctx, restartSel(m, a), a)
+		assert.ErrorIs(t, err, injected)
+	})
+	t.Run("fetch_error_fails_selection", func(t *testing.T) {
+		m := newLDFixture(t, "df-fetch", ldOptions{})
+		m.secret(t, "MD_DF_FETCH", "v", store.SecretTypeEnvironment, store.ScopeProject, m.agent.ProjectID)
+		fb := &ldFaultSecretBackend{SecretBackend: m.backend, fetchErr: injected}
+		m.d.SetSecretBackend(fb)
+		_, err := m.d.selectDeliverySecrets(ctx, restartSel(m, m.agent), m.agent)
+		assert.ErrorIs(t, err, injected)
+		require.Len(t, fb.fetched, 1, "control: the admitted item reached the fetch")
+	})
+	t.Run("failed_or_missing_item_not_delivered", func(t *testing.T) {
+		m := newLDFixture(t, "df-item", ldOptions{})
+		failed := m.secret(t, "MD_DF_ITEM_FAILED", "f", store.SecretTypeEnvironment, store.ScopeProject, m.agent.ProjectID)
+		missing := m.secret(t, "MD_DF_ITEM_MISSING", "m", store.SecretTypeEnvironment, store.ScopeHub, m.hubID)
+		m.secret(t, "MD_DF_ITEM_OK", "ok", store.SecretTypeEnvironment, store.ScopeRuntimeBroker, m.broker.ID)
+		m.d.SetSecretBackend(&ldFaultSecretBackend{SecretBackend: m.backend, itemErrID: failed.ID, dropID: missing.ID})
+		secrets, err := m.d.selectDeliverySecrets(ctx, restartSel(m, m.agent), m.agent)
+		require.NoError(t, err)
+		require.Len(t, secrets, 1)
+		assert.Equal(t, "MD_DF_ITEM_OK", secrets[0].Name)
+		assert.Equal(t, "ok", secrets[0].Value)
+	})
+	t.Run("internal_secret_neither_delivered_nor_fetched", func(t *testing.T) {
+		m := newLDFixture(t, "df-internal", ldOptions{})
+		internalID := api.NewUUID()
+		require.NoError(t, m.store.CreateSecret(ctx, &store.Secret{
+			ID: internalID, Key: "MD_DF_INTERNAL", EncryptedValue: "internal-value", SecretType: store.SecretTypeInternal,
+			Target: "MD_DF_INTERNAL", Scope: store.ScopeProject, ScopeID: m.agent.ProjectID, InjectionMode: store.InjectionModeAlways,
+		}))
+		m.secret(t, "MD_DF_PLAIN", "p", store.SecretTypeEnvironment, store.ScopeProject, m.agent.ProjectID)
+		fb := &ldFaultSecretBackend{SecretBackend: m.backend}
+		m.d.SetSecretBackend(fb)
+		secrets, err := m.d.selectDeliverySecrets(ctx, restartSel(m, m.agent), m.agent)
+		require.NoError(t, err)
+		require.Len(t, secrets, 1, "control: the plain project secret is delivered")
+		assert.Equal(t, "MD_DF_PLAIN", secrets[0].Name)
+		for _, meta := range fb.fetched {
+			assert.NotEqual(t, internalID, meta.ID, "an internal secret was fetched")
+		}
+	})
+	t.Run("mint_refused_for_changed_project", func(t *testing.T) {
+		m := newLDFixture(t, "df-project", ldOptions{})
+		moved := *m.agent
+		moved.ProjectID = tid("md-df-other-project")
+		sel := restartSel(m, &moved)
+		ok, err := sel.authorize(ctx, MaterialKindEnvVar, materialRecordEnvVar, "id", "MD_DF_KEY", store.ScopeProject, moved.ProjectID)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "project changed")
+		assert.False(t, ok)
+		assert.Nil(t, sel.ident)
+	})
+	t.Run("mint_refused_without_target", func(t *testing.T) {
+		m := newLDFixture(t, "df-notarget", ldOptions{})
+		require.Error(t, restartSel(m, nil).mint(ctx))
+		noID := *m.agent
+		noID.ID = ""
+		require.Error(t, restartSel(m, &noID).mint(ctx))
+	})
+	t.Run("user_scope_item_needs_no_credential", func(t *testing.T) {
+		m := newLDFixture(t, "df-userscope", ldOptions{})
+		sel := restartSel(m, m.agent)
+		ok, err := sel.authorize(ctx, MaterialKindEnvVar, materialRecordEnvVar, "id", "MD_DF_KEY", store.ScopeUser, m.agent.OwnerID)
+		require.NoError(t, err)
+		assert.False(t, ok, "user scope has no association grant")
+		assert.Nil(t, sel.ident, "nothing was minted")
+	})
+	t.Run("probe_selector_lookup_error", func(t *testing.T) {
+		m := newLDFixture(t, "df-probe", ldOptions{})
+		srv := &Server{store: &ldListFaultStore{Store: m.store, getAgentErr: injected}, authzService: m.authz, hubID: m.hubID}
+		sel, err := srv.newProbeDeliverySelector(ctx, m.agent)
+		assert.ErrorIs(t, err, injected)
+		assert.Nil(t, sel)
+
+		srv = &Server{store: &ldListFaultStore{Store: m.store, getAgentErr: store.ErrNotFound}, authzService: m.authz, hubID: m.hubID}
+		sel, err = srv.newProbeDeliverySelector(ctx, m.agent)
+		require.NoError(t, err, "a missing record is the create-time probe")
+		assert.Nil(t, sel)
+	})
+}
+
+// TestDispatchDelivery_LocalSelectionMatchesResolve: with the local
+// backend, start and restart selection of an admitted agent returns the
+// same secrets, field for field (Name, Type, Target, Value, Source, Ref),
+// as the Resolve path, across scopes, types and custom targets.
+func TestDispatchDelivery_LocalSelectionMatchesResolve(t *testing.T) {
+	m := newLDFixture(t, "local-parity", ldOptions{})
+	ctx := context.Background()
+	for _, scope := range []string{store.ScopeProject, store.ScopeHub, store.ScopeRuntimeBroker, store.ScopeUser} {
+		up := strings.ToUpper(scope)
+		m.secret(t, "MD_LP_ENV_"+up, "env-"+scope, store.SecretTypeEnvironment, scope, m.scopeID(scope))
+		_, _, err := m.backend.Set(ctx, &secret.SetSecretInput{
+			Name: "md-lp-file-" + scope, Value: "file-" + scope, SecretType: store.SecretTypeFile, Target: "/etc/md-lp/" + scope,
+			Scope: scope, ScopeID: m.scopeID(scope), InjectionMode: store.InjectionModeAlways, CreatedBy: m.projectOwnerID,
+		})
+		require.NoError(t, err)
+	}
+	got, err := m.d.selectDeliverySecrets(ctx, newDeliverySelector(m.authz, m.agent, PurposeRestart), m.agent)
+	require.NoError(t, err)
+	old, _, err := m.d.resolveSecrets(ctx, m.agent)
+	require.NoError(t, err)
+	require.Len(t, got, 8)
+	assert.ElementsMatch(t, old, got)
 }
