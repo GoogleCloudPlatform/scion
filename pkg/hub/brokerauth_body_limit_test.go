@@ -184,6 +184,15 @@ func TestBrokerAuthBodyLimit_HubRotationVerifier(t *testing.T) {
 	payload := bytes.Repeat([]byte("b"), int(apiclient.MaxSignedRequestBodyBytes))
 	_, err = svc.ValidateBrokerSignatureWithRotation(context.Background(), sign(http.MethodPost, "/api/v1/x", payload))
 	assert.NoError(t, err, "signed body at the cap")
+
+	// The cap runs before the secret lookup: with a store whose lookup
+	// fails, an over-cap body still gets the body-size refusal.
+	faulty := NewBrokerAuthService(DefaultBrokerAuthConfig(), &secretFaultStore{Store: svc.store})
+	t.Cleanup(faulty.Close)
+	req, body = overCapRequest(sign)
+	_, err = faulty.ValidateBrokerSignatureWithRotation(context.Background(), req)
+	assert.True(t, errors.Is(err, errBrokerAuthBodyTooLarge), "err = %v", err)
+	assert.Zero(t, body.read, "body bytes read before refusing")
 }
 
 // A body longer than it declared is read at most to the cap and does not
