@@ -2217,6 +2217,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.PerfTrace != nil {
 				keys = append(keys, "server.hub.perf_trace")
 			}
+			if hub.CSPReportRawSamples != nil {
+				keys = append(keys, "server.hub.csp_report_raw_samples")
+			}
 			if hub.MembershipSweepReportOnly != nil {
 				keys = append(keys, "server.hub.membership_sweep_report_only")
 			}

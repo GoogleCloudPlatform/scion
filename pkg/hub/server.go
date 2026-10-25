@@ -270,6 +270,11 @@ type ServerConfig struct {
 	// returned in X-Scion-Perf-* headers to admin requests that opt in. Off by
 	// default; observe only. See perftrace.go.
 	PerfTrace bool
+	// CSPReportRawSamples (server.hub.csp_report_raw_samples) adds each
+	// browser policy report's sample to its csp_violation log record. Off
+	// by default: a sample can hold the start of page content, such as a
+	// chat message. For a short diagnosis only; startup only.
+	CSPReportRawSamples bool
 	// MembershipSweepReportOnly (server.hub.membership_sweep_report_only)
 	// puts the membership-standing sweep in report-only mode: it logs and
 	// audits each agent it would hold (mutation type
@@ -3329,6 +3334,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// A restored agent whose root user is no longer admitted to its project
 	// comes back held (ptone/scion#3433).
 	srv.registerMembershipRestoreHook()
+	// Agent delete, restore and the reincarnation claim revoke the agent's
+	// delegation grants in their own transaction
+	// (.design/agent-delegation.md §16.1).
+	srv.registerAgentDelegationLifecycleHooks()
 
 	// Wire the proxy user provisioner (wraps provisionUser with 60s cache)
 	if cfg.ProxyAuth != nil {
@@ -3450,7 +3459,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.authConfig.ExternalBearerLimiter = srv.externalBearerRateLimiter
 
 	srv.cspReportLimiter = newCSPReportLimiter(cfg.TrustedProxies)
-	srv.cspReports = newCSPReportHandler(srv.cspReportLimiter)
+	srv.cspReports = newCSPReportHandler(srv.cspReportLimiter, cfg.CSPReportRawSamples)
+	if cfg.CSPReportRawSamples {
+		slog.Warn("Browser policy report samples are logged (server.hub.csp_report_raw_samples); samples can hold page content")
+	}
 
 	// Initialize GE Google credential exchange service, sharing the validator
 	// and resolver above so both mechanisms produce identical decisions
@@ -5345,6 +5357,9 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	// suspendAgent's HTTP-path behavior.
 	s.releaseBrokerQuota(ctx, agent)
 	releaseClaim()
+	// As for suspendAgent: the agent's delegation grants end with the
+	// suspension, best effort (.design/agent-delegation.md §16.3).
+	s.revokeAgentDelegationGrantsBestEffort(ctx, store.AgentDelegationGrantFilter{AgentID: agent.ID}, revokeReasonAgentSuspended)
 	s.events.PublishAgentStatus(ctx, agent)
 	return true
 }

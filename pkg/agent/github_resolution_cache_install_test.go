@@ -16,7 +16,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -47,9 +46,9 @@ func newInstallTestResolver(t *testing.T, credential string) (r *GitHubSkillReso
 		apiCalls.Add(1)
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/acme/private/contents/skills/s", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/repos/acme/private/git/trees/"+testCommitSHA+":skills/s", func(w http.ResponseWriter, _ *http.Request) {
 		apiCalls.Add(1)
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/s/SKILL.md", Type: "file", Size: len(content)},
 		})
 	})
@@ -68,7 +67,7 @@ func newInstallTestResolver(t *testing.T, credential string) (r *GitHubSkillReso
 	}
 	first.putEntry(resolutionCacheKey(ghRef, credential), ResolvedSkill{
 		Name: "s", URI: installTestURI,
-		Files: []ResolvedFile{{Path: "SKILL.md", URL: "https://raw.githubusercontent.com/acme/private/x/SKILL.md", Content: []byte(content)}},
+		Files: []ResolvedFile{{Path: "SKILL.md", URL: "https://raw.githubusercontent.com/acme/private/x/SKILL.md", Mode: "0644", Content: []byte(content)}},
 	}, true)
 	first.Flush()
 
@@ -247,7 +246,7 @@ func TestWithContentFlightKeyIsSeparate(t *testing.T) {
 	// A stale in-memory entry with content, which every caller accepts.
 	cache.putEntry(resolutionCacheKey(ghRef, credential), ResolvedSkill{
 		Name: "s", URI: installTestURI,
-		Files: []ResolvedFile{{Path: "SKILL.md", Content: []byte("# skill")}},
+		Files: []ResolvedFile{{Path: "SKILL.md", Mode: "0644", Content: []byte("# skill")}},
 	}, true)
 
 	r := newTestGitHubResolver(server)

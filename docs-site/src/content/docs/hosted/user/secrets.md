@@ -166,7 +166,7 @@ To prevent accidental base64-decoding when setting plaintext secrets that happen
 :::
 
 **Interactive Secrets-Gather:**
-If a template requires specific secrets (defined in `scion-agent.yaml`), Scion utilizes an interactive `secrets-gather` pipeline during agent creation. It will automatically prompt you to securely input any missing values and store them in the backend, ensuring sensitive credentials are never written to plain text configuration files.
+If a template requires specific secrets or environment variables (defined in `scion-agent.yaml`), Scion utilizes an interactive gather pipeline during agent start and resume. For secrets, it prompts you for missing values and sends them for this agent only; they are not stored (store a secret on the Hub with `scion hub secret set` to reuse it), so sensitive credentials are never written to plain text configuration files. For environment variables found in your local environment, interactive `scion start` and `scion resume` prompt before sending them (confirmed automatically by `--yes`), while non-interactive `scion start` and `scion resume` send local environment values only when `--send-env` is passed and fail without it, naming the missing keys and the `--send-env` flag.
 
 ### Secret Types
 Secrets can be projected into the agent container in three ways:

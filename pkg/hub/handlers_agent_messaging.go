@@ -2526,6 +2526,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		if senderProjID, ok := senderAgentProject(ctx); ok {
 			storeMsg.SenderProjectID = &senderProjID
 		}
+		// A delegated send also names the issuer and the grant.
+		stampDelegatedMessageAttribution(ctx, storeMsg)
 
 		// Phase 5 dual-write: resolve-or-create conversation for user/agent → agent messages.
 		// If the CLI already resolved a conversation_id (S4 conversation references),
