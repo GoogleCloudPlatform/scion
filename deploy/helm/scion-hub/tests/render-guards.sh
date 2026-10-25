@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=210   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 16 (workspaceStorage.nfs: thirteen refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check).
+EXPECTED_TOTAL=221   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 16 (workspaceStorage.nfs: thirteen refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -981,6 +981,58 @@ else
   failed=$((failed + 1))
 fi
 unset _ae _ad
+
+echo "== conduit.internalTls =="
+# The relay hop between hub nodes. Opt-in; when on it needs its Secret and a
+# free port, and a non-loopback relay listener without TLS is refused on every
+# path, config.extra included.
+RT_ON=(--set conduit.internalTls.enabled=true --set conduit.internalTls.existingSecret=rg-relay-cert)
+reject "internalTls enabled without existingSecret" "requires conduit.internalTls.existingSecret" \
+  --set conduit.internalTls.enabled=true
+reject "internalTls existingSecret while disabled" "set while conduit.internalTls.enabled is false" \
+  --set conduit.internalTls.existingSecret=rg-relay-cert
+reject "internalTls port on hub.webPort" "is also hub.webPort" "${RT_ON[@]}" --set conduit.internalTls.port=8080
+reject "internalTls port on the in-process broker" "is also the hub's in-process runtime broker" "${RT_ON[@]}" --set conduit.internalTls.port=9800
+reject "internalTls serverName not a DNS name" "must be a DNS name" "${RT_ON[@]}" --set conduit.internalTls.serverName=Bad_Name
+reject "plaintext non-loopback internal_listen through config.extra" "which is not a loopback address" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0:9443"}}}}'
+reject "internalTls with config.extra conduit listener" "also sets server.hub.conduit.internal_listen" "${RT_ON[@]}" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0:9555"}}}}'
+reject "internalTls with config.existingSecret" "inline settings values (conduit.internalTls.enabled" \
+  --set agents.imageRegistry= --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned "${RT_ON[@]}"
+accept "loopback internal_listen through config.extra" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:9443"}}}}'
+accept "internalTls enabled" "${RT_ON[@]}"
+executed=$((executed + 1))
+_rt_on="$(render "${RT_ON[@]}" --set conduit.internalTls.caSecret=rg-relay-ca)"
+_rt_off="$(render)"
+_rt_fail=""
+for _want in \
+  '          internal_listen: 0.0.0.0:9443' \
+  '          internal_tls_cert_file: /etc/scion/relay-tls/tls.crt' \
+  '          internal_tls_key_file: /etc/scion/relay-tls/tls.key' \
+  '          internal_tls_ca_file: /etc/scion/relay-tls-ca/ca.crt' \
+  '          internal_tls_server_name: t-scion-hub-relay.default.svc' \
+  '                  fieldPath: status.podIP' \
+  '              containerPort: 9443' \
+  '              mountPath: "/etc/scion/relay-tls"' \
+  '              mountPath: "/etc/scion/relay-tls-ca"' \
+  '            secretName: rg-relay-cert' \
+  '            secretName: rg-relay-ca'; do
+  printf '%s\n' "$_rt_on" | grep -qxF -- "$_want" || _rt_fail="${_rt_fail} [missing: ${_want# *}]"
+done
+# Whole-directory mounts (a subPath mount never sees a rotated Secret), no
+# relay port on the Service, and nothing at all when disabled.
+printf '%s\n' "$_rt_on" | grep -A2 -E 'mountPath: "/etc/scion/relay-tls' | grep -q 'subPath' && _rt_fail="${_rt_fail} [relay mount uses subPath]"
+printf '%s\n' "$_rt_on" | sed -n '/^kind: Service$/,/^---$/p' | grep -q '9443' && _rt_fail="${_rt_fail} [relay port on the Service]"
+printf '%s\n' "$_rt_off" | grep -qE 'internal_listen|relay-tls|status.podIP' && _rt_fail="${_rt_fail} [disabled render carries relay wiring]"
+if [ -z "$_rt_fail" ] && printf '%s\n' "$_rt_on" | grep -q '^kind: Deployment$'; then
+  echo "ok    conduit.internalTls renders server.hub.conduit TLS keys, whole-directory Secret mounts, POD_IP and a pod-only port; disabled renders none of it"
+else
+  echo "FAIL  conduit.internalTls shape:${_rt_fail:- no Deployment rendered}"
+  failed=$((failed + 1))
+fi
+unset _rt_on _rt_off _rt_fail _want RT_ON
 
 echo "== secrets.backend =="
 # local renders nothing; gcpsm renders server.secrets and needs a project. The

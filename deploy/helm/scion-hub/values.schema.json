@@ -619,6 +619,26 @@
         }
       }
     },
+    "conduit": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The conduit relay's internal hop between hub nodes.",
+      "properties": {
+        "internalTls": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Native TLS on the relay listener, rendered as server.hub.conduit.internal_listen and internal_tls_* with the Secret mounted. Off by default. A non-loopback relay listener without TLS is refused at render.",
+          "properties": {
+            "enabled": {"type": "boolean"},
+            "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+            "existingSecret": {"type": "string", "description": "kubernetes.io/tls Secret with tls.crt and tls.key. Required when enabled."},
+            "caSecret": {"type": "string", "description": "Secret holding the CA bundle. Empty means existingSecret."},
+            "caKey": {"type": "string", "description": "Key of the CA bundle in caSecret."},
+            "serverName": {"type": "string", "description": "Name verified in peer certificates. Empty means <fullname>-relay.<namespace>.svc."}
+          }
+        }
+      }
+    },
     "secrets": {
       "type": "object",
       "additionalProperties": false,

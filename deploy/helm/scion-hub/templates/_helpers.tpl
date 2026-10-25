@@ -2555,7 +2555,7 @@ as R4. Order is the order the guard appends them in, so the refusal message and
 this list read the same way.
 */}}
 {{- define "scion-hub.existingSecretRefusals" -}}
-config.extra, storage.bucket, agents.imageRegistry, hub.adminEmails, hub.hubClass, secrets.backend, secrets.gcpsm.projectId, secrets.gcpsm.replicationLocations, database.name, database.user, database.password, auth.oauth.web.github.clientId, auth.oauth.web.github.clientSecret, auth.oauth.web.google.clientId, auth.oauth.web.google.clientSecret, auth.proxy.iap.audience, auth.transport.mode, auth.transport.oidcAudience, auth.transport.platformAuthSa, runtime.gke, workspaceStorage.nfs.enabled, workspaceStorage.nfs.server, workspaceStorage.nfs.export, workspaceStorage.nfs.mountRoot, workspaceStorage.nfs.shareId, workspaceStorage.nfs.pvName, workspaceStorage.nfs.subpathRoot
+config.extra, storage.bucket, agents.imageRegistry, hub.adminEmails, hub.hubClass, secrets.backend, secrets.gcpsm.projectId, secrets.gcpsm.replicationLocations, database.name, database.user, database.password, auth.oauth.web.github.clientId, auth.oauth.web.github.clientSecret, auth.oauth.web.google.clientId, auth.oauth.web.google.clientSecret, auth.proxy.iap.audience, auth.transport.mode, auth.transport.oidcAudience, auth.transport.platformAuthSa, runtime.gke, workspaceStorage.nfs.enabled, workspaceStorage.nfs.server, workspaceStorage.nfs.export, workspaceStorage.nfs.mountRoot, workspaceStorage.nfs.shareId, workspaceStorage.nfs.pvName, workspaceStorage.nfs.subpathRoot, conduit.internalTls.enabled, conduit.internalTls.port, conduit.internalTls.existingSecret, conduit.internalTls.caSecret, conduit.internalTls.caKey, conduit.internalTls.serverName
 {{- end }}
 
 {{/*
@@ -2701,6 +2701,14 @@ subpathRoot; change both together.
 {{- if trim (toString (index $nfsInline $f | default "")) }}{{- $inline = append $inline (printf "workspaceStorage.nfs.%s" $f) }}{{- end }}
 {{- end }}
 {{- if ne (trim (toString ($nfsInline.subpathRoot | default "projects"))) "projects" }}{{- $inline = append $inline "workspaceStorage.nfs.subpathRoot" }}{{- end }}
+{{- $relayInline := (.Values.conduit | default (dict)).internalTls | default (dict) }}
+{{- if $relayInline.enabled }}{{- $inline = append $inline "conduit.internalTls.enabled" }}{{- end }}
+{{- if ne (int ($relayInline.port | default 9443)) 9443 }}{{- $inline = append $inline "conduit.internalTls.port" }}{{- end }}
+{{- range $f := list "existingSecret" "caSecret" }}
+{{- if trim (toString (index $relayInline $f | default "")) }}{{- $inline = append $inline (printf "conduit.internalTls.%s" $f) }}{{- end }}
+{{- end }}
+{{- if ne (trim (toString ($relayInline.caKey | default "ca.crt"))) "ca.crt" }}{{- $inline = append $inline "conduit.internalTls.caKey" }}{{- end }}
+{{- if trim (toString ($relayInline.serverName | default "")) }}{{- $inline = append $inline "conduit.internalTls.serverName" }}{{- end }}
 {{- if $inline }}
 {{- fail (printf "config.existingSecret is set together with inline settings values (%s). With config.existingSecret the chart renders no settings.yaml, so those values would be silently discarded. Set one or the other: either supply the whole file yourself, or let the chart render it. Note that these are only the settings values the chart can PROVE you set, because their default is empty. Others - auth.mode, hub.name, the database pool sizes, the hub ID and the agent namespace - are just as inert here and cannot be refused, because a default-valued setting is indistinguishable from an unset one; they are listed with the settings keys your own file must carry in NOTES.txt and in values.yaml at config.existingSecret." (join ", " $inline)) }}
 {{- end }}
@@ -3410,6 +3418,20 @@ nothing, so it is refused rather than discarded.
 {{- if $platformAuthSa }}{{- $transportOut = set $transportOut "platform_auth_sa" $platformAuthSa }}{{- end }}
 {{- $authOut = set $authOut "transport" $transportOut }}
 {{- end }}
+{{- /*
+server.hub.conduit from conduit.internalTls: the relay listener on every
+interface, served over native TLS from the mounted Secret. Absent when
+disabled, which leaves every other render byte-identical.
+*/}}
+{{- $relayTls := include "scion-hub.relayTls" . | fromYaml }}
+{{- if $relayTls }}
+{{- $hub = set $hub "conduit" (dict
+    "internal_listen" (printf "0.0.0.0:%d" (int $relayTls.port))
+    "internal_tls_cert_file" (printf "%s/tls.crt" $relayTls.certDir)
+    "internal_tls_key_file" (printf "%s/tls.key" $relayTls.certDir)
+    "internal_tls_ca_file" (printf "%s/ca.crt" $relayTls.caDir)
+    "internal_tls_server_name" $relayTls.serverName) }}
+{{- end }}
 {{- $server := dict
     "mode" "hosted"
     "hub" $hub
@@ -3534,6 +3556,7 @@ forces a chart fork. Merged before the assertions run, not after. */}}
 {{- $rendered := toYaml $doc }}
 {{- include "scion-hub.assertSettings" (dict "root" . "rendered" $rendered "hubId" $hubId) }}
 {{- include "scion-hub.assertNoExtraCollision" (dict "preMerge" $preMerge "extra" .Values.config.extra) }}
+{{- include "scion-hub.assertRelayListenerTls" (dict "doc" $doc) }}
 {{- /* config.extra is an arbitrary subtree the operator controls, so it can put
 a credential at a path no redaction list names - a DSN at server.database.url
 was measured doing exactly that, landing in the Secret AND moving the
@@ -4395,5 +4418,114 @@ it, so the guards run even when the settings Secret is not rendered.
     "subpathRoot" $subpathRoot
     "mountPath" (printf "%s/%s" $mountRoot $shareId) }}
 {{- toYaml $out }}
+{{- end }}
+{{- end }}
+
+{{/*
+conduit.internalTls, validated, or empty when disabled: the conduit relay's
+internal hop between hub nodes over native TLS. Read by the Deployment (the
+Secret volumes, their mounts, the relay port and POD_IP) and by
+scion-hub.settings (server.hub.conduit), one define so the file paths in the
+settings and the mount paths cannot disagree. Called from the always-rendered
+Deployment so its guards also run under config.existingSecret.
+
+The hub derives the advertised endpoint as https://POD_IP:<port> when the
+listener serves TLS, and every hop client verifies the peer certificate against
+the CA file and serverName. One certificate whose SAN is serverName therefore
+serves every replica. The directories are mounted whole, not by subPath, so a
+rotated Secret (for example by cert-manager) reaches the files and the hub
+re-reads them without a restart.
+*/}}
+{{- define "scion-hub.relayTls" -}}
+{{- $c := (.Values.conduit | default (dict)).internalTls | default (dict) }}
+{{- $secret := trim (toString ($c.existingSecret | default "")) }}
+{{- $caSecret := trim (toString ($c.caSecret | default "")) }}
+{{- $caKey := trim (toString ($c.caKey | default "ca.crt")) }}
+{{- $serverName := trim (toString ($c.serverName | default "")) }}
+{{- $port := int ($c.port | default 9443) }}
+{{- if not $c.enabled }}
+{{- $inert := list }}
+{{- if $secret }}{{- $inert = append $inert "conduit.internalTls.existingSecret" }}{{- end }}
+{{- if $caSecret }}{{- $inert = append $inert "conduit.internalTls.caSecret" }}{{- end }}
+{{- if ne $caKey "ca.crt" }}{{- $inert = append $inert "conduit.internalTls.caKey" }}{{- end }}
+{{- if $serverName }}{{- $inert = append $inert "conduit.internalTls.serverName" }}{{- end }}
+{{- if ne $port 9443 }}{{- $inert = append $inert "conduit.internalTls.port" }}{{- end }}
+{{- if $inert }}
+{{- fail (printf "%s set while conduit.internalTls.enabled is false. The chart renders no relay listener in that case, so the value would reach nothing. Set conduit.internalTls.enabled: true, or remove it." (join " and " $inert)) }}
+{{- end }}
+{{- else }}
+{{- if not $secret }}
+{{- fail "conduit.internalTls.enabled is true, which requires conduit.internalTls.existingSecret: a kubernetes.io/tls Secret (tls.crt, tls.key) in the release namespace, for example one issued by cert-manager. The relay listener serves native TLS from it; the chart never creates certificates." }}
+{{- end }}
+{{- range $pair := list (list "existingSecret" $secret) (list "caSecret" $caSecret) }}
+{{- $v := index $pair 1 }}
+{{- if and $v (not (regexMatch "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" $v)) }}
+{{- fail (printf "conduit.internalTls.%s is %s; it must be a Kubernetes Secret name (lower-case letters, digits, '-' and '.')." (index $pair 0) (include "scion-hub.diagValue" $v)) }}
+{{- end }}
+{{- end }}
+{{- if not (regexMatch "^[-._a-zA-Z0-9]+$" $caKey) }}
+{{- fail (printf "conduit.internalTls.caKey is %s; it must be a Secret data key such as ca.crt." (include "scion-hub.diagValue" $caKey)) }}
+{{- end }}
+{{- if not $serverName }}
+{{- $serverName = printf "%s-relay.%s.svc" (include "scion-hub.fullname" .) .Release.Namespace }}
+{{- end }}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $serverName) }}
+{{- fail (printf "conduit.internalTls.serverName is %s; it must be a DNS name, the SAN every hub node's certificate carries." (include "scion-hub.diagValue" $serverName)) }}
+{{- end }}
+{{- if or (lt $port 1) (gt $port 65535) }}
+{{- fail (printf "conduit.internalTls.port is %d; it must be between 1 and 65535." $port) }}
+{{- end }}
+{{- $taken := list (dict "n" (int .Values.hub.webPort) "name" "hub.webPort") (dict "n" (int (include "scion-hub.brokerPort" .)) "name" "the hub's in-process runtime broker") }}
+{{- if .Values.cloudsql.enabled }}
+{{- $taken = append $taken (dict "n" (int .Values.cloudsql.port) "name" "cloudsql.port") }}
+{{- $taken = append $taken (dict "n" (int .Values.cloudsql.healthCheckPort) "name" "cloudsql.healthCheckPort") }}
+{{- end }}
+{{- range $t := $taken }}
+{{- if eq $port (int $t.n) }}
+{{- fail (printf "conduit.internalTls.port %d is also %s. Every container in a pod shares one network namespace, so the second listener fails at startup." $port $t.name) }}
+{{- end }}
+{{- end }}
+{{- $extraHub := dig "server" "hub" (dict) (.Values.config.extra | default (dict)) }}
+{{- if and (kindIs "map" $extraHub) (hasKey $extraHub "conduit") }}
+{{- $extraConduit := index $extraHub "conduit" }}
+{{- if kindIs "map" $extraConduit }}
+{{- range $k := list "internal_listen" "internal_advertise" "internal_tls_cert_file" "internal_tls_key_file" "internal_tls_ca_file" "internal_tls_server_name" }}
+{{- if hasKey $extraConduit $k }}
+{{- fail (printf "conduit.internalTls is enabled and config.extra also sets server.hub.conduit.%s. The chart renders the relay listener, its TLS files and the mounts they name together from conduit.internalTls; use that alone." $k) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $out := dict
+    "port" $port
+    "secret" $secret
+    "caSecret" (default $secret $caSecret)
+    "caKey" $caKey
+    "serverName" $serverName
+    "certDir" "/etc/scion/relay-tls"
+    "caDir" "/etc/scion/relay-tls-ca" }}
+{{- toYaml $out }}
+{{- end }}
+{{- end }}
+
+{{/*
+The relay hop's plaintext refusal, on the merged settings document. A
+server.hub.conduit.internal_listen that is not a literal loopback address must
+come with server.hub.conduit.internal_tls_cert_file, whichever path wrote it
+(conduit.internalTls or config.extra). Releases carrying the matching hub change
+refuse such a listener at startup; earlier ones would serve the hop in
+plaintext, so the chart refuses it at render on every release.
+*/}}
+{{- define "scion-hub.assertRelayListenerTls" -}}
+{{- $conduit := dig "server" "hub" "conduit" (dict) .doc }}
+{{- if kindIs "map" $conduit }}
+{{- $listen := trim (toString (dig "internal_listen" "" $conduit)) }}
+{{- if $listen }}
+{{- $host := regexReplaceAll ":[0-9]*$" $listen "" }}
+{{- $loopback := or (eq $host "localhost") (eq $host "[::1]") (regexMatch "^127\\.[0-9]+\\.[0-9]+\\.[0-9]+$" $host) }}
+{{- if and (not $loopback) (not (dig "internal_tls_cert_file" "" $conduit)) }}
+{{- fail (printf "server.hub.conduit.internal_listen is %s, which is not a loopback address, and no internal_tls_cert_file is set. The relay hop between hub nodes must serve TLS: set conduit.internalTls (enabled, existingSecret), or bind internal_listen to loopback." (include "scion-hub.diagValue" $listen)) }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- end }}

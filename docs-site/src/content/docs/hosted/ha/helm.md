@@ -387,6 +387,40 @@ These are the chart's selector labels, and the chart's tests pin them. Labels in
 `hub.podLabels` cannot override them.
 :::
 
+### Relay TLS between hub nodes
+
+`conduit.internalTls` wires the conduit relay's internal hop between hub nodes
+over native TLS. It is off by default, and the chart then renders no relay
+listener. When you enable it, the chart:
+
+- renders `server.hub.conduit.internal_listen` on `0.0.0.0:<port>` (default
+  `9443`) with `internal_tls_cert_file`, `internal_tls_key_file`,
+  `internal_tls_ca_file` and `internal_tls_server_name`;
+- mounts `existingSecret` (a `kubernetes.io/tls` Secret with `tls.crt` and
+  `tls.key`, for example from cert-manager) and the CA bundle (`caSecret`,
+  default `existingSecret`, key `caKey`, default `ca.crt`) as whole directories,
+  so a rotated certificate is picked up without a restart;
+- sets `POD_IP`, so each node advertises `https://<pod IP>:<port>`, and declares
+  the port on the pod only, never on the Service.
+
+Every node verifies its peers against the CA and `serverName` (default
+`<fullname>-relay.<namespace>.svc`), so one certificate whose SAN is that name
+serves all replicas. A set CA replaces the system roots, and a private CA
+requires it. cert-manager fills `ca.crt` only for some issuers; for others,
+point `caSecret` at a Secret holding the CA.
+
+```yaml
+conduit:
+  internalTls:
+    enabled: true
+    existingSecret: scion-relay-tls   # issued for scion-hub-relay.<namespace>.svc
+```
+
+A relay listener that is not bound to loopback and has no TLS fails the render,
+including one set through `config.extra`. `conduit.internalTls` is refused
+together with `config.existingSecret`; put the same keys in your own settings
+file instead.
+
 The readiness and startup probes target `/readyz` on the hub's web port
 (`hub.webPort`, default 8080). The path cannot be changed. The liveness probe is
 off by default. When `probes.liveness.enabled` is `true`, it is a TCP check on

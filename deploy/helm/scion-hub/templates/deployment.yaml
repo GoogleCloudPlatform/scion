@@ -90,6 +90,8 @@ from this always-rendered template so its guards also run under
 config.existingSecret.
 */}}
 {{- $nfsWs := include "scion-hub.nfsWorkspace" . | fromYaml }}
+{{- /* conduit.internalTls, validated, or empty when disabled. */}}
+{{- $relayTls := include "scion-hub.relayTls" . | fromYaml }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -351,6 +353,26 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
             {{- end }}
+            {{- /*
+            The pod IP, from which the hub derives the relay endpoint it
+            advertises to the other nodes (https://POD_IP:<port>) when
+            conduit.internalTls is enabled. Skipped when hub.extraEnv sets
+            POD_IP itself, so the env list never carries the name twice.
+            */}}
+            {{- if $relayTls }}
+            {{- $userPodIP := false }}
+            {{- range $entry := .Values.hub.extraEnv }}
+            {{- if eq (toString (dig "name" "" $entry)) "POD_IP" }}
+            {{- $userPodIP = true }}
+            {{- end }}
+            {{- end }}
+            {{- if not $userPodIP }}
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            {{- end }}
+            {{- end }}
             {{- with .Values.hub.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -358,6 +380,12 @@ spec:
             - name: http
               containerPort: {{ .Values.hub.webPort }}
               protocol: TCP
+            {{- /* Declared for the pod spec only; the chart's Service never exposes it. */}}
+            {{- if $relayTls }}
+            - name: relay-tls
+              containerPort: {{ $relayTls.port }}
+              protocol: TCP
+            {{- end }}
           {{- /*
           Called OUTSIDE the if, and unconditionally, because the disabled case is
           one of the two things it checks. Inside the if, probes.startup.enabled=false
@@ -454,6 +482,19 @@ spec:
             - name: workspace-nfs
               mountPath: {{ $nfsWs.mountPath | quote }}
             {{- end }}
+            {{- /*
+            The relay hop's certificate and CA, as whole directories and not
+            by subPath: a subPath mount never sees a rotated Secret, and the
+            hub re-reads these files when they change.
+            */}}
+            {{- if $relayTls }}
+            - name: relay-tls
+              mountPath: {{ $relayTls.certDir | quote }}
+              readOnly: true
+            - name: relay-tls-ca
+              mountPath: {{ $relayTls.caDir | quote }}
+              readOnly: true
+            {{- end }}
         {{- /*
         THE FALLBACK PLACEMENT, for clusters below 1.29 where restartPolicy on
         an initContainers entry is ignored. Here the proxy is an ordinary
@@ -515,6 +556,28 @@ spec:
             server: {{ $nfsWs.server | quote }}
             path: {{ $nfsWs.export | quote }}
             readOnly: false
+        {{- end }}
+        {{- /*
+        0444 for the same reason as the settings volume above: the pod runs as
+        a non-root uid and Secret volumes are projected root:root.
+        */}}
+        {{- if $relayTls }}
+        - name: relay-tls
+          secret:
+            secretName: {{ $relayTls.secret }}
+            defaultMode: 0444
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+        - name: relay-tls-ca
+          secret:
+            secretName: {{ $relayTls.caSecret }}
+            defaultMode: 0444
+            items:
+              - key: {{ $relayTls.caKey }}
+                path: ca.crt
         {{- end }}
       {{- with .Values.hub.nodeSelector }}
       nodeSelector:
