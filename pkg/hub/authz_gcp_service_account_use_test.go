@@ -29,7 +29,8 @@
 // state (parentCeilingChainDeny). Allow cases below therefore seed that
 // state (via seedUseParentProofWithEdge): post-backfill, a stored
 // assign-mode agent with a recorded delegation edge, the account row, and
-// an assignment recorded from a project member. The handler-level composition and the parent ceiling's deny cases are in
+// an assignment recorded from a project member. The handler-level
+// composition and the parent ceiling's deny cases are in
 // handlers_gcp_identity_mint_authority_test.go and sa_parent_ceiling_test.go.
 // Deny cases here are decided before step 10 and hold in either state.
 package hub
