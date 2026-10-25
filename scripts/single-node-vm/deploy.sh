@@ -451,48 +451,6 @@ read_current_release() {
   fi
 }
 
-# release_order A B -- prints older, newer or same for release tag A
-# relative to B, or unknown when they cannot be ordered (different
-# channels, or a git build). Nightlies order by date; semver tags order by
-# version, with a pre-release (v1.0.0-preview.2) older than its release.
-release_order() {
-  local a="$1" b="$2" semver_re='^v?([0-9]+\.[0-9]+\.[0-9]+)(-([0-9A-Za-z.-]+))?$'
-  local ka kb ap bp
-  if [[ "$a" == "$b" ]]; then
-    echo same
-    return 0
-  fi
-  if [[ "$a" == nightly-* && "$b" == nightly-* ]]; then
-    ka="${a#nightly-}"
-    kb="${b#nightly-}"
-  elif [[ "$a" =~ $semver_re ]]; then
-    ka="${BASH_REMATCH[1]}"
-    ap="${BASH_REMATCH[3]}"
-    if [[ ! "$b" =~ $semver_re ]]; then
-      echo unknown
-      return 0
-    fi
-    kb="${BASH_REMATCH[1]}"
-    bp="${BASH_REMATCH[3]}"
-    if [[ "$ka" == "$kb" ]]; then
-      # Same core version: the release outranks any pre-release of it.
-      if [[ -z "$ap" ]]; then echo newer; return 0; fi
-      if [[ -z "$bp" ]]; then echo older; return 0; fi
-      ka="$ap"
-      kb="$bp"
-    fi
-  else
-    echo unknown
-    return 0
-  fi
-  if [[ "$ka" == "$kb" ]]; then
-    echo same
-  elif [[ "$(printf '%s\n%s\n' "$ka" "$kb" | sort -V | head -1)" == "$ka" ]]; then
-    echo older
-  else
-    echo newer
-  fi
-}
 
 # read_update_policy_config -- prints the config file's update_policy
 # (empty when unset), or fails with an error for a value other than auto,
@@ -562,6 +520,10 @@ fi
 HYBRID_ENABLED=false
 # shellcheck source=scripts/single-node-vm/hybrid-tier.sh
 source "${SCRIPT_DIR}/hybrid-tier.sh"
+# release_order (the downgrade guard's tag ordering): pure bash, so it
+# works on a macOS operator machine too (BSD sort has no -V).
+# shellcheck source=scripts/single-node-vm/release-order.sh
+source "${SCRIPT_DIR}/release-order.sh"
 
 # One EXIT trap, registered once, removes these three temp files on every
 # exit path, including SIGINT and SIGTERM: SSH_STDERR_FILE,
