@@ -627,7 +627,7 @@
         "internalTls": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Native TLS on the relay listener, rendered as server.hub.conduit.internal_listen and internal_tls_* with the Secret mounted, when enabled resolves to on (see enabled). A non-loopback relay listener without TLS is refused at render.",
+          "description": "When enabled resolves to on (see enabled), rendered as server.hub.conduit.internal_listen and internal_tls_* with the Secret mounted: native TLS on the relay listener. A non-loopback relay listener without TLS is refused at render.",
           "properties": {
             "enabled": {"type": "boolean"},
             "port": {"type": "integer", "minimum": 1, "maximum": 65535},

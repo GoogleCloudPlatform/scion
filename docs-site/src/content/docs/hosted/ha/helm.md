@@ -414,16 +414,20 @@ The hub reads the CA bundle and `serverName` once at startup. Changing
 pods, because the settings checksum or the pod spec changes. A change to a
 Secret's CONTENT does not: after replacing the CA bundle inside an existing
 Secret, run `kubectl rollout restart deployment/<fullname>`. (`<fullname>` is the
-chart's full name, `<release>-scion-hub` unless the release name already
-contains `scion-hub` or `fullnameOverride` is set.)
+chart's full name: `<release>-scion-hub` by default, `<release>-<nameOverride>`
+when `nameOverride` is set, just `<release>` when the release name already
+contains that name, and `fullnameOverride` when that is set.)
 
 To rotate the CA without breaking the hop between nodes, keep both CAs trusted
 while the leaf certificates move:
 
-1. With the default `caSecret` (empty, so `existingSecret`), cert-manager owns
-   `ca.crt` and replaces it along with the leaf, so it cannot hold two CAs. For
-   the overlap window, point `caSecret` at a Secret you manage that holds both
-   the old and the new CA, and run `helm upgrade` (this rolls the pods).
+1. With the default `caSecret` (empty, so `existingSecret`): when
+   `existingSecret` is issued by cert-manager, cert-manager owns its `ca.crt`
+   and replaces it along with the leaf, so it cannot hold two CAs. For the
+   overlap window, point `caSecret` at a Secret you manage that holds both the
+   old and the new CA, and run `helm upgrade` (this rolls the pods). If you made
+   `existingSecret` by hand, its `ca.crt` can hold both CAs directly; edit it and
+   run `kubectl rollout restart deployment/<fullname>`.
 2. Issue the leaf certificates from the new CA. The hub picks up the new
    certificate and key without a restart.
 3. Remove the old CA, either by pointing `caSecret` back or by editing your
