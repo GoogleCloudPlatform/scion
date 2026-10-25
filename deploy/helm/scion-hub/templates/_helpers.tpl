@@ -4526,19 +4526,17 @@ hub releases, not before them.
 {{- define "scion-hub.assertRelayListenerTls" -}}
 {{- $conduit := dig "server" "hub" "conduit" (dict) .doc }}
 {{- if kindIs "map" $conduit }}
+{{- $cert := trim (toString (dig "internal_tls_cert_file" "" $conduit)) }}
+{{- $key := trim (toString (dig "internal_tls_key_file" "" $conduit)) }}
 {{- $listen := trim (toString (dig "internal_listen" "" $conduit)) }}
 {{- if $listen }}
 {{- $host := regexReplaceAll ":[0-9]*$" $listen "" }}
 {{- $loopback := or (eq $host "localhost") (eq $host "[::1]") (regexMatch "^127\\.[0-9]+\\.[0-9]+\\.[0-9]+$" $host) }}
-{{- $cert := trim (toString (dig "internal_tls_cert_file" "" $conduit)) }}
-{{- $key := trim (toString (dig "internal_tls_key_file" "" $conduit)) }}
-{{- if and (not $loopback) (or (not $cert) (not $key)) }}
+{{- if and (not $loopback) (not (and $cert $key)) }}
 {{- fail (printf "server.hub.conduit.internal_listen is %s, which is not a loopback address, and internal_tls_cert_file and internal_tls_key_file are not both set. The relay hop between hub nodes must serve TLS: set conduit.internalTls (enabled, existingSecret), or bind internal_listen to loopback." (include "scion-hub.diagValue" $listen)) }}
 {{- end }}
 {{- end }}
-{{- $certSet := trim (toString (dig "internal_tls_cert_file" "" $conduit)) }}
-{{- $keySet := trim (toString (dig "internal_tls_key_file" "" $conduit)) }}
-{{- if and (or $certSet $keySet) (not (and $certSet $keySet)) }}
+{{- if and (or $cert $key) (not (and $cert $key)) }}
 {{- fail "server.hub.conduit.internal_tls_cert_file and internal_tls_key_file must be set together; the hub refuses one without the other at startup." }}
 {{- end }}
 {{- end }}
