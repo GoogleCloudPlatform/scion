@@ -228,6 +228,18 @@ func maintenanceRunContext(key string) (context.Context, context.CancelFunc) {
 	return context.WithCancel(context.Background())
 }
 
+// maintenanceCleanupTimeout bounds a cleanup write made after a failure.
+const maintenanceCleanupTimeout = 10 * time.Second
+
+// maintenanceCleanupContext returns the context for a cleanup that must run
+// after a failure, whatever happened to parent (which may be the context
+// that failed: cancelled, or past its deadline). It is detached from
+// parent's cancellation, keeps parent's values (logging, trace) and has its
+// own deadline.
+func maintenanceCleanupContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), maintenanceCleanupTimeout)
+}
+
 // launchMaintenanceRun runs executor in the background for the already
 // created run and records the outcome on it.
 //
@@ -246,6 +258,17 @@ func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, execut
 		buf := &runLogBuffer{}
 		restarting := false
 
+		runCtx, cancel := maintenanceRunContext(key)
+		defer cancel()
+
+		// Writes after the run (its outcome, a pending update to clear) use
+		// a detached, bounded context: runCtx may be past its deadline.
+		cleanup := func(f func(ctx context.Context)) {
+			ctx, cancel := maintenanceCleanupContext(runCtx)
+			defer cancel()
+			f(ctx)
+		}
+
 		defer func() {
 			if r := recover(); r != nil {
 				log.Error("Operation executor panicked", maintenanceLogAttrs(key, "run_id", runID, "panic", fmt.Sprint(r))...)
@@ -257,18 +280,18 @@ func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, execut
 					"error": fmt.Sprintf("executor panic: %v", r),
 				})
 				run.Result = string(resultJSON)
-				if err := s.store.UpdateMaintenanceRun(context.Background(), run); err != nil {
-					log.Error("Failed to update run record after panic", maintenanceLogAttrs(key, "run_id", runID, "error", err)...)
-				}
-				// A panic in or after the before-restart hook may leave a
-				// pending update naming this failed run; nothing restarts,
-				// so remove it (a no-op when it names another run or none).
-				s.clearPendingUpdateFor(context.Background(), runID)
+				cleanup(func(ctx context.Context) {
+					if err := s.store.UpdateMaintenanceRun(ctx, run); err != nil {
+						log.Error("Failed to update run record after panic", maintenanceLogAttrs(key, "run_id", runID, "error", err)...)
+					}
+					// A panic in or after the before-restart hook may leave
+					// a pending update naming this failed run; nothing
+					// restarts, so remove it (a no-op when it names another
+					// run or none).
+					s.clearPendingUpdateFor(ctx, runID)
+				})
 			}
 		}()
-
-		runCtx, cancel := maintenanceRunContext(key)
-		defer cancel()
 
 		var execErr error
 		if re, ok := executor.(maintenance.RestartingExecutor); ok {
@@ -298,7 +321,7 @@ func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, execut
 			resultJSON, _ := json.Marshal(result)
 			run.Result = string(resultJSON)
 			if restarting {
-				s.clearPendingUpdateFor(context.Background(), runID)
+				cleanup(func(ctx context.Context) { s.clearPendingUpdateFor(ctx, runID) })
 			}
 			log.Error("Operation failed", maintenanceLogAttrs(key, "run_id", runID, "error", execErr, "duration", finishedAt.Sub(run.StartedAt))...)
 			log.Debug("Operation failure log output", maintenanceLogAttrs(key, "run_id", runID, "log", run.Log)...)
@@ -315,9 +338,11 @@ func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, execut
 			log.Info("Operation completed successfully", maintenanceLogAttrs(key, "run_id", runID, "duration", finishedAt.Sub(run.StartedAt))...)
 		}
 
-		if err := s.store.UpdateMaintenanceRun(context.Background(), run); err != nil {
-			log.Error("Failed to update run record", maintenanceLogAttrs(key, "run_id", runID, "error", err)...)
-		}
+		cleanup(func(ctx context.Context) {
+			if err := s.store.UpdateMaintenanceRun(ctx, run); err != nil {
+				log.Error("Failed to update run record", maintenanceLogAttrs(key, "run_id", runID, "error", err)...)
+			}
+		})
 	}()
 }
 
@@ -359,8 +384,9 @@ func (s *Server) markRunRestarting(ctx context.Context, run *store.MaintenanceOp
 	run.Log = buf.String()
 	if err := s.store.UpdateMaintenanceRun(ctx, run); err != nil {
 		run.Status, run.Result, run.Log = prevStatus, prevResult, prevLog
-		// No restart follows, so the pending update must not survive.
-		s.clearPendingUpdateFor(ctx, run.ID)
+		// No restart follows, so the pending update must not survive, even
+		// when ctx (the hook's) is what failed the write.
+		s.clearPendingUpdateAfterFailure(ctx, run.ID)
 		return fmt.Errorf("record run as restarting: %w", err)
 	}
 	// system.update_available is deliberately left alone: the update is not
@@ -368,6 +394,15 @@ func (s *Server) markRunRestarting(ctx context.Context, run *store.MaintenanceOp
 	// "verified"), and a restart that fails and rolls back must keep the
 	// banner an admin retries from.
 	return nil
+}
+
+// clearPendingUpdateAfterFailure clears the pending update naming runID
+// after a failure, on a cleanup context (maintenanceCleanupContext), so a
+// cancelled or expired ctx cannot leave a stale pending_update behind.
+func (s *Server) clearPendingUpdateAfterFailure(ctx context.Context, runID string) {
+	cctx, cancel := maintenanceCleanupContext(ctx)
+	defer cancel()
+	s.clearPendingUpdateFor(cctx, runID)
 }
 
 // runLogBuffer is a mutex-guarded log buffer. It implements only Write (not

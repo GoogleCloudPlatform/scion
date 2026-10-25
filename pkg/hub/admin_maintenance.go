@@ -939,9 +939,13 @@ func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
 		// The restart signals this process; it is sent once the response
 		// is on the wire. A graceful shutdown would let it finish anyway,
 		// but nothing depends on that.
+		// The request may be gone by then; keep its values only.
+		restartCtx := context.WithoutCancel(r.Context())
 		go func() {
 			time.Sleep(adminRestartSignalDelay)
-			if err := installer.Restart(context.Background()); err != nil {
+			ctx, cancel := context.WithTimeout(restartCtx, adminRestartTimeout)
+			defer cancel()
+			if err := installer.Restart(ctx); err != nil {
 				s.releaseHubRestart(stamp)
 				log.Error("Failed to restart the hub", "error", err, "installer", installer.Name())
 			}
@@ -955,7 +959,12 @@ func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
 		// by the unit's stop, or still running, means the restart is under
 		// way. In both cases the response is written before the hub stops,
 		// or the graceful shutdown lets it finish.
-		if err := installer.Restart(r.Context()); err != nil {
+		// A client that disconnects must not abort (or, through the
+		// watcher's ctx.Done case, misreport) the restart: detach from the
+		// request's cancellation, bounded on its own.
+		restartCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), adminRestartTimeout)
+		defer cancel()
+		if err := installer.Restart(restartCtx); err != nil {
 			s.releaseHubRestart(stamp)
 			log.Error("Failed to initiate hub restart", "error", err, "user", user.Email(), "installer", installer.Name())
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
@@ -994,6 +1003,9 @@ func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
 // adminRestartSignalDelay is how long Restart Hub waits after writing its
 // response before the symlink installer signals the hub.
 const adminRestartSignalDelay = 250 * time.Millisecond
+
+// adminRestartTimeout bounds the installer's Restart for Restart Hub.
+const adminRestartTimeout = 30 * time.Second
 
 // writeRestartAccepted writes the Restart Hub response and flushes it.
 func writeRestartAccepted(w http.ResponseWriter) {

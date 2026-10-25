@@ -320,3 +320,59 @@ func TestMaintenanceRunContext(t *testing.T) {
 		t.Fatal("pull-images got a deadline")
 	}
 }
+
+type cleanupCtxTestKey struct{}
+
+func TestMaintenanceCleanupContext_DetachedAndBounded(t *testing.T) {
+	parent, cancel := context.WithCancel(context.WithValue(context.Background(), cleanupCtxTestKey{}, "trace-1"))
+	cancel()
+	ctx, cancelCleanup := maintenanceCleanupContext(parent)
+	defer cancelCleanup()
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("cleanup ctx inherited the parent's cancellation: %v", err)
+	}
+	dl, ok := ctx.Deadline()
+	if !ok || time.Until(dl) > maintenanceCleanupTimeout {
+		t.Fatalf("cleanup ctx deadline = %v, %v; want bounded by %v", dl, ok, maintenanceCleanupTimeout)
+	}
+	if v := ctx.Value(cleanupCtxTestKey{}); v != "trace-1" {
+		t.Fatalf("cleanup ctx lost the parent's values: %v", v)
+	}
+}
+
+// The before-restart hook's failure path clears the pending update it just
+// wrote. Its ctx may be the one that failed the write (cancelled, expired);
+// the clear must still happen, or boot reconciliation would find a stale
+// pending update for a run that never restarted.
+func TestClearPendingUpdateAfterFailure_ParentCancelled(t *testing.T) {
+	srv, s := newTestServerWithStore(t)
+	run := newRun(t, s)
+	if err := srv.writeHubSettingJSON(context.Background(), HubSettingSectionPendingUpdate,
+		PendingUpdate{RunID: run.ID, From: "nightly-20261023", To: "nightly-20261024", Strategy: "symlink"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	srv.clearPendingUpdateAfterFailure(ctx, run.ID)
+
+	if _, err := s.GetHubSetting(context.Background(), HubSettingSectionPendingUpdate); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("pending_update survived a clear on a cancelled ctx: %v", err)
+	}
+}
+
+// Another run's pending update is left alone, also on the cleanup path.
+func TestClearPendingUpdateAfterFailure_OtherRunKept(t *testing.T) {
+	srv, s := newTestServerWithStore(t)
+	run := newRun(t, s)
+	if err := srv.writeHubSettingJSON(context.Background(), HubSettingSectionPendingUpdate,
+		PendingUpdate{RunID: "another-run", To: "nightly-20261024"}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	srv.clearPendingUpdateAfterFailure(ctx, run.ID)
+	if _, err := s.GetHubSetting(context.Background(), HubSettingSectionPendingUpdate); err != nil {
+		t.Fatalf("another run's pending_update was cleared: %v", err)
+	}
+}
