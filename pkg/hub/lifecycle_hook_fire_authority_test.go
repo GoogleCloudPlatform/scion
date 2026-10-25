@@ -320,28 +320,29 @@ func TestHookFire_WriterEmailChanged_Refused(t *testing.T) {
 	f.assertRefused(t, f.fire(t, h), HookFireWriterNotFound)
 }
 
-// The development user's configured email changed between runs: hooks it
-// wrote under the old address no longer resolve.
-func TestHookFire_DevEmailChanged_Refused(t *testing.T) {
-	f := newFireFixture(t)
-	f.assertRefused(t, f.fire(t, f.hook(t, "old-dev@localhost")), HookFireWriterNotFound)
-}
-
-// A hook written by the development identity mints, both when the seeded
-// row has the same email and when the row's email lags behind the
-// configured identity (seedDevUser never refreshes it).
+// A hook written by the development identity mints while the seeded row
+// carries the same email.
 func TestHookFire_DevWriter_Mints(t *testing.T) {
 	f := newFireFixture(t)
 	dev, err := f.store.GetUser(context.Background(), DevUserID)
 	require.NoError(t, err)
-	f.assertMinted(t, f.fire(t, f.hook(t, NewDevUser(f.srv.config.DevUserConfig).Email())))
+	f.assertMinted(t, f.fire(t, f.hook(t, dev.Email)))
+}
 
-	// The seeded row's email lags behind the configured identity.
+// The development user's email changed: the configured development identity
+// (whose email the write path records) no longer matches the seeded row,
+// which seedDevUser never refreshes. Hooks written under either address that
+// no row carries do not resolve and fail closed, as ruled for a changed
+// development email.
+func TestHookFire_DevEmailChanged_Refused(t *testing.T) {
+	f := newFireFixture(t)
+	dev, err := f.store.GetUser(context.Background(), DevUserID)
+	require.NoError(t, err)
+	configured := NewDevUser(f.srv.config.DevUserConfig).Email()
 	dev.Email = "seeded-dev@localhost"
 	require.NoError(t, f.store.UpdateUser(context.Background(), dev))
-	f.tokenGen.calls = 0
-	f.requests.Store(0)
-	f.assertMinted(t, f.fire(t, f.hook(t, NewDevUser(f.srv.config.DevUserConfig).Email())))
+	f.assertRefused(t, f.fire(t, f.hook(t, configured)), HookFireWriterNotFound)
+	f.assertRefused(t, f.fire(t, f.hook(t, "old-dev@localhost")), HookFireWriterNotFound)
 }
 
 // The development user's hooks stop when development authority is off.

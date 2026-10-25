@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -127,7 +126,7 @@ func (s *Server) authorizeHookFire(ctx context.Context, hook *store.LifecycleHoo
 	}
 
 	// 2. The writer's user row, loaded fresh.
-	user, err := s.resolveHookWriter(ctx, hook.CreatedBy)
+	user, err := s.store.GetUserByEmail(ctx, hook.CreatedBy)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return hookFireDeny(HookFireWriterNotFound, "hook writer does not exist")
@@ -193,28 +192,6 @@ func (s *Server) authorizeHookFire(ctx context.Context, hook *store.LifecycleHoo
 			fmt.Sprintf("hook writer may not act as the service account (%s): %s", result.Outcome.String(), result.Reason))
 	}
 	return nil
-}
-
-// resolveHookWriter loads the user row of a hook's recorded writer email.
-//
-// The development user is the one writer whose row email can lag behind the
-// identity that wrote the hook: the write path records the email of the
-// configured development identity (NewDevUser), while seedDevUser creates
-// the DevUserID row once and never refreshes its email. So when no row has
-// the email, development authority is on, and the email is the one this
-// server's development identity presents, the writer is the DevUserID row.
-// Every later step still applies to that row. Development authority already
-// makes its holder a super-admin, so this resolves nothing it could not do.
-func (s *Server) resolveHookWriter(ctx context.Context, email string) (*store.User, error) {
-	user, err := s.store.GetUserByEmail(ctx, email)
-	if err == nil || !errors.Is(err, store.ErrNotFound) {
-		return user, err
-	}
-	if s.authzService.devLocalAuthorityEnabled() &&
-		strings.EqualFold(email, NewDevUser(s.config.DevUserConfig).Email()) {
-		return s.store.GetUser(ctx, DevUserID)
-	}
-	return nil, err
 }
 
 // hookFireActAsAudit returns the actAs audit sink for one fire of hookID. An
