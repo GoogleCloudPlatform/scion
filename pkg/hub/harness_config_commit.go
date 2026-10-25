@@ -299,7 +299,7 @@ func (s *Server) commitHarnessConfigFiles(ctx context.Context, hc *store.Harness
 	hc.Files = next
 	hc.ContentHash = contentHash
 	hc.Config = idx.Config
-	if idx.Harness == "" && opts.collected != nil && !(present && configYAML == nil) {
+	if idx.Harness == "" && opts.collected != nil && (!present || configYAML != nil) {
 		// A bootstrap or import commit stores the harness its collected
 		// config.yaml gives. Every caller validated that config.yaml before
 		// collection (the schema requires a non-empty harness), so an empty
