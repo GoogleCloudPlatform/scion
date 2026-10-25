@@ -405,11 +405,12 @@ listener. When you enable it, the chart:
 
 Every node verifies its peers against the CA and `serverName`, so one
 certificate whose SAN is that name serves all replicas. The default is
-`<fullname>-relay.<namespace>.svc`, usually `<release>-scion-hub-relay.<namespace>.svc`:
-issue the certificate for that name, or set `conduit.internalTls.serverName` to
-the name your certificate carries. A set CA replaces the system roots, and a private CA
-requires it. cert-manager fills `ca.crt` only for some issuers; for others,
-point `caSecret` at a Secret holding the CA.
+`<fullname>-relay.<namespace>.svc`, usually
+`<release>-scion-hub-relay.<namespace>.svc`: issue the certificate for that
+name, or set `conduit.internalTls.serverName` to the name your certificate
+carries. A set CA replaces the system roots, and a private CA requires it.
+cert-manager fills `ca.crt` only for some issuers; for others, point `caSecret`
+at a Secret holding the CA.
 
 The hub reads the CA bundle and `serverName` once at startup. Changing
 `serverName`, `caSecret` or `caKey` through `helm upgrade` already rolls the
