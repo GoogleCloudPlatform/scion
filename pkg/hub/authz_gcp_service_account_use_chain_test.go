@@ -136,22 +136,23 @@ func TestMissingOwnEdgeNotHubAttestedDeniesGCPServiceAccountUse(t *testing.T) {
 	require.Equal(t, missingEdgeReason(agentID), d.Reason)
 }
 
-// seedDevLocalDelegationEdge records agentID's own edge from delegatorID
-// with local development provenance (version 1, principal ceiling).
-func seedDevLocalDelegationEdge(t *testing.T, s store.Store, delegatorID, agentID, projectID string) {
+// seedDevLocalDelegationEdge records delegateID's edge from the
+// delegator with local development provenance (version 1, principal
+// ceiling).
+func seedDevLocalDelegationEdge(t *testing.T, s store.Store, delegatorType, delegatorID, delegateID, projectID string) {
 	t.Helper()
 	require.NoError(t, s.CreateDelegationEdge(context.Background(), &store.DelegationEdge{
-		DelegatorType: store.DelegationPrincipalUser,
+		DelegatorType: delegatorType,
 		DelegatorID:   delegatorID,
 		DelegateType:  store.DelegationPrincipalAgent,
-		DelegateID:    agentID,
+		DelegateID:    delegateID,
 		ScopeType:     store.RoleScopeProject,
 		ScopeID:       projectID,
 		Role:          string(AgentRoleFull),
 		Active:        true,
 		AuthorityProvenance: store.AuthorityProvenance{
 			ProvenanceVersion:    1,
-			SourcePrincipalKind:  store.DelegationPrincipalUser,
+			SourcePrincipalKind:  delegatorType,
 			SourcePrincipalID:    delegatorID,
 			SourceCredentialKind: store.SourceCredentialDevLocal,
 		},
@@ -159,39 +160,73 @@ func seedDevLocalDelegationEdge(t *testing.T, s store.Store, delegatorID, agentI
 	}))
 }
 
-// An agent edge with local development provenance passes only while dev
+// The chain check's reasons for an edge with local development provenance
+// that it does not admit.
+const (
+	devLocalDisabledReason       = "delegation ceiling: " + reasonDevLocalDisabled
+	devLocalOtherDelegatorReason = "delegation ceiling: local development provenance with another delegator"
+)
+
+// An edge with local development provenance passes only while dev
 // authority is enabled on this server and the delegator is the dev user, as
 // in the chain check; otherwise it denies with ceiling_source_not_allowed,
-// whatever the recorded assignment says.
+// whatever the recorded assignment says. The check applies at every hop:
+// on the agent's own edge (depth 0), including one from an agent
+// delegator, and on an ancestor's edge, where the agent's own edge is
+// recorded from a parent agent and the parent's edge carries the
+// provenance. Each deny row changes one fact against the admitted row of
+// the same shape; the admitted shape of the agent-delegator row is the
+// recorded parent edge in TestMissingAncestorEdgeDeniesGCPServiceAccountUse.
 func TestDevLocalEdgeProvenanceGCPServiceAccountUse(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
+		ancestor   bool // the provenance is on the parent agent's edge
+		agentDeleg bool // the agent's own edge is from a parent agent
 		devEnabled bool
 		devUser    bool
-		admitted   bool
+		reason     string // empty: admitted
 	}{
-		{"dev authority enabled, dev user delegator", true, true, true},
-		{"dev authority disabled", false, true, false},
-		{"another delegator", true, false, false},
+		{"dev authority enabled, dev user delegator", false, false, true, true, ""},
+		{"dev authority disabled", false, false, false, true, devLocalDisabledReason},
+		{"another delegator", false, false, true, false, devLocalOtherDelegatorReason},
+		{"agent delegator", false, true, true, false, devLocalOtherDelegatorReason},
+		{"ancestor edge, dev authority enabled, dev user delegator", true, false, true, true, ""},
+		{"ancestor edge, dev authority disabled", true, false, false, true, devLocalDisabledReason},
+		{"ancestor edge, another delegator", true, false, true, false, devLocalOtherDelegatorReason},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			authz, s := authzTestSetup(t)
 			authz.setDevLocalAuthorityEnabled(tc.devEnabled)
 			saX := tid("devlocal-use-sa")
 			agentID, projectID := tid("devlocal-use-agent"), tid("devlocal-use-project")
+			parentID := tid("devlocal-use-parent")
 			seedUseParentProof(t, s, agentID, projectID, saX)
 			delegator := DevUserID
 			if !tc.devUser {
 				delegator = useAssignerID(agentID)
 			}
-			seedDevLocalDelegationEdge(t, s, delegator, agentID, projectID)
+			switch {
+			case tc.agentDeleg:
+				// The parent's own edge is recorded from a user, so the
+				// provenance on the agent's edge is the only fault.
+				seedDevLocalDelegationEdge(t, s, store.DelegationPrincipalAgent, parentID, agentID, projectID)
+				seedRecordedDelegationEdge(t, s, store.DelegationPrincipalUser, useAssignerID(agentID), store.DelegationPrincipalAgent, parentID,
+					store.RoleScopeProject, projectID, string(AgentRoleFull))
+			case tc.ancestor:
+				seedRecordedDelegationEdge(t, s, store.DelegationPrincipalAgent, parentID, store.DelegationPrincipalAgent, agentID,
+					store.RoleScopeProject, projectID, string(AgentRoleFull))
+				seedDevLocalDelegationEdge(t, s, store.DelegationPrincipalUser, delegator, parentID, projectID)
+			default:
+				seedDevLocalDelegationEdge(t, s, store.DelegationPrincipalUser, delegator, agentID, projectID)
+			}
 
 			d := gcpUseDecision(authz, agentID, projectID, saX)
-			if tc.admitted {
+			if tc.reason == "" {
 				require.True(t, d.Allowed, "cause=%q reason=%q", d.DenyCause, d.Reason)
 				return
 			}
 			requireUseDeniedWithCause(t, d, DenyCauseCeilingSourceNotAllowed)
+			require.Equal(t, tc.reason, d.Reason)
 		})
 	}
 }
