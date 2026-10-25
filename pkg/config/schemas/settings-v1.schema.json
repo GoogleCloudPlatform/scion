@@ -1497,6 +1497,13 @@
           "x-env-var": "SCION_SERVER_HUB_PERFTRACE",
           "x-since": "1"
         },
+        "csp_report_raw_samples": {
+          "type": "boolean",
+          "default": false,
+          "description": "Adds each browser policy report's sample to its csp_violation log record, off by default. A sample can hold the start of page content (for a Trusted Types report, the text passed to the sink, such as a chat message), so it is left out unless this is on. For a short diagnosis; turn it off afterwards. Restart required to change.",
+          "x-env-var": "SCION_SERVER_HUB_CSPREPORTRAWSAMPLES",
+          "x-since": "1"
+        },
         "membership_sweep_report_only": {
           "type": "boolean",
           "default": false,

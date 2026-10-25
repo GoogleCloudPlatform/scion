@@ -2669,10 +2669,10 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// nothing unless every agent directory that exists carries that move's
 	// marker (see the check after the target is resolved).
 	moveReincarnationID := query.Get(api.MoveReincarnationIDQueryParam)
-	if moveReincarnationID != "" && (!deleteFiles || localOnly || softDelete || projectID == "" ||
+	if moveReincarnationID != "" && (!deleteFiles || localOnly || softDelete || removeBranch || projectID == "" ||
 		query.Get(api.PurgeRetainedQueryParam) == "true") {
 		span.SetStatus(codes.Error, "invalid forced move rollback delete")
-		ValidationError(w, "moveReincarnationId needs deleteFiles and projectId, without localOnly, softDelete or purgeRetained", nil)
+		ValidationError(w, "moveReincarnationId needs deleteFiles and projectId, without localOnly, softDelete, removeBranch or purgeRetained", nil)
 		return
 	}
 	// purgeRetained removes the retained files of a soft-deleted agent once
@@ -2902,13 +2902,15 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// directory it would remove that exists carries that move's marker,
 	// checked under the files lock taken above. Anything else was not
 	// created by the move: 409, with a fixed message (the paths are
-	// logged here only).
+	// logged here only). The check looks up the agent's worktree and sharer
+	// registry entry by the same sharer key the delete below uses, so a
+	// worktree provisioned under the hub agent ID is seen too.
 	if moveReincarnationID != "" {
 		checker, ok := target.mgr.(moveMarkerChecker)
 		var paths []string
 		chkErr := errors.New("this broker cannot check move markers")
 		if ok && projectPath != "" {
-			paths, chkErr = checker.CheckMoveMarkers(ctx, projectPath, agentProjectID, target.name, moveReincarnationID)
+			paths, chkErr = checker.CheckMoveMarkers(ctx, projectPath, agentProjectID, target.name, sharerKey, moveReincarnationID)
 		} else if ok {
 			chkErr = errors.New("no project path to check the move markers in")
 		}
@@ -8256,7 +8258,7 @@ var _ moveWorkspaceAbsenceChecker = (*agent.AgentManager)(nil)
 // move's marker on the agent's directories before its rollback delete
 // (agent.AgentManager).
 type moveMarkerChecker interface {
-	CheckMoveMarkers(ctx context.Context, projectPath, projectID, agentName, moveID string) ([]string, error)
+	CheckMoveMarkers(ctx context.Context, projectPath, projectID, agentName, sharerKey, moveID string) ([]string, error)
 }
 
 var _ moveMarkerChecker = (*agent.AgentManager)(nil)

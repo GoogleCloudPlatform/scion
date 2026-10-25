@@ -1641,6 +1641,9 @@ type V1ServerHubConfig struct {
 	DisableLegacyStorageFallback *bool `json:"disable_legacy_storage_fallback,omitempty" yaml:"disable_legacy_storage_fallback,omitempty" koanf:"disable_legacy_storage_fallback"`
 	// PerfTrace turns on per-request performance tracing. Off by default.
 	PerfTrace *bool `json:"perf_trace,omitempty" yaml:"perf_trace,omitempty" koanf:"perf_trace"`
+	// CSPReportRawSamples adds browser policy report samples to the log.
+	// Off by default.
+	CSPReportRawSamples *bool `json:"csp_report_raw_samples,omitempty" yaml:"csp_report_raw_samples,omitempty" koanf:"csp_report_raw_samples"`
 	// MembershipSweepReportOnly makes the membership-standing sweep log and
 	// audit the agents it would hold, without holding or stopping them.
 	// Off by default.
@@ -4175,6 +4178,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.PerfTrace != nil {
 			gc.Hub.PerfTrace = *v1.Hub.PerfTrace
 		}
+		if v1.Hub.CSPReportRawSamples != nil {
+			gc.Hub.CSPReportRawSamples = *v1.Hub.CSPReportRawSamples
+		}
 		if v1.Hub.MembershipSweepReportOnly != nil {
 			gc.Hub.MembershipSweepReportOnly = *v1.Hub.MembershipSweepReportOnly
 		}
@@ -4657,6 +4663,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if gc.Hub.PerfTrace {
 		perfTrace := true
 		v1Hub.PerfTrace = &perfTrace
+	}
+	if gc.Hub.CSPReportRawSamples {
+		rawSamples := true
+		v1Hub.CSPReportRawSamples = &rawSamples
 	}
 	if gc.Hub.MembershipSweepReportOnly {
 		reportOnly := true

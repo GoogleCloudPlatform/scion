@@ -271,6 +271,11 @@ type ServerConfig struct {
 	// returned in X-Scion-Perf-* headers to admin requests that opt in. Off by
 	// default; observe only. See perftrace.go.
 	PerfTrace bool
+	// CSPReportRawSamples (server.hub.csp_report_raw_samples) adds each
+	// browser policy report's sample to its csp_violation log record. Off
+	// by default: a sample can hold the start of page content, such as a
+	// chat message. For a short diagnosis only; startup only.
+	CSPReportRawSamples bool
 	// MembershipSweepReportOnly (server.hub.membership_sweep_report_only)
 	// puts the membership-standing sweep in report-only mode: it logs and
 	// audits each agent it would hold (mutation type
@@ -3442,7 +3447,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	srv.authConfig.ExternalBearerLimiter = srv.externalBearerRateLimiter
 
 	srv.cspReportLimiter = newCSPReportLimiter(cfg.TrustedProxies)
-	srv.cspReports = newCSPReportHandler(srv.cspReportLimiter)
+	srv.cspReports = newCSPReportHandler(srv.cspReportLimiter, cfg.CSPReportRawSamples)
+	if cfg.CSPReportRawSamples {
+		slog.Warn("Browser policy report samples are logged (server.hub.csp_report_raw_samples); samples can hold page content")
+	}
 
 	// Initialize GE Google credential exchange service, sharing the validator
 	// and resolver above so both mechanisms produce identical decisions

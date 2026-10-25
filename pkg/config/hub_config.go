@@ -179,6 +179,11 @@ type HubServerConfig struct {
 	// Off by default; observe only; read at startup.
 	PerfTrace bool `json:"perfTrace" yaml:"perfTrace" koanf:"perfTrace"`
 
+	// CSPReportRawSamples adds each browser policy report's sample to its
+	// csp_violation log record. Off by default (a sample can hold page
+	// content); for diagnosis; read at startup.
+	CSPReportRawSamples bool `json:"cspReportRawSamples" yaml:"cspReportRawSamples" koanf:"cspReportRawSamples"`
+
 	// MembershipSweepReportOnly puts the membership-standing sweep in
 	// report-only mode: it logs and audits the agents it would hold and
 	// stop, and holds and stops none of them. Off by default (the sweep
