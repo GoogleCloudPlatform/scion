@@ -17,6 +17,7 @@ package runtimebroker
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"net/http"
 	"strconv"
 	"strings"
@@ -63,6 +64,17 @@ func (g *guardFixture) served() []string {
 // returns once the hub admitted it.
 func newGuardFixture(t *testing.T, incarnation string, rpcs []string, mods ...func(*conduitRPCGuard)) *guardFixture {
 	t.Helper()
+	// Permissive: unsigned requests would pass this middleware.
+	permissive := NewMultiKeyBrokerAuthMiddleware(true, 5*time.Minute, true)
+	permissive.UpdateKeys([]secretKeyEntry{{hubName: "hub-a", secretKey: []byte(guardKey)}})
+	return newGuardFixtureBehind(t, incarnation, rpcs, permissive.Middleware, mods...)
+}
+
+// newGuardFixtureBehind is newGuardFixture with inner wrapping the
+// recording handler tree behind the guard in place of the permissive
+// broker auth middleware.
+func newGuardFixtureBehind(t *testing.T, incarnation string, rpcs []string, inner func(http.Handler) http.Handler, mods ...func(*conduitRPCGuard)) *guardFixture {
+	t.Helper()
 	g := &guardFixture{}
 	tree := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		g.mu.Lock()
@@ -70,14 +82,11 @@ func newGuardFixture(t *testing.T, incarnation string, rpcs []string, mods ...fu
 		g.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	})
-	// Permissive: unsigned requests would pass this middleware.
-	permissive := NewMultiKeyBrokerAuthMiddleware(true, 5*time.Minute, true)
-	permissive.UpdateKeys([]secretKeyEntry{{hubName: "hub-a", secretKey: []byte(guardKey)}})
 	guard := newConduitRPCGuard(guardBrokerID, func() []byte { return []byte(guardKey) })
 	for _, mod := range mods {
 		mod(guard)
 	}
-	h := newGuardedConduitRPCHandler(permissive.Middleware(tree), "hub-a", 0, nil, guard)
+	h := newGuardedConduitRPCHandler(inner(tree), "hub-a", 0, nil, guard)
 
 	admitted := make(chan conduit.LocalSession, 1)
 	hub := newFakeConduitHub(t, hubStep{after: func(ls conduit.LocalSession) { admitted <- ls }})
@@ -326,6 +335,71 @@ func TestConduitRPCGuard_RepeatRefused(t *testing.T) {
 	assert.Len(t, g2.served(), 1)
 }
 
+// TestConduitRPCGuard_RespelledSignatureRefused: the same signed request
+// with its signature header written in another base64 spelling of the same
+// bytes (other unused low bits, or CR/LF inserted, which the decoder skips)
+// is refused by the guard itself, with nothing else behind it.
+func TestConduitRPCGuard_RespelledSignatureRefused(t *testing.T) {
+	g := newGuardFixtureBehind(t, "inc-1", conduit.BrokerRPCs(), func(h http.Handler) http.Handler { return h })
+	const path = "/api/v1/agents/a1/exec"
+	body := []byte(`{"command":["true"]}`)
+	headers := g.signedHeaders(t, http.MethodPost, path, "", body, signOpts{})
+	sig := headers[apiclient.HeaderSignature]
+	want, err := base64.StdEncoding.DecodeString(sig)
+	require.NoError(t, err)
+
+	spellings := respelledSignatures(t, sig)
+	for _, alt := range []string{sig[:10] + "\r\n" + sig[10:], sig[:20] + "\n" + sig[20:], "\r" + sig, sig + "\n"} {
+		got, err := base64.StdEncoding.DecodeString(alt)
+		require.NoError(t, err, "spelling %q", alt)
+		require.Equal(t, want, got, "spelling %q decodes to the same bytes", alt)
+		spellings = append(spellings, alt)
+	}
+
+	assert.Equal(t, int32(http.StatusOK), g.call(t, http.MethodPost, path, "", headers, body).GetStatus(), "first use")
+	for _, alt := range spellings {
+		h := make(map[string]string, len(headers))
+		for k, v := range headers {
+			h[k] = v
+		}
+		h[apiclient.HeaderSignature] = alt
+		resp := g.call(t, http.MethodPost, path, "", h, body)
+		assert.Equal(t, int32(http.StatusUnauthorized), resp.GetStatus(), "signature spelled %q", alt)
+		assert.Contains(t, string(resp.GetBody()), "request already served", "signature spelled %q", alt)
+	}
+	assert.Len(t, g.served(), 1, "one signed request is served once")
+}
+
+// TestConduitRPCGuard_ReframedNonceRefused: the same signed request with a
+// signed header line moved into its nonce (same canonical input, same
+// signature, different nonce text; the session header stays listed) is
+// refused by the guard itself, with nothing else behind it.
+func TestConduitRPCGuard_ReframedNonceRefused(t *testing.T) {
+	g := newGuardFixtureBehind(t, "inc-1", conduit.BrokerRPCs(), func(h http.Handler) http.Handler { return h })
+	const path = "/api/v1/agents/a1/exec"
+	body := []byte(`{"command":["true"]}`)
+	signed, reframed := reframedTestHeaders(t, func() *http.Request {
+		req, err := http.NewRequest(http.MethodPost, "http://runtime-broker"+path, bytes.NewReader(body))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(conduit.BrokerRPCSessionHeader, g.sessionID)
+		return req
+	}, guardBrokerID, []byte(guardKey), conduit.BrokerRPCSessionHeader)
+	flat := func(h http.Header) map[string]string {
+		out := map[string]string{}
+		for k := range h {
+			out[k] = h.Get(k)
+		}
+		return out
+	}
+
+	assert.Equal(t, int32(http.StatusOK), g.call(t, http.MethodPost, path, "", flat(signed), body).GetStatus(), "first use")
+	resp := g.call(t, http.MethodPost, path, "", flat(reframed), body)
+	assert.Equal(t, int32(http.StatusUnauthorized), resp.GetStatus(), "re-framed request")
+	assert.Contains(t, string(resp.GetBody()), "request already served", "re-framed request")
+	assert.Len(t, g.served(), 1, "one signed request is served once")
+}
+
 // TestSeenOnce_EvictsAfterWindow: a key is refused until its expiry,
 // inclusive, and dropped once now is after it, so the store holds one
 // window at most.
@@ -344,6 +418,19 @@ func TestSeenOnce_EvictsAfterWindow(t *testing.T) {
 	s.mu.Unlock()
 	assert.False(t, k1, "the expired key was dropped")
 	assert.Equal(t, 2, n)
+}
+
+// TestSeenOnce_RefusesExpiryBeforeSweep: a key whose expiry is before a
+// time another add already swept with is refused, even if that add dropped
+// it: the caller's own now can be older than the sweep.
+func TestSeenOnce_RefusesExpiryBeforeSweep(t *testing.T) {
+	s := newSeenOnce()
+	t0 := time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC)
+	assert.True(t, s.add("a", t0, t0.Add(-time.Second)), "first use, inside the window")
+	assert.True(t, s.add("b", t0.Add(10*time.Second), t0.Add(time.Nanosecond)), "another key, after a's expiry")
+	assert.False(t, s.add("a", t0, t0), "a again, checked at its expiry but after the sweep that dropped it")
+	assert.False(t, s.add("c", t0, t0), "a new key whose expiry is before the sweep")
+	assert.True(t, s.add("d", t0.Add(time.Nanosecond), t0), "a key expiring exactly at the sweep time")
 }
 
 // passAllChecker serves every request (handler tests that are not about
@@ -406,6 +493,9 @@ func TestConduitRPCGuard_RepeatAtWindowEdgeRefused(t *testing.T) {
 	var nowNanos atomic.Int64
 	g := newGuardFixture(t, "inc-1", conduit.BrokerRPCs(), func(guard *conduitRPCGuard) {
 		guard.now = func() time.Time { return time.Unix(0, nowNanos.Load()) }
+		// Its own set: the injected clock must not move the process-wide
+		// set's sweep time for other tests.
+		guard.seen = newSeenOnce()
 	})
 	const path = "/api/v1/images/status"
 	headers := g.signedHeaders(t, http.MethodGet, path, "", nil, signOpts{})
