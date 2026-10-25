@@ -1074,3 +1074,191 @@ describe('scion-page-admin-users — invite dialog display name and submit routi
     expect(mod.provisionWarningText('something_new')).toBe('Warning: something_new.');
   });
 });
+
+describe('scion-page-admin-users — delete dialog blockers', () => {
+  let element: PageEl | null = null;
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler([])));
+    mod = await import('./admin-users.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  const BLOCKERS = {
+    agents: [
+      { id: 'a-1', slug: 'worker', projectId: 'p-1', deletionState: '' },
+      { id: 'a-2', slug: 'stuck', projectId: 'p-1', deletionState: 'failed' },
+    ],
+    edges: [
+      { id: 'e-1', delegateType: 'agent', delegateId: 'a-9', scopeType: 'project', scopeId: 'p-2' },
+    ],
+    truncated: true,
+  };
+  const NONE = { agents: [], edges: [], truncated: false };
+
+  /** Fetch handler answering delete-blockers and DELETE for the target. */
+  function withDeleteResponses(
+    blockersRes: () => Response,
+    deleteRes: () => Response
+  ): (url: string | URL | Request, init?: RequestInit) => Promise<Response> {
+    const base = createFetchHandler([makeUser()]);
+    return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+      if (path.endsWith('/api/v1/users/u-target/delete-blockers')) {
+        return Promise.resolve(blockersRes());
+      }
+      if (init?.method === 'DELETE' && path.endsWith('/api/v1/users/u-target')) {
+        return Promise.resolve(deleteRes());
+      }
+      return base(url, init);
+    };
+  }
+
+  async function openDeleteDialog(el: PageEl): Promise<Element> {
+    const item = queryAll(el, 'sl-menu-item.menu-item-danger').find(
+      (i) => i.textContent?.trim() === 'Delete'
+    );
+    expect(item).toBeTruthy();
+    item!.click();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await el.updateComplete;
+    const dialog = el.shadowRoot!.querySelector('sl-dialog[label="Delete user"]');
+    expect(dialog).not.toBeNull();
+    return dialog!;
+  }
+
+  function confirmButton(dialog: Element): HTMLElement {
+    return Array.from(dialog.querySelectorAll('sl-button')).find(
+      (b) => b.textContent?.trim() === 'Delete'
+    ) as HTMLElement;
+  }
+
+  function deleteCalls(): unknown[] {
+    return vi
+      .mocked(fetch)
+      .mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'DELETE');
+  }
+
+  it('parses blocker lists and rejects other shapes', () => {
+    expect(mod.parseUserDeleteBlockers(BLOCKERS)).toEqual(BLOCKERS);
+    expect(mod.parseUserDeleteBlockers({ agents: [{ id: 'a-1' }] })).toEqual({
+      agents: [{ id: 'a-1', slug: '', projectId: '', deletionState: '' }],
+      edges: [],
+      truncated: false,
+    });
+    expect(mod.parseUserDeleteBlockers(null)).toBeNull();
+    expect(mod.parseUserDeleteBlockers({ users: [] })).toBeNull();
+  });
+
+  it('lists the blockers when the dialog opens and disables Delete', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withDeleteResponses(
+          () => jsonResponse(BLOCKERS),
+          () => new Response(null, { status: 204 })
+        )
+      )
+    );
+    const dialog = await openDeleteDialog(element);
+
+    const agents = Array.from(dialog.querySelectorAll('.delete-blockers-agents li'));
+    expect(agents).toHaveLength(2);
+    expect(agents[0].querySelector('a')!.getAttribute('href')).toBe('/agents/a-1');
+    expect(agents[0].textContent).toContain('worker');
+    expect(agents[1].textContent).toContain('(delete failed)');
+    const edges = Array.from(dialog.querySelectorAll('.delete-blockers-edges li'));
+    expect(edges).toHaveLength(1);
+    expect(edges[0].querySelector('a')!.getAttribute('href')).toBe('/agents/a-9');
+    expect(edges[0].textContent?.replace(/\s+/g, ' ')).toContain('in project p-2');
+    expect(dialog.querySelector('.delete-blockers-more')).not.toBeNull();
+    expect(dialog.textContent).not.toContain('This action is permanent');
+    expect(confirmButton(dialog).hasAttribute('disabled')).toBe(true);
+    expect(deleteCalls()).toHaveLength(0);
+  });
+
+  it('shows the usual message when nothing blocks', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withDeleteResponses(
+          () => jsonResponse(NONE),
+          () => new Response(null, { status: 204 })
+        )
+      )
+    );
+    const dialog = await openDeleteDialog(element);
+    expect(dialog.querySelector('.delete-blockers')).toBeNull();
+    expect(dialog.textContent).toContain('This action is permanent');
+    expect(confirmButton(dialog).hasAttribute('disabled')).toBe(false);
+  });
+
+  it('keeps the dialog open and lists the blockers on a 409 user_delete_blocked', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withDeleteResponses(
+          () => jsonResponse(NONE),
+          () =>
+            jsonResponse(
+              {
+                error: {
+                  code: 'user_delete_blocked',
+                  message: 'cannot delete a user who owns agents',
+                  details: { agents: [BLOCKERS.agents[0]], edges: [], truncated: false },
+                },
+              },
+              409
+            )
+        )
+      )
+    );
+    const dialog = await openDeleteDialog(element);
+    confirmButton(dialog).click();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await element.updateComplete;
+
+    expect(deleteCalls()).toHaveLength(1);
+    const open = element.shadowRoot!.querySelector('sl-dialog[label="Delete user"]');
+    expect(open).not.toBeNull();
+    const agents = Array.from(open!.querySelectorAll('.delete-blockers-agents li'));
+    expect(agents).toHaveLength(1);
+    expect(agents[0].textContent).toContain('worker');
+    expect(confirmButton(open!).hasAttribute('disabled')).toBe(true);
+    expect(element.shadowRoot!.querySelector('.feedback-alert')).toBeNull();
+  });
+
+  it('shows another 409 as an error, as before', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        withDeleteResponses(
+          () => jsonResponse(NONE),
+          () =>
+            jsonResponse(
+              { error: { code: 'last_owner', message: 'last owner', details: { projects: [] } } },
+              409
+            )
+        )
+      )
+    );
+    const dialog = await openDeleteDialog(element);
+    confirmButton(dialog).click();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await element.updateComplete;
+
+    expect(element.shadowRoot!.querySelector('sl-dialog[label="Delete user"]')).toBeNull();
+    const alert = element.shadowRoot!.querySelector('.feedback-alert');
+    expect(alert?.getAttribute('variant')).toBe('danger');
+    expect(alert?.textContent).toContain('last owner');
+  });
+});
