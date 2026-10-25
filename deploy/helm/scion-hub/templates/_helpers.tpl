@@ -4626,8 +4626,14 @@ without leading zeros, no empty identifiers, and optional build metadata (which
 does not affect precedence). A tag that starts like a version but is not one
 is refused with the chart's own message rather than passed to semver.
 */}}
-{{- /* Numbers are bounded at 19 digits, inside uint64, so an overflowing number
-gets the malformed-version refusal below rather than a parse error. */}}
+{{- /*
+Numbers are bounded at 19 digits, inside uint64: major, minor and patch, and
+numeric pre-release identifiers too. An overflowing number gets the
+malformed-version refusal below rather than a parse error. This is deliberately
+stricter than Semantic Versioning 2.0.0, which sets no size limit (some valid
+20-digit numbers that fit in uint64 are refused too). It fails closed, and no
+real image tag is affected.
+*/}}
 {{- $num := "(0|[1-9][0-9]{0,18})" }}
 {{- $preId := "(0|[1-9][0-9]{0,18}|[0-9]*[A-Za-z-][0-9A-Za-z-]*)" }}
 {{- $semverRe := printf "^v?%s\\.%s\\.%s(-%s(\\.%s)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$" $num $num $num $preId $preId }}
