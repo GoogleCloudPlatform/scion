@@ -129,7 +129,16 @@ func (t *memTx) BumpLifecycleCursor(ctx context.Context, agentID string, n int, 
 	c.MetadataDigest = upd.MetadataDigest
 	c.LastFingerprint = upd.LastFingerprint
 	c.LastDeleted = upd.LastDeleted
-	c.UpdatedAt = upd.Now
+	// As the store: one UTC value for updated_at and attribution_stamp.
+	now := upd.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	now = now.UTC()
+	c.UpdatedAt = now
+	stamp := now
+	c.AttributionStamp = &stamp
+	c.Attribution = upd.Attribution
 	r := upd.Run
 	c.OpenRun, c.OpenRunGeneration, c.OpenRunMetadataRevision = r.OpenRun, r.OpenRunGeneration, r.OpenRunMetadataRevision
 	c.PendingRunChangeAt, c.ReincarnationBaseRunID = r.PendingRunChangeAt, r.ReincarnationBaseRunID

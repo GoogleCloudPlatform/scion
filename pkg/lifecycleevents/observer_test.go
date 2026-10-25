@@ -222,8 +222,10 @@ func TestObserverSliceOneDoneWhenSequence(t *testing.T) {
 	if evs[1].Gap == nil || !*evs[1].Gap {
 		t.Error("resynced(unobserved_change) must carry gap=true")
 	}
-	if evs[2].LaunchID != "run-1" || evs[2].Metadata == nil || evs[2].MetadataRevision != 1 {
-		t.Errorf("deleted: launch_id=%q metadata_revision=%d", evs[2].LaunchID, evs[2].MetadataRevision)
+	// run-1 was written unobserved: the cursor cannot prove it, so the
+	// deleted omits launch_id (attribution design 6.2, D2 fail closed).
+	if evs[2].LaunchID != "" || evs[2].Metadata == nil || evs[2].MetadataRevision != 1 {
+		t.Errorf("deleted: launch_id=%q metadata_revision=%d, want no launch_id", evs[2].LaunchID, evs[2].MetadataRevision)
 	}
 	if _, ok := h.db.cursor(agentA); ok {
 		t.Error("hard delete must remove the cursor")
@@ -459,6 +461,9 @@ func TestObserverOpenRunClosureCarriesSegment(t *testing.T) {
 	h.db.stateMu.Lock()
 	c := h.db.cursors[agentA]
 	c.OpenRun, c.OpenRunGeneration, c.OpenRunMetadataRevision = "run-1", "1", 1
+	// A coherent observed state: the cursor saw run-1 (attribution
+	// last_run), so the segment is trusted and its closure named.
+	c.Attribution.LastRun = "run-1"
 	h.db.cursors[agentA] = c
 	h.db.stateMu.Unlock()
 	before := clone(a)
@@ -471,9 +476,10 @@ func TestObserverOpenRunClosureCarriesSegment(t *testing.T) {
 		t.Fatalf("closing deleted: %+v", del)
 	}
 
-	// A cursor naming an open run without its frozen revision is
-	// inconsistent: the build fails instead of emitting a closure without
-	// the reference.
+	// A cursor naming an open run without its frozen revision is a
+	// malformed segment identity: no valid closure exists, so it is
+	// discarded before Derive and the loss shows as one resync gap
+	// (attribution design 3.3, P3 and R4-6), not a build failure.
 	h2 := newHarness(t)
 	h2.create(a)
 	h2.db.stateMu.Lock()
@@ -482,10 +488,14 @@ func TestObserverOpenRunClosureCarriesSegment(t *testing.T) {
 	h2.db.cursors[agentA] = c2
 	h2.db.stateMu.Unlock()
 	h2.write(context.Background(), store.AgentWrite{Op: store.AgentWriteHardDelete, Before: clone(a)})
-	if got := seq(h2.events()); got != "created@1" {
-		t.Fatalf("events = %s, want the closure refused", got)
+	if got := seq(h2.events()); got != "created@1 resynced@3(unobserved_change) deleted@4(hard)" {
+		t.Fatalf("events = %s, want the segment discarded with one gap", got)
 	}
-	if h2.counters.Get(telemetryemit.MetricBuildFailures, "segment_state") != 1 {
+	if del := h2.events()[2]; del.SegmentMetadataRevision != nil || del.LaunchID != "" {
+		t.Errorf("deleted after a discard carries segment fields: %+v", del)
+	}
+	if h2.counters.Get(telemetryemit.MetricBuildFailures, "segment_state") != 0 ||
+		h2.counters.Get(telemetryemit.MetricAttributionStale, telemetryemit.AttributionStaleDiscarded) != 1 {
 		t.Errorf("counters: %s", h2.counters)
 	}
 }

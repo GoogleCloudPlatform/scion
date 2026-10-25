@@ -85,12 +85,12 @@ func TestLifecycleSoftFinishRun_OpenSegmentClosesWithItsOwnRun(t *testing.T) {
 	assert.Zero(t, countTransitions(evs, tc.TransitionConfigured))
 }
 
-// TestLifecycleSoftFinishRun_NoOpenSegmentNamesCommittedRun: the agent had
-// stopped (segment closed); the soft finish records B. One deleted(soft)
-// names B, the row's committed run at the deletion: the run whose files
-// the broker may still retain. OLD (before #4058): it named R, the only
-// run the row then recorded. This is the one caller-visible change.
-func TestLifecycleSoftFinishRun_NoOpenSegmentNamesCommittedRun(t *testing.T) {
+// TestLifecycleSoftFinishRun_NoOpenSegmentNamesBeforeRun (attribution
+// design v2.8, T1 deletion step): the agent had stopped (segment closed);
+// the soft finish records B. B is unproven for this generation, so the one
+// deleted(soft) names the BEFORE run R1 with its generation, exactly as
+// before #4058 (no caller-visible change against cec382dd).
+func TestLifecycleSoftFinishRun_NoOpenSegmentNamesBeforeRun(t *testing.T) {
 	f, a := newS2Fixture(t)
 	f.mint(a.ID, "R1")
 	f.startWrite(a.ID)
@@ -99,7 +99,7 @@ func TestLifecycleSoftFinishRun_NoOpenSegmentNamesCommittedRun(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, n)
 	evs := f.events(a.ID)
-	require.Equal(t, "created@1[/1] started@2[R1/1] stopped@3(stopped)[R1/1] deleted@4(soft)[B1/1]", lcFull(evs))
+	require.Equal(t, "created@1[/1] started@2[R1/1] stopped@3(stopped)[R1/1] deleted@4(soft)[R1/1]", lcFull(evs))
 	assert.Nil(t, evs[3].SegmentMetadataRevision, "no segment to close")
 	assert.Zero(t, countTransitions(evs, tc.TransitionResynced))
 	assert.Zero(t, countTransitions(evs, tc.TransitionConfigured))

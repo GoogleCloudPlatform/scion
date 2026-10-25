@@ -81,6 +81,16 @@ type Planned struct {
 	// CarriesAdoption: the event carries the cursor's pending adoption
 	// provenance (adopted_from_launch_id, adopted_at, adoption_source).
 	CarriesAdoption bool
+
+	// Set by Attribute (attribution design 4.3), applied by the builder
+	// after the closure override and before effective-echo filtering.
+	// AttrOmitLaunch: the event's run is unproven for it; omit launch_id.
+	AttrOmitLaunch bool
+	// AttrLaunch: name this attributed run instead of the row's run.
+	AttrLaunch string
+	// DropAdoption: carry no adoption trio (the final launch_id is
+	// omitted, or the adopted-from run is quarantined).
+	DropAdoption bool
 }
 
 // CursorFacts is what Derive needs from the agent's cursor.
@@ -184,6 +194,10 @@ type Facts struct {
 	// AfterReincarnationInFlight: the committed row's reincarnation state
 	// is in flight (store.ReincarnationInFlight).
 	AfterReincarnationInFlight bool
+	// BeforeReincarnationInFlight and BeforePreviousRunIDs are the before
+	// row's (attribution design 4.4 and rule 2).
+	BeforeReincarnationInFlight bool
+	BeforePreviousRunIDs        []string
 
 	Evidence Evidence
 	// LaunchAccepted (with LaunchOwner) is MarkLaunchAccepted's write.

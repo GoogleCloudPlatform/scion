@@ -142,6 +142,8 @@ func (o *Observer) ObserveAgentWrite(ctx context.Context, tx store.LifecycleTx, 
 		facts.BeforePhase, facts.BeforeRunID, facts.BeforeGeneration = before.row.Phase, before.row.RunID, before.row.Generation
 		facts.BeforeDigest, facts.BeforeConfigDigest = before.digest, before.configDigest
 		facts.LaunchActive = before.row.LaunchState == store.LaunchStateActive
+		facts.BeforeReincarnationInFlight = store.ReincarnationInFlight(before.row.ReincarnationState)
+		facts.BeforePreviousRunIDs = before.row.PreviousRunIDs
 	}
 	if after != nil {
 		facts.AfterDeleted = !after.row.DeletedAt.IsZero()
@@ -168,7 +170,12 @@ func (o *Observer) ObserveAgentWrite(ctx context.Context, tx store.LifecycleTx, 
 			facts.Cursor.FingerprintMatches = Fingerprint(before.row, before.digest) == cursor.LastFingerprint
 		}
 	}
+	// Persistent run attribution (attribution design v2.8): normalise the
+	// stored state and discard a malformed segment before any Derive
+	// branch, then select each event's identity from PRE and POST.
+	pre := PrepareAttribution(&facts, cursor)
 	plan := Derive(facts)
+	att := Attribute(facts, pre, &plan)
 
 	rowOf := func(r Row) *rowState {
 		if r == RowAfter {
@@ -253,6 +260,7 @@ func (o *Observer) ObserveAgentWrite(ctx context.Context, tx store.LifecycleTx, 
 	if plan.FreezeSegment {
 		run.OpenRunMetadataRevision = metaRev
 	}
+	FinalizeAttribution(facts, plan, run, &att)
 
 	// Move the cursor.
 	switch {
@@ -271,10 +279,14 @@ func (o *Observer) ObserveAgentWrite(ctx context.Context, tx store.LifecycleTx, 
 			LastDeleted:      facts.AfterDeleted,
 			Now:              w.Now,
 			Run:              run,
+			Attribution:      att.State,
 		}
+		// The skip compares every attribution column and never applies
+		// after a normalisation (attribution design 4.5, review r1 R2).
 		unchanged := cursor != nil && n == 0 && upd.LastFingerprint == cursor.LastFingerprint &&
 			upd.LastDeleted == cursor.LastDeleted && upd.MetadataRevision == cursor.MetadataRevision &&
-			upd.MetadataDigest == cursor.MetadataDigest && run.Equal(cursor.RunState())
+			upd.MetadataDigest == cursor.MetadataDigest && run.Equal(cursor.RunState()) &&
+			!att.Normalized && att.State == cursor.Attribution
 		if !unchanged {
 			if staleCursor {
 				if err := tx.DeleteLifecycleCursor(ctx, agentID); err != nil {
@@ -303,6 +315,14 @@ func (o *Observer) ObserveAgentWrite(ctx context.Context, tx store.LifecycleTx, 
 		if err := tx.InsertLifecycleOutbox(ctx, rows); err != nil {
 			return fmt.Errorf("insert lifecycle outbox: %w", err)
 		}
+	}
+	if reason := att.StaleReason; reason != "" {
+		counters, logger := o.cfg.Counters, o.cfg.Logger
+		tx.AfterCommit(func() {
+			counters.AttributionStale(reason)
+			logger.Info("lifecycle: run attribution normalised to unattributed until the next qualifying fresh mint",
+				"agent_id", agentID, "reason", reason)
+		})
 	}
 	ambiguous, unconfirmed := plan.Ambiguous, plan.UnconfirmedStart
 	if ambiguous != "" || unconfirmed {

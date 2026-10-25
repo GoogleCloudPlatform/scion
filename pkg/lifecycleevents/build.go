@@ -269,7 +269,15 @@ func buildEvent(in eventInput) (*telemetrycontract.LifecycleEvent, error) {
 			ev.RunChangedAt = telemetrycontract.FormatTS(*c.PendingRunChangeAt)
 		}
 	}
-	if p.CarriesAdoption {
+	// Attribution (design 4.3), after the closure override: a closure of
+	// an untrusted segment, or an event whose run is unproven, omits
+	// launch_id; an agent-state event may name the attributed run.
+	if p.AttrOmitLaunch {
+		ev.LaunchID = ""
+	} else if p.AttrLaunch != "" {
+		ev.LaunchID = p.AttrLaunch
+	}
+	if p.CarriesAdoption && !p.DropAdoption && ev.LaunchID != "" {
 		c := in.Cursor
 		if c == nil || c.PendingAdoptedFrom == "" || c.PendingAdoptedAt == nil {
 			return nil, fmt.Errorf("build %s: carries an adoption but the cursor has none", p.Transition)
