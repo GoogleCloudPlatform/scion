@@ -96,7 +96,7 @@ func newProjectQuotaTestService(t *testing.T, s store.Store, cap int64) (*QuotaS
 	return &QuotaService{store: w, logger: slog.Default()}, w
 }
 
-// T-race-lock: Reserve's project-wide count runs while the in-process scope
+// Reserve's project-wide count runs while the in-process scope
 // mutex and the advisory lock are held.
 func TestProjectQuota_ReserveCountsUnderTheScopeLocks(t *testing.T) {
 	_, s := testServer(t)
@@ -120,7 +120,7 @@ func TestProjectQuota_ReserveCountsUnderTheScopeLocks(t *testing.T) {
 	assert.Zero(t, w.locksHeld.Load(), "the advisory lock is released afterwards")
 }
 
-// T-race-admit: two admissions with one slot left, for different creators
+// Two admissions with one slot left, for different creators
 // (the project total is shared) and for one creator. The first is held inside its count
 // until the second has entered Reserve; exactly one is admitted, the other
 // is refused at the project total, and one row exists.

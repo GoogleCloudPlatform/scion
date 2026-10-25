@@ -124,7 +124,7 @@ func seedProjectOccupant(t *testing.T, s store.Store, project *store.Project, br
 	return occ
 }
 
-// 14: reincarnating a stopped agent at a full project is refused with the
+// Reincarnating a stopped agent at a full project is refused with the
 // project message before anything is claimed or written.
 func TestProjectQuota_ReincarnateStoppedAtFullProjectRefused(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
@@ -140,7 +140,7 @@ func TestProjectQuota_ReincarnateStoppedAtFullProjectRefused(t *testing.T) {
 	assert.False(t, hasProjectRow(t, s, a.ID))
 }
 
-// 14b: with room on the broker and a full project, the broker slot the
+// With room on the broker and a full project, the broker slot the
 // handler took first is released after the project refusal.
 func TestProjectQuota_ReincarnateProjectRefusalReleasesBrokerSlot(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
@@ -156,7 +156,7 @@ func TestProjectQuota_ReincarnateProjectRefusalReleasesBrokerSlot(t *testing.T) 
 	assert.False(t, hasProjectRow(t, s, a.ID))
 }
 
-// 15: a reincarnation that stays on its broker reserves the broker slot
+// A reincarnation that stays on its broker reserves the broker slot
 // with the cap check: at a full broker it is refused with the unchanged
 // broker message, before anything is claimed.
 func TestProjectQuota_ReincarnateStoppedAtFullBrokerRefused(t *testing.T) {
@@ -175,7 +175,7 @@ func TestProjectQuota_ReincarnateStoppedAtFullBrokerRefused(t *testing.T) {
 	assert.False(t, hasProjectRow(t, s, a.ID))
 }
 
-// 16 (running case): a running agent already holds its slots, so its
+// A running agent already holds its slots, so its
 // reincarnation at a full project is admitted.
 func TestProjectQuota_ReincarnateRunningAtFullProjectAdmitted(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
@@ -375,7 +375,7 @@ func TestProjectQuota_ConcurrentReincarnateWinnerKeepsRows(t *testing.T) {
 	assert.True(t, hasProjectRow(t, s, a.ID), "Y's re-assert restored the project row")
 }
 
-// 21: a move reaches the same reserve (moves enter startReincarnation from
+// A move reaches the same reserve (moves enter startReincarnation from
 // the move planner): a running agent with no project row, at a full
 // project, is refused before anything is claimed.
 func TestProjectQuota_ReincarnateMoveAtFullProjectRefused(t *testing.T) {
