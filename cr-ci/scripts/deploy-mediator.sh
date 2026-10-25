@@ -3,7 +3,7 @@
 # the Cloud Run service MEDIATOR_SERVICE_NAME as MEDIATOR_SA_NAME
 # (permissions-matrix C12), then grant SCHEDULER_SA_NAME roles/run.invoker on
 # it (C13). max-instances is always 1 (claims live in the mediator's memory),
-# min-instances 0. Every config key is passed as an env var; the secrets are
+# min-instances MEDIATOR_MIN_INSTANCES (0 or 1). Every config key is passed as an env var; the secrets are
 # passed BY NAME (the mediator reads them from Secret Manager itself).
 # Prints the service URL for MEDIATOR_URL.
 set -euo pipefail
@@ -104,7 +104,7 @@ fi
 crci_note "C12: mediator service $SVC (max-instances=1 is required: claims live in memory)"
 crci_run gcloud run deploy "$SVC" --image="$IMAGE" --region="$R" --project="$P" \
   --service-account="$MEDIATOR" \
-  --min-instances=0 --max-instances=1 --cpu=1 --memory=512Mi --concurrency=80 --timeout=300 \
+  --min-instances="${CFG[MEDIATOR_MIN_INSTANCES]}" --max-instances=1 --cpu=1 --memory=512Mi --concurrency=80 --timeout=300 \
   --ingress=all --port=8080 "${ACCESS[@]}" \
   --set-env-vars="$ENV" --labels=managed-by=cr-ci
 

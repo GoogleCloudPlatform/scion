@@ -131,9 +131,30 @@ type DeletionFields struct {
 	// bumped, so stale whole-row writers still conflict.
 	KeepUpdated bool
 
+	// SoftFinishRunID and SoftFinishPreviousRunIDs, when set, write the
+	// agent's run_id and previous_run_ids (an empty list clears them).
+	// Only the delete engine's soft finish sets them, after it deleted the
+	// run the broker reported holding rather than the recorded one
+	// (ptone/scion#5016), so that the soft-deleted row names the runs
+	// whose files the broker may still retain. Only FinalizeAgentDeletion
+	// in soft mode applies them; UpdateAgentDeletion and a hard finalize
+	// refuse a set that carries them, also when Derive sets them
+	// (ErrInvalidInput). Every other run ID write goes through
+	// SetAgentRunID and its compare-and-swap relatives. The names are
+	// unique in the module so the hub's closed-set test of run writers
+	// can find every use (pkg/hub/agent_run_writers_test.go).
+	SoftFinishRunID          *string
+	SoftFinishPreviousRunIDs *[]string
+
 	// Derive, when set, is called with the current row (as read inside the
 	// transaction) after the predicate matched, before the write.
 	Derive func(current *Agent, f *DeletionFields)
+}
+
+// SetsSoftFinishRunIDs reports whether f writes the agent's run_id or
+// previous_run_ids (see DeletionFields.SoftFinishRunID).
+func (f DeletionFields) SetsSoftFinishRunIDs() bool {
+	return f.SoftFinishRunID != nil || f.SoftFinishPreviousRunIDs != nil
 }
 
 // DeletionFinalizeMode selects FinalizeAgentDeletion's terminal write.

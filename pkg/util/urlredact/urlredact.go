@@ -16,8 +16,12 @@
 // is shown: masked on its own when it can be told apart from the host and
 // path, and otherwise the whole URL after its scheme. pkg/config,
 // pkg/apiclient, the log text sanitizer (pkg/util/logging) and the hub
-// commands all use it, so a URL is shown the same way everywhere. It
-// imports only the standard library, so any package can use it.
+// commands all use it, so a URL is shown the same way everywhere. The
+// redactors that show a URL by its host and path only (the hub endpoint in
+// pkg/tunnelclient, clone URLs in pkg/runtimebroker and pkg/provision,
+// fetched URLs in pkg/artifacts/remotefetch, template sources in cmd) use
+// HostAndPath and RedactURLIn. It imports only the standard library, so any
+// package can use it.
 package urlredact
 
 import (
@@ -286,6 +290,13 @@ func cutRawAuthority(raw string) (authority, rest string, hasAuthority bool) {
 	}
 	return authority, rest, true
 }
+
+// AuthorityIsHost reports whether authority, the part of a URL after its
+// scheme and "://" up to its first '/', '?' or '#', ends in a host (see
+// rawAuthorityIsHost). A text redactor uses it to tell a URL whose
+// authority ends early in a text (at white space or a quote) from one that
+// ends in a host.
+func AuthorityIsHost(authority string) bool { return rawAuthorityIsHost(authority) }
 
 // rawAuthorityIsHost reports whether authority (see cutRawAuthority) ends
 // in a host: after its last '@', if any, a name of ASCII letters, digits,

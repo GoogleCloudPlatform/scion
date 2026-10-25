@@ -21,6 +21,8 @@
  * logout logic (design doc Section 4.1: "fix in place and share").
  */
 
+import { browserPath, loadPage } from '../client/navigation.js';
+
 /**
  * Custom event dispatched on `window` before the logout POST begins.
  * Listeners must run synchronously or queue microtask-level cleanup;
@@ -35,7 +37,7 @@ export interface AccountTeardownDetail {
 
 /**
  * Perform a logout by POSTing to the auth endpoint and redirecting to login.
- * Uses the Vite BASE_URL to construct correct paths behind a reverse proxy.
+ * The paths get the Vite BASE_URL (browserPath) so they work behind a reverse proxy.
  *
  * Before the POST, dispatches a `scion:account-teardown` event so that
  * cross-tab terminal coordinators and other subsystems can dispose resources
@@ -43,13 +45,16 @@ export interface AccountTeardownDetail {
  */
 export function performLogout(): void {
   dispatchTeardown('logout');
-  const base = (import.meta.env?.BASE_URL || '/').replace(/\/$/, '');
-  fetch(`${base}/auth/logout`, {
+  // Direct: client/api.ts imports this module for dispatchTeardown, so
+  // using apiFetch here would make an import cycle, and a logout must
+  // not run the helper's 401 redirect.
+  // eslint-disable-next-line no-restricted-globals -- client/api.ts imports this module (import cycle)
+  fetch(browserPath('/auth/logout'), {
     method: 'POST',
     credentials: 'include',
   })
     .then(() => {
-      window.location.href = `${base}/auth/login`;
+      loadPage('/auth/login');
     })
     .catch((error) => {
       console.error('Logout failed:', error);

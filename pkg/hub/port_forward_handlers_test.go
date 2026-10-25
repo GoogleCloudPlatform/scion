@@ -329,6 +329,10 @@ func TestAgentPortProxyResponseIsSandboxed(t *testing.T) {
 	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Set-Cookie", "session=agent-set; Path=/")
 		w.Header().Set("Content-Security-Policy", "default-src *")
+		for name, v := range agentPageHeaders {
+			w.Header().Set(name, v)
+		}
+		w.Header().Set("X-Agent-Kept", "kept")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("<html>agent content</html>"))
@@ -367,8 +371,30 @@ func TestAgentPortProxyResponseIsSandboxed(t *testing.T) {
 	assert.Equal(t, "<html>agent content</html>", rec.Body.String())
 	assert.Equal(t, untrustedContentSandboxCSP, rec.Header().Get("Content-Security-Policy"),
 		"the hub's sandbox CSP must be authoritative; the agent's own CSP must not pass through")
+	// Without the web frontend in front (this recorder is the hub alone),
+	// the response still refuses to be embedded.
+	assert.Equal(t, []string{"'none'"}, cspDirective(rec.Header().Get("Content-Security-Policy"), "frame-ancestors"), "hub-only frame-ancestors")
 	assert.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"))
 	assert.Empty(t, rec.Header().Values("Set-Cookie"), "the agent must not be able to set cookies on the hub origin")
+
+	// Behind the web server's security headers, which set the web pages'
+	// policy first, the sandbox policy is still the only one.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+agent.ID+"/ports/"+portText+"/proxy/", nil)
+	req.Header.Set("X-Scion-Agent-Token", token)
+	webRec := httptest.NewRecorder()
+	(&WebServer{}).securityHeadersMiddleware(srv.Handler()).ServeHTTP(webRec, req)
+	require.Equal(t, http.StatusOK, webRec.Code)
+	assert.Equal(t, []string{untrustedContentSandboxCSP}, webRec.Header().Values("Content-Security-Policy"), "tunnel response policies")
+	assert.Equal(t, []string{"nosniff"}, webRec.Header().Values("X-Content-Type-Options"), "tunnel response nosniff headers")
+
+	// The hub's own page headers are not combined with the app's: each
+	// has exactly the hub's single value. Positive control: a header the
+	// hub does not set still passes through from the app.
+	hub := hubPageHeaderValues(t)
+	for _, name := range hubPageHeaderNames {
+		assert.Equal(t, []string{hub[name]}, webRec.Header().Values(name), "tunnel page header "+name)
+	}
+	assert.Equal(t, "kept", webRec.Header().Get("X-Agent-Kept"))
 }
 
 // TestAgentPortProxyResponseDoesNotRelayHubOriginStateHeaders verifies the

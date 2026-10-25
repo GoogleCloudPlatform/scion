@@ -665,6 +665,9 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 	s.forgetBrokerBackfill(id)
+	// The broker's reservations are released after its row is gone (the
+	// release requires that), audited as the sweep does (ptone/scion#3994).
+	s.releaseDeletedBrokerReservations(ctx, broker.ID)
 
 	// Clean up the broker's HMAC secret (best-effort, post-delete).
 	if err := s.store.DeleteBrokerSecret(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -1304,48 +1307,62 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			// A broker older than templateTiers ignores the telemetry tiers
 			// dispatch sends; warn once (ptone/scion#4224).
 			s.warnBrokerWithoutTemplateTiers(id, broker.Name, heartbeat.Capabilities)
-			changed := false
-			if heartbeat.Capabilities != nil && !reflect.DeepEqual(broker.Capabilities, heartbeat.Capabilities) {
-				broker.Capabilities = heartbeat.Capabilities
-				changed = true
-			}
-			if heartbeat.WorkspaceStorage != nil && !reflect.DeepEqual(broker.WorkspaceStorage, heartbeat.WorkspaceStorage) {
-				broker.WorkspaceStorage = heartbeat.WorkspaceStorage
-				changed = true
-			}
-			if heartbeat.DefaultProfile != nil && broker.DefaultProfile != *heartbeat.DefaultProfile {
-				broker.DefaultProfile = *heartbeat.DefaultProfile
-				changed = true
-			}
+			// The refresh runs on a fresh read of the row and stores only
+			// the fields it changes, so a re-registration or other write
+			// that lands after the read above is kept (ptone/scion#3169).
+			// It can run more than once, so its outputs are reset on
+			// each run and only the last run's values are used.
+			var health *api.BrokerHealthReport
 			if heartbeat.Health != nil {
-				if health := api.NormalizeBrokerHealthReport(heartbeat.Health); !reflect.DeepEqual(broker.Health, health) {
-					// Logged only when the stored report changes, so at
-					// most once per distinct report, with counts only.
-					if n := countBrokerHealthNormalization(heartbeat.Health, health); n.any() {
-						s.agentLifecycleLog.Info("heartbeat: broker health report normalised",
-							"broker_id", id,
-							"dropped_checks", n.DroppedChecks,
-							"unrecognised_values", n.UnrecognisedValues,
-							"unrecognised_status", n.UnrecognisedStatus)
-					}
-					broker.Health = health
+				health = api.NormalizeBrokerHealthReport(heartbeat.Health)
+			}
+			healthChanged := false
+			saRequested := false
+			refresh := func(b *store.RuntimeBroker) bool {
+				healthChanged, saRequested = false, false
+				changed := false
+				if heartbeat.Capabilities != nil && !reflect.DeepEqual(b.Capabilities, heartbeat.Capabilities) {
+					b.Capabilities = heartbeat.Capabilities
 					changed = true
 				}
+				if heartbeat.WorkspaceStorage != nil && !reflect.DeepEqual(b.WorkspaceStorage, heartbeat.WorkspaceStorage) {
+					b.WorkspaceStorage = heartbeat.WorkspaceStorage
+					changed = true
+				}
+				if heartbeat.DefaultProfile != nil && b.DefaultProfile != *heartbeat.DefaultProfile {
+					b.DefaultProfile = *heartbeat.DefaultProfile
+					changed = true
+				}
+				if heartbeat.Health != nil && !reflect.DeepEqual(b.Health, health) {
+					b.Health = health
+					healthChanged = true
+					changed = true
+				}
+				if applyProfileAttach(b.Profiles, heartbeat.ProfileAttach) {
+					changed = true
+				}
+				saChanged, requested := applyProfileSAMappings(b.Profiles, heartbeat.ProfileSAMappings, heartbeat.ProfileSAMappingsHashes, time.Now())
+				saRequested = requested
+				if saChanged {
+					changed = true
+				}
+				return changed
 			}
-			if applyProfileAttach(broker.Profiles, heartbeat.ProfileAttach) {
-				changed = true
-			}
-			saChanged, saRequested := applyProfileSAMappings(broker.Profiles, heartbeat.ProfileSAMappings, heartbeat.ProfileSAMappingsHashes, time.Now())
-			if saChanged {
-				changed = true
-			}
-			heartbeatResp.ProfileSAMappingsRequested = saRequested
-			if changed {
-				if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
-					s.agentLifecycleLog.Warn("heartbeat: failed to persist refreshed broker state",
-						"broker_id", id, "error", err)
+			if err := s.store.RefreshRuntimeBrokerState(ctx, id, refresh); err != nil {
+				s.agentLifecycleLog.Warn("heartbeat: failed to persist refreshed broker state",
+					"broker_id", id, "error", err)
+			} else if healthChanged {
+				// Logged only when the stored report changes, so at
+				// most once per distinct report, with counts only.
+				if n := countBrokerHealthNormalization(heartbeat.Health, health); n.any() {
+					s.agentLifecycleLog.Info("heartbeat: broker health report normalised",
+						"broker_id", id,
+						"dropped_checks", n.DroppedChecks,
+						"unrecognised_values", n.UnrecognisedValues,
+						"unrecognised_status", n.UnrecognisedStatus)
 				}
 			}
+			heartbeatResp.ProfileSAMappingsRequested = saRequested
 		}
 	}
 
@@ -1919,6 +1936,9 @@ type BrokerProjectInfo struct {
 	GitRemote   string `json:"gitRemote,omitempty"`
 	AgentCount  int    `json:"agentCount"`
 	LocalPath   string `json:"localPath,omitempty"`
+	// IsDefault reports whether this broker is the project's default
+	// Runtime Broker. False when the project record is missing.
+	IsDefault bool `json:"isDefault"`
 }
 
 // ListBrokerProjectsResponse is the response for listing projects a broker provides.
@@ -2050,6 +2070,7 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 		if project, ok := projectsByID[p.ProjectID]; ok {
 			info.ProjectName = project.Name
 			info.GitRemote = project.GitRemote
+			info.IsDefault = project.DefaultRuntimeBrokerID == brokerID
 		}
 
 		// Count agents for this project on this broker

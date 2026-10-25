@@ -76,6 +76,15 @@ func TestTableColumnsHaveRunners(t *testing.T) {
 	}
 }
 
+// Every redactor on the table uses the shared rule: none is listed as
+// unmigrated. A redactor added to the table before it is moved is listed
+// in KnownUnmigrated, and this test changed with it, saying why.
+func TestTableHasNoUnmigratedColumns(t *testing.T) {
+	for c := range urlredacttest.KnownUnmigrated {
+		t.Errorf("column %s is listed as not using the shared rule", c)
+	}
+}
+
 func TestUndelimited(t *testing.T) {
 	for _, tc := range []struct {
 		in   string

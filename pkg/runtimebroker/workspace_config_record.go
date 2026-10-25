@@ -156,7 +156,7 @@ func observeWorkspaceConfigStateData(projectPath string) (workspaceConfigState, 
 		if err != nil {
 			return workspaceConfigState{}, nil, err
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		data, err := io.ReadAll(io.LimitReader(f, workspaceConfigMarkerMax))
 		if err != nil {
 			return workspaceConfigState{}, nil, err
@@ -359,13 +359,13 @@ func writeWorkspaceConfigRecord(canonical, recordPath, hubProjectID string, stat
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
+	defer func() { _ = os.Remove(tmp.Name()) }()
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {

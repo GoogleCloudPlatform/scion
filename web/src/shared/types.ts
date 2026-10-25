@@ -144,6 +144,11 @@ export interface PageData {
   data?: Record<string, unknown> | undefined;
   /** Hub profiling readiness_marks setting; present (true) only when on, for a signed-in user */
   readinessMarks?: boolean | undefined;
+  /**
+   * The `experiments` map of GET /api/v1/experiments, as the hub answered
+   * the session user (ptone/scion#2489); present only for a signed-in shell
+   */
+  experiments?: Record<string, boolean> | undefined;
 }
 
 /**
@@ -1231,6 +1236,11 @@ export interface SharedDir {
   name: string;
   read_only?: boolean;
   in_workspace?: boolean;
+  /**
+   * Container path agents mount the dir at, computed by the hub's layout
+   * authority. Present in GET /projects/{id}/shared-dirs responses only.
+   */
+  target?: string;
 }
 
 export type BrokerStatus = 'online' | 'offline' | 'degraded';

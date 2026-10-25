@@ -43,9 +43,10 @@ func TestGatherAndSubmitEnv_NonInteractiveGathersFromLocalEnv(t *testing.T) {
 
 	nonInteractive = true
 	autoConfirm = true // --non-interactive implies --yes
+	allowEnvSend(t)
 
 	// When the key is available in the local env, non-interactive mode
-	// should gather and submit it automatically (same as --yes).
+	// with --send-env gathers and submits it.
 	_ = os.Setenv("TEST_SECRET_KEY", "secret-value")
 	defer func() { _ = os.Unsetenv("TEST_SECRET_KEY") }()
 
@@ -560,6 +561,7 @@ func TestGatherAndSubmitEnv_SlowSubmitOutlastsClientTimeout(t *testing.T) {
 		hubCreateRequestTimeout = origTimeout
 	})
 	nonInteractive, autoConfirm = true, true
+	allowEnvSend(t)
 	hubCreateRequestTimeout = 10 * time.Second
 	t.Setenv("TEST_SLOW_SUBMIT_KEY", "slow-value")
 

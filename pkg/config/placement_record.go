@@ -19,8 +19,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-
-	yamlv3 "gopkg.in/yaml.v3"
 )
 
 // Helpers for RuntimeBuildRecord.EntryName (Kubernetes placement defaults,
@@ -108,7 +106,7 @@ func settingsFileDefinesRuntime(path, name string) bool {
 	var probe struct {
 		Runtimes map[string]any `yaml:"runtimes"`
 	}
-	if err := yamlv3.Unmarshal(raw, &probe); err != nil {
+	if err := unmarshalSettingsYAML(raw, &probe); err != nil {
 		return true
 	}
 	_, ok := probe.Runtimes[name]

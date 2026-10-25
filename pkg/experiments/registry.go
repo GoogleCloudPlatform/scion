@@ -139,7 +139,10 @@ const Artifacts = "hub.artifacts"
 // stores each file through the artifact service, which must be installed
 // with its settings section enabled (hub.artifacts need not be on). The hub
 // checks it on every upload. Attachments stored while it was on stay
-// readable after it is turned off.
+// readable after it is turned off. Its compiled default is off, but a hub
+// whose resource storage is an object store resolves it on unless an
+// override is stored (ptone/scion#5827; pkg/hub
+// deploymentExperimentDefault).
 const AttachmentArtifacts = "hub.attachment_artifacts"
 
 // ChatScheduledSend gates scheduled send in native web chat: the Schedule
@@ -147,6 +150,13 @@ const AttachmentArtifacts = "hub.attachment_artifacts"
 // /api/v1/chat/conversations/{key}/scheduled routes (404 while off), and
 // the delivery sweeper, which holds pending messages while it is off.
 const ChatScheduledSend = "web.chat_scheduled_send"
+
+// ChatStarredMessages gates starred messages in native web chat: the
+// message Star/Unstar action, the private starred indicator and the
+// conversation header's starred-message list in the web UI, and the hub's
+// /api/v1/chat/stars routes (404 while off). Stored stars are kept while
+// it is off.
+const ChatStarredMessages = "web.chat_starred_messages"
 
 // AuthorizationDecisionAuditV2 gates decision logging (remaining-audit P1).
 // It is the only activation control and stays default-off; turning it on
@@ -160,6 +170,21 @@ const AuthorizationDecisionAuditV2 = "hub.authorization_decision_audit_v2"
 // the hub's config PATCH accepts edits of agents with no container whether
 // or not it is on.
 const AgentEdit = "web.agent_edit"
+
+// AgentEditHeld gates held config edits (ptone/scion#3976): while it is on,
+// a config edit of an agent with a live or transitional container is kept
+// as the agent's pending config and applied at its next start, a
+// provision-rendered key is kept pending, and DELETE
+// /api/v1/agents/{id}/pending-config discards pending edits. A
+// reincarnation does not apply pending edits yet (ptone/scion#3978), so it
+// must stay off until that lands. While it is off the hub refuses a config
+// edit of such an agent, as before, and applies no stored pending config;
+// a config edit it writes removes the pending keys that edit names, so a
+// stale pending value cannot later override it. It has its own default-off
+// switch
+// because the Edit page experiment (AgentEdit) is turned on separately; the
+// web layer only mirrors the hub's check.
+const AgentEditHeld = "hub.agent_edit_held"
 
 // AgentDelegation gates agent delegation (.design/agent-delegation.md §10):
 // the grant issuance and credential exchange routes, the delegated
@@ -208,6 +233,35 @@ const AsyncAgentStart = "hub.async_agent_start"
 // and graph nodes. It is web-only and presentation-only: the hub sends the
 // harnessVendor and modelSize fields whether or not it is on.
 const AgentBadges = "web.agent_badges"
+
+// SSEHiddenTabClose gates closing the web UI's events streams in a tab that
+// has been hidden for 60 s (ptone/scion#5235). It is web-only: the hub
+// serves streams the same way whether or not it is on.
+const SSEHiddenTabClose = "web.sse_hidden_tab_close"
+
+// SecretRotation gates opt-in Hub server keyring configuration
+// (server.keyring_file, ptone/scion#1530): a hub configured with a keyring
+// file refuses to start while it is off. It is checked once at startup
+// (the keyring is loaded once, before any listener opens); turning it off
+// later changes nothing until the next restart. Readers of persisted
+// keyring-format data must never depend on it. The design names it
+// "server.secret-rotation"; NamePattern allows no hyphen.
+const SecretRotation = "server.secret_rotation"
+
+// ContentHashV2 gates the content hash the hub records for template and
+// harness-config commits (ptone/scion#5658): while it is on, commits record
+// transfer.ComputeContentHashV2 (paths, normalised modes and file hashes);
+// while it is off, transfer.ComputeContentHashV1 (file hashes only). The hub
+// checks it at every commit, so toggling needs no restart. Rows keep the
+// version they were last committed with, and the commit compare-and-swap is
+// a strict equality on the stored value, so mixed rows are safe in both
+// directions. Skill hashes are v1 regardless. Brokers and CLIs do not read
+// it: their cache keys and sync checks do not depend on the hash version.
+// While it is off, a rename-only or chmod-only re-upload is not visible to
+// the expected-hash check (the behaviour before ptone/scion#5658). Enable it
+// once every CLI and agent image is at or after the release that added it;
+// ptone/scion#5995 makes it the default and removes the gate.
+const ContentHashV2 = "hub.content_hash_v2"
 
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
@@ -318,7 +372,7 @@ var compiled = []Experiment{
 	{
 		Name:        AttachmentArtifacts,
 		Title:       "Attachments as artifacts",
-		Description: "Stores files uploaded in web chat in the artifact service as attachments of the message they are sent in: each one is readable exactly by the readers of that message, and is removed when the message is deleted. Gates the hub's attachment upload path (LayerServer; it also needs the artifact service with its settings section enabled, but not hub.artifacts) and is reserved for the web surfaces that follow (LayerWeb). Attachments stored while it was on stay readable after it is turned off.",
+		Description: "Stores files uploaded in web chat in the artifact service as attachments of the message they are sent in: the stored file is readable exactly by the readers of that message, and is removed when the message is deleted. It is delivered into each recipient agent's inbox; for a message in a project topic thread a copy is also placed in the project's scratchpad shared directory, where every agent and member with access to that directory can read it (direct and group conversations get inbox delivery only). Gates the hub's attachment upload path (LayerServer; it also needs the artifact service with its settings section enabled, but not hub.artifacts) and is reserved for the web surfaces that follow (LayerWeb). Attachments stored while it was on stay readable after it is turned off. Defaults on when the hub's resource storage is an object store (GCS); off on hubs with local storage.",
 		Default:     false,
 		Layers:      []Layer{LayerWeb, LayerServer},
 		Stage:       StageAlpha,
@@ -349,6 +403,17 @@ var compiled = []Experiment{
 		ReviewBy:    "2027-01-31",
 	},
 	{
+		Name:        ChatStarredMessages,
+		Title:       "Starred messages in chat",
+		Description: "Lets each user star chat messages privately and find them again from the conversation header. Gates the Star message action, the starred indicator and the header list (LayerWeb) and the hub's starred-message routes, which answer 404 while it is off (LayerServer). Stars are stored per user and are never shown to anyone else; turning it off keeps them.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#5797",
+		Owner:       "native-chat",
+		ReviewBy:    "2027-01-31",
+	},
+	{
 		Name:        AgentEdit,
 		Title:       "Edit agent",
 		Description: "On the Edit agent page, adds a view that groups the fields by when an edit applies (next start or resume, held, needs a reincarnation, immediately, fixed) and a summary strip counting them. The page and its by-function view are always available.",
@@ -358,6 +423,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#3952",
 		Owner:       "web",
 		ReviewBy:    "2027-01-07",
+	},
+	{
+		Name:        AgentEditHeld,
+		Title:       "Held edits for running agents",
+		Description: "Lets an agent config edit be saved while the agent is running or starting: the hub keeps it as the agent's pending config and applies it at the next start, restart or resume. System prompt, agent instructions, skills and services edits are kept pending, unless the agent's Runtime Broker re-renders them at start (changedFields), in which case they are applied like other edits; a reincarnation does not apply pending edits yet, so what a start does not apply stays pending, and the rest is applied at the next start after a reincarnation, over the values it set. Keep it off until reincarnation applies pending edits. Pending edits can be discarded. While off, a config edit of a running agent is refused as before; stored pending edits are kept but not applied, except that an edit saved while off removes the pending keys it names.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#3952",
+		Owner:       "web",
+		ReviewBy:    "2027-01-20",
 	},
 	{
 		Name:        AgentBadges,
@@ -371,6 +447,17 @@ var compiled = []Experiment{
 		ReviewBy:    "2027-01-19",
 	},
 	{
+		Name:        SSEHiddenTabClose,
+		Title:       "Close live updates in hidden tabs",
+		Description: "A browser tab hidden for 60 seconds closes its live-update streams (page, agent list and terminal metadata) and reopens them, refreshing what it shows, when it is shown again. Terminal connections stay open. Web only; the hub is unaffected.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#5235",
+		Owner:       "web",
+		ReviewBy:    "2027-01-22",
+	},
+	{
 		Name:        AgentPlugins,
 		Title:       "Agent Plugins (native install)",
 		Description: "Installs Agent Plugins 1.0.0 bundles declared in a template's agent_plugins into harnesses that support them natively (codex, copilot, muse-code, claude). While off, agent_plugins is ignored with a start warning and previously installed plugins are removed at the next start.",
@@ -380,6 +467,29 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#4933",
 		Owner:       "harness",
 		ReviewBy:    "2027-01-13",
+	},
+	{
+		Name:        SecretRotation,
+		Title:       "Server keyring (session cookie pilot)",
+		Description: "Lets a hub start with a versioned keyring file (server.keyring_file). In this release only web session cookies use it: several signing generations can be read at once, with deadlines, while every other purpose keeps the legacy server secret. Checked at startup; a hub with a keyring file refuses to start while it is off. Full server-secret rotation is not available yet.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#1530",
+		Owner:       "secret-rotation",
+		ReviewBy:    "2027-01-31",
+	},
+	{
+		Name:        ContentHashV2,
+		Title:       "Content hash v2 (paths and modes)",
+		Description: "While on, template and harness-config commits record a content hash that covers each file's path and executable bit as well as its content, so a rename-only or chmod-only commit changes the hash and a client that diffed against the earlier version gets 409 instead of overwriting it. While off (the default), commits record the earlier hash, which covers file contents only: a rename-only or chmod-only re-upload is not visible to the hub's expected-hash check, as before. Turn it on only when every CLI and agent image that talks to this hub is at or after the release that added it; an older CLI compares its own earlier hash with the hub's and, without a terminal, fails scion start, resume and create with -t for a template it also has locally. Skill hashes do not change either way.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#5658",
+		Owner:       "templates",
+		// ptone/scion#5995 makes it the default and removes the gate.
+		ReviewBy: "2027-01-21",
 	},
 }
 

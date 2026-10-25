@@ -35,7 +35,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
@@ -1469,16 +1468,6 @@ authDone:
 			}
 		}
 	}
-	// If hub endpoint is now set but no auth token, resolve dev auth token
-	// from the host filesystem (env vars or ~/.scion/dev-token file).
-	if _, ok := opts.Env["SCION_HUB_ENDPOINT"]; ok {
-		if _, tokenSet := opts.Env["SCION_AUTH_TOKEN"]; !tokenSet {
-			if token := apiclient.ResolveDevToken(); token != "" {
-				opts.Env["SCION_AUTH_TOKEN"] = token
-			}
-		}
-	}
-
 	// trustedHubEndpoint is Substrate's egress allowlist's one trusted hub
 	// source (RunConfig.TrustedHubEndpoint, see its own doc comment): in
 	// broker mode, opts.TrustedHubEndpoint ONLY — the runtime broker's own
@@ -1530,6 +1519,15 @@ authDone:
 			delete(finalScionCfg.Env, "SCION_HUB_ENDPOINT")
 			delete(finalScionCfg.Env, "SCION_HUB_URL")
 		}
+	}
+
+	// The co-located hub's dev token is the agent's hub token only when the
+	// hub issued none and the endpoint the agent will use is still the
+	// broker's trusted one. Checked here, after every endpoint override
+	// above: an endpoint from the agent config or the config env section
+	// that differs from trustedHubEndpoint drops it.
+	if token := colocatedHubDevTokenForAgent(opts, trustedHubEndpoint); token != "" && opts.Env["SCION_AUTH_TOKEN"] == "" {
+		opts.Env["SCION_AUTH_TOKEN"] = token
 	}
 
 	// Write the agent token to the canonical token file in the agent home
@@ -1692,6 +1690,23 @@ authDone:
 	}
 	warnings = append(warnings, envWarnings...)
 
+	// Host networking and the GCP metadata mode: refuse assign, warn the
+	// user for block. Decided on the merged env, before any container work.
+	var relayedWarnings []string
+	hostNetWarning, hostNetErr := checkHostNetworkMetadata(opts.Name, m.Runtime.Name(), networkMode, agentEnv)
+	if hostNetErr != nil {
+		slog.Warn("Start: refusing agent start: GCP metadata mode under host networking",
+			"agent", opts.Name, "runtime", m.Runtime.Name(), "network_mode", networkMode,
+			"reason", hostNetworkRefusalReason(hostNetErr))
+		return nil, hostNetErr
+	}
+	if hostNetWarning != "" {
+		slog.Warn("Start: GCP metadata block mode is not enforced at the network level under host networking",
+			"agent", opts.Name, "runtime", m.Runtime.Name(), "network_mode", networkMode)
+		warnings = append(warnings, hostNetWarning)
+		relayedWarnings = append(relayedWarnings, hostNetWarning)
+	}
+
 	// Check the OTLP TLS settings in the final env, after every merge. Only
 	// a warning: in the container sciontool logs a failed telemetry start
 	// and runs the agent anyway (cmd/sciontool/commands/init.go), so a
@@ -1709,52 +1724,45 @@ authDone:
 
 	// On resume/restart opts.Workspace is empty, so re-derive the explicit intent
 	// from the persisted config to keep the explicit workspace plain-mounted.
+	// The persisted ExplicitWorkspace flag lives in agentDir's scion-agent.json;
+	// it selects the plain-mount path and is re-derived on every entry so the
+	// guarantee holds on resume.
 	explicitWorkspace := opts.Workspace != "" || (finalScionCfg != nil && finalScionCfg.ExplicitWorkspace)
 
-	// A broker-provisioned worktree-per-agent workspace (runtimebroker's
-	// tryProvisionWorktree) already knows its own repo root — resolve it
-	// directly instead of routing through detectRepoRoot, whose
-	// explicit-workspace skip exists for a user's own --workspace override and
-	// must not swallow the broker's own provisioning too. See
-	// api.ContextWithProvisionedWorktreeRepoRoot for the full rationale.
+	// The repository root is the derived root — validatedWorktreeRepoRoot(broker
+	// candidate, workspace) falling back to detectRepoRoot — reconciled with the
+	// on-disk record and failing closed (resolveStartRepoRoot). The root is
+	// taken only from broker-known paths; git is used only to check them.
 	//
-	// Priority: a fresh ctx signal (this dispatch just ran
-	// tryProvisionWorktree) beats the value persisted in agentDir's
-	// broker-owned state file (recovered on resume/restart, when the broker
-	// does not re-run tryProvisionWorktree). Neither source is trusted as-is:
-	// provision.ValidateWorktreeForBase re-proves the pair against the real
-	// filesystem before RunConfig.RepoRoot is allowed to name a host path. A
-	// user --workspace override normally supplies neither; a persisted value
-	// is honored only if it re-validates against that workspace, so it
-	// otherwise falls through to detectRepoRoot and stays "".
-	//
-	// validatedWorktreeRepoRoot is the one, shared comparison; see its own
-	// doc comment for how it treats candidateRepoRoot and effectiveWorkspace.
-	//
-	// This first pass validates against the pre-workspace-backend
-	// effectiveWorkspace, only because containerWorkspace (computed below)
-	// needs a repoRoot to feed the NFS/cloudrun/gke backend resolution that
-	// can still replace effectiveWorkspace. If that happens, the block after
-	// that resolution re-validates against the value RunConfig will actually
-	// use. persistProvisionedWorktreeRepoRootIfValid, below, runs its own,
-	// separate comparison against the workspace value as it stood before
-	// runtime.ValidateWorkspaceSource resolved it — see that function's own
-	// doc comment for why.
+	// This first pass uses the pre-workspace-backend effectiveWorkspace, only
+	// because containerWorkspace (computed below) needs a repoRoot to feed the
+	// NFS/cloudrun/gke backend resolution that can still replace
+	// effectiveWorkspace. If that happens, the block after that resolution
+	// recomposes against the value RunConfig will actually use.
+	// persistProvisionedWorktreeRepoRootIfValid, below, runs its own, separate
+	// comparison against the workspace value as it stood before
+	// runtime.ValidateWorkspaceSource resolved it — see that function's own doc
+	// comment for why.
+	var startVolumes []api.VolumeMount
+	if finalScionCfg != nil {
+		startVolumes = finalScionCfg.Volumes
+	}
 	ctxRepoRoot := api.ProvisionedWorktreeRepoRootFromContext(ctx)
-	persistedRepoRoot := readProvisionedWorktreeRepoRoot(agentDir)
-	candidateRepoRoot := ctxRepoRoot
-	if candidateRepoRoot == "" {
-		candidateRepoRoot = persistedRepoRoot
-	}
 	preValidationWorkspace := effectiveWorkspace
-	repoRoot := validatedWorktreeRepoRoot(candidateRepoRoot, effectiveWorkspace)
-	// A refusal from detectRepoRoot is returned after the workspace source
-	// check below, which reports the more specific errors for the shapes it
-	// rejects; nothing between here and there sets up a mount.
-	var detectErr error
-	if repoRoot == "" {
-		repoRoot, detectErr = detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir, settings)
-	}
+	// The refusal is returned after the workspace source check below, which
+	// reports the more specific errors for the shapes it rejects; nothing
+	// between here and there sets up a mount. repoRootRec and candidateRepoRoot
+	// are reused by the backend recompose below.
+	repoRoot, repoRootRec, candidateRepoRoot, detectErr := resolveStartRepoRoot(startRepoRootInput{
+		agentName:   opts.Name,
+		agentDir:    agentDir,
+		projectDir:  projectDir,
+		workspace:   effectiveWorkspace,
+		ctxRepoRoot: ctxRepoRoot,
+		explicit:    explicitWorkspace,
+		volumes:     startVolumes,
+		settings:    settings,
+	})
 	// Empty-per-agent (design #2703): the workspace is exactly the private
 	// agents/<slug>/workspace directory, never a git checkout, so no repo
 	// root is mounted even when projectDir sits in a git repository, and any
@@ -2101,6 +2109,9 @@ authDone:
 			sharingMode = store.SharingModeWorktreePerAgent
 		}
 		backend := runtime.SelectWorkspaceBackend(settings.Server.WorkspaceStorage, sharingMode)
+		// Only nfs is applied below; say once if a Kubernetes agent's
+		// gke-shared-volume workspace falls back to emptyDir (ptone/scion#1075).
+		warnK8sWorkspaceBackendDropped(m.Runtime.Name(), settings.Server.WorkspaceStorage, nil)
 		if backend.Name() == "nfs" {
 			// A broker only warns about invalid workspace_storage at
 			// startup, so check the ids here, before any leaf directory
@@ -2260,50 +2271,40 @@ authDone:
 	// through containerWorkspace and the NFS* RunConfig fields below, not
 	// through effectiveWorkspace or repoRoot.
 	//
-	// candidateRepoRoot itself is only ever non-empty for a broker-
-	// provisioned host worktree (non-Kubernetes runtimes: the ctx signal and
-	// the persisted file are both written only along that path), so no
-	// candidate is ever set for a Kubernetes dispatch and
-	// validatedWorktreeRepoRoot returns "" here. That does not mean repoRoot
-	// itself stays empty: the detectRepoRoot fallback right below runs
-	// unconditionally on an empty result, and effectiveWorkspace at this
-	// point is the nfs backend's real git checkout, so detectRepoRoot
-	// typically resolves it to a non-empty RepoRoot (the NFS shared base)
-	// exactly as it would for a plain, non-worktree git project.
-	// RunConfig.RepoRoot being set this way on Kubernetes does not change
-	// where the workspace is mounted: the Kubernetes runtime builds its
-	// workspace mounts from containerWorkspace and the NFS* fields above.
-	// It reads RepoRoot only to decide whether the shared workspace's
-	// in-project agents dir is kept out of the pod (see
-	// k8sWorkspaceAgentsExcluded). The repoRoot computed earlier was
-	// validated against the PRE-backend path, so if the backend actually
-	// changed it, re-resolve against the value RunConfig will use, through
-	// the same validatedWorktreeRepoRoot comparison used above and in the
-	// persistence gate — not a separate, inline comparison of this layout's
-	// own.
+	// The root was composed against the PRE-backend workspace. The derivation
+	// depends on the workspace, so when the backend actually changed it,
+	// recompose against the value RunConfig will use, exactly as the upstream
+	// broker-known-path derivation does on main: validatedWorktreeRepoRoot(
+	// candidate, ws) falling back to detectRepoRoot, with the record
+	// intersection re-applied (failing closed).
+	// On Kubernetes the runtime builds its workspace mounts from
+	// containerWorkspace and the NFS* fields above, not from repoRoot, and reads
+	// RepoRoot only to decide whether the shared workspace's in-project agents
+	// dir is kept out of the pod (see k8sWorkspaceAgentsExcluded).
 	if effectiveWorkspace != preBackendWorkspace && !emptyPerAgent {
-		repoRoot = validatedWorktreeRepoRoot(candidateRepoRoot, effectiveWorkspace)
-		if repoRoot == "" {
-			var detectErr error
-			repoRoot, detectErr = detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir, settings)
-			if detectErr != nil {
-				return nil, detectErr
-			}
+		var reErr error
+		repoRoot, reErr = composeRepoRoot(opts.Name, candidateRepoRoot, repoRootRec, effectiveWorkspace, projectDir, explicitWorkspace, settings)
+		if reErr != nil {
+			return nil, reErr
 		}
 	}
 
-	// A fresh ctx signal always wins over whatever is already persisted, but
+	// A fresh ctx signal replaces a persisted record that is missing or agrees
+	// with it; a readable record outside the agent's mounts that names a
+	// different root refuses the start before this point (reconcileRepoRoot), so
+	// the record is not overwritten in that case. Otherwise the signal is
+	// persisted here, because
 	// GetAgent skips ProvisionAgent (and so never gets a chance to persist)
 	// when the agent directory already exists on disk — e.g. a leftover from
 	// a deleted hub agent recreated under the same name. In that case this
 	// dispatch's signal would never be persisted anywhere else, and a later
-	// resume/restart (which has no fresh ctx signal of its own) would fall
-	// back to detectRepoRoot and lose RepoRoot again. ProvisionAgent shares
+	// resume/restart (which has no fresh ctx signal of its own) would have
+	// no broker record and lose RepoRoot again. ProvisionAgent shares
 	// this same gate for the flow Start never reaches on its own — the hub's
 	// provision-only dispatch, which provisions without starting — so there
 	// is exactly one persistence gate even though there is more than one
 	// caller.
-	persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, preValidationWorkspace)
+	persistProvisionedWorktreeRepoRootIfValid(agentDir, ctxRepoRoot, preValidationWorkspace, startVolumes)
 
 	// The agent's workspace placement, reported to the hub on every start
 	// that gets here (so a re-provision refreshes it). See
@@ -2610,7 +2611,7 @@ authDone:
 		}(),
 		Debug:                util.DebugEnabled(),
 		Resume:               opts.Resume,
-		MetadataInterception: hasMetadataInterception(agentEnv),
+		MetadataInterception: metadataInterceptionGranted(m.Runtime.Name(), networkMode, agentEnv),
 		ExtraHosts:           mergeExtraHosts(opts.ExtraHosts, runtime.BridgeExtraHosts(m.Runtime.Name(), agentEnv)),
 		NetworkMode:          networkMode,
 		Labels: func() map[string]string {
@@ -2740,6 +2741,7 @@ authDone:
 				a.Detached = detached
 				a.Warnings = warnings
 				a.HubOnlyEnvWarnings = hubOnlyEnvWarnings
+				a.RelayedWarnings = relayedWarnings
 				a.Phase = status
 				a.HarnessConfig = harnessConfigName
 				a.HarnessConfigRevision = harnessConfigRevision
@@ -2762,6 +2764,7 @@ authDone:
 		Detached:              detached,
 		Warnings:              warnings,
 		HubOnlyEnvWarnings:    hubOnlyEnvWarnings,
+		RelayedWarnings:       relayedWarnings,
 		HarnessConfig:         harnessConfigName,
 		HarnessConfigRevision: harnessConfigRevision,
 		HarnessConfigSource:   harnessConfigSource,
@@ -3255,20 +3258,6 @@ func resolvedPathWithin(p, root string) bool {
 	return pathWithin(rp, rr)
 }
 
-// samePath reports whether a and b name the same path once symlinks are
-// resolved (cleaned paths are compared when either cannot be resolved).
-func samePath(a, b string) bool {
-	if a == "" || b == "" {
-		return false
-	}
-	ra, errA := filepath.EvalSymlinks(a)
-	rb, errB := filepath.EvalSymlinks(b)
-	if errA != nil || errB != nil {
-		return filepath.Clean(a) == filepath.Clean(b)
-	}
-	return ra == rb
-}
-
 // workspaceSourceRoots returns the per-project root(s) a resolved workspace
 // source may fall under (any one of them is sufficient), for the fail-closed
 // check that runs before any mount is set up. It mirrors the same resolution
@@ -3632,6 +3621,25 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaul
 // unaffected.
 func refuseHostEnvForAgent(name string) bool {
 	return util.IsAgentRefusedHostEnvName(name)
+}
+
+// colocatedHubDevTokenForAgent returns opts.ColocatedHubDevToken when it may
+// become the agent's hub token: a broker-mode start, a non-empty
+// trustedHubEndpoint, and an agent hub endpoint (SCION_HUB_ENDPOINT and
+// SCION_HUB_URL in opts.Env, after all overrides) equal to it. Otherwise it
+// returns "", so a dev token is never sent to an endpoint other than the
+// co-located hub's.
+func colocatedHubDevTokenForAgent(opts api.StartOptions, trustedHubEndpoint string) string {
+	if !opts.BrokerMode || opts.ColocatedHubDevToken == "" || trustedHubEndpoint == "" {
+		return ""
+	}
+	if opts.Env["SCION_HUB_ENDPOINT"] != trustedHubEndpoint {
+		return ""
+	}
+	if hubURL, ok := opts.Env["SCION_HUB_URL"]; ok && hubURL != trustedHubEndpoint {
+		return ""
+	}
+	return opts.ColocatedHubDevToken
 }
 
 // expandConfigHubEndpoint returns the SCION_HUB_ENDPOINT value from a scion

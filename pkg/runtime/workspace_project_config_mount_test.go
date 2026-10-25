@@ -17,6 +17,7 @@ package runtime
 import (
 	"errors"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -238,7 +239,7 @@ func TestBuildCommonRunArgs_ProjectConfigReadOnly(t *testing.T) {
 			{"shared, .scion symlink inside the workspace", symlinkInside, "", "", "", "", false, true},
 			{"shared, .scion symlink outside the workspace", symlinkOutside, "", "", "", "", false, true},
 			{"plain, in-place .scion with agents", plainWith(true), ".scion", "/workspace/.scion", "/workspace/.scion/agents", "", false, false},
-			{"plain, in-place .scion", plainWith(false), ".scion", "/workspace/.scion", "", "", false, false},
+			{"plain, in-place .scion", plainWith(false), ".scion", "/workspace/.scion", "", "/workspace/.scion/agents", false, false},
 			{"plain, agent home under .scion/agents", plainHomeInside, ".scion", "/workspace/.scion", "/workspace/.scion/agents", "", false, false},
 			{"plain, .scion symlink", plainSymlink, "", "", "", "", false, true},
 			{"plain, .scion marker file", plainMarker, "", "", "", "", true, false},
@@ -654,5 +655,175 @@ func TestNestedProjectConfigRel(t *testing.T) {
 		if rel != tt.rel || ok != tt.ok {
 			t.Errorf("%s: (%q, %v), want (%q, %v)", tt.path, rel, ok, tt.rel, tt.ok)
 		}
+	}
+}
+
+// In the plain layout on Docker and Podman the agents root is masked even
+// when it does not exist yet: the broker creates it before the run, so an
+// agent dir created there later (after the run args were built) lies under
+// the mask. Apple masks only an existing agents root.
+func TestBuildCommonRunArgs_PlainAgentsMaskCoversLaterAgentDirs(t *testing.T) {
+	for _, rt := range []string{"docker", "podman", appleContainerRuntimeName} {
+		t.Run(rt, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			ws := filepath.Join(t.TempDir(), "project")
+			writeFile(t, filepath.Join(ws, ".scion", "settings.yaml"), "x: y\n")
+			cfg := minimalRunConfig()
+			cfg.BrokerMode = true
+			cfg.RuntimeName = rt
+			cfg.HomeDir = filepath.Join(t.TempDir(), "home")
+			mkdirs(t, cfg.HomeDir)
+			cfg.Workspace = ws
+			args, err := buildCommonRunArgs(cfg)
+			if err != nil {
+				t.Fatalf("buildCommonRunArgs: %v", err)
+			}
+			var masks []string
+			for i := 0; i < len(args)-1; i++ {
+				switch {
+				case args[i] == "--tmpfs":
+					masks = append(masks, args[i+1])
+				case args[i] == "--mount" && strings.HasPrefix(args[i+1], "type=tmpfs,destination="):
+					masks = append(masks, strings.TrimPrefix(args[i+1], "type=tmpfs,destination="))
+				}
+			}
+			if rt == appleContainerRuntimeName {
+				if len(masks) != 0 {
+					t.Errorf("Apple: unexpected masks %q (the agents root did not exist)", masks)
+				}
+				return
+			}
+			if fi, err := os.Stat(filepath.Join(ws, ".scion", "agents")); err != nil || !fi.IsDir() {
+				t.Fatalf("the agents root was not created before the run: %v", err)
+			}
+			// An agent dir created after the run args were built.
+			later := filepath.Join(ws, ".scion", "agents", "later-agent", "home")
+			mkdirs(t, later)
+			rel, err := filepath.Rel(ws, later)
+			if err != nil {
+				t.Fatal(err)
+			}
+			inContainer := path.Join("/workspace", filepath.ToSlash(rel))
+			covered := false
+			for _, m := range masks {
+				if inContainer == m || strings.HasPrefix(inContainer, m+"/") {
+					covered = true
+				}
+			}
+			if !covered {
+				t.Errorf("%s is not under any mask %q", inContainer, masks)
+			}
+		})
+	}
+}
+
+// On Docker and Podman, when the agents mask's mount point under the
+// read-only .scion cannot be created (here an existing regular file named
+// agents), the start is refused in every layout that masks it: the shared
+// workspace, a project in a repository subdirectory, and the plain layout.
+// Apple, which masks only an existing agents directory, is unaffected.
+func TestBuildCommonRunArgs_AgentsMaskPointFailsClosed(t *testing.T) {
+	type layout func(t *testing.T, cfg RunConfig) RunConfig
+	withAgentsFile := func(scion string) {
+		mkdirs(t, scion)
+		writeFile(t, filepath.Join(scion, "agents"), "not a directory\n")
+	}
+	shared := func(t *testing.T, cfg RunConfig) RunConfig {
+		root := filepath.Join(t.TempDir(), "repo")
+		withAgentsFile(filepath.Join(root, ".scion"))
+		cfg.RepoRoot, cfg.Workspace = root, root
+		return cfg
+	}
+	subdir := func(t *testing.T, cfg RunConfig) RunConfig {
+		root := filepath.Join(t.TempDir(), "repo")
+		mkdirs(t, filepath.Join(root, ".git"))
+		withAgentsFile(filepath.Join(root, "sub", ".scion"))
+		cfg.RepoRoot, cfg.Workspace = root, filepath.Join(root, "sub")
+		return cfg
+	}
+	plain := func(t *testing.T, cfg RunConfig) RunConfig {
+		ws := filepath.Join(t.TempDir(), "project")
+		withAgentsFile(filepath.Join(ws, ".scion"))
+		cfg.Workspace = ws
+		return cfg
+	}
+	for _, rt := range []string{"docker", "podman", appleContainerRuntimeName} {
+		for _, tt := range []struct {
+			name   string
+			layout layout
+		}{
+			{"shared workspace", shared},
+			{"project in a repo subdirectory", subdir},
+			{"plain workspace", plain},
+		} {
+			t.Run(rt+"/"+tt.name, func(t *testing.T) {
+				t.Setenv("HOME", t.TempDir())
+				cfg := minimalRunConfig()
+				cfg.BrokerMode = true
+				cfg.RuntimeName = rt
+				cfg = tt.layout(t, cfg)
+				args, err := buildCommonRunArgs(cfg)
+				if rt == appleContainerRuntimeName {
+					if err != nil {
+						t.Fatalf("Apple: buildCommonRunArgs: %v (present-only masking creates nothing)", err)
+					}
+					for i := 0; i < len(args)-1; i++ {
+						if args[i] == "--tmpfs" && strings.HasSuffix(args[i+1], "/.scion/agents") {
+							t.Errorf("Apple: unexpected agents mask %s", args[i+1])
+						}
+					}
+					return
+				}
+				if err == nil || !strings.Contains(err.Error(), "agents directory") {
+					t.Fatalf("buildCommonRunArgs error = %v, want the start refused", err)
+				}
+				if args != nil {
+					t.Errorf("args returned with the refusal: %q", args)
+				}
+			})
+		}
+	}
+}
+
+func TestEnsureAgentsMaskPoint(t *testing.T) {
+	docker := RunConfig{RuntimeName: "docker"}
+	apple := RunConfig{RuntimeName: appleContainerRuntimeName}
+
+	// Creates the agents directory under a .scion directory.
+	scion := filepath.Join(t.TempDir(), ".scion")
+	mkdirs(t, scion)
+	if err := ensureAgentsMaskPoint(docker, scion); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if fi, err := os.Lstat(filepath.Join(scion, "agents")); err != nil || !fi.IsDir() {
+		t.Fatalf("agents dir not created: %v", err)
+	}
+	// An existing directory is fine.
+	if err := ensureAgentsMaskPoint(docker, scion); err != nil {
+		t.Fatalf("existing dir: %v", err)
+	}
+	// A symlink named agents is refused, even to a directory.
+	linked := filepath.Join(t.TempDir(), ".scion")
+	mkdirs(t, linked)
+	target := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(linked, "agents")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureAgentsMaskPoint(docker, linked); err == nil {
+		t.Error("symlinked agents: want an error")
+	}
+	// Apple and a non-directory src create nothing and never fail.
+	untouched := filepath.Join(t.TempDir(), ".scion")
+	mkdirs(t, untouched)
+	if err := ensureAgentsMaskPoint(apple, untouched); err != nil {
+		t.Errorf("Apple: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(untouched, "agents")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Apple created the agents dir: %v", err)
+	}
+	marker := filepath.Join(t.TempDir(), ".scion")
+	writeFile(t, marker, "project-id: x\n")
+	if err := ensureAgentsMaskPoint(docker, marker); err != nil {
+		t.Errorf("marker src: %v", err)
 	}
 }

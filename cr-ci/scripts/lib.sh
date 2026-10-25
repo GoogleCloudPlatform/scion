@@ -77,6 +77,20 @@ crci_run() {
   fi
 }
 
+# crci_run_hint HINT CMD...: like crci_run, but prints HINT (a crci_note) before
+# stopping when CMD fails.
+crci_run_hint() {
+  local hint=$1 rc
+  shift
+  printf '+ %s\n' "$(crci_quote "$@")"
+  if [[ $CRCI_MODE == apply ]]; then
+    "$@" && return 0
+    rc=$?
+    crci_note "$hint"
+    crci_die "step failed (rc $rc): $(crci_quote "$@")"
+  fi
+}
+
 # crci_is_not_found ERRTEXT: true if a gcloud error says the target does not
 # exist. Recognised (and nothing else):
 #   - "PERMISSION_DENIED" or "denied" anywhere: never not-found (checked first);
@@ -422,9 +436,8 @@ crci_validate_config() {
     fi
   fi
 
-  _crci_required GITHUB_APP_INSTALLATION_SCOPE
   v=${CFG[GITHUB_APP_INSTALLATION_SCOPE]}
-  if [[ -n $v && $v != repo && $v != org ]]; then
+  if [[ $v != repo && $v != org ]]; then
     _crci_fail GITHUB_APP_INSTALLATION_SCOPE "\"$v\" must be \"repo\" or \"org\""
   fi
   if [[ $v == org && ${#owners[@]} -gt 0 ]]; then
@@ -486,12 +499,35 @@ crci_validate_config() {
 
   n=$(_crci_posint RUNNER_DISK_GI) || true
   [[ -n $n ]] || _crci_fail RUNNER_DISK_GI "\"${CFG[RUNNER_DISK_GI]}\" is not a positive integer"
-  [[ -n $n ]] && ((n > 10)) && _crci_fail RUNNER_DISK_GI "$n exceeds the 10 GiB ephemeral-disk maximum"
+  [[ -n $n ]] && ((n > 100)) && _crci_fail RUNNER_DISK_GI "$n exceeds the 100 GiB ephemeral-disk maximum"
   n=$(_crci_posint MAX_CONCURRENT_RUNNERS) || true
   [[ -n $n ]] || _crci_fail MAX_CONCURRENT_RUNNERS "\"${CFG[MAX_CONCURRENT_RUNNERS]}\" is not a positive integer"
+  case ${CFG[RUNNER_BUILD_CACHE_IN_RAM]} in
+    true | false) ;;
+    *) _crci_fail RUNNER_BUILD_CACHE_IN_RAM "\"${CFG[RUNNER_BUILD_CACHE_IN_RAM]}\" must be true or false" ;;
+  esac
+  case ${CFG[MEDIATOR_MIN_INSTANCES]} in
+    0 | 1) ;;
+    *) _crci_fail MEDIATOR_MIN_INSTANCES "\"${CFG[MEDIATOR_MIN_INSTANCES]}\" must be 0 or 1 (max-instances is always 1)" ;;
+  esac
+  # The in-RAM cache (~9.5 GB) plus the ~21 GB compile need the 32 GiB shape (P6 run 4).
+  if [[ ${CFG[RUNNER_BUILD_CACHE_IN_RAM]} == true && -n $mi ]] && ((mi >= 512 && mi < 32 * 1024)); then
+    _crci_fail RUNNER_BUILD_CACHE_IN_RAM "true needs RUNNER_MEMORY=32Gi (the in-RAM build cache plus the compile need ~28 GB), got ${CFG[RUNNER_MEMORY]}"
+  fi
 
   _crci_duration_check TASK_TIMEOUT $((60 * 1000)) $((168 * 3600 * 1000)) "1m" "168h"
   _crci_duration_check CLAIM_TTL $((30 * 1000)) $((3600 * 1000)) "30s" "1h0m0s"
+  # RUNNER_IDLE_TIMEOUT: at least 1m and at most half of TASK_TIMEOUT (Load does the same).
+  local idle_ms task_ms
+  if [[ -n ${CFG[RUNNER_IDLE_TIMEOUT]} ]]; then
+    if ! idle_ms=$(_crci_duration_ms "${CFG[RUNNER_IDLE_TIMEOUT]}"); then
+      _crci_fail RUNNER_IDLE_TIMEOUT "\"${CFG[RUNNER_IDLE_TIMEOUT]}\" is not a duration"
+    elif ((idle_ms < 60 * 1000)); then
+      _crci_fail RUNNER_IDLE_TIMEOUT "${CFG[RUNNER_IDLE_TIMEOUT]} must be at least 1m"
+    elif task_ms=$(_crci_duration_ms "${CFG[TASK_TIMEOUT]}") && ((task_ms >= 60 * 1000 && task_ms <= 168 * 3600 * 1000 && idle_ms * 2 > task_ms)); then
+      _crci_fail RUNNER_IDLE_TIMEOUT "${CFG[RUNNER_IDLE_TIMEOUT]} must be at most half of TASK_TIMEOUT (${CFG[TASK_TIMEOUT]})"
+    fi
+  fi
 
   _crci_match ARTIFACT_REPO "$resid" "Artifact Registry repository ID"
   _crci_match BUILD_STAGING_BUCKET '^[a-z0-9][a-z0-9_-]{1,61}[a-z0-9]$' "Cloud Storage bucket name"

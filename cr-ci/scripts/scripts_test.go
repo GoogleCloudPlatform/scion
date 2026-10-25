@@ -136,6 +136,9 @@ func (e *env) run(script string, stdin string, args ...string) result {
 		"HOME=" + e.dir,
 		"STUB_DIR=" + e.stubDir,
 		"LC_ALL=C",
+		// git in the scripts (default image tags) must not find a stray
+		// repository at or above the temp root, e.g. /tmp/.git.
+		"GIT_CEILING_DIRECTORIES=" + os.TempDir(),
 	}, e.extra...)
 	cmd.Stdin = strings.NewReader(stdin)
 	var out, errb bytes.Buffer
@@ -266,6 +269,7 @@ var dryCases = []dryCase{
 	{"build-runner-image", "build-runner-image.sh", []string{"--tag", "golden"}, nil},
 	{"build-runner-image-local", "build-runner-image.sh", []string{"--tag", "golden", "--local"}, nil},
 	{"deploy-job", "deploy-job.sh", []string{"--tag", "golden"}, nil},
+	{"deploy-job-warm-up", "deploy-job.sh", []string{"--tag", "golden", "--warm-up"}, nil},
 	{"deploy-mediator", "deploy-mediator.sh", []string{"--tag", "golden"}, nil},
 	{"deploy-mediator-no-invoker-iam-check", "deploy-mediator.sh", []string{"--tag", "golden", "--no-invoker-iam-check"}, nil},
 	{"deploy-scheduler", "deploy-scheduler.sh", nil, nil},
@@ -273,6 +277,7 @@ var dryCases = []dryCase{
 	{"set-secrets-generate", "set-secrets.sh", []string{"--generate-webhook-secret", "new-webhook-secret"}, nil},
 	{"teardown", "teardown.sh", nil, nil},
 	{"teardown-keep", "teardown.sh", []string{"--keep-secrets", "--keep-images"}, nil},
+	{"teardown-regional-only", "teardown.sh", []string{"--regional-only"}, nil},
 }
 
 // TestDryRunGolden: every script's dry-run output equals its committed
@@ -325,6 +330,9 @@ func TestApplyRunsExactlyTheDryRunCommands(t *testing.T) {
 		{"build-runner-image-local", "build-runner-image.sh", []string{"--tag", "golden", "--local"}, nil},
 		{"deploy-job", "deploy-job.sh", []string{"--tag", "golden"}, func(e *env) {
 			// apply refuses a missing image; dry-run only shows the check.
+			e.state("exists", "us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:golden")
+		}},
+		{"deploy-job-warm-up", "deploy-job.sh", []string{"--tag", "golden", "--warm-up"}, func(e *env) {
 			e.state("exists", "us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:golden")
 		}},
 		{"deploy-mediator", "deploy-mediator.sh", []string{"--tag", "golden"}, func(e *env) {
@@ -810,6 +818,63 @@ func TestTeardown(t *testing.T) {
 	}
 }
 
+// TestTeardownRegionalOnly: only the stack in REGION goes; everything
+// project-wide (service accounts, secrets, staging bucket, project binding)
+// stays.
+func TestTeardownRegionalOnly(t *testing.T) {
+	e := newEnv(t, baseConfig())
+	e.state("exists", allExisting...)
+	r := e.run("teardown.sh", project+"\n", "--config", "config.env", "--apply", "--regional-only")
+	wantCode(t, r, 0)
+	if !strings.Contains(r.stderr, "the cr-ci stack in region us-central1 of project "+project) {
+		t.Errorf("confirmation prompt does not name the region:\n%s", r.stderr)
+	}
+	var deletes []string
+	for _, c := range r.calls {
+		s := c.String()
+		if strings.Contains(s, " delete ") || strings.Contains(s, "remove-iam-policy-binding") || strings.Contains(s, "storage rm ") {
+			deletes = append(deletes, strings.Join(c.argv[1:4], " "))
+		}
+	}
+	want := []string{"scheduler jobs delete", "run services delete", "run jobs delete", "artifacts repositories delete"}
+	if strings.Join(deletes, "\n") != strings.Join(want, "\n") {
+		t.Errorf("regional teardown:\n--- got\n%s\n--- want\n%s", strings.Join(deletes, "\n"), strings.Join(want, "\n"))
+	}
+
+	r = e.run("teardown.sh", "", "--config", "config.env", "--apply", "--confirm", project, "--regional-only", "--keep-images")
+	wantCode(t, r, 0)
+	for _, c := range r.calls {
+		if s := c.String(); strings.Contains(s, "artifacts repositories delete") || strings.Contains(s, "remove-iam-policy-binding") {
+			t.Errorf("--keep-images: %s", c)
+		}
+	}
+
+	r = e.run("teardown.sh", "", "--config", "config.env", "--apply", "--confirm", project, "--regional-only", "--keep-secrets")
+	if r.code == 0 || !strings.Contains(r.stderr, "--keep-secrets has no effect with --regional-only") {
+		t.Errorf("--regional-only --keep-secrets: code %d, want refused; stderr:\n%s", r.code, r.stderr)
+	}
+	for _, c := range r.calls {
+		if s := c.String(); strings.Contains(s, " delete ") || strings.Contains(s, " describe ") {
+			t.Errorf("--regional-only --keep-secrets: called %s, want refused before any resource call", c)
+		}
+	}
+}
+
+// minimalGitEnv is the whole environment for the tests' own git calls: nothing
+// is inherited, so no GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_CONFIG_* or
+// hooks setting can point git at another repository (such as the real checkout)
+// or change its behaviour. home holds the throwaway repository.
+func minimalGitEnv(home string) []string {
+	return []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + home,
+		"LC_ALL=C",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CEILING_DIRECTORIES=" + filepath.Dir(home),
+	}
+}
+
 // ---- default image tag ------------------------------------------------------------------
 
 // TestDefaultTag builds a throwaway git repo holding the module files the
@@ -837,7 +902,7 @@ func TestDefaultTag(t *testing.T) {
 	g := func(args ...string) string {
 		cmd := exec.Command(git, append([]string{"-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"}, args...)...)
 		cmd.Dir = root
-		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+		cmd.Env = minimalGitEnv(root)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
@@ -893,4 +958,45 @@ func TestDefaultTag(t *testing.T) {
 	if !strings.Contains(r.stderr, "runner job cr-gh-runner-8c32g not found") {
 		t.Errorf("no warning for a missing runner job:\n%s", r.stderr)
 	}
+}
+
+// TestDeployMediatorMinInstances: MEDIATOR_MIN_INSTANCES reaches gcloud run
+// deploy; max-instances stays 1.
+func TestDeployMediatorMinInstances(t *testing.T) {
+	cfg := baseConfig()
+	cfg["MEDIATOR_MIN_INSTANCES"] = "1"
+	e := newEnv(t, cfg)
+	r := e.run("deploy-mediator.sh", "", "--config", "config.env", "--tag", "golden")
+	wantCode(t, r, 0)
+	if !strings.Contains(r.stdout, " --min-instances=1 --max-instances=1 ") {
+		t.Errorf("dry-run lacks --min-instances=1 --max-instances=1:\n%s", r.stdout)
+	}
+}
+
+// TestDeployJobDiskLimitHint: a RUNNER_DISK_GI above the region's limit fails at
+// the job create, and the script says what the error means.
+func TestDeployJobDiskLimitHint(t *testing.T) {
+	cfg := baseConfig()
+	cfg["RUNNER_DISK_GI"] = "25"
+	e := newEnv(t, cfg)
+	e.state("exists", allExisting...)
+	e.extra = []string{"STUB_DISK_LIMIT_GI=23"}
+	r := e.run("deploy-job.sh", "", "--config", "config.env", "--tag", "golden", "--apply")
+	if r.code == 0 {
+		t.Fatal("deploy-job.sh succeeded over the disk limit")
+	}
+	for _, want := range []string{
+		"RUNNER_DISK_GI=25 is above Cloud Run's 10 GiB per-instance default",
+		"N is the limit in us-central1: set RUNNER_DISK_GI to at most N",
+	} {
+		if !strings.Contains(r.stdout+r.stderr, want) {
+			t.Errorf("output lacks %q:\nstdout:\n%s\nstderr:\n%s", want, r.stdout, r.stderr)
+		}
+	}
+	cfg["RUNNER_DISK_GI"] = "23"
+	e = newEnv(t, cfg)
+	e.state("exists", allExisting...)
+	e.extra = []string{"STUB_DISK_LIMIT_GI=23"}
+	r = e.run("deploy-job.sh", "", "--config", "config.env", "--tag", "golden", "--apply")
+	wantCode(t, r, 0)
 }

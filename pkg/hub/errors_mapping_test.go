@@ -68,6 +68,7 @@ func errMappingCases() []errMappingCase {
 		{name: "store.ErrDeleteInProgress", err: store.ErrDeleteInProgress, status: 409, code: "delete_in_progress", message: fixedMessage("a delete is in progress for this agent; wait for it to finish, or force the delete")},
 		{name: "store.ErrVersionConflict", err: store.ErrVersionConflict, status: 409, code: "version_conflict", message: fixedMessage("Version conflict - resource was modified")},
 		{name: "store.ErrProjectMembersGroupPrincipal", err: store.ErrProjectMembersGroupPrincipal, status: 400, code: "invalid_request", message: fixedMessage("Project members groups cannot be role-binding principals or child groups")},
+		{name: "store.ErrInvalidCursor", err: store.ErrInvalidCursor, status: 400, code: "invalid_cursor", message: fixedMessage("invalid cursor: restart pagination from the first page")},
 		{name: "store.ErrInvalidInput", err: store.ErrInvalidInput, status: 400, code: "validation_error", message: fixedMessage("Invalid input")},
 		{name: "store.ErrScopeMismatch", err: store.ErrScopeMismatch, status: 400, code: "scope_mismatch", message: fixedMessage("Binding scope type does not match role definition scope type")},
 		{name: "store.ErrDirectUserOnly", err: store.ErrDirectUserOnly, status: 400, code: "validation_error", message: fixedMessage("This role requires a direct user principal")},
@@ -159,6 +160,12 @@ func TestWriteErrorFromErr_Mapping(t *testing.T) {
 	// must keep its own mapping, not ErrInvalidInput's.
 	if !errors.Is(store.ErrProjectMembersGroupPrincipal, store.ErrInvalidInput) {
 		t.Fatal("store.ErrProjectMembersGroupPrincipal no longer wraps store.ErrInvalidInput; revisit the precedence note")
+	}
+
+	// store.ErrInvalidCursor wraps store.ErrInvalidInput, so existing checks
+	// still match; it must keep its own mapping, not ErrInvalidInput's.
+	if !errors.Is(store.ErrInvalidCursor, store.ErrInvalidInput) {
+		t.Fatal("store.ErrInvalidCursor no longer wraps store.ErrInvalidInput; revisit the precedence note")
 	}
 
 	// Fallback: anything unmapped, including nil and the hub error

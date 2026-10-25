@@ -118,26 +118,180 @@ func RedactURL(raw string) string {
 // cannot be delimited (see urlredact.Undelimited) shows only its scheme and
 // a mask. A URL inside another one's path, query or fragment has its user
 // info masked whole (urlredact.RedactUserInfoIn).
+//
+// A URL whose authority ends at a character that may sit inside a password
+// (white space, a quote, an angle bracket, a backtick or a backslash) is
+// cut there by the text patterns. When that authority, which holds no '@',
+// does not end in a host (urlredact.AuthorityIsHost) or ends in ':', and an
+// '@' follows on the same line, the rest of the user info and the host
+// follow it: the URL shows only its scheme and a mask, and the text up to
+// the end of the word holding that '@' is dropped (see authorityRunsOn).
+// An authority that ends in a host and a port (digits) is not taken as
+// cut: like a password that reads as a port and a path, it cannot be told
+// from a URL followed by text. A URL whose authority, holding no '@', ends
+// in a port that is not a number shows only its scheme and a mask as well,
+// and the port net/url quotes in its "invalid port" error is masked (see
+// redactPortErrors).
 func RedactURLsIn(text string) string {
-	return textFullURLRe.ReplaceAllStringFunc(text, func(m string) string {
-		authority := textURLRe.FindString(m)
-		rest := m[len(authority):]
-		// Punctuation that ends a sentence is not part of the URL.
-		trimmed := strings.TrimRight(rest, ".,;:!?)]}'")
-		tail := rest[len(trimmed):]
-		// The whole URL, not its authority cut at the first '/', '?' or
-		// '#': user info containing one of those ends the authority early.
-		if full := authority + trimmed; urlredact.Undelimited(full) {
-			return urlredact.MaskWhole(full, urlredact.Mask) + tail
+	var b strings.Builder
+	written := 0 // text[written:] is not in b yet
+	var next nextAtFinder
+	for _, loc := range textFullURLRe.FindAllStringIndex(text, -1) {
+		if loc[0] < written {
+			continue // inside text already dropped
 		}
-		if strings.Contains(authority, "@") {
-			authority = RedactURL(authority)
+		m := text[loc[0]:loc[1]]
+		if end, ok := authorityRunsOn(text, m, loc[1], &next); ok {
+			b.WriteString(text[written:loc[0]])
+			b.WriteString(urlredact.MaskWhole(m, urlredact.Mask))
+			written = end
+			continue
 		}
-		// A URL inside this one (a redirect parameter, or a second URL
-		// with no space before it) has its user info masked by the shared
-		// rule as well.
-		return authority + urlredact.RedactUserInfoIn(redactURLParams(trimmed), urlredact.Mask) + tail
+		b.WriteString(text[written:loc[0]])
+		if !strings.Contains(m, "@") && authorityHasBadPort(textURLRe.FindString(m)) {
+			// No host ends this authority: what follows its ':' may be
+			// the start of a password (url.Parse quotes the URL up to
+			// its first '?' or '#').
+			b.WriteString(urlredact.MaskWhole(m, urlredact.Mask))
+		} else {
+			b.WriteString(redactTextURL(m))
+		}
+		written = loc[1]
+	}
+	if written > 0 {
+		b.WriteString(text[written:])
+		text = b.String()
+	}
+	return redactPortErrors(text)
+}
+
+// netURLPortErrRe matches the error text net/url writes for a port that is
+// not a number ("invalid port %q after host"), on one line, whatever the
+// length of the port. The quoted port is what follows the last ':' of the
+// authority, which for a URL with a '/', '?' or '#' in its password is the
+// start of the password. RE2 matches in linear time, so the match is not
+// bounded.
+var netURLPortErrRe = regexp.MustCompile(`invalid port (.*?) after host`)
+
+// redactPortErrors replaces the port quoted in each net/url "invalid port"
+// error in text with ':' and a mask, keeping its quoting (plain or
+// escaped, as in JSON or a %q string).
+func redactPortErrors(text string) string {
+	if !strings.Contains(text, "invalid port ") {
+		return text
+	}
+	return netURLPortErrRe.ReplaceAllStringFunc(text, func(m string) string {
+		quote := `"`
+		if strings.HasPrefix(m[len("invalid port "):], `\"`) {
+			quote = `\"`
+		}
+		return "invalid port " + quote + ":" + urlredact.Mask + quote + " after host"
 	})
+}
+
+// authorityHasBadPort reports whether authority, a scheme and "://" and
+// the authority as textURLRe matches it, ends in a ':' and a port that is
+// not all digits (an empty port is not one).
+func authorityHasBadPort(authority string) bool {
+	h := authority[strings.Index(authority, "://")+len("://"):]
+	if i := strings.LastIndexByte(h, ']'); i >= 0 {
+		h = h[i+1:]
+	}
+	i := strings.LastIndexByte(h, ':')
+	if i < 0 {
+		return false
+	}
+	for _, r := range h[i+1:] {
+		if r < '0' || r > '9' {
+			return true
+		}
+	}
+	return false
+}
+
+// redactTextURL redacts m, one match of textFullURLRe, for RedactURLsIn.
+func redactTextURL(m string) string {
+	authority := textURLRe.FindString(m)
+	rest := m[len(authority):]
+	// Punctuation that ends a sentence is not part of the URL.
+	trimmed := strings.TrimRight(rest, ".,;:!?)]}'")
+	tail := rest[len(trimmed):]
+	// The whole URL, not its authority cut at the first '/', '?' or
+	// '#': user info containing one of those ends the authority early.
+	if full := authority + trimmed; urlredact.Undelimited(full) {
+		return urlredact.MaskWhole(full, urlredact.Mask) + tail
+	}
+	if strings.Contains(authority, "@") {
+		authority = RedactURL(authority)
+	}
+	// A URL inside this one (a redirect parameter, or a second URL
+	// with no space before it) has its user info masked by the shared
+	// rule as well.
+	return authority + urlredact.RedactUserInfoIn(redactURLParams(trimmed), urlredact.Mask) + tail
+}
+
+// textWordTrailing is the punctuation after a word that ends a sentence, a
+// quotation or an escape rather than the word itself.
+const textWordTrailing = ".,;:!?)]}>'\"`\\"
+
+// authorityRunsOn reports whether the URL m, a match of textFullURLRe in
+// text ending at end, has an authority that the text patterns cut early:
+// its authority holds no '@' and does not end in a host (or ends in ':'),
+// and an '@' follows m on the same line. It then returns where the word
+// holding that '@' ends, less trailing punctuation (textWordTrailing): the
+// text from m up to there may hold the rest of the user info and is not
+// shown.
+func authorityRunsOn(text, m string, end int, next *nextAtFinder) (int, bool) {
+	authority := textURLRe.FindString(m)
+	hostPart := authority[strings.Index(authority, "://")+len("://"):]
+	// An authority ending in ':' (an empty port) is taken as cut as well:
+	// a password may start with white space or a quote.
+	if strings.Contains(m, "@") || (urlredact.AuthorityIsHost(hostPart) && !strings.HasSuffix(hostPart, ":")) {
+		return 0, false
+	}
+	at := next.find(text, end)
+	if at < 0 {
+		return 0, false
+	}
+	wordEnd := len(text)
+	if i := strings.IndexAny(text[at:], " \t\n\v\f\r"); i >= 0 {
+		wordEnd = at + i
+	}
+	return at + len(strings.TrimRight(text[at:wordEnd], textWordTrailing)), true
+}
+
+// nextAtFinder finds the first '@' at or after a position in a text, on the
+// same line. It keeps its last answer and reuses it while it still holds,
+// so that RedactURLsIn scans each part of the text about once.
+type nextAtFinder struct {
+	valid bool
+	from  int // the position of the last search
+	at    int // the '@' it found, or -1
+	nl    int // the first newline at or after from, or -1 for none
+}
+
+// find returns the index of the first '@' in text at or after from and
+// before the next newline, or -1. Calls must not go back: from never
+// decreases.
+func (f *nextAtFinder) find(text string, from int) int {
+	switch {
+	case f.valid && f.at >= 0 && from <= f.at:
+		// No '@' in [f.from, f.at), and f.at is before the newline.
+		return f.at
+	case f.valid && f.at < 0 && (f.nl < 0 || from <= f.nl):
+		// No '@' from f.from to the end of the same line.
+		return -1
+	}
+	f.valid, f.from, f.at, f.nl = true, from, -1, -1
+	line := text[from:]
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		f.nl = from + i
+		line = line[:i]
+	}
+	if i := strings.IndexByte(line, '@'); i >= 0 {
+		f.at = from + i
+	}
+	return f.at
 }
 
 // AddHub adds a hub entry named name for endpoint. The name and the URL

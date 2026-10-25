@@ -834,6 +834,36 @@ func (s *Server) releaseDeregisteredScopeReservations(ctx context.Context, reser
 	return released
 }
 
+// releaseDeletedBrokerReservations releases the active max_agents_per_broker
+// reservations scoped to brokerID once its row is deleted, so no active
+// reservation is left pointing at a Runtime Broker that no longer exists
+// (ptone/scion#3994). It is the sweep's deregistered-scope pass
+// (releaseDeregisteredScopeReservations) run on that one scope: each row is
+// released only after a point lookup confirms the broker is gone and with a
+// conditional write that also requires it, and each release is counted,
+// logged and audited exactly as the sweep does. Best-effort: a row it misses
+// is released by the next sweep.
+func (s *Server) releaseDeletedBrokerReservations(ctx context.Context, brokerID string) {
+	if s.quotaService == nil {
+		return
+	}
+	limitDef, err := s.store.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.agentLifecycleLog.Warn("broker delete: failed to look up max_agents_per_broker limit definition; the sweep releases the broker's reservations",
+				"broker_id", brokerID, "error", err)
+		}
+		return
+	}
+	reservations, err := s.store.ListActiveReservations(ctx, limitDef.ID, store.QuotaScopeBroker, brokerID)
+	if err != nil {
+		s.agentLifecycleLog.Warn("broker delete: failed to list the broker's reservations; the sweep releases them",
+			"broker_id", brokerID, "error", err)
+		return
+	}
+	s.releaseDeregisteredScopeReservations(ctx, reservations, nil)
+}
+
 // brokerBackfillHolds reports whether the backfill records a reservation for
 // agent when it holds none: it is in a counted phase, or its stop is queued
 // and still intended (the container may still be running; container status
