@@ -73,8 +73,12 @@ func (a *HMACAuth) ApplyAuth(req *http.Request) error {
 		return err
 	}
 
-	// 5. Build canonical string
-	canonical := BuildCanonicalString(req, timestamp, nonce)
+	// 5. Build canonical string. A body read error fails the signing:
+	// the signer never signs the unreadable-body marker.
+	canonical, err := buildCanonicalString(req, timestamp, nonce)
+	if err != nil {
+		return err
+	}
 
 	// 6. Compute HMAC-SHA256
 	sig := ComputeHMAC(a.SecretKey, canonical)
@@ -138,8 +142,10 @@ func CheckSignedBodyFraming(r *http.Request) error {
 }
 
 // bodyUnreadableMarker is written in place of the body hash when the body
-// cannot be read. It starts with '!', which is outside the base64 alphabet,
-// so it never equals a signer's body hash and verification fails.
+// cannot be read on the verifying side. It starts with '!', which is
+// outside the base64 alphabet, so it never equals a body hash, and no
+// signer signs it (ApplyAuth fails on a body read error), so verification
+// fails.
 const bodyUnreadableMarker = "!body-unreadable"
 
 // Refresh indicates that refresh is not supported for HMAC auth.
@@ -153,7 +159,22 @@ func (a *HMACAuth) Refresh() (bool, error) { return false, nil }
 // The body hash line is present exactly when the body has at least one
 // byte, whatever ContentLength or Transfer-Encoding say. An empty body has
 // no hash line.
+//
+// When the body cannot be read, the hash is replaced by a marker that no
+// signer produces (HMACAuth.ApplyAuth refuses to sign instead), so the
+// signature does not verify.
 func BuildCanonicalString(r *http.Request, timestamp, nonce string) []byte {
+	canonical, err := buildCanonicalString(r, timestamp, nonce)
+	if err != nil {
+		canonical = append(canonical, bodyUnreadableMarker...)
+	}
+	return canonical
+}
+
+// buildCanonicalString builds the canonical string as BuildCanonicalString
+// does, but returns the body read error instead of writing the marker; the
+// canonical string returned with an error ends before the body hash.
+func buildCanonicalString(r *http.Request, timestamp, nonce string) ([]byte, error) {
 	var buf bytes.Buffer
 
 	// HTTP method
@@ -196,16 +217,16 @@ func BuildCanonicalString(r *http.Request, timestamp, nonce string) []byte {
 		// Read the body and restore it for the handler.
 		bodyBytes, err := io.ReadAll(r.Body)
 		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-		switch {
-		case err != nil:
-			buf.WriteString(bodyUnreadableMarker)
-		case len(bodyBytes) > 0:
+		if err != nil {
+			return buf.Bytes(), fmt.Errorf("failed to read request body for signing: %w", err)
+		}
+		if len(bodyBytes) > 0 {
 			bodyHash := sha256.Sum256(bodyBytes)
 			buf.WriteString(base64.StdEncoding.EncodeToString(bodyHash[:]))
 		}
 	}
 
-	return buf.Bytes()
+	return buf.Bytes(), nil
 }
 
 // ComputeHMAC computes HMAC-SHA256.

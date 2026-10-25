@@ -384,3 +384,70 @@ func TestSizeRequestBody_KeepsSizedRewindableBody(t *testing.T) {
 		t.Fatal("a swapped body verifies")
 	}
 }
+
+// failingSizedBody returns some bytes and then a read error.
+type failingSizedBody struct{ sent bool }
+
+func (f *failingSizedBody) Read(p []byte) (int, error) {
+	if !f.sent {
+		f.sent = true
+		return copy(p, `{"part`), nil
+	}
+	return 0, io.ErrUnexpectedEOF
+}
+
+// A sized, rewindable body whose read fails is not signed: the signer
+// never signs the unreadable-body marker, so no request whose body read
+// fails on the verifier can match a signature.
+func TestHMACAuth_ApplyAuth_SizedRewindableBodyReadErrorFails(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "http://broker.test/api/v1/agents", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Body = io.NopCloser(&failingSizedBody{})
+	req.ContentLength = 100
+	req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(&failingSizedBody{}), nil }
+	auth := &HMACAuth{BrokerID: "broker-1", SecretKey: []byte(goldenSecret)}
+	if err := auth.ApplyAuth(req); err == nil {
+		t.Fatal("ApplyAuth signed a request whose body could not be read")
+	}
+	if req.Header.Get(HeaderSignature) != "" {
+		t.Fatal("a signature was set")
+	}
+}
+
+// The verifier side still writes the marker on a read error.
+func TestBuildCanonicalString_ReadErrorWritesMarkerOnly(t *testing.T) {
+	req := goldenBodylessRequest()
+	req.Body = io.NopCloser(&failingSizedBody{})
+	req.ContentLength = 100
+	got := string(BuildCanonicalString(req, goldenTimestamp, goldenNonce))
+	if got != goldenBodylessCanonical+bodyUnreadableMarker {
+		t.Fatalf("got %q", got)
+	}
+	if _, err := buildCanonicalString(goldenBodylessRequest(), goldenTimestamp, goldenNonce); err != nil {
+		t.Fatalf("bodyless: %v", err)
+	}
+
+	// A real signer's signature, over a body or over no body, never
+	// verifies a request whose body read fails on the verifier.
+	secret := []byte(goldenSecret)
+	auth := &HMACAuth{BrokerID: "broker-1", SecretKey: secret}
+	for _, body := range []string{"", goldenBody} {
+		var rd io.Reader
+		if body != "" {
+			rd = strings.NewReader(body)
+		}
+		signed, err := http.NewRequest(http.MethodPost, "http://broker.test/api/v1/agents", rd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := auth.ApplyAuth(signed); err != nil {
+			t.Fatal(err)
+		}
+		failing := asServerRequest(signed, &failingSizedBody{}, 100, nil)
+		if verify(t, failing, secret) {
+			t.Fatalf("signature over body %q verifies a request whose body read fails", body)
+		}
+	}
+}
