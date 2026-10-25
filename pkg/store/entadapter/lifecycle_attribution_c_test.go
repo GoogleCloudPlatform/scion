@@ -819,3 +819,60 @@ func TestLifecycleAttribution_T18cSameStoredTimestamp(t *testing.T) {
 	assert.Equal(t, "Z9", att.LastRun)
 	assert.Empty(t, f.events(a.ID)[len(f.events(a.ID))-1].LaunchID)
 }
+
+// TestLifecycleAttribution_T31eUnknownTargetNotListed: under UNKNOWN a
+// revert to a run that is NOT in the stored list (here B0, replaced by P1
+// before the legacy period) is held by rule 6U, not trusted by rule 6
+// (M29).
+func TestLifecycleAttribution_T31eUnknownTargetNotListed(t *testing.T) {
+	f, a := newS2Fixture(t)
+	f.mint(a.ID, "B0")
+	f.startWrite(a.ID)
+	f.stopRecord(a.ID, "B0", "stopped")
+	f.mint(a.ID, "P1")
+	makeLegacy(t, f, a.ID)
+	f.metaEdit(a.ID, "m-31e") // normalises (pushes P1, not B0)
+	f.mint(a.ID, "R2")
+	att := attrCursor(t, f, a.ID)
+	require.Equal(t, store.AttributionClear, att.State)
+	require.NotContains(t, strings.Split(att.QuarantinedRuns, ","), "B0")
+	f.revert(a.ID, "R2", "B0")
+	assert.Equal(t, store.AttributionHeld, attrCursor(t, f, a.ID).State)
+	f.metaEdit(a.ID, "m-31e-2")
+	evs := f.events(a.ID)
+	assert.Empty(t, evs[len(evs)-1].LaunchID, lcFull(evs))
+}
+
+// TestLifecycleAttribution_T34bNoEmptyElementInAList: a held B1, then a
+// revert to "" (rule 5): the list keeps only B1, with no empty element and
+// no CORRUPT normalisation on the next write (M34).
+func TestLifecycleAttribution_T34bNoEmptyElementInAList(t *testing.T) {
+	f, a := heldAfterSoftFinish(t)
+	f.revert(a.ID, "B1", "")
+	f.metaEdit(a.ID, "m-34b")
+	assert.Equal(t, "B1", attrCursor(t, f, a.ID).QuarantinedRuns)
+	assert.Zero(t, f.counters.Get(telemetryemit.MetricAttributionStale, telemetryemit.AttributionStaleCorrupt))
+}
+
+// TestLifecycleAttribution_T23dNormalisationPushOnEstablishingMint (r4
+// R4-1(a)): the soft finish and the restore both commit without a bump;
+// the next observed write is a fresh mint, which establishes (POST clear,
+// no POST push), so only the normalisation push quarantines B1. A later
+// revert to B1 is held (rule 4) and nothing names B1 (M38).
+func TestLifecycleAttribution_T23dNormalisationPushOnEstablishingMint(t *testing.T) {
+	f, a := stoppedAgent(t)
+	f.withoutObservation(func() {
+		softFinish(t, f, a.ID, "B1", "R1")
+		f.restore(a.ID)
+	})
+	f.mint(a.ID, "R2")
+	att := attrCursor(t, f, a.ID)
+	require.Equal(t, store.AttributionClear, att.State)
+	assert.Contains(t, strings.Split(att.QuarantinedRuns, ","), "B1", "pushed by the normalisation")
+	f.revert(a.ID, "R2", "B1")
+	assert.Equal(t, store.AttributionHeld, attrCursor(t, f, a.ID).State)
+	f.metaEdit(a.ID, "m-23d")
+	evs := f.events(a.ID)
+	checkLaunchMap(t, evs, "B1")
+	assert.Empty(t, evs[len(evs)-1].LaunchID)
+}
