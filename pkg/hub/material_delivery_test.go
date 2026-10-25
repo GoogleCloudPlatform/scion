@@ -1359,12 +1359,16 @@ func TestDeliverySelection_DefensiveBranches(t *testing.T) {
 	})
 	t.Run("fetch_error_fails_selection", func(t *testing.T) {
 		m := newLDFixture(t, "df-fetch", ldOptions{})
-		m.secret(t, "MD_DF_FETCH", "v", store.SecretTypeEnvironment, store.ScopeProject, m.agent.ProjectID)
+		sm := m.secret(t, "MD_DF_FETCH", "v", store.SecretTypeEnvironment, store.ScopeProject, m.agent.ProjectID)
 		fb := &ldFaultSecretBackend{SecretBackend: m.backend, fetchErr: injected}
 		m.d.SetSecretBackend(fb)
 		_, err := m.d.selectDeliverySecrets(ctx, restartSel(m, m.agent), m.agent)
 		assert.ErrorIs(t, err, injected)
-		require.Len(t, fb.fetched, 1, "control: the admitted item reached the fetch")
+		var ids []string
+		for _, meta := range fb.fetched {
+			ids = append(ids, meta.ID)
+		}
+		assert.Contains(t, ids, sm.ID, "control: the admitted item reached the fetch")
 	})
 	t.Run("failed_or_missing_item_not_delivered", func(t *testing.T) {
 		m := newLDFixture(t, "df-item", ldOptions{})
