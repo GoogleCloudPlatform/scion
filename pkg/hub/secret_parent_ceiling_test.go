@@ -1314,8 +1314,11 @@ func TestUserSecretParentCeiling_DecideAgentAuthoredSource(t *testing.T) {
 func TestUserSecretParentCeiling_HubDeliveryStopsBeforeStep10(t *testing.T) {
 	f := newUSPFixture(t, "hd-t18")
 	withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
-	h, err := f.srv.authzService.newHubDeliveryIdentity(context.Background(), f.agentID)
-	require.NoError(t, err)
+	// A literal of the shape the constructor builds for this agent (only
+	// the hub_delivery test files call the constructor,
+	// TestHubDelivery_ConstructorCallSites). Step 0b and the arm's
+	// permission check refuse before the stored-agent evidence is read.
+	h := &hubDeliveryIdentity{agentID: f.agentID, projectID: f.projectID, ancestry: []string{f.userID}, originUserID: f.userID, boundAgentID: f.agentID}
 
 	d := decidePerm(f.srv.authzService, h, f.resource(), ActionUse, "secret.use", true)
 	assertStep0bDenied(t, d, "delivery credential is limited to deliver permissions", "secret.use")
