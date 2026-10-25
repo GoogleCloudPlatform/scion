@@ -715,9 +715,9 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/conduit_grants.go", Function: "CompareAndSwap", Symbol: "UpdateSecretValueIfVersion", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Conduit grant key ring rotation (compare-and-swap), cryptographic infrastructure", Scope: "pkg/hub/conduit_grants.go"}},
 
 	// -----------------------------------------------------------------------
-	// pkg/hub/lifecycle_hook_executor.go — pre-start hook execution
+	// pkg/hub/lifecycle_hook_executor.go — lifecycle hook execution
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/lifecycle_hook_executor.go", Function: "resolveIdentityAndToken", Symbol: "GenerateAccessToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Pre-start hook: generates GCP token for hook execution", Scope: "pkg/hub/lifecycle_hook_executor.go"}},
+	{File: "pkg/hub/lifecycle_hook_executor.go", Function: "resolveIdentityAndToken", Symbol: "GenerateAccessToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Lifecycle hook: generates GCP token for hook execution after the fire-time writer authority check (Server.AuthorizeHookFire)", Scope: "pkg/hub/lifecycle_hook_executor.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/maintenance/maintenance_executors.go — maintenance operations

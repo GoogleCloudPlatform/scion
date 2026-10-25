@@ -148,22 +148,21 @@ const SurfaceHookExecutionIdentity = "hook-execution-identity"
 // cannot file it. Failing closed on the latter would turn a logging
 // misconfiguration into an outage.
 //
-// ⚠️ THIS AUTHORIZATION IS WRITE-TIME ONLY, AND THAT IS A RESIDUAL RISK, NOT A
-// DESIGN GOAL. The permission is evaluated when a hook is created or updated
-// and never again. The executor resolves the identity and mints a token
-// (lifecycle_hook_executor.go resolveIdentityAndToken) without re-checking
-// either this permission or sa.Verified. Two consequences follow, and neither
-// is fixed here:
+// This is the WRITE-TIME check. It is evaluated when a hook is created or
+// updated. Before every token mint the executor re-checks, at fire time, the
+// authority this check required (pkg/hub Server.AuthorizeHookFire): the
+// hook's recorded writer (CreatedBy) must still resolve to an active user
+// created before the hook, still hold hub.lifecycle_hooks.update, and still
+// pass the caller-permission (actAs) check under the current hook identity
+// check mode, and the account must still pass ExecutionIdentityAdmissible.
+// So revoking a writer's role, suspending or deleting the writer, revoking
+// their actAs grant (with the check enforced), or enabling enforcement later
+// stops hooks they already wrote. Webhook actions mint nothing and are not
+// re-checked.
 //
-//   - Enabling the check later is NOT a kill switch. Hooks written while it was
-//     off keep executing with their existing identities, because nothing
-//     re-evaluates them. The toggle governs new writes only.
-//   - Revoking a caller's actAs grant in IAM does not stop hooks they already
-//     wrote.
-//
-// Closing this requires an execution-time check in the executor and is tracked
-// separately. Do not read the presence of this gate as meaning a running hook's
-// identity has been authorized recently.
+// Known limit: the writer is recorded by email only, and update does not
+// change it, so a hook re-saved by another admin is still checked against
+// its creator.
 func ValidateHook(
 	ctx context.Context,
 	hook *store.LifecycleHook,
@@ -474,46 +473,7 @@ func validateExecutionIdentity(
 		}}
 	}
 
-	var errs []FieldError
-
-	// Must be verified.
-	if !sa.Verified || sa.VerificationStatus != store.GCPVerificationVerified {
-		errs = append(errs, FieldError{
-			Field:   "executionIdentity",
-			Message: fmt.Sprintf("GCP service account %q is not verified (status: %s)", sa.Email, sa.VerificationStatus),
-		})
-	}
-
-	// Must be in scope. For hub-scoped hooks, any hub-scoped SA is valid.
-	// For project-scoped hooks, the SA must be in the same project scope.
-	switch hook.ScopeType {
-	case store.LifecycleHookScopeHub:
-		// Hub-scoped hooks can use hub-scoped SAs.
-		if sa.Scope != "hub" {
-			errs = append(errs, FieldError{
-				Field:   "executionIdentity",
-				Message: fmt.Sprintf("hub-scoped hook requires a hub-scoped service account; SA %q has scope %q", sa.Email, sa.Scope),
-			})
-		}
-	case store.LifecycleHookScopeProject:
-		// Project-scoped hooks require the SA to be in the same project.
-		if sa.Scope != "project" || sa.ScopeID != hook.ScopeID {
-			errs = append(errs, FieldError{
-				Field:   "executionIdentity",
-				Message: fmt.Sprintf("project-scoped hook requires a service account in the same project; SA %q has scope %s/%s", sa.Email, sa.Scope, sa.ScopeID),
-			})
-		}
-	}
-
-	// A broker host service account record is used only through GCP
-	// identity passthrough translation; it is never a direct reference.
-	if store.IsHostSATranslationRecord(sa) {
-		errs = append(errs, FieldError{
-			Field: "executionIdentity",
-			Message: fmt.Sprintf("GCP service account %q is a broker host service account used for GCP identity "+
-				"passthrough on sandbox profiles and cannot be used as a hook execution identity", sa.Email),
-		})
-	}
+	errs := ExecutionIdentityAdmissible(hook, sa)
 
 	// --- caller permission (actAs) ---
 	//
@@ -563,6 +523,58 @@ func validateExecutionIdentity(
 			"surface", SurfaceHookExecutionIdentity, "hook", hook.ID,
 			"callerKind", caller.Kind.String(), "caller", caller.ID,
 			"targetSA", sa.Email, "mechanism", result.Mechanism)
+	}
+
+	return errs
+}
+
+// ExecutionIdentityAdmissible reports whether sa may be hook's execution
+// identity at all, independent of who is asking: it must be verified, in the
+// hook's scope, and not a broker host service account record. ValidateHook
+// applies it at write time and the executor's fire-time authority check
+// applies it again before every token mint, so the two cannot drift. It
+// returns nil when sa is admissible. hook.ScopeType must already be
+// defaulted (ValidateHook does so; a stored hook always has it).
+func ExecutionIdentityAdmissible(hook *store.LifecycleHook, sa *store.GCPServiceAccount) []FieldError {
+	var errs []FieldError
+
+	// Must be verified.
+	if !sa.Verified || sa.VerificationStatus != store.GCPVerificationVerified {
+		errs = append(errs, FieldError{
+			Field:   "executionIdentity",
+			Message: fmt.Sprintf("GCP service account %q is not verified (status: %s)", sa.Email, sa.VerificationStatus),
+		})
+	}
+
+	// Must be in scope. For hub-scoped hooks, any hub-scoped SA is valid.
+	// For project-scoped hooks, the SA must be in the same project scope.
+	switch hook.ScopeType {
+	case store.LifecycleHookScopeHub:
+		// Hub-scoped hooks can use hub-scoped SAs.
+		if sa.Scope != "hub" {
+			errs = append(errs, FieldError{
+				Field:   "executionIdentity",
+				Message: fmt.Sprintf("hub-scoped hook requires a hub-scoped service account; SA %q has scope %q", sa.Email, sa.Scope),
+			})
+		}
+	case store.LifecycleHookScopeProject:
+		// Project-scoped hooks require the SA to be in the same project.
+		if sa.Scope != "project" || sa.ScopeID != hook.ScopeID {
+			errs = append(errs, FieldError{
+				Field:   "executionIdentity",
+				Message: fmt.Sprintf("project-scoped hook requires a service account in the same project; SA %q has scope %s/%s", sa.Email, sa.Scope, sa.ScopeID),
+			})
+		}
+	}
+
+	// A broker host service account record is used only through GCP
+	// identity passthrough translation; it is never a direct reference.
+	if store.IsHostSATranslationRecord(sa) {
+		errs = append(errs, FieldError{
+			Field: "executionIdentity",
+			Message: fmt.Sprintf("GCP service account %q is a broker host service account used for GCP identity "+
+				"passthrough on sandbox profiles and cannot be used as a hook execution identity", sa.Email),
+		})
 	}
 
 	return errs

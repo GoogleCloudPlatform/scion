@@ -2212,6 +2212,11 @@ type Server struct {
 	hookIdentityChecker   store.CallerPermissionChecker
 	hookIdentityCheckMode string
 
+	// hookFireLimiter rate limits fire-time actAs refusal audit records per
+	// lifecycle hook (hookFireActAsAudit); created on first use.
+	hookFireLimiter     *hookRefusalLimiter
+	hookFireLimiterOnce sync.Once
+
 	// GCP token rate limiter (nil = no rate limiting)
 	gcpTokenRateLimiter *GCPTokenRateLimiter
 
@@ -4898,7 +4903,7 @@ func (s *Server) StartLifecycleHookEvaluator(opts ...EvaluatorOption) {
 		allOpts = append([]EvaluatorOption{WithDBDriver(driver)}, opts...)
 	}
 
-	executor := NewHTTPExecutor(s.store, s.gcpTokenGenerator, s.auditLogger, logging.Subsystem("hub.lifecycle-hooks.executor"))
+	executor := NewHTTPExecutor(s.store, s.gcpTokenGenerator, s.auditLogger, logging.Subsystem("hub.lifecycle-hooks.executor"), s)
 	ev := NewLifecycleHookEvaluator(s.store, s.events, executor, logging.Subsystem("hub.lifecycle-hooks"), allOpts...)
 	s.lifecycleHookEvaluator = ev
 	s.lifecycleHookEvaluator.Start()

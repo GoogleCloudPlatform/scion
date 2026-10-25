@@ -10,6 +10,10 @@ The CLI's local-only mode is gone. Every agent command now goes through a Hub, p
 
 [Read the full release notes for this week ->](/scion/release-notes/2026-10-12/)
 
+## Lifecycle hooks re-check their writer before minting a token
+
+An `http` lifecycle hook with an execution identity now mints its service-account token only if the hook's writer (`createdBy`) still qualifies at that moment. The writer must still be an active user created before the hook, must still hold `hub.lifecycle_hooks.update`, and, when the GCP IAM check is enforced, must still be able to act as the service account. The service account must still be verified and in scope. Before, these were checked only when the hook was written. When a check fails, the request is not sent, and the execution audit records `hook writer no longer authorized` with the failed check, at most once every 10 minutes per hook and cause. **Existing hooks stop authenticating** if their writer was deleted, suspended or demoted, if the writer's email changed, or, with the IAM check enforced, if the writer lost `actAs`. Updating a hook does not change its writer. To restore such a hook, an admin who holds the authority today re-creates it. `webhook` actions are unchanged. See [Lifecycle Hooks](/scion/hosted/ha/lifecycle-hooks/#the-writers-authority-is-re-checked-every-time-a-token-is-minted).
+
 ## Templates describe the job, not the environment
 
 A template now describes the agent's **job** (harness config, model, instructions, skills, tools, limits). Its **environment** (image, resources, volumes, Kubernetes settings, telemetry, hub access) comes only from the harness-config, settings and profiles, the hub and the project. See [Settings Precedence](/scion/reference/settings-precedence/#the-model-a-template-describes-the-job-settings-describe-the-environment) and [Agent Configuration](/scion/reference/agent-config/#key-classes).
