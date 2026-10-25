@@ -13,6 +13,7 @@
     "./agent-store-count/*.ts",
     "./artifacts-access/*.ts",
     "./artifacts-agent-owned/*.ts",
+    "./artifacts-review/*.ts",
     "./chat/*.ts",
     "./chat-file-preview/*.ts",
     "./chat-mobile/*.ts",

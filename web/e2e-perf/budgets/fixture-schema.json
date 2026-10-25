@@ -40,6 +40,7 @@
         "experiments.hub.flat_runtime_brokers:boolean",
         "experiments.web.agent_badges:boolean",
         "experiments.web.agent_edit:boolean",
+        "experiments.web.artifact_review_editor:boolean",
         "experiments.web.chat_scheduled_send:boolean",
         "experiments.web.chat_starred_messages:boolean",
         "experiments.web.gcs_links:boolean",
