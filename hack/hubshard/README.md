@@ -59,15 +59,28 @@ optional `HUB_SHARD_DEADLINE` (a Unix time: every step runs under
 `GOGC` of `shard.sh`'s test runs. Other tags combine as usual: `shard.sh`
 passes `no_sqlite` or `integration` next to the shard tags.
 
-`make test-hub-shard` runs the shard binary with `-test.v` and prints its
-output as it would print without `-test.v` (the `=== RUN`, `--- PASS`,
-`--- SKIP` lines and the t.Log lines of tests that did not fail are
-dropped; stderr is not filtered), then a sorted summary of the skipped
-top-level tests, one per line with the skip message and its `file:line`
-(a skipped subtest counts for its top-level test), before the `ok`/`FAIL`
-line. The summary changes neither the exit status nor the lines before
-it. See `run_skip_summary` in [`lib.sh`](lib.sh); `make
-hubshard-skip-summary-selftest` tests it with a fake test binary.
+`make test-hub-shard` runs the shard binary with `-test.v` and rebuilds
+its stdout as without `-test.v` (the `=== RUN`, `--- PASS`, `--- SKIP`
+lines and the t.Log lines of tests that did not fail are dropped; a
+failed test's lines keep their order; stderr is not filtered), then
+prints a sorted summary of the skipped top-level tests, one per line with
+the skip message and its `file:line` (a skipped subtest counts for its
+top-level test; `(no reason)` when no message was logged right before
+the skip), before the `ok`/`FAIL` line. Pass/fail and the exit status are
+unchanged; stdout is rebuilt from `-test.v` and matches the non-verbose
+output except in these documented cases:
+
+- A print without a trailing newline glues the next `-test.v` line to
+  it, so a verbose line (`--- PASS`, a passing test's t.Log line or an
+  `=== RUN` line) is printed after the partial line; a glued `=== RUN`
+  is missed, so the next lines count for the previous test.
+- In a test that does not fail, a direct print shaped like a t.Log line
+  (`    name.go:N: ...`) is dropped, and so is an 8-space indented direct
+  print right after a t.Log line.
+
+See `run_skip_summary` in [`lib.sh`](lib.sh); `make
+hubshard-skip-summary-selftest` tests it with a fake test binary and with
+the recorded output of a real one ([`testdata/skip-summary`](testdata/skip-summary)).
 
 ```text
 == skipped tests: 2

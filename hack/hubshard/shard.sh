@@ -28,9 +28,11 @@
 #       Compile shard K (go test -c), check that the binary's test list is
 #       exactly what hubshard -list K expects, then run that binary (no
 #       second compile), skipping the common files' tests outside shard 1.
-#       The run's output is the binary's without -test.v, followed by a
-#       sorted summary of the skipped top-level tests (run_skip_summary
-#       in lib.sh); the summary does not change the exit status.
+#       The binary runs with -test.v; its stdout is rebuilt as without
+#       -test.v and followed by a sorted summary of the skipped top-level
+#       tests (run_skip_summary in lib.sh). Pass/fail and the exit status
+#       are unchanged; stdout is rebuilt from -test.v and matches the
+#       non-verbose output except in the cases documented there.
 #       Running the binary skips the vet checks go test runs before a test
 #       (go test's built-in vet pass). CI vets every shard fully (make
 #       vet-hub-shard; make hubshard-parity checks those vets cover every
@@ -152,7 +154,8 @@ compile() {
 # exit status is the binary's: non-zero on a failed test, a panic or
 # -test.timeout. Prints an ok/FAIL line like go test's. With
 # skip_summary set, the binary runs under run_skip_summary (lib.sh), which
-# adds a summary of the skipped tests before that line.
+# adds a summary of the skipped tests before that line; pass/fail and the
+# exit status are unchanged.
 skip_summary=
 run_binary() {
 	local bin=$1 label=$2 start rc

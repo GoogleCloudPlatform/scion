@@ -18,13 +18,18 @@
 # prints canned go test -test.v output. Each case checks that stdout is
 # the output the binary prints without -test.v, followed by the skip
 # summary, that stderr passes through untouched, and that the exit status
-# is the binary's.
+# is the binary's. The scenarios under testdata/skip-summary hold the
+# output of a real test binary, with and without -test.v (see its
+# README.md); for each, run_binary from shard.sh must print the same
+# stdout, the same final ok/FAIL line and exit status with the summary as
+# without -test.v.
 
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 # shellcheck source=hack/hubshard/lib.sh
 . ./hack/hubshard/lib.sh
+unset HUB_SHARD_DEADLINE
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -213,6 +218,105 @@ check "parallel" 1
 : >"$tmp/stderr.txt"
 echo '== skipped tests: none' >"$tmp/want.txt"
 check "killed, no output" 124
+
+# 6. A log-shaped line printed between top-level tests (after one test's
+# result, before the next test starts) is not the previous test's t.Log
+# line, so it is kept.
+: >"$tmp/stderr.txt"
+cat >"$tmp/verbose.txt" <<'EOF'
+=== RUN   TestA
+    a_test.go:9: passing log
+--- PASS: TestA (0.00s)
+    main_test.go:5: between tests
+=== RUN   TestB
+--- PASS: TestB (0.00s)
+PASS
+EOF
+cat >"$tmp/want.txt" <<'EOF'
+    main_test.go:5: between tests
+PASS
+== skipped tests: none
+EOF
+check "log-shaped line between tests" 0
+
+# 7. A failing awk (here a syntax error) neither fails a passing run nor
+# loses output: cat passes the unfiltered stdout on.
+: >"$tmp/stderr.txt"
+cp "$tmp/want.txt" "$tmp/verbose.txt"
+cat >>"$tmp/verbose.txt" <<'EOF'
+=== RUN   TestC
+    c_test.go:1: c log
+--- PASS: TestC (0.00s)
+EOF
+rc=0
+(skip_summary_awk='BEGIN {' && run_skip_summary "$fake" >"$tmp/out" 2>/dev/null) || rc=$?
+[ "$rc" -eq 0 ] || fail "awk failure: exit status $rc, want 0"
+if ! diff -u "$tmp/verbose.txt" "$tmp/out" >"$tmp/diff"; then
+	fail "awk failure: stdout differs from the unfiltered output (- want, + got)"
+	cat "$tmp/diff" >&2
+fi
+
+# 8. Scenarios from a real test binary. scenario.test prints the
+# scenario's verbose.txt with -test.v, else its plain.txt, and exits with
+# its rc. run_binary is taken from shard.sh as is.
+scenario="$tmp/scenario.test"
+cat >"$scenario" <<'EOF'
+#!/usr/bin/env bash
+last=
+for a in "$@"; do last=$a; done
+if [ "$last" = -test.v ]; then
+	cat "$SCENARIO_DIR/verbose.txt"
+else
+	cat "$SCENARIO_DIR/plain.txt"
+fi
+exit "$(cat "$SCENARIO_DIR/rc")"
+EOF
+chmod +x "$scenario"
+# shellcheck disable=SC2034 # used by run_binary, evaluated below
+goroot_bin=/nonexistent run_gogc=
+eval "$(sed -n '/^skip_summary=$/,/^}$/p' hack/hubshard/shard.sh)"
+if ! declare -F run_binary >/dev/null; then
+	fail "run_binary not found in hack/hubshard/shard.sh"
+fi
+# The long-line scenario stores its 200000-byte runs of x as @X200000@.
+expand_long='BEGIN { x = "x"; while (length(x) < 200000) x = x x; x = substr(x, 1, 200000) }
+{ gsub(/@X200000@/, x); print }'
+# no_time drops the run time from run_binary's ok/FAIL line.
+no_time() { sed 's/	[0-9][0-9]*s/	Ns/'; }
+n=0
+for src in hack/hubshard/testdata/skip-summary/*/; do
+	name=$(basename "$src")
+	dir="$tmp/scenario/$name"
+	mkdir -p "$dir"
+	cp "$src/rc" "$src/summary.txt" "$dir/"
+	for f in verbose.txt plain.txt; do
+		LC_ALL=C awk "$expand_long" "$src/$f" >"$dir/$f"
+	done
+	want_rc=$(cat "$dir/rc")
+	rc_v=0
+	SCENARIO_DIR=$dir skip_summary=1 run_binary "$scenario" "shard 9" -test.count=1 >"$tmp/v.out" 2>/dev/null || rc_v=$?
+	rc_p=0
+	SCENARIO_DIR=$dir run_binary "$scenario" "shard 9" -test.count=1 >"$tmp/p.out" 2>/dev/null || rc_p=$?
+	[ "$rc_p" -eq "$want_rc" ] || fail "scenario $name: exit status without -test.v $rc_p, want $want_rc"
+	[ "$rc_v" -eq "$rc_p" ] || fail "scenario $name: exit status $rc_v, want $rc_p as without -test.v"
+	got_last=$(tail -n 1 "$tmp/v.out" | no_time)
+	want_last=$(tail -n 1 "$tmp/p.out" | no_time)
+	[ "$got_last" = "$want_last" ] || fail "scenario $name: last line '$got_last', want '$want_last'"
+	sed '$d' "$tmp/v.out" | sed '/^== skipped tests:/,$d' >"$tmp/v.body"
+	sed '$d' "$tmp/p.out" >"$tmp/p.body"
+	cmp -s "$dir/plain.txt" "$tmp/p.body" || fail "scenario $name: output without -test.v is not plain.txt"
+	if ! diff -u "$tmp/p.body" "$tmp/v.body" >"$tmp/diff"; then
+		fail "scenario $name: stdout differs from the output without -test.v (- want, + got)"
+		cut -c 1-200 "$tmp/diff" >&2
+	fi
+	sed '$d' "$tmp/v.out" | sed -n '/^== skipped tests:/,$p' >"$tmp/v.summary"
+	if ! diff -u "$dir/summary.txt" "$tmp/v.summary" >"$tmp/diff"; then
+		fail "scenario $name: summary differs (- want, + got)"
+		cat "$tmp/diff" >&2
+	fi
+	n=$((n + 1))
+done
+[ "$n" -ge 14 ] || fail "found $n scenarios under hack/hubshard/testdata/skip-summary, want at least 14"
 
 if [ "$fails" -ne 0 ]; then
 	echo "hubshard skip summary selftest: $fails failure(s)" >&2
