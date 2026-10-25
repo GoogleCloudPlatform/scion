@@ -99,6 +99,16 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "scion-hub.labels" . | nindent 4 }}
+  {{- /*
+  Set only when the relay wiring is on and the image could not be checked
+  against the minimum hub release for relay TLS (scion-hub.relayTlsImageCheck),
+  so the unverified state is visible on the object, not only in NOTES.txt.
+  Deployment metadata, not the pod template, so it never rolls the pods.
+  */}}
+  {{- if and $relayTls (eq (toString $relayTls.imageCheck) "unverified") }}
+  annotations:
+    scion.io/relay-tls-image-check: unverified
+  {{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
   strategy:

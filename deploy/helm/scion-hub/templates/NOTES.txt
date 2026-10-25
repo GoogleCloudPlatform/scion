@@ -21,6 +21,17 @@ Reach the hub:
   by exact string in both the route table and the authentication exemption, so
   a prefixed variant is at once unrouted and not exempt from authentication.
 
+{{- $relayTls := include "scion-hub.relayTls" . | fromYaml }}
+{{- if and $relayTls (eq (toString $relayTls.imageCheck) "unverified") }}
+!! RELAY TLS: THE HUB IMAGE VERSION COULD NOT BE CHECKED.
+
+  The relay hop between hub nodes is configured for TLS, but the image is set by
+  digest or by a tag the chart cannot read as a version, so the chart could not
+  confirm that the hub honours the internal_tls_* settings. A hub release older
+  than the one that adds them would serve the relay hop in PLAINTEXT. Check the
+  image yourself, or set conduit.internalTls.enabled: false.
+
+{{ end -}}
 Agent pods will be created in namespace: {{ include "scion-hub.agentNamespace" . }}
 {{- if .Values.runtime.listAllNamespaces }}
   runtime.listAllNamespaces is true, so the hub was granted a ClusterRole rather

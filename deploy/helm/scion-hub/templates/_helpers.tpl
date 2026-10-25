@@ -4498,7 +4498,9 @@ restart.
 {{- end }}
 {{- end }}
 {{- end }}
+{{- $imageCheck := include "scion-hub.relayTlsImageCheck" . }}
 {{- $out := dict
+    "imageCheck" $imageCheck
     "port" $port
     "secret" $secret
     "caSecret" (default $secret $caSecret)
@@ -4585,5 +4587,52 @@ The chart is deliberately stricter than the hub in these cases:
 {{- if and (or $cert $key) (not (and $cert $key)) }}
 {{- fail "server.hub.conduit.internal_tls_cert_file and internal_tls_key_file must be set together; the hub refuses one without the other at startup." }}
 {{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+The first hub release whose relay listener honours the internal_tls_*
+settings. An older hub ignores them and serves the relay hop in plaintext, so
+the chart refuses its relay wiring for an image older than this.
+
+PLACEHOLDER VALUES, NOT FOR RELEASE: replace both with the real release
+version and the first nightly date that carries the change before this chart
+is published. The placeholders are deliberately far in the future, so until
+they are replaced every parseable tag counts as too old and the relay wiring
+fails closed.
+*/}}
+{{- define "scion-hub.relayTlsMinHub" -}}
+version: "99.0.0"
+nightly: "99990101"
+{{- end }}
+
+{{/*
+Checks the hub image against scion-hub.relayTlsMinHub when the relay wiring is
+on, and returns "ok" or "unverified". It fails the render for a tag that is
+older. The tag is image.tag, else .Chart.AppVersion.
+- A semver tag (v1.2.3, 1.2.3-preview.4) is compared by semver precedence.
+- A nightly tag (nightly-YYYYMMDD) is compared by date.
+- Anything else, or an image.digest (which a tag cannot describe), cannot be
+  checked: it is allowed, returns "unverified", and the chart warns in NOTES.txt
+  and annotates the Deployment.
+*/}}
+{{- define "scion-hub.relayTlsImageCheck" -}}
+{{- $min := include "scion-hub.relayTlsMinHub" . | fromYaml }}
+{{- $tag := trim (toString (.Values.image.tag | default .Chart.AppVersion)) }}
+{{- $semverRe := "^v?(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$" }}
+{{- if .Values.image.digest }}
+{{- print "unverified" }}
+{{- else if regexMatch $semverRe $tag }}
+{{- if lt ((semver $tag).Compare (semver $min.version)) 0 }}
+{{- fail (printf "the hub image tag %s is older than %s, the first hub release that serves the relay hop with the internal_tls_* settings. An older hub ignores them and would serve the hop in plaintext. Use a newer image, or set conduit.internalTls.enabled: false." (include "scion-hub.diagValue" $tag) $min.version) }}
+{{- end }}
+{{- print "ok" }}
+{{- else if regexMatch "^nightly-[0-9]{8}$" $tag }}
+{{- if lt (trimPrefix "nightly-" $tag) (toString $min.nightly) }}
+{{- fail (printf "the hub image tag %s is older than nightly-%s, the first nightly that serves the relay hop with the internal_tls_* settings. An older hub ignores them and would serve the hop in plaintext. Use a newer image, or set conduit.internalTls.enabled: false." (include "scion-hub.diagValue" $tag) $min.nightly) }}
+{{- end }}
+{{- print "ok" }}
+{{- else }}
+{{- print "unverified" }}
 {{- end }}
 {{- end }}

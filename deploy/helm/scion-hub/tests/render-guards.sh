@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=236   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 16 (workspaceStorage.nfs: thirteen refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check) + 3 (relay hop: cert-without-key refusals on non-loopback and loopback listeners, no relay-level trusted_proxies) + 3 (internal_listen loopback needs host:port and a valid 127.x: no-port IP, no-port localhost, out-of-range octet) + 5 (internal_listen: leading and trailing whitespace, port 65536, port 0, no port with TLS files) + 4 (TLS settings as written: server name with a slash, server name with trailing whitespace, blank cert path, padded key path).
+EXPECTED_TOTAL=245   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 16 (workspaceStorage.nfs: thirteen refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check) + 3 (relay hop: cert-without-key refusals on non-loopback and loopback listeners, no relay-level trusted_proxies) + 3 (internal_listen loopback needs host:port and a valid 127.x: no-port IP, no-port localhost, out-of-range octet) + 5 (internal_listen: leading and trailing whitespace, port 65536, port 0, no port with TLS files) + 4 (TLS settings as written: server name with a slash, server name with trailing whitespace, blank cert path, padded key path) + 9 (minimum hub image for the relay wiring: older and minimum semver, newer semver, older and minimum nightly, no gate with the relay off, the unverified annotation, no annotation on a checked tag, the NOTES warning present and absent).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -986,7 +986,9 @@ echo "== conduit.internalTls =="
 # The relay hop between hub nodes. Opt-in; when on it needs its Secret and a
 # free port, and a non-loopback relay listener without TLS is refused on every
 # path, config.extra included.
-RT_ON=(--set conduit.internalTls.enabled=true --set conduit.internalTls.existingSecret=rg-relay-cert)
+# The hub image is set by digest here, so these rows do not depend on the
+# minimum hub release for relay TLS; the version gate has its own rows below.
+RT_ON=(--set conduit.internalTls.enabled=true --set conduit.internalTls.existingSecret=rg-relay-cert --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000)
 reject "internalTls enabled without existingSecret" "requires conduit.internalTls.existingSecret" \
   --set conduit.internalTls.enabled=true
 reject "internalTls existingSecret while disabled" "set while conduit.internalTls.enabled is false" \
@@ -1080,6 +1082,62 @@ else
   echo "ok    the relay wiring renders no relay-level trusted_proxies and no server.relay block"
 fi
 unset _rt_settings _rt_conduit RT_ON
+
+echo "== conduit.internalTls minimum hub image =="
+# The relay wiring is refused for a hub image older than the first release that
+# honours the internal_tls_* settings (scion-hub.relayTlsMinHub). The floor is
+# read from the chart, so these rows follow it when it changes.
+_rt_min="$(sed -n '/define "scion-hub.relayTlsMinHub"/,/end/p' "$CHART/templates/_helpers.tpl" | sed -n 's/^version: "\(.*\)"$/\1/p')"
+_rt_min_n="$(sed -n '/define "scion-hub.relayTlsMinHub"/,/end/p' "$CHART/templates/_helpers.tpl" | sed -n 's/^nightly: "\(.*\)"$/\1/p')"
+_rt_major="${_rt_min%%.*}"
+RT_TAG=(--set conduit.internalTls.enabled=true --set conduit.internalTls.existingSecret=rg-relay-cert)
+if [ -z "$_rt_min" ] || [ -z "$_rt_min_n" ] || ! [[ "$_rt_major" =~ ^[0-9]+$ ]]; then
+  executed=$((executed + 9)); failed=$((failed + 9))
+  echo "FAIL  relay image gate: could not read scion-hub.relayTlsMinHub (version '$_rt_min', nightly '$_rt_min_n'); none of its 9 rows ran"
+else
+  reject "relay wiring with an older semver tag" "is older than ${_rt_min}" "${RT_TAG[@]}" --set-string image.tag=0.0.1
+  accept "relay wiring with the minimum semver tag" "${RT_TAG[@]}" --set-string "image.tag=${_rt_min}"
+  accept "relay wiring with a newer semver tag" "${RT_TAG[@]}" --set-string "image.tag=v$((_rt_major + 1)).0.0"
+  reject "relay wiring with an older nightly tag" "is older than nightly-${_rt_min_n}" "${RT_TAG[@]}" --set-string image.tag=nightly-20000101
+  accept "relay wiring with the minimum nightly tag" "${RT_TAG[@]}" --set-string "image.tag=nightly-${_rt_min_n}"
+  accept "relay off with an older tag (no gate)" --set-string image.tag=0.0.1
+  executed=$((executed + 1))
+  _rt_latest="$(render "${RT_TAG[@]}" --set-string image.tag=latest --show-only templates/deployment.yaml)"
+  if printf '%s\n' "$_rt_latest" | grep -qxF '    scion.io/relay-tls-image-check: unverified'; then
+    echo "ok    an unparseable tag (latest) is allowed and the Deployment is annotated unverified"
+  else
+    echo "FAIL  relay image gate: tag latest did not render with the unverified annotation"; failed=$((failed + 1))
+  fi
+  executed=$((executed + 1))
+  _rt_ok="$(render "${RT_TAG[@]}" --set-string "image.tag=${_rt_min}" --show-only templates/deployment.yaml)"
+  if printf '%s\n' "$_rt_ok" | grep -q '^kind: Deployment$' && ! printf '%s\n' "$_rt_ok" | grep -q 'relay-tls-image-check'; then
+    echo "ok    a checked tag renders no unverified annotation"
+  else
+    echo "FAIL  relay image gate: a checked tag rendered the unverified annotation, or no Deployment"; failed=$((failed + 1))
+  fi
+  # NOTES.txt is rendered through a copy whose NOTES is renamed to a manifest and
+  # shown with --debug, as chart-integrity.sh E11 does (helm template does not
+  # print NOTES, and exits non-zero on the prose). Both renders must carry the
+  # unconditional SCHEMA_VERSION anchor, so an empty probe cannot pass.
+  executed=$((executed + 1))
+  _rt_tmp="$(mktemp -d)"
+  _rt_warn='RELAY TLS: THE HUB IMAGE VERSION COULD NOT BE CHECKED'
+  _rt_notes() { "$HELM" template t "$_rt_tmp/c" --debug "${BASE[@]}" "${RT_TAG[@]}" "$@" --show-only templates/zz-notes-probe.txt 2>/dev/null \
+    | sed -n '/^# Source: .*zz-notes-probe\.txt$/,$p'; }
+  if cp -r "$CHART" "$_rt_tmp/c" && mv "$_rt_tmp/c/templates/NOTES.txt" "$_rt_tmp/c/templates/zz-notes-probe.txt"; then
+    _rt_n_latest="$(_rt_notes --set-string image.tag=latest)"
+    _rt_n_ok="$(_rt_notes --set-string "image.tag=${_rt_min}")"
+  fi
+  if printf '%s\n' "$_rt_n_latest" | grep -qF 'SCHEMA_VERSION IS LOAD-BEARING' && printf '%s\n' "$_rt_n_ok" | grep -qF 'SCHEMA_VERSION IS LOAD-BEARING' \
+    && printf '%s\n' "$_rt_n_latest" | grep -qF "$_rt_warn" && ! printf '%s\n' "$_rt_n_ok" | grep -qF "$_rt_warn"; then
+    echo "ok    NOTES.txt warns when the hub image version could not be checked, and not when it was"
+  else
+    echo "FAIL  relay image gate: the NOTES warning is missing for tag latest, present for a checked tag, or the NOTES probe rendered nothing"; failed=$((failed + 1))
+  fi
+  case "$_rt_tmp" in /tmp/*) rm -rf "$_rt_tmp" ;; esac
+  unset -f _rt_notes; unset _rt_n_latest _rt_n_ok _rt_warn
+fi
+unset _rt_min _rt_min_n _rt_major _rt_latest _rt_ok _rt_tmp RT_TAG
 
 echo "== secrets.backend =="
 # local renders nothing; gcpsm renders server.secrets and needs a project. The
