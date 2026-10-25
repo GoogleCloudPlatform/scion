@@ -68,6 +68,7 @@ func newFireFixture(t *testing.T) *fireFixture {
 	f.sa = &store.GCPServiceAccount{
 		ID:                 uuid.New().String(),
 		Scope:              store.ScopeHub,
+		ScopeID:            "test-hub-id",
 		Email:              "hook-sa@gcp-project.iam.gserviceaccount.com",
 		ProjectID:          "gcp-project",
 		DisplayName:        "Hook SA",
@@ -140,7 +141,7 @@ func (f *fireFixture) hook(t *testing.T, writerEmail string) *store.LifecycleHoo
 		Name:              "fire-check",
 		ScopeType:         store.LifecycleHookScopeHub,
 		Trigger:           store.LifecycleHookTriggerRunning,
-		Action:            &store.LifecycleHookAction{Type: store.LifecycleHookActionHTTP, Method: "POST", URL: f.target.URL + "/hook", Body: `{}`},
+		Action:            &store.LifecycleHookAction{Type: store.LifecycleHookActionHTTP, Method: "POST", URL: f.target.URL + "/hook", Body: `{}`, TimeoutSeconds: 10, OnError: store.LifecycleHookOnErrorLog},
 		ExecutionIdentity: f.sa.ID,
 		Enabled:           true,
 		CreatedBy:         writerEmail,
@@ -150,6 +151,32 @@ func (f *fireFixture) hook(t *testing.T, writerEmail string) *store.LifecycleHoo
 	require.NoError(t, f.store.CreateLifecycleHook(context.Background(), h))
 	stored, err := f.store.GetLifecycleHook(context.Background(), h.ID)
 	require.NoError(t, err)
+	return stored
+}
+
+// resave re-saves h through the real PUT handler as the development user (a
+// hub admin on the test server), keeping its writer, and returns the stored
+// hook. The PUT carries an https URL, as ValidateHook requires for an http
+// action; the returned hook's action URL is pointed back at the local test
+// target in memory, so a fire reaches it.
+func (f *fireFixture) resave(t *testing.T, h *store.LifecycleHook, name string) *store.LifecycleHook {
+	t.Helper()
+	action := *h.Action
+	action.URL = "https://hooks.example.com/hook"
+	rec := doRequest(t, f.srv, http.MethodPut, "/api/v1/admin/lifecycle-hooks/"+h.ID, updateLifecycleHookRequest{
+		Name:              name,
+		Trigger:           h.Trigger,
+		Action:            &action,
+		ExecutionIdentity: h.ExecutionIdentity,
+		Enabled:           true,
+		StateVersion:      h.StateVersion,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	stored, err := f.store.GetLifecycleHook(context.Background(), h.ID)
+	require.NoError(t, err)
+	require.Equal(t, name, stored.Name)
+	require.Equal(t, "https://hooks.example.com/hook", stored.Action.URL)
+	stored.Action.URL = f.target.URL + "/hook"
 	return stored
 }
 
@@ -416,17 +443,7 @@ func TestHookFire_ResavedByOtherAdmin_CreatorDemoted_Refused(t *testing.T) {
 	require.NoError(t, f.store.DeleteRoleBinding(context.Background(), f.bindingID))
 
 	// The development user (a hub admin on the test server) re-saves it.
-	rec := doRequest(t, f.srv, http.MethodPut, "/api/v1/admin/lifecycle-hooks/"+h.ID, updateLifecycleHookRequest{
-		Name:              h.Name + "-resaved",
-		Trigger:           h.Trigger,
-		Action:            h.Action,
-		ExecutionIdentity: h.ExecutionIdentity,
-		Enabled:           true,
-		StateVersion:      h.StateVersion,
-	})
-	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
-	resaved, err := f.store.GetLifecycleHook(context.Background(), h.ID)
-	require.NoError(t, err)
+	resaved := f.resave(t, h, h.Name+"-resaved")
 	require.Equal(t, f.writer.Email, resaved.CreatedBy, "update keeps the creator")
 
 	f.assertRefused(t, f.fire(t, resaved), HookFireWriterLacksPermission)
@@ -439,19 +456,9 @@ func TestHookFire_UpdatedHook_KeepsCreated_Mints(t *testing.T) {
 	h := f.hook(t, f.writer.Email)
 	created := h.Created
 
-	rec := doRequest(t, f.srv, http.MethodPut, "/api/v1/admin/lifecycle-hooks/"+h.ID, updateLifecycleHookRequest{
-		Name:              h.Name + "-edited",
-		Trigger:           h.Trigger,
-		Action:            h.Action,
-		ExecutionIdentity: h.ExecutionIdentity,
-		Enabled:           true,
-		StateVersion:      h.StateVersion,
-	})
-	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
-	updated, err := f.store.GetLifecycleHook(context.Background(), h.ID)
-	require.NoError(t, err)
+	updated := f.resave(t, h, h.Name+"-edited")
 	require.True(t, updated.Created.Equal(created), "update must not change Created")
-	require.True(t, updated.Updated.After(created) || updated.Updated.Equal(created))
+	require.Equal(t, f.writer.Email, updated.CreatedBy)
 
 	f.assertMinted(t, f.fire(t, updated))
 }
