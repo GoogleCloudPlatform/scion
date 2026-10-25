@@ -234,6 +234,7 @@ func TestLifecycleAttribution_T3Force(t *testing.T) {
 	att := attrCursor(t, f, a.ID)
 	assert.Equal(t, "X1", att.UntrustedOpenRun, "the segment opened while held is marked")
 	f.stopRecord(a.ID, "X1", "stopped")
+	assert.Equal(t, "", attrCursor(t, f, a.ID).UntrustedOpenRun, "the closure clears the segment and its marker together")
 	f.mint(a.ID, "R2")
 	f.startWrite(a.ID)
 	evs := f.events(a.ID)

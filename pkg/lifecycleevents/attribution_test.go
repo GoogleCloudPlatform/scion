@@ -378,8 +378,11 @@ func plannedString(f Facts, plan Plan) string {
 func TestAttribution_T25HintClosureUntrusted(t *testing.T) {
 	cur := &store.LifecycleCursor{AgentID: agentA, TransitionRevision: 3, UpdatedAt: t0, OpenRun: "X1", OpenRunGeneration: "1", OpenRunMetadataRevision: 2}
 	cur.AttributionStamp = &cur.UpdatedAt
-	cur.Attribution = store.LifecycleAttribution{State: store.AttributionHeld, LastRun: "X1", LastGeneration: "1",
-		QuarantinedRuns: "X1", QuarantineMode: store.QuarantineComplete,
+	// A clear state with an exact-match marker (a segment opened while
+	// held, then a clear state): only the closure rule can omit here, so a
+	// closure misrouted to the identity rule would name X1 (M20).
+	cur.Attribution = store.LifecycleAttribution{State: store.AttributionClear, LastRun: "X1", LastGeneration: "1",
+		QuarantineMode: store.QuarantineComplete,
 		UntrustedOpenRun: "X1", UntrustedOpenRunGeneration: "1", UntrustedOpenRunRev: 2}
 	f := Facts{Op: store.AgentWriteLaunch, HasBefore: true, BeforeLive: true, HasAfter: true,
 		BeforePhase: "running", AfterPhase: "error", BeforeRunID: "X1", AfterRunID: "X1", BeforeGeneration: 1, AfterGeneration: 1,

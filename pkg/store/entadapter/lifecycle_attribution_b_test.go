@@ -454,6 +454,27 @@ func TestLifecycleAttribution_T11dOlderWriterReopens(t *testing.T) {
 	assert.Equal(t, tc.TransitionStopped, evs[len(evs)-1].Transition)
 }
 
+// TestLifecycleAttribution_T11dSameRunNewSegment: the older binary closes
+// the untrusted X1 segment and reopens X1 by name at another revision
+// (it emitted started[X1/1]): the marker is keyed to the exact
+// (run, generation, revision), so the new segment is trusted for its own
+// closure (R4), whereas a run-only comparison would omit it (M25).
+func TestLifecycleAttribution_T11dSameRunNewSegment(t *testing.T) {
+	f, a := newS2Fixture(t)
+	f.mint(a.ID, "R1")
+	f.startWrite(a.ID)
+	f.stopRecord(a.ID, "R1", "stopped")
+	softFinish(t, f, a.ID, "X1")
+	f.restore(a.ID)
+	f.heartbeat(a.ID, "running", "X1")
+	editCursor(t, f, a.ID, true, func(u *ent.AgentLifecycleCursorUpdateOne) {
+		u.SetOpenRunMetadataRevision(9).SetUpdatedAt(time.Now().UTC().Add(time.Second))
+	})
+	f.stopRecord(a.ID, "X1", "stopped")
+	evs := f.events(a.ID)
+	assert.Equal(t, "X1/1", evs[len(evs)-1].LaunchID+"/"+evs[len(evs)-1].IncarnationID, lcFull(evs))
+}
+
 // TestLifecycleAttribution_T11mMalformedSegment (P3, R4-6): a malformed
 // segment identity is discarded at normalisation: no closure for it, one
 // resync gap without launch_id, the cursor is bumped and later writes emit
