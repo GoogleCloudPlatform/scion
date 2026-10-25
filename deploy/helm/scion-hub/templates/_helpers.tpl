@@ -4526,8 +4526,27 @@ hub releases, not before them.
 {{- define "scion-hub.assertRelayListenerTls" -}}
 {{- $conduit := dig "server" "hub" "conduit" (dict) .doc }}
 {{- if kindIs "map" $conduit }}
-{{- $cert := trim (toString (dig "internal_tls_cert_file" "" $conduit)) }}
-{{- $key := trim (toString (dig "internal_tls_key_file" "" $conduit)) }}
+{{- /*
+The TLS files and server name are checked as written, as the hub reads them
+(validateInternalTLS): the cert and key are set together or not at all, and a
+server name may not contain "/", ":", a space or a tab, or be padded with
+whitespace. A blank or whitespace-padded file path is refused too; the hub
+would count it as set and then fail to open it.
+*/}}
+{{- $certRaw := toString (dig "internal_tls_cert_file" "" $conduit) }}
+{{- $keyRaw := toString (dig "internal_tls_key_file" "" $conduit) }}
+{{- range $pair := list (list "internal_tls_cert_file" $certRaw) (list "internal_tls_key_file" $keyRaw) }}
+{{- $v := index $pair 1 }}
+{{- if and $v (ne (trim $v) $v) }}
+{{- fail (printf "server.hub.conduit.%s is %s, which is blank or padded with whitespace. The hub would try to open that exact path; write the file path without surrounding whitespace." (index $pair 0) (include "scion-hub.diagValue" $v)) }}
+{{- end }}
+{{- end }}
+{{- $nameRaw := toString (dig "internal_tls_server_name" "" $conduit) }}
+{{- if and $nameRaw (or (regexMatch "[/: \t]" $nameRaw) (ne (trim $nameRaw) $nameRaw)) }}
+{{- fail (printf "server.hub.conduit.internal_tls_server_name is %s; it must be a host name with no \"/\", \":\", spaces, tabs or surrounding whitespace. The hub refuses anything else at startup." (include "scion-hub.diagValue" $nameRaw)) }}
+{{- end }}
+{{- $cert := $certRaw }}
+{{- $key := $keyRaw }}
 {{- $listenRaw := toString (dig "internal_listen" "" $conduit) }}
 {{- $listen := trim $listenRaw }}
 {{- if $listen }}

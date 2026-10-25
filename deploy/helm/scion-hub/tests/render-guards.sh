@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=232   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 16 (workspaceStorage.nfs: thirteen refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check) + 3 (relay hop: cert-without-key refusals on non-loopback and loopback listeners, no relay-level trusted_proxies) + 3 (internal_listen loopback needs host:port and a valid 127.x: no-port IP, no-port localhost, out-of-range octet) + 5 (internal_listen: leading and trailing whitespace, port 65536, port 0, no port with TLS files).
+EXPECTED_TOTAL=236   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 16 (workspaceStorage.nfs: thirteen refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check) + 3 (relay hop: cert-without-key refusals on non-loopback and loopback listeners, no relay-level trusted_proxies) + 3 (internal_listen loopback needs host:port and a valid 127.x: no-port IP, no-port localhost, out-of-range octet) + 5 (internal_listen: leading and trailing whitespace, port 65536, port 0, no port with TLS files) + 4 (TLS settings as written: server name with a slash, server name with trailing whitespace, blank cert path, padded key path).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -1022,6 +1022,15 @@ reject "internal_listen port 0" "it must be host:port with a port of 1-65535" \
   --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:0"}}}}'
 reject "internal_listen without a port, with TLS files" "it must be host:port with a port of 1-65535" \
   --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0","internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":"/x/tls.key"}}}}'
+# The TLS files and the server name are checked as the hub reads them.
+reject "internal_tls_server_name with a slash through config.extra" "it must be a host name" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_tls_server_name":"relay/internal"}}}}'
+reject "internal_tls_server_name with trailing whitespace through config.extra" "it must be a host name" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_tls_server_name":"relay.internal "}}}}'
+reject "a blank internal_tls_cert_file through config.extra" "which is blank or padded with whitespace" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:9443","internal_tls_cert_file":"  "}}}}'
+reject "a padded internal_tls_key_file through config.extra" "which is blank or padded with whitespace" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":" /x/tls.key"}}}}'
 accept "loopback internal_listen through config.extra" \
   --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:9443"}}}}'
 accept "internalTls enabled" "${RT_ON[@]}"
