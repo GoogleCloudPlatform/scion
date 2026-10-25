@@ -382,7 +382,7 @@ func TestAttribution_T25HintClosureUntrusted(t *testing.T) {
 	// held, then a clear state): only the closure rule can omit here, so a
 	// closure misrouted to the identity rule would name X1 (M20).
 	cur.Attribution = store.LifecycleAttribution{State: store.AttributionClear, LastRun: "X1", LastGeneration: "1",
-		QuarantineMode: store.QuarantineComplete,
+		QuarantineMode:   store.QuarantineComplete,
 		UntrustedOpenRun: "X1", UntrustedOpenRunGeneration: "1", UntrustedOpenRunRev: 2}
 	f := Facts{Op: store.AgentWriteLaunch, HasBefore: true, BeforeLive: true, HasAfter: true,
 		BeforePhase: "running", AfterPhase: "error", BeforeRunID: "X1", AfterRunID: "X1", BeforeGeneration: 1, AfterGeneration: 1,
