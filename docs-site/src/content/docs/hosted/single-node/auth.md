@@ -474,7 +474,7 @@ While the Hub automatically translates passthrough to assign mode at agent creat
 
 #### Host networking on Docker and Podman
 
-On the Docker and Podman runtimes, an agent container runs with `--network=host` when its Hub endpoint is on loopback (`localhost`, `127.0.0.1`, `::1`, or `host.docker.internal`) or when `SCION_FORCE_HOST_NETWORK` is set on the Runtime Broker. Because the container shares the host network namespace, `sciontool` cannot install its `iptables` rule for `169.254.169.254` without altering the host's own networking:
+On the Docker runtime, an agent container runs with `--network=host` when its Hub endpoint is on loopback (`localhost`, `127.0.0.1`, `::1`, or `host.docker.internal`). On Docker and Podman, it also runs with `--network=host` whenever `SCION_FORCE_HOST_NETWORK` is set on the Runtime Broker. Because the container shares the host network namespace, `sciontool` cannot install its `iptables` rule for `169.254.169.254` without altering the host's own networking:
 
 - **`assign`** is always refused under host networking.
 - **`block`** is governed by the Runtime Broker's [`SCION_HOST_NETWORK_BLOCK_POLICY`](/scion/reference/server-config/#runtime-broker-environment-variables) environment variable:
