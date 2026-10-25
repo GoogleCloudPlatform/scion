@@ -4511,12 +4511,17 @@ restart.
 {{- end }}
 
 {{/*
-The relay hop's plaintext refusal, on the merged settings document. A
+The relay hop's TLS check, on the merged settings document. A
 server.hub.conduit.internal_listen that is not a literal loopback address must
-come with server.hub.conduit.internal_tls_cert_file, whichever path wrote it
-(conduit.internalTls or config.extra). Releases carrying the matching hub change
-refuse such a listener at startup; earlier ones would serve the hop in
-plaintext, so the chart refuses it at render on every release.
+come with BOTH server.hub.conduit.internal_tls_cert_file and
+internal_tls_key_file, whichever path wrote it (conduit.internalTls or
+config.extra). Either file alone is refused as well, as the hub refuses it.
+
+What this check can and cannot do: it guarantees the rendered settings ask for
+TLS. Serving TLS is the hub's job, and only hub releases that understand the
+internal_tls_* settings do it. An earlier hub ignores those keys and serves the
+listener in plaintext, so this chart's relay wiring is meant to ship with those
+hub releases, not before them.
 */}}
 {{- define "scion-hub.assertRelayListenerTls" -}}
 {{- $conduit := dig "server" "hub" "conduit" (dict) .doc }}
@@ -4525,9 +4530,16 @@ plaintext, so the chart refuses it at render on every release.
 {{- if $listen }}
 {{- $host := regexReplaceAll ":[0-9]*$" $listen "" }}
 {{- $loopback := or (eq $host "localhost") (eq $host "[::1]") (regexMatch "^127\\.[0-9]+\\.[0-9]+\\.[0-9]+$" $host) }}
-{{- if and (not $loopback) (not (dig "internal_tls_cert_file" "" $conduit)) }}
-{{- fail (printf "server.hub.conduit.internal_listen is %s, which is not a loopback address, and no internal_tls_cert_file is set. The relay hop between hub nodes must serve TLS: set conduit.internalTls (enabled, existingSecret), or bind internal_listen to loopback." (include "scion-hub.diagValue" $listen)) }}
+{{- $cert := trim (toString (dig "internal_tls_cert_file" "" $conduit)) }}
+{{- $key := trim (toString (dig "internal_tls_key_file" "" $conduit)) }}
+{{- if and (not $loopback) (or (not $cert) (not $key)) }}
+{{- fail (printf "server.hub.conduit.internal_listen is %s, which is not a loopback address, and internal_tls_cert_file and internal_tls_key_file are not both set. The relay hop between hub nodes must serve TLS: set conduit.internalTls (enabled, existingSecret), or bind internal_listen to loopback." (include "scion-hub.diagValue" $listen)) }}
 {{- end }}
+{{- end }}
+{{- $certSet := trim (toString (dig "internal_tls_cert_file" "" $conduit)) }}
+{{- $keySet := trim (toString (dig "internal_tls_key_file" "" $conduit)) }}
+{{- if and (or $certSet $keySet) (not (and $certSet $keySet)) }}
+{{- fail "server.hub.conduit.internal_tls_cert_file and internal_tls_key_file must be set together; the hub refuses one without the other at startup." }}
 {{- end }}
 {{- end }}
 {{- end }}

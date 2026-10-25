@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=221   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 16 (workspaceStorage.nfs: thirteen refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check).
+EXPECTED_TOTAL=224   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 16 (workspaceStorage.nfs: thirteen refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check) + 3 (relay hop: cert-without-key refusals on non-loopback and loopback listeners, no relay-level trusted_proxies).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -1000,6 +1000,10 @@ reject "internalTls with config.extra conduit listener" "also sets server.hub.co
   --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0:9555"}}}}'
 reject "internalTls with config.existingSecret" "inline settings values (conduit.internalTls.enabled" \
   --set agents.imageRegistry= --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned "${RT_ON[@]}"
+reject "cert without key on a non-loopback listener through config.extra" "internal_tls_cert_file and internal_tls_key_file are not both set" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0:9443","internal_tls_cert_file":"/x/tls.crt"}}}}'
+reject "cert without key on a loopback listener through config.extra" "must be set together" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:9443","internal_tls_cert_file":"/x/tls.crt"}}}}'
 accept "loopback internal_listen through config.extra" \
   --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:9443"}}}}'
 accept "internalTls enabled" "${RT_ON[@]}"
@@ -1032,7 +1036,23 @@ else
   echo "FAIL  conduit.internalTls shape:${_rt_fail:- no Deployment rendered}"
   failed=$((failed + 1))
 fi
-unset _rt_on _rt_off _rt_fail _want RT_ON
+unset _rt_on _rt_off _rt_fail _want
+# The relay wiring trusts no forwarded headers: with the relay on, the rendered
+# settings carry no server.relay block and no trusted_proxies under
+# server.hub.conduit. A relay-level trusted_proxies default stays empty.
+executed=$((executed + 1))
+_rt_settings="$(render "${RT_ON[@]}" --show-only templates/secret-settings.yaml)"
+_rt_conduit="$(printf '%s\n' "$_rt_settings" | sed -n '/^        conduit:$/,/^        [a-z_]*:/p')"
+if ! printf '%s\n' "$_rt_conduit" | grep -q 'internal_listen:'; then
+  echo "FAIL  relay trusted_proxies pin: no server.hub.conduit block rendered, so nothing was inspected"
+  failed=$((failed + 1))
+elif printf '%s\n' "$_rt_conduit" | grep -q 'trusted_proxies' || printf '%s\n' "$_rt_settings" | grep -qE '^      relay:$'; then
+  echo "FAIL  relay trusted_proxies pin: the relay wiring rendered a trusted_proxies entry or a server.relay block"
+  failed=$((failed + 1))
+else
+  echo "ok    the relay wiring renders no relay-level trusted_proxies and no server.relay block"
+fi
+unset _rt_settings _rt_conduit RT_ON
 
 echo "== secrets.backend =="
 # local renders nothing; gcpsm renders server.secrets and needs a project. The
