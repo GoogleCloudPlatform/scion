@@ -551,6 +551,12 @@ func TestDrainerMaintenanceCadence(t *testing.T) {
 		c.Now = time.Now
 		c.PollInterval = time.Millisecond
 		c.MaintenanceInterval = time.Hour
+		// The harness stamps rows with the fixed test clock (t0) while this
+		// drainer runs on the real clock: keep the age trim out of the way,
+		// or the first maintenance pass drops the rows as older than
+		// MaxOutboxAge once t0 is that far in the past. This test checks
+		// the maintenance cadence, not trimming.
+		c.MaxAge = time.Since(t0) + 365*24*time.Hour
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
