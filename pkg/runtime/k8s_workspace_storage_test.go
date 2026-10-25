@@ -131,6 +131,12 @@ func TestBuildPod_NFSProvisionStateMount(t *testing.T) {
 			agentWant: []corev1.VolumeMount{
 				{Name: "workspace", MountPath: "/repo-root/.git", SubPath: "projects/proj-123/workspace/.git"},
 				{Name: "workspace", MountPath: "/repo-root/worktrees/agent-1", SubPath: "projects/proj-123/workspace/worktrees/agent-1"},
+				// read-only admin narrowing.
+				{Name: "workspace", MountPath: "/repo-root/.git/hooks", SubPath: "projects/proj-123/workspace/.git/hooks", ReadOnly: true},
+				{Name: "workspace", MountPath: "/repo-root/.git/info", SubPath: "projects/proj-123/workspace/.git/info", ReadOnly: true},
+				{Name: "workspace", MountPath: "/repo-root/.git/objects/info", SubPath: "projects/proj-123/workspace/.git/objects/info", ReadOnly: true},
+				{Name: "workspace", MountPath: "/repo-root/.git/worktrees", SubPath: "projects/proj-123/workspace/.git/worktrees", ReadOnly: true},
+				{Name: "workspace", MountPath: "/repo-root/.git/worktrees/agent-1", SubPath: "projects/proj-123/workspace/.git/worktrees/agent-1"},
 			},
 		},
 	} {
