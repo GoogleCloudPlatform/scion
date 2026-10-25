@@ -230,6 +230,15 @@ change its writer, so a hook another admin re-saved still depends on its
 creator. To restore the hook, an admin who holds the authority today deletes
 it and creates it again. The new hook records that admin as its writer.
 
+**Hubs that use development authentication.** The development user's stored
+email is set when the Hub first starts with development authentication and is
+not updated afterwards. Hooks record the email of the development identity the
+Hub is configured with now (its configured email, or `<username>@localhost`).
+If the two differ, every `http` hook that identity writes fails with
+`writer_not_found`, and re-creating the hook does not help. To fix this, make
+the configured development email match the stored one again, or update the
+stored user's email to the configured one.
+
 ## Scope vs. selector
 
 Two fields determine where a hook applies, and they are not interchangeable:
