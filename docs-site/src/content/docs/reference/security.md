@@ -57,6 +57,8 @@ Runtime Brokers represent high-trust infrastructure. They use HMAC-based request
 - **Signing & Verification**: Every request includes headers for `X-Scion-Broker-ID`, `X-Scion-Timestamp`, `X-Scion-Nonce`, and `X-Scion-Signature`. The Hub strictly verifies that the authenticated caller identity matches any target broker paths to prevent cross-tenant escalation.
 - **Replay Protection**: Nonce-based tracking and timestamp validation (5-minute clock skew tolerance) prevent replay attacks.
 - **NAT Traversal**: Brokers establish a persistent WebSocket control channel. The initial upgrade request is HMAC-authenticated, establishing a trusted session for subsequent commands.
+- **Before Keys Are Loaded**: A Runtime Broker that has no HMAC keys yet (pending registration, or a credential that failed to load) serves only `/healthz` and `/readyz`. Every other request, including agent create and control, is answered with `503` and the error code `broker_auth_unavailable` until registration completes and the broker loads its keys. A broker without keys starts only on a loopback address.
+- **Browser Origins**: The Runtime Broker sends no CORS headers by default, so browsers do not allow cross-origin calls to it. See [`server.broker.cors`](/scion/reference/server-config/#broker-cors-serverbrokercors) to allow specific origins.
 
 ### 1.5 Broker Registration and Association Credentials
 

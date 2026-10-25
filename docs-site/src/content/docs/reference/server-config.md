@@ -288,7 +288,26 @@ Controls the Runtime Broker service.
 | `state_dir` | string | `~/.scion/runtime-broker-state` | Base directory of the broker's runtime state: the [launch journal](#asynchronous-agent-create), dispatch attempts and pending env-gather. The broker uses `<state_dir>/<broker-id>`. Must be an absolute path or start with `~/`; a relative path refuses startup. Read at startup. Flat Runtime Broker instances (`instances`) do not use it and keep their default directories; setting it on a process that hosts them logs a warning. |
 | `broker_token` | string | | Authentication token for the Hub. |
 | `auto_provide` | bool | `false` | Automatically add as provider for new projects. |
+| `cors` | object | | Broker CORS configuration; off by default (see [Broker CORS](#broker-cors-serverbrokercors)). |
 | `instances` | list | | Experimental. Flat Runtime Broker instances this process hosts; see [Flat Runtime Brokers](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental). Empty or absent means the regular Runtime Broker. Several entries are accepted, each with a unique `key`; the Hub may run in the same process or remotely (see the link). Read only from the global `settings.yaml` (not `server.yaml` or project settings). Each entry has `key` (immutable local key: lower-case letters, digits and `-`, starting and ending with a letter or digit, up to 63 characters), `name` (the name registered with the Hub), and `runtime_target` (see [Flat instance runtime target](#flat-instance-runtime-target-serverbrokerinstancesruntime_target)). An entry may also set `agent_defaults`, the workload defaults of the agents it runs (see below). |
+
+#### Broker CORS (`server.broker.cors`)
+
+Nothing in Scion calls the Runtime Broker from a browser: the Hub reaches it with signed server-side requests or over the control channel. CORS on the broker is therefore off by default, and the broker sends no CORS headers.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `enabled` | bool | `false` | Enable CORS on the broker API. A missing `server.broker.cors` block means off. |
+| `allowed_origins` | list | `[]` | Origins allowed to call the broker cross-origin. Enabling CORS without listing origins allows none. `"*"` allows every origin; the broker logs a warning at startup when it is set. |
+| `allowed_methods` | list | `GET, POST, PUT, PATCH, DELETE, OPTIONS` | Methods sent in `Access-Control-Allow-Methods` for an allowed origin. |
+| `allowed_headers` | list | `Authorization, Content-Type, X-Scion-Broker-Token, X-API-Key` | Headers sent in `Access-Control-Allow-Headers` for an allowed origin. |
+| `max_age` | int | `3600` | Preflight cache lifetime in seconds. |
+
+Env: `SCION_SERVER_RUNTIMEBROKER_CORS_ENABLED`, `SCION_SERVER_RUNTIMEBROKER_CORS_ALLOWEDORIGINS` (comma-separated), and the matching names for methods, headers and max age.
+
+:::note[Upgrade note]
+Earlier releases enabled broker CORS by default for every origin. A deployment that relied on that must now set `server.broker.cors.enabled: true` and list its origins in `allowed_origins`.
+:::
 
 #### Flat instance runtime target (`server.broker.instances[].runtime_target`)
 
