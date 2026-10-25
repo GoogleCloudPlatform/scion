@@ -1105,6 +1105,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 			// mirroring the cascade in resolveCloneToken. Users who store
 			// GITHUB_TOKEN at user/profile scope only (no project-scoped token)
 			// would otherwise still hit the NoAuth suppression bug (#1165).
+			// This by-name read of the owner's user-scope row does not go
+			// through the start-time user-scope checks in
+			// startSecretResolveOpts; it is tracked separately.
 			if (ghSecret == nil || ghSecret.Value == "") && agent.OwnerID != "" {
 				ghSecret, err = d.secretBackend.Get(ctx, "GITHUB_TOKEN", secret.ScopeUser, agent.OwnerID)
 				if err != nil {
