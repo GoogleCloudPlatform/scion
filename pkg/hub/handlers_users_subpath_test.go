@@ -62,10 +62,15 @@ func TestUserByID_UnknownSubPathNotFound(t *testing.T) {
 		{http.MethodGet, base + "/unknown", nil},
 		{http.MethodGet, base + "/unknown/deeper", nil},
 		{http.MethodGet, base + "/revoke-sessions/extra", nil},
+		{http.MethodGet, base + "/revoke-sessions/", nil},
 		{http.MethodPatch, base + "/unknown", patch},
 		{http.MethodPatch, base + "/revoke-sessions/extra", patch},
+		{http.MethodPatch, base + "/revoke-sessions/", patch},
+		{http.MethodPatch, base + "/delete-blockers/extra", patch},
 		{http.MethodDelete, base + "/unknown", nil},
 		{http.MethodDelete, base + "/revoke-sessions/extra", nil},
+		{http.MethodDelete, base + "/revoke-sessions/", nil},
+		{http.MethodDelete, base + "/delete-blockers/extra", nil},
 		{http.MethodPost, base + "/unknown", nil},
 	} {
 		msg := tc.method + " " + tc.path
@@ -120,6 +125,7 @@ func TestUserByID_KnownSubRoutesUnchanged(t *testing.T) {
 		{"get user", http.MethodGet, base, nil, http.StatusOK, "", true},
 		{"get user trailing slash", http.MethodGet, base + "/", nil, http.StatusOK, "", true},
 		{"patch user", http.MethodPatch, base, map[string]interface{}{"displayName": "Dave"}, http.StatusOK, "", true},
+		{"patch user trailing slash", http.MethodPatch, base + "/", map[string]interface{}{"displayName": "Dave B"}, http.StatusOK, "", true},
 		{"user other method", http.MethodPut, base, nil, http.StatusMethodNotAllowed, "GET, PATCH, DELETE", false},
 		{"revoke sessions", http.MethodPost, base + "/revoke-sessions", nil, http.StatusOK, "", false},
 		{"revoke sessions other method", http.MethodGet, base + "/revoke-sessions", nil, http.StatusMethodNotAllowed, "POST", false},
@@ -140,9 +146,16 @@ func TestUserByID_KnownSubRoutesUnchanged(t *testing.T) {
 		})
 	}
 
-	// DELETE on the bare ID deletes the user (last: it consumes the fixture).
-	rec := doRequest(t, srv, http.MethodDelete, base, nil)
-	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
-	_, err := s.GetUser(context.Background(), dave.ID)
-	require.ErrorIs(t, err, store.ErrNotFound)
+	// DELETE on the bare ID, with and without a trailing slash, deletes the
+	// user (last: each consumes a fixture).
+	erin := newActiveMember(t, s, "user-erin", "erin@test.com")
+	for _, tc := range []struct{ id, path string }{
+		{erin.ID, "/api/v1/users/" + erin.ID + "/"},
+		{dave.ID, base},
+	} {
+		rec := doRequest(t, srv, http.MethodDelete, tc.path, nil)
+		require.Equal(t, http.StatusNoContent, rec.Code, "DELETE %s: %s", tc.path, rec.Body.String())
+		_, err := s.GetUser(context.Background(), tc.id)
+		require.ErrorIs(t, err, store.ErrNotFound, "DELETE %s", tc.path)
+	}
 }
