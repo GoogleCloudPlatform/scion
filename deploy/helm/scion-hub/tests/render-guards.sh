@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=227   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 16 (workspaceStorage.nfs: thirteen refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check) + 3 (relay hop: cert-without-key refusals on non-loopback and loopback listeners, no relay-level trusted_proxies) + 3 (internal_listen loopback needs host:port and a valid 127.x: no-port IP, no-port localhost, out-of-range octet).
+EXPECTED_TOTAL=232   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 16 (workspaceStorage.nfs: thirteen refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check) + 3 (relay hop: cert-without-key refusals on non-loopback and loopback listeners, no relay-level trusted_proxies) + 3 (internal_listen loopback needs host:port and a valid 127.x: no-port IP, no-port localhost, out-of-range octet) + 5 (internal_listen: leading and trailing whitespace, port 65536, port 0, no port with TLS files).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -1006,12 +1006,22 @@ reject "cert without key on a loopback listener through config.extra" "must be s
   --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:9443","internal_tls_cert_file":"/x/tls.crt"}}}}'
 # Loopback means host:port with a port of 1-65535 and a valid 127.x.y.z,
 # localhost or [::1], as the hub reads it; anything else needs TLS.
-reject "internal_listen loopback IP without a port" "which is not a loopback address" \
+reject "internal_listen loopback IP without a port" "it must be host:port with a port of 1-65535" \
   --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1"}}}}'
-reject "internal_listen localhost without a port" "which is not a loopback address" \
+reject "internal_listen localhost without a port" "it must be host:port with a port of 1-65535" \
   --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"localhost"}}}}'
 reject "internal_listen 127.x with an out-of-range octet" "which is not a loopback address" \
   --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.300.0.1:9443"}}}}'
+reject "internal_listen with leading whitespace" "with leading or trailing whitespace" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":" 127.0.0.1:9443"}}}}'
+reject "internal_listen with trailing whitespace" "with leading or trailing whitespace" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:9443 "}}}}'
+reject "internal_listen port 65536" "it must be host:port with a port of 1-65535" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:65536"}}}}'
+reject "internal_listen port 0" "it must be host:port with a port of 1-65535" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:0"}}}}'
+reject "internal_listen without a port, with TLS files" "it must be host:port with a port of 1-65535" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0","internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":"/x/tls.key"}}}}'
 accept "loopback internal_listen through config.extra" \
   --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:9443"}}}}'
 accept "internalTls enabled" "${RT_ON[@]}"

@@ -4528,25 +4528,36 @@ hub releases, not before them.
 {{- if kindIs "map" $conduit }}
 {{- $cert := trim (toString (dig "internal_tls_cert_file" "" $conduit)) }}
 {{- $key := trim (toString (dig "internal_tls_key_file" "" $conduit)) }}
-{{- $listen := trim (toString (dig "internal_listen" "" $conduit)) }}
+{{- $listenRaw := toString (dig "internal_listen" "" $conduit) }}
+{{- $listen := trim $listenRaw }}
 {{- if $listen }}
 {{- /*
-Loopback, as the hub's CheckRelayInternalListen reads it: host:port with a
-port of 1-65535, and a host of localhost, [::1] or a valid 127.x.y.z (octets
-0-255, no leading zeros). The chart is stricter than the hub on other loopback
-spellings (LOCALHOST, an expanded ::1, ::ffff:127.0.0.1), which it treats as
-not loopback.
+The hub validates internal_listen untrimmed (SplitHostPort, then Atoi on the
+port), and a leading space would not bind, so surrounding whitespace is refused.
+The value must be host:port with a port of 1-65535 in any mode; the host is
+empty, a bracketed IPv6 literal, or a name or IPv4 address without colons.
+
+Without TLS the listener must also be loopback, as the hub's
+CheckRelayInternalListen reads it: a host of localhost, [::1] or a valid
+127.x.y.z (octets 0-255, no leading zeros).
+
+The chart is deliberately stricter than the hub in these cases:
+- other loopback spellings (LOCALHOST, an expanded ::1, ::ffff:127.0.0.1),
+  which it treats as not loopback;
+- port 0;
+- a port written with a sign or a leading zero (for example :+9443, :09443).
 */}}
-{{- $loopback := false }}
-{{- $m := regexFindAll "^(.*):([0-9]+)$" $listen 1 }}
-{{- if $m }}
-{{- $host := regexReplaceAll "^(.*):([0-9]+)$" $listen "${1}" }}
-{{- $portStr := regexReplaceAll "^(.*):([0-9]+)$" $listen "${2}" }}
-{{- $oct := "(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])" }}
-{{- $portOk := and (regexMatch "^[1-9][0-9]{0,4}$" $portStr) (le (int $portStr) 65535) }}
-{{- $hostOk := or (eq $host "localhost") (eq $host "[::1]") (regexMatch (printf "^127\\.%s\\.%s\\.%s$" $oct $oct $oct) $host) }}
-{{- $loopback = and $portOk $hostOk }}
+{{- if ne $listenRaw $listen }}
+{{- fail (printf "server.hub.conduit.internal_listen is %s, with leading or trailing whitespace. The hub reads the value as written and refuses it at startup; remove the whitespace." (include "scion-hub.diagValue" $listenRaw)) }}
 {{- end }}
+{{- $hostPort := "^(|\\[[^\\[\\]]+\\]|[^:\\[\\]]+):([1-9][0-9]{0,4})$" }}
+{{- $portStr := regexReplaceAll $hostPort $listen "${2}" }}
+{{- if or (not (regexMatch $hostPort $listen)) (gt (int $portStr) 65535) }}
+{{- fail (printf "server.hub.conduit.internal_listen is %s; it must be host:port with a port of 1-65535 (for example 0.0.0.0:9443 or [::1]:9443). The hub refuses anything else at startup." (include "scion-hub.diagValue" $listen)) }}
+{{- end }}
+{{- $host := regexReplaceAll $hostPort $listen "${1}" }}
+{{- $oct := "(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])" }}
+{{- $loopback := or (eq $host "localhost") (eq $host "[::1]") (regexMatch (printf "^127\\.%s\\.%s\\.%s$" $oct $oct $oct) $host) }}
 {{- if and (not $loopback) (not (and $cert $key)) }}
 {{- fail (printf "server.hub.conduit.internal_listen is %s, which is not a loopback address (localhost, [::1] or 127.x.y.z, with a port of 1-65535), and internal_tls_cert_file and internal_tls_key_file are not both set. The relay hop between hub nodes must serve TLS: set conduit.internalTls (enabled, existingSecret), or bind internal_listen to loopback." (include "scion-hub.diagValue" $listen)) }}
 {{- end }}
