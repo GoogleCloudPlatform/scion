@@ -443,3 +443,59 @@ func TestChainFromAgentCreate(t *testing.T) {
 		})
 	}
 }
+
+// TestSetAgentRunIDHasOneFreshMintCaller (WP1 attribution design v2.8,
+// section 6.1; review r6 L4): a run mint is trusted as fresh because its
+// only production caller generates the run ID for its own dispatch. The
+// callers of SetAgentRunID are exactly HTTPAgentDispatcher.beginRun, and
+// beginRun passes the result of uuid.NewString(). The scan covers the
+// module outside pkg/store and pkg/ent; pkg/store/storetest (shared store
+// tests, not production) supplies run IDs of its own and is outside it.
+func TestSetAgentRunIDHasOneFreshMintCaller(t *testing.T) {
+	assert.Equal(t,
+		[]string{"pkg/hub/httpdispatcher.go HTTPAgentDispatcher.beginRun"},
+		referencesOutsideStore(t, map[string]bool{"SetAgentRunID": true}))
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "httpdispatcher.go", nil, parser.SkipObjectResolution)
+	require.NoError(t, err)
+	var begin *ast.FuncDecl
+	for _, d := range file.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "beginRun" {
+			begin = fd
+		}
+	}
+	require.NotNil(t, begin, "beginRun not found")
+	fresh := map[string]bool{} // identifiers assigned uuid.NewString()
+	var mintArgs []ast.Expr
+	ast.Inspect(begin.Body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.AssignStmt:
+			for i, rhs := range x.Rhs {
+				if call, ok := rhs.(*ast.CallExpr); ok && isSelector(call.Fun, "uuid", "NewString") && i < len(x.Lhs) {
+					if id, ok := x.Lhs[i].(*ast.Ident); ok {
+						fresh[id.Name] = true
+					}
+				}
+			}
+		case *ast.CallExpr:
+			if sel, ok := x.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "SetAgentRunID" && len(x.Args) >= 3 {
+				mintArgs = append(mintArgs, x.Args[2])
+			}
+		}
+		return true
+	})
+	require.Len(t, mintArgs, 1, "beginRun mints once")
+	id, ok := mintArgs[0].(*ast.Ident)
+	require.True(t, ok, "the minted run ID is an identifier")
+	assert.True(t, fresh[id.Name], "beginRun's minted run ID %s must come from uuid.NewString()", id.Name)
+}
+
+func isSelector(e ast.Expr, pkg, name string) bool {
+	sel, ok := e.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != name {
+		return false
+	}
+	x, ok := sel.X.(*ast.Ident)
+	return ok && x.Name == pkg
+}
