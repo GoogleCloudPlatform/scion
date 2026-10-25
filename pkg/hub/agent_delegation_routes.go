@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // delegatedRouteID names one exact route resolution the delegated-credential
@@ -41,7 +42,28 @@ const opProjectRead authzop.OperationID = "project.read"
 // to: the agent or project named in the path.
 type delegatedRouteTarget struct {
 	Type string
-	ID   string
+	// ID is the path segment that names the target. On the project form of
+	// an agent sub-route it is the agent's ID or its slug in ProjectID.
+	ID string
+	// ProjectID is the project of a project-form agent sub-route, resolved
+	// the way handleProjectAgents resolves it; empty on every other route.
+	ProjectID string
+}
+
+// namesAgent reports whether the route target names agent: by ID on any
+// agent route, or by slug inside the agent's own project on the project
+// form. A project-form target also requires the agent's project.
+func (t delegatedRouteTarget) namesAgent(agent *store.Agent) bool {
+	if t.Type != "agent" || t.ID == "" || agent == nil || agent.ID == "" {
+		return false
+	}
+	if t.ProjectID == "" {
+		return t.ID == agent.ID
+	}
+	if t.ProjectID != agent.ProjectID {
+		return false
+	}
+	return t.ID == agent.ID || (agent.Slug != "" && t.ID == agent.Slug)
 }
 
 // delegatedRoute is the single server-owned resolution of a request that
@@ -78,6 +100,11 @@ type agentDelegationAdmission struct {
 var agentDelegationAdmittedRoutes = []agentDelegationAdmission{
 	{Method: http.MethodGet, RouteID: delegatedRouteID(AgentRouteRoot), Operation: opAgentRead},
 	{Method: http.MethodGet, RouteID: projectResourceRouteID, Operation: opProjectRead},
+	{Method: http.MethodPost, RouteID: delegatedRouteID(AgentRouteActionMessage), Operation: opAgentActionMessage},
+	{Method: http.MethodPost, RouteID: delegatedRouteID(ProjectAgentRouteActionMessage), Operation: opAgentActionMessage},
+	// The PTY WebSocket handshake. The lifecycle operations that share
+	// agent.attach (exec, env, resetauth, keys) are not admitted.
+	{Method: http.MethodGet, RouteID: delegatedRouteID(AgentRoutePTY), Operation: opAgentAttach},
 }
 
 // agentDelegationAdmissionFor returns the admission entry for method and
@@ -126,10 +153,17 @@ func resolveDelegatedRoute(meta RouteMetadata, method, escapedPath string) (dele
 		if !ok {
 			return delegatedRoute{}, nil, false
 		}
+		target := delegatedRouteTarget{Type: "agent", ID: route.AgentID}
+		if strings.HasPrefix(escapedPath, "/api/v1/projects/") {
+			if route.ProjectID == "" {
+				return delegatedRoute{}, nil, false
+			}
+			target.ProjectID = resolveProjectID(route.ProjectID)
+		}
 		return delegatedRoute{
 			RouteID:     delegatedRouteID(route.RouteID),
 			OperationID: route.OperationID,
-			Target:      delegatedRouteTarget{Type: "agent", ID: route.AgentID},
+			Target:      target,
 		}, &route, true
 	}
 	if meta.RouteID == "projects.byId" {
@@ -148,8 +182,7 @@ func resolveDelegatedRoute(meta RouteMetadata, method, escapedPath string) (dele
 // whether the request may continue.
 func (s *Server) admitDelegatedRequest(w http.ResponseWriter, r *http.Request, meta RouteMetadata) (*http.Request, bool) {
 	refuse := func() (*http.Request, bool) {
-		writeError(w, http.StatusForbidden, agentDelegationCodeCredentialNotAdmitted,
-			"this route does not accept a delegated credential", nil)
+		writeDelegatedNotAdmitted(w)
 		return nil, false
 	}
 	route, agentRoute, ok := resolveDelegatedRoute(meta, r.Method, r.URL.EscapedPath())
@@ -202,11 +235,42 @@ func admitDelegatedHandler(w http.ResponseWriter, r *http.Request, op authzop.Op
 	}
 	entry, admitted := delegatedAdmissionFromContext(ctx)
 	target, hasTarget := delegatedTargetFromContext(ctx)
-	if !admitted || entry.Operation != op || !hasTarget ||
+	if !admitted || entry.Operation != op || !hasTarget || target.ProjectID != "" ||
 		target.Type != resource.Type || target.ID == "" || target.ID != resource.ID {
-		writeError(w, http.StatusForbidden, agentDelegationCodeCredentialNotAdmitted,
-			"this route does not accept a delegated credential", nil)
+		writeDelegatedNotAdmitted(w)
 		return false
 	}
 	return true
+}
+
+// admitDelegatedAgentHandler is admitDelegatedHandler for a handler whose
+// target is an agent it loaded by the path's agent segment, which on the
+// project form may be the agent's slug. For a delegated caller it returns
+// true only when routeGuard admitted this request for exactly op and the
+// route target names agent (delegatedRouteTarget.namesAgent); otherwise it
+// answers 403 credential_not_admitted. The handler-branch drift test counts
+// its calls with admitDelegatedHandler's.
+func admitDelegatedAgentHandler(w http.ResponseWriter, r *http.Request, op authzop.OperationID, agent *store.Agent) bool {
+	ctx := r.Context()
+	if !isDelegatedAgentIdentity(GetIdentityFromContext(ctx)) {
+		return true
+	}
+	if !delegatedRequestAdmittedFor(ctx, op, agent) {
+		writeDelegatedNotAdmitted(w)
+		return false
+	}
+	return true
+}
+
+// delegatedRequestAdmittedFor reports whether routeGuard admitted the
+// request in ctx for exactly op, on a route whose target names agent.
+func delegatedRequestAdmittedFor(ctx context.Context, op authzop.OperationID, agent *store.Agent) bool {
+	entry, admitted := delegatedAdmissionFromContext(ctx)
+	target, hasTarget := delegatedTargetFromContext(ctx)
+	return admitted && entry.Operation == op && hasTarget && target.namesAgent(agent)
+}
+
+func writeDelegatedNotAdmitted(w http.ResponseWriter) {
+	writeError(w, http.StatusForbidden, agentDelegationCodeCredentialNotAdmitted,
+		"this route does not accept a delegated credential", nil)
 }

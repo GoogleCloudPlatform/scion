@@ -118,3 +118,22 @@ func legacyAgentWorkspaceRoot(projectDir, agentName, agentDir string, sharedOrEx
 	}
 	return legacy
 }
+
+// composeSharedRepoRoot is composeRepoRoot for a workspace the backend placed
+// on the shared tree: the derived root falls back to the shared layout's
+// workspace (sharedLayoutWorkspaceRoot, which also checks that the backend's
+// path is that one) instead of the local layout's, and the fail-closed record
+// intersection (reconcileRepoRoot) is the same. An explicit workspace derives
+// no root, as in detectRepoRoot.
+func composeSharedRepoRoot(agentName, candidate string, rec repoRootRecordState, workspace, projectDir, projectID string, explicit bool, settings *config.VersionedSettings) (string, error) {
+	derived := validatedWorktreeRepoRoot(candidate, workspace)
+	var detectErr error
+	if derived == "" && !explicit {
+		var sharedRoot string
+		sharedRoot, detectErr = sharedLayoutWorkspaceRoot(settings, projectID, workspace)
+		if detectErr == nil {
+			derived, detectErr = detectRepoRootFrom(workspace, projectDir, sharedRoot)
+		}
+	}
+	return reconcileRepoRoot(agentName, derived, detectErr, rec)
+}

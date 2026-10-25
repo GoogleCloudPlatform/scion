@@ -39,6 +39,7 @@ permissions). Available scopes:
 | `project:update` | Update project settings, configurations, and annotations |
 | `project:manage` | Manage project membership through your own project role, under the same governance rules as a signed-in session; hub role-binding authority is not used through a token. A role is granted only when the token also carries a scope for every permission of that role |
 | `project:create` | Create and register projects. Hub tokens only; your user must hold `project.create`, and the token must also carry a scope for every permission of the project owner role |
+| `project:chat_post` | Keep `project.chat_post` on the token so it can grant roles that include it, such as the built-in `project-member` role through `project:manage`. It does not post: a token posts in a project's chat threads with `inbox:write`, and your own account must hold `project.chat_post` there |
 | `project:clone` | Clone a project, together with `project:read` and `project:create` on a hub token; your user must be able to read the source project and hold `project.create`. Selecting this scope needs `project.clone`, which the built-in super-admin role carries |
 | `agent:create` | Create agents |
 | `agent:read` | Read agent status/metadata |
@@ -295,8 +296,9 @@ The same per-request checks apply, with these limits:
   sign-in, and every token is refused for them: writing integration secrets or integration
   settings that configure credentials, authentication, endpoints or host paths; installing or
   updating an integration; and changing the GitHub App configuration.
-- **Invitations and the allow list.** Inviting users (single or bulk) and managing invitation
-  codes admit only a hub token carrying `user:invite`. Reading the allow list and its domains
+- **Invitations and the allow list.** Inviting users (single or bulk), pre-registering a user
+  (`POST /api/v1/users`, `scion hub users provision`) and managing invitation codes admit only a
+  hub token carrying `user:invite`. Reading the allow list and its domains
   needs `hub_allow_list:read`; adding, importing or removing allow-list entries needs
   `hub_allow_list:read` and `hub_allow_list:update`. Your user must also hold the matching hub
   permission. An invited user gets no role binding or group membership from the invitation.

@@ -1832,7 +1832,8 @@ func TestGetServerConfigDB_SupersededKeys_SeededSectionExcluded(t *testing.T) {
 // value is attributed to settings.yaml, which wins over the seed layer; a
 // key with only a seed value or only a settings.yaml value keeps its source;
 // and the public URL keeps its settings.yaml attribution (ptone/scion#4865,
-// ptone/scion#4904).
+// ptone/scion#4904). authorized_domains, whose saved value the hub does not
+// apply (ptone/scion#6000), is not reported as superseded at all.
 func TestGetServerConfigDB_SupersededKeySourceFollowsPrecedence(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -1840,6 +1841,7 @@ func TestGetServerConfigDB_SupersededKeySourceFollowsPrecedence(t *testing.T) {
 		"SCION_SERVER_HUB_ADMINEMAILS", "SCION_SERVER_HUB_MONITORINGDASHBOARDURL",
 		"SCION_SERVER_AUTH_DEFAULTUSERROLE", "SCION_SERVER_AUTH_AUTHORIZEDDOMAINS",
 		"SCION_SERVER_HUB_ENDPOINT", "SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS",
+		"SCION_SERVER_AUTH_USERACCESSMODE", "SCION_SEED_SERVER_AUTH_USERACCESSMODE",
 	} {
 		t.Setenv(name, "")
 	}
@@ -1862,6 +1864,7 @@ server:
     public_url: https://file.example.com
   auth:
     authorized_domains: ["file.example.com"]
+    user_access_mode: domain_restricted
 `
 	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settings), 0o644); err != nil {
 		t.Fatal(err)
@@ -1875,7 +1878,7 @@ server:
 	fakeStore := newFakeHubSettingStore()
 	ops := NewOperationalSettings(fakeStore, bootK, emptyKoanf())
 	ops.SetUnseededBootstrap(config.LoadUnseededBootstrapKoanfWithConfigPath(""))
-	fakeStore.seedWithOrigin("access", json.RawMessage(`{"admin_emails":["db@example.com"],"default_user_role":"member","authorized_domains":["db.example.com"]}`), "managed")
+	fakeStore.seedWithOrigin("access", json.RawMessage(`{"admin_emails":["db@example.com"],"default_user_role":"member","authorized_domains":["db.example.com"],"user_access_mode":"open"}`), "managed")
 	fakeStore.seedWithOrigin("endpoints", json.RawMessage(`{"monitoring_dashboard_url":"https://db-dash.example.com","public_url":"https://saved.example.com"}`), "managed")
 	if _, err := ops.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
@@ -1898,11 +1901,16 @@ server:
 		"server.hub.monitoring_dashboard_url": "yaml",     // seed and settings.yaml
 		"server.hub.public_url":               "yaml",     // seed and settings.yaml
 		"server.auth.default_user_role":       "seed_env", // seed only
-		"server.auth.authorized_domains":      "yaml",     // settings.yaml only
+		"server.auth.user_access_mode":        "yaml",     // settings.yaml only
 	} {
 		if got[key] != want {
 			t.Errorf("superseded %s source = %q, want %q (all: %v)", key, got[key], want, got)
 		}
+	}
+	// The hub does not apply a saved authorized_domains (ptone/scion#6000):
+	// the saved value supersedes nothing, so the key is not listed.
+	if src, ok := got["server.auth.authorized_domains"]; ok {
+		t.Errorf("server.auth.authorized_domains reported superseded (source %q); the saved value is not applied", src)
 	}
 }
 

@@ -110,6 +110,25 @@ func detachedContext(parent context.Context, d time.Duration) (context.Context, 
 	return context.WithTimeout(context.WithoutCancel(parent), d)
 }
 
+// agentDMDispatchTimeout caps one ExecuteAgentDM dispatch, broker retries
+// included.
+const agentDMDispatchTimeout = 30 * time.Second
+
+// dispatchContext returns the context ExecuteAgentDM dispatches on: it keeps
+// parent's values and deadline but not its cancellation, and is capped at
+// d (ptone/scion#4827). The row is already persisted when the dispatch
+// starts, so a caller that goes away must not abort the dispatch and leave
+// the row pending; only a deadline (the caller's or d) can still end it
+// ambiguous.
+func dispatchContext(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), d)
+	if dl, ok := parent.Deadline(); ok {
+		dctx, dcancel := context.WithDeadline(ctx, dl)
+		return dctx, func() { dcancel(); cancel() }
+	}
+	return ctx, cancel
+}
+
 // markDispatched transitions a message from pending to dispatched after
 // broker/managed-runtime acceptance. Uses a bounded finalization context
 // so request cancellation does not discard the known outcome.

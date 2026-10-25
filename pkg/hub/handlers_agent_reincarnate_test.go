@@ -1182,8 +1182,9 @@ func TestReincarnateAgent_PlanUsesSettingsImageOverHarnessConfig(t *testing.T) {
 	overlay.Update(nil, nil, map[string]config.HarnessConfigEntry{
 		hcSlug: {Harness: "claude", Image: "settings-image:v1"},
 	})
+	prevOverlay := config.GetGlobalSettingsOverlay()
 	config.SetGlobalSettingsOverlay(overlay)
-	t.Cleanup(func() { config.SetGlobalSettingsOverlay(nil) })
+	t.Cleanup(func() { config.SetGlobalSettingsOverlay(prevOverlay) })
 
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)

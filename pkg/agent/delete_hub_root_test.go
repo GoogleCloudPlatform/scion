@@ -225,7 +225,7 @@ func TestAgentManagerDeleteTarget_UsesHubProjectIDFromContext(t *testing.T) {
 	m := &AgentManager{}
 
 	ctx := api.ContextWithHubProjectID(context.Background(), hubRootHubID)
-	if _, err := m.DeleteTarget(ctx, agentName, runtime.RunRef{}, true, l.projectPath, false); err != nil {
+	if _, err := m.DeleteTarget(ctx, agentName, "", runtime.RunRef{}, true, l.projectPath, false); err != nil {
 		t.Fatalf("DeleteTarget: %v", err)
 	}
 	assertGone(t, "lookup state dir", l.stateDir)

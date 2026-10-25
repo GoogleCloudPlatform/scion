@@ -784,15 +784,15 @@ func (s *Server) purgeFixtureUser(ctx context.Context, run fixturePurgeRun, basi
 		return nil
 	}
 	var lastOwnerErr *lastProjectOwnerDeleteError
-	var ownsAgentsErr *userOwnsAgentsDeleteError
+	var blockedErr *userDeleteBlockedError
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		// Deleted concurrently: nothing is left to do.
 		report.IdentityDeleted = false
 		return nil
-	case errors.As(err, &ownsAgentsErr):
+	case errors.As(err, &blockedErr):
 		report.IdentityKeptReason = "owns_agents"
-		report.IdentityKeptDetails = map[string]any{"agents": ownsAgentsErr.agents}
+		report.IdentityKeptDetails = map[string]any{"agents": blockedErr.blockers.Agents, "edges": blockedErr.blockers.Edges}
 		return nil
 	case errors.As(err, &lastOwnerErr):
 		report.IdentityKeptReason = "last_owner"

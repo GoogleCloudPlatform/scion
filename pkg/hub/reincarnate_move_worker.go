@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
@@ -268,8 +269,41 @@ func (s *Server) rollbackMove(ctx context.Context, md agentMoveDispatcher, agent
 				"agent_id", agentID, "error", err)
 		}
 	}
-	s.releaseBrokerQuota(ctx, cur)
-	s.restoreBrokerReservation(ctx, withBroker(cur, mv.SourceBrokerID))
+	// Known limitation: the forward move released the source's slot, so a
+	// source that filled while the move ran ends one over its cap after
+	// this rollback, as after the restart backstop's re-assert.
+	s.ensureBrokerReservationOn(ctx, cur, mv.SourceBrokerID)
+}
+
+// ensureBrokerReservationOn moves agent a's max_agents_per_broker
+// reservation to brokerID, without the cap check (the agent held that
+// slot before the move), for a move's rollback and its failed-move
+// reconcile. When the reservation is already held on brokerID it writes
+// nothing: releasing and re-asserting a held slot would free it for a
+// moment, and a reservation taken on that broker in between would leave
+// it over its cap once the unchecked re-assert ran. Otherwise, and when
+// the read fails (logged), it releases the reservation and re-asserts it
+// on brokerID, so a read error never leaves the agent without one.
+func (s *Server) ensureBrokerReservationOn(ctx context.Context, a *store.Agent, brokerID string) {
+	if s.quotaService == nil || a == nil || brokerID == "" {
+		return
+	}
+	on := withBroker(a, brokerID)
+	if def, err := s.store.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker); err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.agentLifecycleLog.Warn("move: reading the broker limit failed; moving the reservation anyway",
+				"agent_id", a.ID, "runtime_broker_id", brokerID, "error", err)
+		}
+	} else if held, err := s.store.GetActiveReservation(ctx, def.ID, a.ID); err == nil {
+		if held.ScopeType == store.QuotaScopeBroker && held.ScopeID == brokerID {
+			return
+		}
+	} else if !errors.Is(err, store.ErrNotFound) {
+		s.agentLifecycleLog.Warn("move: reading the agent's broker reservation failed; moving it anyway",
+			"agent_id", a.ID, "runtime_broker_id", brokerID, "error", err)
+	}
+	s.releaseBrokerQuota(ctx, on)
+	s.restoreBrokerReservation(ctx, on)
 }
 
 // rollbackMoveTarget removes what a failed move created for the agent on
@@ -332,8 +366,9 @@ const (
 
 // reconcileFailedMove runs whenever a move's record is failed (by the worker
 // or the stale sweep). The agent row's runtime broker is the truth: on the
-// source, the broker reservation is moved back there (released, then
-// re-asserted); on the target, it already follows the agent. A record with
+// source, the broker reservation is moved back there
+// (ensureBrokerReservationOn: nothing is written when it is already
+// there); on the target, it already follows the agent. A record with
 // no source cleanup outcome yet records skipped:interrupted. A plain
 // reincarnation's record is left alone.
 func (s *Server) reconcileFailedMove(ctx context.Context, reincarnationID string) {
@@ -346,8 +381,7 @@ func (s *Server) reconcileFailedMove(ctx context.Context, reincarnationID string
 		s.agentLifecycleLog.Warn("failed move: could not load the agent to reconcile its reservation",
 			"agent_id", rec.AgentID, "reincarnation_id", rec.ID, "error", err)
 	} else if a.RuntimeBrokerID == rec.SourceBrokerID {
-		s.releaseBrokerQuota(ctx, a)
-		s.restoreBrokerReservation(ctx, a)
+		s.ensureBrokerReservationOn(ctx, a, rec.SourceBrokerID)
 	}
 	if rec.SourceCleanup == "" {
 		if err := s.store.SetAgentReincarnationSourceCleanup(ctx, rec.ID, sourceCleanupSkippedInterrupted); err != nil {

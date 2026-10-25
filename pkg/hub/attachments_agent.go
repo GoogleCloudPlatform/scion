@@ -28,6 +28,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 )
 
 // Agents attach files by path: `scion message --attach` copies each file into
@@ -119,14 +120,11 @@ func agentAttachmentRelPath(agentPath string) (string, bool) {
 	}
 	clean := path.Clean(agentPath)
 	// Shared dirs mount at /scion-volumes/<name>, or under the workspace when
-	// declared in-workspace. Both forms are accepted regardless of how the
-	// project declares the dir: the sending CLI hardcodes the first.
-	prefixes := []string{
-		"/scion-volumes/" + attachmentSharedDirName + "/",
-		"/workspace/.scion-volumes/" + attachmentSharedDirName + "/",
-	}
-	for _, prefix := range prefixes {
-		rel, ok := strings.CutPrefix(clean, prefix)
+	// declared in-workspace. Both targets the layout authority computes are
+	// accepted regardless of how the project declares the dir: the sending
+	// CLI probes them in this order.
+	for _, target := range projectfs.SharedDirTargets(attachmentSharedDirName, "") {
+		rel, ok := strings.CutPrefix(clean, target+"/")
 		if !ok || rel == "" {
 			continue
 		}
@@ -216,8 +214,8 @@ func (s *Server) ingestAgentAttachments(ctx context.Context, projectID, senderID
 		return nil, nil
 	}
 
-	sharedHostDir, _ := s.sharedDirHostPath(ctx, projectID, attachmentSharedDirName)
-	if sharedHostDir == "" {
+	sp := s.resolveScratchpad(ctx, projectID)
+	if sp == nil {
 		s.messageLog.ErrorContext(ctx, "Agent attachments dropped: no scratchpad shared dir on this host",
 			"project_id", projectID, "count", len(paths), "paths", paths)
 		return nil, warnAll(paths, attachmentWarnNoSharedDir)
@@ -231,9 +229,12 @@ func (s *Server) ingestAgentAttachments(ctx context.Context, projectID, senderID
 		paths = paths[:MaxAttachmentsPerMessage]
 	}
 
-	// One root for the batch: agents mount this dir read-write, so the path
-	// under it is attacker-controlled and has to be resolved per component.
-	root, err := openConfinedBase(sharedHostDir, false)
+	// One root for the batch, opened through the layout authority
+	// (Resolved.Open; on a shared backend pkg/shareddirs' anchored O_NOFOLLOW
+	// walk): agents mount this dir read-write, so the path under it is
+	// attacker-controlled and has to be resolved per component. Nothing is
+	// created: a missing scratchpad holds no file to attach.
+	root, err := sp.resolution.Resolved.Open(false)
 	if err != nil {
 		s.messageLog.ErrorContext(ctx, "Agent attachments dropped: cannot open scratchpad shared dir",
 			"project_id", projectID, "count", len(paths), "error", err)

@@ -70,7 +70,9 @@ const maxPreviewFileSize = 50 * 1024 * 1024
 // responses. allow-same-origin must never be added: it would undo exactly
 // that isolation. The header has no effect when the response is loaded as a
 // subresource such as an <img>, so inline image previews are unaffected.
-const untrustedContentSandboxCSP = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads"
+// frame-ancestors 'none': these pages are never embedded in other pages,
+// with or without the web frontend in front of the hub.
+const untrustedContentSandboxCSP = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads; frame-ancestors 'none'"
 
 // contentDisposition builds a Content-Disposition header value with
 // mime.FormatMediaType, as the skill and template handlers do, so non-ASCII
@@ -1631,7 +1633,10 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 
 	token := s.resolveCloneToken(ctx, project)
 
-	pullResult, err := util.PullSharedWorkspace(workspacePath, token)
+	// Pull from the project's clone URL as the hub knows it, not from the
+	// remote configured in the workspace, which agents can change.
+	cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
+	pullResult, err := util.PullSharedWorkspace(workspacePath, cloneURL, token)
 	if err != nil {
 		slog.Warn("shared workspace pull failed",
 			"project_id", project.ID, "error", err.Error())

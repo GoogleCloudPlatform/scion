@@ -429,6 +429,27 @@ type relayFixture struct {
 	regStore registry.Store
 	reg      *registry.Registry
 	launched *store.Agent
+	// noAgentKeyWait makes the agent start helpers (startAgent,
+	// startSciontoolAgent) return once the session is admitted, without
+	// waiting for the agent's first grant-key fetch
+	// (waitAgentGrantKeys). Set it in a test that breaks or delays that
+	// fetch on purpose.
+	noAgentKeyWait bool
+}
+
+// waitAgentGrantKeys waits, for at most 10 seconds, until keys (the
+// agent's key holder) holds the hub's current signing key. A sciontool
+// agent fetches its grant keys from the hub in its own goroutine when it
+// starts, alongside its session dial, and installs keys only from that
+// fetch, never from a Welcome. The hub serves the fetch with a fresh read
+// of the stored key ring, so a test that counts ring reads must not start
+// counting until the fetch is done.
+func waitAgentGrantKeys(t *testing.T, srv *Server, keys grant.KeySet) {
+	t.Helper()
+	signer, err := srv.conduitGrantKeySet().signer(context.Background())
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { _, ok := keys.Lookup(signer.KeyID); return ok },
+		10*time.Second, 10*time.Millisecond, "the agent's first grant-key fetch")
 }
 
 func newRelayFixture(t *testing.T, mod func(*ConduitRelayOptions)) *relayFixture {
@@ -725,7 +746,9 @@ func (f *conduitProxyFixture) withWriteTimeout(t *testing.T, d time.Duration) {
 }
 
 // startAgent runs a sciontool conduit agent for the launched agent and
-// returns once its session is admitted. stop ends it and waits for Run.
+// returns once its session is admitted and, unless f.noAgentKeyWait, its
+// first grant-key fetch has installed the hub's current key
+// (waitAgentGrantKeys). stop ends it and waits for Run.
 func (f *conduitProxyFixture) startAgent(t *testing.T) (stop func()) {
 	t.Helper()
 	admitted := make(chan *conduitv1.Welcome, 4)
@@ -735,6 +758,9 @@ func (f *conduitProxyFixture) startAgent(t *testing.T) (stop func()) {
 		require.Equal(t, f.launched.RunID, w.GetEndpointIncarnation())
 	case <-time.After(10 * time.Second):
 		t.Fatal("conduit session not admitted")
+	}
+	if !f.noAgentKeyWait {
+		waitAgentGrantKeys(t, f.srv, f.sciontool.Keys())
 	}
 	return stop
 }
@@ -915,6 +941,26 @@ func (f *relayFixture) agentSessions(t *testing.T) []registry.SessionRecord {
 		out = append(out, s.Session)
 	}
 	return out
+}
+
+// conduitSessionState describes a conduit session for a failure message:
+// its id, open or ended, its error, and whether it is draining or received
+// a GoAway (ptone/scion#5255, ptone/scion#4893, ptone/scion#5045).
+func conduitSessionState(ls conduit.LocalSession) string {
+	state := "open"
+	select {
+	case <-ls.Done():
+		state = "ended"
+	default:
+	}
+	goAway := false
+	select {
+	case <-ls.GoAwayReceived():
+		goAway = true
+	default:
+	}
+	info := ls.Info()
+	return fmt.Sprintf("%s %s, err %v, draining %v, GoAway received %v", info.SessionID, state, ls.Err(), info.Draining, goAway)
 }
 
 var errInjectedStoreFault = errors.New("injected store fault")

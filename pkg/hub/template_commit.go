@@ -329,7 +329,7 @@ func (s *Server) commitTemplateFiles(ctx context.Context, tmpl *store.Template, 
 	}
 
 	// 2. Content hash.
-	contentHash := computeContentHash(next)
+	contentHash := s.computeContentHash(next)
 
 	// 3. Derive the index from the template's own agent config.
 	read := blobFileReader(stor, base, next)

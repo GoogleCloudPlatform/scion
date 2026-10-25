@@ -1606,38 +1606,6 @@ func TestResolveChannelLink_CachesConfirmedThread(t *testing.T) {
 
 // --- downloadDiscordAttachment tests ---
 
-func TestDownloadDiscordAttachment_DefaultPath(t *testing.T) {
-	// When downloadsPath is empty, the function writes to
-	// /home/scion/.scion/projects/<slug>/downloads and returns
-	// /workspace/downloads/<name> as the agent-visible path.
-	// We can't safely write to /home/scion in tests, so we verify
-	// the path computation by setting downloadsPath to a temp dir
-	// and confirming the custom-path branch differs from the default.
-
-	fileContent := []byte("default-path-test")
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(fileContent)
-	}))
-	defer srv.Close()
-
-	projectSlug := "test-project"
-
-	// Verify the default hostDir and agentPath computation.
-	defaultHostDir := filepath.Join("/home/scion/.scion/projects", projectSlug, "downloads")
-	assert.Equal(t, "/home/scion/.scion/projects/test-project/downloads", defaultHostDir)
-
-	defaultAgentPath := filepath.Join("/workspace/downloads", "discord_123_photo.png")
-	assert.Equal(t, "/workspace/downloads/discord_123_photo.png", defaultAgentPath)
-
-	// Verify that a broker with no downloadsPath set would use
-	// the default agent path prefix.
-	b := &DiscordBroker{
-		log:        discardLogger(),
-		httpClient: srv.Client(),
-	}
-	assert.Empty(t, b.downloadsPath, "downloadsPath should be empty by default")
-}
-
 func TestDownloadDiscordAttachment_CustomDownloadsPath(t *testing.T) {
 	fileContent := []byte("fake-image-data-for-test")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1847,34 +1815,32 @@ func TestDownloadDiscordAttachment_SharedDirPath(t *testing.T) {
 	assert.Contains(t, agentPath, "shared-photo.png")
 	assert.Contains(t, placeholder, "shared-photo.png")
 
-	// Verify the file was actually written to the host-side shared dir path.
-	// SharedDirHostPath returns <home>/.scion/project-configs/<slug>__<shortUUID>/shared-dirs/scratchpad
+	// The file is written below the host-side scratchpad, in a per-download
+	// directory: .attachments/_discord/discord_<ts>/<name> (projectfs).
 	expectedHostBase := filepath.Join(fakeHome, ".scion", "project-configs", "my-project__abcd1234", "shared-dirs", "scratchpad", ".attachments", "_discord")
 	entries, err := os.ReadDir(expectedHostBase)
 	require.NoError(t, err, "shared dir host path should exist")
 	require.Len(t, entries, 1)
-	assert.Contains(t, entries[0].Name(), "shared-photo.png")
+	require.True(t, entries[0].IsDir())
+	assert.True(t, strings.HasPrefix(entries[0].Name(), "discord_"), entries[0].Name())
+	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_discord/"+entries[0].Name()+"/shared-photo.png", agentPath)
+	data, err := os.ReadFile(filepath.Join(expectedHostBase, entries[0].Name(), "shared-photo.png"))
+	require.NoError(t, err)
+	assert.Equal(t, fileContent, data)
 }
 
-func TestDownloadDiscordAttachment_EmptyProjectID_LegacyPath(t *testing.T) {
-	// When projectID is empty and downloadsPath is empty, the function should
-	// fall back to the legacy /workspace/downloads/ agent path.
-	fileContent := []byte("legacy-fallback-test")
+func TestDownloadDiscordAttachment_EmptyProjectID_Refused(t *testing.T) {
+	// With no downloadsPath and no project ID there is no scratchpad to store
+	// the attachment in; the legacy ~/.scion/projects/<slug>/downloads
+	// fallback is gone (ptone/scion#5827), so the download is refused.
+	fileContent := []byte("no-project")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(fileContent)
 	}))
 	defer srv.Close()
 
-	// Point legacyProjectsRoot at a temp dir so the fallback path is writable
-	// on CI runners where /home/scion does not exist. The t.Setenv("HOME",…)
-	// below has no effect on this code path (the path is a literal, not
-	// HOME-derived) and is kept only for documentation.
 	fakeHome := t.TempDir()
 	t.Setenv("HOME", fakeHome)
-
-	origRoot := legacyProjectsRoot
-	legacyProjectsRoot = filepath.Join(fakeHome, ".scion/projects")
-	t.Cleanup(func() { legacyProjectsRoot = origRoot })
 
 	b := &DiscordBroker{
 		log:        discardLogger(),
@@ -1888,14 +1854,12 @@ func TestDownloadDiscordAttachment_EmptyProjectID_LegacyPath(t *testing.T) {
 		Size:     len(fileContent),
 	}
 
-	ctx := context.Background()
-	agentPath, _, err := b.downloadDiscordAttachment(ctx, att, "test-slug", "")
+	_, _, err := b.downloadDiscordAttachment(context.Background(), att, "test-slug", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no project ID")
+	entries, err := os.ReadDir(fakeHome)
 	require.NoError(t, err)
-
-	// Legacy agent path should be /workspace/downloads/<name>.
-	assert.True(t, strings.HasPrefix(agentPath, "/workspace/downloads/"),
-		"agentPath %q should start with legacy prefix", agentPath)
-	assert.Contains(t, agentPath, "legacy.txt")
+	assert.Empty(t, entries, "nothing is written anywhere")
 }
 
 func TestDownloadDiscordAttachment_DownloadsPathOverridesSharedDir(t *testing.T) {

@@ -42,6 +42,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/httpcompress"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/eventstreams"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/ssemetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -50,6 +51,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/webassets"
 	"github.com/GoogleCloudPlatform/scion/web"
 	"github.com/google/uuid"
+	"github.com/gorilla/securecookie"
 	"github.com/gorilla/sessions"
 	"golang.org/x/net/http2"
 	//nolint:staticcheck // h2c is kept for local cleartext HTTP/2 support.
@@ -177,7 +179,16 @@ type WebServerConfig struct {
 	// When set, static files are served from this path instead of the embedded FS.
 	AssetsDir string
 	// SessionSecret is the HMAC key for signing session cookies.
+	// Ignored when SigningRing is set.
 	SessionSecret string
+	// SigningRing, when set, supplies the session cookie keys (a keyring
+	// file, ptone/scion#1530): the active generation encodes, every
+	// generation decodes, each within its deadlines. Nil uses the legacy
+	// adapter over SessionSecret, whose derived keys are unchanged.
+	SigningRing *keyring.SigningRing
+	// Now is the clock for keyring deadlines (nil: time.Now). A seam for
+	// tests; production leaves it nil.
+	Now func() time.Time
 	// BaseURL is the public URL for OAuth redirects (e.g., "https://scion.example.com").
 	BaseURL string
 	// DevAuthToken is the dev token for auto-login (empty = disabled).
@@ -270,6 +281,13 @@ type WebServer struct {
 	hasAssets      bool                        // cached result of asset detection
 	startTime      time.Time
 	log            *slog.Logger // subsystem logger for hub.web
+
+	// sessionCodecs are sessionStore's codecs, active generation first.
+	sessionCodecs []securecookie.Codec
+	// signingRing is the ring sessionCodecs came from.
+	signingRing *keyring.SigningRing
+	// now is the keyring deadline clock (WebServerConfig.Now).
+	now func() time.Time
 
 	// testLoginLimiter rate-limits POST /api/v1/auth/test-login per source IP.
 	testLoginLimiter *testLoginLimiter
@@ -539,8 +557,10 @@ var spaShellTemplate = `{{template "head" .}}{{template "body" .}}
         }
     </style>
 
-    <!-- Theme detection script (runs before paint) -->
-    <script>
+    <!-- Theme detection script (runs before paint). It is the shell's only
+         inline executable script, and it carries this response's script
+         nonce. -->
+    <script nonce="{{.ScriptNonce}}">
         (function() {
             var saved = localStorage.getItem('scion-theme');
             if (saved === 'dark' || (!saved && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
@@ -620,6 +640,9 @@ type spaShellData struct {
 	// ModulePreloads are the request paths hinted with <link
 	// rel="modulepreload"> in the head (WebServer.shellModulePreloads).
 	ModulePreloads []string
+	// ScriptNonce is the nonce of this response's page policy, carried by
+	// the shell's one inline script (scriptNonceForShell).
+	ScriptNonce string
 }
 
 // logger returns the web subsystem logger, falling back to slog.Default()
@@ -699,15 +722,23 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	}
 
 	// Initialize session store
-	sessionKey := cfg.SessionSecret
-	if sessionKey == "" {
-		// Generate a random key for development/testing
-		b := make([]byte, 32)
-		if _, err := rand.Read(b); err != nil {
-			ws.logger().Error("Failed to generate session secret", "error", err)
+	ring := cfg.SigningRing
+	if ring == nil {
+		sessionKey := cfg.SessionSecret
+		if sessionKey == "" {
+			// Generate a random key for development/testing
+			b := make([]byte, 32)
+			if _, err := rand.Read(b); err != nil {
+				ws.logger().Error("Failed to generate session secret", "error", err)
+			}
+			sessionKey = hex.EncodeToString(b)
+			ws.logger().Warn("No session secret configured, using random key (sessions will not persist across restarts)")
 		}
-		sessionKey = hex.EncodeToString(b)
-		ws.logger().Warn("No session secret configured, using random key (sessions will not persist across restarts)")
+		ring = keyring.Legacy(sessionKey).Signing()
+	}
+	ws.now = cfg.Now
+	if ws.now == nil {
+		ws.now = time.Now
 	}
 
 	// Use an encrypted, signed cookie session store so that NO session state
@@ -727,26 +758,38 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	// "JWT tokens exceed 4096 bytes" concern that motivated the disk store no
 	// longer applies to the current compact HS256 tokens.
 	//
-	// Keys are derived deterministically from the shared SESSION_SECRET so all
-	// replicas agree: a 32-byte HMAC authentication key and a 32-byte AES-256
-	// encryption key, with domain separation so the two keys differ.
-	cookieStore := sessions.NewCookieStore(
-		deriveSessionKey(sessionKey, "scion-session-hash"),
-		deriveSessionKey(sessionKey, "scion-session-block"),
-	)
+	// Keys are derived deterministically from the shared signing secret of
+	// each keyring generation so all replicas agree: a 32-byte HMAC
+	// authentication key and a 32-byte AES-256 encryption key, with domain
+	// separation so the two keys differ (deriveSessionKey; the legacy
+	// adapter derives exactly the pre-keyring keys from SESSION_SECRET).
+	// With a keyring file every generation gets a codec, active first: the
+	// active one encodes, and each decodes until its verify_until, so a
+	// cookie minted by any replica's active generation is readable here
+	// (ptone/scion#1530 §3, Cookies).
+	codecs, err := keyring.CookieCodecs(ring, webSessionHashPurpose, webSessionBlockPurpose, webSessionMaxAge, ws.now)
+	if err != nil {
+		// Unreachable with a validated keyring (cmd refuses startup first);
+		// fail closed: with no codecs every session save and read fails.
+		ws.logger().Error("Session cookie keyring has no usable active generation; sessions are disabled", "error", err)
+	}
+	cookieStore := &sessions.CookieStore{Codecs: codecs}
+	ws.sessionCodecs = cookieStore.Codecs
+	ws.signingRing = ring
 	cookieStore.Options = &sessions.Options{
 		Path:     "/",
-		MaxAge:   86400, // 24 hours
+		MaxAge:   webSessionMaxAge, // 24 hours
 		HttpOnly: true,
 		Secure:   baseURLIsHTTPS(cfg.BaseURL),
 		SameSite: http.SameSiteLaxMode,
 	}
-	// Keep securecookie's timestamp window in sync with the cookie MaxAge. We
-	// intentionally leave the default 4096-byte securecookie length limit in
-	// force (unlike the disk store, which disabled it): if a session ever grew
-	// past the browser cookie cap, Save() would return an error we can log
-	// rather than silently emitting an oversized cookie the browser drops.
-	cookieStore.MaxAge(cookieStore.Options.MaxAge)
+	// securecookie's timestamp window matches the cookie MaxAge: CookieCodecs
+	// set it on every codec (CookieStore.MaxAge cannot reach the wrapped
+	// codecs). We intentionally leave the default 4096-byte securecookie
+	// length limit in force (unlike the disk store, which disabled it): if a
+	// session ever grew past the browser cookie cap, Save() would return an
+	// error we can log rather than silently emitting an oversized cookie the
+	// browser drops.
 	ws.sessionStore = cookieStore
 
 	// Resolve asset source
@@ -792,8 +835,10 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	return ws
 }
 
-// deriveSessionKey deterministically derives a 32-byte key from the shared
-// session secret and a label. The label provides domain separation so the
+// deriveSessionKey deterministically derives a 32-byte key from a
+// generation's signing secret (the shared session secret in legacy mode)
+// and a label; it is the derivation of the web session cookie keys
+// (webSessionHashPurpose, webSessionBlockPurpose). The label provides domain separation so the
 // HMAC authentication key and the AES encryption key differ even though both
 // originate from the same SESSION_SECRET. Every replica configured with the
 // same secret derives identical keys, which is what lets a session cookie
@@ -801,6 +846,72 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 func deriveSessionKey(secret, label string) []byte {
 	sum := sha256.Sum256([]byte(label + ":" + secret))
 	return sum[:]
+}
+
+// webSessionMaxAge is the session cookie (and securecookie timestamp)
+// lifetime in seconds: 24 hours.
+const webSessionMaxAge = 86400
+
+// The keyring purposes of the session cookie keys: deriveSessionKey with
+// the same labels, so every generation (and the legacy adapter) derives
+// keys exactly as before.
+var (
+	webSessionHashPurpose  = sessionKeyPurpose("scion-session-hash")
+	webSessionBlockPurpose = sessionKeyPurpose("scion-session-block")
+)
+
+func sessionKeyPurpose(label string) keyring.Purpose {
+	return keyring.NewPurpose(label, func(secret []byte) []byte { return deriveSessionKey(string(secret), label) })
+}
+
+// resaveUnderActiveGeneration re-saves session when its cookie decoded
+// only under a non-active keyring generation, so the browser gets it back
+// under the active one (ptone/scion#1530 §3, Cookies). Values are saved
+// unchanged: no hub token expiry is extended. It does nothing when:
+//   - the response already sets the session cookie (another save on this
+//     request, e.g. dev or proxy auth, already wrote it under the active
+//     generation);
+//   - the active generation's issuance is closed (sign_until reached;
+//     /readyz reports that state, so no per-request warning).
+//
+// Any other save failure is logged and the request continues with the
+// session as read.
+func (ws *WebServer) resaveUnderActiveGeneration(w http.ResponseWriter, r *http.Request, session *sessions.Session) {
+	if session == nil || session.IsNew || len(ws.sessionCodecs) < 2 {
+		return
+	}
+	c, err := r.Cookie(webSessionName)
+	if err != nil || keyring.DecodesWithActive(webSessionName, c.Value, ws.sessionCodecs) {
+		return
+	}
+	for _, sc := range w.Header().Values("Set-Cookie") {
+		if strings.HasPrefix(sc, webSessionName+"=") {
+			return
+		}
+	}
+	if _, err := ws.signingRing.Active(webSessionHashPurpose, ws.now()); err != nil {
+		return
+	}
+	if err := session.Save(r, w); err != nil {
+		ws.logger().Warn("Failed to re-save session under the active signing generation", "error", err)
+	}
+}
+
+// keyringResaveMiddleware re-saves, under the active keyring generation, a
+// session cookie an authenticated page request carried under another
+// generation (resaveUnderActiveGeneration). Public routes (which include
+// the API, see isPublicRoute) and requests without a session user pass
+// through untouched. It is the innermost middleware, so the admin-mode and
+// suspended-user checks run first.
+func (ws *WebServer) keyringResaveMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(ws.sessionCodecs) > 1 && !isPublicRoute(r.URL.Path) && getWebSessionUser(r.Context()) != nil {
+			if session, err := ws.sessionStore.Get(r, webSessionName); err == nil {
+				ws.resaveUnderActiveGeneration(w, r, session)
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // SetMaintenanceState sets the shared runtime maintenance state.
@@ -1140,6 +1251,7 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 			tokenValid = true
 		}
 
+		saved := false
 		// If token is invalid (expired or bad signature), try to refresh.
 		if !tokenValid {
 			refreshToken, _ := session.Values[sessKeyHubRefreshToken].(string)
@@ -1151,6 +1263,7 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 					session.Values[sessKeyHubAccessToken] = newAccess
 					session.Values[sessKeyHubRefreshToken] = newRefresh
 					session.Values[sessKeyHubTokenExpiry] = time.Now().Add(time.Duration(expiresIn) * time.Second).UnixMilli()
+					saved = true
 					if err := session.Save(r, w); err != nil {
 						ws.logger().Warn("Failed to persist refreshed Hub token to session", "error", err)
 					}
@@ -1200,12 +1313,29 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 						session.Values[sessKeyHubAccessToken] = newAccess
 						session.Values[sessKeyHubRefreshToken] = newRefresh
 						session.Values[sessKeyHubTokenExpiry] = time.Now().Add(time.Duration(expiresIn) * time.Second).UnixMilli()
+						saved = true
 						if err := session.Save(r, w); err != nil {
 							ws.logger().Warn("Failed to persist refreshed Hub token to session", "error", err)
 						}
 					}
 				}
 			}
+		}
+
+		// API requests skip sessionAuthMiddleware (isPublicRoute), so this
+		// is their re-save point: a session read under a non-active keyring
+		// generation goes back under the active one (once; a refresh above
+		// already saved it under the active generation).
+		//
+		// Pilot behaviour (ptone/scion#1530 Phase 1): this runs before the
+		// hub authorizes the request, so a request the hub then refuses
+		// (for example a suspended user) still gets its session re-saved.
+		// The re-save writes identical contents under the active pair,
+		// extends no token expiry and confers nothing; gating it on the
+		// response status would need a ResponseWriter wrapper that risks
+		// the streaming, Flush and Hijack paths of the API mux.
+		if !saved {
+			ws.resaveUnderActiveGeneration(w, r, session)
 		}
 
 		// Clone the request and inject the Authorization header.
@@ -1849,6 +1979,8 @@ func (ws *WebServer) spaHandler() http.HandlerFunc {
 			return
 		}
 
+		nonce := scriptNonceForShell(w, r)
+		setShellReportHeaders(w.Header())
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", perUserPageCacheControl)
 		w.WriteHeader(http.StatusOK)
@@ -1862,6 +1994,7 @@ func (ws *WebServer) spaHandler() http.HandlerFunc {
 			IsLoginPage:    r.URL.Path == "/login",
 			IsInvitePage:   r.URL.Path == "/invite",
 			ModulePreloads: ws.shellModulePreloads,
+			ScriptNonce:    nonce,
 		}
 		// Send the head first and flush it, so the browser starts fetching
 		// the entry and its preloaded chunks while the page data is
@@ -2876,13 +3009,14 @@ func isCompressBypassPath(path string) bool {
 			return true
 		case "agents":
 			// Agent item responses (GET/PATCH /api/v1/agents/{id} and the
-			// project-scoped form) stay uncompressed.
+			// project-scoped form) stay uncompressed, as does the agent
+			// returned by DELETE /api/v1/agents/{id}/pending-config.
 			if i+2 == len(segs) {
 				return true
 			}
 			if i+2 < len(segs) {
 				switch segs[i+2] {
-				case "pty", "ports", "workspace":
+				case "pty", "ports", "workspace", "pending-config":
 					return true
 				}
 			}
@@ -4140,29 +4274,14 @@ func sessionString(session *sessions.Session, key string) string {
 	return ""
 }
 
-// webContentSecurityPolicy is the CSP sent with every web response. The
-// client bundles its scripts, styles and Shoelace assets, so the only named
-// external hosts are Google Fonts (stylesheet and font files) and Cloud
-// Storage (signed upload and download URLs); img-src also allows any HTTPS
-// image through its https: source.
-//
-// img-src allows blob: because the chat file preview fetches image bytes
-// with credentials and renders them through URL.createObjectURL (gs://
-// links, attachments, workspace files). A blob: URL matches neither 'self'
-// nor https:, so without it the browser blocks the load and the preview
-// shows a broken image. blob: is allowed for images only, never for
-// scripts or frames.
-const webContentSecurityPolicy = "default-src 'self'; " +
-	"script-src 'self' 'unsafe-inline'; " +
-	"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
-	"font-src 'self' https://fonts.gstatic.com; " +
-	"img-src 'self' data: blob: https:; " +
-	"connect-src 'self' data: ws: wss: http://localhost:* http://127.0.0.1:* https://storage.googleapis.com"
-
-// securityHeadersMiddleware adds security headers to all responses.
+// securityHeadersMiddleware adds security headers to all responses. Each
+// response gets its own script nonce (see web_csp.go); the SPA shell reads
+// it from the request context and puts it on its inline script.
 func (ws *WebServer) securityHeadersMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", webContentSecurityPolicy)
+		nonce := newScriptNonce()
+		w.Header().Set("Content-Security-Policy", webContentSecurityPolicy(nonce))
+		r = r.WithContext(withScriptNonce(r.Context(), nonce))
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
@@ -4204,7 +4323,14 @@ func (ws *WebServer) loggingMiddleware(next http.Handler) http.Handler {
 func (ws *WebServer) buildHandler() http.Handler {
 	var handler http.Handler = ws.mux
 
-	// Admin mode middleware (innermost — runs after session user is loaded).
+	// Keyring re-save (innermost): an authenticated page or SSR request
+	// whose session was read under a non-active keyring generation gets it
+	// back under the active one, only after the admin-mode and
+	// suspended-user checks let it through (a successfully used session,
+	// ptone/scion#1530 §3). API requests re-save in sessionToBearerMiddleware.
+	handler = ws.keyringResaveMiddleware(handler)
+
+	// Admin mode middleware (runs after session user is loaded).
 	// Always applied — checks runtime MaintenanceState on each request.
 	handler = ws.adminModeWebMiddleware(handler)
 

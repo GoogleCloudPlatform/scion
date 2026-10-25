@@ -512,6 +512,16 @@ func filterDescriptiveLabels(agentName string, labels map[string]string) map[str
 }
 
 func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName string, err error) {
+	// Refuse, at the single production entry point for every start / restart /
+	// wake / reincarnate, the Kubernetes shapes where agents in a project would
+	// share one repository (its .git) on the NFS export. Run is the only
+	// caller of buildPod, so this gate cannot be bypassed, and keeping it here
+	// rather than in buildPod leaves buildPod a pure pod constructor (the
+	// read-only .git narrowing it builds for that shape stays testable and ready
+	// for the follow-up that lifts this refusal).
+	if msg, refuse := k8sSharedRepoShapeRefusal(config); refuse {
+		return "", errors.New(msg)
+	}
 	fmt.Printf("Starting agent '%s' on Kubernetes...\n", config.Name)
 	namespace := r.runNamespace(config.Labels)
 
@@ -607,6 +617,10 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		}
 		config.Workspace = resolvedWorkspace
 	}
+
+	// The scion.* annotations below are added to a copy, so the caller's
+	// config.Annotations is not modified (ptone/scion#5970).
+	config.Annotations = maps.Clone(config.Annotations)
 
 	// Persist workspace path in annotations for later sync
 	if config.Workspace != "" {
@@ -2049,6 +2063,10 @@ func applyKubernetesBlockIdentity(pod *corev1.Pod) {
 }
 
 func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev1.Pod, error) {
+	// The pod's annotations start from a copy, so the annotations added
+	// below do not modify the caller's config.Annotations.
+	config.Annotations = maps.Clone(config.Annotations)
+
 	// Command Resolution — see buildCommonRunArgs for the Docker/Podman
 	// equivalent. No-auth mode builds a raw shell command string to avoid
 	// the double-sh-c wrapping that previously caused the no-auth command
@@ -2508,6 +2526,15 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			{Name: "workspace", MountPath: "/repo-root/.git", SubPath: gitSubPath},
 			{Name: "workspace", MountPath: agentWorkingDir, SubPath: worktreeSubPath},
 		}
+		// Read-only narrowing of the shared .git admin surface for the agent
+		// container: hooks/info/objects-info/worktrees read-only, the agent's
+		// own worktrees/<name>/ read-write. This shape is gated by the refusal in
+		// Run today; the narrowing is kept here so the follow-up
+		// that lifts the refusal (adding the per-agent private .git/config on the
+		// export) needs no mount changes. The init container stays writable (it
+		// provisions: clone + worktree add) and is hardened by pkg/provision's
+		// SafeGitCommand/HostGitArgs instead.
+		agentVolumeMounts = append(agentVolumeMounts, k8sGitAdminReadOnlyMounts(gitSubPath, config.NFSWorktreeName)...)
 	}
 	// Keep the in-project agents root of a shared /workspace mount out of
 	// the agent's view (k8sWorkspaceAgentsExcluded). The worktree and
@@ -2557,7 +2584,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			Name:        config.Name,
 			Namespace:   namespace,
 			Labels:      config.Labels,
-			Annotations: withWorkspaceAgentsAnnotation(withHomeStorageAnnotation(config.Annotations, nfsHome), agentsExcluded),
+			Annotations: withScionAnnotation(withScionAnnotation(config.Annotations, k8sHomeStorageAnnotation, HomeStorageNFS, nfsHome), k8sWorkspaceAgentsAnnotation, "true", agentsExcluded),
 		},
 		Spec: corev1.PodSpec{
 			SecurityContext: podSecurityContext,
@@ -4627,6 +4654,115 @@ func NFSWorktreeContainerPath(name string) string {
 	return "/repo-root/worktrees/" + name
 }
 
+// k8sSharedRepoShapeRefusal reports whether this Kubernetes pod would share one
+// repository's .git across the project's agents on the NFS export, and the
+// neutral end-state message to return if so. The shared-.git shapes are:
+//   - worktree-per-agent (NFSWorktreeName set): every agent mounts the shared
+//     .git at /repo-root/.git;
+//   - shared-workspace (the project's shared checkout, with its .git, mounted at
+//     /workspace for every agent), which includes pre-#3998 agents that stay on
+//     the shared checkout (nfsKeepSharedCheckout).
+//
+// Clone-per-agent (NFSAgentDirName set) and empty-per-agent (NFSAgentDirEmpty)
+// each get their own agent directory and do not share a .git; the local/emptyDir
+// backends do not either. Everything else on the NFS backend is a shared checkout.
+//
+// The shape is derived from the per-agent workspace fields re-sent on every
+// start — NFSWorktreeName, NFSAgentDirName, NFSAgentDirEmpty and the
+// SCION_WORKSPACE_GIT env hint; the ephemeral GitCloneForInit can only add a
+// refusal, never lift one. So the refusal fires on EVERY start of a shared-repo
+// agent, including a bare restart; and an NFS agent whose shape is unset/unknown is
+// refused fail-closed rather than brought up on a writable shared checkout.
+func k8sSharedRepoShapeRefusal(config RunConfig) (string, bool) {
+	if config.WorkspaceBackendName != "nfs" || config.NFSPVClaimName == "" {
+		return "", false
+	}
+	// worktree-per-agent: every agent mounts the shared .git.
+	if config.NFSWorktreeName != "" {
+		return k8sSharedRepoShapeRefusalText, true
+	}
+	// clone-per-agent and empty-per-agent get their own agent directory and do not
+	// share a repository.
+	if config.NFSAgentDirName != "" || config.NFSAgentDirEmpty {
+		return "", false
+	}
+	// Otherwise this NFS agent uses the project's shared checkout (shared-workspace).
+	// A git-backed shared checkout is the shared-repository shape and is refused on
+	// every start (create, restart, or an unset shape). A non-git shared workspace
+	// has no shared .git and is allowed — but only when the signals positively say
+	// non-git; if git-ness cannot be determined, refuse (fail closed).
+	if config.GitCloneForInit != nil {
+		return k8sSharedRepoShapeRefusalText, true
+	}
+	if v, present := runConfigEnvValue(config, "SCION_WORKSPACE_GIT"); present {
+		if b, ok := util.ParseBool(v); ok && !b {
+			return "", false // positively non-git
+		}
+	}
+	return k8sSharedRepoShapeRefusalText, true
+}
+
+// runConfigEnvValue returns the value of the given key in config.Env ("KEY=VALUE"
+// entries), and whether it was present.
+func runConfigEnvValue(config RunConfig, key string) (string, bool) {
+	for _, kv := range config.Env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// k8sSharedRepoShapeRefusalText is the exact neutral end-state message returned
+// when a Kubernetes start is refused for the shared-repository shape.
+const k8sSharedRepoShapeRefusalText = "Kubernetes does not support git projects that share one repository across agents " +
+	"(worktree-per-agent or shared-workspace on NFS). Re-create the agent as clone-per-agent, " +
+	"or run it on a local or Docker broker. Work not pushed from the existing agent remains in " +
+	"the project's shared checkout on the workspace storage."
+
+// k8sGitAdminReadOnlyMounts returns the read-only subPath volumeMounts that
+// narrow the shared .git admin surface for a worktree-per-agent agent container.
+// The shared .git subPath itself is mounted read-write
+// elsewhere (objects and refs must be writable for commit); these layer
+// read-only over hooks/, info/, objects/info/ and worktrees/, with the agent's
+// own worktrees/<name>/ re-mounted read-write on top so it can still write its
+// own HEAD/index/logs. gitSubPath is the export-relative path of the shared
+// .git; ownWorktreeName is this agent's worktree admin dir name.
+//
+// Note: this does NOT make .git/config read-only — the per-agent private config
+// on Kubernetes needs the seeded copy on the export and is a tracked follow-up;
+// until it lands the shared config stays read-write (documented residual).
+func k8sGitAdminReadOnlyMounts(gitSubPath, ownWorktreeName string) []corev1.VolumeMount {
+	const base = "/repo-root/.git"
+	ro := func(rel string) corev1.VolumeMount {
+		return corev1.VolumeMount{
+			Name:      "workspace",
+			MountPath: path.Join(base, rel),
+			SubPath:   path.Join(gitSubPath, rel),
+			ReadOnly:  true,
+		}
+	}
+	mounts := []corev1.VolumeMount{
+		ro("hooks"),
+		ro("info"),
+		ro(path.Join("objects", "info")),
+		ro("worktrees"),
+	}
+	if ownWorktreeName != "" {
+		// The agent's own worktree admin dir is read-write on top of the
+		// read-only worktrees/ dir (its gitdir/config.worktree are not singled
+		// out read-only here — unlike the bind-mount runtimes; the shared-repo
+		// shape is refused at start and the shared-config follow-up adds the
+		// per-worktree file pins).
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      "workspace",
+			MountPath: path.Join(base, "worktrees", ownWorktreeName),
+			SubPath:   path.Join(gitSubPath, "worktrees", ownWorktreeName),
+		})
+	}
+	return mounts
+}
+
 // nfsWorktreeSubPaths returns the subPaths of the shared checkout's .git and
 // of the agent's worktree (<workspace>/worktrees/<agent name>) for
 // worktree-per-agent mode. name must be the agent's slug (lower-case
@@ -4831,20 +4967,22 @@ func k8sAgentsMaskPodVolume() corev1.Volume {
 	}
 }
 
-// withWorkspaceAgentsAnnotation returns annotations with
-// k8sWorkspaceAgentsAnnotation set when excluded is true and removed
-// otherwise. The input map is not modified.
-func withWorkspaceAgentsAnnotation(annotations map[string]string, excluded bool) map[string]string {
-	if _, has := annotations[k8sWorkspaceAgentsAnnotation]; !excluded && !has {
+// withScionAnnotation returns annotations with key set to value when set
+// is true and key removed otherwise. buildPod uses it for the annotations
+// it owns (k8sHomeStorageAnnotation, k8sWorkspaceAgentsAnnotation), so a
+// caller-supplied value never survives. The input map is not modified; it
+// is returned as is when no change is needed.
+func withScionAnnotation(annotations map[string]string, key, value string, set bool) map[string]string {
+	if _, has := annotations[key]; !set && !has {
 		return annotations
 	}
 	out := make(map[string]string, len(annotations)+1)
 	for k, v := range annotations {
 		out[k] = v
 	}
-	delete(out, k8sWorkspaceAgentsAnnotation)
-	if excluded {
-		out[k8sWorkspaceAgentsAnnotation] = "true"
+	delete(out, key)
+	if set {
+		out[key] = value
 	}
 	return out
 }

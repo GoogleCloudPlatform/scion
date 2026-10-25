@@ -258,12 +258,8 @@ type tiCall struct {
 func tiCensus(t *testing.T) (map[string]map[string][]tiCall, *token.FileSet) {
 	t.Helper()
 	fset := token.NewFileSet()
-	// pkgmove:scan-covers pkg/hub/apierr
-	// scanned through guardScanSubdirs; guards the test-identity call census (pkg/hub only; ../store is read alone).
-	// pkgmove:scan-covers pkg/hub/internal/principal
-	// scanned through guardScanSubdirs; guards the test-identity call census (pkg/hub only; ../store is read alone).
-	// pkgmove:scan-covers pkg/hub/maintenance
-	// scanned through guardScanSubdirs once it exists; guards the test-identity call census (pkg/hub only; ../store is read alone).
+	// pkgmove:scan-covers guardScanSubdirs
+	// scanned through guardScanSubdirs; guards the test-identity call census (pkg/hub and its guardScanSubdirs entries; ../store is read alone).
 	entries, err := readGuardScanDirs(".")
 	require.NoError(t, err)
 	out := map[string]map[string][]tiCall{}
@@ -563,6 +559,7 @@ func tiFuncCalls(census map[string]map[string][]tiCall, fn string) []string {
 func tiStoreUserCreators(t *testing.T, re *regexp.Regexp) []string {
 	t.Helper()
 	dir := filepath.Join("..", "store")
+	// scan-coverage:exempt reads pkg/store only.
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	fset := token.NewFileSet()

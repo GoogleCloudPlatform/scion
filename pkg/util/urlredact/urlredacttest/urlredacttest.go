@@ -19,6 +19,7 @@
 package urlredacttest
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -246,4 +247,45 @@ func Echoes(raw string) []string {
 		base, tail = raw[:i], raw[i:]
 	}
 	return []string{GitEcho(raw), base + "/info/refs" + tail, base + "/"}
+}
+
+// EndpointShape is an endpoint as a user may give it, with a credential in
+// an unusual place. Every value is made up.
+type EndpointShape struct {
+	Name, URL, Secret string
+	// Residual is set for a shape that the redactors which find URLs in
+	// free text, or take a URL alone (config.RedactURL, RedactURLsIn),
+	// leave as given by the rule itself (see urlredact.Undelimited): a URL
+	// without a scheme is not one to them, and a password that reads as a
+	// port and a path cannot be told from a path. A redactor that knows the
+	// endpoint (urlredact.RedactURLIn, HostAndPath) shows no part of
+	// Secret for any shape.
+	Residual bool
+}
+
+// EndpointShapes are the endpoint shapes the per-package tests run each
+// redactor of a hub endpoint on: as given, in an error text that quotes it
+// as given, and as a url.Error quotes it (%q). Each test pins the whole
+// output for every shape.
+var EndpointShapes = []EndpointShape{
+	{Name: "slash in password, no path", URL: "https://svc:Vb8k/Tq3m@hub.example.com", Secret: "Vb8k/Tq3m"},
+	{Name: "password, token query and fragment", URL: "https://alice:Vb8kTq3m@hub.example.com/p?token=Rw5nYp2c#frag", Secret: "Vb8kTq3m"},
+	{Name: "password, bad port", URL: "https://alice:Vb8kTq3m@hub.example.com:80a/p?k=Rw5nYp2c#frag", Secret: "Vb8kTq3m"},
+	{Name: "no scheme", URL: "alice:Vb8kTq3m@hub.example.com/p?k=Rw5nYp2c#frag", Secret: "Vb8kTq3m", Residual: true},
+	{Name: "no scheme, bad escape in host", URL: "alice:Vb8kTq3m@%zz?k=Rw5nYp2c#frag", Secret: "Vb8kTq3m", Residual: true},
+	{Name: "slash in password", URL: "https://alice:Vb8k/Tq3m@hub.example.com/p?k=Rw5nYp2c#frag", Secret: "Vb8k/Tq3m"},
+	{Name: "question mark in password", URL: "https://alice:Vb8k?Tq3m@hub.example.com/p?k=Rw5nYp2c#frag", Secret: "Vb8k?Tq3m"},
+	{Name: "hash in password", URL: "https://alice:Vb8k#Tq3m@hub.example.com/p?k=Rw5nYp2c#frag", Secret: "Vb8k#Tq3m"},
+	{Name: "space in password", URL: "https://alice:Vb8k Tq3m@hub.example.com/p?k=Rw5nYp2c#frag", Secret: "Vb8k Tq3m"},
+	{Name: "password read as a port and a path", URL: "https://alice:4826/Tq3m@hub.example.com/p?k=Rw5nYp2c#frag", Secret: "4826/Tq3m", Residual: true},
+	{Name: "double quote in password", URL: `https://alice:Vb8k"Tq3m/x@hub.example.com/p?k=Rw5nYp2c#frag`, Secret: `Vb8k"Tq3m/x`},
+	{Name: "backslash in password", URL: `https://alice:Vb8k\Tq3m/x@hub.example.com/p?k=Rw5nYp2c#frag`, Secret: `Vb8k\Tq3m/x`},
+	{Name: "short piece before a slash", URL: "https://alice:Vb/Vb8kTq3m@hub.example.com/p?k=Rw5nYp2c#frag", Secret: "Vb/Vb8kTq3m"},
+	{Name: "'@' in the path, no user info", URL: "https://hub.example.com/team@acme", Secret: ""},
+}
+
+// EndpointTexts returns the error texts a text redactor of shape is run
+// on: the URL quoted as given, and as a url.Error quotes it (%q).
+func EndpointTexts(url string) (asGiven, quoted string) {
+	return `Get "` + url + `": refused`, "parse " + strconv.Quote(url) + ": refused"
 }

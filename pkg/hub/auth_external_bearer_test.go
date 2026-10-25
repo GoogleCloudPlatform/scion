@@ -534,12 +534,8 @@ func TestNoTokenInfoOutsideGoogleCredentialValidator(t *testing.T) {
 	tokeninfoRE := regexp.MustCompile(`(?i)tokeninfo`)
 	var offenders []string
 
-	// pkgmove:scan-covers pkg/hub/apierr
-	// recursive walk already includes pkg/hub/apierr.
-	// pkgmove:scan-covers pkg/hub/internal/principal
-	// recursive walk already includes pkg/hub/internal/principal.
-	// pkgmove:scan-covers pkg/hub/maintenance
-	// recursive walk already includes pkg/hub/maintenance (no SkipDir for it).
+	// pkgmove:scan-covers pkg/hub/...
+	// recursive walk of pkg/hub (".", no SkipDir): covers every directory below it.
 	err := filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err

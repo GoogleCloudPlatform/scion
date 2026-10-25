@@ -56,10 +56,9 @@ func (l Layout) DescriptorDiff(d *api.BrokerWorkspaceStorage, hubExportID string
 		diff = append(diff, fmt.Sprintf("backend: hub %q, broker %q", l.Backend, d.Backend))
 	} else if l.Backend == BackendCloudRunVolume || l.Backend == BackendGKESharedVolume {
 		root, _ := l.subPathRoot()
-		switch {
-		case d.Volume == nil:
+		if d.Volume == nil {
 			diff = append(diff, "volume: broker reports no volume identity (upgrade it)")
-		default:
+		} else {
 			if d.Volume.SubPathRoot != root {
 				diff = append(diff, fmt.Sprintf("subpath_root: hub %q, broker %q", root, d.Volume.SubPathRoot))
 			}
@@ -69,10 +68,9 @@ func (l Layout) DescriptorDiff(d *api.BrokerWorkspaceStorage, hubExportID string
 		}
 	} else if l.Backend == BackendNFS {
 		root, _ := l.subPathRoot()
-		switch {
-		case d.NFS == nil:
+		if d.NFS == nil {
 			diff = append(diff, "nfs: broker reports no usable share")
-		default:
+		} else {
 			if d.NFS.Server != l.Share.Server {
 				diff = append(diff, fmt.Sprintf("nfs server: hub %q, broker %q", l.Share.Server, d.NFS.Server))
 			}

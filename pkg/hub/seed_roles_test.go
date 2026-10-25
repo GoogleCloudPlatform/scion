@@ -203,12 +203,13 @@ func TestBuiltInRoles_HubAdminConstraintPermissions(t *testing.T) {
 }
 
 // TestBuiltInRoles_HubAdminRevision pins the hub-admin revision and its
-// latest addition: revision 8 adds project.manage_visitors
-// (ptone/scion#4603).
+// latest additions: revision 9 adds project.chat_post (ptone/scion#5518),
+// revision 8 project.manage_visitors (ptone/scion#4603).
 func TestBuiltInRoles_HubAdminRevision(t *testing.T) {
 	admin := builtInRoleByName(t, store.SystemRoleHubAdmin)
-	assert.Equal(t, 8, admin.Revision)
+	assert.Equal(t, 9, admin.Revision)
 	assert.Contains(t, admin.Permissions, "project.manage_visitors")
+	assert.Contains(t, admin.Permissions, "project.chat_post")
 }
 
 // TestBuiltInRoles_ProjectMemberPermissions verifies that the curated
@@ -1055,7 +1056,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"gcp_service_account.assign",
 				"harness_config.create", "harness_config.delete",
 				"harness_config.list", "harness_config.read", "harness_config.update",
-				"project.delete", "project.list", "project.manage", "project.manage_visitors",
+				"project.chat_post", "project.delete", "project.list", "project.manage", "project.manage_visitors",
 				"project.read", "project.secret_read", "project.set_messaging_policy", "project.update",
 				"scheduled_event.create", "scheduled_event.delete",
 				"scheduled_event.list", "scheduled_event.read", "scheduled_event.update",
@@ -1078,7 +1079,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"gcp_service_account.assign",
 				"harness_config.create",
 				"harness_config.list", "harness_config.read", "harness_config.update",
-				"project.list", "project.manage", "project.manage_visitors",
+				"project.chat_post", "project.list", "project.manage", "project.manage_visitors",
 				"project.read", "project.secret_read", "project.update",
 				"scheduled_event.create",
 				"scheduled_event.list", "scheduled_event.read", "scheduled_event.update",
@@ -1096,7 +1097,7 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"agent.create", "agent.list", "agent.read",
 				"gcp_service_account.assign",
 				"harness_config.create", "harness_config.list", "harness_config.read",
-				"project.list", "project.read",
+				"project.chat_post", "project.list", "project.read",
 				"scheduled_event.create", "scheduled_event.list", "scheduled_event.read",
 				"skill.list", "skill.read",
 				"template.create", "template.list", "template.read",
@@ -1119,9 +1120,9 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 // TestProjectRoleRevisions verifies the current revision of each project role.
 func TestProjectRoleRevisions(t *testing.T) {
 	wantRevisions := map[string]int{
-		store.ProjectRoleOwner:   10,
-		store.ProjectRoleAdmin:   8,
-		store.ProjectRoleMember:  5,
+		store.ProjectRoleOwner:   11,
+		store.ProjectRoleAdmin:   9,
+		store.ProjectRoleMember:  6,
 		store.ProjectRoleVisitor: 1,
 	}
 	for _, role := range BuiltInRoles() {
@@ -1145,9 +1146,9 @@ func TestProjectRoleReconciliationConverges(t *testing.T) {
 		revision    int
 		permissions func() []string
 	}{
-		{store.ProjectRoleOwner, 10, projectOwnerPermissionIDs},
-		{store.ProjectRoleAdmin, 8, projectAdminPermissionIDs},
-		{store.ProjectRoleMember, 5, projectMemberCuratedPermissionIDs},
+		{store.ProjectRoleOwner, 11, projectOwnerPermissionIDs},
+		{store.ProjectRoleAdmin, 9, projectAdminPermissionIDs},
+		{store.ProjectRoleMember, 6, projectMemberCuratedPermissionIDs},
 		{store.ProjectRoleVisitor, 1, projectVisitorPermissionIDs},
 	}
 

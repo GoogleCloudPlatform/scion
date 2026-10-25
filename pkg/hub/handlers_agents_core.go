@@ -32,7 +32,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -537,7 +536,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	cursor := query.Get("cursor")
 	if cursor != "" {
 		if err := validateAuthorizedListCursor(cursor, cursorBinding); err != nil {
-			BadRequest(w, err.Error())
+			writeInvalidCursor(w)
 			return
 		}
 	}
@@ -1239,9 +1238,15 @@ func (s *Server) markCreateCleanupRefused(ctx context.Context, agentID string, r
 const createCleanupRefusedPrefix = "Create failed and its cleanup was refused: "
 
 // createCleanupRefusedMessage is the kept row's message after a refused
-// create-failure cleanup.
+// create-failure cleanup. It names force delete only when a force delete
+// would remove the run the broker holds (reportedRunDeletable,
+// ptone/scion#5016).
 func createCleanupRefusedMessage(refused *DeleteRunMismatchError) string {
-	return createCleanupRefusedPrefix + deleteRunMismatchMessage(refused) + ". Delete the agent to retry."
+	msg := createCleanupRefusedPrefix + deleteRunMismatchMessage(refused) + ". Delete the agent to retry"
+	if reportedRunDeletable(refused) {
+		msg += "; force delete removes run " + refused.CurrentRunID + " that the broker holds, then the agent"
+	}
+	return msg + "."
 }
 
 // isCreateCleanupRefusedRow reports whether a is a row markCreateCleanupRefused
@@ -3800,6 +3805,9 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 	case AgentRouteHoldLift:
 		s.handleAgentHoldLift(w, r, id)
 
+	case AgentRoutePendingConfig:
+		s.handleAgentPendingConfig(w, r, id)
+
 	case AgentRouteDelegations:
 		s.handleAgentDelegations(w, r, id)
 	case AgentRouteDelegationExchange:
@@ -3988,9 +3996,32 @@ func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, a
 			resp.Messageability = s.ComputeMessageability(ctx, identity, agent)
 		}
 	}
-	resp.Editability = buildAgentEditability(agent, s.agentEditAccessFor(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
+	access := s.agentEditAccessFor(ctx, GetIdentityFromContext(ctx), agent, resp.Cap)
+	access.HeldEdits = s.heldEditsEnabled()
+	resp.Editability = buildAgentEditability(agent, access)
 
-	resp.AppliedConfig = redactAppliedConfigEnvForResponse(resp.AppliedConfig, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
+	// The resolved container TZ, as on the PATCH response, for a caller who
+	// may view the agent's env: the zone can come from a user, project, hub
+	// or broker TZ env var (ptone/scion#2767). Others get neither field.
+	if s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap) {
+		tz := s.agentTZ(ctx, agent)
+		resp.ResolvedTimezone = &tz.TZ
+		resp.TimezoneSource = &tz.Source
+	}
+
+	resp.AppliedConfig, resp.PendingConfig = redactAgentConfigsForResponse(resp.AppliedConfig, resp.PendingConfig, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
+	if r.URL.Query().Get("view") == agentViewEdit {
+		// The applied config with every pending key applied, as the
+		// edit form shows it; the same env gate as the applied config.
+		next := s.effectiveNextRun(ctx, agent)
+		if next == agent.AppliedConfig {
+			next = cloneAppliedConfig(next)
+			if next != nil {
+				next.CreateInputs = nil
+			}
+		}
+		resp.EffectiveNextRun = redactAppliedConfigEnvForResponse(next, s.envViewAllowed(ctx, GetIdentityFromContext(ctx), agent, resp.Cap))
+	}
 
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -4101,6 +4132,10 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// agent's container timezone. Absent leaves the pin unchanged. It
 		// is accepted in any phase and applies at the next start.
 		ExplicitTimezone *string `json:"explicitTimezone,omitempty"`
+		// AgentRole is refused with held edits on (the role changes
+		// through reincarnate; held role edits are not stored yet).
+		// Without them it is ignored, as before.
+		AgentRole *string `json:"agentRole,omitempty"`
 	}
 
 	// The body is read into a buffer, rather than decoded straight off
@@ -4158,6 +4193,13 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		return
 	}
 
+	heldEdits := s.heldEditsEnabled()
+	if heldEdits && updates.AgentRole != nil {
+		writeError(w, http.StatusConflict, ErrCodeConflict, "The role cannot be edited here; change it by reincarnating the agent",
+			map[string]interface{}{"fields": map[string]string{"agentRole": "Change the role by reincarnating the agent."}})
+		return
+	}
+
 	// Refuse, before anything is written, a request that names a key the
 	// mutability table locks for this agent (agent_config_mutability.go):
 	// the same rule GET editability reports.
@@ -4166,7 +4208,7 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		resolvedHarness, _ := s.resolveAgentHarnessCapabilities(ctx, agent)
 		appliedFixed = appliedFixedValues(agent, resolvedHarness)
 	}
-	if ref := lockedPatchKeys(agent, presentAgentPatchKeys(updates.Name, updates.Labels, updates.Annotations, updates.TaskSummary, updates.GCPIdentity != nil, updates.ExplicitTimezone != nil), rawFields, updates.Config, appliedFixed); ref != nil {
+	if ref := lockedPatchKeysFor(agent, heldEdits, presentAgentPatchKeys(updates.Name, updates.Labels, updates.Annotations, updates.TaskSummary, updates.GCPIdentity != nil, updates.ExplicitTimezone != nil), rawFields, updates.Config, appliedFixed); ref != nil {
 		writePatchRefusal(w, agent, ref, updates.Config != nil)
 		return
 	}
@@ -4224,162 +4266,44 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		agent.TaskSummary = updates.TaskSummary
 	}
 
-	// Apply config updates. Allowed for a non-deleted agent with no
-	// container: created, stopped, error or suspended. Every start of such
-	// an agent -- a first start, a fresh start of a stopped or failed
-	// agent, and a resume of a suspended one -- creates a new container
-	// from AppliedConfig, so the edit is dispatched with it. Agents with a
-	// live container, or one being created or removed, are refused until
-	// held edits exist (see agent_config_mutability.go).
+	// Apply config updates. Without held edits (hub.agent_edit_held off)
+	// they are allowed for a non-deleted agent with no container: created,
+	// stopped, error or suspended. Every start of such an agent -- a first
+	// start, a fresh start of a stopped or failed agent, and a resume of a
+	// suspended one -- creates a new container from AppliedConfig, so the
+	// edit is dispatched with it. Agents with a live container, or one
+	// being created or removed, are refused. With held edits on,
+	// applyAgentConfigUpdateHeld keeps such edits as the agent's pending
+	// config instead (agent_pending_config.go).
+	var configHeld, pendingSaved, pendingFolded, pendingSuperseded, pendingUnappliable []string
 	if updates.Config != nil {
 		if !agent.DeletedAt.IsZero() {
 			Conflict(w, "Config cannot be updated for deleted agents")
 			return
 		}
-		if !configPatchPhase(agent.Phase) {
-			Conflict(w, configPatchPhaseMessage)
-			return
-		}
-		resolvedHarness, harnessCaps := s.resolveAgentHarnessCapabilities(ctx, agent)
-		if issues := validateConfigAgainstHarnessCapabilities(updates.Config, harnessCaps); len(issues) > 0 {
-			ValidationError(w, "Config contains unsupported fields for harness "+resolvedHarness, map[string]interface{}{
-				"harness": resolvedHarness,
-				"fields":  issues,
-			})
-			return
-		}
-		if agent.AppliedConfig == nil {
-			agent.AppliedConfig = &store.AgentAppliedConfig{}
-		}
-		cfg := updates.Config
-		if cfg.ThinkingLevel != nil {
-			if tl := *cfg.ThinkingLevel; tl < 0 || tl > 100 {
-				BadRequest(w, "thinking_level must be between 0 and 100")
+		if heldEdits {
+			out, ok := s.applyAgentConfigUpdateHeld(ctx, w, agent, configPatch{cfg: updates.Config, raw: rawFields, present: presentConfigKeys})
+			if !ok {
 				return
 			}
-		}
-		var modelSize string
-		if cfg.Model != "" {
-			// Resolved here, ahead of both recordExplicitEdits and the live
-			// write below, so both compare/store the same resolved value
-			// the requester's alias (if any) maps to -- not the raw alias
-			// they typed. This also ensures InlineConfig (set later)
-			// carries the resolved value.
-			// The size alias, if any, is taken first: it replaces the
-			// recorded size with the model below, so an explicit ID
-			// clears it. Declined limitation (#5502 review M2):
-			// CreateInputs records the resolved model, not the alias, so
-			// a reincarnation after this PATCH re-derives no size. The
-			// badge is display-only, and keeping the alias would change
-			// the reincarnate explicit-input contract.
-			modelSize = config.ModelSizeAlias(cfg.Model)
-			cfg.Model = s.resolveModelAliasForAgent(ctx, agent, cfg.Model)
-		}
-
-		// old is a snapshot of the live config exactly as it stood before
-		// any of the writes below, for recordExplicitEdits' diff (Option C,
-		// ptone/scion#2493, invariant E). Taken after thinking-level
-		// validation and model-alias resolution (pure reads) but before the
-		// first assignment into agent.AppliedConfig itself.
-		old := *agent.AppliedConfig
-
-		// config.env never sets the agent timezone; explicitTimezone does.
-		// The strip runs here, between the `old` snapshot above and the
-		// recordExplicitEdits call below -- never after it. See
-		// recordExplicitEdits' doc comment for why. An empty value is a
-		// marker the configure page may round-trip, so it is dropped
-		// silently.
-		if v, ok := cfg.Env[agentTZEnvKey]; ok {
-			delete(cfg.Env, agentTZEnvKey)
-			if v != "" {
-				warnings = append(warnings, configEnvTZIgnoredWarning)
+			warnings = append(warnings, out.warnings...)
+			configApplied, configHeld, configHeldForReincarnate = out.applied, out.held, out.heldForReincarnate
+			pendingSaved, pendingFolded, pendingUnappliable = out.saved, out.folded, out.unappliable
+		} else {
+			if !configPatchPhase(agent.Phase) {
+				Conflict(w, configPatchPhaseMessage)
+				return
 			}
-		}
-		// canViewAgentEnv is the same attach-equivalent-access gate the GET
-		// response's Env redaction uses (ResponseView). A caller who fails
-		// it never saw the live Env to begin with, so their request's env
-		// map cannot be trusted to list every key that still exists live --
-		// see recordExplicitEdits' env-removal gate. It also gates the env
-		// removals below (removedConfigEntries, nextClearedFields).
-		canAttachEnv := canViewAgentEnv(ctx, s, agent)
-		if agent.AppliedConfig.CreateInputs != nil {
-			recordExplicitEdits(agent.AppliedConfig.CreateInputs, &old, cfg, presentConfigKeys,
-				dispatchImageRegistry(s.GetDispatcher(), agent), canAttachEnv)
-		}
-
-		if cfg.Image != "" {
-			agent.AppliedConfig.Image = cfg.Image
-		}
-		if cfg.Model != "" {
-			agent.AppliedConfig.Model = cfg.Model
-			agent.AppliedConfig.ModelSize = modelSize
-		}
-		// Thinking level is applied only when the request names it; an
-		// explicit null unsets it, an absent key leaves it alone.
-		if presentConfigKeys["thinking_level"] {
-			agent.AppliedConfig.ThinkingLevel = cfg.ThinkingLevel
-		}
-		if cfg.Task != "" {
-			agent.AppliedConfig.Task = cfg.Task
-		}
-		if cfg.AuthSelectedType != "" {
-			agent.AppliedConfig.HarnessAuth = cfg.AuthSelectedType
-		}
-		if cfg.Env != nil {
-			// AppliedConfig.Env is a copy, so the auto-expose resolution
-			// below never leaks a derived value into InlineConfig.Env.
-			agent.AppliedConfig.Env = maps.Clone(cfg.Env)
-			project, err := s.store.GetProject(ctx, agent.ProjectID)
-			if err != nil {
-				slog.WarnContext(ctx, "applyAgentUpdate: project lookup failed; auto-expose project tier not re-derived",
-					"agent", agent.ID, "project", agent.ProjectID, "error", err)
-				project = nil
+			if !s.validateAgentConfigPatch(ctx, w, agent, updates.Config) {
+				return
 			}
-			applyPatchAutoExposeEnv(agent.AppliedConfig, &old, project, cfg.Env)
+			res := s.applyAgentConfigPatch(ctx, agent, configPatch{cfg: updates.Config, raw: rawFields, present: presentConfigKeys}, canViewAgentEnv(ctx, s, agent))
+			warnings = append(warnings, res.warnings...)
+			configApplied, configHeldForReincarnate = res.applied, res.heldForReincarnate
+			// A pending value stored while held edits were on must not be
+			// applied later over the value written now.
+			pendingSuperseded = dropPendingKeysNamed(agent, presentConfigKeys)
 		}
-		dropEchoedInlineImage(cfg, &old, dispatchImageRegistry(s.GetDispatcher(), agent))
-		// Start from the live InlineConfig and overlay only the keys the
-		// request names (ptone/scion#3901). The configure page does not
-		// render volumes, skills, MCP servers, services, command args or
-		// kubernetes, and sends telemetry and env only when touched, so a
-		// wholesale replace would wipe them on every Save and Start.
-		// The harness cannot change here: harness and harness_config are
-		// fixed keys, refused above when they would change. So the check
-		// against the agent's harness above covers every key the request
-		// sends, and kept keys are left as they were.
-		merged := mergePresentInlineFields(old.InlineConfig, cfg, presentConfigKeys)
-		agent.AppliedConfig.InlineConfig = merged
-		// provision, cleared and removed are computed once and drive both
-		// the reincarnation warnings and the disposition, so a key warned
-		// as taking effect at the next reincarnation is the key reported
-		// held for it.
-		provision, cleared := reincarnateOnlyConfigEdits(rawFields, cfg, old.InlineConfig)
-		removed := removedConfigEntries(old.InlineConfig, cfg, presentConfigKeys, canAttachEnv)
-		// The broker's start-time merge keeps a previous value the inline
-		// config leaves empty; the cleared paths it sends with each start
-		// let the broker remove them (ptone/scion#3906).
-		merged.ClearedFields = nextClearedFields(old.InlineConfig, cfg, rawFields, cleared, canAttachEnv)
-		// The provision-rendered keys changed since creation, which a
-		// broker with changedFields re-renders at start; for such a broker
-		// they take effect at the next start, not at the next
-		// reincarnation (ptone/scion#3982).
-		merged.ChangedFields = nextChangedFields(old.InlineConfig, provision)
-		// A resources edit that drops a stored sub-field keeps that
-		// sub-field at start (the merge applies only non-empty values) and
-		// records no clear, so it waits for the next reincarnation
-		// (ptone/scion#5676). Added after the clears are recorded:
-		// recording it would revert the whole resources value.
-		cleared = withDroppedResourcesSubField(cleared, old.InlineConfig, cfg, presentConfigKeys)
-		// A broker with clearedFields applies the clears recorded above at
-		// the next start (ptone/scion#4890), so only the rest are held.
-		// What is reported applied follows what was recorded above.
-		sup := s.agentBrokerStartSupport(ctx, agent)
-		provision = sup.heldProvisionEdits(provision, old.InlineConfig, cfg, merged.ClearedFields)
-		cleared = sup.heldClearEdits(cleared, rawFields, merged.ClearedFields, droppedEnvKeys(old.InlineConfig, cfg, presentConfigKeys))
-		removed = sup.heldRemovals(removed, merged.ClearedFields)
-		warnings = append(warnings, sup.reincarnateOnlyEditWarnings(provision, cleared)...)
-		warnings = append(warnings, removedEntriesWarnings(removed)...)
-		configApplied, configHeldForReincarnate = configEditDisposition(rawFields, cfg, old.InlineConfig, provision, cleared, removed)
 	}
 
 	// Apply GCP identity update (only allowed for agents in 'created' phase)
@@ -4590,13 +4514,28 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		return
 	}
 
+	if len(pendingFolded) > 0 {
+		s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigApplied, pendingFolded, pendingFoldTriggerUpdate)
+	}
+	if len(pendingSaved) > 0 {
+		s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigSaved, pendingSaved, "")
+	}
+	s.auditUnappliablePendingKeys(ctx, agent.ID, pendingUnappliable)
+	if len(pendingSuperseded) > 0 {
+		s.auditPendingConfig(ctx, agent.ID, mutationTypeAgentPendingConfigDiscarded, pendingSuperseded, pendingDiscardTriggerSuperseded)
+	}
+
 	tz := s.agentTZ(ctx, agent)
+	disposition := agentUpdateDisposition(before, agent, configApplied, configHeldForReincarnate, timezoneChanged, saWrite != nil && saWrite.Assignment != nil)
+	if len(configHeld) > 0 {
+		disposition.Held = configHeld
+	}
 	writeJSON(w, http.StatusOK, agentUpdateResponse{
 		Agent:            redactedAgentCopy(ctx, s, agent),
 		ResolvedTimezone: tz.TZ,
 		TimezoneSource:   tz.Source,
 		Warnings:         warnings,
-		Disposition:      agentUpdateDisposition(before, agent, configApplied, configHeldForReincarnate, timezoneChanged, saWrite != nil && saWrite.Assignment != nil),
+		Disposition:      disposition,
 	})
 }
 
@@ -5142,6 +5081,9 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 				return
 			}
 			writeErrorFromErr(w, err, "")
+			return
+		}
+		if !admitDelegatedAgentHandler(w, r, opAgentActionMessage, targetAgent) {
 			return
 		}
 

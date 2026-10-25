@@ -1961,8 +1961,8 @@ func runHubProjectCreate(cmd *cobra.Command, args []string) error {
 	//
 	// The clone-url label is always https, whatever scheme the remote uses
 	// (ptone/scion#2862). Agents and shared-workspace init clone from it
-	// with the hub/broker token, and token auth only works over HTTPS:
-	// util.authenticatedCloneURL injects the token only for https URLs, and
+	// with the hub/broker token, and token auth only works over HTTPS: the
+	// host-scoped credential helper supplies the token for https URLs only, and
 	// the broker's git credential helper supplies GITHUB_TOKEN for HTTP(S)
 	// clones only (see hubCloneTransportNote). An ssh:// or git:// label
 	// would clone without credentials, or stall on an SSH host-key prompt.

@@ -40,6 +40,7 @@ const (
 	ErrCodeAgentUpgradeRequired             = apierr.ErrCodeAgentUpgradeRequired
 	ErrCodeBrokerAuthFailed                 = apierr.ErrCodeBrokerAuthFailed
 	ErrCodeBrokerTimeout                    = apierr.ErrCodeBrokerTimeout
+	ErrCodeChatPostDenied                   = apierr.ErrCodeChatPostDenied
 	ErrCodeClockSkew                        = apierr.ErrCodeClockSkew
 	ErrCodeCloneFailed                      = apierr.ErrCodeCloneFailed
 	ErrCodeConflict                         = apierr.ErrCodeConflict
@@ -109,11 +110,13 @@ const (
 	ErrCodeUnavailable                      = apierr.ErrCodeUnavailable
 	ErrCodeUnprocessable                    = apierr.ErrCodeUnprocessable
 	ErrCodeUnsupportedCapability            = apierr.ErrCodeUnsupportedCapability
+	ErrCodeUserDeleteBlocked                = apierr.ErrCodeUserDeleteBlocked
 	ErrCodeUserNotFound                     = apierr.ErrCodeUserNotFound
 	ErrCodeValidationError                  = apierr.ErrCodeValidationError
 	ErrCodeVersionConflict                  = apierr.ErrCodeVersionConflict
 	deleteInProgressMessage                 = apierr.DeleteInProgressMessage
 	storeMembersGroupPrincipalMessage       = apierr.StoreMembersGroupPrincipalMessage
+	invalidCursorMessage                    = apierr.InvalidCursorMessage
 )
 
 var (
@@ -143,6 +146,10 @@ func writeError(p0 http.ResponseWriter, p1 int, p2 string, p3 string, p4 map[str
 
 func writeErrorFromErr(p0 http.ResponseWriter, p1 error, p2 string) {
 	apierr.WriteErrorFromErr(p0, p1, p2)
+}
+
+func writeInvalidCursor(p0 http.ResponseWriter) {
+	apierr.WriteInvalidCursor(p0)
 }
 
 func writeJSON(p0 http.ResponseWriter, p1 int, p2 interface{}) {

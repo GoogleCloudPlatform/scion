@@ -39,11 +39,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact"
 )
 
 const (
@@ -215,17 +217,26 @@ func ParseDelegations(values []string) (map[string]string, error) {
 // (lowercase scheme and host, no default port, no trailing slash, no
 // query, fragment or user info). https is required except for a loopback
 // host.
+//
+// An endpoint holding an '@' anywhere is refused: with one, a password
+// containing '/', '?' or '#' can parse as a host, port and path. Error
+// texts show the endpoint only by its scheme, host, port and path (see
+// displayEndpoint).
 func NormalizeEndpoint(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", errors.New("an endpoint is required (--endpoint)")
 	}
+	shown := displayEndpoint(raw)
+	if strings.Contains(raw, "@") {
+		return "", fmt.Errorf("invalid endpoint %s: no user info or '@'", shown)
+	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
-		return "", fmt.Errorf("invalid endpoint %q: must be an absolute URL", raw)
+		return "", fmt.Errorf("invalid endpoint %s: must be an absolute URL", shown)
 	}
 	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return "", fmt.Errorf("invalid endpoint %q: no user info, query or fragment", raw)
+		return "", fmt.Errorf("invalid endpoint %s: no user info, query or fragment", shown)
 	}
 	scheme := strings.ToLower(u.Scheme)
 	host := strings.ToLower(u.Hostname())
@@ -237,13 +248,13 @@ func NormalizeEndpoint(raw string) (string, error) {
 		}
 	case "http":
 		if !isLoopbackHost(host) {
-			return "", fmt.Errorf("invalid endpoint %q: https is required", raw)
+			return "", fmt.Errorf("invalid endpoint %s: https is required", shown)
 		}
 		if port == "80" {
 			port = ""
 		}
 	default:
-		return "", fmt.Errorf("invalid endpoint %q: https is required", raw)
+		return "", fmt.Errorf("invalid endpoint %s: https is required", shown)
 	}
 	hostport := host
 	if strings.Contains(host, ":") {
@@ -253,6 +264,20 @@ func NormalizeEndpoint(raw string) (string, error) {
 		hostport += ":" + port
 	}
 	return scheme + "://" + hostport + strings.TrimRight(u.EscapedPath(), "/"), nil
+}
+
+// endpointNotShown stands for an endpoint that error texts do not show.
+const endpointNotShown = "(endpoint not shown)"
+
+// displayEndpoint returns raw for an error text, quoted: by its scheme,
+// host, port and path only (urlredact.HostAndPath), or endpointNotShown
+// when raw does not parse or holds an '@' that HostAndPath cannot place.
+func displayEndpoint(raw string) string {
+	u, ok := urlredact.HostAndPath(raw)
+	if !ok {
+		return endpointNotShown
+	}
+	return strconv.Quote(u.String())
 }
 
 func isLoopbackHost(h string) bool {
@@ -351,7 +376,7 @@ func ownHubAddrs(getenv func(string) string) ([]hubAddr, error) {
 func CheckNotOwnHub(endpoint string, getenv func(string) string) error {
 	target, err := parseHubAddr(endpoint)
 	if err != nil {
-		return fmt.Errorf("invalid endpoint %q: %v", endpoint, err)
+		return fmt.Errorf("invalid endpoint %s: %v", displayEndpoint(endpoint), err)
 	}
 	owns, err := ownHubAddrs(getenv)
 	if err != nil {

@@ -686,13 +686,14 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	f.artifact = seedLiveInventoryArtifact(t, ctx, artStore, artBlobs, f.project)
 	seedLiveInventoryCatalogFiles(t, ctx, s, artBlobs, &f)
 
-	// hub.conduit, hub.agent_delegation and federation.project_visitors on
-	// too, so their experiment-gated routes are live: the registry above
-	// with all three also defaulting on (no operational settings, which the
-	// other entries rely on, are replaced).
+	// hub.conduit, hub.agent_delegation, federation.project_visitors and
+	// hub.agent_edit_held on too, so their experiment-gated routes are
+	// live: the registry above with all four also defaulting on (no
+	// operational settings, which the other entries rely on, are replaced).
 	var active []experiments.Experiment
 	for _, e := range srv.experimentRegistry().All() {
-		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.FederationProjectVisitors {
+		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.FederationProjectVisitors ||
+			e.Name == experiments.ChatStarredMessages || e.Name == experiments.AgentEditHeld {
 			e.Default = true
 		}
 		active = append(active, e)
@@ -704,6 +705,8 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(experiments.Artifacts))
 	require.True(t, srv.experimentEnabled(experiments.AgentDelegation))
 	require.True(t, srv.experimentEnabled(experiments.FederationProjectVisitors))
+	require.True(t, srv.experimentEnabled(experiments.ChatStarredMessages))
+	require.True(t, srv.experimentEnabled(experiments.AgentEditHeld))
 	// POST /api/v1/auth/federation-token also answers 404 while the OIDC
 	// provider is off: install a test key manager and allow the audience
 	// that bodyOverrides sends, so the route reaches its caller checks.
@@ -942,6 +945,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/agents/{id}/status":                                           {"id": f.agent},
 		"/api/v1/projects/{projectId}/agents/{id}/status":                      {"projectId": f.project, "id": f.agent},
 		"/api/v1/agents/{id}/workspace":                                        {"id": f.agent},
+		"/api/v1/agents/{id}/pending-config":                                   {"id": f.agent},
 		"/api/v1/agents/{id}/workspace/sync-from":                              {"id": f.agent},
 		"/api/v1/agents/{id}/workspace/sync-to":                                {"id": f.agent},
 		"/api/v1/agents/{id}/workspace/sync-to/finalize":                       {"id": f.agent},
@@ -1055,6 +1059,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		// --- user family ---
 		"/api/v1/users/{id}":                 {"id": f.user},
 		"/api/v1/users/{id}/revoke-sessions": {"id": f.user},
+		"/api/v1/users/{id}/delete-blockers": {"id": f.user},
 
 		// --- skill family ---
 		"/api/v1/skills/{id}":                          {"id": f.skill},
@@ -1187,6 +1192,9 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/chat/conversations/{id}/typing":               {"id": f.chatTopic},
 		"/api/v1/chat/conversations/{id}/interagent":           {"id": f.chat.dmAgent},
 		"/api/v1/chat/conversations/{id}/promote":              {"id": f.chat.dmAgent},
+		// Starred messages: the fixture thread's message (the PUT entry
+		// stars it before the read entries, the DELETE entry removes it).
+		"/api/v1/chat/stars/{messageId}": {"messageId": f.chat.topicMessage},
 
 		// --- integrations family ---
 		"/api/v1/admin/integrations/{name}":         {"name": f.integrationName},
@@ -1227,6 +1235,9 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 func queryOverrides(f idFixtures) map[string]string {
 	return map[string]string{
 		"/api/v1/chat/prefs": "agentId=" + f.agent,
+		// The star list needs its conversation, the state its messages.
+		"/api/v1/chat/stars":       "conversationKey=" + f.chatTopic,
+		"/api/v1/chat/stars/state": "messageId=" + f.chat.topicMessage,
 		// The single-file publish is selected by ?name= (pkg/artifacts).
 		"/api/v1/artifacts": "name=live-inventory.txt&scope=" + f.project,
 		// handleConversationResolve 400s without a reference.
@@ -1258,6 +1269,8 @@ func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 		// an admitted caller gets 200 instead of a body 400
 		// (seedLiveInventoryFixtures allows it).
 		{"federation.token.mint", "/api/v1/auth/federation-token"}: {"audience": liveInventoryFederationAudience},
+		// A star names the conversation of the message it stars.
+		{"chat.star.add", "/api/v1/chat/stars/{messageId}"}: {"conversationKey": f.chatTopic},
 		// updateProjectMemberRole (handlers_project_members.go) 400s
 		// "roleDefinitionId is required" on an empty body before the
 		// binding ID is used for anything; with a real role ID, the

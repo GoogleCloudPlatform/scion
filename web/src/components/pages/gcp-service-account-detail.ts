@@ -64,6 +64,7 @@ import { saRef, saStatusUrl, saVerifyUrl } from '../../shared/gcp-service-accoun
 import { deleteGCPServiceAccount } from '../../shared/gcp-service-account-delete.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
+import { navigateTo } from '../../client/navigation.js';
 import '../shared/detail-header.js';
 import '../shared/gcp-service-account-status.js';
 
@@ -266,7 +267,7 @@ export class ScionPageGCPServiceAccountDetail extends LitElement {
         this.actionError = outcome.message;
         return;
       }
-      window.location.href = '/settings?tab=service-accounts';
+      navigateTo('/settings?tab=service-accounts');
     } catch (err) {
       this.actionError = err instanceof Error ? err.message : 'Failed to delete';
     } finally {

@@ -396,13 +396,6 @@ func SuggestedProjectStorageYAML(ps *V1ProjectStorageConfig) string {
 	return string(data)
 }
 
-func homesOrLocal(h string) string {
-	if h == "" {
-		return HomeStorageBackendLocal
-	}
-	return h
-}
-
 func isZeroWorkspaceStorage(ws *V1WorkspaceStorageConfig) bool {
 	return ws.Backend == "" && ws.NFS == nil && ws.CloudRunVolume == nil && ws.GKESharedVolume == nil
 }
@@ -585,7 +578,7 @@ func CheckStorageBlocksLoaded(gc *GlobalConfig, check bool, data []byte) error {
 		return nil
 	}
 	var doc interface{}
-	if err := yamlv3.Unmarshal(data, &doc); err != nil {
+	if err := unmarshalSettingsYAML(data, &doc); err != nil {
 		for _, key := range storageSettingKeys {
 			if strings.Contains(string(data), key) {
 				return fmt.Errorf("the global settings file cannot be parsed and mentions %s; refusing to fall back to the local backend", key)
@@ -644,7 +637,7 @@ func GlobalSettingsStorageKey(keys []string) string {
 		return ""
 	}
 	var doc interface{}
-	if yamlv3.Unmarshal(data, &doc) != nil {
+	if unmarshalSettingsYAML(data, &doc) != nil {
 		return ""
 	}
 	return findMappingKey(doc, keys)

@@ -729,6 +729,22 @@ func (c *GitHubResolutionCache) getStale(uri string) (ResolvedSkill, bool) {
 	return skill, true
 }
 
+// legacyModelessEntry returns the entry under uri if it is one recorded
+// before file modes were carried (some file has no Mode) and could still
+// be served: fresh, or, for a branch ref, within MaxResolutionStaleAge.
+// GitHubSkillResolver serves it only when re-resolving the ref failed
+// (ptone/scion#5781).
+func (c *GitHubResolutionCache) legacyModelessEntry(uri string, isBranchRef bool) (ResolvedSkill, bool) {
+	skill, ok := c.Get(uri)
+	if !ok && isBranchRef {
+		skill, ok = c.getStale(uri)
+	}
+	if !ok || skillFilesHaveModes(skill.Files) {
+		return ResolvedSkill{}, false
+	}
+	return skill, true
+}
+
 // credSlot is a per-credentialID semaphore plus a reference count of callers
 // currently holding or waiting on it, so acquireCredentialSlot can delete the
 // entry once nothing needs it anymore (see the map-growth comment there).

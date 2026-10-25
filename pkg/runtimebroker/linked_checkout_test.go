@@ -436,6 +436,11 @@ func assertRoutedToLocalWorktree(t *testing.T, sc *startContext) {
 	if sc.Opts.GitClone != nil {
 		t.Errorf("Opts.GitClone = %+v, want nil", sc.Opts.GitClone)
 	}
+	// The recorded origin must be captured from the clone URL before GitClone is
+	// cleared, so worktree creation can pin the git-lfs endpoint from it.
+	if sc.Opts.RecordedOriginURL != linkedTestRemote {
+		t.Errorf("Opts.RecordedOriginURL = %q, want %q (captured before GitClone cleared)", sc.Opts.RecordedOriginURL, linkedTestRemote)
+	}
 	if sc.Opts.Workspace != "" {
 		t.Errorf("Opts.Workspace = %q, want empty", sc.Opts.Workspace)
 	}

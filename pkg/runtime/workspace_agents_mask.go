@@ -94,6 +94,16 @@ const workspaceProjectConfigDir = ".scion"
 // the agent could point it elsewhere for later starts.
 var errProjectConfigSymlink = errors.New("the workspace's .scion is a symbolic link; project configuration in a workspace that agents share must be a directory or a project marker file, so that it can be mounted read-only")
 
+// errOutsideRootNotRegistered is returned when a workspace outside the repository
+// root is not a registered worktree of it: the outside-root fallback then mounts
+// nothing and refuses, rather than binding the whole checkout.
+var errOutsideRootNotRegistered = errors.New("workspace is outside the project repository root and is not a registered worktree of it; refusing to mount the whole repository")
+
+// errAppleSharedWorkspaceUnsupported is returned when a shared-workspace git layout
+// is requested on the Apple runtime, which cannot bind a per-agent read-only
+// .git/config without breaking the main worktree.
+var errAppleSharedWorkspaceUnsupported = errors.New("the shared-workspace git layout is not supported on the Apple runtime, which cannot make .git/config read-only without breaking the main worktree; use a worktree-per-agent project or a different runtime")
+
 // errProjectConfigMarkerNoBind is returned for a workspace whose .scion is
 // a project marker file on a runtime that cannot bind a single file: the
 // marker would stay writable, so the agent could replace it.
@@ -195,4 +205,147 @@ func nestedProjectConfigRel(repoRoot, projectConfigPath string) (string, bool) {
 		return "", false
 	}
 	return rel, true
+}
+
+// ensureAgentsMaskPoint creates <src>/agents, the mount point of the agents
+// mask under the read-only project configuration directory src, on the
+// runtimes that mask the agents directory whenever src is a directory
+// (Docker and Podman). The read-only mount leaves the container runtime no
+// way to create it, so a failure to create it, or an existing entry that is
+// not a real directory, refuses the start instead of running without the
+// mask. Apple masks only an existing agents directory and creates nothing;
+// a src that is not a directory (a marker file) has no agents directory.
+func ensureAgentsMaskPoint(config RunConfig, src string) error {
+	if config.RuntimeName == appleContainerRuntimeName || !isDir(src) {
+		return nil
+	}
+	agents := filepath.Join(src, "agents")
+	if err := os.MkdirAll(agents, 0o755); err != nil {
+		return fmt.Errorf("cannot create the project's agents directory to mask it: %w", err)
+	}
+	info, err := os.Lstat(agents)
+	if err != nil {
+		return fmt.Errorf("cannot check the project's agents directory to mask it: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("the project's agents directory is not a directory (%s), so it cannot be masked", info.Mode().Type())
+	}
+	return nil
+}
+
+// agentsMaskLstat is the os.Lstat seam used only by requireExistingAgentsMask,
+// so tests can inject an entry type or a stat error for src or <src>/agents
+// without a privileged filesystem setup. Tests swap it and restore it with
+// t.Cleanup, and must not run in parallel.
+var agentsMaskLstat = os.Lstat
+
+// errAgentsMaskPointMissing is returned on Docker and Podman when a nested or
+// outside-root own-checkout project .scion directory has no agents directory.
+// This runtime masks .scion/agents in the container but, unlike the
+// workspace-root layouts, never creates it under these read-only binds, so the
+// start is refused until the directory exists.
+var errAgentsMaskPointMissing = errors.New("the project's .scion directory has no agents directory; this runtime masks .scion/agents in the container and does not create it in this directory")
+
+// errAgentsMaskNotDir is returned when a project .scion entry, or its agents
+// entry, exists but is not a real directory, so it cannot be masked and is not
+// created in its place.
+var errAgentsMaskNotDir = errors.New("the project's .scion/agents entry is not a directory, so it cannot be masked")
+
+// requireExistingAgentsMask requests a tmpfs mask of <tgt>/agents for a project
+// .scion bound read-only at tgt whose broker-side source is src. It NEVER
+// creates anything: these binds (a nested .scion, or an outside-root own
+// checkout's .scion) are the user's checkout, which the runtime must not write
+// to. src and <src>/agents are classified with os.Lstat (never following a
+// symlink), so a link or other non-directory fails closed rather than masking
+// the wrong target. On Docker and Podman an absent agents directory refuses the
+// start, so every start that succeeds already has a real directory to mask;
+// Apple masks only an existing directory and creates nothing. The mask target is
+// handed to addMask, which the caller emits as a tmpfs AFTER the bind mounts, so
+// the mask lands over the bind. It is the single no-create code path shared by
+// the nested and outside-root own-.scion cases.
+func requireExistingAgentsMask(config RunConfig, src, tgt string, addMask func(maskTarget string)) error {
+	srcInfo, err := agentsMaskLstat(src)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			// workspaceProjectConfigMount already found src, so a not-exist here
+			// is a race: binding a missing source would make the runtime create
+			// it and start unmasked. Fail closed.
+			return fmt.Errorf("agent %q: %s disappeared before the start: %w", config.Name, src, err)
+		}
+		return fmt.Errorf("agent %q: cannot check %s to mask it: %w", config.Name, src, err)
+	}
+	switch mode := srcInfo.Mode(); {
+	case mode&os.ModeSymlink != 0:
+		return fmt.Errorf("agent %q: %s: %w", config.Name, src, errProjectConfigSymlink)
+	case mode.IsDir():
+		// Fall through to the agents/ entry below.
+	case mode.IsRegular():
+		// A project marker file has no agents/ to mask.
+		return nil
+	default:
+		return fmt.Errorf("agent %q: %s (%s): %w; replace it with a directory", config.Name, src, agentsMaskEntryType(mode), errAgentsMaskNotDir)
+	}
+
+	agentsPath := filepath.Join(src, "agents")
+	agentsInfo, err := agentsMaskLstat(agentsPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			if config.RuntimeName == appleContainerRuntimeName {
+				// Apple masks only an existing agents dir and creates nothing.
+				return nil
+			}
+			return fmt.Errorf("agent %q: %s: %w; run: mkdir %q and start the agent again", config.Name, src, errAgentsMaskPointMissing, agentsPath)
+		}
+		return fmt.Errorf("agent %q: cannot check %s to mask it: %w", config.Name, agentsPath, err)
+	}
+	if !agentsInfo.Mode().IsDir() {
+		return fmt.Errorf("agent %q: %s (%s): %w; replace it with a directory", config.Name, agentsPath, agentsMaskEntryType(agentsInfo.Mode()), errAgentsMaskNotDir)
+	}
+	addMask(path.Join(tgt, "agents"))
+	return nil
+}
+
+// agentsMaskEntryType names a non-directory entry type for the fail-closed mask
+// errors: "symlink", "regular file", or "special file (<type>)".
+func agentsMaskEntryType(mode fs.FileMode) string {
+	switch {
+	case mode&os.ModeSymlink != 0:
+		return "symlink"
+	case mode.IsRegular():
+		return "regular file"
+	default:
+		return "special file (" + mode.Type().String() + ")"
+	}
+}
+
+// applyNestedProjectConfig handles a project whose configuration directory lies
+// in a SUBDIRECTORY of the bound workspace (ProjectConfigPath is not
+// <workspace>/.scion), so that binding the workspace read-write would otherwise
+// leave the real <workspace>/<sub>/.scion (settings, templates, agents/)
+// writable in the container. It binds that nested .scion READ-ONLY and masks its
+// agents/ via requireExistingAgentsMask (emitted after the bind mounts, and
+// never created under the read-only bind). A symlinked or (on a no-file-bind
+// runtime) marker nested .scion is refused fail-closed (errProjectConfigSymlink
+// / errProjectConfigMarkerNoBind). It is a no-op when the project config is at
+// <workspace>/.scion or absent. containerWorkspace is where the workspace is
+// bound (e.g. "/workspace" or "/repo-root/<rel>").
+func applyNestedProjectConfig(config RunConfig, containerWorkspace string, registerMount func(string, string, bool, bool), addMask func(maskTarget string)) error {
+	rel, ok := nestedProjectConfigRel(config.Workspace, config.ProjectConfigPath)
+	if !ok {
+		return nil
+	}
+	subdir := filepath.Dir(rel) // rel is "<sub>/.scion"
+	projectDir := filepath.Join(config.Workspace, subdir)
+	containerProjectDir := path.Join(containerWorkspace, filepath.ToSlash(subdir))
+	src, tgt, ok, err := workspaceProjectConfigMount(projectDir, containerProjectDir, config.RuntimeName != appleContainerRuntimeName)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	registerMount(src, tgt, true, true) // nested .scion read-only (after the /workspace bind)
+	// Mask the nested .scion's agents/ when it exists, failing closed otherwise;
+	// requireExistingAgentsMask never creates anything under this read-only bind.
+	return requireExistingAgentsMask(config, src, tgt, addMask)
 }

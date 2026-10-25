@@ -471,3 +471,29 @@ func TestCheckGlobalStorageBlocksLoaded_V1BlockNotLoaded(t *testing.T) {
 	assert.ErrorContains(t, err, "shared_dir_storage")
 	assert.NoError(t, CheckGlobalStorageBlocksLoaded(&GlobalConfig{SharedDirStorage: &V1SharedDirStorageConfig{Backend: "nfs"}}), "a loaded block passes")
 }
+
+// nonStringParentMergeKeyYAML has a "<<" merge key with a non-scalar
+// mapping key under a parent mapping that also has a non-string key. The
+// yaml.v3 decoder panics on it even when the target is interface{}.
+const nonStringParentMergeKeyYAML = "schema_version: \"1\"\nserver:\n  1: x\n  <<: {[a]: b}\n"
+
+// TestStorageBlockChecks_DecoderPanicIsParseError: a global settings file
+// whose YAML makes the decoder panic is an ordinary parse failure for the
+// storage-block checks, as for every other settings decode:
+// CheckStorageBlocksLoaded refuses a file that mentions a storage key and
+// GlobalSettingsStorageKey reports none, neither panicking.
+func TestStorageBlockChecks_DecoderPanicIsParseError(t *testing.T) {
+	content := nonStringParentMergeKeyYAML + "  project_storage:\n    backend: nfs\n"
+	var err error
+	require.NotPanics(t, func() { err = CheckStorageBlocksLoaded(&GlobalConfig{}, true, []byte(content)) })
+	assert.ErrorContains(t, err, "cannot be parsed and mentions project_storage")
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".scion")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(content), 0o600))
+	var key string
+	require.NotPanics(t, func() { key = GlobalSettingsStorageKey([]string{"project_storage"}) })
+	assert.Equal(t, "", key, "an unparseable file is left to the load-error path")
+}

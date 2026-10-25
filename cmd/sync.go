@@ -267,6 +267,12 @@ func syncToViaHub(hubCtx *HubContext, agentID, agentName, localPath string) erro
 		statusln("No files to sync.")
 		return nil
 	}
+	// Uploads read through this root; see transfer.Client.UploadFiles.
+	localRoot, err := os.OpenRoot(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to open local workspace %s: %w", localPath, err)
+	}
+	defer func() { _ = localRoot.Close() }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -334,7 +340,7 @@ func syncToViaHub(hubCtx *HubContext, agentID, agentName, localPath string) erro
 		return nil
 	}
 
-	if err := transferClient.UploadFiles(ctx, toUpload, resp.UploadURLs, progress); err != nil {
+	if err := transferClient.UploadFiles(ctx, localRoot, toUpload, resp.UploadURLs, progress); err != nil {
 		return fmt.Errorf("upload failed: %w", err)
 	}
 

@@ -30,7 +30,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -393,7 +392,9 @@ func TestBoundaryAuditWriterRemoved(t *testing.T) {
 	// declaration with these names is forbidden.
 	forbiddenTypes := map[string]bool{"AuditRequest": true, "ImpactCounts": true}
 
-	files, err := filepath.Glob("*.go")
+	// pkgmove:scan-covers guardScanSubdirs
+	// scanned through guardScanSubdirs: pkg/hub and every area moved out of it.
+	files, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	require.NotEmpty(t, files)
 	fset := token.NewFileSet()

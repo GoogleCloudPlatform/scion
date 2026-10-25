@@ -181,6 +181,7 @@ func attachmentDeliveries(messageID string, refs []AttachmentRef) []messages.Att
 		out = append(out, messages.AttachmentDelivery{
 			ArtifactID: ref.ID, MessageID: messageID, Name: ref.Name,
 			MimeType: ref.MimeType, Size: ref.Size, SHA256: ref.sha256,
+			ProjectedPath: ref.projectedPath, ProjectedMount: ref.projectedMount,
 		})
 	}
 	return out
