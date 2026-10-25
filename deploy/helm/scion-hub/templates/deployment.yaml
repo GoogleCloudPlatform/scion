@@ -484,8 +484,9 @@ spec:
             {{- end }}
             {{- /*
             The relay hop's certificate and CA, as whole directories and not
-            by subPath: a subPath mount never sees a rotated Secret, and the
-            hub re-reads these files when they change.
+            by subPath: a subPath mount never sees a rotated Secret. The hub
+            re-reads the certificate and key when they change; it reads the CA
+            once at startup, so a CA change needs a rolling restart.
             */}}
             {{- if $relayTls }}
             - name: relay-tls

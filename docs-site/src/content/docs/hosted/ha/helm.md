@@ -399,7 +399,7 @@ listener. When you enable it, the chart:
 - mounts `existingSecret` (a `kubernetes.io/tls` Secret with `tls.crt` and
   `tls.key`, for example from cert-manager) and the CA bundle (`caSecret`,
   default `existingSecret`, key `caKey`, default `ca.crt`) as whole directories,
-  so a rotated certificate is picked up without a restart;
+  so a rotated certificate and key are picked up without a restart;
 - sets `POD_IP`, so each node advertises `https://<pod IP>:<port>`, and declares
   the port on the pod only, never on the Service.
 
@@ -408,6 +408,12 @@ Every node verifies its peers against the CA and `serverName` (default
 serves all replicas. A set CA replaces the system roots, and a private CA
 requires it. cert-manager fills `ca.crt` only for some issuers; for others,
 point `caSecret` at a Secret holding the CA.
+
+The hub reads the CA bundle and `serverName` once at startup, so changing them
+needs a rolling restart (`kubectl rollout restart deployment/<release>-scion-hub`).
+To rotate the CA without breaking the hop between nodes: add the new CA to the
+bundle and restart, then issue leaf certificates from the new CA, then remove
+the old CA from the bundle and restart again.
 
 ```yaml
 conduit:

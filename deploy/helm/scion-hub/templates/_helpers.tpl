@@ -4433,8 +4433,10 @@ The hub derives the advertised endpoint as https://POD_IP:<port> when the
 listener serves TLS, and every hop client verifies the peer certificate against
 the CA file and serverName. One certificate whose SAN is serverName therefore
 serves every replica. The directories are mounted whole, not by subPath, so a
-rotated Secret (for example by cert-manager) reaches the files and the hub
-re-reads them without a restart.
+rotated Secret (for example by cert-manager) reaches the files. The hub re-reads
+the certificate and key when they change, without a restart. It reads the CA
+bundle and serverName once at startup, so changing either needs a rolling
+restart.
 */}}
 {{- define "scion-hub.relayTls" -}}
 {{- $c := (.Values.conduit | default (dict)).internalTls | default (dict) }}
