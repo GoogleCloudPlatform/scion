@@ -274,6 +274,12 @@ func buildEvent(in eventInput) (*telemetrycontract.LifecycleEvent, error) {
 	// launch_id; an agent-state event may name the attributed run.
 	if p.AttrOmitLaunch {
 		ev.LaunchID = ""
+		// An untrusted segment terminal keeps the segment's frozen
+		// generation, an observed fact (design 4.3 rule 1), as a closure
+		// of an open segment already does above.
+		if p.ClosesSegment && !p.ClosesOpenRun && in.Cursor != nil && in.Cursor.OpenRunGeneration != "" {
+			ev.IncarnationID = in.Cursor.OpenRunGeneration
+		}
 	} else if p.AttrLaunch != "" {
 		ev.LaunchID = p.AttrLaunch
 	}
