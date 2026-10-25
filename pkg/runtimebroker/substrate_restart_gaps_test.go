@@ -305,7 +305,7 @@ func TestNonProberRuntime_RealAgentManager_NotFoundUnchanged(t *testing.T) {
 	}
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	w := httptest.NewRecorder()
 	srv.deleteAgent(w, httptest.NewRequest(http.MethodDelete, "/api/v1/agents/dev", nil), "dev", gapProjBID)
@@ -499,7 +499,7 @@ func TestNonProberRuntime_StopLookupError_PropagatesAsFailure(t *testing.T) {
 	}
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	w := httptest.NewRecorder()
 	srv.stopAgent(w, httptest.NewRequest(http.MethodPost, "/api/v1/agents/dev/stop", nil), "dev", gapProjBID)

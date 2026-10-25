@@ -161,7 +161,6 @@ func prepareK8sHost(t *testing.T, globalDir string, insts ...config.V1RuntimeBro
 		Activator:  act,
 		BuildServer: func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) {
 			cfg := runtimebroker.DefaultServerConfig()
-			cfg.BrokerAuthEnabled = false // no hub keys here: serve the broker API without auth
 			cfg.BrokerID = ic.Identity.RuntimeBrokerID
 			cfg.StateDir = filepath.Join(globalDir, "state", ic.Identity.RuntimeBrokerID)
 			cfg.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance, HubInProcess: true}

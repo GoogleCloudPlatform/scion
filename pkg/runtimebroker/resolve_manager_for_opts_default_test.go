@@ -34,7 +34,7 @@ func newKubernetesDefaultTestServer(t *testing.T) *Server {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", "")
 
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	return New(cfg, &filteringMockManager{}, fakeKubernetesRuntime("cluster-default", "ns-default"), config.RuntimeBuildRecord{})
 }
 
@@ -451,7 +451,7 @@ runtimes:
 func TestResolveManagerForOpts_NonKubernetesDefaultSkipsResolution(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", "")
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	srv := New(cfg, &filteringMockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	srv.config.ForceRuntime = ""
 
@@ -488,7 +488,7 @@ runtimes:
 func TestResolveManagerForOpts_NilClientKubernetesDefaultResolves(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", "")
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	srv := New(cfg, &filteringMockManager{}, &runtime.KubernetesRuntime{Client: nil, DefaultNamespace: "ns-default"}, config.RuntimeBuildRecord{})
 	srv.config.ForceRuntime = ""
 

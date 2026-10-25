@@ -38,7 +38,7 @@ import (
 // keeps the informational SA email/project ID env, and gets no
 // emulator-specific env (mode, redirect, or port).
 func TestBuildStartContext_KubernetesAssignWithMapping(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	projectDir := newTestProjectSettings(t, testKubernetesProjectSettingsYAML)
@@ -105,7 +105,7 @@ runtimes:
 // operator's pinned namespace must be rejected the same authoritative way a
 // differing explicit KSA already is.
 func TestBuildStartContext_KubernetesAssignConflictingNamespaceRejected(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	projectDir := newTestProjectSettings(t, testKubernetesProjectSettingsYAML)
@@ -140,7 +140,7 @@ func TestBuildStartContext_KubernetesAssignConflictingNamespaceRejected(t *testi
 // non-conflicting half: an explicit namespace that already equals the
 // operator's pinned namespace proceeds normally.
 func TestBuildStartContext_KubernetesAssignMatchingNamespaceAccepted(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	projectDir := newTestProjectSettings(t, testKubernetesProjectSettingsYAML)
@@ -185,7 +185,7 @@ func TestBuildStartContext_KubernetesAssignNoOperatorNamespace(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("SCION_K8S_NAMESPACE", "ns-runtime-default")
-			cfg := testServerConfig()
+			cfg := DefaultServerConfig()
 			cfg.StateDir = t.TempDir()
 			srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 			projectDir := newTestProjectSettings(t, testKubernetesProjectSettingsYAML)
@@ -238,7 +238,7 @@ func TestBuildStartContext_KubernetesAssignNoOperatorNamespace(t *testing.T) {
 // resolved-entry validation, which requires a lowercase email — the mapping
 // lookup and the validation call must agree on the same lower-cased value.
 func TestBuildStartContext_KubernetesAssignMixedCaseSAEmailStillResolves(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	projectDir := newTestProjectSettings(t, testKubernetesProjectSettingsYAML)
@@ -274,7 +274,7 @@ func TestBuildStartContext_KubernetesAssignMixedCaseSAEmailStillResolves(t *test
 // GSA email, so a looser assertion would not catch the reject check itself
 // being disabled.
 func TestBuildStartContext_KubernetesAssignWithoutMapping(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	projectDir := newTestProjectSettings(t, testKubernetesProjectSettingsYAML)
@@ -311,7 +311,7 @@ func TestBuildStartContext_KubernetesAssignWithoutMapping(t *testing.T) {
 // there is nothing to look up and the fix is different (supply a GSA, not
 // add a mapping).
 func TestBuildStartContext_KubernetesAssignEmptyGSAEmail(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	projectDir := newTestProjectSettings(t, testKubernetesProjectSettingsYAML)
@@ -343,7 +343,7 @@ func TestBuildStartContext_KubernetesAssignEmptyGSAEmail(t *testing.T) {
 // load (malformed YAML) must not be reported as "no mapping found" either —
 // the fix is different (repair settings.yaml, not add a mapping).
 func TestBuildStartContext_KubernetesAssignGlobalSettingsLoadFailure(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	projectDir := newTestProjectSettings(t, testKubernetesProjectSettingsYAML)
@@ -377,7 +377,7 @@ func TestBuildStartContext_KubernetesAssignGlobalSettingsLoadFailure(t *testing.
 // or silently overridden — either direction would run the pod as an
 // identity other than the one the mapping says this GSA should get.
 func TestBuildStartContext_KubernetesAssignConflictingInlineServiceAccountName(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	projectDir := newTestProjectSettings(t, testKubernetesProjectSettingsYAML)
@@ -416,7 +416,7 @@ func TestBuildStartContext_KubernetesAssignConflictingInlineServiceAccountName(t
 // field (not InlineConfig) — a separate source the conflict check also
 // reads, and one that must independently reject a mismatch.
 func TestBuildStartContext_KubernetesAssignConflictingConfigServiceAccountName(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	projectDir := newTestProjectSettings(t, testKubernetesProjectSettingsYAML)
@@ -452,7 +452,7 @@ func TestBuildStartContext_KubernetesAssignConflictingConfigServiceAccountName(t
 // covers the non-conflicting half of the same rule: an explicit inline
 // ServiceAccountName that already equals the mapped KSA proceeds normally.
 func TestBuildStartContext_KubernetesAssignExplicitServiceAccountNameMatchesMapping(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	projectDir := newTestProjectSettings(t, testKubernetesProjectSettingsYAML)
@@ -493,7 +493,7 @@ func TestBuildStartContext_KubernetesAssignExplicitServiceAccountNameMatchesMapp
 // only via a hub-injected resolvedEnv (as httpdispatcher.go actually sends
 // them), and the mapping must still resolve from that source.
 func TestBuildStartContext_KubernetesAssignResolvedEnvSAEmailSource(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	projectDir := newTestProjectSettings(t, testKubernetesProjectSettingsYAML)
@@ -529,7 +529,7 @@ func TestBuildStartContext_KubernetesAssignResolvedEnvSAEmailSource(t *testing.T
 // start/restart) for the same GSA must produce byte-identical
 // SCION_METADATA_* env, not differ by dispatch path.
 func TestBuildStartContext_KubernetesAssignCreateAndStartProduceSameEnv(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	metadataKeys := []string{"SCION_METADATA_MODE", "SCION_METADATA_SA_EMAIL", "SCION_METADATA_PROJECT_ID", "GCE_METADATA_HOST", "GCE_METADATA_ROOT", "SCION_METADATA_PORT"}
 
@@ -554,7 +554,7 @@ func TestBuildStartContext_KubernetesAssignCreateAndStartProduceSameEnv(t *testi
 		t.Fatalf("create path: expected acceptance, got %v", err)
 	}
 
-	cfg2 := testServerConfig()
+	cfg2 := DefaultServerConfig()
 	cfg2.StateDir = t.TempDir()
 	srvStart := newTestServerForStartContextRuntime(t, cfg2, "kubernetes")
 	projectDirStart := newTestProjectSettings(t, testKubernetesProjectSettingsYAML)
@@ -601,7 +601,7 @@ func TestBuildStartContext_KubernetesAssignCreateAndStartProduceSameEnv(t *testi
 // are deliberately different, so only reading the correct one passes.
 func TestBuildStartContext_KubernetesAssignSavedProfileFallback(t *testing.T) {
 	const otherProfile = "other-profile"
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv, dotScion := newTestServerForStartContextMultiProfile(t, cfg, "docker", otherProfile, "kubernetes")
 	newTestGlobalSettings(t, fmt.Sprintf(`schema_version: "1"
@@ -647,7 +647,7 @@ runtimes:
 // showing up later as a confusing "no mapping" error for some other GSA.
 // This dispatch itself still succeeds, using the global mapping.
 func TestBuildStartContext_KubernetesAssignProjectLevelMappingLogsWarning(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 
@@ -699,7 +699,7 @@ runtimes:
 // distinguishable by isKubernetes, not just by which KSA resolves).
 func TestBuildStartContext_KubernetesAssignNonActiveProfileMapping(t *testing.T) {
 	const otherProfile = "other-profile"
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv, _ := newTestServerForStartContextMultiProfile(t, cfg, "docker", otherProfile, "kubernetes")
 	newTestGlobalSettings(t, fmt.Sprintf(`schema_version: "1"
@@ -751,7 +751,7 @@ runtimes:
         kubernetes_service_account_mappings:
             agent-worker@my-project.iam.gserviceaccount.com: Invalid_KSA_Name
 `
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	projectDir := newTestProjectSettings(t, testKubernetesProjectSettingsYAML)
@@ -797,7 +797,7 @@ runtimes:
         kubernetes_service_account_mappings:
             agent-worker@my-project.iam.gserviceaccount.com: project-sourced-ksa
 `
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	projectDir := newTestProjectSettings(t, projectSettingsYAML)
@@ -838,7 +838,7 @@ runtimes:
 // to Kubernetes; the unused "other-profile"/"docker" values just satisfy the
 // helper's signature.
 func TestBuildStartContext_KubernetesAssignProfileMappingOverridesRuntimeMapping(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv, _ := newTestServerForStartContextMultiProfile(t, cfg, "kubernetes", "other-profile", "docker")
 	newTestGlobalSettings(t, `schema_version: "1"

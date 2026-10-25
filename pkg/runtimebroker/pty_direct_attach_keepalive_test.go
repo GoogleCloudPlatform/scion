@@ -94,7 +94,7 @@ exec "$TW_DIRECT_ATTACH_TMUX" -S "$TW_DIRECT_ATTACH_SOCKET" "$@"
 		Labels:      map[string]string{"scion.name": slug},
 	}}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return adapter }}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	httpSrv := httptest.NewServer(http.HandlerFunc(srv.handleAgentAttach))
 	t.Cleanup(httpSrv.Close)
@@ -230,7 +230,7 @@ func TestHandleAgentAttach_StoppedContainerSkipsReadinessWait(t *testing.T) {
 			}}, nil
 		},
 	}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	httpSrv := httptest.NewServer(http.HandlerFunc(srv.handleAgentAttach))
 	t.Cleanup(httpSrv.Close)

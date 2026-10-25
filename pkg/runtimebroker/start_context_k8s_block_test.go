@@ -36,7 +36,7 @@ import (
 func TestBuildStartContext_KubernetesBlockUnconfiguredUsesNamespaceDefault(t *testing.T) {
 	for _, runtimeName := range []string{"kubernetes", "k8s"} {
 		t.Run(runtimeName, func(t *testing.T) {
-			cfg := testServerConfig()
+			cfg := DefaultServerConfig()
 			cfg.StateDir = t.TempDir()
 			srv := newTestServerForStartContextRuntime(t, cfg, runtimeName)
 
@@ -127,7 +127,7 @@ func TestBuildStartContext_KubernetesBlockConfiguredServiceAccount(t *testing.T)
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := testServerConfig()
+			cfg := DefaultServerConfig()
 			cfg.StateDir = t.TempDir()
 			srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 			newTestGlobalSettings(t, testKubernetesBlockGlobalSettingsYAML)
@@ -149,7 +149,7 @@ func TestBuildStartContext_KubernetesBlockConfiguredServiceAccount(t *testing.T)
 // runtime entry's. See TestBuildStartContext_KubernetesBlockProjectSettingIgnored
 // for a project's own settings.
 func TestBuildStartContext_KubernetesBlockProfileOverridesRuntimeEntry(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv, _ := newTestServerForStartContextMultiProfile(t, cfg, "docker", "team", "kubernetes")
 	newTestGlobalSettings(t, `schema_version: "1"
@@ -193,7 +193,7 @@ runtimes:
 // is read only from the broker's global settings. With none there, the pod
 // runs as the namespace's default ServiceAccount.
 func TestBuildStartContext_KubernetesBlockProjectSettingIgnored(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	projectDir := newTestProjectSettings(t, testKubernetesBlockGlobalSettingsYAML)
@@ -216,7 +216,7 @@ func TestBuildStartContext_KubernetesBlockProjectSettingIgnored(t *testing.T) {
 // hand-edited, malformed kubernetes_block_service_account: refused at the
 // point of use rather than reaching the pod spec.
 func TestBuildStartContext_KubernetesBlockInvalidServiceAccountRefused(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	newTestGlobalSettings(t, strings.Replace(testKubernetesBlockGlobalSettingsYAML, "scion-block", "Not_Valid", 1))
@@ -249,7 +249,7 @@ runtimes:
             agent-worker@my-project.iam.gserviceaccount.com: agent-worker-ksa
 `
 	t.Run("passthrough", func(t *testing.T) {
-		cfg := testServerConfig()
+		cfg := DefaultServerConfig()
 		cfg.StateDir = t.TempDir()
 		srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 		newTestGlobalSettings(t, globalYAML)
@@ -270,7 +270,7 @@ runtimes:
 		}
 	})
 	t.Run("assign", func(t *testing.T) {
-		cfg := testServerConfig()
+		cfg := DefaultServerConfig()
 		cfg.StateDir = t.TempDir()
 		srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 		projectDir := newTestProjectSettings(t, testKubernetesProjectSettingsYAML)
@@ -296,7 +296,7 @@ runtimes:
 		}
 	})
 	t.Run("docker_block", func(t *testing.T) {
-		cfg := testServerConfig()
+		cfg := DefaultServerConfig()
 		cfg.StateDir = t.TempDir()
 		srv := newTestServerForStartContextRuntime(t, cfg, "docker")
 		newTestGlobalSettings(t, globalYAML)
@@ -323,7 +323,7 @@ runtimes:
 // request-level serviceAccountName that conflicts with block is refused at
 // that point, and the project directory must already exist by then.
 func TestBuildStartContext_KubernetesBlockRefusedAfterProjectDirResolution(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 

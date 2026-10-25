@@ -53,7 +53,7 @@ func makeTestCreds(name, brokerID, hubEndpoint string) *brokercredentials.Broker
 
 // newTestServerWithInMemoryCreds creates a server with in-memory credentials for a "local" connection.
 func newTestServerWithInMemoryCreds(creds *brokercredentials.BrokerCredentials) *Server {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.BrokerID = creds.BrokerID
 	cfg.BrokerName = "test-host"
 	cfg.HubEnabled = true
@@ -121,7 +121,7 @@ func TestHubConnection_MultipleConnections(t *testing.T) {
 
 	localCreds := makeTestCreds("local", "broker-local", "http://localhost:8080")
 
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.BrokerID = "broker-local"
 	cfg.BrokerName = "test-host"
 	cfg.HubEnabled = true
@@ -894,7 +894,7 @@ func TestCredentialWatcher_AddConnection(t *testing.T) {
 	}
 
 	// Create server without hub integration to avoid auto-creating connections
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.BrokerID = "broker-1"
 	cfg.BrokerName = "test-host"
 
@@ -972,7 +972,7 @@ func TestCredentialWatcher_RemoveConnection(t *testing.T) {
 	}
 
 	// Create server without hub integration
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.BrokerID = "broker-1"
 
 	mgr := &mockManager{}
@@ -1024,7 +1024,7 @@ func TestCredentialWatcher_RemoveConnection(t *testing.T) {
 }
 
 func TestBuildAuthMiddleware_NoKeys(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.BrokerAuthEnabled = true
 	srv := New(cfg, &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 
@@ -1037,7 +1037,7 @@ func TestBuildAuthMiddleware_NoKeys(t *testing.T) {
 func TestBuildAuthMiddleware_WithKeys(t *testing.T) {
 	creds := makeTestCreds("local", "broker-1", "http://localhost:8080")
 
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.BrokerID = "broker-1"
 	cfg.BrokerName = "test-host"
 	cfg.HubEnabled = true
@@ -1084,7 +1084,7 @@ func TestRuntimeBroker_DefaultAuth_DeniesUnauthenticatedRequests(t *testing.T) {
 }
 
 func TestValidateBrokerAuthStartup_HubModeWithoutKeysLoopbackAllowed(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.Host = "127.0.0.1"
 	cfg.HubEnabled = true
 	cfg.HubEndpoint = "http://localhost:9810"
@@ -1097,7 +1097,7 @@ func TestValidateBrokerAuthStartup_HubModeWithoutKeysLoopbackAllowed(t *testing.
 }
 
 func TestValidateBrokerAuthStartup_HubModeWithoutKeysNonLoopbackFails(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.Host = "0.0.0.0"
 	cfg.HubEnabled = true
 	cfg.HubEndpoint = "http://localhost:9810"
@@ -1112,7 +1112,7 @@ func TestValidateBrokerAuthStartup_HubModeWithoutKeysNonLoopbackFails(t *testing
 func TestValidateBrokerAuthStartup_NonLoopbackPermissiveModeFails(t *testing.T) {
 	creds := makeTestCreds("local", "broker-1", "http://localhost:8080")
 
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.Host = "0.0.0.0"
 	cfg.BrokerID = "broker-1"
 	cfg.BrokerName = "test-host"
@@ -1185,7 +1185,7 @@ func TestColocated_RemoteConnection_GetsHeartbeat(t *testing.T) {
 	// when HeartbeatEnabled is true.
 	remoteCreds := makeTestCreds("hub-prod", "broker-1", "https://hub.prod.example.com")
 
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.BrokerID = "broker-1"
 	cfg.BrokerName = "test-host"
 	cfg.HubEnabled = true
@@ -1237,7 +1237,7 @@ func TestColocated_ComboMode_HeartbeatPerConnection(t *testing.T) {
 
 	// Create server with in-memory local creds
 	localCreds := makeTestCreds("local", "broker-1", "http://localhost:8080")
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.BrokerID = "broker-1"
 	cfg.BrokerName = "test-host"
 	cfg.HubEnabled = true
@@ -1324,7 +1324,7 @@ func TestColocated_CredentialWatcher_PreservesLocalConnection(t *testing.T) {
 
 	// Create server with in-memory local creds
 	localCreds := makeTestCreds("local", "broker-1", "http://localhost:8080")
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.BrokerID = "broker-1"
 	cfg.BrokerName = "test-host"
 	cfg.HubEnabled = true
@@ -1404,7 +1404,7 @@ func TestColocated_CredentialWatcher_AddRemoteAlongsideLocal(t *testing.T) {
 
 	// Create server with in-memory local creds only
 	localCreds := makeTestCreds("local", "broker-1", "http://localhost:8080")
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.BrokerID = "broker-1"
 	cfg.BrokerName = "test-host"
 	cfg.HubEnabled = true
@@ -1513,7 +1513,7 @@ func TestColocated_MultipleRemoteConnections(t *testing.T) {
 
 	// Create server with local + multi-store
 	localCreds := makeTestCreds("local", "broker-1", "http://localhost:8080")
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.BrokerID = "broker-1"
 	cfg.BrokerName = "test-host"
 	cfg.HubEnabled = true

@@ -41,7 +41,7 @@ const (
 // as stale.
 func newGlobalDirTestServer(t *testing.T, markerID, markerSlug string) (srv *Server, home, globalDir, markerPath string) {
 	t.Helper()
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv = newTestServerForStartContext(t, cfg)
 

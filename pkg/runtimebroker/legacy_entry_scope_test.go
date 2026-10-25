@@ -198,10 +198,10 @@ func TestLookupAgentMatch_UnlabelledInRequestedProject_FoundOnEveryStage(t *test
 		{"default runtime", func(t *testing.T) (*Server, context.Context) {
 			mgr := &filteringMockManager{}
 			mgr.agents = []api.AgentInfo{entry(t)}
-			return New(testServerConfig(), mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{}), context.Background()
+			return New(DefaultServerConfig(), mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{}), context.Background()
 		}},
 		{"auxiliary runtime", func(t *testing.T) (*Server, context.Context) {
-			srv := New(testServerConfig(), &filteringMockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
+			srv := New(DefaultServerConfig(), &filteringMockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 			auxMgr := &filteringMockManager{}
 			auxMgr.agents = []api.AgentInfo{entry(t)}
 			srv.auxiliaryRuntimesMu.Lock()
@@ -210,7 +210,7 @@ func TestLookupAgentMatch_UnlabelledInRequestedProject_FoundOnEveryStage(t *test
 			return srv, context.Background()
 		}},
 		{"own runtime", func(t *testing.T) (*Server, context.Context) {
-			srv := New(testServerConfig(), &filteringMockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
+			srv := New(DefaultServerConfig(), &filteringMockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 			ownMgr := &filteringMockManager{}
 			ownMgr.agents = []api.AgentInfo{entry(t)}
 			own := &agentOwnRuntime{mgr: ownMgr, rt: &runtime.MockRuntime{NameFunc: func() string { return "own" }}}
@@ -398,7 +398,7 @@ func TestStopAgent_LegacyEntryShapesPerRuntime(t *testing.T) {
 			}
 			mgr := agent.NewManager(rt)
 			t.Cleanup(mgr.Close)
-			srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+			srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 			m, err := srv.lookupAgentMatch(context.Background(), "dev", scopeProjB)
 			if !tc.found {
@@ -520,7 +520,7 @@ func TestResolveAgentRuntimeTarget_UnlabelledOtherProjectOnDefault_PicksRequeste
 	defMgr.agents = []api.AgentInfo{legacyEntry("dev", "cid-a", legacyProjectPath(t, scopeProjA))}
 	auxMgr := &filteringMockManager{}
 	auxMgr.agents = []api.AgentInfo{legacyEntry("dev", "cid-b", legacyProjectPath(t, scopeProjB))}
-	srv := New(testServerConfig(), defMgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), defMgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	auxRT := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
 	srv.auxiliaryRuntimesMu.Lock()
 	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRT, Manager: auxMgr}

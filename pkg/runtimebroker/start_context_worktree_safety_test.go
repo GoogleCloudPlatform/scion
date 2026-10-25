@@ -112,7 +112,7 @@ func TestTryProvisionWorktree_InvalidAgentIDLeavesSharedBaseIntact(t *testing.T)
 
 	for _, agentID := range []string{"..", "a/b"} {
 		t.Run("agentID="+agentID, func(t *testing.T) {
-			cfg := testServerConfig()
+			cfg := DefaultServerConfig()
 			cfg.StateDir = t.TempDir()
 			srv := newTestServerForStartContext(t, cfg)
 
@@ -172,7 +172,7 @@ func setUpAgent1SharedBase(t *testing.T, srv *Server, projectPath, bare string) 
 // symlink and its target are left untouched.
 func TestTryProvisionWorktree_SymlinkedOwnWorktreeRejected(t *testing.T) {
 	requireWorktreeGit(t)
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -227,7 +227,7 @@ func TestTryProvisionWorktree_SymlinkedOwnWorktreeRejected(t *testing.T) {
 // through that symlink.
 func TestTryProvisionWorktree_SymlinkedWorktreesDirRejected(t *testing.T) {
 	requireWorktreeGit(t)
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -274,7 +274,7 @@ func TestTryProvisionWorktree_SymlinkedWorktreesDirRejected(t *testing.T) {
 // never joined or mounted.
 func TestTryProvisionWorktree_SharerRegistryOutsidePathRejected(t *testing.T) {
 	requireWorktreeGit(t)
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -327,7 +327,7 @@ func TestTryProvisionWorktree_SharerRegistryOutsidePathRejected(t *testing.T) {
 // symlinks are resolved.
 func TestTryProvisionWorktree_SharerRegistryFakeGitfileStillRejected(t *testing.T) {
 	requireWorktreeGit(t)
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -386,7 +386,7 @@ func TestTryProvisionWorktree_SharerRegistryFakeGitfileStillRejected(t *testing.
 // same input.
 func TestValidateMountedWorktree(t *testing.T) {
 	requireWorktreeGit(t)
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -483,7 +483,7 @@ func TestValidateMountedWorktree(t *testing.T) {
 // only by the broker.
 func TestTryProvisionWorktree_SharerRegistryNestedMarkerRejected(t *testing.T) {
 	requireWorktreeGit(t)
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -538,7 +538,7 @@ func TestTryProvisionWorktree_SharerRegistryNestedMarkerRejected(t *testing.T) {
 // gitfile that looks valid on its own.
 func TestTryProvisionWorktree_SharerRegistryIntermediateSymlinkRejected(t *testing.T) {
 	requireWorktreeGit(t)
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -607,7 +607,7 @@ func TestTryProvisionWorktree_SharerRegistryIntermediateSymlinkRejected(t *testi
 // location, worktrees/agent-1/agent-1.
 func TestTryProvisionWorktree_SharerRegistryNonCanonicalPathRejected(t *testing.T) {
 	requireWorktreeGit(t)
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -677,7 +677,7 @@ func TestTryProvisionWorktree_SharerRegistryNonCanonicalPathRejected(t *testing.
 // rather than comparing their un-resolved text.
 func TestTryProvisionWorktree_SymlinkedProjectParentAccepted(t *testing.T) {
 	requireWorktreeGit(t)
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 

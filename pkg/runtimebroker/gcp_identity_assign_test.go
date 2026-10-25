@@ -241,7 +241,7 @@ func TestRestartAgent_LateKubernetesAssignWithoutServiceAccountRunsBeforeStop(t 
 // request naming the Kubernetes profile resolves the ServiceAccount from
 // that profile's runtime entry, with no profile-level mapping configured.
 func TestBuildStartContext_KubernetesAssignRuntimeEntryMappingForNamedProfile(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv, _ := newTestServerForStartContextMultiProfile(t, cfg, "docker", "team", "kubernetes")
 	newTestGlobalSettings(t, testLateCheckMappingGlobalSettingsYAML)
@@ -275,7 +275,7 @@ func TestBuildStartContext_KubernetesAssignRuntimeEntryMappingForNamedProfile(t 
 // namespace and mapping differ from the default entry's. Both the namespace
 // and the mapping must come from the entry the profile selects.
 func TestBuildStartContext_KubernetesAssignProfileSelectsSecondRuntimeEntry(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv, dotScion := newTestServerForStartContextMultiProfile(t, cfg, "kubernetes", "team", "kubernetes")
 	const projectSettingsYAML = `schema_version: "1"
@@ -366,7 +366,7 @@ func TestBuildStartContext_KubernetesAssignProjectRuntimeEntryOverrideRefused(t 
 		{name: "context override", override: "context: ctx-project", want: []string{`"k8s-team"`, `"ctx-project"`, `"ctx-team"`, "context"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := testServerConfig()
+			cfg := DefaultServerConfig()
 			cfg.StateDir = t.TempDir()
 			srv, dotScion := newTestServerForStartContextMultiProfile(t, cfg, "kubernetes", "team", "kubernetes")
 			projectSettingsYAML := `schema_version: "1"
@@ -433,7 +433,7 @@ func TestBuildStartContext_KubernetesAssignForceRuntimeNamespaceMismatchRefused(
 		{name: "runtime namespace matches", runtimeNS: "ns-global", wantRefused: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := testServerConfig()
+			cfg := DefaultServerConfig()
 			cfg.StateDir = t.TempDir()
 			srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 			srv.runtime = &runtime.KubernetesRuntime{DefaultNamespace: tc.runtimeNS}
@@ -512,7 +512,7 @@ func TestBuildStartContext_KubernetesAssignIgnoresGlobalDirProjectConfig(t *test
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("SCION_K8S_NAMESPACE", "ns-runtime-default")
-			cfg := testServerConfig()
+			cfg := DefaultServerConfig()
 			cfg.StateDir = t.TempDir()
 			srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 			projectDir := newTestProjectSettings(t, testKubernetesProjectSettingsYAML)
@@ -652,7 +652,7 @@ runtimes:
 // not valid YAML; a wrong-typed value would not do, since the settings
 // loader falls back to the default for that key and the load succeeds.
 func TestBuildStartContext_KubernetesAssignProjectSettingsLoadError(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	// The broker's default runtime is Kubernetes, so the dispatch still
 	// reaches Kubernetes when the project settings fail to load.

@@ -26,7 +26,7 @@ import (
 )
 
 func TestBuildStartContext_HubManagedProjectWritesMarker(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -84,7 +84,7 @@ func TestBuildStartContext_HubManagedProjectWritesMarker(t *testing.T) {
 }
 
 func TestBuildStartContext_HubManagedProjectSlugResolution(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -125,7 +125,7 @@ func TestBuildStartContext_HubManagedProjectSlugResolution(t *testing.T) {
 // ~/.scion/projects/<slug> holds only infrastructure, buildStartContext must
 // always resolve to the canonical projects/ path.
 func TestBuildStartContext_NeverFallsBackToLegacyGrovesDir(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -168,7 +168,7 @@ func TestBuildStartContext_NeverFallsBackToLegacyGrovesDir(t *testing.T) {
 // string-concatenating a wrapped error even when this particular failure
 // isn't itself a 4xx.
 func TestBuildStartContext_GlobalDirFailureMessageOmitsRawError(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -203,7 +203,7 @@ func TestBuildStartContext_GlobalDirFailureMessageOmitsRawError(t *testing.T) {
 // here via cloudrun-sandbox with no configured hub listen port): Message
 // must be a fixed string, not the wrapped error's own text.
 func TestBuildStartContext_HubEndpointResolutionFailureMessageOmitsRawError(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	cfg.HubListenPort = 0
 	srv := newTestServerForStartContextRuntime(t, cfg, "cloudrun-sandbox")
@@ -235,7 +235,7 @@ func TestBuildStartContext_HubEndpointResolutionFailureMessageOmitsRawError(t *t
 
 func TestBuildStartContext_HubManagedProjectPreservesExistingProjectID(t *testing.T) {
 	t.Run("preserves when external config dir exists", func(t *testing.T) {
-		cfg := testServerConfig()
+		cfg := DefaultServerConfig()
 		cfg.StateDir = t.TempDir()
 		srv := newTestServerForStartContext(t, cfg)
 
@@ -281,7 +281,7 @@ func TestBuildStartContext_HubManagedProjectPreservesExistingProjectID(t *testin
 	})
 
 	t.Run("overwrites when external config dir missing (stale)", func(t *testing.T) {
-		cfg := testServerConfig()
+		cfg := DefaultServerConfig()
 		cfg.StateDir = t.TempDir()
 		srv := newTestServerForStartContext(t, cfg)
 
@@ -322,7 +322,7 @@ func TestBuildStartContext_HubManagedProjectPreservesExistingProjectID(t *testin
 
 func TestBuildStartContext_HubManagedProjectPreservesExistingMarker(t *testing.T) {
 	t.Run("preserves when external config dir exists", func(t *testing.T) {
-		cfg := testServerConfig()
+		cfg := DefaultServerConfig()
 		cfg.StateDir = t.TempDir()
 		srv := newTestServerForStartContext(t, cfg)
 
@@ -373,7 +373,7 @@ func TestBuildStartContext_HubManagedProjectPreservesExistingMarker(t *testing.T
 	})
 
 	t.Run("overwrites when external config dir missing (stale)", func(t *testing.T) {
-		cfg := testServerConfig()
+		cfg := DefaultServerConfig()
 		cfg.StateDir = t.TempDir()
 		srv := newTestServerForStartContext(t, cfg)
 
@@ -421,7 +421,7 @@ func TestBuildStartContext_HubManagedProjectPreservesExistingMarker(t *testing.T
 // are set), a stale on-disk project-id is overwritten when the external config
 // dir was cleaned up. This is the primary regression test for miller79/scion#28.
 func TestBuildStartContext_LinkedGitProjectUpdatesStaleProjectID(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 

@@ -32,7 +32,7 @@ import (
 // without turning on the per-agent clone mode: the workspace stays mounted
 // and no in-container clone env is set.
 func TestBuildStartContext_SharedWorkspaceClone_KeepsWorkspaceMount(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 	workspace := t.TempDir()
@@ -67,7 +67,7 @@ func TestBuildStartContext_SharedWorkspaceClone_KeepsWorkspaceMount(t *testing.T
 // The broker no longer emits the legacy SCION_SHARED_WORKSPACE var for a
 // shared workspace (ptone/scion#575); SCION_WORKSPACE_MODE carries the mode.
 func TestBuildStartContext_SharedWorkspace_NoLegacyEnv(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -89,7 +89,7 @@ func TestBuildStartContext_SharedWorkspace_NoLegacyEnv(t *testing.T) {
 }
 
 func TestBuildStartContext_SharedWorkspaceClone_IgnoredWithoutSharedWorkspaceOrWithGitClone(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 	shared := &api.GitCloneConfig{URL: "https://github.com/org/shared.git", Branch: "main"}

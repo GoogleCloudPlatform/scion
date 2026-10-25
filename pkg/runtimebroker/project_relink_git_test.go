@@ -526,7 +526,7 @@ func TestUnrecordedRelinkAllowed(t *testing.T) {
 	authCtx := func(name string) context.Context {
 		return context.WithValue(context.Background(), authenticatingHubConnCtxKey{}, name)
 	}
-	flat := &Server{config: testServerConfig(), hubConnections: map[string]*HubConnection{"local": local}}
+	flat := &Server{config: DefaultServerConfig(), hubConnections: map[string]*HubConnection{"local": local}}
 	for _, tc := range []struct {
 		name string
 		s    *Server

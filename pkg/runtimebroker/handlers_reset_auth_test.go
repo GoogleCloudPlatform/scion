@@ -74,7 +74,7 @@ func TestResetAuth_SignalFailureReturnsReloadUnconfirmed(t *testing.T) {
 			return "", nil
 		},
 	}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	w := doResetAuth(t, srv, token)
 
@@ -114,7 +114,7 @@ func TestResetAuth_SignalFailureKeepsTransportNote(t *testing.T) {
 			return "", nil
 		},
 	}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	body, _ := json.Marshal(ResetAuthRequest{Token: "t", TransportToken: "tt"})
 	r := httptest.NewRequest(http.MethodPost,
@@ -161,7 +161,7 @@ func TestResetAuth_PrefersInitSignaler(t *testing.T) {
 			return "", nil
 		},
 	}}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	w := doResetAuth(t, srv, "fresh-token")
 
@@ -181,7 +181,7 @@ func TestResetAuth_InitSignalerFailureReturnsReloadUnconfirmed(t *testing.T) {
 		MockRuntime: &scionrt.MockRuntime{NameFunc: func() string { return "docker" }},
 		signalErr:   fmt.Errorf("docker kill failed: exit status 1"),
 	}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	w := doResetAuth(t, srv, "fresh-token")
 
@@ -215,7 +215,7 @@ func TestResetAuth_SignalSuccessReturns200(t *testing.T) {
 			return "", nil
 		},
 	}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	w := doResetAuth(t, srv, "fresh-token")
 
@@ -274,7 +274,7 @@ func TestResetAuth_TokenDeliveredViaStdinNotArgv(t *testing.T) {
 			return "", nil
 		},
 	}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	w := doResetAuth(t, srv, token)
 
@@ -305,7 +305,7 @@ func TestResetAuth_ListUnavailableReturns503(t *testing.T) {
 			return "", nil
 		},
 	}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	w := doResetAuth(t, srv, "fresh-token")
 
@@ -349,7 +349,7 @@ func TestResetAuth_NotFoundReturns404(t *testing.T) {
 			return "", nil
 		},
 	}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	w := doResetAuth(t, srv, "fresh-token")
 
@@ -404,7 +404,7 @@ func TestResetAuth_AmbiguousMatchReturns500(t *testing.T) {
 			return "", nil
 		},
 	}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	w := doResetAuth(t, srv, "fresh-token")
 
@@ -434,7 +434,7 @@ func TestResetAuth_MissingTokenIsValidationError(t *testing.T) {
 			return "", nil
 		},
 	}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	w := doResetAuth(t, srv, "")
 

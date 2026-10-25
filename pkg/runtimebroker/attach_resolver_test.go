@@ -67,7 +67,7 @@ func TestHandlePTYStream_AuxRuntimeWithoutAttach_ClosesBeforeExec(t *testing.T) 
 			fakeRuntime := filepath.Join(dir, "fake-runtime")
 			require.NoError(t, os.WriteFile(fakeRuntime, []byte("#!/bin/sh\necho \"$@\" >> '"+marker+"'\nexit 1\n"), 0o700))
 
-			srv := New(testServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
+			srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 			auxRT := &attachCapableTestRuntime{
 				MockRuntime:    &runtime.MockRuntime{NameFunc: func() string { return fakeRuntime }},
 				supportsAttach: false,
@@ -286,7 +286,7 @@ func TestHandleInfo_OptedOutDefaultRuntime_ReportsBrokerWideAttachFalse(t *testi
 // before the swap the heartbeat reports attach supported; after swapping
 // to a runtime that opts out, the next heartbeat must report false.
 func TestSwapRuntime_PropagatesAttachCapabilityToHeartbeat(t *testing.T) {
-	srv := New(testServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	hb := NewHeartbeatService(&mockRuntimeBrokerService{}, "test-host", time.Hour, &mockManager{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	hb.SetDefaultRuntime(srv.runtime)
 	srv.hubMu.Lock()

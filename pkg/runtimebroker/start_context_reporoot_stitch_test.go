@@ -896,7 +896,7 @@ func TestBuildStartContext_KubernetesDispatchOnDockerDefaultBroker_SetsNoRepoRoo
 	clearSCIONEnv(t)
 
 	const otherProfile = "k8s-profile"
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv, dotScion := newTestServerForStartContextMultiProfile(t, cfg, "docker", otherProfile, "kubernetes")
 

@@ -25,7 +25,7 @@ import (
 )
 
 func newLateComponentServer() *Server {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.BrokerID = "broker-1"
 	cfg.BrokerName = "test-host"
 	cfg.HeartbeatEnabled = false

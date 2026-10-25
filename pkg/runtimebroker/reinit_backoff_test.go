@@ -63,7 +63,7 @@ func newReinitBackoffFixture(t *testing.T) *reinitBackoffFixture {
 	t.Setenv(transportauth.EnvTransportMode, "")
 	t.Setenv(transportauth.EnvTransportAudience, "")
 
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.BrokerID = "broker-1"
 	cfg.HeartbeatEnabled = false
 	cfg.ControlChannelEnabled = false

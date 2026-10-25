@@ -59,7 +59,7 @@ func newTestServerForRuntimeRemap(t *testing.T) (*Server, *mockManager) {
 	// cluster from the ambient kubeconfig (ptone/scion#2680).
 	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "absent"))
 
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	// Deliberately NOT set to "mock"/"docker": an empty ForceRuntime means

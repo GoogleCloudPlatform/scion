@@ -35,7 +35,7 @@ import (
 
 func newCacheTestServer(t *testing.T, brokerID, rtName string, sc *SharedCaches) *Server {
 	t.Helper()
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.BrokerID = brokerID
 	cfg.StateDir = t.TempDir()
 	cfg.HubEnabled = true

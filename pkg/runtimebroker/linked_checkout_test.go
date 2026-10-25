@@ -386,7 +386,7 @@ func TestDispatchFromColocatedHub_IgnoresHostCredentialPolicy(t *testing.T) {
 // connection that is co-located (loopback endpoint) when colocated is set.
 func linkedStartContextServer(t *testing.T, remote string, gitInit, colocated bool) (*Server, string) {
 	t.Helper()
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	cfg.WorkstationMode = true
 	srv := newTestServerForStartContextRuntime(t, cfg, "docker")

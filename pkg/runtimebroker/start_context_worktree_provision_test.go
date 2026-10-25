@@ -248,7 +248,7 @@ func TestResolveWorktreeProvision_InvalidIDsRejected(t *testing.T) {
 
 func TestTryProvisionWorktree_MissingIdentityOnStart_FailsClosed(t *testing.T) {
 	requireWorktreeGit(t)
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -485,7 +485,7 @@ func TestResolveWorktreeProvision_FullCloneDepth(t *testing.T) {
 func TestTryProvisionWorktree_JoinResolvesSharedPath(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -584,7 +584,7 @@ func TestTryProvisionWorktree_JoinTargetPreExisting_FailsInsteadOfFallback(t *te
 	}
 	t.Setenv("SCION_HOST_UID", "")
 
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -671,7 +671,7 @@ func TestTryProvisionWorktree_JoinTargetPreExisting_FailsInsteadOfFallback(t *te
 // (GoogleCloudPlatform/scion#1931).
 func TestBuildStartContext_WorktreePerAgentOnStart_TakesWorktreePathAndReusesIt(t *testing.T) {
 	requireWorktreeGit(t)
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -748,7 +748,7 @@ func TestBuildStartContext_WorktreePerAgentOnStart_TakesWorktreePathAndReusesIt(
 // SCION_GIT_CLONE_URL since the worktree path suppresses the in-container
 // clone on both operations.
 func TestBuildStartContext_WorktreePerAgentEnvParity(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -816,7 +816,7 @@ func TestBuildStartContext_WorktreePerAgentEnvParity(t *testing.T) {
 // existing worktree, since it may hold un-pushed work.
 func TestBuildStartContext_WorktreePerAgentStart_ProvisioningFailureNeverRemovesExistingWorktree(t *testing.T) {
 	requireWorktreeGit(t)
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -906,7 +906,7 @@ func TestBuildStartContext_WorktreePerAgentStart_ProvisioningFailureNeverRemoves
 // returning success.
 func TestBuildStartContext_WorktreePerAgentStart_MissingMarkersFailsInsteadOfSelfHeal(t *testing.T) {
 	requireWorktreeGit(t)
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -993,7 +993,7 @@ func TestBuildStartContext_WorktreePerAgentStart_SingleMissingMarkerFailsClosed(
 		{name: "base .git only missing", removeGit: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := testServerConfig()
+			cfg := DefaultServerConfig()
 			cfg.StateDir = t.TempDir()
 			srv := newTestServerForStartContext(t, cfg)
 
@@ -1073,7 +1073,7 @@ func TestBuildStartContext_WorktreePerAgentCreate_ProvisioningFailureCleansUpPar
 		t.Skip("root bypasses directory permissions, so the read-only sharer dir fault injection below never fails")
 	}
 
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 

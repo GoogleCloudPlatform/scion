@@ -1320,8 +1320,16 @@ func (s *Server) validateBrokerAuthStartup() error {
 		return fmt.Errorf("runtime broker API bound to %q requires strict broker auth with valid HMAC keys", s.config.Host)
 	}
 
-	// Loopback-only listeners may be temporarily permissive, but emit a warning.
-	if loopbackOnly && (!strictAuthConfigured || !hasKeys) {
+	// Loopback-only listeners may start without keys or strict auth, but emit
+	// a warning. With broker auth enabled and no keys, the auth gate serves
+	// only the health endpoints.
+	switch {
+	case loopbackOnly && s.config.BrokerAuthEnabled && !hasKeys:
+		slog.Warn("Runtime Broker has no HMAC keys; only health endpoints are served until keys are loaded",
+			"host", s.config.Host,
+			"brokerAuthStrictMode", s.config.BrokerAuthStrictMode,
+		)
+	case loopbackOnly && (!strictAuthConfigured || !hasKeys):
 		slog.Warn("Runtime Broker API is loopback-only and running without strict broker auth",
 			"host", s.config.Host,
 			"brokerAuthEnabled", s.config.BrokerAuthEnabled,

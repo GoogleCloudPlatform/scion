@@ -226,7 +226,7 @@ func newPartitionInstanceWithLocks(t *testing.T, d *sharedDaemon, key, stateDir 
 	}
 	rt := newDaemonRuntime(d)
 	mgr := agent.NewManager(rt).(*agent.AgentManager)
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.BrokerID = id.RuntimeBrokerID
 	cfg.BrokerName = key
 	cfg.StateDir = stateDir

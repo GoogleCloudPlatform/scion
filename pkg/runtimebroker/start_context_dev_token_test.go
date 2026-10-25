@@ -117,7 +117,7 @@ func TestBuildStartContext_ColocatedHubDevToken(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			clearSCIONEnv(t)
 			t.Setenv("SCION_AUTH_TOKEN", devToken)
-			cfg := testServerConfig()
+			cfg := DefaultServerConfig()
 			cfg.StateDir = t.TempDir()
 			cfg.ContainerHubEndpoint = bridge
 			srv := newTestServerForStartContextRuntime(t, cfg, "docker")

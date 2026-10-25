@@ -31,7 +31,7 @@ import (
 // points HOME at its own temp dir.
 func newEmptyPerAgentStartContextServer(t *testing.T) (*Server, string) {
 	t.Helper()
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 	globalDir, err := config.GetGlobalDir()

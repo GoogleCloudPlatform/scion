@@ -425,7 +425,6 @@ func TestColocatedShutdown_LegacyBrokerDrainsBeforeHubHTTPDrain(t *testing.T) {
 	brokerAddr := fmt.Sprintf("127.0.0.1:%d", brokerPort)
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	cfg := runtimebroker.DefaultServerConfig()
-	cfg.BrokerAuthEnabled = false // no hub keys here: serve the broker API without auth
 	cfg.Host = "127.0.0.1"
 	cfg.Port = brokerPort
 	cfg.BrokerID = "legacy-colocated"

@@ -563,7 +563,7 @@ runtimes:
 		}
 
 		creds := makeTestCreds(connectionName, "test-broker-id", connEndpoint)
-		cfg := testServerConfig()
+		cfg := DefaultServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
 		cfg.HubEnabled = true

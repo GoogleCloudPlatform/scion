@@ -47,7 +47,7 @@ func TestBuildStartContext_LaunchIDEnv(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := testServerConfig()
+			cfg := DefaultServerConfig()
 			cfg.StateDir = t.TempDir()
 			srv := newTestServerForStartContext(t, cfg)
 
@@ -78,7 +78,7 @@ func TestBuildStartContext_LaunchIDEnv(t *testing.T) {
 }
 
 func TestBuildStartContext_BasicFields(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.BrokerID = "broker-1"
 	cfg.BrokerName = "test-broker"
 	cfg.Debug = true
@@ -151,7 +151,7 @@ func TestBuildStartContext_BasicFields(t *testing.T) {
 }
 
 func TestBuildStartContext_EnvMerging(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -201,7 +201,7 @@ func TestBuildStartContext_DebugNotPropagatedExplicitLogLevelKept(t *testing.T) 
 		{name: "config env", config: &CreateAgentConfig{Env: []string{"SCION_LOG_LEVEL=" + spec}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := testServerConfig()
+			cfg := DefaultServerConfig()
 			cfg.Debug = true
 			cfg.StateDir = t.TempDir()
 			srv := newTestServerForStartContext(t, cfg)
@@ -255,7 +255,7 @@ func TestBuildStartContext_AuthTokenPrecedence(t *testing.T) {
 		// Broker has its own (invalid-as-JWT) dev token in the environment.
 		t.Setenv("SCION_AUTH_TOKEN", devToken)
 
-		cfg := testServerConfig()
+		cfg := DefaultServerConfig()
 		cfg.StateDir = t.TempDir()
 		srv := newTestServerForStartContext(t, cfg)
 
@@ -281,7 +281,7 @@ func TestBuildStartContext_AuthTokenPrecedence(t *testing.T) {
 	t.Run("explicit AgentToken wins", func(t *testing.T) {
 		t.Setenv("SCION_AUTH_TOKEN", devToken)
 
-		cfg := testServerConfig()
+		cfg := DefaultServerConfig()
 		cfg.StateDir = t.TempDir()
 		srv := newTestServerForStartContext(t, cfg)
 
@@ -306,7 +306,7 @@ func TestBuildStartContext_AuthTokenPrecedence(t *testing.T) {
 	t.Run("broker dev token not used without a co-located hub", func(t *testing.T) {
 		t.Setenv("SCION_AUTH_TOKEN", devToken)
 
-		cfg := testServerConfig()
+		cfg := DefaultServerConfig()
 		cfg.StateDir = t.TempDir()
 		srv := newTestServerForStartContext(t, cfg)
 
@@ -330,7 +330,7 @@ func TestBuildStartContext_AuthTokenPrecedence(t *testing.T) {
 }
 
 func TestBuildStartContext_TelemetryOverride(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -353,7 +353,7 @@ func TestBuildStartContext_TelemetryOverride(t *testing.T) {
 }
 
 func TestBuildStartContext_ResolvedSecrets(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -383,7 +383,7 @@ func TestBuildStartContext_ResolvedSecrets(t *testing.T) {
 // the hub's create/patch check or dispatch-time drop. A non-reserved secret
 // in the same request must still pass through.
 func TestBuildStartContext_DropsReservedTargetResolvedSecret(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -413,7 +413,7 @@ func TestBuildStartContext_DropsReservedTargetResolvedSecret(t *testing.T) {
 }
 
 func TestBuildStartContext_ConfigFields(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -455,7 +455,7 @@ func TestBuildStartContext_ConfigFields(t *testing.T) {
 }
 
 func TestBuildStartContext_GitClone(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -501,7 +501,7 @@ func TestBuildStartContext_GitClone(t *testing.T) {
 }
 
 func TestBuildStartContext_NilHTTPRequest(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -522,7 +522,7 @@ func TestBuildStartContext_NilHTTPRequest(t *testing.T) {
 // missing Operation with a clear error rather than inferring one from
 // whether HTTPRequest happens to be set (GoogleCloudPlatform/scion#1931).
 func TestBuildStartContext_RequiresOperation(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -542,7 +542,7 @@ func TestBuildStartContext_RequiresOperation(t *testing.T) {
 // sc.Opts.FreshProvision is true only for opCreate and false for
 // opHTTPStart and opHTTPRestart (GoogleCloudPlatform/scion#1931).
 func TestBuildStartContext_FreshProvisionSetOnlyForCreate(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -576,7 +576,7 @@ func TestBuildStartContext_FreshProvisionSetOnlyForCreate(t *testing.T) {
 // directory and write a marker file, an invalid Operation still leaves the
 // filesystem untouched.
 func TestBuildStartContext_InvalidOperationCreatesNothing(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -608,7 +608,7 @@ func TestBuildStartContext_InvalidOperationCreatesNothing(t *testing.T) {
 }
 
 func TestBuildStartContext_AttachMode(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -626,7 +626,7 @@ func TestBuildStartContext_AttachMode(t *testing.T) {
 }
 
 func TestBuildStartContext_NoAuth(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -715,7 +715,7 @@ func TestBuildStartContext_WorkspaceMode(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := testServerConfig()
+			cfg := DefaultServerConfig()
 			cfg.StateDir = t.TempDir()
 			srv := newTestServerForStartContext(t, cfg)
 
@@ -741,7 +741,7 @@ func TestBuildStartContext_WorkspaceMode(t *testing.T) {
 // resolvedEnv is propagated to the container env, and the broker-side code does
 // not overwrite it with the shared-plain default.
 func TestBuildStartContext_WorkspaceMode_StartPathFallback(t *testing.T) {
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -780,7 +780,7 @@ func TestBuildStartContext_WorkspaceMode_StartPathFallback(t *testing.T) {
 // (GitClone config, on-disk git dir, hub-injected resolvedEnv) are tested below.
 func TestBuildStartContext_WorkspaceGit(t *testing.T) {
 	t.Run("git clone config implies git workspace", func(t *testing.T) {
-		cfg := testServerConfig()
+		cfg := DefaultServerConfig()
 		cfg.StateDir = t.TempDir()
 		srv := newTestServerForStartContext(t, cfg)
 
@@ -805,7 +805,7 @@ func TestBuildStartContext_WorkspaceGit(t *testing.T) {
 	})
 
 	t.Run("no git clone and no workspace implies absent git var", func(t *testing.T) {
-		cfg := testServerConfig()
+		cfg := DefaultServerConfig()
 		cfg.StateDir = t.TempDir()
 		srv := newTestServerForStartContext(t, cfg)
 
@@ -825,7 +825,7 @@ func TestBuildStartContext_WorkspaceGit(t *testing.T) {
 	})
 
 	t.Run("start path hub-injected SCION_WORKSPACE_GIT propagates", func(t *testing.T) {
-		cfg := testServerConfig()
+		cfg := DefaultServerConfig()
 		cfg.StateDir = t.TempDir()
 		srv := newTestServerForStartContext(t, cfg)
 
@@ -854,7 +854,7 @@ func TestBuildStartContext_WorkspaceGit(t *testing.T) {
 			t.Skipf("git init failed: %s", string(out))
 		}
 
-		cfg := testServerConfig()
+		cfg := DefaultServerConfig()
 		cfg.StateDir = t.TempDir()
 		srv := newTestServerForStartContext(t, cfg)
 
@@ -892,7 +892,7 @@ func TestBuildStartContext_WorkspaceGit(t *testing.T) {
 // broker's ~35 classification sites unrecoverable downstream.
 func TestBuildStartContext_EnvClassificationsCarried(t *testing.T) {
 	t.Run("non-nil hub classifications merged with broker keys", func(t *testing.T) {
-		cfg := testServerConfig()
+		cfg := DefaultServerConfig()
 		cfg.StateDir = t.TempDir()
 		srv := newTestServerForStartContext(t, cfg)
 
@@ -934,7 +934,7 @@ func TestBuildStartContext_EnvClassificationsCarried(t *testing.T) {
 	})
 
 	t.Run("nil hub classifications stays nil", func(t *testing.T) {
-		cfg := testServerConfig()
+		cfg := DefaultServerConfig()
 		cfg.StateDir = t.TempDir()
 		srv := newTestServerForStartContext(t, cfg)
 

@@ -295,10 +295,12 @@ Controls the Runtime Broker service.
 
 Nothing in Scion calls the Runtime Broker from a browser: the Hub reaches it with signed server-side requests or over the control channel. CORS on the broker is therefore off by default, and the broker sends no CORS headers.
 
+CORS headers are added only to requests that pass broker authentication. Broker authentication runs first, and preflight (`OPTIONS`) requests are not exempt from it, so a broker with HMAC keys refuses an unsigned preflight before CORS applies. Allowing an origin therefore helps only a caller that can sign its requests.
+
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `enabled` | bool | `false` | Enable CORS on the broker API. A missing `server.broker.cors` block means off. |
-| `allowed_origins` | list | `[]` | Origins allowed to call the broker cross-origin. Enabling CORS without listing origins allows none. `"*"` allows every origin; the broker logs a warning at startup when it is set. |
+| `allowed_origins` | list | `[]` | Origins that get CORS headers on authenticated broker requests. Enabling CORS without listing origins allows none. `"*"` allows every origin; the broker logs a warning at startup when it is set. |
 | `allowed_methods` | list | `GET, POST, PUT, PATCH, DELETE, OPTIONS` | Methods sent in `Access-Control-Allow-Methods` for an allowed origin. |
 | `allowed_headers` | list | `Authorization, Content-Type, X-Scion-Broker-Token, X-API-Key` | Headers sent in `Access-Control-Allow-Headers` for an allowed origin. |
 | `max_age` | int | `3600` | Preflight cache lifetime in seconds. |

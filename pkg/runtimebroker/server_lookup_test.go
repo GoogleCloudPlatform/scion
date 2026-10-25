@@ -68,7 +68,7 @@ func TestLookupContainerID_DefaultManager(t *testing.T) {
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	containerID, err := srv.LookupContainerID(context.Background(), "myagent", "")
 	if err != nil {
@@ -89,7 +89,7 @@ func TestLookupContainerID_CaseInsensitive(t *testing.T) {
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	containerID, err := srv.LookupContainerID(context.Background(), "MyAgent", "")
 	if err != nil {
@@ -104,7 +104,7 @@ func TestLookupContainerID_NotFound(t *testing.T) {
 	mgr := &filteringMockManager{}
 	mgr.agents = []api.AgentInfo{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	_, err := srv.LookupContainerID(context.Background(), "nonexistent", "")
 	if err == nil {
@@ -132,7 +132,7 @@ func TestLookupContainerID_FallbackToAuxiliary(t *testing.T) {
 
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-	srv := New(testServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
 
 	// Add auxiliary runtime
 	srv.auxiliaryRuntimesMu.Lock()
@@ -166,7 +166,7 @@ func TestLookupAgent_DefaultRuntime(t *testing.T) {
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	result, err := srv.LookupAgent(context.Background(), "agent1", "")
 	if err != nil {
@@ -202,7 +202,7 @@ func TestLookupAgent_K8sAuxiliaryRuntime(t *testing.T) {
 
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-	srv := New(testServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
 
 	srv.auxiliaryRuntimesMu.Lock()
 	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{
@@ -230,7 +230,7 @@ func TestLookupAgent_NotFound(t *testing.T) {
 	mgr := &filteringMockManager{}
 	mgr.agents = []api.AgentInfo{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	_, err := srv.LookupAgent(context.Background(), "ghost", "")
 	if err == nil {
@@ -252,7 +252,7 @@ func TestLookupAgent_PrefersContainerIDLabel(t *testing.T) {
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	result, err := srv.LookupAgent(context.Background(), "agent1", "")
 	if err != nil {
@@ -273,7 +273,7 @@ func TestLookupAgent_FallsBackToContainerID(t *testing.T) {
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	result, err := srv.LookupAgent(context.Background(), "agent1", "")
 	if err != nil {
@@ -293,7 +293,7 @@ func TestResolveManagerForAgent_DefaultManager(t *testing.T) {
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	result := srv.resolveManagerForAgent(context.Background(), "myagent", "")
 	if result != mgr {
@@ -317,7 +317,7 @@ func TestResolveManagerForAgent_FallbackToAuxiliary(t *testing.T) {
 
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-	srv := New(testServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
 
 	srv.auxiliaryRuntimesMu.Lock()
 	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{
@@ -337,7 +337,7 @@ func TestResolveManagerForAgent_NotFoundFallsBackToDefault(t *testing.T) {
 	defaultMgr.agents = []api.AgentInfo{}
 
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(testServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
 
 	result := srv.resolveManagerForAgent(context.Background(), "nonexistent", "")
 	if result != defaultMgr {
@@ -359,7 +359,7 @@ func TestResolveManagerForAgent_CaseInsensitive(t *testing.T) {
 
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-	srv := New(testServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
 
 	srv.auxiliaryRuntimesMu.Lock()
 	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{
@@ -383,7 +383,7 @@ func TestResolveRuntimeForAgent_DefaultRuntime(t *testing.T) {
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	result := srv.resolveRuntimeForAgent(context.Background(), "myagent", "")
 	if result != rt {
@@ -405,7 +405,7 @@ func TestResolveRuntimeForAgent_FallbackToAuxiliary(t *testing.T) {
 
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-	srv := New(testServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
 
 	srv.auxiliaryRuntimesMu.Lock()
 	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{
@@ -425,7 +425,7 @@ func TestResolveRuntimeForAgent_NotFoundFallsBackToDefault(t *testing.T) {
 	defaultMgr.agents = []api.AgentInfo{}
 
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(testServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
 
 	result := srv.resolveRuntimeForAgent(context.Background(), "nonexistent", "")
 	if result != rt {
@@ -442,7 +442,7 @@ func TestResolveAgentRuntimeTarget_ProjectScopedAuxiliary(t *testing.T) {
 	}}}
 	defaultRuntime := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	auxRuntime := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-	srv := New(testServerConfig(), defaultMgr, defaultRuntime, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), defaultMgr, defaultRuntime, config.RuntimeBuildRecord{})
 	srv.auxiliaryRuntimesMu.Lock()
 	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRuntime, Manager: auxMgr}
 	srv.auxiliaryRuntimesMu.Unlock()
@@ -475,7 +475,7 @@ func TestResolveAgentRuntimeTarget_ProjectFallbackSkipsOtherProjects(t *testing.
 	}}}
 	defaultRuntime := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	auxRuntime := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-	srv := New(testServerConfig(), defaultMgr, defaultRuntime, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), defaultMgr, defaultRuntime, config.RuntimeBuildRecord{})
 	srv.auxiliaryRuntimesMu.Lock()
 	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRuntime, Manager: auxMgr}
 	srv.auxiliaryRuntimesMu.Unlock()
@@ -492,7 +492,7 @@ func TestResolveAgentRuntimeTarget_ProjectFallbackAcceptsUnlabeledAgent(t *testi
 			Labels: map[string]string{"scion.name": "legacy-agent"}},
 	}}}
 	runtime := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(testServerConfig(), manager, runtime, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), manager, runtime, config.RuntimeBuildRecord{})
 
 	selectedManager, selectedRuntime := srv.resolveAgentRuntimeTarget(context.Background(), "legacy-agent", scopeProjA)
 	if selectedManager != manager || selectedRuntime != runtime {
@@ -555,7 +555,7 @@ func TestHasAgentInProjectOrUnlabeled(t *testing.T) {
 
 func TestRuntimeCommand_ReturnsRuntimeName(t *testing.T) {
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "podman" }}
-	srv := New(testServerConfig(), &mockManager{}, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), &mockManager{}, rt, config.RuntimeBuildRecord{})
 
 	if got := srv.RuntimeCommand(); got != "podman" {
 		t.Errorf("expected podman, got %s", got)
@@ -563,7 +563,7 @@ func TestRuntimeCommand_ReturnsRuntimeName(t *testing.T) {
 }
 
 func TestRuntimeCommand_DefaultFallback(t *testing.T) {
-	srv := New(testServerConfig(), &mockManager{}, nil, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), &mockManager{}, nil, config.RuntimeBuildRecord{})
 
 	if got := srv.RuntimeCommand(); got != "docker" {
 		t.Errorf("expected docker fallback, got %s", got)
@@ -585,7 +585,7 @@ func TestLookupContainerID_ProjectScopedDisambiguation(t *testing.T) {
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	// With project scoping, should get the correct container
 	id, err := srv.LookupContainerID(context.Background(), "foobar", "project-aaa")
@@ -620,7 +620,7 @@ func TestLookupAgent_ProjectScopedDisambiguation(t *testing.T) {
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	result, err := srv.LookupAgent(context.Background(), "foobar", "project-ccc")
 	if err != nil {
@@ -645,7 +645,7 @@ func TestLookupContainerID_DifferentProjectNotMatchedViaFallback(t *testing.T) {
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	if _, err := srv.LookupContainerID(context.Background(), "coordinator", "project-bbb"); err == nil {
 		t.Error("expected error: a different project's labeled agent must not match via fallback")
@@ -675,7 +675,7 @@ func TestHandleAgentAttach_GroveIDQueryParamNotHonoured(t *testing.T) {
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/shared-agent/attach?groveId=project-a", nil)
 	req.Header.Set("Upgrade", "websocket")
@@ -717,7 +717,7 @@ func TestLookupAgent_AuxiliaryListErrorSurfacesUnavailable(t *testing.T) {
 
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-	srv := New(testServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
 
 	srv.auxiliaryRuntimesMu.Lock()
 	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRt, Manager: auxMgr}
@@ -768,7 +768,7 @@ func TestLookupAgent_AuxiliaryListErrorInProjectFallbackSurfacesUnavailable(t *t
 
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-	srv := New(testServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
 
 	srv.auxiliaryRuntimesMu.Lock()
 	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRt, Manager: auxMgr}
@@ -792,7 +792,7 @@ func TestLookupAgent_AuxiliaryListErrorInProjectFallbackSurfacesUnavailable(t *t
 func TestLookupAgent_PrimaryManagerFallbackListErrorSurfacesUnavailable(t *testing.T) {
 	mgr := &scopedThenFailManager{failErr: errors.New("list: connection reset")}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	_, err := srv.LookupAgent(context.Background(), "ghost", "some-project")
 	if err == nil {
@@ -811,7 +811,7 @@ func TestLookupAgent_NoAuxiliaryRuntimesStillReportsNotFound(t *testing.T) {
 	mgr := &filteringMockManager{}
 	mgr.agents = []api.AgentInfo{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	_, err := srv.LookupAgent(context.Background(), "ghost", "")
 	if err == nil {
@@ -833,7 +833,7 @@ func TestLookupAgent_ProjectFallbackForLegacyContainers(t *testing.T) {
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	// Should still find agents without scion.project_id via fallback when
 	// their recorded path identifies as the project.
@@ -883,7 +883,7 @@ func TestLookupAgent_AuxiliaryLoopStopsAfterFirstMatch(t *testing.T) {
 		defaultMgr.agents = []api.AgentInfo{}
 
 		rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-		srv := New(testServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
+		srv := New(DefaultServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
 
 		managers := make(map[string]*countingListManager, len(keys))
 		srv.auxiliaryRuntimesMu.Lock()
@@ -944,7 +944,7 @@ func TestLookupAgent_RuntimeNameFromIdentityKeyedAux(t *testing.T) {
 
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	auxRt := fakeKubernetesRuntime("cluster-a", "scion-ns")
-	srv := New(testServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
 
 	identity := auxiliaryRuntimeIdentity(auxRt)
 	if identity == "kubernetes" {
@@ -991,7 +991,7 @@ func TestLookupAgent_RuntimeNameFromIdentityKeyedAux_ProjectFallbackBranch(t *te
 
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	auxRt := fakeKubernetesRuntime("cluster-a", "scion-ns")
-	srv := New(testServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
 
 	identity := auxiliaryRuntimeIdentity(auxRt)
 	srv.auxiliaryRuntimesMu.Lock()
@@ -1026,7 +1026,7 @@ func TestLookupContainerID_NoContainerIDIsErrAgentNotFound(t *testing.T) {
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	_, err := srv.LookupContainerID(context.Background(), "coordinator", "project-A")
 	if err == nil {
@@ -1060,7 +1060,7 @@ func TestLookupContainerID_AmbiguousMatchIsNotErrAgentNotFound(t *testing.T) {
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	_, err := srv.LookupContainerID(context.Background(), "coordinator", "project-A")
 	if err == nil {
@@ -1088,7 +1088,7 @@ func TestLookupContainerID_ListingErrorIsListUnavailable(t *testing.T) {
 	}
 	mgr.listErr = errors.New("docker ps failed: exit status 1")
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	_, err := srv.LookupContainerID(context.Background(), "coordinator", "project-A")
 	if err == nil {
@@ -1118,7 +1118,7 @@ func TestLookupContainerID_AuxiliaryListErrorSurfacesUnavailable(t *testing.T) {
 
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-	srv := New(testServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
 
 	srv.auxiliaryRuntimesMu.Lock()
 	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRt, Manager: auxMgr}
@@ -1145,7 +1145,7 @@ func TestLookupContainerID_AuxiliaryListErrorSurfacesUnavailable(t *testing.T) {
 func TestLookupContainerID_FallbackListErrorSurfacesUnavailable(t *testing.T) {
 	mgr := &scopedThenFailManager{failErr: errors.New("list: connection reset")}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	_, err := srv.LookupContainerID(context.Background(), "ghost", "some-project")
 	if err == nil {
@@ -1172,7 +1172,7 @@ func TestLookupContainerID_FallbackAuxiliaryListErrorSurfacesUnavailable(t *test
 
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	auxRt := &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
-	srv := New(testServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
+	srv := New(DefaultServerConfig(), defaultMgr, rt, config.RuntimeBuildRecord{})
 
 	srv.auxiliaryRuntimesMu.Lock()
 	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: auxRt, Manager: auxMgr}
@@ -1276,7 +1276,7 @@ func TestLookupAgent_PhaseIsRawRuntimeNotMerged(t *testing.T) {
 					}, nil
 				},
 			}
-			srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+			srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 			result, err := srv.LookupAgent(context.Background(), "agent1", "")
 			if err != nil {

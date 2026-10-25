@@ -373,7 +373,7 @@ func TestResolveManagerForOpts_OperatorDefinedSubstrateProfilesSelectedByProject
 	defaultMgr := agent.NewManager(defaultRT)
 	t.Cleanup(defaultMgr.Close)
 
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.ForceRuntime = ""
@@ -507,7 +507,7 @@ func TestResolveManagerForOpts_ProjectDefinedSubstrateProfileRefused(t *testing.
 	defaultMgr := agent.NewManager(defaultRT)
 	t.Cleanup(defaultMgr.Close)
 
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.ForceRuntime = ""
@@ -575,7 +575,7 @@ runtimes:
 		t.Fatal(err)
 	}
 
-	cfg := testServerConfig()
+	cfg := DefaultServerConfig()
 	cfg.ForceRuntime = ""
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	mgr := agent.NewManager(rt)

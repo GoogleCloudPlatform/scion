@@ -32,7 +32,7 @@ const hubFilesProjectID = "a46b3dcd-0000-4000-8000-000000000001"
 // newHubFilesTestServer returns a test server and its HOME.
 func newHubFilesTestServer(t *testing.T) (*Server, string) {
 	t.Helper()
-	srv := newTestServerForStartContext(t, testServerConfig())
+	srv := newTestServerForStartContext(t, DefaultServerConfig())
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Fatal(err)

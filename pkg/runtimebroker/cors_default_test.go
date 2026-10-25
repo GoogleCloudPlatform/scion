@@ -26,8 +26,9 @@ import (
 
 // Broker CORS policy: off by default, explicit opt-in per origin.
 
-// newCORSServer returns a keyed server whose CORS settings come from cors,
-// and the key that signs requests for it.
+// newCORSServer returns a keyed, strict server whose CORS settings come
+// from cors, and the key that signs requests for it. Change the auth mode in
+// cors to test a permissive server.
 func newCORSServer(t *testing.T, cors func(*ServerConfig)) (*Server, []byte) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
@@ -89,12 +90,52 @@ func TestCORSDefault_NoAllowOrigin(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, key := newCORSServer(t, tc.cors)
 			h := srv.Handler()
-			for _, method := range []string{http.MethodPost, http.MethodGet, http.MethodOptions} {
+			// Signed requests only: on a strict server an unsigned preflight
+			// is refused by broker auth before CORS runs (see
+			// TestCORSDefault_PreflightNoAllowOrigin).
+			for _, method := range []string{http.MethodPost, http.MethodGet} {
 				if got := corsAllowOrigin(h, method, "https://example.invalid", key); got != "" {
 					t.Errorf("%s from a foreign origin: Access-Control-Allow-Origin = %q, want none", method, got)
 				}
 			}
 		})
+	}
+}
+
+// A preflight carries no signature, so it reaches the CORS policy only on a
+// server whose broker auth admits unsigned requests (permissive mode).
+// There the default must not allow a foreign origin either.
+func TestCORSDefault_PreflightNoAllowOrigin(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cors func(*ServerConfig)
+	}{
+		{"global config defaults", fromGlobalDefaults},
+		{"server config defaults", func(*ServerConfig) {}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, key := newCORSServer(t, func(cfg *ServerConfig) {
+				tc.cors(cfg)
+				cfg.BrokerAuthStrictMode = false
+			})
+			h := srv.Handler()
+			if got := corsAllowOrigin(h, http.MethodOptions, "https://example.invalid", key); got != "" {
+				t.Errorf("preflight from a foreign origin: Access-Control-Allow-Origin = %q, want none", got)
+			}
+		})
+	}
+}
+
+// Control for TestCORSDefault_PreflightNoAllowOrigin: on the same permissive
+// server, a preflight from an opted-in origin does reach the CORS policy.
+func TestCORSOptIn_PreflightListedOrigin(t *testing.T) {
+	srv, key := newCORSServer(t, func(cfg *ServerConfig) {
+		cfg.BrokerAuthStrictMode = false
+		cfg.CORSEnabled = true
+		cfg.CORSAllowedOrigins = []string{"https://ui.example.test"}
+	})
+	if got := corsAllowOrigin(srv.Handler(), http.MethodOptions, "https://ui.example.test", key); got != "https://ui.example.test" {
+		t.Errorf("preflight from the listed origin: Access-Control-Allow-Origin = %q, want the origin", got)
 	}
 }
 
