@@ -181,7 +181,8 @@ nb && !/^ +--- (PASS|FAIL|SKIP): / { finish() }
 	if ($2 == "RUN") {
 		seen[cur] = 1
 		p = parent(cur)
-		if (p != "") delete last[p]
+		# A subtest start clears the reason of every test it may be under.
+		for (q = p; q != ""; q = parent(q)) delete last[q]
 		for (; p != ""; p = parent(p)) held(p, "\001" cur)
 	} else if ($2 == "PAUSE") {
 		paused[cur] = 1

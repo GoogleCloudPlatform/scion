@@ -181,3 +181,10 @@ func TestLogShapedFail(t *testing.T) {
 		t.Error("s fails")
 	})
 }
+
+func TestSkipSiblingParent(t *testing.T) {
+	t.Run("x", func(t *testing.T) {})
+	t.Log("setup")
+	t.Run("x/y", func(t *testing.T) { t.Log("y work") })
+	t.SkipNow()
+}

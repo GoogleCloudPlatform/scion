@@ -349,7 +349,7 @@ for src in hack/hubshard/testdata/skip-summary/*/; do
 	fi
 	n=$((n + 1))
 done
-[ "$n" -ge 16 ] || fail "found $n scenarios under hack/hubshard/testdata/skip-summary, want at least 16"
+[ "$n" -ge 17 ] || fail "found $n scenarios under hack/hubshard/testdata/skip-summary, want at least 17"
 
 if [ "$fails" -ne 0 ]; then
 	echo "hubshard skip summary selftest: $fails failure(s)" >&2

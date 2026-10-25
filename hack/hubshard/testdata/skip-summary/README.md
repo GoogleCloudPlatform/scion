@@ -31,6 +31,7 @@ with `-test.paniconexit0 -test.count=1 -test.run='^Name$'`:
 | skip-after-subtest | `TestSkipAfterSub` | |
 | slash-sibling | `TestSlashSibling` | |
 | slash-sibling-fail | `TestSlashSiblingFail` | |
+| skip-sibling-parent | `TestSkipSiblingParent` | |
 
 In `long-line`, each run of 200000 `x` bytes is stored as `@X200000@`;
 the self-test expands it.
