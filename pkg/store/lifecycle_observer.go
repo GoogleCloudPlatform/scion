@@ -236,6 +236,13 @@ type LifecycleCursor struct {
 	// created ("" when the cursor was created later).
 	RequestedTemplate string
 
+	// Attribution is the persistent run attribution (WP1 attribution
+	// design v2.8). AttributionStamp is written from the same value as
+	// UpdatedAt in every bump that writes Attribution; nil on a cursor no
+	// attribution-aware writer has bumped yet.
+	Attribution      LifecycleAttribution
+	AttributionStamp *time.Time
+
 	UpdatedAt time.Time
 }
 
@@ -257,6 +264,39 @@ type LifecycleCursorUpdate struct {
 	// Run is the run-segment state after this write; every bump writes it
 	// whole (design 2.4a cursor run state).
 	Run LifecycleRunState
+	// Attribution is the run attribution after this write; every bump
+	// writes it whole, and the store writes attribution_stamp from the same
+	// value as updated_at in the same statement.
+	Attribution LifecycleAttribution
+}
+
+// Attribution states and quarantine modes (WP1 attribution design 3.2).
+// The empty values are the column defaults and the fail-closed readings:
+// a LEGACY cursor and an UNKNOWN quarantine history.
+const (
+	AttributionLegacy  = ""
+	AttributionClear   = "clear"
+	AttributionHeld    = "held"
+	QuarantineUnknown  = ""
+	QuarantineComplete = "complete"
+)
+
+// LifecycleAttribution is a cursor's persistent run attribution (WP1
+// attribution design 3.2-3.4). Generations are decimal strings, as the
+// event incarnation_id. QuarantinedRuns is the stored comma-separated
+// list, newest first; lifecycleevents parses and validates it.
+type LifecycleAttribution struct {
+	State                      string
+	LastRun                    string
+	LastGeneration             string
+	AttributedRun              string
+	AttributedGeneration       string
+	QuarantinedRuns            string
+	QuarantineMode             string
+	ReincarnationMintRun       string
+	UntrustedOpenRun           string
+	UntrustedOpenRunGeneration string
+	UntrustedOpenRunRev        int64
 }
 
 // LifecycleRunState is the cursor's run-segment state (design 2.4a).

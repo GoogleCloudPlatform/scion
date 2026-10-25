@@ -562,6 +562,18 @@ var (
 		{Name: "creator_principal_id", Type: field.TypeString, Default: ""},
 		{Name: "requested_template", Type: field.TypeString, Default: ""},
 		{Name: "updated_at", Type: field.TypeTime},
+		{Name: "attribution_state", Type: field.TypeString, Default: ""},
+		{Name: "attribution_stamp", Type: field.TypeTime, Nullable: true},
+		{Name: "last_run", Type: field.TypeString, Default: ""},
+		{Name: "last_generation", Type: field.TypeString, Default: ""},
+		{Name: "attributed_run", Type: field.TypeString, Default: ""},
+		{Name: "attributed_generation", Type: field.TypeString, Default: ""},
+		{Name: "quarantined_runs", Type: field.TypeString, Default: ""},
+		{Name: "quarantine_mode", Type: field.TypeString, Default: ""},
+		{Name: "reincarnation_mint_run", Type: field.TypeString, Default: ""},
+		{Name: "untrusted_open_run", Type: field.TypeString, Default: ""},
+		{Name: "untrusted_open_run_generation", Type: field.TypeString, Default: ""},
+		{Name: "untrusted_open_run_rev", Type: field.TypeInt64, Default: 0},
 	}
 	// AgentLifecycleCursorsTable holds the schema information for the "agent_lifecycle_cursors" table.
 	AgentLifecycleCursorsTable = &schema.Table{

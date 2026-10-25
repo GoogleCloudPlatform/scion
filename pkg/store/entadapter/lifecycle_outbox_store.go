@@ -163,7 +163,21 @@ func entCursorToStore(c *ent.AgentLifecycleCursor) *store.LifecycleCursor {
 		CreatorPrincipalType:    c.CreatorPrincipalType,
 		CreatorPrincipalID:      c.CreatorPrincipalID,
 		RequestedTemplate:       c.RequestedTemplate,
-		UpdatedAt:               c.UpdatedAt,
+		Attribution: store.LifecycleAttribution{
+			State:                      c.AttributionState,
+			LastRun:                    c.LastRun,
+			LastGeneration:             c.LastGeneration,
+			AttributedRun:              c.AttributedRun,
+			AttributedGeneration:       c.AttributedGeneration,
+			QuarantinedRuns:            c.QuarantinedRuns,
+			QuarantineMode:             c.QuarantineMode,
+			ReincarnationMintRun:       c.ReincarnationMintRun,
+			UntrustedOpenRun:           c.UntrustedOpenRun,
+			UntrustedOpenRunGeneration: c.UntrustedOpenRunGeneration,
+			UntrustedOpenRunRev:        c.UntrustedOpenRunRev,
+		},
+		AttributionStamp: c.AttributionStamp,
+		UpdatedAt:        c.UpdatedAt,
 	}
 }
 
@@ -202,10 +216,15 @@ func (l *lifecycleTx) BumpLifecycleCursor(ctx context.Context, agentID string, n
 	if err != nil {
 		return nil, err
 	}
+	// One normalised value for updated_at and attribution_stamp, written in
+	// the same statement (attribution design 7.1): the stamp check compares
+	// the two with time.Equal.
 	now := upd.Now
 	if now.IsZero() {
 		now = time.Now()
 	}
+	now = now.UTC()
+	att := upd.Attribution
 	if upd.Create {
 		c, err := l.client.AgentLifecycleCursor.Create().
 			SetID(uid).
@@ -228,6 +247,18 @@ func (l *lifecycleTx) BumpLifecycleCursor(ctx context.Context, agentID string, n
 			SetNillablePendingAdoptedAt(utcPtr(upd.Run.PendingAdoptedAt)).
 			SetPendingAdoptionSource(upd.Run.PendingAdoptionSource).
 			SetPendingAdoptedTo(upd.Run.PendingAdoptedTo).
+			SetAttributionState(att.State).
+			SetAttributionStamp(now).
+			SetLastRun(att.LastRun).
+			SetLastGeneration(att.LastGeneration).
+			SetAttributedRun(att.AttributedRun).
+			SetAttributedGeneration(att.AttributedGeneration).
+			SetQuarantinedRuns(att.QuarantinedRuns).
+			SetQuarantineMode(att.QuarantineMode).
+			SetReincarnationMintRun(att.ReincarnationMintRun).
+			SetUntrustedOpenRun(att.UntrustedOpenRun).
+			SetUntrustedOpenRunGeneration(att.UntrustedOpenRunGeneration).
+			SetUntrustedOpenRunRev(att.UntrustedOpenRunRev).
 			Save(ctx)
 		if err != nil {
 			return nil, mapError(err)
@@ -248,7 +279,19 @@ func (l *lifecycleTx) BumpLifecycleCursor(ctx context.Context, agentID string, n
 		SetReincarnationBaseRunID(upd.Run.ReincarnationBaseRunID).
 		SetPendingAdoptedFrom(upd.Run.PendingAdoptedFrom).
 		SetPendingAdoptionSource(upd.Run.PendingAdoptionSource).
-		SetPendingAdoptedTo(upd.Run.PendingAdoptedTo)
+		SetPendingAdoptedTo(upd.Run.PendingAdoptedTo).
+		SetAttributionState(att.State).
+		SetAttributionStamp(now).
+		SetLastRun(att.LastRun).
+		SetLastGeneration(att.LastGeneration).
+		SetAttributedRun(att.AttributedRun).
+		SetAttributedGeneration(att.AttributedGeneration).
+		SetQuarantinedRuns(att.QuarantinedRuns).
+		SetQuarantineMode(att.QuarantineMode).
+		SetReincarnationMintRun(att.ReincarnationMintRun).
+		SetUntrustedOpenRun(att.UntrustedOpenRun).
+		SetUntrustedOpenRunGeneration(att.UntrustedOpenRunGeneration).
+		SetUntrustedOpenRunRev(att.UntrustedOpenRunRev)
 	if t := upd.Run.PendingRunChangeAt; t != nil {
 		u.SetPendingRunChangeAt(t.UTC())
 	} else {

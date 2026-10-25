@@ -51,6 +51,30 @@ const (
 	FieldRequestedTemplate = "requested_template"
 	// FieldUpdatedAt holds the string denoting the updated_at field in the database.
 	FieldUpdatedAt = "updated_at"
+	// FieldAttributionState holds the string denoting the attribution_state field in the database.
+	FieldAttributionState = "attribution_state"
+	// FieldAttributionStamp holds the string denoting the attribution_stamp field in the database.
+	FieldAttributionStamp = "attribution_stamp"
+	// FieldLastRun holds the string denoting the last_run field in the database.
+	FieldLastRun = "last_run"
+	// FieldLastGeneration holds the string denoting the last_generation field in the database.
+	FieldLastGeneration = "last_generation"
+	// FieldAttributedRun holds the string denoting the attributed_run field in the database.
+	FieldAttributedRun = "attributed_run"
+	// FieldAttributedGeneration holds the string denoting the attributed_generation field in the database.
+	FieldAttributedGeneration = "attributed_generation"
+	// FieldQuarantinedRuns holds the string denoting the quarantined_runs field in the database.
+	FieldQuarantinedRuns = "quarantined_runs"
+	// FieldQuarantineMode holds the string denoting the quarantine_mode field in the database.
+	FieldQuarantineMode = "quarantine_mode"
+	// FieldReincarnationMintRun holds the string denoting the reincarnation_mint_run field in the database.
+	FieldReincarnationMintRun = "reincarnation_mint_run"
+	// FieldUntrustedOpenRun holds the string denoting the untrusted_open_run field in the database.
+	FieldUntrustedOpenRun = "untrusted_open_run"
+	// FieldUntrustedOpenRunGeneration holds the string denoting the untrusted_open_run_generation field in the database.
+	FieldUntrustedOpenRunGeneration = "untrusted_open_run_generation"
+	// FieldUntrustedOpenRunRev holds the string denoting the untrusted_open_run_rev field in the database.
+	FieldUntrustedOpenRunRev = "untrusted_open_run_rev"
 	// Table holds the table name of the agentlifecyclecursor in the database.
 	Table = "agent_lifecycle_cursors"
 )
@@ -77,6 +101,18 @@ var Columns = []string{
 	FieldCreatorPrincipalID,
 	FieldRequestedTemplate,
 	FieldUpdatedAt,
+	FieldAttributionState,
+	FieldAttributionStamp,
+	FieldLastRun,
+	FieldLastGeneration,
+	FieldAttributedRun,
+	FieldAttributedGeneration,
+	FieldQuarantinedRuns,
+	FieldQuarantineMode,
+	FieldReincarnationMintRun,
+	FieldUntrustedOpenRun,
+	FieldUntrustedOpenRunGeneration,
+	FieldUntrustedOpenRunRev,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -124,6 +160,28 @@ var (
 	DefaultUpdatedAt func() time.Time
 	// UpdateDefaultUpdatedAt holds the default value on update for the "updated_at" field.
 	UpdateDefaultUpdatedAt func() time.Time
+	// DefaultAttributionState holds the default value on creation for the "attribution_state" field.
+	DefaultAttributionState string
+	// DefaultLastRun holds the default value on creation for the "last_run" field.
+	DefaultLastRun string
+	// DefaultLastGeneration holds the default value on creation for the "last_generation" field.
+	DefaultLastGeneration string
+	// DefaultAttributedRun holds the default value on creation for the "attributed_run" field.
+	DefaultAttributedRun string
+	// DefaultAttributedGeneration holds the default value on creation for the "attributed_generation" field.
+	DefaultAttributedGeneration string
+	// DefaultQuarantinedRuns holds the default value on creation for the "quarantined_runs" field.
+	DefaultQuarantinedRuns string
+	// DefaultQuarantineMode holds the default value on creation for the "quarantine_mode" field.
+	DefaultQuarantineMode string
+	// DefaultReincarnationMintRun holds the default value on creation for the "reincarnation_mint_run" field.
+	DefaultReincarnationMintRun string
+	// DefaultUntrustedOpenRun holds the default value on creation for the "untrusted_open_run" field.
+	DefaultUntrustedOpenRun string
+	// DefaultUntrustedOpenRunGeneration holds the default value on creation for the "untrusted_open_run_generation" field.
+	DefaultUntrustedOpenRunGeneration string
+	// DefaultUntrustedOpenRunRev holds the default value on creation for the "untrusted_open_run_rev" field.
+	DefaultUntrustedOpenRunRev int64
 )
 
 // OrderOption defines the ordering options for the AgentLifecycleCursor queries.
@@ -227,4 +285,64 @@ func ByRequestedTemplate(opts ...sql.OrderTermOption) OrderOption {
 // ByUpdatedAt orders the results by the updated_at field.
 func ByUpdatedAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldUpdatedAt, opts...).ToFunc()
+}
+
+// ByAttributionState orders the results by the attribution_state field.
+func ByAttributionState(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAttributionState, opts...).ToFunc()
+}
+
+// ByAttributionStamp orders the results by the attribution_stamp field.
+func ByAttributionStamp(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAttributionStamp, opts...).ToFunc()
+}
+
+// ByLastRun orders the results by the last_run field.
+func ByLastRun(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLastRun, opts...).ToFunc()
+}
+
+// ByLastGeneration orders the results by the last_generation field.
+func ByLastGeneration(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLastGeneration, opts...).ToFunc()
+}
+
+// ByAttributedRun orders the results by the attributed_run field.
+func ByAttributedRun(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAttributedRun, opts...).ToFunc()
+}
+
+// ByAttributedGeneration orders the results by the attributed_generation field.
+func ByAttributedGeneration(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAttributedGeneration, opts...).ToFunc()
+}
+
+// ByQuarantinedRuns orders the results by the quarantined_runs field.
+func ByQuarantinedRuns(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldQuarantinedRuns, opts...).ToFunc()
+}
+
+// ByQuarantineMode orders the results by the quarantine_mode field.
+func ByQuarantineMode(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldQuarantineMode, opts...).ToFunc()
+}
+
+// ByReincarnationMintRun orders the results by the reincarnation_mint_run field.
+func ByReincarnationMintRun(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldReincarnationMintRun, opts...).ToFunc()
+}
+
+// ByUntrustedOpenRun orders the results by the untrusted_open_run field.
+func ByUntrustedOpenRun(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldUntrustedOpenRun, opts...).ToFunc()
+}
+
+// ByUntrustedOpenRunGeneration orders the results by the untrusted_open_run_generation field.
+func ByUntrustedOpenRunGeneration(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldUntrustedOpenRunGeneration, opts...).ToFunc()
+}
+
+// ByUntrustedOpenRunRev orders the results by the untrusted_open_run_rev field.
+func ByUntrustedOpenRunRev(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldUntrustedOpenRunRev, opts...).ToFunc()
 }

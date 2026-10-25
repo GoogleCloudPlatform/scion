@@ -96,6 +96,58 @@ func (AgentLifecycleCursor) Fields() []ent.Field {
 		field.Time("updated_at").
 			Default(time.Now).
 			UpdateDefault(time.Now),
+
+		// Persistent run attribution (WP1 attribution design v2.8, section
+		// 3.2). Every column is additive with a fail-closed default: ""
+		// reads as a LEGACY cursor (attribution_state) with an UNKNOWN
+		// quarantine history (quarantine_mode), and a NULL stamp.
+		//
+		// attribution_state: "" LEGACY (written by a binary without this
+		// design), "clear" or "held".
+		field.String("attribution_state").
+			Default(""),
+		// attribution_stamp is written from the same value as updated_at
+		// in every bump this design makes; a cursor update by a writer
+		// that does not maintain the attribution leaves them unequal. A
+		// consistency check, not proof of provenance (design 7.1).
+		field.Time("attribution_stamp").
+			Optional().
+			Nillable(),
+		// last_run and last_generation are the row's run and generation
+		// as of the last observed write.
+		field.String("last_run").
+			Default(""),
+		field.String("last_generation").
+			Default(""),
+		// attributed_run and attributed_generation: in "held", the identity
+		// agent-state events may name for the held run ("" run: explicit
+		// UNATTRIBUTED); in "clear", the undo identity of the newest
+		// quarantined run.
+		field.String("attributed_run").
+			Default(""),
+		field.String("attributed_generation").
+			Default(""),
+		// quarantined_runs: the runs this cursor held unproven, newest
+		// first, comma-separated, at most store.MaxPreviousRunIDs.
+		field.String("quarantined_runs").
+			Default(""),
+		// quarantine_mode: "" UNKNOWN (sticky: the list may be incomplete)
+		// or "complete".
+		field.String("quarantine_mode").
+			Default(""),
+		// reincarnation_mint_run witnesses the observed establishing mint
+		// of a claimed, in-flight reincarnation.
+		field.String("reincarnation_mint_run").
+			Default(""),
+		// untrusted_open_run, untrusted_open_run_generation and
+		// untrusted_open_run_rev mark the exact open segment opened or
+		// bound while its run was unproven.
+		field.String("untrusted_open_run").
+			Default(""),
+		field.String("untrusted_open_run_generation").
+			Default(""),
+		field.Int64("untrusted_open_run_rev").
+			Default(0),
 	}
 }
 

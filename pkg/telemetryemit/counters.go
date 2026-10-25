@@ -49,12 +49,16 @@ const (
 	MetricAmbiguous       = "lifecycle_ambiguous_transitions"    // {kind}
 	MetricUnconfirmed     = "lifecycle_unconfirmed_starts"       //
 	MetricStaleEcho       = "lifecycle_stale_echo"               // {path, reason}
-	attrPath              = "path"
-	attrKind              = "kind"
-	attrTransition        = "transition"
-	attrReason            = "reason"
-	attrCause             = "cause"
-	attrState             = "state"
+	// MetricAttributionStale counts a cursor whose run attribution could
+	// not be trusted and was normalised to unattributed (WP1 attribution
+	// design 7.1, 3.3): reason is one of the AttributionStale* values.
+	MetricAttributionStale = "lifecycle_attribution_stale" // {reason}
+	attrPath               = "path"
+	attrKind               = "kind"
+	attrTransition         = "transition"
+	attrReason             = "reason"
+	attrCause              = "cause"
+	attrState              = "state"
 )
 
 // Observer states for MetricObserverState (design 3.3).
@@ -125,7 +129,19 @@ type LifecycleCounters interface {
 	// StaleEchoPathSync or StaleEchoPathLaunchReport, reason the store's
 	// stale reason or unsettled_adoption.
 	StaleEcho(path, reason string)
+	// AttributionStale counts a cursor normalised to unattributed, or a
+	// malformed segment discarded (attribution design 7.1 and 3.3).
+	AttributionStale(reason string)
 }
+
+// Reasons of MetricAttributionStale.
+const (
+	AttributionStaleMissing   = "missing_cursor"
+	AttributionStaleLegacy    = "legacy"
+	AttributionStaleStamp     = "stale_stamp"
+	AttributionStaleCorrupt   = "corrupt"
+	AttributionStaleDiscarded = "segment_discarded"
+)
 
 // Paths of MetricStaleEcho.
 const (
@@ -164,6 +180,9 @@ func (NopCounters) UnconfirmedStart() {}
 
 // StaleEcho implements LifecycleCounters.
 func (NopCounters) StaleEcho(string, string) {}
+
+// AttributionStale implements LifecycleCounters.
+func (NopCounters) AttributionStale(string) {}
 
 // MemoryCounters keeps values in memory, for tests. Get reads a value by
 // metric name and attribute value ("" for none).
@@ -276,6 +295,9 @@ func (m *MemoryCounters) StaleEcho(path, reason string) {
 	m.add(MetricStaleEcho, StaleEchoKey(path, reason), 1)
 }
 
+// AttributionStale implements LifecycleCounters.
+func (m *MemoryCounters) AttributionStale(reason string) { m.add(MetricAttributionStale, reason, 1) }
+
 func (m *MemoryCounters) ObserverState(state string) {
 	for _, s := range observerStates {
 		v := int64(0)
@@ -293,7 +315,7 @@ type OTelCounters struct {
 	enqueued, buildFailures, resyncs, emitAttempts, emitFailures, delivered, dropped metric.Int64Counter
 	sinkBlocked, pending, oldestAge, seqAllocated, seqDelivered, observerState       metric.Int64Gauge
 	drainerState, sinkKind                                                           metric.Int64Gauge
-	ambiguous, unconfirmed, staleEcho                                                metric.Int64Counter
+	ambiguous, unconfirmed, staleEcho, attrStale                                     metric.Int64Counter
 }
 
 // NewOTelCounters creates the instruments on mp's meter named scope.
@@ -332,6 +354,7 @@ func NewOTelCounters(mp metric.MeterProvider, scope string) (*OTelCounters, erro
 		ambiguous:     counter(MetricAmbiguous),
 		unconfirmed:   counter(MetricUnconfirmed),
 		staleEcho:     counter(MetricStaleEcho),
+		attrStale:     counter(MetricAttributionStale),
 	}
 	if err := errors.Join(errs...); err != nil {
 		return nil, err
@@ -407,4 +430,9 @@ func (c *OTelCounters) UnconfirmedStart() { c.unconfirmed.Add(bg, 1) }
 // StaleEcho implements LifecycleCounters.
 func (c *OTelCounters) StaleEcho(path, reason string) {
 	c.staleEcho.Add(bg, 1, metric.WithAttributes(attribute.String(attrPath, path), attribute.String(attrReason, reason)))
+}
+
+// AttributionStale implements LifecycleCounters.
+func (c *OTelCounters) AttributionStale(reason string) {
+	c.attrStale.Add(bg, 1, attr(attrReason, reason))
 }

@@ -17567,6 +17567,19 @@ type AgentLifecycleCursorMutation struct {
 	creator_principal_id          *string
 	requested_template            *string
 	updated_at                    *time.Time
+	attribution_state             *string
+	attribution_stamp             *time.Time
+	last_run                      *string
+	last_generation               *string
+	attributed_run                *string
+	attributed_generation         *string
+	quarantined_runs              *string
+	quarantine_mode               *string
+	reincarnation_mint_run        *string
+	untrusted_open_run            *string
+	untrusted_open_run_generation *string
+	untrusted_open_run_rev        *int64
+	adduntrusted_open_run_rev     *int64
 	clearedFields                 map[string]struct{}
 	done                          bool
 	oldValue                      func(context.Context) (*AgentLifecycleCursor, error)
@@ -18447,6 +18460,471 @@ func (m *AgentLifecycleCursorMutation) ResetUpdatedAt() {
 	m.updated_at = nil
 }
 
+// SetAttributionState sets the "attribution_state" field.
+func (m *AgentLifecycleCursorMutation) SetAttributionState(s string) {
+	m.attribution_state = &s
+}
+
+// AttributionState returns the value of the "attribution_state" field in the mutation.
+func (m *AgentLifecycleCursorMutation) AttributionState() (r string, exists bool) {
+	v := m.attribution_state
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAttributionState returns the old "attribution_state" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldAttributionState(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAttributionState is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAttributionState requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAttributionState: %w", err)
+	}
+	return oldValue.AttributionState, nil
+}
+
+// ResetAttributionState resets all changes to the "attribution_state" field.
+func (m *AgentLifecycleCursorMutation) ResetAttributionState() {
+	m.attribution_state = nil
+}
+
+// SetAttributionStamp sets the "attribution_stamp" field.
+func (m *AgentLifecycleCursorMutation) SetAttributionStamp(t time.Time) {
+	m.attribution_stamp = &t
+}
+
+// AttributionStamp returns the value of the "attribution_stamp" field in the mutation.
+func (m *AgentLifecycleCursorMutation) AttributionStamp() (r time.Time, exists bool) {
+	v := m.attribution_stamp
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAttributionStamp returns the old "attribution_stamp" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldAttributionStamp(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAttributionStamp is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAttributionStamp requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAttributionStamp: %w", err)
+	}
+	return oldValue.AttributionStamp, nil
+}
+
+// ClearAttributionStamp clears the value of the "attribution_stamp" field.
+func (m *AgentLifecycleCursorMutation) ClearAttributionStamp() {
+	m.attribution_stamp = nil
+	m.clearedFields[agentlifecyclecursor.FieldAttributionStamp] = struct{}{}
+}
+
+// AttributionStampCleared returns if the "attribution_stamp" field was cleared in this mutation.
+func (m *AgentLifecycleCursorMutation) AttributionStampCleared() bool {
+	_, ok := m.clearedFields[agentlifecyclecursor.FieldAttributionStamp]
+	return ok
+}
+
+// ResetAttributionStamp resets all changes to the "attribution_stamp" field.
+func (m *AgentLifecycleCursorMutation) ResetAttributionStamp() {
+	m.attribution_stamp = nil
+	delete(m.clearedFields, agentlifecyclecursor.FieldAttributionStamp)
+}
+
+// SetLastRun sets the "last_run" field.
+func (m *AgentLifecycleCursorMutation) SetLastRun(s string) {
+	m.last_run = &s
+}
+
+// LastRun returns the value of the "last_run" field in the mutation.
+func (m *AgentLifecycleCursorMutation) LastRun() (r string, exists bool) {
+	v := m.last_run
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastRun returns the old "last_run" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldLastRun(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastRun is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastRun requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastRun: %w", err)
+	}
+	return oldValue.LastRun, nil
+}
+
+// ResetLastRun resets all changes to the "last_run" field.
+func (m *AgentLifecycleCursorMutation) ResetLastRun() {
+	m.last_run = nil
+}
+
+// SetLastGeneration sets the "last_generation" field.
+func (m *AgentLifecycleCursorMutation) SetLastGeneration(s string) {
+	m.last_generation = &s
+}
+
+// LastGeneration returns the value of the "last_generation" field in the mutation.
+func (m *AgentLifecycleCursorMutation) LastGeneration() (r string, exists bool) {
+	v := m.last_generation
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastGeneration returns the old "last_generation" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldLastGeneration(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastGeneration is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastGeneration requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastGeneration: %w", err)
+	}
+	return oldValue.LastGeneration, nil
+}
+
+// ResetLastGeneration resets all changes to the "last_generation" field.
+func (m *AgentLifecycleCursorMutation) ResetLastGeneration() {
+	m.last_generation = nil
+}
+
+// SetAttributedRun sets the "attributed_run" field.
+func (m *AgentLifecycleCursorMutation) SetAttributedRun(s string) {
+	m.attributed_run = &s
+}
+
+// AttributedRun returns the value of the "attributed_run" field in the mutation.
+func (m *AgentLifecycleCursorMutation) AttributedRun() (r string, exists bool) {
+	v := m.attributed_run
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAttributedRun returns the old "attributed_run" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldAttributedRun(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAttributedRun is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAttributedRun requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAttributedRun: %w", err)
+	}
+	return oldValue.AttributedRun, nil
+}
+
+// ResetAttributedRun resets all changes to the "attributed_run" field.
+func (m *AgentLifecycleCursorMutation) ResetAttributedRun() {
+	m.attributed_run = nil
+}
+
+// SetAttributedGeneration sets the "attributed_generation" field.
+func (m *AgentLifecycleCursorMutation) SetAttributedGeneration(s string) {
+	m.attributed_generation = &s
+}
+
+// AttributedGeneration returns the value of the "attributed_generation" field in the mutation.
+func (m *AgentLifecycleCursorMutation) AttributedGeneration() (r string, exists bool) {
+	v := m.attributed_generation
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAttributedGeneration returns the old "attributed_generation" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldAttributedGeneration(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAttributedGeneration is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAttributedGeneration requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAttributedGeneration: %w", err)
+	}
+	return oldValue.AttributedGeneration, nil
+}
+
+// ResetAttributedGeneration resets all changes to the "attributed_generation" field.
+func (m *AgentLifecycleCursorMutation) ResetAttributedGeneration() {
+	m.attributed_generation = nil
+}
+
+// SetQuarantinedRuns sets the "quarantined_runs" field.
+func (m *AgentLifecycleCursorMutation) SetQuarantinedRuns(s string) {
+	m.quarantined_runs = &s
+}
+
+// QuarantinedRuns returns the value of the "quarantined_runs" field in the mutation.
+func (m *AgentLifecycleCursorMutation) QuarantinedRuns() (r string, exists bool) {
+	v := m.quarantined_runs
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldQuarantinedRuns returns the old "quarantined_runs" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldQuarantinedRuns(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldQuarantinedRuns is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldQuarantinedRuns requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldQuarantinedRuns: %w", err)
+	}
+	return oldValue.QuarantinedRuns, nil
+}
+
+// ResetQuarantinedRuns resets all changes to the "quarantined_runs" field.
+func (m *AgentLifecycleCursorMutation) ResetQuarantinedRuns() {
+	m.quarantined_runs = nil
+}
+
+// SetQuarantineMode sets the "quarantine_mode" field.
+func (m *AgentLifecycleCursorMutation) SetQuarantineMode(s string) {
+	m.quarantine_mode = &s
+}
+
+// QuarantineMode returns the value of the "quarantine_mode" field in the mutation.
+func (m *AgentLifecycleCursorMutation) QuarantineMode() (r string, exists bool) {
+	v := m.quarantine_mode
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldQuarantineMode returns the old "quarantine_mode" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldQuarantineMode(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldQuarantineMode is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldQuarantineMode requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldQuarantineMode: %w", err)
+	}
+	return oldValue.QuarantineMode, nil
+}
+
+// ResetQuarantineMode resets all changes to the "quarantine_mode" field.
+func (m *AgentLifecycleCursorMutation) ResetQuarantineMode() {
+	m.quarantine_mode = nil
+}
+
+// SetReincarnationMintRun sets the "reincarnation_mint_run" field.
+func (m *AgentLifecycleCursorMutation) SetReincarnationMintRun(s string) {
+	m.reincarnation_mint_run = &s
+}
+
+// ReincarnationMintRun returns the value of the "reincarnation_mint_run" field in the mutation.
+func (m *AgentLifecycleCursorMutation) ReincarnationMintRun() (r string, exists bool) {
+	v := m.reincarnation_mint_run
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReincarnationMintRun returns the old "reincarnation_mint_run" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldReincarnationMintRun(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReincarnationMintRun is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReincarnationMintRun requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReincarnationMintRun: %w", err)
+	}
+	return oldValue.ReincarnationMintRun, nil
+}
+
+// ResetReincarnationMintRun resets all changes to the "reincarnation_mint_run" field.
+func (m *AgentLifecycleCursorMutation) ResetReincarnationMintRun() {
+	m.reincarnation_mint_run = nil
+}
+
+// SetUntrustedOpenRun sets the "untrusted_open_run" field.
+func (m *AgentLifecycleCursorMutation) SetUntrustedOpenRun(s string) {
+	m.untrusted_open_run = &s
+}
+
+// UntrustedOpenRun returns the value of the "untrusted_open_run" field in the mutation.
+func (m *AgentLifecycleCursorMutation) UntrustedOpenRun() (r string, exists bool) {
+	v := m.untrusted_open_run
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUntrustedOpenRun returns the old "untrusted_open_run" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldUntrustedOpenRun(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUntrustedOpenRun is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUntrustedOpenRun requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUntrustedOpenRun: %w", err)
+	}
+	return oldValue.UntrustedOpenRun, nil
+}
+
+// ResetUntrustedOpenRun resets all changes to the "untrusted_open_run" field.
+func (m *AgentLifecycleCursorMutation) ResetUntrustedOpenRun() {
+	m.untrusted_open_run = nil
+}
+
+// SetUntrustedOpenRunGeneration sets the "untrusted_open_run_generation" field.
+func (m *AgentLifecycleCursorMutation) SetUntrustedOpenRunGeneration(s string) {
+	m.untrusted_open_run_generation = &s
+}
+
+// UntrustedOpenRunGeneration returns the value of the "untrusted_open_run_generation" field in the mutation.
+func (m *AgentLifecycleCursorMutation) UntrustedOpenRunGeneration() (r string, exists bool) {
+	v := m.untrusted_open_run_generation
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUntrustedOpenRunGeneration returns the old "untrusted_open_run_generation" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldUntrustedOpenRunGeneration(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUntrustedOpenRunGeneration is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUntrustedOpenRunGeneration requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUntrustedOpenRunGeneration: %w", err)
+	}
+	return oldValue.UntrustedOpenRunGeneration, nil
+}
+
+// ResetUntrustedOpenRunGeneration resets all changes to the "untrusted_open_run_generation" field.
+func (m *AgentLifecycleCursorMutation) ResetUntrustedOpenRunGeneration() {
+	m.untrusted_open_run_generation = nil
+}
+
+// SetUntrustedOpenRunRev sets the "untrusted_open_run_rev" field.
+func (m *AgentLifecycleCursorMutation) SetUntrustedOpenRunRev(i int64) {
+	m.untrusted_open_run_rev = &i
+	m.adduntrusted_open_run_rev = nil
+}
+
+// UntrustedOpenRunRev returns the value of the "untrusted_open_run_rev" field in the mutation.
+func (m *AgentLifecycleCursorMutation) UntrustedOpenRunRev() (r int64, exists bool) {
+	v := m.untrusted_open_run_rev
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUntrustedOpenRunRev returns the old "untrusted_open_run_rev" field's value of the AgentLifecycleCursor entity.
+// If the AgentLifecycleCursor object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentLifecycleCursorMutation) OldUntrustedOpenRunRev(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUntrustedOpenRunRev is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUntrustedOpenRunRev requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUntrustedOpenRunRev: %w", err)
+	}
+	return oldValue.UntrustedOpenRunRev, nil
+}
+
+// AddUntrustedOpenRunRev adds i to the "untrusted_open_run_rev" field.
+func (m *AgentLifecycleCursorMutation) AddUntrustedOpenRunRev(i int64) {
+	if m.adduntrusted_open_run_rev != nil {
+		*m.adduntrusted_open_run_rev += i
+	} else {
+		m.adduntrusted_open_run_rev = &i
+	}
+}
+
+// AddedUntrustedOpenRunRev returns the value that was added to the "untrusted_open_run_rev" field in this mutation.
+func (m *AgentLifecycleCursorMutation) AddedUntrustedOpenRunRev() (r int64, exists bool) {
+	v := m.adduntrusted_open_run_rev
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetUntrustedOpenRunRev resets all changes to the "untrusted_open_run_rev" field.
+func (m *AgentLifecycleCursorMutation) ResetUntrustedOpenRunRev() {
+	m.untrusted_open_run_rev = nil
+	m.adduntrusted_open_run_rev = nil
+}
+
 // Where appends a list predicates to the AgentLifecycleCursorMutation builder.
 func (m *AgentLifecycleCursorMutation) Where(ps ...predicate.AgentLifecycleCursor) {
 	m.predicates = append(m.predicates, ps...)
@@ -18481,7 +18959,7 @@ func (m *AgentLifecycleCursorMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentLifecycleCursorMutation) Fields() []string {
-	fields := make([]string, 0, 19)
+	fields := make([]string, 0, 31)
 	if m.project_id != nil {
 		fields = append(fields, agentlifecyclecursor.FieldProjectID)
 	}
@@ -18539,6 +19017,42 @@ func (m *AgentLifecycleCursorMutation) Fields() []string {
 	if m.updated_at != nil {
 		fields = append(fields, agentlifecyclecursor.FieldUpdatedAt)
 	}
+	if m.attribution_state != nil {
+		fields = append(fields, agentlifecyclecursor.FieldAttributionState)
+	}
+	if m.attribution_stamp != nil {
+		fields = append(fields, agentlifecyclecursor.FieldAttributionStamp)
+	}
+	if m.last_run != nil {
+		fields = append(fields, agentlifecyclecursor.FieldLastRun)
+	}
+	if m.last_generation != nil {
+		fields = append(fields, agentlifecyclecursor.FieldLastGeneration)
+	}
+	if m.attributed_run != nil {
+		fields = append(fields, agentlifecyclecursor.FieldAttributedRun)
+	}
+	if m.attributed_generation != nil {
+		fields = append(fields, agentlifecyclecursor.FieldAttributedGeneration)
+	}
+	if m.quarantined_runs != nil {
+		fields = append(fields, agentlifecyclecursor.FieldQuarantinedRuns)
+	}
+	if m.quarantine_mode != nil {
+		fields = append(fields, agentlifecyclecursor.FieldQuarantineMode)
+	}
+	if m.reincarnation_mint_run != nil {
+		fields = append(fields, agentlifecyclecursor.FieldReincarnationMintRun)
+	}
+	if m.untrusted_open_run != nil {
+		fields = append(fields, agentlifecyclecursor.FieldUntrustedOpenRun)
+	}
+	if m.untrusted_open_run_generation != nil {
+		fields = append(fields, agentlifecyclecursor.FieldUntrustedOpenRunGeneration)
+	}
+	if m.untrusted_open_run_rev != nil {
+		fields = append(fields, agentlifecyclecursor.FieldUntrustedOpenRunRev)
+	}
 	return fields
 }
 
@@ -18585,6 +19099,30 @@ func (m *AgentLifecycleCursorMutation) Field(name string) (ent.Value, bool) {
 		return m.RequestedTemplate()
 	case agentlifecyclecursor.FieldUpdatedAt:
 		return m.UpdatedAt()
+	case agentlifecyclecursor.FieldAttributionState:
+		return m.AttributionState()
+	case agentlifecyclecursor.FieldAttributionStamp:
+		return m.AttributionStamp()
+	case agentlifecyclecursor.FieldLastRun:
+		return m.LastRun()
+	case agentlifecyclecursor.FieldLastGeneration:
+		return m.LastGeneration()
+	case agentlifecyclecursor.FieldAttributedRun:
+		return m.AttributedRun()
+	case agentlifecyclecursor.FieldAttributedGeneration:
+		return m.AttributedGeneration()
+	case agentlifecyclecursor.FieldQuarantinedRuns:
+		return m.QuarantinedRuns()
+	case agentlifecyclecursor.FieldQuarantineMode:
+		return m.QuarantineMode()
+	case agentlifecyclecursor.FieldReincarnationMintRun:
+		return m.ReincarnationMintRun()
+	case agentlifecyclecursor.FieldUntrustedOpenRun:
+		return m.UntrustedOpenRun()
+	case agentlifecyclecursor.FieldUntrustedOpenRunGeneration:
+		return m.UntrustedOpenRunGeneration()
+	case agentlifecyclecursor.FieldUntrustedOpenRunRev:
+		return m.UntrustedOpenRunRev()
 	}
 	return nil, false
 }
@@ -18632,6 +19170,30 @@ func (m *AgentLifecycleCursorMutation) OldField(ctx context.Context, name string
 		return m.OldRequestedTemplate(ctx)
 	case agentlifecyclecursor.FieldUpdatedAt:
 		return m.OldUpdatedAt(ctx)
+	case agentlifecyclecursor.FieldAttributionState:
+		return m.OldAttributionState(ctx)
+	case agentlifecyclecursor.FieldAttributionStamp:
+		return m.OldAttributionStamp(ctx)
+	case agentlifecyclecursor.FieldLastRun:
+		return m.OldLastRun(ctx)
+	case agentlifecyclecursor.FieldLastGeneration:
+		return m.OldLastGeneration(ctx)
+	case agentlifecyclecursor.FieldAttributedRun:
+		return m.OldAttributedRun(ctx)
+	case agentlifecyclecursor.FieldAttributedGeneration:
+		return m.OldAttributedGeneration(ctx)
+	case agentlifecyclecursor.FieldQuarantinedRuns:
+		return m.OldQuarantinedRuns(ctx)
+	case agentlifecyclecursor.FieldQuarantineMode:
+		return m.OldQuarantineMode(ctx)
+	case agentlifecyclecursor.FieldReincarnationMintRun:
+		return m.OldReincarnationMintRun(ctx)
+	case agentlifecyclecursor.FieldUntrustedOpenRun:
+		return m.OldUntrustedOpenRun(ctx)
+	case agentlifecyclecursor.FieldUntrustedOpenRunGeneration:
+		return m.OldUntrustedOpenRunGeneration(ctx)
+	case agentlifecyclecursor.FieldUntrustedOpenRunRev:
+		return m.OldUntrustedOpenRunRev(ctx)
 	}
 	return nil, fmt.Errorf("unknown AgentLifecycleCursor field %s", name)
 }
@@ -18774,6 +19336,90 @@ func (m *AgentLifecycleCursorMutation) SetField(name string, value ent.Value) er
 		}
 		m.SetUpdatedAt(v)
 		return nil
+	case agentlifecyclecursor.FieldAttributionState:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAttributionState(v)
+		return nil
+	case agentlifecyclecursor.FieldAttributionStamp:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAttributionStamp(v)
+		return nil
+	case agentlifecyclecursor.FieldLastRun:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastRun(v)
+		return nil
+	case agentlifecyclecursor.FieldLastGeneration:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastGeneration(v)
+		return nil
+	case agentlifecyclecursor.FieldAttributedRun:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAttributedRun(v)
+		return nil
+	case agentlifecyclecursor.FieldAttributedGeneration:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAttributedGeneration(v)
+		return nil
+	case agentlifecyclecursor.FieldQuarantinedRuns:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetQuarantinedRuns(v)
+		return nil
+	case agentlifecyclecursor.FieldQuarantineMode:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetQuarantineMode(v)
+		return nil
+	case agentlifecyclecursor.FieldReincarnationMintRun:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReincarnationMintRun(v)
+		return nil
+	case agentlifecyclecursor.FieldUntrustedOpenRun:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUntrustedOpenRun(v)
+		return nil
+	case agentlifecyclecursor.FieldUntrustedOpenRunGeneration:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUntrustedOpenRunGeneration(v)
+		return nil
+	case agentlifecyclecursor.FieldUntrustedOpenRunRev:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUntrustedOpenRunRev(v)
+		return nil
 	}
 	return fmt.Errorf("unknown AgentLifecycleCursor field %s", name)
 }
@@ -18791,6 +19437,9 @@ func (m *AgentLifecycleCursorMutation) AddedFields() []string {
 	if m.addopen_run_metadata_revision != nil {
 		fields = append(fields, agentlifecyclecursor.FieldOpenRunMetadataRevision)
 	}
+	if m.adduntrusted_open_run_rev != nil {
+		fields = append(fields, agentlifecyclecursor.FieldUntrustedOpenRunRev)
+	}
 	return fields
 }
 
@@ -18805,6 +19454,8 @@ func (m *AgentLifecycleCursorMutation) AddedField(name string) (ent.Value, bool)
 		return m.AddedMetadataRevision()
 	case agentlifecyclecursor.FieldOpenRunMetadataRevision:
 		return m.AddedOpenRunMetadataRevision()
+	case agentlifecyclecursor.FieldUntrustedOpenRunRev:
+		return m.AddedUntrustedOpenRunRev()
 	}
 	return nil, false
 }
@@ -18835,6 +19486,13 @@ func (m *AgentLifecycleCursorMutation) AddField(name string, value ent.Value) er
 		}
 		m.AddOpenRunMetadataRevision(v)
 		return nil
+	case agentlifecyclecursor.FieldUntrustedOpenRunRev:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddUntrustedOpenRunRev(v)
+		return nil
 	}
 	return fmt.Errorf("unknown AgentLifecycleCursor numeric field %s", name)
 }
@@ -18848,6 +19506,9 @@ func (m *AgentLifecycleCursorMutation) ClearedFields() []string {
 	}
 	if m.FieldCleared(agentlifecyclecursor.FieldPendingAdoptedAt) {
 		fields = append(fields, agentlifecyclecursor.FieldPendingAdoptedAt)
+	}
+	if m.FieldCleared(agentlifecyclecursor.FieldAttributionStamp) {
+		fields = append(fields, agentlifecyclecursor.FieldAttributionStamp)
 	}
 	return fields
 }
@@ -18868,6 +19529,9 @@ func (m *AgentLifecycleCursorMutation) ClearField(name string) error {
 		return nil
 	case agentlifecyclecursor.FieldPendingAdoptedAt:
 		m.ClearPendingAdoptedAt()
+		return nil
+	case agentlifecyclecursor.FieldAttributionStamp:
+		m.ClearAttributionStamp()
 		return nil
 	}
 	return fmt.Errorf("unknown AgentLifecycleCursor nullable field %s", name)
@@ -18933,6 +19597,42 @@ func (m *AgentLifecycleCursorMutation) ResetField(name string) error {
 		return nil
 	case agentlifecyclecursor.FieldUpdatedAt:
 		m.ResetUpdatedAt()
+		return nil
+	case agentlifecyclecursor.FieldAttributionState:
+		m.ResetAttributionState()
+		return nil
+	case agentlifecyclecursor.FieldAttributionStamp:
+		m.ResetAttributionStamp()
+		return nil
+	case agentlifecyclecursor.FieldLastRun:
+		m.ResetLastRun()
+		return nil
+	case agentlifecyclecursor.FieldLastGeneration:
+		m.ResetLastGeneration()
+		return nil
+	case agentlifecyclecursor.FieldAttributedRun:
+		m.ResetAttributedRun()
+		return nil
+	case agentlifecyclecursor.FieldAttributedGeneration:
+		m.ResetAttributedGeneration()
+		return nil
+	case agentlifecyclecursor.FieldQuarantinedRuns:
+		m.ResetQuarantinedRuns()
+		return nil
+	case agentlifecyclecursor.FieldQuarantineMode:
+		m.ResetQuarantineMode()
+		return nil
+	case agentlifecyclecursor.FieldReincarnationMintRun:
+		m.ResetReincarnationMintRun()
+		return nil
+	case agentlifecyclecursor.FieldUntrustedOpenRun:
+		m.ResetUntrustedOpenRun()
+		return nil
+	case agentlifecyclecursor.FieldUntrustedOpenRunGeneration:
+		m.ResetUntrustedOpenRunGeneration()
+		return nil
+	case agentlifecyclecursor.FieldUntrustedOpenRunRev:
+		m.ResetUntrustedOpenRunRev()
 		return nil
 	}
 	return fmt.Errorf("unknown AgentLifecycleCursor field %s", name)

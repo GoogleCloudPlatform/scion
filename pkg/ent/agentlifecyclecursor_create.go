@@ -282,6 +282,174 @@ func (_c *AgentLifecycleCursorCreate) SetNillableUpdatedAt(v *time.Time) *AgentL
 	return _c
 }
 
+// SetAttributionState sets the "attribution_state" field.
+func (_c *AgentLifecycleCursorCreate) SetAttributionState(v string) *AgentLifecycleCursorCreate {
+	_c.mutation.SetAttributionState(v)
+	return _c
+}
+
+// SetNillableAttributionState sets the "attribution_state" field if the given value is not nil.
+func (_c *AgentLifecycleCursorCreate) SetNillableAttributionState(v *string) *AgentLifecycleCursorCreate {
+	if v != nil {
+		_c.SetAttributionState(*v)
+	}
+	return _c
+}
+
+// SetAttributionStamp sets the "attribution_stamp" field.
+func (_c *AgentLifecycleCursorCreate) SetAttributionStamp(v time.Time) *AgentLifecycleCursorCreate {
+	_c.mutation.SetAttributionStamp(v)
+	return _c
+}
+
+// SetNillableAttributionStamp sets the "attribution_stamp" field if the given value is not nil.
+func (_c *AgentLifecycleCursorCreate) SetNillableAttributionStamp(v *time.Time) *AgentLifecycleCursorCreate {
+	if v != nil {
+		_c.SetAttributionStamp(*v)
+	}
+	return _c
+}
+
+// SetLastRun sets the "last_run" field.
+func (_c *AgentLifecycleCursorCreate) SetLastRun(v string) *AgentLifecycleCursorCreate {
+	_c.mutation.SetLastRun(v)
+	return _c
+}
+
+// SetNillableLastRun sets the "last_run" field if the given value is not nil.
+func (_c *AgentLifecycleCursorCreate) SetNillableLastRun(v *string) *AgentLifecycleCursorCreate {
+	if v != nil {
+		_c.SetLastRun(*v)
+	}
+	return _c
+}
+
+// SetLastGeneration sets the "last_generation" field.
+func (_c *AgentLifecycleCursorCreate) SetLastGeneration(v string) *AgentLifecycleCursorCreate {
+	_c.mutation.SetLastGeneration(v)
+	return _c
+}
+
+// SetNillableLastGeneration sets the "last_generation" field if the given value is not nil.
+func (_c *AgentLifecycleCursorCreate) SetNillableLastGeneration(v *string) *AgentLifecycleCursorCreate {
+	if v != nil {
+		_c.SetLastGeneration(*v)
+	}
+	return _c
+}
+
+// SetAttributedRun sets the "attributed_run" field.
+func (_c *AgentLifecycleCursorCreate) SetAttributedRun(v string) *AgentLifecycleCursorCreate {
+	_c.mutation.SetAttributedRun(v)
+	return _c
+}
+
+// SetNillableAttributedRun sets the "attributed_run" field if the given value is not nil.
+func (_c *AgentLifecycleCursorCreate) SetNillableAttributedRun(v *string) *AgentLifecycleCursorCreate {
+	if v != nil {
+		_c.SetAttributedRun(*v)
+	}
+	return _c
+}
+
+// SetAttributedGeneration sets the "attributed_generation" field.
+func (_c *AgentLifecycleCursorCreate) SetAttributedGeneration(v string) *AgentLifecycleCursorCreate {
+	_c.mutation.SetAttributedGeneration(v)
+	return _c
+}
+
+// SetNillableAttributedGeneration sets the "attributed_generation" field if the given value is not nil.
+func (_c *AgentLifecycleCursorCreate) SetNillableAttributedGeneration(v *string) *AgentLifecycleCursorCreate {
+	if v != nil {
+		_c.SetAttributedGeneration(*v)
+	}
+	return _c
+}
+
+// SetQuarantinedRuns sets the "quarantined_runs" field.
+func (_c *AgentLifecycleCursorCreate) SetQuarantinedRuns(v string) *AgentLifecycleCursorCreate {
+	_c.mutation.SetQuarantinedRuns(v)
+	return _c
+}
+
+// SetNillableQuarantinedRuns sets the "quarantined_runs" field if the given value is not nil.
+func (_c *AgentLifecycleCursorCreate) SetNillableQuarantinedRuns(v *string) *AgentLifecycleCursorCreate {
+	if v != nil {
+		_c.SetQuarantinedRuns(*v)
+	}
+	return _c
+}
+
+// SetQuarantineMode sets the "quarantine_mode" field.
+func (_c *AgentLifecycleCursorCreate) SetQuarantineMode(v string) *AgentLifecycleCursorCreate {
+	_c.mutation.SetQuarantineMode(v)
+	return _c
+}
+
+// SetNillableQuarantineMode sets the "quarantine_mode" field if the given value is not nil.
+func (_c *AgentLifecycleCursorCreate) SetNillableQuarantineMode(v *string) *AgentLifecycleCursorCreate {
+	if v != nil {
+		_c.SetQuarantineMode(*v)
+	}
+	return _c
+}
+
+// SetReincarnationMintRun sets the "reincarnation_mint_run" field.
+func (_c *AgentLifecycleCursorCreate) SetReincarnationMintRun(v string) *AgentLifecycleCursorCreate {
+	_c.mutation.SetReincarnationMintRun(v)
+	return _c
+}
+
+// SetNillableReincarnationMintRun sets the "reincarnation_mint_run" field if the given value is not nil.
+func (_c *AgentLifecycleCursorCreate) SetNillableReincarnationMintRun(v *string) *AgentLifecycleCursorCreate {
+	if v != nil {
+		_c.SetReincarnationMintRun(*v)
+	}
+	return _c
+}
+
+// SetUntrustedOpenRun sets the "untrusted_open_run" field.
+func (_c *AgentLifecycleCursorCreate) SetUntrustedOpenRun(v string) *AgentLifecycleCursorCreate {
+	_c.mutation.SetUntrustedOpenRun(v)
+	return _c
+}
+
+// SetNillableUntrustedOpenRun sets the "untrusted_open_run" field if the given value is not nil.
+func (_c *AgentLifecycleCursorCreate) SetNillableUntrustedOpenRun(v *string) *AgentLifecycleCursorCreate {
+	if v != nil {
+		_c.SetUntrustedOpenRun(*v)
+	}
+	return _c
+}
+
+// SetUntrustedOpenRunGeneration sets the "untrusted_open_run_generation" field.
+func (_c *AgentLifecycleCursorCreate) SetUntrustedOpenRunGeneration(v string) *AgentLifecycleCursorCreate {
+	_c.mutation.SetUntrustedOpenRunGeneration(v)
+	return _c
+}
+
+// SetNillableUntrustedOpenRunGeneration sets the "untrusted_open_run_generation" field if the given value is not nil.
+func (_c *AgentLifecycleCursorCreate) SetNillableUntrustedOpenRunGeneration(v *string) *AgentLifecycleCursorCreate {
+	if v != nil {
+		_c.SetUntrustedOpenRunGeneration(*v)
+	}
+	return _c
+}
+
+// SetUntrustedOpenRunRev sets the "untrusted_open_run_rev" field.
+func (_c *AgentLifecycleCursorCreate) SetUntrustedOpenRunRev(v int64) *AgentLifecycleCursorCreate {
+	_c.mutation.SetUntrustedOpenRunRev(v)
+	return _c
+}
+
+// SetNillableUntrustedOpenRunRev sets the "untrusted_open_run_rev" field if the given value is not nil.
+func (_c *AgentLifecycleCursorCreate) SetNillableUntrustedOpenRunRev(v *int64) *AgentLifecycleCursorCreate {
+	if v != nil {
+		_c.SetUntrustedOpenRunRev(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *AgentLifecycleCursorCreate) SetID(v uuid.UUID) *AgentLifecycleCursorCreate {
 	_c.mutation.SetID(v)
@@ -387,6 +555,50 @@ func (_c *AgentLifecycleCursorCreate) defaults() {
 		v := agentlifecyclecursor.DefaultUpdatedAt()
 		_c.mutation.SetUpdatedAt(v)
 	}
+	if _, ok := _c.mutation.AttributionState(); !ok {
+		v := agentlifecyclecursor.DefaultAttributionState
+		_c.mutation.SetAttributionState(v)
+	}
+	if _, ok := _c.mutation.LastRun(); !ok {
+		v := agentlifecyclecursor.DefaultLastRun
+		_c.mutation.SetLastRun(v)
+	}
+	if _, ok := _c.mutation.LastGeneration(); !ok {
+		v := agentlifecyclecursor.DefaultLastGeneration
+		_c.mutation.SetLastGeneration(v)
+	}
+	if _, ok := _c.mutation.AttributedRun(); !ok {
+		v := agentlifecyclecursor.DefaultAttributedRun
+		_c.mutation.SetAttributedRun(v)
+	}
+	if _, ok := _c.mutation.AttributedGeneration(); !ok {
+		v := agentlifecyclecursor.DefaultAttributedGeneration
+		_c.mutation.SetAttributedGeneration(v)
+	}
+	if _, ok := _c.mutation.QuarantinedRuns(); !ok {
+		v := agentlifecyclecursor.DefaultQuarantinedRuns
+		_c.mutation.SetQuarantinedRuns(v)
+	}
+	if _, ok := _c.mutation.QuarantineMode(); !ok {
+		v := agentlifecyclecursor.DefaultQuarantineMode
+		_c.mutation.SetQuarantineMode(v)
+	}
+	if _, ok := _c.mutation.ReincarnationMintRun(); !ok {
+		v := agentlifecyclecursor.DefaultReincarnationMintRun
+		_c.mutation.SetReincarnationMintRun(v)
+	}
+	if _, ok := _c.mutation.UntrustedOpenRun(); !ok {
+		v := agentlifecyclecursor.DefaultUntrustedOpenRun
+		_c.mutation.SetUntrustedOpenRun(v)
+	}
+	if _, ok := _c.mutation.UntrustedOpenRunGeneration(); !ok {
+		v := agentlifecyclecursor.DefaultUntrustedOpenRunGeneration
+		_c.mutation.SetUntrustedOpenRunGeneration(v)
+	}
+	if _, ok := _c.mutation.UntrustedOpenRunRev(); !ok {
+		v := agentlifecyclecursor.DefaultUntrustedOpenRunRev
+		_c.mutation.SetUntrustedOpenRunRev(v)
+	}
 }
 
 // check runs all checks and user-defined validators on the builder.
@@ -441,6 +653,39 @@ func (_c *AgentLifecycleCursorCreate) check() error {
 	}
 	if _, ok := _c.mutation.UpdatedAt(); !ok {
 		return &ValidationError{Name: "updated_at", err: errors.New(`ent: missing required field "AgentLifecycleCursor.updated_at"`)}
+	}
+	if _, ok := _c.mutation.AttributionState(); !ok {
+		return &ValidationError{Name: "attribution_state", err: errors.New(`ent: missing required field "AgentLifecycleCursor.attribution_state"`)}
+	}
+	if _, ok := _c.mutation.LastRun(); !ok {
+		return &ValidationError{Name: "last_run", err: errors.New(`ent: missing required field "AgentLifecycleCursor.last_run"`)}
+	}
+	if _, ok := _c.mutation.LastGeneration(); !ok {
+		return &ValidationError{Name: "last_generation", err: errors.New(`ent: missing required field "AgentLifecycleCursor.last_generation"`)}
+	}
+	if _, ok := _c.mutation.AttributedRun(); !ok {
+		return &ValidationError{Name: "attributed_run", err: errors.New(`ent: missing required field "AgentLifecycleCursor.attributed_run"`)}
+	}
+	if _, ok := _c.mutation.AttributedGeneration(); !ok {
+		return &ValidationError{Name: "attributed_generation", err: errors.New(`ent: missing required field "AgentLifecycleCursor.attributed_generation"`)}
+	}
+	if _, ok := _c.mutation.QuarantinedRuns(); !ok {
+		return &ValidationError{Name: "quarantined_runs", err: errors.New(`ent: missing required field "AgentLifecycleCursor.quarantined_runs"`)}
+	}
+	if _, ok := _c.mutation.QuarantineMode(); !ok {
+		return &ValidationError{Name: "quarantine_mode", err: errors.New(`ent: missing required field "AgentLifecycleCursor.quarantine_mode"`)}
+	}
+	if _, ok := _c.mutation.ReincarnationMintRun(); !ok {
+		return &ValidationError{Name: "reincarnation_mint_run", err: errors.New(`ent: missing required field "AgentLifecycleCursor.reincarnation_mint_run"`)}
+	}
+	if _, ok := _c.mutation.UntrustedOpenRun(); !ok {
+		return &ValidationError{Name: "untrusted_open_run", err: errors.New(`ent: missing required field "AgentLifecycleCursor.untrusted_open_run"`)}
+	}
+	if _, ok := _c.mutation.UntrustedOpenRunGeneration(); !ok {
+		return &ValidationError{Name: "untrusted_open_run_generation", err: errors.New(`ent: missing required field "AgentLifecycleCursor.untrusted_open_run_generation"`)}
+	}
+	if _, ok := _c.mutation.UntrustedOpenRunRev(); !ok {
+		return &ValidationError{Name: "untrusted_open_run_rev", err: errors.New(`ent: missing required field "AgentLifecycleCursor.untrusted_open_run_rev"`)}
 	}
 	return nil
 }
@@ -553,6 +798,54 @@ func (_c *AgentLifecycleCursorCreate) createSpec() (*AgentLifecycleCursor, *sqlg
 	if value, ok := _c.mutation.UpdatedAt(); ok {
 		_spec.SetField(agentlifecyclecursor.FieldUpdatedAt, field.TypeTime, value)
 		_node.UpdatedAt = value
+	}
+	if value, ok := _c.mutation.AttributionState(); ok {
+		_spec.SetField(agentlifecyclecursor.FieldAttributionState, field.TypeString, value)
+		_node.AttributionState = value
+	}
+	if value, ok := _c.mutation.AttributionStamp(); ok {
+		_spec.SetField(agentlifecyclecursor.FieldAttributionStamp, field.TypeTime, value)
+		_node.AttributionStamp = &value
+	}
+	if value, ok := _c.mutation.LastRun(); ok {
+		_spec.SetField(agentlifecyclecursor.FieldLastRun, field.TypeString, value)
+		_node.LastRun = value
+	}
+	if value, ok := _c.mutation.LastGeneration(); ok {
+		_spec.SetField(agentlifecyclecursor.FieldLastGeneration, field.TypeString, value)
+		_node.LastGeneration = value
+	}
+	if value, ok := _c.mutation.AttributedRun(); ok {
+		_spec.SetField(agentlifecyclecursor.FieldAttributedRun, field.TypeString, value)
+		_node.AttributedRun = value
+	}
+	if value, ok := _c.mutation.AttributedGeneration(); ok {
+		_spec.SetField(agentlifecyclecursor.FieldAttributedGeneration, field.TypeString, value)
+		_node.AttributedGeneration = value
+	}
+	if value, ok := _c.mutation.QuarantinedRuns(); ok {
+		_spec.SetField(agentlifecyclecursor.FieldQuarantinedRuns, field.TypeString, value)
+		_node.QuarantinedRuns = value
+	}
+	if value, ok := _c.mutation.QuarantineMode(); ok {
+		_spec.SetField(agentlifecyclecursor.FieldQuarantineMode, field.TypeString, value)
+		_node.QuarantineMode = value
+	}
+	if value, ok := _c.mutation.ReincarnationMintRun(); ok {
+		_spec.SetField(agentlifecyclecursor.FieldReincarnationMintRun, field.TypeString, value)
+		_node.ReincarnationMintRun = value
+	}
+	if value, ok := _c.mutation.UntrustedOpenRun(); ok {
+		_spec.SetField(agentlifecyclecursor.FieldUntrustedOpenRun, field.TypeString, value)
+		_node.UntrustedOpenRun = value
+	}
+	if value, ok := _c.mutation.UntrustedOpenRunGeneration(); ok {
+		_spec.SetField(agentlifecyclecursor.FieldUntrustedOpenRunGeneration, field.TypeString, value)
+		_node.UntrustedOpenRunGeneration = value
+	}
+	if value, ok := _c.mutation.UntrustedOpenRunRev(); ok {
+		_spec.SetField(agentlifecyclecursor.FieldUntrustedOpenRunRev, field.TypeInt64, value)
+		_node.UntrustedOpenRunRev = value
 	}
 	return _node, _spec
 }
@@ -861,6 +1154,162 @@ func (u *AgentLifecycleCursorUpsert) SetUpdatedAt(v time.Time) *AgentLifecycleCu
 // UpdateUpdatedAt sets the "updated_at" field to the value that was provided on create.
 func (u *AgentLifecycleCursorUpsert) UpdateUpdatedAt() *AgentLifecycleCursorUpsert {
 	u.SetExcluded(agentlifecyclecursor.FieldUpdatedAt)
+	return u
+}
+
+// SetAttributionState sets the "attribution_state" field.
+func (u *AgentLifecycleCursorUpsert) SetAttributionState(v string) *AgentLifecycleCursorUpsert {
+	u.Set(agentlifecyclecursor.FieldAttributionState, v)
+	return u
+}
+
+// UpdateAttributionState sets the "attribution_state" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsert) UpdateAttributionState() *AgentLifecycleCursorUpsert {
+	u.SetExcluded(agentlifecyclecursor.FieldAttributionState)
+	return u
+}
+
+// SetAttributionStamp sets the "attribution_stamp" field.
+func (u *AgentLifecycleCursorUpsert) SetAttributionStamp(v time.Time) *AgentLifecycleCursorUpsert {
+	u.Set(agentlifecyclecursor.FieldAttributionStamp, v)
+	return u
+}
+
+// UpdateAttributionStamp sets the "attribution_stamp" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsert) UpdateAttributionStamp() *AgentLifecycleCursorUpsert {
+	u.SetExcluded(agentlifecyclecursor.FieldAttributionStamp)
+	return u
+}
+
+// ClearAttributionStamp clears the value of the "attribution_stamp" field.
+func (u *AgentLifecycleCursorUpsert) ClearAttributionStamp() *AgentLifecycleCursorUpsert {
+	u.SetNull(agentlifecyclecursor.FieldAttributionStamp)
+	return u
+}
+
+// SetLastRun sets the "last_run" field.
+func (u *AgentLifecycleCursorUpsert) SetLastRun(v string) *AgentLifecycleCursorUpsert {
+	u.Set(agentlifecyclecursor.FieldLastRun, v)
+	return u
+}
+
+// UpdateLastRun sets the "last_run" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsert) UpdateLastRun() *AgentLifecycleCursorUpsert {
+	u.SetExcluded(agentlifecyclecursor.FieldLastRun)
+	return u
+}
+
+// SetLastGeneration sets the "last_generation" field.
+func (u *AgentLifecycleCursorUpsert) SetLastGeneration(v string) *AgentLifecycleCursorUpsert {
+	u.Set(agentlifecyclecursor.FieldLastGeneration, v)
+	return u
+}
+
+// UpdateLastGeneration sets the "last_generation" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsert) UpdateLastGeneration() *AgentLifecycleCursorUpsert {
+	u.SetExcluded(agentlifecyclecursor.FieldLastGeneration)
+	return u
+}
+
+// SetAttributedRun sets the "attributed_run" field.
+func (u *AgentLifecycleCursorUpsert) SetAttributedRun(v string) *AgentLifecycleCursorUpsert {
+	u.Set(agentlifecyclecursor.FieldAttributedRun, v)
+	return u
+}
+
+// UpdateAttributedRun sets the "attributed_run" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsert) UpdateAttributedRun() *AgentLifecycleCursorUpsert {
+	u.SetExcluded(agentlifecyclecursor.FieldAttributedRun)
+	return u
+}
+
+// SetAttributedGeneration sets the "attributed_generation" field.
+func (u *AgentLifecycleCursorUpsert) SetAttributedGeneration(v string) *AgentLifecycleCursorUpsert {
+	u.Set(agentlifecyclecursor.FieldAttributedGeneration, v)
+	return u
+}
+
+// UpdateAttributedGeneration sets the "attributed_generation" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsert) UpdateAttributedGeneration() *AgentLifecycleCursorUpsert {
+	u.SetExcluded(agentlifecyclecursor.FieldAttributedGeneration)
+	return u
+}
+
+// SetQuarantinedRuns sets the "quarantined_runs" field.
+func (u *AgentLifecycleCursorUpsert) SetQuarantinedRuns(v string) *AgentLifecycleCursorUpsert {
+	u.Set(agentlifecyclecursor.FieldQuarantinedRuns, v)
+	return u
+}
+
+// UpdateQuarantinedRuns sets the "quarantined_runs" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsert) UpdateQuarantinedRuns() *AgentLifecycleCursorUpsert {
+	u.SetExcluded(agentlifecyclecursor.FieldQuarantinedRuns)
+	return u
+}
+
+// SetQuarantineMode sets the "quarantine_mode" field.
+func (u *AgentLifecycleCursorUpsert) SetQuarantineMode(v string) *AgentLifecycleCursorUpsert {
+	u.Set(agentlifecyclecursor.FieldQuarantineMode, v)
+	return u
+}
+
+// UpdateQuarantineMode sets the "quarantine_mode" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsert) UpdateQuarantineMode() *AgentLifecycleCursorUpsert {
+	u.SetExcluded(agentlifecyclecursor.FieldQuarantineMode)
+	return u
+}
+
+// SetReincarnationMintRun sets the "reincarnation_mint_run" field.
+func (u *AgentLifecycleCursorUpsert) SetReincarnationMintRun(v string) *AgentLifecycleCursorUpsert {
+	u.Set(agentlifecyclecursor.FieldReincarnationMintRun, v)
+	return u
+}
+
+// UpdateReincarnationMintRun sets the "reincarnation_mint_run" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsert) UpdateReincarnationMintRun() *AgentLifecycleCursorUpsert {
+	u.SetExcluded(agentlifecyclecursor.FieldReincarnationMintRun)
+	return u
+}
+
+// SetUntrustedOpenRun sets the "untrusted_open_run" field.
+func (u *AgentLifecycleCursorUpsert) SetUntrustedOpenRun(v string) *AgentLifecycleCursorUpsert {
+	u.Set(agentlifecyclecursor.FieldUntrustedOpenRun, v)
+	return u
+}
+
+// UpdateUntrustedOpenRun sets the "untrusted_open_run" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsert) UpdateUntrustedOpenRun() *AgentLifecycleCursorUpsert {
+	u.SetExcluded(agentlifecyclecursor.FieldUntrustedOpenRun)
+	return u
+}
+
+// SetUntrustedOpenRunGeneration sets the "untrusted_open_run_generation" field.
+func (u *AgentLifecycleCursorUpsert) SetUntrustedOpenRunGeneration(v string) *AgentLifecycleCursorUpsert {
+	u.Set(agentlifecyclecursor.FieldUntrustedOpenRunGeneration, v)
+	return u
+}
+
+// UpdateUntrustedOpenRunGeneration sets the "untrusted_open_run_generation" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsert) UpdateUntrustedOpenRunGeneration() *AgentLifecycleCursorUpsert {
+	u.SetExcluded(agentlifecyclecursor.FieldUntrustedOpenRunGeneration)
+	return u
+}
+
+// SetUntrustedOpenRunRev sets the "untrusted_open_run_rev" field.
+func (u *AgentLifecycleCursorUpsert) SetUntrustedOpenRunRev(v int64) *AgentLifecycleCursorUpsert {
+	u.Set(agentlifecyclecursor.FieldUntrustedOpenRunRev, v)
+	return u
+}
+
+// UpdateUntrustedOpenRunRev sets the "untrusted_open_run_rev" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsert) UpdateUntrustedOpenRunRev() *AgentLifecycleCursorUpsert {
+	u.SetExcluded(agentlifecyclecursor.FieldUntrustedOpenRunRev)
+	return u
+}
+
+// AddUntrustedOpenRunRev adds v to the "untrusted_open_run_rev" field.
+func (u *AgentLifecycleCursorUpsert) AddUntrustedOpenRunRev(v int64) *AgentLifecycleCursorUpsert {
+	u.Add(agentlifecyclecursor.FieldUntrustedOpenRunRev, v)
 	return u
 }
 
@@ -1210,6 +1659,188 @@ func (u *AgentLifecycleCursorUpsertOne) SetUpdatedAt(v time.Time) *AgentLifecycl
 func (u *AgentLifecycleCursorUpsertOne) UpdateUpdatedAt() *AgentLifecycleCursorUpsertOne {
 	return u.Update(func(s *AgentLifecycleCursorUpsert) {
 		s.UpdateUpdatedAt()
+	})
+}
+
+// SetAttributionState sets the "attribution_state" field.
+func (u *AgentLifecycleCursorUpsertOne) SetAttributionState(v string) *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetAttributionState(v)
+	})
+}
+
+// UpdateAttributionState sets the "attribution_state" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertOne) UpdateAttributionState() *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateAttributionState()
+	})
+}
+
+// SetAttributionStamp sets the "attribution_stamp" field.
+func (u *AgentLifecycleCursorUpsertOne) SetAttributionStamp(v time.Time) *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetAttributionStamp(v)
+	})
+}
+
+// UpdateAttributionStamp sets the "attribution_stamp" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertOne) UpdateAttributionStamp() *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateAttributionStamp()
+	})
+}
+
+// ClearAttributionStamp clears the value of the "attribution_stamp" field.
+func (u *AgentLifecycleCursorUpsertOne) ClearAttributionStamp() *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.ClearAttributionStamp()
+	})
+}
+
+// SetLastRun sets the "last_run" field.
+func (u *AgentLifecycleCursorUpsertOne) SetLastRun(v string) *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetLastRun(v)
+	})
+}
+
+// UpdateLastRun sets the "last_run" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertOne) UpdateLastRun() *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateLastRun()
+	})
+}
+
+// SetLastGeneration sets the "last_generation" field.
+func (u *AgentLifecycleCursorUpsertOne) SetLastGeneration(v string) *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetLastGeneration(v)
+	})
+}
+
+// UpdateLastGeneration sets the "last_generation" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertOne) UpdateLastGeneration() *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateLastGeneration()
+	})
+}
+
+// SetAttributedRun sets the "attributed_run" field.
+func (u *AgentLifecycleCursorUpsertOne) SetAttributedRun(v string) *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetAttributedRun(v)
+	})
+}
+
+// UpdateAttributedRun sets the "attributed_run" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertOne) UpdateAttributedRun() *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateAttributedRun()
+	})
+}
+
+// SetAttributedGeneration sets the "attributed_generation" field.
+func (u *AgentLifecycleCursorUpsertOne) SetAttributedGeneration(v string) *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetAttributedGeneration(v)
+	})
+}
+
+// UpdateAttributedGeneration sets the "attributed_generation" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertOne) UpdateAttributedGeneration() *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateAttributedGeneration()
+	})
+}
+
+// SetQuarantinedRuns sets the "quarantined_runs" field.
+func (u *AgentLifecycleCursorUpsertOne) SetQuarantinedRuns(v string) *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetQuarantinedRuns(v)
+	})
+}
+
+// UpdateQuarantinedRuns sets the "quarantined_runs" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertOne) UpdateQuarantinedRuns() *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateQuarantinedRuns()
+	})
+}
+
+// SetQuarantineMode sets the "quarantine_mode" field.
+func (u *AgentLifecycleCursorUpsertOne) SetQuarantineMode(v string) *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetQuarantineMode(v)
+	})
+}
+
+// UpdateQuarantineMode sets the "quarantine_mode" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertOne) UpdateQuarantineMode() *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateQuarantineMode()
+	})
+}
+
+// SetReincarnationMintRun sets the "reincarnation_mint_run" field.
+func (u *AgentLifecycleCursorUpsertOne) SetReincarnationMintRun(v string) *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetReincarnationMintRun(v)
+	})
+}
+
+// UpdateReincarnationMintRun sets the "reincarnation_mint_run" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertOne) UpdateReincarnationMintRun() *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateReincarnationMintRun()
+	})
+}
+
+// SetUntrustedOpenRun sets the "untrusted_open_run" field.
+func (u *AgentLifecycleCursorUpsertOne) SetUntrustedOpenRun(v string) *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetUntrustedOpenRun(v)
+	})
+}
+
+// UpdateUntrustedOpenRun sets the "untrusted_open_run" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertOne) UpdateUntrustedOpenRun() *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateUntrustedOpenRun()
+	})
+}
+
+// SetUntrustedOpenRunGeneration sets the "untrusted_open_run_generation" field.
+func (u *AgentLifecycleCursorUpsertOne) SetUntrustedOpenRunGeneration(v string) *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetUntrustedOpenRunGeneration(v)
+	})
+}
+
+// UpdateUntrustedOpenRunGeneration sets the "untrusted_open_run_generation" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertOne) UpdateUntrustedOpenRunGeneration() *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateUntrustedOpenRunGeneration()
+	})
+}
+
+// SetUntrustedOpenRunRev sets the "untrusted_open_run_rev" field.
+func (u *AgentLifecycleCursorUpsertOne) SetUntrustedOpenRunRev(v int64) *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetUntrustedOpenRunRev(v)
+	})
+}
+
+// AddUntrustedOpenRunRev adds v to the "untrusted_open_run_rev" field.
+func (u *AgentLifecycleCursorUpsertOne) AddUntrustedOpenRunRev(v int64) *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.AddUntrustedOpenRunRev(v)
+	})
+}
+
+// UpdateUntrustedOpenRunRev sets the "untrusted_open_run_rev" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertOne) UpdateUntrustedOpenRunRev() *AgentLifecycleCursorUpsertOne {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateUntrustedOpenRunRev()
 	})
 }
 
@@ -1726,6 +2357,188 @@ func (u *AgentLifecycleCursorUpsertBulk) SetUpdatedAt(v time.Time) *AgentLifecyc
 func (u *AgentLifecycleCursorUpsertBulk) UpdateUpdatedAt() *AgentLifecycleCursorUpsertBulk {
 	return u.Update(func(s *AgentLifecycleCursorUpsert) {
 		s.UpdateUpdatedAt()
+	})
+}
+
+// SetAttributionState sets the "attribution_state" field.
+func (u *AgentLifecycleCursorUpsertBulk) SetAttributionState(v string) *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetAttributionState(v)
+	})
+}
+
+// UpdateAttributionState sets the "attribution_state" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertBulk) UpdateAttributionState() *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateAttributionState()
+	})
+}
+
+// SetAttributionStamp sets the "attribution_stamp" field.
+func (u *AgentLifecycleCursorUpsertBulk) SetAttributionStamp(v time.Time) *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetAttributionStamp(v)
+	})
+}
+
+// UpdateAttributionStamp sets the "attribution_stamp" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertBulk) UpdateAttributionStamp() *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateAttributionStamp()
+	})
+}
+
+// ClearAttributionStamp clears the value of the "attribution_stamp" field.
+func (u *AgentLifecycleCursorUpsertBulk) ClearAttributionStamp() *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.ClearAttributionStamp()
+	})
+}
+
+// SetLastRun sets the "last_run" field.
+func (u *AgentLifecycleCursorUpsertBulk) SetLastRun(v string) *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetLastRun(v)
+	})
+}
+
+// UpdateLastRun sets the "last_run" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertBulk) UpdateLastRun() *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateLastRun()
+	})
+}
+
+// SetLastGeneration sets the "last_generation" field.
+func (u *AgentLifecycleCursorUpsertBulk) SetLastGeneration(v string) *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetLastGeneration(v)
+	})
+}
+
+// UpdateLastGeneration sets the "last_generation" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertBulk) UpdateLastGeneration() *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateLastGeneration()
+	})
+}
+
+// SetAttributedRun sets the "attributed_run" field.
+func (u *AgentLifecycleCursorUpsertBulk) SetAttributedRun(v string) *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetAttributedRun(v)
+	})
+}
+
+// UpdateAttributedRun sets the "attributed_run" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertBulk) UpdateAttributedRun() *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateAttributedRun()
+	})
+}
+
+// SetAttributedGeneration sets the "attributed_generation" field.
+func (u *AgentLifecycleCursorUpsertBulk) SetAttributedGeneration(v string) *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetAttributedGeneration(v)
+	})
+}
+
+// UpdateAttributedGeneration sets the "attributed_generation" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertBulk) UpdateAttributedGeneration() *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateAttributedGeneration()
+	})
+}
+
+// SetQuarantinedRuns sets the "quarantined_runs" field.
+func (u *AgentLifecycleCursorUpsertBulk) SetQuarantinedRuns(v string) *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetQuarantinedRuns(v)
+	})
+}
+
+// UpdateQuarantinedRuns sets the "quarantined_runs" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertBulk) UpdateQuarantinedRuns() *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateQuarantinedRuns()
+	})
+}
+
+// SetQuarantineMode sets the "quarantine_mode" field.
+func (u *AgentLifecycleCursorUpsertBulk) SetQuarantineMode(v string) *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetQuarantineMode(v)
+	})
+}
+
+// UpdateQuarantineMode sets the "quarantine_mode" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertBulk) UpdateQuarantineMode() *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateQuarantineMode()
+	})
+}
+
+// SetReincarnationMintRun sets the "reincarnation_mint_run" field.
+func (u *AgentLifecycleCursorUpsertBulk) SetReincarnationMintRun(v string) *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetReincarnationMintRun(v)
+	})
+}
+
+// UpdateReincarnationMintRun sets the "reincarnation_mint_run" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertBulk) UpdateReincarnationMintRun() *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateReincarnationMintRun()
+	})
+}
+
+// SetUntrustedOpenRun sets the "untrusted_open_run" field.
+func (u *AgentLifecycleCursorUpsertBulk) SetUntrustedOpenRun(v string) *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetUntrustedOpenRun(v)
+	})
+}
+
+// UpdateUntrustedOpenRun sets the "untrusted_open_run" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertBulk) UpdateUntrustedOpenRun() *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateUntrustedOpenRun()
+	})
+}
+
+// SetUntrustedOpenRunGeneration sets the "untrusted_open_run_generation" field.
+func (u *AgentLifecycleCursorUpsertBulk) SetUntrustedOpenRunGeneration(v string) *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetUntrustedOpenRunGeneration(v)
+	})
+}
+
+// UpdateUntrustedOpenRunGeneration sets the "untrusted_open_run_generation" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertBulk) UpdateUntrustedOpenRunGeneration() *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateUntrustedOpenRunGeneration()
+	})
+}
+
+// SetUntrustedOpenRunRev sets the "untrusted_open_run_rev" field.
+func (u *AgentLifecycleCursorUpsertBulk) SetUntrustedOpenRunRev(v int64) *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.SetUntrustedOpenRunRev(v)
+	})
+}
+
+// AddUntrustedOpenRunRev adds v to the "untrusted_open_run_rev" field.
+func (u *AgentLifecycleCursorUpsertBulk) AddUntrustedOpenRunRev(v int64) *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.AddUntrustedOpenRunRev(v)
+	})
+}
+
+// UpdateUntrustedOpenRunRev sets the "untrusted_open_run_rev" field to the value that was provided on create.
+func (u *AgentLifecycleCursorUpsertBulk) UpdateUntrustedOpenRunRev() *AgentLifecycleCursorUpsertBulk {
+	return u.Update(func(s *AgentLifecycleCursorUpsert) {
+		s.UpdateUntrustedOpenRunRev()
 	})
 }
 

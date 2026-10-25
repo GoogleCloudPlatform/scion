@@ -595,6 +595,50 @@ func init() {
 	agentlifecyclecursor.DefaultUpdatedAt = agentlifecyclecursorDescUpdatedAt.Default.(func() time.Time)
 	// agentlifecyclecursor.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
 	agentlifecyclecursor.UpdateDefaultUpdatedAt = agentlifecyclecursorDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// agentlifecyclecursorDescAttributionState is the schema descriptor for attribution_state field.
+	agentlifecyclecursorDescAttributionState := agentlifecyclecursorFields[20].Descriptor()
+	// agentlifecyclecursor.DefaultAttributionState holds the default value on creation for the attribution_state field.
+	agentlifecyclecursor.DefaultAttributionState = agentlifecyclecursorDescAttributionState.Default.(string)
+	// agentlifecyclecursorDescLastRun is the schema descriptor for last_run field.
+	agentlifecyclecursorDescLastRun := agentlifecyclecursorFields[22].Descriptor()
+	// agentlifecyclecursor.DefaultLastRun holds the default value on creation for the last_run field.
+	agentlifecyclecursor.DefaultLastRun = agentlifecyclecursorDescLastRun.Default.(string)
+	// agentlifecyclecursorDescLastGeneration is the schema descriptor for last_generation field.
+	agentlifecyclecursorDescLastGeneration := agentlifecyclecursorFields[23].Descriptor()
+	// agentlifecyclecursor.DefaultLastGeneration holds the default value on creation for the last_generation field.
+	agentlifecyclecursor.DefaultLastGeneration = agentlifecyclecursorDescLastGeneration.Default.(string)
+	// agentlifecyclecursorDescAttributedRun is the schema descriptor for attributed_run field.
+	agentlifecyclecursorDescAttributedRun := agentlifecyclecursorFields[24].Descriptor()
+	// agentlifecyclecursor.DefaultAttributedRun holds the default value on creation for the attributed_run field.
+	agentlifecyclecursor.DefaultAttributedRun = agentlifecyclecursorDescAttributedRun.Default.(string)
+	// agentlifecyclecursorDescAttributedGeneration is the schema descriptor for attributed_generation field.
+	agentlifecyclecursorDescAttributedGeneration := agentlifecyclecursorFields[25].Descriptor()
+	// agentlifecyclecursor.DefaultAttributedGeneration holds the default value on creation for the attributed_generation field.
+	agentlifecyclecursor.DefaultAttributedGeneration = agentlifecyclecursorDescAttributedGeneration.Default.(string)
+	// agentlifecyclecursorDescQuarantinedRuns is the schema descriptor for quarantined_runs field.
+	agentlifecyclecursorDescQuarantinedRuns := agentlifecyclecursorFields[26].Descriptor()
+	// agentlifecyclecursor.DefaultQuarantinedRuns holds the default value on creation for the quarantined_runs field.
+	agentlifecyclecursor.DefaultQuarantinedRuns = agentlifecyclecursorDescQuarantinedRuns.Default.(string)
+	// agentlifecyclecursorDescQuarantineMode is the schema descriptor for quarantine_mode field.
+	agentlifecyclecursorDescQuarantineMode := agentlifecyclecursorFields[27].Descriptor()
+	// agentlifecyclecursor.DefaultQuarantineMode holds the default value on creation for the quarantine_mode field.
+	agentlifecyclecursor.DefaultQuarantineMode = agentlifecyclecursorDescQuarantineMode.Default.(string)
+	// agentlifecyclecursorDescReincarnationMintRun is the schema descriptor for reincarnation_mint_run field.
+	agentlifecyclecursorDescReincarnationMintRun := agentlifecyclecursorFields[28].Descriptor()
+	// agentlifecyclecursor.DefaultReincarnationMintRun holds the default value on creation for the reincarnation_mint_run field.
+	agentlifecyclecursor.DefaultReincarnationMintRun = agentlifecyclecursorDescReincarnationMintRun.Default.(string)
+	// agentlifecyclecursorDescUntrustedOpenRun is the schema descriptor for untrusted_open_run field.
+	agentlifecyclecursorDescUntrustedOpenRun := agentlifecyclecursorFields[29].Descriptor()
+	// agentlifecyclecursor.DefaultUntrustedOpenRun holds the default value on creation for the untrusted_open_run field.
+	agentlifecyclecursor.DefaultUntrustedOpenRun = agentlifecyclecursorDescUntrustedOpenRun.Default.(string)
+	// agentlifecyclecursorDescUntrustedOpenRunGeneration is the schema descriptor for untrusted_open_run_generation field.
+	agentlifecyclecursorDescUntrustedOpenRunGeneration := agentlifecyclecursorFields[30].Descriptor()
+	// agentlifecyclecursor.DefaultUntrustedOpenRunGeneration holds the default value on creation for the untrusted_open_run_generation field.
+	agentlifecyclecursor.DefaultUntrustedOpenRunGeneration = agentlifecyclecursorDescUntrustedOpenRunGeneration.Default.(string)
+	// agentlifecyclecursorDescUntrustedOpenRunRev is the schema descriptor for untrusted_open_run_rev field.
+	agentlifecyclecursorDescUntrustedOpenRunRev := agentlifecyclecursorFields[31].Descriptor()
+	// agentlifecyclecursor.DefaultUntrustedOpenRunRev holds the default value on creation for the untrusted_open_run_rev field.
+	agentlifecyclecursor.DefaultUntrustedOpenRunRev = agentlifecyclecursorDescUntrustedOpenRunRev.Default.(int64)
 	agentlifecycleoutboxFields := schema.AgentLifecycleOutbox{}.Fields()
 	_ = agentlifecycleoutboxFields
 	// agentlifecycleoutboxDescAttempts is the schema descriptor for attempts field.

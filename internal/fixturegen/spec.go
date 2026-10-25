@@ -606,6 +606,14 @@ func Spec() []TableFixture {
 				"creator_principal_type": "user", "creator_principal_id": userID,
 				"requested_template": "claude",
 				"updated_at":         baseTime,
+				// Persistent run attribution (WP1 attribution design v2.8):
+				// a clear cursor whose stamp equals updated_at.
+				"attribution_state": "clear", "attribution_stamp": baseTime,
+				"last_run": "", "last_generation": "1",
+				"attributed_run": "", "attributed_generation": "",
+				"quarantined_runs": "", "quarantine_mode": "complete",
+				"reincarnation_mint_run": "", "untrusted_open_run": "",
+				"untrusted_open_run_generation": "", "untrusted_open_run_rev": 0,
 			},
 		}},
 		{Table: "agent_lifecycle_outbox", Rows: []row{

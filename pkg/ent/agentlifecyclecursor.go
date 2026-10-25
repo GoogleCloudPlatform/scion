@@ -55,8 +55,32 @@ type AgentLifecycleCursor struct {
 	// RequestedTemplate holds the value of the "requested_template" field.
 	RequestedTemplate string `json:"requested_template,omitempty"`
 	// UpdatedAt holds the value of the "updated_at" field.
-	UpdatedAt    time.Time `json:"updated_at,omitempty"`
-	selectValues sql.SelectValues
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	// AttributionState holds the value of the "attribution_state" field.
+	AttributionState string `json:"attribution_state,omitempty"`
+	// AttributionStamp holds the value of the "attribution_stamp" field.
+	AttributionStamp *time.Time `json:"attribution_stamp,omitempty"`
+	// LastRun holds the value of the "last_run" field.
+	LastRun string `json:"last_run,omitempty"`
+	// LastGeneration holds the value of the "last_generation" field.
+	LastGeneration string `json:"last_generation,omitempty"`
+	// AttributedRun holds the value of the "attributed_run" field.
+	AttributedRun string `json:"attributed_run,omitempty"`
+	// AttributedGeneration holds the value of the "attributed_generation" field.
+	AttributedGeneration string `json:"attributed_generation,omitempty"`
+	// QuarantinedRuns holds the value of the "quarantined_runs" field.
+	QuarantinedRuns string `json:"quarantined_runs,omitempty"`
+	// QuarantineMode holds the value of the "quarantine_mode" field.
+	QuarantineMode string `json:"quarantine_mode,omitempty"`
+	// ReincarnationMintRun holds the value of the "reincarnation_mint_run" field.
+	ReincarnationMintRun string `json:"reincarnation_mint_run,omitempty"`
+	// UntrustedOpenRun holds the value of the "untrusted_open_run" field.
+	UntrustedOpenRun string `json:"untrusted_open_run,omitempty"`
+	// UntrustedOpenRunGeneration holds the value of the "untrusted_open_run_generation" field.
+	UntrustedOpenRunGeneration string `json:"untrusted_open_run_generation,omitempty"`
+	// UntrustedOpenRunRev holds the value of the "untrusted_open_run_rev" field.
+	UntrustedOpenRunRev int64 `json:"untrusted_open_run_rev,omitempty"`
+	selectValues        sql.SelectValues
 }
 
 // scanValues returns the types for scanning values from sql.Rows.
@@ -66,11 +90,11 @@ func (*AgentLifecycleCursor) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case agentlifecyclecursor.FieldLastDeleted:
 			values[i] = new(sql.NullBool)
-		case agentlifecyclecursor.FieldTransitionRevision, agentlifecyclecursor.FieldMetadataRevision, agentlifecyclecursor.FieldOpenRunMetadataRevision:
+		case agentlifecyclecursor.FieldTransitionRevision, agentlifecyclecursor.FieldMetadataRevision, agentlifecyclecursor.FieldOpenRunMetadataRevision, agentlifecyclecursor.FieldUntrustedOpenRunRev:
 			values[i] = new(sql.NullInt64)
-		case agentlifecyclecursor.FieldMetadataDigest, agentlifecyclecursor.FieldLastFingerprint, agentlifecyclecursor.FieldOpenRun, agentlifecyclecursor.FieldOpenRunGeneration, agentlifecyclecursor.FieldReincarnationBaseRunID, agentlifecyclecursor.FieldPendingAdoptedFrom, agentlifecyclecursor.FieldPendingAdoptionSource, agentlifecyclecursor.FieldPendingAdoptedTo, agentlifecyclecursor.FieldCreatorPrincipalType, agentlifecyclecursor.FieldCreatorPrincipalID, agentlifecyclecursor.FieldRequestedTemplate:
+		case agentlifecyclecursor.FieldMetadataDigest, agentlifecyclecursor.FieldLastFingerprint, agentlifecyclecursor.FieldOpenRun, agentlifecyclecursor.FieldOpenRunGeneration, agentlifecyclecursor.FieldReincarnationBaseRunID, agentlifecyclecursor.FieldPendingAdoptedFrom, agentlifecyclecursor.FieldPendingAdoptionSource, agentlifecyclecursor.FieldPendingAdoptedTo, agentlifecyclecursor.FieldCreatorPrincipalType, agentlifecyclecursor.FieldCreatorPrincipalID, agentlifecyclecursor.FieldRequestedTemplate, agentlifecyclecursor.FieldAttributionState, agentlifecyclecursor.FieldLastRun, agentlifecyclecursor.FieldLastGeneration, agentlifecyclecursor.FieldAttributedRun, agentlifecyclecursor.FieldAttributedGeneration, agentlifecyclecursor.FieldQuarantinedRuns, agentlifecyclecursor.FieldQuarantineMode, agentlifecyclecursor.FieldReincarnationMintRun, agentlifecyclecursor.FieldUntrustedOpenRun, agentlifecyclecursor.FieldUntrustedOpenRunGeneration:
 			values[i] = new(sql.NullString)
-		case agentlifecyclecursor.FieldPendingRunChangeAt, agentlifecyclecursor.FieldPendingAdoptedAt, agentlifecyclecursor.FieldUpdatedAt:
+		case agentlifecyclecursor.FieldPendingRunChangeAt, agentlifecyclecursor.FieldPendingAdoptedAt, agentlifecyclecursor.FieldUpdatedAt, agentlifecyclecursor.FieldAttributionStamp:
 			values[i] = new(sql.NullTime)
 		case agentlifecyclecursor.FieldID, agentlifecyclecursor.FieldProjectID:
 			values[i] = new(uuid.UUID)
@@ -211,6 +235,79 @@ func (_m *AgentLifecycleCursor) assignValues(columns []string, values []any) err
 			} else if value.Valid {
 				_m.UpdatedAt = value.Time
 			}
+		case agentlifecyclecursor.FieldAttributionState:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field attribution_state", values[i])
+			} else if value.Valid {
+				_m.AttributionState = value.String
+			}
+		case agentlifecyclecursor.FieldAttributionStamp:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field attribution_stamp", values[i])
+			} else if value.Valid {
+				_m.AttributionStamp = new(time.Time)
+				*_m.AttributionStamp = value.Time
+			}
+		case agentlifecyclecursor.FieldLastRun:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field last_run", values[i])
+			} else if value.Valid {
+				_m.LastRun = value.String
+			}
+		case agentlifecyclecursor.FieldLastGeneration:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field last_generation", values[i])
+			} else if value.Valid {
+				_m.LastGeneration = value.String
+			}
+		case agentlifecyclecursor.FieldAttributedRun:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field attributed_run", values[i])
+			} else if value.Valid {
+				_m.AttributedRun = value.String
+			}
+		case agentlifecyclecursor.FieldAttributedGeneration:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field attributed_generation", values[i])
+			} else if value.Valid {
+				_m.AttributedGeneration = value.String
+			}
+		case agentlifecyclecursor.FieldQuarantinedRuns:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field quarantined_runs", values[i])
+			} else if value.Valid {
+				_m.QuarantinedRuns = value.String
+			}
+		case agentlifecyclecursor.FieldQuarantineMode:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field quarantine_mode", values[i])
+			} else if value.Valid {
+				_m.QuarantineMode = value.String
+			}
+		case agentlifecyclecursor.FieldReincarnationMintRun:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field reincarnation_mint_run", values[i])
+			} else if value.Valid {
+				_m.ReincarnationMintRun = value.String
+			}
+		case agentlifecyclecursor.FieldUntrustedOpenRun:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field untrusted_open_run", values[i])
+			} else if value.Valid {
+				_m.UntrustedOpenRun = value.String
+			}
+		case agentlifecyclecursor.FieldUntrustedOpenRunGeneration:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field untrusted_open_run_generation", values[i])
+			} else if value.Valid {
+				_m.UntrustedOpenRunGeneration = value.String
+			}
+		case agentlifecyclecursor.FieldUntrustedOpenRunRev:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field untrusted_open_run_rev", values[i])
+			} else if value.Valid {
+				_m.UntrustedOpenRunRev = value.Int64
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -307,6 +404,44 @@ func (_m *AgentLifecycleCursor) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("updated_at=")
 	builder.WriteString(_m.UpdatedAt.Format(time.ANSIC))
+	builder.WriteString(", ")
+	builder.WriteString("attribution_state=")
+	builder.WriteString(_m.AttributionState)
+	builder.WriteString(", ")
+	if v := _m.AttributionStamp; v != nil {
+		builder.WriteString("attribution_stamp=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	builder.WriteString("last_run=")
+	builder.WriteString(_m.LastRun)
+	builder.WriteString(", ")
+	builder.WriteString("last_generation=")
+	builder.WriteString(_m.LastGeneration)
+	builder.WriteString(", ")
+	builder.WriteString("attributed_run=")
+	builder.WriteString(_m.AttributedRun)
+	builder.WriteString(", ")
+	builder.WriteString("attributed_generation=")
+	builder.WriteString(_m.AttributedGeneration)
+	builder.WriteString(", ")
+	builder.WriteString("quarantined_runs=")
+	builder.WriteString(_m.QuarantinedRuns)
+	builder.WriteString(", ")
+	builder.WriteString("quarantine_mode=")
+	builder.WriteString(_m.QuarantineMode)
+	builder.WriteString(", ")
+	builder.WriteString("reincarnation_mint_run=")
+	builder.WriteString(_m.ReincarnationMintRun)
+	builder.WriteString(", ")
+	builder.WriteString("untrusted_open_run=")
+	builder.WriteString(_m.UntrustedOpenRun)
+	builder.WriteString(", ")
+	builder.WriteString("untrusted_open_run_generation=")
+	builder.WriteString(_m.UntrustedOpenRunGeneration)
+	builder.WriteString(", ")
+	builder.WriteString("untrusted_open_run_rev=")
+	builder.WriteString(fmt.Sprintf("%v", _m.UntrustedOpenRunRev))
 	builder.WriteByte(')')
 	return builder.String()
 }

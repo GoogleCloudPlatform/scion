@@ -150,6 +150,66 @@ func UpdatedAt(v time.Time) predicate.AgentLifecycleCursor {
 	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldUpdatedAt, v))
 }
 
+// AttributionState applies equality check predicate on the "attribution_state" field. It's identical to AttributionStateEQ.
+func AttributionState(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldAttributionState, v))
+}
+
+// AttributionStamp applies equality check predicate on the "attribution_stamp" field. It's identical to AttributionStampEQ.
+func AttributionStamp(v time.Time) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldAttributionStamp, v))
+}
+
+// LastRun applies equality check predicate on the "last_run" field. It's identical to LastRunEQ.
+func LastRun(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldLastRun, v))
+}
+
+// LastGeneration applies equality check predicate on the "last_generation" field. It's identical to LastGenerationEQ.
+func LastGeneration(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldLastGeneration, v))
+}
+
+// AttributedRun applies equality check predicate on the "attributed_run" field. It's identical to AttributedRunEQ.
+func AttributedRun(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldAttributedRun, v))
+}
+
+// AttributedGeneration applies equality check predicate on the "attributed_generation" field. It's identical to AttributedGenerationEQ.
+func AttributedGeneration(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldAttributedGeneration, v))
+}
+
+// QuarantinedRuns applies equality check predicate on the "quarantined_runs" field. It's identical to QuarantinedRunsEQ.
+func QuarantinedRuns(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldQuarantinedRuns, v))
+}
+
+// QuarantineMode applies equality check predicate on the "quarantine_mode" field. It's identical to QuarantineModeEQ.
+func QuarantineMode(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldQuarantineMode, v))
+}
+
+// ReincarnationMintRun applies equality check predicate on the "reincarnation_mint_run" field. It's identical to ReincarnationMintRunEQ.
+func ReincarnationMintRun(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldReincarnationMintRun, v))
+}
+
+// UntrustedOpenRun applies equality check predicate on the "untrusted_open_run" field. It's identical to UntrustedOpenRunEQ.
+func UntrustedOpenRun(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldUntrustedOpenRun, v))
+}
+
+// UntrustedOpenRunGeneration applies equality check predicate on the "untrusted_open_run_generation" field. It's identical to UntrustedOpenRunGenerationEQ.
+func UntrustedOpenRunGeneration(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldUntrustedOpenRunGeneration, v))
+}
+
+// UntrustedOpenRunRev applies equality check predicate on the "untrusted_open_run_rev" field. It's identical to UntrustedOpenRunRevEQ.
+func UntrustedOpenRunRev(v int64) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldUntrustedOpenRunRev, v))
+}
+
 // ProjectIDEQ applies the EQ predicate on the "project_id" field.
 func ProjectIDEQ(v uuid.UUID) predicate.AgentLifecycleCursor {
 	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldProjectID, v))
@@ -1173,6 +1233,746 @@ func UpdatedAtLT(v time.Time) predicate.AgentLifecycleCursor {
 // UpdatedAtLTE applies the LTE predicate on the "updated_at" field.
 func UpdatedAtLTE(v time.Time) predicate.AgentLifecycleCursor {
 	return predicate.AgentLifecycleCursor(sql.FieldLTE(FieldUpdatedAt, v))
+}
+
+// AttributionStateEQ applies the EQ predicate on the "attribution_state" field.
+func AttributionStateEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldAttributionState, v))
+}
+
+// AttributionStateNEQ applies the NEQ predicate on the "attribution_state" field.
+func AttributionStateNEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNEQ(FieldAttributionState, v))
+}
+
+// AttributionStateIn applies the In predicate on the "attribution_state" field.
+func AttributionStateIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldIn(FieldAttributionState, vs...))
+}
+
+// AttributionStateNotIn applies the NotIn predicate on the "attribution_state" field.
+func AttributionStateNotIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNotIn(FieldAttributionState, vs...))
+}
+
+// AttributionStateGT applies the GT predicate on the "attribution_state" field.
+func AttributionStateGT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGT(FieldAttributionState, v))
+}
+
+// AttributionStateGTE applies the GTE predicate on the "attribution_state" field.
+func AttributionStateGTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGTE(FieldAttributionState, v))
+}
+
+// AttributionStateLT applies the LT predicate on the "attribution_state" field.
+func AttributionStateLT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLT(FieldAttributionState, v))
+}
+
+// AttributionStateLTE applies the LTE predicate on the "attribution_state" field.
+func AttributionStateLTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLTE(FieldAttributionState, v))
+}
+
+// AttributionStateContains applies the Contains predicate on the "attribution_state" field.
+func AttributionStateContains(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContains(FieldAttributionState, v))
+}
+
+// AttributionStateHasPrefix applies the HasPrefix predicate on the "attribution_state" field.
+func AttributionStateHasPrefix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasPrefix(FieldAttributionState, v))
+}
+
+// AttributionStateHasSuffix applies the HasSuffix predicate on the "attribution_state" field.
+func AttributionStateHasSuffix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasSuffix(FieldAttributionState, v))
+}
+
+// AttributionStateEqualFold applies the EqualFold predicate on the "attribution_state" field.
+func AttributionStateEqualFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEqualFold(FieldAttributionState, v))
+}
+
+// AttributionStateContainsFold applies the ContainsFold predicate on the "attribution_state" field.
+func AttributionStateContainsFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContainsFold(FieldAttributionState, v))
+}
+
+// AttributionStampEQ applies the EQ predicate on the "attribution_stamp" field.
+func AttributionStampEQ(v time.Time) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldAttributionStamp, v))
+}
+
+// AttributionStampNEQ applies the NEQ predicate on the "attribution_stamp" field.
+func AttributionStampNEQ(v time.Time) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNEQ(FieldAttributionStamp, v))
+}
+
+// AttributionStampIn applies the In predicate on the "attribution_stamp" field.
+func AttributionStampIn(vs ...time.Time) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldIn(FieldAttributionStamp, vs...))
+}
+
+// AttributionStampNotIn applies the NotIn predicate on the "attribution_stamp" field.
+func AttributionStampNotIn(vs ...time.Time) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNotIn(FieldAttributionStamp, vs...))
+}
+
+// AttributionStampGT applies the GT predicate on the "attribution_stamp" field.
+func AttributionStampGT(v time.Time) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGT(FieldAttributionStamp, v))
+}
+
+// AttributionStampGTE applies the GTE predicate on the "attribution_stamp" field.
+func AttributionStampGTE(v time.Time) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGTE(FieldAttributionStamp, v))
+}
+
+// AttributionStampLT applies the LT predicate on the "attribution_stamp" field.
+func AttributionStampLT(v time.Time) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLT(FieldAttributionStamp, v))
+}
+
+// AttributionStampLTE applies the LTE predicate on the "attribution_stamp" field.
+func AttributionStampLTE(v time.Time) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLTE(FieldAttributionStamp, v))
+}
+
+// AttributionStampIsNil applies the IsNil predicate on the "attribution_stamp" field.
+func AttributionStampIsNil() predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldIsNull(FieldAttributionStamp))
+}
+
+// AttributionStampNotNil applies the NotNil predicate on the "attribution_stamp" field.
+func AttributionStampNotNil() predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNotNull(FieldAttributionStamp))
+}
+
+// LastRunEQ applies the EQ predicate on the "last_run" field.
+func LastRunEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldLastRun, v))
+}
+
+// LastRunNEQ applies the NEQ predicate on the "last_run" field.
+func LastRunNEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNEQ(FieldLastRun, v))
+}
+
+// LastRunIn applies the In predicate on the "last_run" field.
+func LastRunIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldIn(FieldLastRun, vs...))
+}
+
+// LastRunNotIn applies the NotIn predicate on the "last_run" field.
+func LastRunNotIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNotIn(FieldLastRun, vs...))
+}
+
+// LastRunGT applies the GT predicate on the "last_run" field.
+func LastRunGT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGT(FieldLastRun, v))
+}
+
+// LastRunGTE applies the GTE predicate on the "last_run" field.
+func LastRunGTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGTE(FieldLastRun, v))
+}
+
+// LastRunLT applies the LT predicate on the "last_run" field.
+func LastRunLT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLT(FieldLastRun, v))
+}
+
+// LastRunLTE applies the LTE predicate on the "last_run" field.
+func LastRunLTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLTE(FieldLastRun, v))
+}
+
+// LastRunContains applies the Contains predicate on the "last_run" field.
+func LastRunContains(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContains(FieldLastRun, v))
+}
+
+// LastRunHasPrefix applies the HasPrefix predicate on the "last_run" field.
+func LastRunHasPrefix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasPrefix(FieldLastRun, v))
+}
+
+// LastRunHasSuffix applies the HasSuffix predicate on the "last_run" field.
+func LastRunHasSuffix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasSuffix(FieldLastRun, v))
+}
+
+// LastRunEqualFold applies the EqualFold predicate on the "last_run" field.
+func LastRunEqualFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEqualFold(FieldLastRun, v))
+}
+
+// LastRunContainsFold applies the ContainsFold predicate on the "last_run" field.
+func LastRunContainsFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContainsFold(FieldLastRun, v))
+}
+
+// LastGenerationEQ applies the EQ predicate on the "last_generation" field.
+func LastGenerationEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldLastGeneration, v))
+}
+
+// LastGenerationNEQ applies the NEQ predicate on the "last_generation" field.
+func LastGenerationNEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNEQ(FieldLastGeneration, v))
+}
+
+// LastGenerationIn applies the In predicate on the "last_generation" field.
+func LastGenerationIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldIn(FieldLastGeneration, vs...))
+}
+
+// LastGenerationNotIn applies the NotIn predicate on the "last_generation" field.
+func LastGenerationNotIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNotIn(FieldLastGeneration, vs...))
+}
+
+// LastGenerationGT applies the GT predicate on the "last_generation" field.
+func LastGenerationGT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGT(FieldLastGeneration, v))
+}
+
+// LastGenerationGTE applies the GTE predicate on the "last_generation" field.
+func LastGenerationGTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGTE(FieldLastGeneration, v))
+}
+
+// LastGenerationLT applies the LT predicate on the "last_generation" field.
+func LastGenerationLT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLT(FieldLastGeneration, v))
+}
+
+// LastGenerationLTE applies the LTE predicate on the "last_generation" field.
+func LastGenerationLTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLTE(FieldLastGeneration, v))
+}
+
+// LastGenerationContains applies the Contains predicate on the "last_generation" field.
+func LastGenerationContains(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContains(FieldLastGeneration, v))
+}
+
+// LastGenerationHasPrefix applies the HasPrefix predicate on the "last_generation" field.
+func LastGenerationHasPrefix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasPrefix(FieldLastGeneration, v))
+}
+
+// LastGenerationHasSuffix applies the HasSuffix predicate on the "last_generation" field.
+func LastGenerationHasSuffix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasSuffix(FieldLastGeneration, v))
+}
+
+// LastGenerationEqualFold applies the EqualFold predicate on the "last_generation" field.
+func LastGenerationEqualFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEqualFold(FieldLastGeneration, v))
+}
+
+// LastGenerationContainsFold applies the ContainsFold predicate on the "last_generation" field.
+func LastGenerationContainsFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContainsFold(FieldLastGeneration, v))
+}
+
+// AttributedRunEQ applies the EQ predicate on the "attributed_run" field.
+func AttributedRunEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldAttributedRun, v))
+}
+
+// AttributedRunNEQ applies the NEQ predicate on the "attributed_run" field.
+func AttributedRunNEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNEQ(FieldAttributedRun, v))
+}
+
+// AttributedRunIn applies the In predicate on the "attributed_run" field.
+func AttributedRunIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldIn(FieldAttributedRun, vs...))
+}
+
+// AttributedRunNotIn applies the NotIn predicate on the "attributed_run" field.
+func AttributedRunNotIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNotIn(FieldAttributedRun, vs...))
+}
+
+// AttributedRunGT applies the GT predicate on the "attributed_run" field.
+func AttributedRunGT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGT(FieldAttributedRun, v))
+}
+
+// AttributedRunGTE applies the GTE predicate on the "attributed_run" field.
+func AttributedRunGTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGTE(FieldAttributedRun, v))
+}
+
+// AttributedRunLT applies the LT predicate on the "attributed_run" field.
+func AttributedRunLT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLT(FieldAttributedRun, v))
+}
+
+// AttributedRunLTE applies the LTE predicate on the "attributed_run" field.
+func AttributedRunLTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLTE(FieldAttributedRun, v))
+}
+
+// AttributedRunContains applies the Contains predicate on the "attributed_run" field.
+func AttributedRunContains(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContains(FieldAttributedRun, v))
+}
+
+// AttributedRunHasPrefix applies the HasPrefix predicate on the "attributed_run" field.
+func AttributedRunHasPrefix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasPrefix(FieldAttributedRun, v))
+}
+
+// AttributedRunHasSuffix applies the HasSuffix predicate on the "attributed_run" field.
+func AttributedRunHasSuffix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasSuffix(FieldAttributedRun, v))
+}
+
+// AttributedRunEqualFold applies the EqualFold predicate on the "attributed_run" field.
+func AttributedRunEqualFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEqualFold(FieldAttributedRun, v))
+}
+
+// AttributedRunContainsFold applies the ContainsFold predicate on the "attributed_run" field.
+func AttributedRunContainsFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContainsFold(FieldAttributedRun, v))
+}
+
+// AttributedGenerationEQ applies the EQ predicate on the "attributed_generation" field.
+func AttributedGenerationEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldAttributedGeneration, v))
+}
+
+// AttributedGenerationNEQ applies the NEQ predicate on the "attributed_generation" field.
+func AttributedGenerationNEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNEQ(FieldAttributedGeneration, v))
+}
+
+// AttributedGenerationIn applies the In predicate on the "attributed_generation" field.
+func AttributedGenerationIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldIn(FieldAttributedGeneration, vs...))
+}
+
+// AttributedGenerationNotIn applies the NotIn predicate on the "attributed_generation" field.
+func AttributedGenerationNotIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNotIn(FieldAttributedGeneration, vs...))
+}
+
+// AttributedGenerationGT applies the GT predicate on the "attributed_generation" field.
+func AttributedGenerationGT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGT(FieldAttributedGeneration, v))
+}
+
+// AttributedGenerationGTE applies the GTE predicate on the "attributed_generation" field.
+func AttributedGenerationGTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGTE(FieldAttributedGeneration, v))
+}
+
+// AttributedGenerationLT applies the LT predicate on the "attributed_generation" field.
+func AttributedGenerationLT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLT(FieldAttributedGeneration, v))
+}
+
+// AttributedGenerationLTE applies the LTE predicate on the "attributed_generation" field.
+func AttributedGenerationLTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLTE(FieldAttributedGeneration, v))
+}
+
+// AttributedGenerationContains applies the Contains predicate on the "attributed_generation" field.
+func AttributedGenerationContains(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContains(FieldAttributedGeneration, v))
+}
+
+// AttributedGenerationHasPrefix applies the HasPrefix predicate on the "attributed_generation" field.
+func AttributedGenerationHasPrefix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasPrefix(FieldAttributedGeneration, v))
+}
+
+// AttributedGenerationHasSuffix applies the HasSuffix predicate on the "attributed_generation" field.
+func AttributedGenerationHasSuffix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasSuffix(FieldAttributedGeneration, v))
+}
+
+// AttributedGenerationEqualFold applies the EqualFold predicate on the "attributed_generation" field.
+func AttributedGenerationEqualFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEqualFold(FieldAttributedGeneration, v))
+}
+
+// AttributedGenerationContainsFold applies the ContainsFold predicate on the "attributed_generation" field.
+func AttributedGenerationContainsFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContainsFold(FieldAttributedGeneration, v))
+}
+
+// QuarantinedRunsEQ applies the EQ predicate on the "quarantined_runs" field.
+func QuarantinedRunsEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldQuarantinedRuns, v))
+}
+
+// QuarantinedRunsNEQ applies the NEQ predicate on the "quarantined_runs" field.
+func QuarantinedRunsNEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNEQ(FieldQuarantinedRuns, v))
+}
+
+// QuarantinedRunsIn applies the In predicate on the "quarantined_runs" field.
+func QuarantinedRunsIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldIn(FieldQuarantinedRuns, vs...))
+}
+
+// QuarantinedRunsNotIn applies the NotIn predicate on the "quarantined_runs" field.
+func QuarantinedRunsNotIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNotIn(FieldQuarantinedRuns, vs...))
+}
+
+// QuarantinedRunsGT applies the GT predicate on the "quarantined_runs" field.
+func QuarantinedRunsGT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGT(FieldQuarantinedRuns, v))
+}
+
+// QuarantinedRunsGTE applies the GTE predicate on the "quarantined_runs" field.
+func QuarantinedRunsGTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGTE(FieldQuarantinedRuns, v))
+}
+
+// QuarantinedRunsLT applies the LT predicate on the "quarantined_runs" field.
+func QuarantinedRunsLT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLT(FieldQuarantinedRuns, v))
+}
+
+// QuarantinedRunsLTE applies the LTE predicate on the "quarantined_runs" field.
+func QuarantinedRunsLTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLTE(FieldQuarantinedRuns, v))
+}
+
+// QuarantinedRunsContains applies the Contains predicate on the "quarantined_runs" field.
+func QuarantinedRunsContains(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContains(FieldQuarantinedRuns, v))
+}
+
+// QuarantinedRunsHasPrefix applies the HasPrefix predicate on the "quarantined_runs" field.
+func QuarantinedRunsHasPrefix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasPrefix(FieldQuarantinedRuns, v))
+}
+
+// QuarantinedRunsHasSuffix applies the HasSuffix predicate on the "quarantined_runs" field.
+func QuarantinedRunsHasSuffix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasSuffix(FieldQuarantinedRuns, v))
+}
+
+// QuarantinedRunsEqualFold applies the EqualFold predicate on the "quarantined_runs" field.
+func QuarantinedRunsEqualFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEqualFold(FieldQuarantinedRuns, v))
+}
+
+// QuarantinedRunsContainsFold applies the ContainsFold predicate on the "quarantined_runs" field.
+func QuarantinedRunsContainsFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContainsFold(FieldQuarantinedRuns, v))
+}
+
+// QuarantineModeEQ applies the EQ predicate on the "quarantine_mode" field.
+func QuarantineModeEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldQuarantineMode, v))
+}
+
+// QuarantineModeNEQ applies the NEQ predicate on the "quarantine_mode" field.
+func QuarantineModeNEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNEQ(FieldQuarantineMode, v))
+}
+
+// QuarantineModeIn applies the In predicate on the "quarantine_mode" field.
+func QuarantineModeIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldIn(FieldQuarantineMode, vs...))
+}
+
+// QuarantineModeNotIn applies the NotIn predicate on the "quarantine_mode" field.
+func QuarantineModeNotIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNotIn(FieldQuarantineMode, vs...))
+}
+
+// QuarantineModeGT applies the GT predicate on the "quarantine_mode" field.
+func QuarantineModeGT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGT(FieldQuarantineMode, v))
+}
+
+// QuarantineModeGTE applies the GTE predicate on the "quarantine_mode" field.
+func QuarantineModeGTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGTE(FieldQuarantineMode, v))
+}
+
+// QuarantineModeLT applies the LT predicate on the "quarantine_mode" field.
+func QuarantineModeLT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLT(FieldQuarantineMode, v))
+}
+
+// QuarantineModeLTE applies the LTE predicate on the "quarantine_mode" field.
+func QuarantineModeLTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLTE(FieldQuarantineMode, v))
+}
+
+// QuarantineModeContains applies the Contains predicate on the "quarantine_mode" field.
+func QuarantineModeContains(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContains(FieldQuarantineMode, v))
+}
+
+// QuarantineModeHasPrefix applies the HasPrefix predicate on the "quarantine_mode" field.
+func QuarantineModeHasPrefix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasPrefix(FieldQuarantineMode, v))
+}
+
+// QuarantineModeHasSuffix applies the HasSuffix predicate on the "quarantine_mode" field.
+func QuarantineModeHasSuffix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasSuffix(FieldQuarantineMode, v))
+}
+
+// QuarantineModeEqualFold applies the EqualFold predicate on the "quarantine_mode" field.
+func QuarantineModeEqualFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEqualFold(FieldQuarantineMode, v))
+}
+
+// QuarantineModeContainsFold applies the ContainsFold predicate on the "quarantine_mode" field.
+func QuarantineModeContainsFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContainsFold(FieldQuarantineMode, v))
+}
+
+// ReincarnationMintRunEQ applies the EQ predicate on the "reincarnation_mint_run" field.
+func ReincarnationMintRunEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldReincarnationMintRun, v))
+}
+
+// ReincarnationMintRunNEQ applies the NEQ predicate on the "reincarnation_mint_run" field.
+func ReincarnationMintRunNEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNEQ(FieldReincarnationMintRun, v))
+}
+
+// ReincarnationMintRunIn applies the In predicate on the "reincarnation_mint_run" field.
+func ReincarnationMintRunIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldIn(FieldReincarnationMintRun, vs...))
+}
+
+// ReincarnationMintRunNotIn applies the NotIn predicate on the "reincarnation_mint_run" field.
+func ReincarnationMintRunNotIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNotIn(FieldReincarnationMintRun, vs...))
+}
+
+// ReincarnationMintRunGT applies the GT predicate on the "reincarnation_mint_run" field.
+func ReincarnationMintRunGT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGT(FieldReincarnationMintRun, v))
+}
+
+// ReincarnationMintRunGTE applies the GTE predicate on the "reincarnation_mint_run" field.
+func ReincarnationMintRunGTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGTE(FieldReincarnationMintRun, v))
+}
+
+// ReincarnationMintRunLT applies the LT predicate on the "reincarnation_mint_run" field.
+func ReincarnationMintRunLT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLT(FieldReincarnationMintRun, v))
+}
+
+// ReincarnationMintRunLTE applies the LTE predicate on the "reincarnation_mint_run" field.
+func ReincarnationMintRunLTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLTE(FieldReincarnationMintRun, v))
+}
+
+// ReincarnationMintRunContains applies the Contains predicate on the "reincarnation_mint_run" field.
+func ReincarnationMintRunContains(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContains(FieldReincarnationMintRun, v))
+}
+
+// ReincarnationMintRunHasPrefix applies the HasPrefix predicate on the "reincarnation_mint_run" field.
+func ReincarnationMintRunHasPrefix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasPrefix(FieldReincarnationMintRun, v))
+}
+
+// ReincarnationMintRunHasSuffix applies the HasSuffix predicate on the "reincarnation_mint_run" field.
+func ReincarnationMintRunHasSuffix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasSuffix(FieldReincarnationMintRun, v))
+}
+
+// ReincarnationMintRunEqualFold applies the EqualFold predicate on the "reincarnation_mint_run" field.
+func ReincarnationMintRunEqualFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEqualFold(FieldReincarnationMintRun, v))
+}
+
+// ReincarnationMintRunContainsFold applies the ContainsFold predicate on the "reincarnation_mint_run" field.
+func ReincarnationMintRunContainsFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContainsFold(FieldReincarnationMintRun, v))
+}
+
+// UntrustedOpenRunEQ applies the EQ predicate on the "untrusted_open_run" field.
+func UntrustedOpenRunEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldUntrustedOpenRun, v))
+}
+
+// UntrustedOpenRunNEQ applies the NEQ predicate on the "untrusted_open_run" field.
+func UntrustedOpenRunNEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNEQ(FieldUntrustedOpenRun, v))
+}
+
+// UntrustedOpenRunIn applies the In predicate on the "untrusted_open_run" field.
+func UntrustedOpenRunIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldIn(FieldUntrustedOpenRun, vs...))
+}
+
+// UntrustedOpenRunNotIn applies the NotIn predicate on the "untrusted_open_run" field.
+func UntrustedOpenRunNotIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNotIn(FieldUntrustedOpenRun, vs...))
+}
+
+// UntrustedOpenRunGT applies the GT predicate on the "untrusted_open_run" field.
+func UntrustedOpenRunGT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGT(FieldUntrustedOpenRun, v))
+}
+
+// UntrustedOpenRunGTE applies the GTE predicate on the "untrusted_open_run" field.
+func UntrustedOpenRunGTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGTE(FieldUntrustedOpenRun, v))
+}
+
+// UntrustedOpenRunLT applies the LT predicate on the "untrusted_open_run" field.
+func UntrustedOpenRunLT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLT(FieldUntrustedOpenRun, v))
+}
+
+// UntrustedOpenRunLTE applies the LTE predicate on the "untrusted_open_run" field.
+func UntrustedOpenRunLTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLTE(FieldUntrustedOpenRun, v))
+}
+
+// UntrustedOpenRunContains applies the Contains predicate on the "untrusted_open_run" field.
+func UntrustedOpenRunContains(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContains(FieldUntrustedOpenRun, v))
+}
+
+// UntrustedOpenRunHasPrefix applies the HasPrefix predicate on the "untrusted_open_run" field.
+func UntrustedOpenRunHasPrefix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasPrefix(FieldUntrustedOpenRun, v))
+}
+
+// UntrustedOpenRunHasSuffix applies the HasSuffix predicate on the "untrusted_open_run" field.
+func UntrustedOpenRunHasSuffix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasSuffix(FieldUntrustedOpenRun, v))
+}
+
+// UntrustedOpenRunEqualFold applies the EqualFold predicate on the "untrusted_open_run" field.
+func UntrustedOpenRunEqualFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEqualFold(FieldUntrustedOpenRun, v))
+}
+
+// UntrustedOpenRunContainsFold applies the ContainsFold predicate on the "untrusted_open_run" field.
+func UntrustedOpenRunContainsFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContainsFold(FieldUntrustedOpenRun, v))
+}
+
+// UntrustedOpenRunGenerationEQ applies the EQ predicate on the "untrusted_open_run_generation" field.
+func UntrustedOpenRunGenerationEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldUntrustedOpenRunGeneration, v))
+}
+
+// UntrustedOpenRunGenerationNEQ applies the NEQ predicate on the "untrusted_open_run_generation" field.
+func UntrustedOpenRunGenerationNEQ(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNEQ(FieldUntrustedOpenRunGeneration, v))
+}
+
+// UntrustedOpenRunGenerationIn applies the In predicate on the "untrusted_open_run_generation" field.
+func UntrustedOpenRunGenerationIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldIn(FieldUntrustedOpenRunGeneration, vs...))
+}
+
+// UntrustedOpenRunGenerationNotIn applies the NotIn predicate on the "untrusted_open_run_generation" field.
+func UntrustedOpenRunGenerationNotIn(vs ...string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNotIn(FieldUntrustedOpenRunGeneration, vs...))
+}
+
+// UntrustedOpenRunGenerationGT applies the GT predicate on the "untrusted_open_run_generation" field.
+func UntrustedOpenRunGenerationGT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGT(FieldUntrustedOpenRunGeneration, v))
+}
+
+// UntrustedOpenRunGenerationGTE applies the GTE predicate on the "untrusted_open_run_generation" field.
+func UntrustedOpenRunGenerationGTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGTE(FieldUntrustedOpenRunGeneration, v))
+}
+
+// UntrustedOpenRunGenerationLT applies the LT predicate on the "untrusted_open_run_generation" field.
+func UntrustedOpenRunGenerationLT(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLT(FieldUntrustedOpenRunGeneration, v))
+}
+
+// UntrustedOpenRunGenerationLTE applies the LTE predicate on the "untrusted_open_run_generation" field.
+func UntrustedOpenRunGenerationLTE(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLTE(FieldUntrustedOpenRunGeneration, v))
+}
+
+// UntrustedOpenRunGenerationContains applies the Contains predicate on the "untrusted_open_run_generation" field.
+func UntrustedOpenRunGenerationContains(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContains(FieldUntrustedOpenRunGeneration, v))
+}
+
+// UntrustedOpenRunGenerationHasPrefix applies the HasPrefix predicate on the "untrusted_open_run_generation" field.
+func UntrustedOpenRunGenerationHasPrefix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasPrefix(FieldUntrustedOpenRunGeneration, v))
+}
+
+// UntrustedOpenRunGenerationHasSuffix applies the HasSuffix predicate on the "untrusted_open_run_generation" field.
+func UntrustedOpenRunGenerationHasSuffix(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldHasSuffix(FieldUntrustedOpenRunGeneration, v))
+}
+
+// UntrustedOpenRunGenerationEqualFold applies the EqualFold predicate on the "untrusted_open_run_generation" field.
+func UntrustedOpenRunGenerationEqualFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEqualFold(FieldUntrustedOpenRunGeneration, v))
+}
+
+// UntrustedOpenRunGenerationContainsFold applies the ContainsFold predicate on the "untrusted_open_run_generation" field.
+func UntrustedOpenRunGenerationContainsFold(v string) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldContainsFold(FieldUntrustedOpenRunGeneration, v))
+}
+
+// UntrustedOpenRunRevEQ applies the EQ predicate on the "untrusted_open_run_rev" field.
+func UntrustedOpenRunRevEQ(v int64) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldEQ(FieldUntrustedOpenRunRev, v))
+}
+
+// UntrustedOpenRunRevNEQ applies the NEQ predicate on the "untrusted_open_run_rev" field.
+func UntrustedOpenRunRevNEQ(v int64) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNEQ(FieldUntrustedOpenRunRev, v))
+}
+
+// UntrustedOpenRunRevIn applies the In predicate on the "untrusted_open_run_rev" field.
+func UntrustedOpenRunRevIn(vs ...int64) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldIn(FieldUntrustedOpenRunRev, vs...))
+}
+
+// UntrustedOpenRunRevNotIn applies the NotIn predicate on the "untrusted_open_run_rev" field.
+func UntrustedOpenRunRevNotIn(vs ...int64) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldNotIn(FieldUntrustedOpenRunRev, vs...))
+}
+
+// UntrustedOpenRunRevGT applies the GT predicate on the "untrusted_open_run_rev" field.
+func UntrustedOpenRunRevGT(v int64) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGT(FieldUntrustedOpenRunRev, v))
+}
+
+// UntrustedOpenRunRevGTE applies the GTE predicate on the "untrusted_open_run_rev" field.
+func UntrustedOpenRunRevGTE(v int64) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldGTE(FieldUntrustedOpenRunRev, v))
+}
+
+// UntrustedOpenRunRevLT applies the LT predicate on the "untrusted_open_run_rev" field.
+func UntrustedOpenRunRevLT(v int64) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLT(FieldUntrustedOpenRunRev, v))
+}
+
+// UntrustedOpenRunRevLTE applies the LTE predicate on the "untrusted_open_run_rev" field.
+func UntrustedOpenRunRevLTE(v int64) predicate.AgentLifecycleCursor {
+	return predicate.AgentLifecycleCursor(sql.FieldLTE(FieldUntrustedOpenRunRev, v))
 }
 
 // And groups predicates with the AND operator between them.
