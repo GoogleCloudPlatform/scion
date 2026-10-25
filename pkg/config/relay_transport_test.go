@@ -75,3 +75,20 @@ func TestCheckRelayInternalListen(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckRelayTransportDoesNotEchoAmbiguousURL: an unparsable endpoint
+// that holds an '@' is not echoed (its masked form could read as a
+// loopback host), and a parsed endpoint's refusal names its host.
+func TestCheckRelayTransportDoesNotEchoAmbiguousURL(t *testing.T) {
+	err := CheckRelayTransport("http://relay.internal%zz@127.0.0.1:9810")
+	if !errors.Is(err, ErrPlaintextNonLoopback) {
+		t.Fatalf("CheckRelayTransport = %v, want ErrPlaintextNonLoopback", err)
+	}
+	if strings.Contains(err.Error(), "127.0.0.1") || !strings.Contains(err.Error(), "not shown") {
+		t.Errorf("unparsable endpoint with '@' is echoed: %q", err)
+	}
+	err = CheckRelayTransport("http://10.0.0.5:9810")
+	if err == nil || !strings.Contains(err.Error(), `host "10.0.0.5"`) {
+		t.Errorf("refusal %v does not name the host", err)
+	}
+}

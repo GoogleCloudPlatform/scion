@@ -17,6 +17,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"strings"
 )
 
@@ -38,9 +39,25 @@ func CheckRelayTransport(rawURL string) error {
 	if err := CheckHubTransport(rawURL); err != nil {
 		return fmt.Errorf("%w: conduit relay internal endpoint %s is not https:// and not loopback, so relay "+
 			"traffic would cross the network unencrypted; %s",
-			ErrPlaintextNonLoopback, RedactURL(rawURL), relayTransportFix)
+			ErrPlaintextNonLoopback, relayEndpointShown(rawURL), relayTransportFix)
 	}
 	return nil
+}
+
+// relayEndpointShown is how a refused endpoint is named: masked, with its
+// host named explicitly. A URL that does not parse is not echoed when it
+// holds an '@', as in CheckHubTransport: RedactURL would mask only the part
+// before the last '@', and what is left (for example "@127.0.0.1") would
+// read as the host.
+func relayEndpointShown(rawURL string) string {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Host == "" {
+		if strings.Contains(rawURL, "@") {
+			return "(not shown: it does not parse and contains '@')"
+		}
+		return RedactURL(rawURL)
+	}
+	return fmt.Sprintf("%s (host %q)", RedactURL(rawURL), u.Hostname())
 }
 
 // CheckRelayInternalListen is the listener half of the relay internal hop
