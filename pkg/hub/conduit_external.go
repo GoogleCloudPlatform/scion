@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,6 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
@@ -69,6 +71,11 @@ type ConduitExternalOptions struct {
 	PeerAuth relay.PeerAuth
 	// HTTPClient performs the internal calls to relays (nil: default).
 	HTTPClient *http.Client
+	// HopTLS is the TLS client configuration of every internal hop call
+	// to the relays, the ingress proxy leg included (relay.NewHopClientTLS;
+	// nil: the system roots). Used when HTTPClient is nil. Verification is
+	// never skipped.
+	HopTLS *tls.Config
 	// Ingress is the conduit ingress mode (config.ConduitIngressProxy or
 	// config.ConduitIngressRedirect; "" = proxy). Startup refuses redirect
 	// for now, so only proxy serves dials; any other value refuses them.
@@ -197,7 +204,15 @@ func (s *Server) StartConduitExternal(ctx context.Context, opts ConduitExternalO
 	if id == "" {
 		id = ConduitInstanceID("")
 	}
-	peers := &relay.PeerClient{HTTP: opts.HTTPClient, Auth: opts.PeerAuth}
+	httpClient := opts.HTTPClient
+	var hopWS *websocket.Dialer
+	if opts.HopTLS != nil {
+		hopWS = relay.NewHopWSDialer(opts.HopTLS)
+		if httpClient == nil {
+			httpClient = relay.NewHopHTTPClient(opts.HopTLS)
+		}
+	}
+	peers := &relay.PeerClient{HTTP: httpClient, WS: hopWS, Auth: opts.PeerAuth}
 	rtr, err := router.New(router.Config{
 		Registry: reg,
 		Store:    st,
@@ -226,8 +241,8 @@ func (s *Server) StartConduitExternal(ctx context.Context, opts ConduitExternalO
 	if rt.lifetimeCap <= 0 {
 		rt.lifetimeCap = config.ConduitDefaultLifetimeCap
 	}
-	if opts.HTTPClient != nil && opts.HTTPClient.Transport != nil {
-		rt.ingressTransport = newConduitIngressTransport(opts.HTTPClient.Transport, conduitIngressResponseHeaderTimeout)
+	if httpClient != nil && httpClient.Transport != nil {
+		rt.ingressTransport = newConduitIngressTransport(httpClient.Transport, conduitIngressResponseHeaderTimeout)
 	}
 	s.conduitEligibleRelays.Store(-1)
 	if !s.conduitExternal.CompareAndSwap(nil, rt) {
