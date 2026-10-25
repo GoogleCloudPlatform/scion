@@ -1459,3 +1459,59 @@ func TestDispatchDelivery_LocalSelectionMatchesResolve(t *testing.T) {
 	require.Len(t, got, 8)
 	assert.ElementsMatch(t, old, got)
 }
+
+// TestMaterialAssociation_FactDefensiveBranches: the association fact's
+// defensive branches, each reached by one fault against an admitted
+// control. Most cannot be reached through newHubDeliveryIdentity and
+// materialAssociationCandidate, so the fact is called directly.
+func TestMaterialAssociation_FactDefensiveBranches(t *testing.T) {
+	m := newLDFixture(t, "fact-df", ldOptions{})
+	ctx := context.Background()
+	sm := m.secret(t, "MD_FACT_DF", "v", store.SecretTypeEnvironment, store.ScopeProject, m.agent.ProjectID)
+	res := materialDeliveryResource(MaterialKindSecret, materialRecordSecret, sm.ID, sm.Name, store.ScopeProject, m.agent.ProjectID, m.agent.ID, GrantProjectAssociation, PurposeRestart)
+	h := hdIdentity(t, m.authz, m.agent.ID)
+	rule := RelationshipRuleProjectAssociation
+
+	holds, detail := m.authz.materialAssociationFact(ctx, h, rule, res)
+	require.True(t, holds, "control: %s", detail)
+
+	t.Run("nil_evidence", func(t *testing.T) {
+		bad := *h
+		bad.evidence = nil
+		holds, detail := m.authz.materialAssociationFact(ctx, &bad, rule, res)
+		assert.False(t, holds)
+		assert.Equal(t, "delivery credential has no stored-agent evidence", detail)
+	})
+	t.Run("bound_agent_differs", func(t *testing.T) {
+		bad := *h
+		bad.boundAgentID = tid("md-fact-df-other")
+		holds, detail := m.authz.materialAssociationFact(ctx, &bad, rule, res)
+		assert.False(t, holds)
+		assert.Equal(t, "delivery credential is bound to a different agent", detail)
+	})
+	t.Run("evidence_agent_differs", func(t *testing.T) {
+		bad := *h
+		other := *m.agent
+		other.ID = tid("md-fact-df-other")
+		bad.evidence = &storedAgentIdentity{agent: &other}
+		holds, detail := m.authz.materialAssociationFact(ctx, &bad, rule, res)
+		assert.False(t, holds)
+		assert.Equal(t, "delivery credential is bound to a different agent", detail)
+	})
+	t.Run("rule_does_not_match_scope", func(t *testing.T) {
+		holds, detail := m.authz.materialAssociationFact(ctx, h, RelationshipRuleHubAssociation, res)
+		assert.False(t, holds)
+		assert.Equal(t, "delivery item scope does not match the association", detail)
+	})
+	t.Run("store_unavailable", func(t *testing.T) {
+		holds, detail := (&AuthzService{}).materialAssociationFact(ctx, h, rule, res)
+		assert.False(t, holds)
+		assert.Contains(t, detail, "store not available")
+	})
+	t.Run("project_lookup_error", func(t *testing.T) {
+		a := hdWithStore(t, m.authz, &ldFaultStore{Store: m.store, getProjectErr: errors.New("injected project lookup failure")})
+		holds, detail := a.materialAssociationFact(ctx, h, rule, res)
+		assert.False(t, holds)
+		assert.Contains(t, detail, "project lookup failed")
+	})
+}
