@@ -1544,24 +1544,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
 			return
 		}
-		if errs := config.ValidateHomeStorageOverrides(runtimes, profiles); len(errs) > 0 {
+		// The per-runtime and per-profile storage overrides are removed
+		// (server.project_storage decides storage; volumes: replaces
+		// node-local overrides).
+		if errs := config.RemovedStorageOverrideErrors(runtimes, profiles, nil); len(errs) > 0 {
 			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
 			return
-		}
-		// shared_dir_storage_backend "nfs" needs a complete
-		// server.shared_dir_storage.nfs block, which lives only in the
-		// global settings file. Configuration only; no mount is checked.
-		if len(runtimes) > 0 || len(profiles) > 0 {
-			if gs, _, gErr := config.LoadGlobalSettings(); gErr == nil {
-				var sdGlobal *config.V1SharedDirStorageConfig
-				if gs != nil && gs.Server != nil {
-					sdGlobal = gs.Server.SharedDirStorage
-				}
-				if errs := config.ValidateSharedDirStorageBackends(runtimes, profiles, sdGlobal); len(errs) > 0 {
-					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
-					return
-				}
-			}
 		}
 		// safe_to_evict on a non-Kubernetes runtime is accepted and ignored,
 		// with the same warning as config validate. A section missing from
@@ -2296,6 +2284,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 		}
 		if srv.Secrets != nil && !isZeroStruct(srv.Secrets) {
 			keys = append(keys, "server.secrets")
+		}
+		if srv.ProjectStorage != nil && !isZeroStruct(srv.ProjectStorage) {
+			keys = append(keys, "server.project_storage")
 		}
 		if srv.WorkspaceStorage != nil && !isZeroStruct(srv.WorkspaceStorage) {
 			keys = append(keys, "server.workspace_storage")

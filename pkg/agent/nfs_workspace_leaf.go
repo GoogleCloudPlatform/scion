@@ -171,7 +171,7 @@ func ensureNFSWorkspaceLeavesClaim(runtimeName, projectID string, resolved runti
 		if err := api.ValidateSharedDirs(dirs); err != nil {
 			return false, false, fmt.Errorf("workspace_storage nfs: shared_dirs: %w", err)
 		}
-		// Same layout as the Kubernetes runtime's nfsSharedDirSubPath:
+		// Same layout as projectfs.Layout.Resolve for a shared dir:
 		// a sibling "shared-dirs" directory next to the workspace.
 		sharedRoot := filepath.Join(filepath.Dir(rel), "shared-dirs")
 		for _, name := range sharedDirNames {

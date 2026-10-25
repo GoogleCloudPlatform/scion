@@ -22,6 +22,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 )
 
 // sharedWorkspaceAgentsDir is the in-project agents root, relative to the
@@ -143,7 +145,19 @@ func workspaceProjectConfigMount(workspace, containerWorkspace string, allowMark
 	if err != nil {
 		return "", "", false, fmt.Errorf("cannot check the workspace for project configuration to mount read-only: %w", err)
 	}
-	candidate := filepath.Join(root, workspaceProjectConfigDir)
+	// The entry and its container target come from the layout authority
+	// (projectfs.ProjectConfigEntry, realized as a bind), never joined here.
+	entry, err := projectfs.ProjectConfigEntry(projectfs.Resolved{
+		Backend: projectfs.BackendLocal, Kind: projectfs.KindWorkspace, HostPath: root, Target: containerWorkspace,
+	})
+	if err != nil {
+		return "", "", false, err
+	}
+	realized, err := projectfs.Layout{Backend: projectfs.BackendLocal}.Realize(entry, projectfs.RuntimeBind)
+	if err != nil {
+		return "", "", false, err
+	}
+	candidate := realized.Source
 	info, err := os.Lstat(candidate)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", "", false, nil
@@ -151,7 +165,7 @@ func workspaceProjectConfigMount(workspace, containerWorkspace string, allowMark
 	if err != nil {
 		return "", "", false, fmt.Errorf("cannot check the workspace's .scion to mount it read-only: %w", err)
 	}
-	target = path.Join(containerWorkspace, workspaceProjectConfigDir)
+	target = realized.Target
 	switch {
 	case info.Mode()&os.ModeSymlink != 0:
 		return "", "", false, errProjectConfigSymlink

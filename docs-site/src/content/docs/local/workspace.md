@@ -431,13 +431,21 @@ scion shared-dir info <name>
 scion shared-dir remove <name>
 ```
 
+### Removing a Shared Directory
+
+Removing a shared directory deletes its data:
+
+- **On a shared backend** (`server.project_storage.backend` `nfs`, `cloudrun-volume` or `gke-shared-volume`): removing the declaration through the Hub (Web UI or API) deletes the directory and everything in it from the shared export or volume, which every agent of the project mounts.
+- **On the local backend**: unchanged. The directory on the Hub host or the co-located broker is deleted, as before.
+- **The `scratchpad` directory** cannot be removed while the Hub's project default `default_scratchpad` is on. The request is refused with `409`.
+
 ### When the Backing Directory Is Created
 
 Creating a shared directory and creating its backing directory on disk are separate steps:
 
 - **Local CLI (`scion shared-dir create`)** creates the backing directory immediately.
 - **Hub (Web UI or API)** only records the declaration. The backing directory is created on first use:
-  - when an agent in the project starts on a Runtime Broker. Each broker creates the directory locally, or on the NFS export when `server.shared_dir_storage.backend` is `nfs`.
+  - when an agent in the project starts on a Runtime Broker. Each broker creates the directory locally, or on the shared export or volume when `server.project_storage.backend` is `nfs`, `cloudrun-volume` or `gke-shared-volume`.
   - when a file is first written or uploaded to it through the Hub.
 
 Until then, listing the shared directory's files through the Hub returns an empty list, and reading a file returns not found. Listing or reading never creates the directory.
@@ -454,7 +462,7 @@ Each shared directory's mount location depends on its `in_workspace` setting:
 
 A shared directory is mounted at one of these locations, not both.
 
-By default, shared directories live on the host that runs the agent. In hosted deployments, an operator can set [`server.shared_dir_storage.backend`](/scion/reference/server-config/#shared-directory-storage-servershared_dir_storage) to `nfs`. Every Runtime Broker then resolves a project's shared directories to the same NFS export, so agents on different brokers share the same files.
+By default, shared directories live on the host that runs the agent. In hosted deployments, an operator can set [`server.project_storage.backend`](/scion/reference/server-config/#project-storage-serverproject_storage) to `nfs`. Every Runtime Broker then resolves a project's shared directories (and workspaces) to the same NFS export, so agents on different brokers share the same files. A directory that should stay on each node, such as a build cache, is a `volumes:` entry, not a shared directory.
 
 ### Common Patterns
 
