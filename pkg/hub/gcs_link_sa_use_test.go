@@ -324,6 +324,48 @@ func TestGCSLink_SAUse_AccessConstraintRestrictionsHaveCheck(t *testing.T) {
 	require.True(t, d.Allowed, "cause=%q reason=%q", d.DenyCause, d.Reason)
 }
 
+// TestGCSLink_SAUse_SenderStanding: the proxy refuses a sending agent that
+// is not in good standing, as the GCP token handlers refuse its own token
+// request (agentStandingForbidden): a held agent, or an agent whose root
+// user is inactive. The refusal comes before the use decision and answers
+// the uniform not-found response before any token is minted; the use
+// decision itself still admits, so standing is the only cause. The clean
+// agent is the admitted control.
+func TestGCSLink_SAUse_SenderStanding(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		fault func(t *testing.T, f *gcsFixture, sc gcsUseScenario)
+	}{
+		{"in good standing", nil},
+		{"held agent", func(t *testing.T, f *gcsFixture, sc gcsUseScenario) {
+			holdAgentFor(t, f.store, sc.agent.ID, sc.agent.ProjectID, gcsStandingRootID(sc.agent.Slug))
+		}},
+		{"inactive root", func(t *testing.T, f *gcsFixture, sc gcsUseScenario) {
+			ctx := context.Background()
+			u, err := f.store.GetUser(ctx, gcsStandingRootID(sc.agent.Slug))
+			require.NoError(t, err)
+			u.Status = store.UserStatusSuspended
+			require.NoError(t, f.store.UpdateUser(ctx, u))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newGCSFixture(t)
+			sc := newGCSUseScenario(t, f, "use-standing")
+			require.NoError(t, f.srv.agentStanding(context.Background(), sc.agent.ID), "precondition: the sender is in good standing")
+			if tc.fault == nil {
+				requireGCSFetchAllowed(t, f, sc.fetch(t, f), sc.sa)
+				return
+			}
+			tc.fault(t, f, sc)
+			require.Error(t, f.srv.agentStanding(context.Background(), sc.agent.ID), "precondition: the sender is not in good standing")
+
+			requireGCSUniformDeny(t, f, sc.fetch(t, f), GCSLinkReasonSAUseNotAuthorized)
+			d := sc.useDecision(t, f)
+			require.True(t, d.Allowed, "the use decision admits; standing refused: cause=%q reason=%q", d.DenyCause, d.Reason)
+		})
+	}
+}
+
 // TestGCSLink_SAUse_ActAsEnforceMode: in enforce mode the recorded source,
 // never the agent or the viewer, must pass actAs on the account; a denial
 // refuses the fetch before any token is minted.

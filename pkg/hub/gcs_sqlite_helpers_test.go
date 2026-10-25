@@ -141,7 +141,9 @@ func gcsTestUser(t *testing.T, s store.Store, seed string) *store.User {
 
 func gcsTestAgent(t *testing.T, s store.Store, project *store.Project, seed string, gcpIdentity *store.GCPIdentityConfig) *store.Agent {
 	t.Helper()
-	a := &store.Agent{ID: tid(seed), Slug: seed, Name: seed, ProjectID: project.ID, Phase: "running"}
+	root := gcsStandingRootID(seed)
+	ensureStandingRoot(t, s, project.ID, root)
+	a := &store.Agent{ID: tid(seed), Slug: seed, Name: seed, ProjectID: project.ID, Phase: "running", CreatedBy: root}
 	if gcpIdentity != nil {
 		a.AppliedConfig = &store.AgentAppliedConfig{GCPIdentity: gcpIdentity}
 	}
@@ -150,6 +152,16 @@ func gcsTestAgent(t *testing.T, s store.Store, project *store.Project, seed stri
 		gcsRecordAssignment(t, s, a, gcpIdentity.ServiceAccountID)
 	}
 	return a
+}
+
+// gcsStandingRootID is the user gcsTestAgent records as the creator of the
+// agent seeded seed: an active member of its project, so the agent (which
+// has no delegation edge) is rooted at a user in good standing (agentStanding
+// resolves the creator through its stored links). It is not the source of
+// the agent's assignment (gcsAssignerID), so a test can change either one
+// alone.
+func gcsStandingRootID(seed string) string {
+	return tid(seed + "-standing-root")
 }
 
 // gcsAssignerID is the ID of the user gcsRecordAssignment records as the

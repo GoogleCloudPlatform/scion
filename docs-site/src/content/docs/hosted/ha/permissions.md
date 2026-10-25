@@ -188,7 +188,9 @@ An agent whose own delegation chain has an unrecorded hop (an agent from before 
 
 An [access constraint](#monotonic-restrictions-accessconstraints) on the agent also applies: a constraint whose maximum permissions do not include `gcp_service_account.use` refuses the token request.
 
-The same rule applies when the Hub fetches a `gs://` link from chat with the sending agent's service account (see [gs:// links in chat](/scion/hosted/single-node/hub-server/#gs-links-in-chat)). A refused fetch looks like any other unavailable object.
+An agent that is not in good standing (suspended by a hold, below a suspended or deleted parent agent, or rooted at a user who is inactive or no longer admitted to the project) is refused before this decision.
+
+The same rule, standing included, applies when the Hub fetches a `gs://` link from chat with the sending agent's service account (see [gs:// links in chat](/scion/hosted/single-node/hub-server/#gs-links-in-chat)). A refused fetch looks like any other unavailable object.
 
 If the Hub cannot save the result of a service account verification (on registration, minting or an explicit verify), the request fails with `500` instead of reporting success. On registration the account record already exists, so re-run verification on it (`scion project service-accounts verify <id>`, or `POST .../gcp-service-accounts/<id>/verify`) rather than registering it again.
 

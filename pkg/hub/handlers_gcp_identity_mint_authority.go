@@ -95,14 +95,25 @@ func (s *Server) authorizeAgentGCPMint(ctx context.Context, agentRecord *store.A
 
 // authorizeGCSLinkServiceAccountUse is the same authorization event for the
 // GCS link proxy, which mints a read-only token for the sending agent's
-// account to fetch an object the agent named in a message. The request
-// carries the viewer's credential, not the agent's, so the use decision is
-// made for the stored agent record (AuthzService.decideStoredAgentServiceAccountUse,
-// with the same step 10 as the token mint), then the same actAs check on
-// the recorded source runs in enforce mode. sa must already have passed
-// resolveCurrentSA for sender. Every lookup error denies.
+// account to fetch an object the agent named in a message. As the token
+// handlers do before the mint (agentStandingForbidden), it first refuses a
+// sender that is not in good standing (agentStanding: a held or deleted
+// agent, a held or deleted agent on its chain, or a root user who is
+// inactive or no longer admitted to the project); a standing lookup fault
+// refuses too. The request carries the viewer's credential, not the
+// agent's, so the use decision is then made for the stored agent record
+// (AuthzService.decideStoredAgentServiceAccountUse, with the same step 10
+// as the token mint), then the same actAs check on the recorded source
+// runs in enforce mode. sa must already have passed resolveCurrentSA for
+// sender. Every lookup error denies. The caller answers every refusal with
+// the proxy's uniform not-found response, never the token handlers' 403.
 func (s *Server) authorizeGCSLinkServiceAccountUse(ctx context.Context, sender *store.Agent, sa *store.GCPServiceAccount) bool {
 	if s.authzService == nil || sender == nil || sa == nil {
+		return false
+	}
+	if err := s.agentStanding(ctx, sender.ID); err != nil {
+		slog.Info("GCS link fetch refused: sending agent not in good standing",
+			"agent_id", sender.ID, "sa_id", sa.ID, "standing", standingReason(err))
 		return false
 	}
 	d := s.authzService.decideStoredAgentServiceAccountUse(ctx, sender, sa)

@@ -672,10 +672,11 @@ func (s *Server) handleGCSObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 9b: the sender's authority to use that account, decided as the
-	// GCP token mint decides it: the use decision with the account's parent
-	// ceiling for the stored sender, then actAs on the recorded source in
-	// enforce mode (authorizeGCSLinkServiceAccountUse). A refusal answers
-	// the same not-found response.
+	// GCP token mint decides it: the sender's standing (a held agent, a
+	// held chain or an inactive root refuses), then the use decision with
+	// the account's parent ceiling for the stored sender, then actAs on the
+	// recorded source in enforce mode (authorizeGCSLinkServiceAccountUse).
+	// A refusal answers the same not-found response.
 	if !s.authorizeGCSLinkServiceAccountUse(ctx, sender, sa) {
 		deny(GCSLinkReasonSAUseNotAuthorized, http.StatusNotFound)
 		return

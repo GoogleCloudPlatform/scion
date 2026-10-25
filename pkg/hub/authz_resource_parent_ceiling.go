@@ -571,7 +571,10 @@ func (a *AuthzService) parentCeilingMissingEdge(ctx context.Context, agent Agent
 // Decide's own (applyResourceParentCeiling): the chain check of recorded
 // state, then the account's parent ceiling. The decision is always
 // audited, allow or deny, as Decide audits a step-10 parent-ceiling
-// decision.
+// decision. The agent's standing is not part of this decision, as it is
+// not part of Decide on the mint: the token handlers check it first
+// (agentStandingForbidden), and the proxy's caller,
+// authorizeGCSLinkServiceAccountUse, checks it first in the same way.
 func (a *AuthzService) decideStoredAgentServiceAccountUse(ctx context.Context, agent *store.Agent, sa *store.GCPServiceAccount) Decision {
 	if a == nil || agent == nil || sa == nil {
 		return Decision{Allowed: false, Reason: "invalid stored-agent use request", DeniedBy: DeniedByDelegationCeiling, DenyCause: DenyCauseCeilingError}

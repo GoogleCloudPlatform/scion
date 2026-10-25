@@ -169,8 +169,11 @@ calls, and never a token the browser can see or reuse directly.
   hold `gcp_service_account.assign` on the account and, in
   `gcp_iam_check_mode: enforce`, still pass the `actAs` check, and an
   access constraint on the sending agent applies as it does to the agent's
-  token request. If any of these fails, the link fails like any other
-  unavailable object.
+  token request. The sending agent must also be in good standing, as for its
+  own token request: a suspended (held) agent, an agent below a suspended or
+  deleted parent, or an agent whose root user is inactive or no longer in the
+  project cannot open links. If any of these fails, the link fails like any
+  other unavailable object.
 - **Size limits and previews**: objects up to 10 MiB can be opened. PNG,
   JPEG, GIF and WebP objects preview as images; other text — including SVG,
   which is always shown as source rather than rendered — previews inline up
