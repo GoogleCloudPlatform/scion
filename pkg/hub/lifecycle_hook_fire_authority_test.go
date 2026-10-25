@@ -345,6 +345,42 @@ func TestHookFire_DevEmailChanged_Refused(t *testing.T) {
 	f.assertRefused(t, f.fire(t, f.hook(t, "old-dev@localhost")), HookFireWriterNotFound)
 }
 
+// The development identity's configured email changed after the row was
+// seeded: the row keeps the old email, so a hook written under that old
+// email (before the change) still resolves to the development user and
+// mints. Only the email no row carries fails closed.
+func TestHookFire_DevRowKeepsOldEmail_OldEmailHook_Mints(t *testing.T) {
+	f := newFireFixture(t)
+	dev, err := f.store.GetUser(context.Background(), DevUserID)
+	require.NoError(t, err)
+	dev.Email = "old-dev@localhost"
+	require.NoError(t, f.store.UpdateUser(context.Background(), dev))
+	require.NotEqual(t, dev.Email, NewDevUser(f.srv.config.DevUserConfig).Email(), "the configured identity has moved on")
+	f.assertMinted(t, f.fire(t, f.hook(t, "old-dev@localhost")))
+}
+
+// A fire-time decision that cannot be made (a role-binding lookup fault,
+// an indeterminate deny) refuses the mint.
+func TestHookFire_WriterDecisionIndeterminate_Refused(t *testing.T) {
+	f := newFireFixture(t)
+	h := f.hook(t, f.writer.Email)
+	orig := f.srv.authzService.store
+	f.srv.authzService.store = &failingRoleBindingStore{Store: orig}
+	t.Cleanup(func() { f.srv.authzService.store = orig })
+
+	writer := NewAuthenticatedUser(f.writer.ID, f.writer.Email, f.writer.DisplayName, f.writer.Role, "")
+	d := f.srv.authzService.Decide(maskAuthzInputs(context.Background()), AuthzRequest{
+		Principal:  principalContextForIdentity(writer),
+		Credential: credentialContextForIdentity(writer),
+		Resource:   Resource{Type: "hub", ID: "hub"},
+		Action:     Action("update"),
+		Permission: hookWritePermission,
+	})
+	require.True(t, d.IsIndeterminate(), "the fault makes the decision indeterminate, got %+v", d)
+
+	f.assertRefused(t, f.fire(t, h), HookFireWriterLacksPermission)
+}
+
 // The development user's hooks stop when development authority is off.
 func TestHookFire_DevWriter_DevAuthorityOff_Refused(t *testing.T) {
 	f := newFireFixture(t)
