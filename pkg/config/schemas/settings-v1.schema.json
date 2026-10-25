@@ -1548,14 +1548,38 @@
             },
             "internal_listen": {
               "type": "string",
-              "description": "host:port of the internal relay API listener (multi-node deployments). It serves only the internal relay API and must be reachable only inside the cluster/VPC, never publicly. TLS on the internal hop is recommended (e.g. a service mesh or TLS-terminating proxy, advertised as https://); plain http:// is accepted.",
+              "description": "host:port of the internal relay API listener (multi-node deployments). It serves only the internal relay API and must be reachable only inside the cluster/VPC, never publicly. Without internal_tls_cert_file and internal_tls_key_file it must be a loopback address (for example 127.0.0.1:<port> behind a same-host TLS terminator); a wildcard or network address refuses startup.",
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALLISTEN",
               "x-since": "1"
             },
             "internal_advertise": {
               "type": "string",
-              "description": "Base URL (http(s)://host:port) other hub nodes use to reach this node's internal listener. Default: POD_IP with the listen port, else the listen host if it is not a wildcard. Prefer https:// (TLS on the internal hop); http:// is accepted.",
+              "description": "Base URL (http(s)://host:port) other hub nodes use to reach this node's internal listener. Default: POD_IP with the listen port, else the listen host if it is not a wildcard. Must be https:// unless its host is loopback; derived as https:// when the listener serves TLS.",
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALADVERTISE",
+              "x-since": "1"
+            },
+            "internal_tls_cert_file": {
+              "type": "string",
+              "description": "Path of the PEM certificate chain the internal relay listener serves TLS with. Set together with internal_tls_key_file. Re-read when the file changes.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALTLSCERTFILE",
+              "x-since": "1"
+            },
+            "internal_tls_key_file": {
+              "type": "string",
+              "description": "Path of the PEM private key of internal_tls_cert_file. Set together with internal_tls_cert_file.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALTLSKEYFILE",
+              "x-since": "1"
+            },
+            "internal_tls_ca_file": {
+              "type": "string",
+              "description": "Path of the PEM CA bundle every internal relay hop client verifies peers with. When set it replaces the system roots. A private or internal CA REQUIRES it: the system roots do not validate such a certificate, and the hop then fails closed.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALTLSCAFILE",
+              "x-since": "1"
+            },
+            "internal_tls_server_name": {
+              "type": "string",
+              "description": "Name internal relay hop clients verify in the peer certificate instead of the dialed host, so one certificate (for example with the SAN scion-relay.internal) can serve every node dialed by pod IP. Default: the dialed host.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALTLSSERVERNAME",
               "x-since": "1"
             },
             "peer_auth": {
