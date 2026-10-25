@@ -373,6 +373,30 @@ func TestProjectQuota_RestartStoppedAtFullProjectRefused(t *testing.T) {
 	assert.Equal(t, string(state.PhaseStopped), got.Phase)
 	assert.Equal(t, before.RunIntent, got.RunIntent)
 	assert.False(t, hasProjectRow(t, s, cand.ID))
+	// The restart reserves before its start claim, so no claim finish
+	// frees a broker row its project refusal left behind.
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, cand.ID), "the broker slot taken first is rolled back")
+}
+
+// A restart whose start claim is refused after its capacity hold was taken
+// (another start holds the claim) rolls back both rows it created: the
+// restart reserves before its claim, so no claim finish frees them.
+func TestProjectQuota_RestartClaimRefusedRollsBack(t *testing.T) {
+	srv, s := testServer(t)
+	disp := &quotaLifecycleDispatcher{}
+	srv.SetDispatcher(disp)
+	broker, project := newQuotaTestBrokerAndProject(t, s, "pq-restart-claim")
+	a := newCreatorAgent(t, s, broker, project, "pq-restart-claim", state.PhaseStopped, tid("user-a"))
+	_, err := s.ClaimAgentStart(context.Background(), a.ID, "other-hub", store.StartClaimUser, "", time.Minute)
+	require.NoError(t, err)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restart", nil)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Zero(t, disp.startCount.Load())
+	assert.Zero(t, disp.stopCount.Load())
+	assert.Equal(t, string(state.PhaseStopped), getAgent(t, s, a.ID).Phase, "the starting mark is restored")
+	assert.False(t, hasProjectRow(t, s, a.ID), "the project row the restart created is rolled back")
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID), "the broker row the restart created is rolled back")
 }
 
 // A running agent's restart at a full project is admitted: it already holds
