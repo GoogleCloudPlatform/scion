@@ -351,6 +351,15 @@ server:
               auth_selected_type: vertex-ai
 ```
 
+#### Runtime Broker environment variables
+
+These environment variables are read by the Runtime Broker process when launching Docker or Podman agent containers:
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `SCION_FORCE_HOST_NETWORK` | unset | When set to any non-empty value, forces Docker and Podman agent containers to run with `--network=host` even when the Hub endpoint is not a loopback address (`localhost`, `127.0.0.1`, `::1`, or `host.docker.internal`). |
+| `SCION_HOST_NETWORK_BLOCK_POLICY` | `auto` | Controls how the Runtime Broker handles an agent whose GCP identity metadata mode is `block` when the container runs with `--network=host` (where in-container `iptables` interception of `169.254.169.254` cannot be installed). `auto` (or unset) refuses agent start on a detected Linux cloud host (GCE, AWS EC2, Azure, Oracle Cloud, Alibaba Cloud, OpenStack, DigitalOcean, or Hetzner, detected from local DMI, `cloud-init`, or GCE guest-agent files) and allows it with a warning on other hosts; `strict` always refuses `block` under host networking; `allow` allows agent start even on a detected cloud host and logs a warning. Any unrecognized value is logged at `ERROR` and treated as `strict`. See [Host networking on Docker and Podman](/scion/hosted/single-node/auth/#host-networking-on-docker-and-podman). |
+
 ### Database (`server.database`)
 
 Persistence settings for the Hub.
@@ -929,12 +938,14 @@ Controls how the Hub checks for and applies its own updates. The Hub dispatches 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `deployment_tier` | string | `binary` if no repository path is configured, otherwise `source` | Update strategy. `binary` updates from GitHub Releases; `source` updates from a git checkout. The single-node VM deploy script sets `binary`. |
-| `release_channel` | string | Detected from the running version | Release channel to track: `stable`, `preview`, or `nightly`. When empty, the channel is derived from the version string (`v0.5.0` → `stable`, `v0.5.0-rc1` → `preview`, `nightly-*` → `nightly`). Development builds have no channel and skip scheduled checks. |
+| `release_channel` | string | Detected from the running version | Release channel to track: `stable`, `preview`, or `nightly`. When empty, the channel is derived from the version string (`v0.5.0` → `stable`, `v0.5.0-preview.1` or `v0.5.0-rc1` → `preview`, `nightly-*` → `nightly`). Development builds have no channel and skip scheduled checks. |
 | `update_policy` | string | `auto` for `binary`, `disabled` for `source` | `auto` checks on a schedule and installs updates automatically. `notify` checks on a schedule and shows an update-available banner in the admin UI, where an admin applies or dismisses it. `disabled` turns off scheduled checks; manual checks from the admin UI still work. |
 | `check_interval_hours` | integer | `6` | How often the scheduled release check runs. Minimum `1`. Each run is jittered by up to ±30 minutes. |
 | `github_repo` | string | `GoogleCloudPlatform/scion` | GitHub repository used for release and manifest lookups. |
 
 Scheduled checks run only when `deployment_tier` is `binary` and `update_policy` is not `disabled`. A binary update downloads the release tarball, verifies the new binary's version, backs up the current binary, installs the new one, and restarts the `scion-hub` systemd service. If the install fails, the backup is restored.
+
+On the `preview` channel, automated weekly preview builds (`vX.Y.Z-preview.N`) are published every Friday at 14:00 UTC by fast-forwarding the active `release/vX.Y` branch to the newest `nightly-YYYYMMDD` tag whose `Build & Test` check succeeded and updating `LATEST.json` and the `preview` branch. If the release branch has diverged from `main` (for example with cherry-picked fixes during a pre-stable freeze), the weekly workflow skips the automatic fast-forward and preview tags are cut from `release/vX.Y` until that tested preview commit is promoted to `vX.Y.Z` on `stable`.
 
 The related admin endpoints are `POST /api/v1/admin/maintenance/check-updates` (manual check) and `GET` / `DELETE` on `/api/v1/admin/maintenance/update-available` (read or dismiss a pending update notification). Both require the `hub.maintenance.execute` permission.
 
