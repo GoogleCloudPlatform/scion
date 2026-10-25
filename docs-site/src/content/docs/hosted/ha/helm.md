@@ -448,14 +448,14 @@ conduit:
 older than the first release that honours the `internal_tls_*` settings, because
 an older hub would serve the relay listener in plaintext. The same check applies
 to a non-loopback relay listener set through `config.extra` with
-`conduit.internalTls` off. The image tag is
-`image.tag`, else the chart's `appVersion`. A semver tag is compared by version
-(build metadata is ignored, and a pre-release sorts below its release) and a
-`nightly-YYYYMMDD` tag by date; a tag that starts like a version but is not
-valid semver is refused. An `image.digest`, or a tag that is not a
-version (such as `latest`), cannot be checked: the render is allowed,
-`NOTES.txt` prints a warning, and the Deployment is annotated
-`scion.io/relay-tls-image-check: unverified`. Check such an image yourself.
+`conduit.internalTls` off. The image tag is `image.tag`, else the chart's
+`appVersion`. A semver tag is compared by version (build metadata is ignored,
+and a pre-release sorts below its release) and a `nightly-YYYYMMDD` tag by date;
+a tag that starts like a version but is not valid semver is refused. An
+`image.digest`, or a tag that is not a version (such as `latest`), cannot be
+checked: the render is allowed, `NOTES.txt` prints a warning, and the Deployment
+is annotated `scion.io/relay-tls-image-check: unverified`. Check such an image
+yourself.
 
 **Rolling back.** Hub releases before the one that adds relay TLS ignore the
 `internal_tls_*` settings and would serve this listener in plaintext. If you roll

@@ -4578,9 +4578,8 @@ The chart is deliberately stricter than the hub in these cases:
 {{- if or (not (regexMatch $hostPort $listen)) (gt (int $portStr) 65535) }}
 {{- fail (printf "server.hub.conduit.internal_listen is %s; it must be host:port with a port of 1-65535 (for example 0.0.0.0:9443 or [::1]:9443). The hub refuses anything else at startup." (include "scion-hub.diagValue" $listen)) }}
 {{- end }}
-{{- $host := regexReplaceAll $hostPort $listen "${1}" }}
-{{- $oct := "(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])" }}
-{{- $loopback := or (eq $host "localhost") (eq $host "[::1]") (regexMatch (printf "^127\\.%s\\.%s\\.%s$" $oct $oct $oct) $host) }}
+{{- /* One loopback definition, shared with the image check's exemption. */}}
+{{- $loopback := eq (include "scion-hub.isLoopbackListen" $listen) "true" }}
 {{- if and (not $loopback) (not (and $cert $key)) }}
 {{- fail (printf "server.hub.conduit.internal_listen is %s, which is not a loopback address (localhost, [::1] or 127.x.y.z, with a port of 1-65535), and internal_tls_cert_file and internal_tls_key_file are not both set. The relay hop between hub nodes must serve TLS: set conduit.internalTls (enabled, existingSecret), or bind internal_listen to loopback." (include "scion-hub.diagValue" $listen)) }}
 {{- end }}
@@ -4615,8 +4614,8 @@ older. The tag is image.tag, else .Chart.AppVersion.
 - A semver tag (v1.2.3, 1.2.3-preview.4) is compared by semver precedence.
 - A nightly tag (nightly-YYYYMMDD) is compared by date.
 - Anything else, or an image.digest (which a tag cannot describe), cannot be
-  checked: it is allowed, returns "unverified", and the chart warns in NOTES.txt
-  and annotates the Deployment.
+  checked: it is allowed, returns "unverified", and the chart warns in
+  NOTES.txt and annotates the Deployment.
 */}}
 {{- define "scion-hub.relayTlsImageCheck" -}}
 {{- $min := include "scion-hub.relayTlsMinHub" . | fromYaml }}
@@ -4627,8 +4626,11 @@ without leading zeros, no empty identifiers, and optional build metadata (which
 does not affect precedence). A tag that starts like a version but is not one
 is refused with the chart's own message rather than passed to semver.
 */}}
-{{- $preId := "(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)" }}
-{{- $semverRe := printf "^v?(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-%s(\\.%s)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$" $preId $preId }}
+{{- /* Numbers are bounded at 19 digits, inside uint64, so an overflowing number
+gets the malformed-version refusal below rather than a parse error. */}}
+{{- $num := "(0|[1-9][0-9]{0,18})" }}
+{{- $preId := "(0|[1-9][0-9]{0,18}|[0-9]*[A-Za-z-][0-9A-Za-z-]*)" }}
+{{- $semverRe := printf "^v?%s\\.%s\\.%s(-%s(\\.%s)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$" $num $num $num $preId $preId }}
 {{- if .Values.image.digest }}
 {{- print "unverified" }}
 {{- else if regexMatch $semverRe $tag }}

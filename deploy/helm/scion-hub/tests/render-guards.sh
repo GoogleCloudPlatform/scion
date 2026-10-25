@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=253   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 16 (workspaceStorage.nfs: thirteen refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check) + 3 (relay hop: cert-without-key refusals on non-loopback and loopback listeners, no relay-level trusted_proxies) + 3 (internal_listen loopback needs host:port and a valid 127.x: no-port IP, no-port localhost, out-of-range octet) + 5 (internal_listen: leading and trailing whitespace, port 65536, port 0, no port with TLS files) + 4 (TLS settings as written: server name with a slash, server name with trailing whitespace, blank cert path, padded key path) + 9 (minimum hub image for the relay wiring: older and minimum semver, newer semver, older and minimum nightly, no gate with the relay off, the unverified annotation, no annotation on a checked tag, the NOTES warning present and absent) + 8 (older tag with build metadata, minimum with build metadata, pre-release of the minimum, malformed version, config.extra listener on an older tag and on a digest, the digest annotation, padded CA path; the gate block now runs 16 rows).
+EXPECTED_TOTAL=257   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 16 (workspaceStorage.nfs: thirteen refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check) + 3 (relay hop: cert-without-key refusals on non-loopback and loopback listeners, no relay-level trusted_proxies) + 3 (internal_listen loopback needs host:port and a valid 127.x: no-port IP, no-port localhost, out-of-range octet) + 5 (internal_listen: leading and trailing whitespace, port 65536, port 0, no port with TLS files) + 4 (TLS settings as written: server name with a slash, server name with trailing whitespace, blank cert path, padded key path) + 9 (minimum hub image for the relay wiring: older and minimum semver, newer semver, older and minimum nightly, no gate with the relay off, the unverified annotation, no annotation on a checked tag, the NOTES warning present and absent) + 8 (older tag with build metadata, minimum with build metadata, pre-release of the minimum, malformed version, config.extra listener on an older tag and on a digest, the digest annotation, padded CA path; the gate block now runs 16 rows) + 4 (overflowing version number, newer pre-release, newer tag with build metadata, config.extra loopback listener on an older tag; the gate block now runs 20 rows).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -1094,8 +1094,8 @@ _rt_min_n="$(sed -n '/define "scion-hub.relayTlsMinHub"/,/end/p' "$CHART/templat
 _rt_major="${_rt_min%%.*}"
 RT_TAG=(--set conduit.internalTls.enabled=true --set conduit.internalTls.existingSecret=rg-relay-cert)
 if [ -z "$_rt_min" ] || [ -z "$_rt_min_n" ] || ! [[ "$_rt_major" =~ ^[0-9]+$ ]]; then
-  executed=$((executed + 16)); failed=$((failed + 16))
-  echo "FAIL  relay image gate: could not read scion-hub.relayTlsMinHub (version '$_rt_min', nightly '$_rt_min_n'); none of its 16 rows ran"
+  executed=$((executed + 20)); failed=$((failed + 20))
+  echo "FAIL  relay image gate: could not read scion-hub.relayTlsMinHub (version '$_rt_min', nightly '$_rt_min_n'); none of its 20 rows ran"
 else
   reject "relay wiring with an older semver tag" "is older than ${_rt_min}" "${RT_TAG[@]}" --set-string image.tag=0.0.1
   accept "relay wiring with the minimum semver tag" "${RT_TAG[@]}" --set-string "image.tag=${_rt_min}"
@@ -1110,6 +1110,15 @@ else
   accept "relay wiring with the minimum tag carrying build metadata" "${RT_TAG[@]}" --set-string "image.tag=${_rt_min}+build.1"
   reject "relay wiring with a pre-release of the minimum" "is older than ${_rt_min}" "${RT_TAG[@]}" --set-string "image.tag=${_rt_min}-rc.1"
   reject "relay wiring with a malformed version tag" "is not a valid semantic version" "${RT_TAG[@]}" --set-string image.tag=1.2.0-01
+  reject "relay wiring with an overflowing version number" "is not a valid semantic version" "${RT_TAG[@]}" --set-string image.tag=99999999999999999999.0.0
+  # Rows that do not lean on appVersion being below the floor.
+  _rt_core="${_rt_min%%[-+]*}"
+  _rt_patch="${_rt_core##*.}"
+  accept "relay wiring with a newer pre-release (patch+1, -preview.10)" "${RT_TAG[@]}" --set-string "image.tag=${_rt_core%.*}.$((_rt_patch + 1))-preview.10"
+  accept "relay wiring with a newer tag carrying build metadata" "${RT_TAG[@]}" --set-string "image.tag=v$((_rt_major + 1)).0.0+meta.1"
+  accept "config.extra loopback relay listener on an older tag (loopback is not gated)" --set-string image.tag=0.0.1 \
+    --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:9443","internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":"/x/tls.key"}}}}'
+  unset _rt_core _rt_patch
   # A non-loopback relay listener from config.extra, with the wiring off, is held
   # to the same floor: an older hub would serve it in plaintext.
   reject "config.extra non-loopback relay listener on an older tag" "is older than ${_rt_min}" --set-string image.tag=0.1.0 \
