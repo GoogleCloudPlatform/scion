@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
@@ -127,6 +128,12 @@ func (c *HubClient) post(ctx context.Context, path string, body []byte) ([]byte,
 	timeout := c.Timeout
 	if timeout <= 0 {
 		timeout = DefaultHubCallTimeout
+	}
+	// The relay internal hop rule, before anything is sent: the hub
+	// internal API carries user and agent credentials. Permanent, so it
+	// is not marked ErrHubUnavailable.
+	if err := config.CheckRelayTransport(c.BaseURL); err != nil {
+		return nil, fmt.Errorf("conduit relay: refusing the hub internal API: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()

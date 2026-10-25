@@ -16,6 +16,8 @@ package relay
 
 import (
 	"context"
+	"crypto/tls"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -129,4 +131,10 @@ func (r *Relay) SetAfterBrokerAdmissionHookForTest(h func(sessionID string)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.testHookAfterBrokerAdmission = h
+}
+
+// NewHopServerTLSWithClockForTest is NewHopServerTLS with now as the
+// certificate reload clock.
+func NewHopServerTLSWithClockForTest(certFile, keyFile string, now func() time.Time) (*tls.Config, error) {
+	return newHopServerTLS(certFile, keyFile, slog.Default(), now)
 }
