@@ -29,7 +29,9 @@ test_release_order_pinned_cases() {
   _ro_expect v1.10.0 v1.9.0 newer
   _ro_expect v0.9.9 v1.0.0 older
   _ro_expect v2.0.0 v10.0.0 older
-  _ro_expect 1.2.3 v1.2.3 newer   # different strings, same core, both releases: tie broken by bytes, as sort -V did
+  # Same core, both releases: the "release outranks a pre-release" branch
+  # answers newer before any comparison (unchanged from before).
+  _ro_expect 1.2.3 v1.2.3 newer
   # A pre-release is older than its release; pre-releases order by their
   # own components.
   _ro_expect v1.0.0-test v1.0.0 older
@@ -60,7 +62,11 @@ test_release_order_matches_gnu_sort_v() {
   local keys=(20261023 20261024 20260101 20261023.1 20261023.2 20261023.10 1.0.0 1.0.1 1.2.0 1.10.0
     0.9.9 10.0.0 1.0.0.1 preview.1 preview.2 preview.10 preview.4 rc.1 rc.2 rc.10 alpha alpha.1
     alpha.beta beta beta.2 test test.1 1 01 001 10 9 a b A Z a1 a01 a10 'a~' '~a' x-y x.y x_y
-    rc1 rc10 rc-1 preview4 preview.04 dev.0 0 00 1.0 1.0.0-rc ab abc 1a 1a.b 2.tar.gz a.b.c)
+    rc1 rc10 rc-1 preview4 preview.04 dev.0 0 00 1.0 1.0.0-rc ab abc 1a 1a.b 2.tar.gz a.b.c
+    x.b 'x.b~' '1.0~rc.tar' 1.0.tar a.tar 'a~.tar' 'a.b~c' a.bc)
+  # The last row exercises filevercmp's second pass: keys whose prefixes
+  # (file suffix cut) compare equal, so the full strings decide (x.b~
+  # before x.b, a.b~c before a.bc).
   local a b first want mismatches="" n=0
   for a in "${keys[@]}"; do
     for b in "${keys[@]}"; do
