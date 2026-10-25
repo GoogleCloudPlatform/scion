@@ -344,7 +344,7 @@ Reading a project's chat threads needs `project.read`. Posting in them, and prom
 
 With a user access token, `project.chat_post` is checked on the token holder's account; the token itself still needs only `inbox:write`. The `project:chat_post` token scope does not post; it keeps `project.chat_post` on the token so that a token with `project:manage` can grant roles that include it, such as `project-member`. Scheduled chat messages are checked again when they are sent, and fail with `no_access` if the sender can no longer post. Direct messages are not affected.
 
-These chat writes do not check `project.chat_post` yet: thread create; thread rename, default-agent change and delete; project attachment upload; message edit and delete; and thread posts sent through the agent message endpoint (`POST /api/v1/agents/{id}/message` with a thread key). They keep their existing checks, and are tracked in [ptone/scion#5519](https://github.com/ptone/scion/issues/5519).
+`project.chat_post` is checked on thread posts, scheduled thread sends and DM promotion only. Thread create; thread rename, default-agent change and delete; project attachment upload; message edit and delete; and thread posts sent through the agent message endpoint (`POST /api/v1/agents/{id}/message` with a thread key) keep their own checks and do not require `project.chat_post`.
 
 :::caution[Upgrade: custom roles are not backfilled]
 Upgrading adds `project.chat_post` to the built-in roles above only. Custom project roles are left as they are: a custom role that holds `project.read` but not `project.chat_post` can no longer post in the project's chat threads, and scheduled messages from its holders fail with `no_access`. If a custom role should keep posting, add `project.chat_post` to it.

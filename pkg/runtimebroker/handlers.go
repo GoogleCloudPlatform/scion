@@ -784,6 +784,17 @@ func isSingleCleanPathElement(name string) bool {
 	return filepath.Clean(name) == name
 }
 
+// startSharerKey is the sharer key a failed start's file cleanup passes to
+// agent.DeleteStartFailureFiles: the hub agent ID the start provisioned the
+// agent's worktree under, or "" (the agent name) when the ID is not a
+// valid path element, which no worktree was provisioned under.
+func startSharerKey(agentID string) string {
+	if isSingleCleanPathElement(agentID) {
+		return agentID
+	}
+	return ""
+}
+
 func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	createStart := time.Now()
@@ -1949,7 +1960,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 					s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent's files belong to another run",
 						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name,
 						"run_id", opts.RunID, "files_run_id", owner)
-				} else if _, cleanupErr := agent.DeleteAgentFilesForHubProject(opts.Name, opts.ProjectPath, opts.HubProjectID, true); cleanupErr != nil && !errors.Is(cleanupErr, agent.ErrAgentProjectUnresolved) {
+				} else if cleanupErr := agent.DeleteStartFailureFiles(opts.Name, startSharerKey(req.ID), opts.ProjectPath, opts.HubProjectID); cleanupErr != nil && !errors.Is(cleanupErr, agent.ErrAgentProjectUnresolved) {
 					s.agentLifecycleLog.Warn("Failed to clean up agent files after start failure",
 						"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name, "error", cleanupErr)
 				} else {
@@ -2669,10 +2680,10 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// nothing unless every agent directory that exists carries that move's
 	// marker (see the check after the target is resolved).
 	moveReincarnationID := query.Get(api.MoveReincarnationIDQueryParam)
-	if moveReincarnationID != "" && (!deleteFiles || localOnly || softDelete || projectID == "" ||
+	if moveReincarnationID != "" && (!deleteFiles || localOnly || softDelete || removeBranch || projectID == "" ||
 		query.Get(api.PurgeRetainedQueryParam) == "true") {
 		span.SetStatus(codes.Error, "invalid forced move rollback delete")
-		ValidationError(w, "moveReincarnationId needs deleteFiles and projectId, without localOnly, softDelete or purgeRetained", nil)
+		ValidationError(w, "moveReincarnationId needs deleteFiles and projectId, without localOnly, softDelete, removeBranch or purgeRetained", nil)
 		return
 	}
 	// purgeRetained removes the retained files of a soft-deleted agent once
@@ -2719,16 +2730,27 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	runID := query.Get("runId")
 	span.SetAttributes(attribute.String("scion.agent.run_id", runID))
 	// agentId, when the hub sends it, is the hub's ID of the agent being
-	// deleted. It is only compared against the agent ID an in-flight launch
-	// on this broker was registered with, so a late delete for an old agent
+	// deleted. It is compared against the agent ID an in-flight launch on
+	// this broker was registered with, so a late delete for an old agent
 	// leaves alone the start of a newer agent of the same name
-	// (ptone/scion#2632). Without it, the cancel matches by name as before.
+	// (ptone/scion#2632), and against the runtime entry's agent_id label
+	// (deleteSharerKey). It is also the key the agent's worktree and sharer
+	// registry entry were provisioned under, so the file cleanup finds
+	// them (ptone/scion#3405). Without it, the cancel matches by name as
+	// before.
 	hubAgentID := query.Get(api.AgentIDQueryParam)
 	if runID != "" && scionrt.ValidateRunID(runID) != nil {
 		// A run ID is a label value on the runtime entry; anything else
 		// is a malformed request, not a runtime failure to retry.
 		span.SetStatus(codes.Error, "invalid runId")
 		ValidationError(w, "invalid runId", nil)
+		return
+	}
+	if hubAgentID != "" && !isSingleCleanPathElement(hubAgentID) {
+		// The ID names a directory under the shared base's worktrees
+		// directory, as at provisioning, which accepts no other form.
+		span.SetStatus(codes.Error, "invalid agentId")
+		ValidationError(w, "invalid agentId", nil)
 		return
 	}
 
@@ -2839,6 +2861,23 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	projectPath := target.projectPath
 	agentProjectID := target.projectID
 
+	// The runtime entry must be the agent the hub is deleting: an entry
+	// labelled with another agent's ID is a different agent that holds the
+	// name, so nothing is deleted. Checked before any side effect.
+	sharerKey, idMismatch := deleteSharerKey(hubAgentID, target.agentID, target.name)
+	if hubAgentID == "" && target.agentID != "" && !isSingleCleanPathElement(target.agentID) {
+		s.agentLifecycleLog.Warn("Agent delete: the runtime entry's agent_id label is not a valid path element; looking up the agent's worktree by name",
+			"agent_id", id, "project_id", agentProjectID, "container_id", target.containerID)
+	}
+	if idMismatch {
+		span.SetStatus(codes.Error, "agent ID mismatch")
+		s.agentLifecycleLog.Warn("Agent delete: the runtime entry belongs to another agent; nothing deleted",
+			"agent_id", id, "project_id", agentProjectID, "hub_agent_id", hubAgentID,
+			"entry_agent_id", target.agentID, "container_id", target.containerID)
+		Conflict(w, "Agent delete: the runtime entry with this name belongs to another agent; nothing was deleted")
+		return
+	}
+
 	// A delete that touches the agent's files (or its delete marks, or its
 	// ownership record's slug) holds the process-wide workspace lock on
 	// them from the file-ownership checks below through the last cleanup,
@@ -2870,17 +2909,24 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		return
 	}
 
+	// deleteHubProjectID is the Hub project ID the delete resolves the
+	// agent's hub-project state directory with; the forced move's rollback
+	// check below uses the same one.
+	deleteHubProjectID := projectID
+
 	// A forced move's rollback delete removes nothing unless every agent
 	// directory it would remove that exists carries that move's marker,
 	// checked under the files lock taken above. Anything else was not
 	// created by the move: 409, with a fixed message (the paths are
-	// logged here only).
+	// logged here only). The check looks up the agent's worktree and sharer
+	// registry entry by the same sharer key the delete below uses, so a
+	// worktree provisioned under the hub agent ID is seen too.
 	if moveReincarnationID != "" {
 		checker, ok := target.mgr.(moveMarkerChecker)
 		var paths []string
 		chkErr := errors.New("this broker cannot check move markers")
 		if ok && projectPath != "" {
-			paths, chkErr = checker.CheckMoveMarkers(ctx, projectPath, agentProjectID, target.name, moveReincarnationID)
+			paths, chkErr = checker.CheckMoveMarkers(ctx, projectPath, agentProjectID, deleteHubProjectID, target.name, sharerKey, moveReincarnationID)
 		} else if ok {
 			chkErr = errors.New("no project path to check the move markers in")
 		}
@@ -3052,7 +3098,7 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// The request's project ID is the Hub project ID the agent was started
 	// with (opts.HubProjectID); file deletion resolves the agent's state
 	// directory with it, as lookup does. Without one, nothing changes.
-	_, err = target.mgr.DeleteTarget(api.ContextWithHubProjectID(ctx, projectID), target.name, deleteRunRef(target, runID), filesToDelete, projectPath, removeBranch)
+	_, err = target.mgr.DeleteTarget(api.ContextWithHubProjectID(ctx, deleteHubProjectID), target.name, sharerKey, deleteRunRef(target, runID), filesToDelete, projectPath, removeBranch)
 	// A soft delete marks agent-info.json deleted only once the runtime
 	// entry is gone (ptone/scion#4766): some runtimes do not let the host
 	// write files in the container, so the host never writes the file while
@@ -8228,7 +8274,7 @@ var _ moveWorkspaceAbsenceChecker = (*agent.AgentManager)(nil)
 // move's marker on the agent's directories before its rollback delete
 // (agent.AgentManager).
 type moveMarkerChecker interface {
-	CheckMoveMarkers(ctx context.Context, projectPath, projectID, agentName, moveID string) ([]string, error)
+	CheckMoveMarkers(ctx context.Context, projectPath, projectID, hubProjectID, agentName, sharerKey, moveID string) ([]string, error)
 }
 
 var _ moveMarkerChecker = (*agent.AgentManager)(nil)
@@ -8338,8 +8384,39 @@ type deleteTarget struct {
 	name        string // agent directory / slug name used for file cleanup
 	containerID string // empty for a file-only (never started / container gone) agent
 	runID       string // the entry's scion.run_id label; empty for legacy or file-only entries
+	agentID     string // the entry's agent_id label; empty for file-only or unlabelled entries
 	projectPath string
 	projectID   string
+}
+
+// deleteSharerKey decides, for a delete, the key the agent's worktree and
+// sharer registry entry are found under (agent.DeleteHubAgentFiles; ""
+// means the agent name), from the hub's agent ID (hubAgentID, already
+// validated), the runtime entry's agent_id label (labelID, "" for a
+// file-only or unlabelled entry) and the agent name. mismatch reports a
+// runtime entry labelled with another agent's ID: the delete must then
+// touch nothing.
+//
+// A label equal to the agent name or its slug is the label of an agent
+// started outside hub dispatch (created locally and linked, or a
+// workstation's linked checkout), which is provisioned by name: that is no
+// mismatch, and the name is the key. An older hub sends no agent ID: a
+// label that is a valid path element is then the key, as it is the ID the
+// agent was provisioned under.
+func deleteSharerKey(hubAgentID, labelID, name string) (key string, mismatch bool) {
+	switch {
+	case labelID == "" || labelID == hubAgentID:
+		return hubAgentID, false
+	case labelID == name || labelID == api.Slugify(name):
+		return "", false
+	case hubAgentID == "":
+		if isSingleCleanPathElement(labelID) {
+			return labelID, false
+		}
+		return "", false
+	default:
+		return "", true
+	}
 }
 
 // agentNameMatches reports whether a runtime entry is the agent named id.
@@ -8555,6 +8632,7 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, runID, 
 			name:        id,
 			containerID: scionrt.AgentOperationID(m.entry),
 			runID:       m.entry.RunID,
+			agentID:     m.entry.Labels[api.LabelAgentID],
 			projectPath: m.entry.ProjectPath,
 			projectID:   m.entry.ProjectID,
 		}

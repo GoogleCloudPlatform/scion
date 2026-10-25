@@ -256,6 +256,19 @@ func TestCloudRunSandboxWatch_LogsStderrOnAbnormalExit(t *testing.T) {
 	if strings.Contains(got, "prior run") {
 		t.Errorf("watcher logged the prior run's output:\n%s", got)
 	}
+	// Both exit lines carry the integer exit code, not a pointer.
+	exitLines := 0
+	for _, line := range strings.Split(got, "\n") {
+		if strings.Contains(line, "msg=\"sandbox exited") {
+			exitLines++
+			if !strings.Contains(line+" ", " exitCode=3 ") {
+				t.Errorf("exit line does not log exitCode=3:\n%s", line)
+			}
+		}
+	}
+	if exitLines != 2 {
+		t.Errorf("want 2 exit lines (exited, exited abnormally), got %d:\n%s", exitLines, got)
+	}
 }
 
 // TestCloudRunSandboxWatch_UnknownExitIsWarnNotError: an unknown exit code
@@ -295,6 +308,10 @@ func TestCloudRunSandboxWatch_UnknownExitIsWarnNotError(t *testing.T) {
 	}
 	if !strings.Contains(got, "level=WARN") || !strings.Contains(got, "clone refused") {
 		t.Errorf("unknown exit not logged at warn with the entrypoint output:\n%s", got)
+	}
+	// An unknown exit code is left out, not logged as a nil pointer.
+	if strings.Contains(got, "exitCode=") {
+		t.Errorf("unknown exit logged an exitCode key:\n%s", got)
 	}
 }
 

@@ -280,6 +280,25 @@ func TestFetchTimeouts(t *testing.T) {
 	})
 }
 
+// pastDeadlineCtx has a deadline that has already passed but is never
+// cancelled, standing in for the moment between the deadline and the timer
+// that cancels the context.
+type pastDeadlineCtx struct{ context.Context }
+
+func (pastDeadlineCtx) Deadline() (time.Time, bool) { return time.Now().Add(-time.Second), true }
+
+// TestFetchFailureAfterDeadlineIsTimeout: a failure that happens once the
+// deadline has passed is reported as a timeout even when the context has
+// not been cancelled yet.
+func TestFetchFailureAfterDeadlineIsTimeout(t *testing.T) {
+	env := newTestEnv(t, serveBytes(pngBytes, ""), Config{})
+	ctx := pastDeadlineCtx{context.Background()}
+	_, err := env.fetcher.Fetch(ctx, env.url("unknown.test", "/i"))
+	if got := reasonOf(t, err); got != ReasonTimeout {
+		t.Fatalf("reason %q, want %q (%v)", got, ReasonTimeout, err)
+	}
+}
+
 func TestFetchStatus(t *testing.T) {
 	env := newTestEnv(t, func(w http.ResponseWriter, _ *http.Request) { http.NotFound(w, nil) }, Config{})
 	_, err := env.fetcher.Fetch(context.Background(), env.url("example.com", "/missing"))
