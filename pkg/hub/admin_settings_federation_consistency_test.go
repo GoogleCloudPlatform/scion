@@ -99,6 +99,32 @@ func TestServerConfigDB_GetDisabledIssuerlessFederationShown(t *testing.T) {
 	assert.Equal(t, resp.Federation, resp.Server.Federation, "both places report the same federation")
 }
 
+// TestServerConfigDB_EnvValuesAgainstDisabledIssuerlessFederation: the
+// server-config GET reports a stored federation section that is disabled
+// and has no trusted issuers (ptone/scion#5694), and env_values compares each
+// SCION_SERVER_FEDERATION_* value with that reported view. A value equal to
+// the applied stored value is in effect; a different one is not and is
+// labelled as differing from the saved row. A federation key whose name
+// looks secret is masked and its value never appears.
+func TestServerConfigDB_EnvValuesAgainstDisabledIssuerlessFederation(t *testing.T) {
+	secretKey := "server.federation.client_secret"
+	values := dbEnvValuesGET(t, map[string][2]string{
+		"federation": {"managed", `{"enabled":false,"algorithms":["RS256"],"refresh_interval":"3h0m0s"}`},
+	}, nil, map[string]any{
+		"server.federation.enabled":          true,
+		"server.federation.algorithms":       []any{"ES256"},
+		"server.federation.refresh_interval": "3h0m0s",
+		secretKey:                            envSecretSentinel(secretKey),
+	}, nil)
+	wantEnvValue(t, values, "server.federation.enabled", EnvKeyValue{Value: true, InEffect: boolPtr(false), SavedDiffers: true})
+	wantEnvValue(t, values, "server.federation.algorithms", EnvKeyValue{Value: []any{"ES256"}, InEffect: boolPtr(false), SavedDiffers: true})
+	wantEnvValue(t, values, "server.federation.refresh_interval", EnvKeyValue{Value: "3h0m0s", InEffect: boolPtr(true)})
+	wantEnvValue(t, values, secretKey, maskedEnvKeyValue())
+	raw, err := json.Marshal(values)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), envSecretSentinel(secretKey), "a secret-looking federation value is never shown")
+}
+
 // File tier: both places read the same settings.yaml block.
 func TestServerConfigFile_GetFederationOneSource(t *testing.T) {
 	settingsPath := setTempScionHome(t)
