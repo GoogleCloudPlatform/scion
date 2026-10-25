@@ -103,7 +103,7 @@ func TestConduitIngress_RefusesPlaintextNonLoopbackRelay(t *testing.T) {
 	}
 }
 
-// tlsIngressRelay serves fr behind a TLS listener with the operator
+// serveRelayTLS serves relay id behind a TLS listener with the operator
 // certificate and re-registers its endpoint as https.
 func (f *ingressFixture) serveRelayTLS(t *testing.T, id string, srvTLS *tls.Config) {
 	t.Helper()
