@@ -1719,6 +1719,8 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 					code = agent.GitHubRateLimitedCode
 				} else if isGHNotFound(err) {
 					code = agent.SkillErrCodeNotFound
+				} else if agent.IsGitHubSkillTreeError(err) {
+					code = agent.SkillErrCodeUnsupportedContent
 				}
 				resolveErrors = append(resolveErrors, *newSkillResolveError(ctx, skillResolveSourceGitHub,
 					skillRef.URI, code, ghErrorStatus(err), err.Error()))
@@ -2265,18 +2267,36 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 		}
 	}
 
+	// A row written before file modes were recorded is a miss above, so
+	// the ref is resolved again with its modes. If that re-resolve fails
+	// (a rate-limit cooldown, a network error), the row is served as it
+	// was before rather than failing the agent start over it, though its
+	// files may then lack exec bits (ptone/scion#5781).
+	modelessFallback := func(err error) (*ResolvedSkillResponse, error) {
+		if s.ghResolutionStore == nil || ctx.Err() != nil {
+			return nil, err
+		}
+		legacy, ok, lerr := s.ghResolutionStore.GetModeless(ctx, cacheKey, isBranchRef, agent.DefaultResolutionCacheTTL, agent.MaxResolutionStaleAge)
+		if lerr != nil || !ok {
+			return nil, err
+		}
+		slog.WarnContext(ctx, "github_resolution_cache: re-resolve failed; serving an entry from before file modes were recorded, so its files may lack executable bits",
+			"uri", rawURI, "commit_sha", safeShortSHA(legacy.CommitSHA), "error", err)
+		return buildResolvedSkillResponse(ghRef, legacy), nil
+	}
+
 	// A ref GitHub reported as not found for this cache key within the last
 	// agent.FailureMemoTTL fails again now, without asking GitHub. A fresh or
 	// stale entry above still wins.
 	if ferr := s.ghFailures.Recent(cacheKey); ferr != nil {
 		slog.DebugContext(ctx, "github_resolution_cache: returning remembered not found", "uri", rawURI)
-		return nil, ferr
+		return modelessFallback(ferr)
 	}
 
 	// A miss during a rate-limit cooldown fails now, without starting a
 	// flight: no request could be sent for this identity anyway.
 	if retryAt, cooling := s.githubCooldown().Active(cooldownID); cooling {
-		return nil, &agent.GitHubRateLimitError{Ref: rawURI, RetryAt: retryAt, Unauthenticated: agent.GitHubCooldownIdentityIsAnonymous(cooldownID)}
+		return modelessFallback(&agent.GitHubRateLimitError{Ref: rawURI, RetryAt: retryAt, Unauthenticated: agent.GitHubCooldownIdentityIsAnonymous(cooldownID)})
 	}
 
 	// 5. Cache miss, with no usable stale entry: coalesce concurrent misses
@@ -2345,9 +2365,9 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 		if res.Err != nil {
 			var rl *agent.GitHubRateLimitError
 			if errors.As(res.Err, &rl) {
-				return nil, rl.WithRef(rawURI)
+				return modelessFallback(rl.WithRef(rawURI))
 			}
-			return nil, res.Err
+			return modelessFallback(res.Err)
 		}
 		// Build the response from this caller's own ghRef, not whichever
 		// caller happened to lead or already have the result cached: the
@@ -2407,7 +2427,7 @@ func (s *Server) refreshGitHubSkillInBackground(cacheKey, rawURI string, ghRef *
 }
 
 // fetchAndCacheGitHubSkill resolves ghRef against the GitHub API (commit SHA,
-// then directory contents), stores the result in the resolution cache under
+// then the skill directory tree), stores the result in the resolution cache under
 // cacheKey, and returns the stored entry. installID is recorded on the cache
 // entry's TokenScope and must be the same value the triggering request
 // resolved via resolveGitHubToken — both the synchronous path and a
@@ -2467,7 +2487,7 @@ func (s *Server) fetchAndCacheGitHubSkill(
 		refSHAMemo.set(memoKey, commitSHA)
 	}
 
-	fileEntries, err := ghListContents(ctx, cooldown, cooldownID, apiBase, rawBase, ghRef.Owner, ghRef.Repo, ghRef.SkillPath, commitSHA, token)
+	fileEntries, err := ghListTree(ctx, cooldown, cooldownID, apiBase, rawBase, ghRef.Owner, ghRef.Repo, ghRef.SkillPath, commitSHA, token)
 	if err != nil {
 		err = fmt.Errorf("failed to list contents: %w", err)
 		s.rememberGHNotFound(cacheKey, err)
@@ -2534,6 +2554,10 @@ func buildResolvedSkillResponse(ghRef *agent.GitHubSkillRef, entry *GitHubCacheE
 			URL:  f.URL,
 			Size: f.Size,
 			Hash: f.Hash,
+			// Empty only on a row written before modes were recorded,
+			// which is served only when a re-resolve failed; the client
+			// writes such a file 0644, as before (ptone/scion#5781).
+			Mode: f.Mode,
 		}
 	}
 

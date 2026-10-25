@@ -41,19 +41,53 @@ const (
 // hub-local (signingKeySourceIsHubLocal): the test admin tier refuses it.
 const SigningKeySourceKeyring = "keyring"
 
+// keyringReleaseCheck refuses keyring files this release does not support
+// (keyring.Keyring.CheckSessionPilot). A variable so tests can build
+// servers on versioned rings; production never changes it.
+var keyringReleaseCheck = (*keyring.Keyring).CheckSessionPilot
+
+// legacyReaderCheckPurpose derives nothing; checkLegacyEmitActiveReader
+// uses it only to list the legacy readers' IDs.
+var legacyReaderCheckPurpose = keyring.NewPurpose("legacy_reader_check", func([]byte) []byte { return nil })
+
+// checkLegacyEmitActiveReader refuses a signing ring that would issue
+// ID-less values its own readers cannot accept (ptone/scion#1530 Phase 4,
+// design addendum §3): with emit "legacy" the active generation signs the
+// ID-less skill URLs, artifact views, list cursors and attachment delivery
+// capabilities, and ID-less values verify only against legacy_read_ids, so
+// the active generation must be one of them. It is a membership check, independent of deadlines (the
+// zero time is before every deadline). Session cookies are unaffected:
+// they try every generation. The error names no key or ID.
+func checkLegacyEmitActiveReader(r *keyring.SigningRing) error {
+	if r.Emit() != keyring.EmitLegacy {
+		return nil
+	}
+	for _, k := range r.Candidates(legacyReaderCheckPurpose, "", time.Time{}) {
+		if k.ID == r.ActiveID() {
+			return nil
+		}
+	}
+	return errors.New(`keyring file: with signing.emit "legacy" the active signing key must be listed in signing.legacy_read_ids, or the ID-less values it issues could not be verified`)
+}
+
 // validateKeyringConfig checks a keyring-mode ServerConfig
-// (ptone/scion#1530 Phase 1): the keyring must satisfy this release's
-// session pilot limits, SharedSigningSecret must be its "legacy" signing
-// entry (every purpose but the web session cookies still uses it), and
-// explicit agent/user JWT signing keys are refused, so no purpose is
-// partly rotated. Legacy mode (no keyring file) is unchanged: explicit
-// signing keys keep their precedence.
+// (ptone/scion#1530), in this order: the keyring passes this release's
+// check (keyringReleaseCheck); with emit "legacy" its active signing
+// generation is a legacy reader (checkLegacyEmitActiveReader);
+// SharedSigningSecret equals its "legacy" signing entry, compared in
+// constant time (every purpose not yet on the signing ring still uses
+// it); and explicit agent/user JWT signing keys are refused, so no purpose
+// is partly rotated. In legacy mode (no keyring file) explicit signing keys
+// take precedence.
 func validateKeyringConfig(cfg ServerConfig) error {
 	k := cfg.Keyring
 	if k == nil || k.Source() != keyring.SourceFile {
 		return nil
 	}
-	if err := k.CheckSessionPilot(); err != nil {
+	if err := keyringReleaseCheck(k); err != nil {
+		return err
+	}
+	if err := checkLegacyEmitActiveReader(k.Signing()); err != nil {
 		return err
 	}
 	legacy, _ := k.Signing().LegacySecret()

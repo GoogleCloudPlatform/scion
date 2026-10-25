@@ -151,6 +151,13 @@ const AttachmentArtifacts = "hub.attachment_artifacts"
 // the delivery sweeper, which holds pending messages while it is off.
 const ChatScheduledSend = "web.chat_scheduled_send"
 
+// ChatStarredMessages gates starred messages in native web chat: the
+// message Star/Unstar action, the private starred indicator and the
+// conversation header's starred-message list in the web UI, and the hub's
+// /api/v1/chat/stars routes (404 while off). Stored stars are kept while
+// it is off.
+const ChatStarredMessages = "web.chat_starred_messages"
+
 // AuthorizationDecisionAuditV2 gates decision logging (remaining-audit P1).
 // It is the only activation control and stays default-off; turning it on
 // needs explicit owner approval.
@@ -392,6 +399,17 @@ var compiled = []Experiment{
 		Layers:      []Layer{LayerWeb, LayerServer},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#3666",
+		Owner:       "native-chat",
+		ReviewBy:    "2027-01-31",
+	},
+	{
+		Name:        ChatStarredMessages,
+		Title:       "Starred messages in chat",
+		Description: "Lets each user star chat messages privately and find them again from the conversation header. Gates the Star message action, the starred indicator and the header list (LayerWeb) and the hub's starred-message routes, which answer 404 while it is off (LayerServer). Stars are stored per user and are never shown to anyone else; turning it off keeps them.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#5797",
 		Owner:       "native-chat",
 		ReviewBy:    "2027-01-31",
 	},

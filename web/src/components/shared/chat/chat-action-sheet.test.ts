@@ -88,6 +88,19 @@ describe('scion-action-sheet', () => {
     expect(closed).toHaveBeenCalledTimes(1);
   });
 
+  it('exposes a toggle row as a pressed or unpressed button, others without aria-pressed', async () => {
+    const el = await mount();
+    el.items = [
+      ...ITEMS,
+      { id: 'star', label: 'Unstar message', checked: true },
+      { id: 'star-off', label: 'Star message', checked: false },
+    ];
+    await el.updateComplete;
+    expect(item(el, 'star').getAttribute('aria-pressed')).toBe('true');
+    expect(item(el, 'star-off').getAttribute('aria-pressed')).toBe('false');
+    expect(item(el, 'reply').hasAttribute('aria-pressed')).toBe(false);
+  });
+
   it('marks destructive and disabled rows', async () => {
     const el = await mount();
     expect(item(el, 'delete').classList.contains('destructive')).toBe(true);

@@ -23,7 +23,8 @@ import (
 )
 
 // swapOpenForTest makes the non-unix open step open other instead of the
-// path it was given, as if the path were swapped between Lstat and open.
+// path it was given, as if the open were redirected (for example through a
+// link) to a different file than the one at path.
 func swapOpenForTest(t *testing.T, other string) {
 	t.Helper()
 	orig := openForLstatVerify

@@ -160,7 +160,7 @@ func gitWritesIntoWorkspace(t *testing.T, ws, name, content string) {
 	binDir := t.TempDir()
 	target := filepath.Join(ws, name)
 	script := "#!/bin/sh\n" +
-		"if [ \"$1\" = clone ]; then printf '%s' '" + content + "' > '" + target + "'; fi\n" +
+		"for a in \"$@\"; do if [ \"$a\" = clone ]; then printf '%s' '" + content + "' > '" + target + "'; break; fi; done\n" +
 		"exec '" + realGit + "' \"$@\"\n"
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755))
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))

@@ -46,6 +46,7 @@ var skillResolutionPhrases = map[string]string{
 	SkillErrCodeUpstreamUnavailable: "skill source unavailable",
 	SkillErrCodeUnreachable:         "skill source unreachable",
 	SkillErrCodeInvalidURI:          "invalid skill URI",
+	SkillErrCodeUnsupportedContent:  "unsupported skill content",
 	SkillErrCodeUnknownRegistry:     "skill registry not configured",
 	SkillErrCodeRegistryDisabled:    "skill registry disabled",
 	SkillErrCodeWrongRegistryType:   "unsupported skill registry type",

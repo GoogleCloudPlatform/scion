@@ -99,9 +99,9 @@ type k8sStyleManager struct {
 	real agent.Manager
 }
 
-func (m *k8sStyleManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
-	_, _ = m.mockManager.DeleteTarget(ctx, agentName, ref, deleteFiles, projectPath, removeBranch)
-	return m.real.DeleteTarget(ctx, agentName, ref, deleteFiles, projectPath, removeBranch)
+func (m *k8sStyleManager) DeleteTarget(ctx context.Context, agentName, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	_, _ = m.mockManager.DeleteTarget(ctx, agentName, sharerKey, ref, deleteFiles, projectPath, removeBranch)
+	return m.real.DeleteTarget(ctx, agentName, sharerKey, ref, deleteFiles, projectPath, removeBranch)
 }
 
 // A delete for run-old resolves run-old's entry from a stale list, but the
@@ -393,8 +393,8 @@ func TestRestart_NameInUse_409(t *testing.T) {
 // does).
 type filesFailManager struct{ k8sStyleManager }
 
-func (m *filesFailManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
-	if _, err := m.k8sStyleManager.DeleteTarget(ctx, agentName, ref, false, projectPath, removeBranch); err != nil {
+func (m *filesFailManager) DeleteTarget(ctx context.Context, agentName, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	if _, err := m.k8sStyleManager.DeleteTarget(ctx, agentName, sharerKey, ref, false, projectPath, removeBranch); err != nil {
 		return false, err
 	}
 	return false, fmt.Errorf("%w: %w", agent.ErrAgentFilesDelete, errors.New("delete: FindBranchForAgent for dev: registry I/O error"))

@@ -26,6 +26,12 @@ export interface ActionSheetItem {
   icon?: string;
   destructive?: boolean;
   disabled?: boolean;
+  /**
+   * Set for a toggle (such as Star message): its current state. The row
+   * is exposed as a toggle button (`aria-pressed`); the label also names
+   * the action.
+   */
+  checked?: boolean;
 }
 
 /** `detail` of the `action-sheet-select` event. */
@@ -260,6 +266,11 @@ export class ScionActionSheet extends LitElement {
                 type="button"
                 class="item ${item.destructive ? 'destructive' : ''}"
                 data-id=${item.id}
+                aria-pressed=${item.checked === undefined
+                  ? nothing
+                  : item.checked
+                    ? 'true'
+                    : 'false'}
                 ?disabled=${item.disabled === true}
                 @click=${(): void => this.select(item)}
               >
