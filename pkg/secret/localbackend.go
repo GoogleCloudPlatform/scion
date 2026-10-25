@@ -222,6 +222,13 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 			if s.SecretType == store.SecretTypeInternal {
 				continue
 			}
+			// The owner path: a user-scope row of userID is held to the
+			// caller's UserScopeCheck before its value is read. A rejected
+			// row is skipped, so a lower-scope row with the same key stays
+			// in effect.
+			if sc.scope == store.ScopeUser && opts != nil && opts.UserScopeCheck != nil && !opts.UserScopeCheck(*fromStoreSecretMeta(&s)) {
+				continue
+			}
 
 			rawValue, err := b.store.GetSecretValue(ctx, s.Key, sc.scope, sc.scopeID)
 			if err != nil {

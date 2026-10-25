@@ -163,6 +163,12 @@ type ResolveOpts struct {
 	// access via the policy engine. If nil, progeny secrets are not included.
 	// Returns true if access is allowed.
 	AuthzCheck func(secret SecretMeta) bool
+
+	// UserScopeCheck, when non-nil, is called for each user-scope secret
+	// of the userID scope (the owner path, not the progeny path) before its
+	// value is read. A secret it rejects is skipped, so a lower-scope secret
+	// with the same key stays in effect. If nil, no such check is made.
+	UserScopeCheck func(secret SecretMeta) bool
 }
 
 // FetchResult holds the outcome of fetching one secret's value by its
