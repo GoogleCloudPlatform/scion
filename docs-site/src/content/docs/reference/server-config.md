@@ -1483,9 +1483,20 @@ A `SCION_SERVER_*` variable on a Layer-1 key therefore does not override a row a
 
 Because env overrides on Layer-1 keys reintroduce per-node drift, the system warns administrators:
 
-- `GET /api/v1/admin/server-config` includes an `env_overrides` array listing every key, Layer-0 or Layer-1, that a `SCION_SERVER_*` variable sets on the serving node.
+- `GET /api/v1/admin/server-config` includes an `env_overrides` array listing every key, Layer-0 or Layer-1, that a `SCION_SERVER_*` variable sets on the serving node. Keys that no settings write path accepts (for example the hub class, the test identity settings, the relay-peer secret and the server keyring file) are left out, so the response does not reveal whether they are set.
+- The same response includes `env_values`, a map with exactly the `env_overrides` keys, each `{ "value": "********", "masked": true }` for a masked key, or `{ "value": ..., "in_effect": true|false, "saved_differs": true }` otherwise (`masked` and `saved_differs` are left out when false):
+  - `value` is the environment value as the Hub parsed it (string, number, boolean or list).
+  - `masked` is `true` when `value` is the placeholder `********`: the key is a secret (masked as in the rest of the response), it sits under `profiles`, `runtimes` or `harness_configs`, or its value cannot be shown safely.
+  - `in_effect` is `true` when the Hub on the serving node runs with the environment value:
+    - In `settings.yaml` mode the environment layer wins over the file, so it is `true`, except for the keys below that start-up sets afterwards.
+    - On database-backed Hubs a Layer-1 key is in effect only when the environment value equals the value the Hub applies (a saved database value, or a seeded row, wins). Other Layer-0 keys are read at startup with the environment on top and are in effect, except for the keys below.
+    - `scion server start` sets some keys after loading the settings, whatever the environment says: on a workstation Hub the hub host, the broker switch, dev auth, the storage provider and the secrets backend; and in any mode the keys of `--port`, `--host`, `--db`, `--enable-runtime-broker`, `--runtime-broker-port`, `--dev-auth`, `--storage-bucket` and `--storage-dir`. For these keys `in_effect` compares the environment value with the value start-up resolved. The `--conduit-*` flags are not compared (a known limitation): for their keys `in_effect` follows the settings precedence.
+  - `saved_differs` is `true` when a stored value exists (in `settings.yaml`, or in an admin-saved database row for a Layer-1 key) and differs from the environment value. A default, a seeded row, or a stored value equal to the environment value is not reported.
+  - A masked entry carries only `value` (`********`) and `masked`: neither `in_effect` nor `saved_differs` is computed or returned for it. Both compare the environment value with a stored or running value, so for a secret they would let a caller who can write settings confirm a guessed value.
+
+  `env_values` is additive; `env_overrides` is unchanged.
 - A startup `WARN` log lists any overridden Layer-1 keys.
-- The admin UI renders a visible warning banner when env overrides are detected, and an "Overridden by environment on this node" badge on each affected field, or on the section for the `runtimes` and `profiles` maps.
+- The admin UI renders a visible warning banner when env overrides are detected, and a badge on each affected field, or on the section for the `runtimes` and `profiles` maps: "Overridden by environment on this node" with the value in effect, "Environment value superseded by the saved setting" when a saved value wins, or "Environment value not in effect on this node" when a start-up default or flag wins.
 
 ### Admin API Behavior Notes
 
