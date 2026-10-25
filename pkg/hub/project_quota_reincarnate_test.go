@@ -241,6 +241,15 @@ func TestProjectQuota_ReincarnateClaimHeldLeavesRowsToTheStart(t *testing.T) {
 // which the worker's deferred call runs after the record reads failed.
 const releasedRowsWait = 5 * time.Second
 
+// waitForRowsReleased polls released on the test goroutine (it may call
+// require) until it reports true or releasedRowsWait has passed.
+func waitForRowsReleased(released func() bool) {
+	deadline := time.Now().Add(releasedRowsWait)
+	for !released() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // After the stop step succeeded, a failure that
 // leaves no container releases the rows the reincarnation created,
 // including one its own re-assert wrote; a stop-step failure releases
@@ -256,9 +265,11 @@ func TestProjectQuota_ReincarnateFailureReleasesOwnedRows(t *testing.T) {
 		r := waitForReincarnationSettled(t, s, a.ID)
 		require.Equal(t, store.AgentReincarnationStateFailed, r.State)
 		// The worker's deferred release runs after it records failed.
-		assert.Eventually(t, func() bool {
+		waitForRowsReleased(func() bool {
 			return !hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID) && !hasProjectRow(t, s, a.ID)
-		}, releasedRowsWait, 10*time.Millisecond, "the broker and project rows are released")
+		})
+		assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID))
+		assert.False(t, hasProjectRow(t, s, a.ID))
 	})
 	t.Run("stop-failure-keeps", func(t *testing.T) {
 		disp := newReincarnateTestDispatcher()
@@ -271,18 +282,39 @@ func TestProjectQuota_ReincarnateFailureReleasesOwnedRows(t *testing.T) {
 		require.Equal(t, store.AgentReincarnationStateFailed, r.State)
 		assert.True(t, hasProjectRow(t, s, a.ID), "the old container may run: nothing is released")
 	})
-	t.Run("pre-existing-rows-kept", func(t *testing.T) {
+	// A row held before the reincarnation is not its to release. The
+	// reincarnation creates the other row, and the deferred release frees
+	// that one; the kept row is read only once the created row is gone, so
+	// the release has run. It releases the broker row first, then the
+	// project row.
+	t.Run("pre-existing-broker-row-kept", func(t *testing.T) {
 		disp := newReincarnateTestDispatcher()
 		disp.reprovisionErr = errors.New("simulated reprovision failure")
 		srv, s, project, broker := setupReincarnateTestServer(t, disp)
 		a := newReincarnateTestAgent(t, s, project, broker, nil)
 		reserveBrokerSlot(t, s, broker, a.ID)
+		rec := reincarnateAsDev(t, srv, a.ID, ReincarnateAgentRequest{})
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+		r := waitForReincarnationSettled(t, s, a.ID)
+		require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+		// The project row the handler created is the release's last write.
+		waitForRowsReleased(func() bool { return !hasProjectRow(t, s, a.ID) })
+		require.False(t, hasProjectRow(t, s, a.ID), "the created project row is released: the release has run")
+		assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID), "the broker row held before is kept")
+	})
+	t.Run("pre-existing-project-row-kept", func(t *testing.T) {
+		disp := newReincarnateTestDispatcher()
+		disp.reprovisionErr = errors.New("simulated reprovision failure")
+		srv, s, project, broker := setupReincarnateTestServer(t, disp)
+		a := newReincarnateTestAgent(t, s, project, broker, nil)
 		seedProjectRow(t, s, a)
 		rec := reincarnateAsDev(t, srv, a.ID, ReincarnateAgentRequest{})
 		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 		r := waitForReincarnationSettled(t, s, a.ID)
 		require.Equal(t, store.AgentReincarnationStateFailed, r.State)
-		assert.True(t, hasProjectRow(t, s, a.ID), "a row held before the reincarnation is not its to release")
+		waitForRowsReleased(func() bool { return !hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID) })
+		require.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID), "the created broker row is released: the release has run")
+		assert.True(t, hasProjectRow(t, s, a.ID), "the project row held before is kept")
 	})
 	t.Run("re-asserted-row-is-owned", func(t *testing.T) {
 		disp := newReincarnateTestDispatcher()
@@ -306,8 +338,8 @@ func TestProjectQuota_ReincarnateFailureReleasesOwnedRows(t *testing.T) {
 		require.Equal(t, store.AgentReincarnationStateFailed, r.State)
 		require.True(t, released.Load())
 		require.NotEmpty(t, capacityAudits(t, s, auditQuotaProjectBackstopReassert, a.ID), "the re-assert wrote a row")
-		assert.Eventually(t, func() bool { return !hasProjectRow(t, s, a.ID) }, releasedRowsWait, 10*time.Millisecond,
-			"the re-asserted row is owned and released")
+		waitForRowsReleased(func() bool { return !hasProjectRow(t, s, a.ID) })
+		assert.False(t, hasProjectRow(t, s, a.ID), "the re-asserted row is owned and released")
 	})
 }
 
