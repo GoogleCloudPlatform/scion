@@ -135,8 +135,14 @@ func (a *AuthzService) materialAssociationCandidate(principal PrincipalContext, 
 //   - A2: the item's scope matches the rule, its record kind matches the
 //     resource type, and the resource's parent is the item's scope.
 //   - A3: the association: project items are in the agent's stored
-//     project; hub items are on this hub (the hub ID the caller derived);
-//     broker items are on the agent's stored runtime broker.
+//     project and broker items are on the agent's stored runtime broker,
+//     both checked against the stored agent. For hub items the hub ID is
+//     trusted caller input, not checked here: AuthzService does not hold
+//     the hub's ID, so the fact requires only that the caller named one.
+//     Only hub code can name a delivery item (materialDeliveryResource),
+//     and launch selection names its own hub ID (the dispatcher's hub ID
+//     for env vars, the secret backend's for secrets). A4 then requires
+//     the record to exist under that ID.
 //   - A4: the stored record exists under that key and scope, has the
 //     resource's ID, and is deliverable (a secret is not internal; an env
 //     var's secret flag matches the requested kind).
@@ -184,15 +190,17 @@ func (a *AuthzService) materialAssociationFact(ctx context.Context, h *hubDelive
 	switch rule {
 	case RelationshipRuleProjectAssociation:
 		scopeID = agent.ProjectID
-	case RelationshipRuleHubAssociation:
-		scopeID = item.ScopeID
 	case RelationshipRuleBrokerAssociation:
 		scopeID = agent.RuntimeBrokerID
+	case RelationshipRuleHubAssociation:
+		// Trusted caller input (see A3 above): the hub ID the hub-internal
+		// caller named. There is no stored agent field to compare it with.
+		scopeID = item.ScopeID
 	}
 	if scopeID == "" {
 		return false, "delivery item scope does not apply to the target agent"
 	}
-	if item.ScopeID != scopeID {
+	if rule != RelationshipRuleHubAssociation && item.ScopeID != scopeID {
 		return false, "delivery item is not associated with the target agent"
 	}
 	if resource.ParentType != scopeToResourceType(item.Scope) || resource.ParentID != scopeID {
