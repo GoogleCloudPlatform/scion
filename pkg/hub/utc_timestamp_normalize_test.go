@@ -732,6 +732,8 @@ func TestUTCTimestampNormalize_StartupCheckRunsInBackground(t *testing.T) {
 // byte-identical, while it still rewrites the other webchat time columns.
 func TestUTCTimestampNormalize_LeavesStarTimesFixedWidth(t *testing.T) {
 	wcs, s, db := hubNewEntWebChatStore(t)
+	stars, ok := wcs.(MessageStarStore)
+	require.True(t, ok, "the webchat store must implement MessageStarStore")
 	ctx := context.Background()
 	proj := normProject(t, s, "norm-stars")
 	topicID := tid("norm-star-topic")
@@ -750,7 +752,7 @@ func TestUTCTimestampNormalize_LeavesStarTimesFixedWidth(t *testing.T) {
 			ID: ids[i], ProjectID: proj.ID, Sender: "user:alice", Recipient: "chat",
 			Msg: fmt.Sprintf("star %d", i), Type: "chat", Channel: "web", ThreadID: topicID, CreatedAt: normBase,
 		}))
-		_, changed, err := wcs.(MessageStarStore).AddMessageStar(ctx, "u1", StarTarget{MessageID: ids[i], ProjectID: proj.ID, Selector: sel})
+		_, changed, err := stars.AddMessageStar(ctx, "u1", StarTarget{MessageID: ids[i], ProjectID: proj.ID, Selector: sel})
 		require.NoError(t, err)
 		require.True(t, changed)
 		execOne(t, db, "UPDATE webchat_message_star SET starred_at = ? WHERE message_id = ?", sqliteStarTime(at), ids[i])
@@ -772,11 +774,11 @@ func TestUTCTimestampNormalize_LeavesStarTimesFixedWidth(t *testing.T) {
 	assert.NotContains(t, log, "webchat_message_star")
 
 	// The star store still reads both, in keyset order.
-	rec, err := wcs.GetMessageStar(ctx, "u1", ids[1])
+	rec, err := stars.GetMessageStar(ctx, "u1", ids[1])
 	require.NoError(t, err)
 	require.NotNil(t, rec)
 	requireUTCInstant(t, rec.StarredAt, frac)
-	page, err := wcs.ListMessageStarCandidates(ctx, StarFilter{UserID: "u1", Selector: sel, Limit: 10})
+	page, err := stars.ListMessageStarCandidates(ctx, StarFilter{UserID: "u1", Selector: sel, Limit: 10})
 	require.NoError(t, err)
 	require.Len(t, page.Items, 2)
 	assert.Equal(t, ids[1], page.Items[0].MessageID, "newest star first")
