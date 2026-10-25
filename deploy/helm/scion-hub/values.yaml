@@ -764,7 +764,9 @@ workspaceStorage:
 
 # The conduit relay's internal hop between hub nodes, over native TLS.
 #
-# Off by default, and the chart then renders no relay listener. When enabled,
+# enabled is true, false or "auto". "auto" (the default) turns it on when
+# replicaCount is above one, and then existingSecret is required; at one
+# replica, or under config.existingSecret, it renders no relay listener. When on,
 # the chart renders server.hub.conduit.internal_listen on 0.0.0.0:<port> with
 # the internal_tls_* files, mounts the certificate Secret and the CA, declares
 # the port on the pod (never on the Service), and sets POD_IP, from which the
@@ -784,7 +786,7 @@ workspaceStorage:
 # config.existingSecret, where your own settings file carries these keys.
 conduit:
   internalTls:
-    enabled: false
+    enabled: auto
 
     # Port of the relay listener inside the pod. Reachable from the other hub
     # pods only; keep it out of any Service, Ingress or Gateway.

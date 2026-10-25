@@ -390,8 +390,11 @@ These are the chart's selector labels, and the chart's tests pin them. Labels in
 ### Relay TLS between hub nodes
 
 `conduit.internalTls` wires the conduit relay's internal hop between hub nodes
-over native TLS. It is off by default, and the chart then renders no relay
-listener. When you enable it, the chart:
+over native TLS. `enabled` is `true`, `false` or `auto` (the default). `auto`
+turns it on when `replicaCount` is above one, and the render then requires
+`existingSecret`; at one replica, or under `config.existingSecret`, the chart
+renders no relay listener. Set `enabled: false` to keep a multi-replica release
+without it. When it is on, the chart:
 
 - renders `server.hub.conduit.internal_listen` on `0.0.0.0:<port>` (default
   `9443`) with `internal_tls_cert_file`, `internal_tls_key_file`,

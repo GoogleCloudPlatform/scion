@@ -2711,7 +2711,7 @@ subpathRoot; change both together.
 {{- end }}
 {{- if ne (trim (toString ($nfsInline.subpathRoot | default "projects"))) "projects" }}{{- $inline = append $inline "workspaceStorage.nfs.subpathRoot" }}{{- end }}
 {{- $relayInline := (.Values.conduit | default (dict)).internalTls | default (dict) }}
-{{- if $relayInline.enabled }}{{- $inline = append $inline "conduit.internalTls.enabled" }}{{- end }}
+{{- if eq (toString $relayInline.enabled) "true" }}{{- $inline = append $inline "conduit.internalTls.enabled" }}{{- end }}
 {{- if ne (int ($relayInline.port | default 9443)) 9443 }}{{- $inline = append $inline "conduit.internalTls.port" }}{{- end }}
 {{- range $f := list "existingSecret" "caSecret" }}
 {{- if trim (toString (index $relayInline $f | default "")) }}{{- $inline = append $inline (printf "conduit.internalTls.%s" $f) }}{{- end }}
@@ -4454,17 +4454,32 @@ restart.
 {{- $caKey := trim (toString ($c.caKey | default "ca.crt")) }}
 {{- $serverName := trim (toString ($c.serverName | default "")) }}
 {{- $port := int ($c.port | default 9443) }}
-{{- if not $c.enabled }}
+{{- /*
+enabled is true, false or "auto" (the default). "auto" turns the relay hop on
+when replicaCount is above one: those replicas reach each other's relays, and
+the hop must be TLS. It stays off under config.existingSecret, where the
+operator's own file decides.
+*/}}
+{{- $mode := toString (ternary "auto" $c.enabled (eq (toString $c.enabled) "<nil>")) }}
+{{- if not (has $mode (list "true" "false" "auto")) }}
+{{- fail (printf "conduit.internalTls.enabled is %s; it must be true, false or \"auto\"." (include "scion-hub.diagValue" $mode)) }}
+{{- end }}
+{{- $on := or (eq $mode "true") (and (eq $mode "auto") (gt (int .Values.replicaCount) 1) (not .Values.config.existingSecret)) }}
+{{- if not $on }}
 {{- $inert := list }}
 {{- if $secret }}{{- $inert = append $inert "conduit.internalTls.existingSecret" }}{{- end }}
 {{- if $caSecret }}{{- $inert = append $inert "conduit.internalTls.caSecret" }}{{- end }}
 {{- if ne $caKey "ca.crt" }}{{- $inert = append $inert "conduit.internalTls.caKey" }}{{- end }}
 {{- if $serverName }}{{- $inert = append $inert "conduit.internalTls.serverName" }}{{- end }}
 {{- if ne $port 9443 }}{{- $inert = append $inert "conduit.internalTls.port" }}{{- end }}
-{{- if $inert }}
-{{- fail (printf "%s set while conduit.internalTls.enabled is false. The chart renders no relay listener in that case, so the value would reach nothing. Set conduit.internalTls.enabled: true, or remove it." (join " and " $inert)) }}
+{{- /* Under "auto" the values may be set ahead of a scale-up, so only an explicit false refuses them. */}}
+{{- if and $inert (eq $mode "false") }}
+{{- fail (printf "%s set while the relay hop is off (conduit.internalTls.enabled is %s, replicaCount is %d). The chart renders no relay listener in that case, so the value would reach nothing. Set conduit.internalTls.enabled: true, or remove it." (join " and " $inert) $mode (int .Values.replicaCount)) }}
 {{- end }}
 {{- else }}
+{{- if and (not $secret) (eq $mode "auto") }}
+{{- fail (printf "replicaCount is %d, and conduit.internalTls.enabled \"auto\" (the default) turns on TLS for the relay hop between hub nodes above one replica. Set conduit.internalTls.existingSecret to a kubernetes.io/tls Secret (tls.crt, tls.key) in the release namespace, for example one issued by cert-manager, or set conduit.internalTls.enabled: false." (int .Values.replicaCount)) }}
+{{- end }}
 {{- if not $secret }}
 {{- fail "conduit.internalTls.enabled is true, which requires conduit.internalTls.existingSecret: a kubernetes.io/tls Secret (tls.crt, tls.key) in the release namespace, for example one issued by cert-manager. The relay listener serves native TLS from it; the chart never creates certificates." }}
 {{- end }}

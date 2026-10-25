@@ -2089,6 +2089,9 @@ declare -A PROBE_MUTATION=(
   [auth.oauth.web.github.clientId]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret'
   [auth.oauth.web.github.clientSecret]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret2'
   [hub.adminEmails]='--set|hub.adminEmails={probe-admin@example.com}'
+  # Above one replica conduit.internalTls "auto" needs a relay Secret; the
+  # companion turns the relay off so this leaf moves only the Deployment.
+  [replicaCount]='--set|conduit.internalTls.enabled=false|--set|replicaCount=2'
   # The relay leaves are inert unless the listener is on, which needs its
   # Secret, so each one carries both and ends in the --set of its own leaf.
   # They also set an image digest: the relay wiring refuses an image tag older

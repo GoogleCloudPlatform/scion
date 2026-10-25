@@ -629,7 +629,7 @@
           "additionalProperties": false,
           "description": "When enabled resolves to on (see enabled), rendered as server.hub.conduit.internal_listen and internal_tls_* with the Secret mounted: native TLS on the relay listener. A non-loopback relay listener without TLS is refused at render.",
           "properties": {
-            "enabled": {"type": "boolean"},
+            "enabled": {"oneOf": [{"type": "boolean"}, {"type": "string", "enum": ["auto"]}], "description": "true, false or auto (on when replicaCount is above one)."},
             "port": {"type": "integer", "minimum": 1, "maximum": 65535},
             "existingSecret": {"type": "string", "description": "kubernetes.io/tls Secret with tls.crt and tls.key. Required when enabled."},
             "caSecret": {"type": "string", "description": "Secret holding the CA bundle. Empty means existingSecret."},
