@@ -18,8 +18,13 @@
 // Two body shapes are accepted: the Reporting API (Content-Type
 // application/reports+json, a JSON array of reports) and the older
 // single-report form (Content-Type application/csp-report, an object with a
-// "csp-report" member). Reports are only logged: nothing is stored and
-// nothing is sent back besides the status code.
+// "csp-report" member). Reports are only logged: nothing is persisted in
+// application storage and nothing is sent back besides the status code.
+//
+// A record holds the directive, the sink of a Trusted Types report, the
+// blocked URI and source file (reduced, see reduceURL) and the line. The
+// report's sample, which can hold the start of page content such as a
+// chat message, is left out unless Handler.RawSamples is set.
 package cspreport
 
 import (
@@ -40,7 +45,8 @@ const (
 	// parsed.
 	MaxBodyBytes = 16 << 10
 
-	// MaxSampleRunes is the length the sample is cut to before it is logged.
+	// MaxSampleRunes is the length the sample is cut to before it is
+	// logged (only with Handler.RawSamples).
 	MaxSampleRunes = 120
 
 	// maxFieldBytes bounds the other string fields of a record.
@@ -61,6 +67,10 @@ const (
 	contentTypeReports   = "application/reports+json"
 	contentTypeCSPReport = "application/csp-report"
 	reportTypeCSP        = "csp-violation"
+
+	// directiveTrustedTypes is the directive of a Trusted Types sink
+	// report; its sample starts with the sink name and a '|'.
+	directiveTrustedTypes = "require-trusted-types-for"
 )
 
 // Limiter decides whether a request may be handled now. retryAfterSeconds
@@ -81,11 +91,19 @@ type Handler struct {
 	Allow       Limiter
 	AllowRecord RecordLimiter
 	Log         *slog.Logger
+	// RawSamples adds each report's sample, cut to MaxSampleRunes, to its
+	// record as "sample". Off by default: a sample can hold the start of
+	// page content (a Trusted Types sample is the text passed to the
+	// sink), so it is logged only when an operator turns this on to
+	// diagnose a report.
+	RawSamples bool
 }
 
-// Violation is one logged report.
+// Violation is one parsed report. Sample is logged only with
+// Handler.RawSamples.
 type Violation struct {
 	Directive  string
+	Sink       string
 	BlockedURI string
 	SourceFile string
 	Line       int
@@ -149,13 +167,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			break
 		}
-		log.LogAttrs(r.Context(), slog.LevelInfo, LogMessage,
+		attrs := []slog.Attr{
 			slog.String("directive", v.Directive),
 			slog.String("blocked_uri", v.BlockedURI),
 			slog.String("source_file", v.SourceFile),
 			slog.Int("line", v.Line),
-			slog.String("sample", v.Sample),
-		)
+		}
+		if v.Sink != "" {
+			attrs = append(attrs, slog.String("sink", v.Sink))
+		}
+		if h.RawSamples {
+			attrs = append(attrs, slog.String("sample", v.Sample))
+		}
+		log.LogAttrs(r.Context(), slog.LevelInfo, LogMessage, attrs...)
 	}
 	if dropped > 0 {
 		if ok, _ := h.allowRecord(); ok {
@@ -247,20 +271,132 @@ func parseCSPReport(body []byte) ([]Violation, error) {
 	return []Violation{newViolation(directive, b.BlockedURI, b.SourceFile, b.LineNumber, b.ScriptSample)}, nil
 }
 
-// newViolation bounds every field of a record. URLs keep their scheme,
-// host and path; the query and fragment are not needed to find the code
-// that caused a report.
+// newViolation bounds every field of a record. URLs are reduced by
+// reduceURL; the sink is taken from the sample of a Trusted Types report.
 func newViolation(directive, blockedURI, sourceFile string, line int, sample string) Violation {
 	if line < 0 {
 		line = 0
 	}
 	return Violation{
 		Directive:  truncateBytes(directive, maxFieldBytes),
-		BlockedURI: truncateBytes(withoutQuery(blockedURI), maxFieldBytes),
-		SourceFile: truncateBytes(withoutQuery(sourceFile), maxFieldBytes),
+		Sink:       sinkName(directive, sample),
+		BlockedURI: truncateBytes(reduceURL(blockedURI), maxFieldBytes),
+		SourceFile: truncateBytes(reduceURL(sourceFile), maxFieldBytes),
 		Line:       line,
 		Sample:     truncateRunes(sample, MaxSampleRunes),
 	}
+}
+
+// trustedTypesSinks is the closed list of sink names a Trusted Types
+// report's sample can start with (the Trusted Types specification's
+// "Interface member" names, and the global functions). Any other text
+// before the '|' is not logged.
+var trustedTypesSinks = map[string]bool{
+	"Element innerHTML":               true,
+	"Element outerHTML":               true,
+	"Element insertAdjacentHTML":      true,
+	"Element setHTMLUnsafe":           true,
+	"ShadowRoot innerHTML":            true,
+	"ShadowRoot setHTMLUnsafe":        true,
+	"Document write":                  true,
+	"Document writeln":                true,
+	"Document parseHTMLUnsafe":        true,
+	"DOMParser parseFromString":       true,
+	"Range createContextualFragment":  true,
+	"HTMLIFrameElement srcdoc":        true,
+	"HTMLScriptElement src":           true,
+	"HTMLScriptElement text":          true,
+	"HTMLScriptElement innerText":     true,
+	"HTMLScriptElement textContent":   true,
+	"SVGScriptElement href":           true,
+	"Window setTimeout":               true,
+	"Window setInterval":              true,
+	"WorkerGlobalScope setTimeout":    true,
+	"WorkerGlobalScope setInterval":   true,
+	"WorkerGlobalScope importScripts": true,
+	"Function":                        true,
+	"eval":                            true,
+}
+
+// sinkName returns the sink a Trusted Types report names: the part of its
+// sample before the first '|' (for example "Element innerHTML"), only when
+// it is one of trustedTypesSinks. Anything else, and every other
+// directive's sample, gives "".
+func sinkName(directive, sample string) string {
+	if directive != directiveTrustedTypes {
+		return ""
+	}
+	i := strings.IndexByte(sample, '|')
+	if i <= 0 {
+		return ""
+	}
+	if name := sample[:i]; trustedTypesSinks[name] {
+		return name
+	}
+	return ""
+}
+
+// reduceURL keeps what is needed to find the code behind a report and
+// drops what can carry data:
+//   - a value without a scheme (a keyword such as "inline", "eval" or
+//     "trusted-types-sink", or a path) is kept without its query and
+//     fragment; a scheme-relative value ("//host/path") also loses its
+//     user information;
+//   - an http, https, ws or wss URL keeps its scheme, host and path; the
+//     user information, query and fragment are dropped;
+//   - any other scheme (data:, blob:, javascript:, ...) is reduced to the
+//     scheme alone, for example "data:".
+//
+// The bytes that are kept are not re-encoded.
+func reduceURL(s string) string {
+	scheme, rest, ok := splitScheme(s)
+	if !ok {
+		s = withoutQuery(s)
+		if strings.HasPrefix(s, "//") {
+			return "//" + withoutUserInfo(s[2:])
+		}
+		return s
+	}
+	switch strings.ToLower(scheme) {
+	case "http", "https", "ws", "wss":
+	default:
+		return strings.ToLower(scheme) + ":"
+	}
+	rest = withoutQuery(rest)
+	if !strings.HasPrefix(rest, "//") {
+		return strings.ToLower(scheme) + ":"
+	}
+	return scheme + "://" + withoutUserInfo(rest[2:])
+}
+
+// withoutUserInfo takes "authority/path" (the part after "//") and drops
+// the user information from the authority.
+func withoutUserInfo(s string) string {
+	authority, path := s, ""
+	if i := strings.IndexByte(s, '/'); i >= 0 {
+		authority, path = s[:i], s[i:]
+	}
+	if i := strings.LastIndexByte(authority, '@'); i >= 0 {
+		authority = authority[i+1:]
+	}
+	return authority + path
+}
+
+// splitScheme splits s at the colon after a URL scheme (an ASCII letter,
+// then letters, digits, '+', '-' or '.').
+func splitScheme(s string) (scheme, rest string, ok bool) {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'):
+		case i > 0 && ((c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.'):
+		case i > 0 && c == ':':
+			return s[:i], s[i+1:], true
+		default:
+			return "", "", false
+		}
+	}
+	return "", "", false
 }
 
 // withoutQuery drops everything from the first '?' or '#'.

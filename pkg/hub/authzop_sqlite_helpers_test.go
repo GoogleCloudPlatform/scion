@@ -1061,6 +1061,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		// --- user family ---
 		"/api/v1/users/{id}":                 {"id": f.user},
 		"/api/v1/users/{id}/revoke-sessions": {"id": f.user},
+		"/api/v1/users/{id}/delete-blockers": {"id": f.user},
 
 		// --- skill family ---
 		"/api/v1/skills/{id}":                          {"id": f.skill},

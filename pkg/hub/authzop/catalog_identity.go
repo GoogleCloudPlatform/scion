@@ -710,12 +710,39 @@ var identityOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		// last_owner: the user is the last active owner of a project.
-		// conflict: last super-admin, self-delete, the user still has
-		// agents (owned, descendants, or started by their schedules), or
-		// the user's role bindings changed concurrently during the delete.
-		DenialCodes: []DenialCode{DenialForbidden, DenialLastOwner, DenialConflict},
-		TestRefs:    []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
-		Bearer:      SessionOnly(ReasonGovernancePending),
+		// user_delete_blocked: the user has agents (owned, descendants,
+		// or started by their schedules) or active delegations to agents
+		// that exist.
+		// conflict: last super-admin, self-delete, or the user's role
+		// bindings changed concurrently during the delete.
+		DenialCodes: []DenialCode{DenialForbidden, DenialLastOwner, DenialUserDeleteBlocked, DenialConflict},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestDeleteUser_GuardOrder"},
+		},
+		Bearer: SessionOnly(ReasonGovernancePending),
+	},
+	{
+		ID:          "user.admin.deleteblockers",
+		Domain:      "user.admin",
+		Description: "List what blocks deleting a user (agents and active delegations), without deleting",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/{id}/delete-blockers", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "user-from-url",
+		BasePermission:   "user.delete",
+		Effects:          []SecurityEffect{EffectReadOne},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestUserDeleteBlockers_RequiresUserDelete"},
+			{Package: "pkg/hub", Function: "TestSessionOnlyGate_ReasonIsReported"},
+		},
+		Bearer: SessionOnly(ReasonGovernancePending),
 	},
 
 	// =====================================================================

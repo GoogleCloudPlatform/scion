@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 356
+**Operations:** 357
 
 ## Table of Contents
 
@@ -214,6 +214,7 @@
 - [user.admin.provision](#useradminprovision) — Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants
 - [user.admin.promote](#useradminpromote) — Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present)
 - [user.admin.delete](#useradmindelete) — Delete a user account
+- [user.admin.deleteblockers](#useradmindeleteblockers) — List what blocks deleting a user (agents and active delegations), without deleting
 - [group.read](#groupread) — Read group details
 - [group.list](#grouplist) — List groups. Each row is shown only when the caller may read it (group.read); a user access token needs group:read on a hub boundary, and a group with no project resolves to the hub
 - [group.create](#groupcreate) — Create a new group. A user access token needs group:create on a hub boundary; the target is the hub's group collection. Creating under a parent group runs the member-add delegation check on the parent
@@ -8182,11 +8183,46 @@
 - **Before Fields:** target_user_id, email, role, status
 - **Atomic:** Yes
 
-**Denial Codes:** `forbidden`, `last_owner`, `conflict`
+**Denial Codes:** `forbidden`, `last_owner`, `user_delete_blocked`, `conflict`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestDeleteUser_GuardOrder`
+
+---
+
+## user.admin.deleteblockers
+
+**Domain:** user.admin
+
+**Description:** List what blocks deleting a user (agents and active delegations), without deleting
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users/{id}/delete-blockers` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `user.delete`
+
+**Resource Resolver:** user-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserDeleteBlockers_RequiresUserDelete`
+- `pkg/hub:TestSessionOnlyGate_ReasonIsReported`
 
 ---
 
@@ -9777,7 +9813,7 @@
 
 **Effects:** `update-resource`
 
-**Denial Codes:** `forbidden`, `last_owner`, `conflict`
+**Denial Codes:** `forbidden`, `last_owner`, `user_delete_blocked`, `conflict`
 
 ### Tests
 
@@ -12897,7 +12933,7 @@
 - **Before Fields:** user_id, role, issued_by, purpose, expires_at
 - **Atomic:** Yes
 
-**Denial Codes:** `forbidden`, `not_found`, `conflict`
+**Denial Codes:** `forbidden`, `not_found`, `user_delete_blocked`, `conflict`
 
 ### Tests
 
