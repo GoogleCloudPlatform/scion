@@ -161,8 +161,20 @@ func TestHopTLSConfigsNeverSkipVerification(t *testing.T) {
 		}
 	}
 
+	for f, src := range hopSources(t) {
+		if strings.Contains(src, "InsecureSkipVerify") {
+			t.Errorf("%s mentions InsecureSkipVerify: the relay internal hop never skips TLS verification", f)
+		}
+	}
+}
+
+// hopSources reads the non-test sources of the relay internal hop: the
+// relay packages, the hub's conduit files and the server's conduit and
+// relay commands. It fails unless the globs still match them.
+func hopSources(t *testing.T) map[string]string {
+	t.Helper()
 	root := filepath.Join("..", "..", "..")
-	var files []string
+	out := map[string]string{}
 	for _, pattern := range []string{
 		"pkg/conduit/*/*.go", "pkg/conduit/*/*/*.go", "pkg/conduit/*.go",
 		"pkg/hub/conduit*.go", "cmd/server_conduit*.go", "cmd/server_relay*.go",
@@ -171,25 +183,48 @@ func TestHopTLSConfigsNeverSkipVerification(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		files = append(files, m...)
-	}
-	scanned := 0
-	for _, f := range files {
-		if strings.HasSuffix(f, "_test.go") {
-			continue
-		}
-		b, err := os.ReadFile(f)
-		if err != nil {
-			t.Fatal(err)
-		}
-		scanned++
-		if strings.Contains(string(b), "InsecureSkipVerify") {
-			t.Errorf("%s mentions InsecureSkipVerify: the relay internal hop never skips TLS verification", f)
+		for _, f := range m {
+			if strings.HasSuffix(f, "_test.go") {
+				continue
+			}
+			b, err := os.ReadFile(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out[f] = string(b)
 		}
 	}
 	// The scan must have covered the hop sources, or it proves nothing.
-	if scanned < 20 {
-		t.Fatalf("scanned %d source files; the globs no longer match the relay hop sources", scanned)
+	if len(out) < 20 {
+		t.Fatalf("scanned %d source files; the globs no longer match the relay hop sources", len(out))
+	}
+	for _, want := range []string{"hoptls.go", "conduit_relay.go", "server_conduit.go"} {
+		found := false
+		for f := range out {
+			found = found || filepath.Base(f) == want
+		}
+		if !found {
+			t.Fatalf("the hop source scan no longer covers %s", want)
+		}
+	}
+	return out
+}
+
+// TestHopSourcesBuildHTTPClientsThroughTheHelper: no relay internal hop
+// source builds an HTTP client inline or uses http.DefaultClient; every
+// hop client comes from NewHopHTTPClientWithTimeout (hoptls.go), which
+// follows no redirect. A call site that goes back to &http.Client{...}
+// fails here.
+func TestHopSourcesBuildHTTPClientsThroughTheHelper(t *testing.T) {
+	for f, src := range hopSources(t) {
+		if filepath.Base(f) == "hoptls.go" && strings.Contains(f, filepath.Join("conduit", "relay")) {
+			continue
+		}
+		for _, banned := range []string{"http.Client{", "http.DefaultClient"} {
+			if strings.Contains(src, banned) {
+				t.Errorf("%s uses %s: build relay hop HTTP clients with relay.NewHopHTTPClientWithTimeout", f, banned)
+			}
+		}
 	}
 }
 
@@ -286,5 +321,36 @@ func TestHopDefaultClientsFollowNoRedirect(t *testing.T) {
 	_ = hub.Call(ctx, "/internal/v1/hub/admit", map[string]string{"k": "v"}, nil)
 	if n := targetHits.Load(); n != 0 {
 		t.Fatalf("the redirect target received %d requests through the default hop clients; want none", n)
+	}
+}
+
+// TestHopInjectedClientsFollowNoRedirect: a client injected into
+// PeerClient or HubClient, here one that follows redirects by default, is
+// used without redirects, and the caller's client is not modified.
+func TestHopInjectedClientsFollowNoRedirect(t *testing.T) {
+	var targetHits atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(target.Close)
+	peer, hits := redirectingPeer(t, http.StatusPermanentRedirect, target.URL+"/x")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	injected := &http.Client{}
+	pc := &relay.PeerClient{HTTP: injected, Auth: testPeerAuth(t, "relay-b")}
+	_, _ = pc.Probe(ctx, peer.URL, "relay-a", 1)
+	rec := registry.SessionRecord{SessionID: "s1", RelayInstanceID: "relay-a", RelayGeneration: 1}
+	_, _ = relay.NewRemoteSession(pc, peer.URL, rec, registry.Want{ProjectID: "p1"}).Call(ctx, &conduitv1.RpcRequest{RequestId: "r1", Body: []byte("body")})
+	hub := &relay.HubClient{BaseURL: peer.URL, HTTP: injected, Auth: testPeerAuth(t, "relay-a")}
+	_ = hub.Call(ctx, "/internal/v1/hub/admit", map[string]string{"k": "v"}, nil)
+	if n := hits.Load(); n != 3 {
+		t.Fatalf("the peer received %d requests, want 3", n)
+	}
+	if n := targetHits.Load(); n != 0 {
+		t.Fatalf("the redirect target received %d requests through an injected client; want none", n)
+	}
+	if injected.CheckRedirect != nil {
+		t.Fatal("the caller's client was modified")
 	}
 }

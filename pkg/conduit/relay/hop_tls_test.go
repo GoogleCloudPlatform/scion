@@ -22,6 +22,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -305,4 +307,34 @@ func TestHopUpperCaseSchemeEndpoint(t *testing.T) {
 		ep := "HTTP://" + strings.TrimPrefix(p.a.Internal.URL, "http://")
 		roundTrip(t, relay.NewRemoteSession(p.b.Peers, ep, p.rec, p.want))
 	})
+}
+
+// TestHopRelayInjectedClientFollowsNoRedirect: a client given to relay.New
+// (Config.HTTPClient) is used without redirects for its calls to other
+// relays, and the caller's client is not modified.
+func TestHopRelayInjectedClientFollowsNoRedirect(t *testing.T) {
+	var targetHits atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		targetHits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(target.Close)
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/x", http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(peer.Close)
+	injected := &http.Client{}
+	w := relaytest.NewWorld(t)
+	n := w.StartNode("relay-a", func(c *relay.Config) { c.HTTPClient = injected; c.RequireSelfCheck = false })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := n.Relay.PeerClient().Probe(ctx, peer.URL, "relay-x", 1); err == nil {
+		t.Fatal("Probe through a redirect succeeded")
+	}
+	if got := targetHits.Load(); got != 0 {
+		t.Fatalf("the redirect target received %d requests through relay.New's client; want none", got)
+	}
+	if injected.CheckRedirect != nil {
+		t.Fatal("the caller's client was modified")
+	}
 }
