@@ -211,7 +211,7 @@ var hostCredOps = []hostCredOp{
 
 func newHostCredStartServer(t *testing.T, policy, colocated bool, endpoint string) *Server {
 	t.Helper()
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	cfg.HostCredentials = policy
 	srv := newTestServerForStartContext(t, cfg)

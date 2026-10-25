@@ -67,7 +67,7 @@ func TestHandlePTYStream_AuxRuntimeWithoutAttach_ClosesBeforeExec(t *testing.T) 
 			fakeRuntime := filepath.Join(dir, "fake-runtime")
 			require.NoError(t, os.WriteFile(fakeRuntime, []byte("#!/bin/sh\necho \"$@\" >> '"+marker+"'\nexit 1\n"), 0o700))
 
-			srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
+			srv := New(testServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 			auxRT := &attachCapableTestRuntime{
 				MockRuntime:    &runtime.MockRuntime{NameFunc: func() string { return fakeRuntime }},
 				supportsAttach: false,
@@ -269,7 +269,7 @@ profiles:
 func TestHandleInfo_OptedOutDefaultRuntime_ReportsBrokerWideAttachFalse(t *testing.T) {
 	writeHomeSettings(t, `schema_version: "1"
 `)
-	srv := New(DefaultServerConfig(), &mockManager{}, newOptOutTestRuntime("optout"), config.RuntimeBuildRecord{})
+	srv := New(testServerConfig(), &mockManager{}, newOptOutTestRuntime("optout"), config.RuntimeBuildRecord{})
 
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/info", nil))
@@ -286,7 +286,7 @@ func TestHandleInfo_OptedOutDefaultRuntime_ReportsBrokerWideAttachFalse(t *testi
 // before the swap the heartbeat reports attach supported; after swapping
 // to a runtime that opts out, the next heartbeat must report false.
 func TestSwapRuntime_PropagatesAttachCapabilityToHeartbeat(t *testing.T) {
-	srv := New(DefaultServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
+	srv := New(testServerConfig(), &mockManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	hb := NewHeartbeatService(&mockRuntimeBrokerService{}, "test-host", time.Hour, &mockManager{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	hb.SetDefaultRuntime(srv.runtime)
 	srv.hubMu.Lock()

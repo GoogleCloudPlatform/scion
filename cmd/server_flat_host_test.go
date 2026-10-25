@@ -300,6 +300,7 @@ func colocatedTestHost(t *testing.T, hubSrv *hub.Server, globalDir string, insts
 		Activator: &colocatedFlatActivator{hubSrv: hubSrv, endpoint: "http://localhost:9800/"},
 		BuildServer: func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) {
 			cfg := runtimebroker.DefaultServerConfig()
+			cfg.BrokerAuthEnabled = false // no hub keys here: serve the broker API without auth
 			cfg.BrokerID = ic.Identity.RuntimeBrokerID
 			cfg.StateDir = filepath.Join(globalDir, "state", ic.Identity.RuntimeBrokerID)
 			cfg.FlatInstance = &runtimebroker.FlatInstanceConfig{Identity: ic.Identity, Instance: ic.Instance, HubInProcess: true}

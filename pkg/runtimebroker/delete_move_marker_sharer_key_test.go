@@ -59,7 +59,7 @@ func newMoveSharerFixture(t *testing.T) (*sharerFixture, *moveSharerManager, *by
 	f := newSharerFixture(t)
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	mgr := &moveSharerManager{checker: agent.NewManager(rt).(*agent.AgentManager)}
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	f.srv = New(cfg, mgr, rt, config.RuntimeBuildRecord{})

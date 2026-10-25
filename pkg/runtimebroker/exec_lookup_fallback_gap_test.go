@@ -151,7 +151,7 @@ func fallbackOnDefaultBroker(t *testing.T, defRec, auxRec *callRecorder) (*Serve
 	rt := recordingRuntime("docker", unlabelledDev(t, "c-legacy"), defRec)
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 	addAuxRuntime(t, srv, "aux-a", recordingRuntime("aux-a", nil, auxRec))
 	return srv, mgr, rt
 }
@@ -163,7 +163,7 @@ func fallbackOnLaterAuxBroker(t *testing.T, defRec, recA, recB *callRecorder) *S
 	rt := recordingRuntime("docker", nil, defRec)
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 	addAuxRuntime(t, srv, "aux-a", recordingRuntime("aux-a", nil, recA))
 	addAuxRuntime(t, srv, "aux-b", recordingRuntime("aux-b", unlabelledDev(t, "c-b"), recB))
 	return srv
@@ -284,7 +284,7 @@ func TestResetAuth_AuxMatch_TokenViaStdinThenSignalOnSameRuntime(t *testing.T) {
 	rt := recordingRuntime("docker", nil, defRec)
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 	addAuxRuntime(t, srv, "aux-a", recordingRuntime("aux-a", nil, recA))
 	addAuxRuntime(t, srv, "aux-b", recordingRuntime("aux-b", []api.AgentInfo{{
 		Name:        "dev",
@@ -337,7 +337,7 @@ func TestResetAuth_SignalerOnDefaultOnly_AuxTargetUsesExecKill(t *testing.T) {
 	rt := &signalingRecordingRuntime{MockRuntime: recordingRuntime("docker", nil, defRec), rec: defRec}
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 	addAuxRuntime(t, srv, "aux-b", recordingRuntime("aux-b", labelledDev("c-b"), recB))
 
 	w := doResetAuthLookupTest(srv)
@@ -361,7 +361,7 @@ func TestResetAuth_SignalerOnPairedAux_UsesSignalInitReload(t *testing.T) {
 	rt := recordingRuntime("docker", nil, defRec)
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 	addAuxRuntime(t, srv, "aux-b", &signalingRecordingRuntime{
 		MockRuntime: recordingRuntime("aux-b", labelledDev("c-b"), recB), rec: recB})
 

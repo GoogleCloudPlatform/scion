@@ -57,7 +57,7 @@ func newSyncStartTestServer(t *testing.T) (*Server, *startFuncManager, string, s
 		mockManager: &mockManager{},
 		starts:      make(chan func(context.Context, api.StartOptions) (*api.AgentInfo, error), 4),
 	}
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}

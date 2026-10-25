@@ -124,7 +124,7 @@ func newPodFixture(t *testing.T, key string, target config.V1RuntimeTargetConfig
 	}
 	f.mgr = agent.NewManager(rt).(*agent.AgentManager)
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	cfg.ForceRuntime = "kubernetes"
 	f.srv = New(cfg, f.mgr, rt, config.RuntimeBuildRecord{})

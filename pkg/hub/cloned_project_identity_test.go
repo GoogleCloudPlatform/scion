@@ -597,6 +597,7 @@ func TestHubWorkspaceOnSameHome_BrokerKeepsHubIdentity(t *testing.T) {
 			before := identitySnapshot(t, workspacePath)
 
 			cfg := runtimebroker.DefaultServerConfig()
+			cfg.BrokerAuthEnabled = false // no hub keys here: serve the broker API without auth
 			cfg.BrokerID = "same-home-broker"
 			cfg.BrokerName = "same-home-broker"
 			cfg.StorageBucket = "bucket"

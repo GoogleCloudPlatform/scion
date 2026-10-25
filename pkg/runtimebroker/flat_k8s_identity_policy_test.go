@@ -54,7 +54,7 @@ runtimes:
 // namespace agents) whose runtime_target carries target.
 func newFlatKubernetesStartServer(t *testing.T, target config.V1RuntimeTargetConfig) *Server {
 	t.Helper()
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	target.Type = "kubernetes"

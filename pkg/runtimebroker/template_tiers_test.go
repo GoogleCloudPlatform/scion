@@ -127,7 +127,7 @@ func TestBuildStartContext_TelemetryPolicyBeatsEnv(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := DefaultServerConfig()
+			cfg := testServerConfig()
 			cfg.StateDir = t.TempDir()
 			srv := newTestServerForStartContext(t, cfg)
 

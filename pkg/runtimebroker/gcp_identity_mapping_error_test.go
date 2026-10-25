@@ -41,7 +41,7 @@ runtimes:
 // *startContextError.
 func buildAssignStartContextErr(t *testing.T, saEmail, explicitKSA string) *startContextError {
 	t.Helper()
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	cfg.BrokerName = "broker-a"
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")

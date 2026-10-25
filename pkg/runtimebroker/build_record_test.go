@@ -106,7 +106,7 @@ func newBRFixture(t *testing.T) *brFixture {
 				rec: config.RuntimeBuildRecord{Present: true, EntryName: "broken-rt"}},
 		},
 	}
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.ForceRuntime = ""
 	f.srv = New(cfg, f.defMgr, f.defRT, brDefaultRecord)
 	f.srv.resolveAuxiliaryRuntime = func(_, _, profile string) (scionrt.Runtime, config.RuntimeBuildRecord) {
@@ -231,7 +231,7 @@ func TestBuildRecord_BR1_SwapRuntimeReplacesDefaultRecord(t *testing.T) {
 		if startRec.EntryName != "file-rt" {
 			t.Fatalf("startup record EntryName = %q, want file-rt (file view)", startRec.EntryName)
 		}
-		srv := New(DefaultServerConfig(), agent.NewManager(startRT), startRT, startRec)
+		srv := New(testServerConfig(), agent.NewManager(startRT), startRT, startRec)
 
 		// The co-located overlay is installed with stored runtimes, then the
 		// reload resolves and swaps.
@@ -435,7 +435,7 @@ func TestBuildRecord_BR5_HolderWithoutRecordIsZero(t *testing.T) {
 	f := newBRFixture(t)
 	zero := config.RuntimeBuildRecord{}
 
-	srv := New(DefaultServerConfig(), f.defMgr, f.defRT, zero)
+	srv := New(testServerConfig(), f.defMgr, f.defRT, zero)
 	if _, _, rec := srv.defaultPair(); rec != zero {
 		t.Errorf("default holder record = %+v, want zero", rec)
 	}

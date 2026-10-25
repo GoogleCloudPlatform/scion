@@ -266,7 +266,7 @@ func TestStartAgentAfterCreate_WorktreePerAgent_RealManagerPreservesWorkspace(t 
 
 	bare := initBareRepoWithCommit(t)
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	cfg.ForceRuntime = "mock"
 	realMgr := agent.NewManager(&runtime.MockRuntime{
@@ -479,7 +479,7 @@ func TestStartAgentAfterCreate_EnvAgentNameIgnored(t *testing.T) {
 	sentinelFile := filepath.Join(existingWorkspace, "sentinel.go")
 	mustWriteFile(sentinelFile, "package main // must survive\n")
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	cfg.ForceRuntime = "mock"
 	realMgr := agent.NewManager(&runtime.MockRuntime{

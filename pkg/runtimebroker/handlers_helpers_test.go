@@ -479,7 +479,7 @@ func newTestServerWithManager(t *testing.T, mgr agent.Manager) *Server {
 	t.Helper()
 	setupTestScionEnv(t)
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.ForceRuntime = "mock"
@@ -538,7 +538,7 @@ func (m *envCapturingManager) Start(ctx context.Context, opts api.StartOptions) 
 }
 
 func newTestServerWithEnvCapture() (*Server, *envCapturingManager) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.Debug = true
@@ -609,7 +609,7 @@ func (m *provisionCapturingManager) Start(ctx context.Context, opts api.StartOpt
 }
 
 func newTestServerWithProvisionCapture() (*Server, *provisionCapturingManager) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.ForceRuntime = "mock"

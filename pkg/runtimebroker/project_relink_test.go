@@ -77,7 +77,7 @@ func newRelinkFixture(t *testing.T) *relinkFixture {
 		t.Fatal(err)
 	}
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	mgr := &mockManager{agents: []api.AgentInfo{{

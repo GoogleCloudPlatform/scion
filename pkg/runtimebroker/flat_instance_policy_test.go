@@ -117,7 +117,7 @@ func newPolicyInstance(t *testing.T, inst *config.V1RuntimeBrokerInstanceConfig)
 	rt.DefaultNamespace = "agents"
 	p.mgr = agent.NewManager(rt).(*agent.AgentManager)
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	cfg.ForceRuntime = "kubernetes"
 	if inst != nil {

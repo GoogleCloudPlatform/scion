@@ -483,7 +483,7 @@ func TestCreateAgent_WiresProvisionedWorktreeRepoRootOntoStartContext(t *testing
 			return "mock-id", nil
 		},
 	}
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.ForceRuntime = "docker"
 	srv := New(cfg, agent.NewManager(mockRT), mockRT, config.RuntimeBuildRecord{})
 
@@ -635,7 +635,7 @@ func TestCreateAgent_ProvisionOnlyThenStart_RepoRootSurvives(t *testing.T) {
 			return "mock-id", nil
 		},
 	}
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.ForceRuntime = "docker"
 	mgr := agent.NewManager(mockRT)
 	srv := New(cfg, mgr, mockRT, config.RuntimeBuildRecord{})
@@ -896,7 +896,7 @@ func TestBuildStartContext_KubernetesDispatchOnDockerDefaultBroker_SetsNoRepoRoo
 	clearSCIONEnv(t)
 
 	const otherProfile = "k8s-profile"
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv, dotScion := newTestServerForStartContextMultiProfile(t, cfg, "docker", otherProfile, "kubernetes")
 

@@ -60,7 +60,7 @@ func TestHubConnection_OverlappingStartAndReinitialize(t *testing.T) {
 	hub, heartbeats := newLifecycleTestHub(t)
 	creds := makeTestCreds("hub-overlap", "broker-1", hub.URL)
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "broker-1"
 	cfg.BrokerName = "test-host"
 	cfg.HeartbeatEnabled = true
@@ -148,7 +148,7 @@ func TestHubConnection_RequestedReinitializeAppliesLatest(t *testing.T) {
 	t.Setenv(transportauth.EnvTransportMode, "")
 	t.Setenv(transportauth.EnvTransportAudience, "")
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "broker-1"
 	cfg.HeartbeatEnabled = false
 	cfg.ControlChannelEnabled = false
@@ -231,7 +231,7 @@ func TestHubConnection_NoRestartAfterFinalStop(t *testing.T) {
 			const name = "hub-final"
 			creds := makeTestCreds(name, "broker-1", hub.URL)
 
-			cfg := DefaultServerConfig()
+			cfg := testServerConfig()
 			cfg.BrokerID = "broker-1"
 			cfg.BrokerName = "test-host"
 			cfg.HeartbeatEnabled = true

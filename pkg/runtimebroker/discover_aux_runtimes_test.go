@@ -76,7 +76,7 @@ func newDiscoveryTestServer(t *testing.T, defaultRuntimeName string) *Server {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", "")
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	rt := &runtime.MockRuntime{NameFunc: func() string { return defaultRuntimeName }}
 	return New(cfg, &filteringMockManager{}, rt, config.RuntimeBuildRecord{})
 }
@@ -279,7 +279,7 @@ func TestDiscoverAuxiliaryRuntimes_DifferentInstanceOfDefaultTypeStillRegisters(
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", "")
 	defaultRT := fakeKubernetesRuntime("cluster-default", "ns-default")
-	srv := New(DefaultServerConfig(), &filteringMockManager{}, defaultRT, config.RuntimeBuildRecord{})
+	srv := New(testServerConfig(), &filteringMockManager{}, defaultRT, config.RuntimeBuildRecord{})
 
 	projectDir := t.TempDir()
 	writeProjectSettings(t, projectDir, `schema_version: "1"

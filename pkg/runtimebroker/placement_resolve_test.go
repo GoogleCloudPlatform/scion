@@ -142,7 +142,7 @@ func newPlacementServer(t *testing.T, global string, conn k8s.ConnectionMode, re
 
 	f.rt = fakeKubernetesRuntime("ctx-a", "agents")
 	f.rt.Client.Connection = conn
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	f.srv = New(cfg, mgr, f.rt, rec)

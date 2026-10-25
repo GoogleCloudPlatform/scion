@@ -190,7 +190,7 @@ func TestExecCommand_DefaultRuntimeMatch_DispatchesToDefaultRuntime(t *testing.T
 	}
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 	addAuxRuntime(t, srv, "aux-a", matchingAuxRuntimeExec("aux-a", "c-a", auxExec))
 
 	w := doExecLookupTest(srv)

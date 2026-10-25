@@ -66,7 +66,7 @@ func newPlainDockerBroker(t *testing.T, defaultStops *stopRecorder) *Server {
 	}
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	return New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	return New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 }
 
 // matchingAuxRuntime reports one project-labelled "dev" entry with the given

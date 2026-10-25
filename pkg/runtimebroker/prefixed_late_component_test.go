@@ -35,7 +35,7 @@ type prefixedInstance struct {
 }
 
 func newPrefixedInstance(id string) *prefixedInstance {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = id
 	cfg.BrokerName = "test-host"
 	cfg.HeartbeatEnabled = false

@@ -99,7 +99,7 @@ func newLifecycleFixture(t *testing.T) *lifecycleFixture {
 		"    kubernetes:\n"+
 		"        type: kubernetes\n")
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.StateDir = t.TempDir()

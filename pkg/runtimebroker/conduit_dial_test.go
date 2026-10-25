@@ -429,7 +429,7 @@ func TestHubConnection_ConduitDialerLifecycle(t *testing.T) {
 	hub := newFakeConduitHub(t, hubStep{})
 	creds := makeTestCreds("hub-conduit", "broker-1", hub.srv.URL)
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "broker-1"
 	cfg.BrokerName = "test-host"
 	cfg.HubEnabled = true

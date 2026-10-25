@@ -334,7 +334,7 @@ func TestWorkspaceLocks_SharedAcrossServers(t *testing.T) {
 
 	shared := NewWorkspaceLocks()
 	newServer := func(locks *WorkspaceLocks) *Server {
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.StateDir = t.TempDir()
 		cfg.WorkspaceLocks = locks
 		return New(cfg, &mockManager{}, nil, config.RuntimeBuildRecord{})
@@ -456,7 +456,7 @@ func TestWorkspaceLocks_AgentFileLockPaths(t *testing.T) {
 			"another project's lock set includes the global project's agent entry %s", p)
 	}
 
-	s := New(DefaultServerConfig(), &mockManager{}, nil, config.RuntimeBuildRecord{})
+	s := New(testServerConfig(), &mockManager{}, nil, config.RuntimeBuildRecord{})
 	unlock, err := s.lockProjectWorkspace(context.Background(), filepath.Join(dir, "workspace"), dir)
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
@@ -523,7 +523,7 @@ func TestWorkspaceLocks_WorkspaceDownloadWaitsForProjectLock(t *testing.T) {
 	setupTestScionEnv(t)
 	locks := NewWorkspaceLocks()
 	newSrv := func() *Server {
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.StateDir = t.TempDir()
 		cfg.WorkspaceLocks = locks
 		return New(cfg, &mockManager{}, nil, config.RuntimeBuildRecord{})
@@ -572,7 +572,7 @@ func TestWorkspaceLocks_WorkspaceApplyWaitsForTheWorkspace(t *testing.T) {
 	worktreePath := filepath.Join(tmpDir, ".scion_worktrees", filepath.Base(tmpDir), "test-agent")
 	require.NoError(t, os.MkdirAll(worktreePath, 0o755))
 	locks := NewWorkspaceLocks()
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StorageBucket = "test-bucket"
 	cfg.WorkspaceLocks = locks
 	mgr := &mockAgentManager{agents: []api.AgentInfo{{Name: "test-agent", ContainerID: "test-agent", ProjectPath: projectPath}}}

@@ -44,7 +44,7 @@ import (
 // unmarshaling untrusted JSON using both field names, then confirms the
 // existing agent's persisted state file survives unchanged.
 func TestApplyInlineConfigUpdate_RepoRootOverrideIsInert(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 

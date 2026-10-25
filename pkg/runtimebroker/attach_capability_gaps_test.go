@@ -114,7 +114,7 @@ func newFallbackOnlyAuxServer(t *testing.T) (*Server, *attachCapableTestRuntime)
 	t.Helper()
 	mgr := &mockManager{}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 
 	auxMgr := &mockManager{agents: []api.AgentInfo{{
 		Name: "some-agent", ID: "cid-1", ContainerID: "cid-1",

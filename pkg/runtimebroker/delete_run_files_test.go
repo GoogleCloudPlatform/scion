@@ -405,7 +405,7 @@ func newRealFilesServer(t *testing.T, rt *runtime.MockRuntime) (*Server, string)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Chdir(t.TempDir())
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	return New(cfg, agent.NewManager(rt), rt, config.RuntimeBuildRecord{}), home

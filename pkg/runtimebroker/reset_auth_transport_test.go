@@ -81,7 +81,7 @@ func doTransportResetAuth(t *testing.T, rec *resetAuthRecorder, body string) *ht
 	rt := rec.runtime()
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)
-	srv := New(DefaultServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
+	srv := New(testServerConfig(), mgr, rt, config.RuntimeBuildRecord{})
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/dev/reset-auth", strings.NewReader(body))
 	srv.resetAuth(w, req, "dev", stopLookupProjectID)

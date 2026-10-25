@@ -259,7 +259,7 @@ func TestTryProvisionWorktree_FallbackFailureLogNeverContainsCredentials(t *test
 	const secretToken = "SUPERSECRETSAUCE"
 	credentialedURL := "https://" + secretToken + "@127.0.0.1:1/x.git?access_token=" + secretToken
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 	projectPath := filepath.Join(t.TempDir(), "proj")
@@ -308,7 +308,7 @@ func TestTryProvisionWorktree_FallbackFailureLogNeverContainsCredentials(t *test
 // fails.
 func TestBuildStartContext_WorktreePerAgentStart_PreExistedFailureLogNeverContainsCredentials(t *testing.T) {
 	requireWorktreeGit(t)
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -383,7 +383,7 @@ func TestBuildStartContext_GitCloneDebugLogRedactsCredentials(t *testing.T) {
 		{name: "token in query string", url: "https://github.com/org/repo.git?access_token=supersecret"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := DefaultServerConfig()
+			cfg := testServerConfig()
 			cfg.StateDir = t.TempDir()
 			cfg.Debug = true
 			srv := newTestServerForStartContext(t, cfg)

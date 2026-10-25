@@ -59,7 +59,7 @@ var dispatchRuntimeCases = []dispatchRuntimeCase{
 // connection.
 func newDispatchRuntimeServer(t *testing.T, tc dispatchRuntimeCase, containerHubEndpoint string) (*Server, string) {
 	t.Helper()
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	cfg.ContainerHubEndpoint = containerHubEndpoint
 	srv, dotScion := newTestServerForStartContextMultiProfile(t, cfg, tc.defaultRuntime, dispatchRuntimeOtherProfile, tc.profileRuntime)
@@ -273,7 +273,7 @@ func TestBuildStartContext_CloudrunSandboxEndpointFollowsDispatchRuntime(t *test
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := DefaultServerConfig()
+			cfg := testServerConfig()
 			cfg.StateDir = t.TempDir()
 			cfg.HubListenPort = 8080
 			srv, _ := newTestServerForStartContextMultiProfile(t, cfg, "cloudrun-sandbox", dispatchRuntimeOtherProfile, "kubernetes")

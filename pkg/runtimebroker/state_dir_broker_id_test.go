@@ -70,7 +70,7 @@ func TestNew_BrokerIDNotPathElementRefusesStart(t *testing.T) {
 	setupTestScionEnv(t)
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "mock" }}
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "../x"
 	cfg.ForceRuntime = "mock"
 	srv := New(cfg, &mockManager{}, rt, config.RuntimeBuildRecord{})

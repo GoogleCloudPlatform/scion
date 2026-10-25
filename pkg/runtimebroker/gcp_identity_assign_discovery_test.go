@@ -116,7 +116,7 @@ type discoveryResult struct {
 
 func (r discoveryRun) run(t *testing.T) discoveryResult {
 	t.Helper()
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	cfg.BrokerName = "broker-a"
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
@@ -372,7 +372,7 @@ func TestKSADiscovery_MappedMismatchSource(t *testing.T) {
 // A client that cannot be obtained keeps identity_not_mapped, with the
 // unavailable result.
 func TestKSADiscovery_ClientUnavailable(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 	projectDir := newTestProjectSettings(t, testKubernetesProjectSettingsYAML)
@@ -408,7 +408,7 @@ func TestKSADiscovery_PlacementCheckedBeforeDiscovery(t *testing.T) {
 		{name: "context override", override: "context: ctx-project", want: `sets context "ctx-project" in the project's settings but "ctx-team"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := DefaultServerConfig()
+			cfg := testServerConfig()
 			cfg.StateDir = t.TempDir()
 			srv, dotScion := newTestServerForStartContextMultiProfile(t, cfg, "kubernetes", "team", "kubernetes")
 			projectSettingsYAML := `schema_version: "1"

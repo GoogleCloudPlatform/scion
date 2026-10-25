@@ -207,7 +207,7 @@ func strconvQuote(s string) string { return strconv.Quote(s) }
 // non-empty, is written as the agent's broker-side image-provenance.json.
 func classificationFixture(t *testing.T, provenance string) (*Server, string, string) {
 	t.Helper()
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv, dotScion := newTestServerForStartContextMultiProfile(t, cfg, "docker", "kube", "kubernetes")
 	const name = "classified-agent"
@@ -407,7 +407,7 @@ runtimes:
 			t.Fatal(err)
 		}
 	}
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	mgr := &mockManager{agents: []api.AgentInfo{{

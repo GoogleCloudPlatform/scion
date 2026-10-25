@@ -68,7 +68,7 @@ runtimes:
 
 func newResolveTestServer(t *testing.T, rt runtime.Runtime) *Server {
 	t.Helper()
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.ForceRuntime = ""
 	mgr := agent.NewManager(rt)
 	t.Cleanup(mgr.Close)

@@ -24,7 +24,7 @@ import (
 )
 
 func TestBuildStartContext_HubEndpoint(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.HubEndpoint = "https://hub.example.com"
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
@@ -59,7 +59,7 @@ func TestBuildStartContext_TrustedHubEndpointOperatorTiersOnly(t *testing.T) {
 	const tenantEndpoint = "http://169.254.169.254"
 
 	t.Run("resolved-env-only value is delivered but not trusted", func(t *testing.T) {
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.StateDir = t.TempDir()
 		srv := newTestServerForStartContext(t, cfg)
 
@@ -84,7 +84,7 @@ func TestBuildStartContext_TrustedHubEndpointOperatorTiersOnly(t *testing.T) {
 
 	t.Run("broker config endpoint is trusted even with a resolved-env value present", func(t *testing.T) {
 		const operatorEndpoint = "https://hub.operator.example"
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.StateDir = t.TempDir()
 		cfg.HubEndpoint = operatorEndpoint
 		srv := newTestServerForStartContext(t, cfg)
@@ -111,7 +111,7 @@ func TestBuildStartContext_TrustedHubEndpointOperatorTiersOnly(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte("hub:\n  endpoint: "+settingsEndpoint+"\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.StateDir = t.TempDir()
 		srv := newTestServerForStartContext(t, cfg)
 
@@ -140,7 +140,7 @@ func TestBuildStartContext_TrustedHubEndpointOperatorTiersOnly(t *testing.T) {
 // read from the broker's own HubListenPort config — not a public
 // IAP-fronted URL, which the sandbox cannot authenticate against.
 func TestBuildStartContext_CloudrunSandboxHubEndpoint(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	cfg.HubListenPort = 8080
 	srv := newTestServerForStartContextRuntime(t, cfg, "cloudrun-sandbox")
@@ -179,7 +179,7 @@ func TestBuildStartContext_CloudrunSandboxHubEndpoint(t *testing.T) {
 // shipped defect pattern. If buildStartContext succeeds for cloudrun-sandbox,
 // the hub endpoint must NEVER be a public IAP-fronted URL.
 func TestBuildStartContext_CloudrunSandboxHubNeverRunApp(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	cfg.HubListenPort = 8080
 	srv := newTestServerForStartContextRuntime(t, cfg, "cloudrun-sandbox")

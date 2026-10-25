@@ -102,6 +102,7 @@ func (f *hostFixture) config(t *testing.T, instances ...config.V1RuntimeBrokerIn
 		BuildServer: func(ic InstanceContext) (*runtimebroker.Server, error) {
 			f.built = append(f.built, ic.Instance.Key)
 			cfg := runtimebroker.DefaultServerConfig()
+			cfg.BrokerAuthEnabled = false // no hub keys here: serve the broker API without auth
 			cfg.BrokerID = ic.Identity.RuntimeBrokerID
 			cfg.BrokerName = ic.Instance.Name
 			cfg.StateDir = t.TempDir()

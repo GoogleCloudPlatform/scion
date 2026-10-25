@@ -113,6 +113,7 @@ func newFenceE2E(t *testing.T) *fenceE2E {
 
 	mgr := &runLabelManager{}
 	cfg := runtimebroker.DefaultServerConfig()
+	cfg.BrokerAuthEnabled = false // no hub keys here: serve the broker API without auth
 	cfg.BrokerID = "fence-broker"
 	cfg.BrokerName = "fence-broker"
 	brokerNow := &atomic.Pointer[time.Time]{}

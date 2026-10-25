@@ -417,7 +417,7 @@ func TestWorkspaceHandlerErrors_FixedText(t *testing.T) {
 		if err := os.MkdirAll(ws, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.StorageBucket = "test-bucket"
 		cfg.WorktreeBase = base
 		var mgr *mockAgentManager
@@ -654,7 +654,7 @@ func TestCreateAgent_GlobalDirError_FixedText(t *testing.T) {
 // to resolve the global dir: fixed text at the client, cause in the broker
 // log with the project slug.
 func TestDeleteProject_GlobalDirError_FixedText(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	srv := New(cfg, &mockAgentManager{}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})
 	logs := captureLifecycleJSONLog(srv)
 	t.Setenv("HOME", "")

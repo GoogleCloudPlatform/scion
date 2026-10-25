@@ -112,7 +112,7 @@ func TestBuildStartContext_HubGCPIdentityDispatchFixture(t *testing.T) {
 		for _, p := range paths {
 			for _, runtimeName := range []string{"kubernetes", "docker"} {
 				t.Run(name+"/"+p.label+"/"+runtimeName, func(t *testing.T) {
-					cfg := DefaultServerConfig()
+					cfg := testServerConfig()
 					cfg.StateDir = t.TempDir()
 					srv := newTestServerForStartContextRuntime(t, cfg, runtimeName)
 					in := p.in

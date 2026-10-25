@@ -25,7 +25,7 @@ import (
 )
 
 func newLateComponentServer() *Server {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "broker-1"
 	cfg.BrokerName = "test-host"
 	cfg.HeartbeatEnabled = false
@@ -90,8 +90,9 @@ func TestLateComponent_TakesEffectWithoutRestart(t *testing.T) {
 	if lateComponentInPlace(srv) {
 		t.Fatal("precondition: component already set up when the handler was built")
 	}
-	if got := lateComponentStatus(h, nil); got != http.StatusOK {
-		t.Fatalf("before setup: got %d, want %d", got, http.StatusOK)
+	// No keys yet: only health endpoints are served.
+	if got := lateComponentStatus(h, nil); got != http.StatusServiceUnavailable {
+		t.Fatalf("before setup: got %d, want %d", got, http.StatusServiceUnavailable)
 	}
 
 	key := addLateComponentConn(t, srv, "hub-late")

@@ -28,7 +28,7 @@ import (
 
 func newImageTestServer(t *testing.T, rt *runtime.MockRuntime) *Server {
 	t.Helper()
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker"
 	cfg.BrokerName = "test-host"
 	cfg.HubEnabled = false

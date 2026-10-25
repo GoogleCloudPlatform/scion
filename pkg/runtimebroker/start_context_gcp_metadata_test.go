@@ -22,7 +22,7 @@ import (
 )
 
 func TestBuildStartContext_GCPMetadataDefaultBlock(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -57,7 +57,7 @@ func TestBuildStartContext_GCPMetadataDefaultBlock(t *testing.T) {
 }
 
 func TestBuildStartContext_GCPMetadataPassthrough(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -95,7 +95,7 @@ func TestBuildStartContext_GCPMetadataPassthrough(t *testing.T) {
 }
 
 func TestBuildStartContext_GCPMetadataExplicitBlock(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -138,7 +138,7 @@ func TestBuildStartContext_GCPMetadataExplicitBlock(t *testing.T) {
 // — see TestBuildStartContext_KubernetesBlockConfiguredServiceAccount) so
 // this runtime-appropriate default can apply.
 func TestBuildStartContext_GCPMetadataNoIdentityInputOnKubernetesDefaultsToPassthrough(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 
@@ -166,7 +166,7 @@ func TestBuildStartContext_GCPMetadataNoIdentityInputOnKubernetesDefaultsToPasst
 // its pre-existing "block" default when the caller supplies no GCP identity
 // information at all.
 func TestBuildStartContext_GCPMetadataNoIdentityInputOnDockerDefaultsToBlock(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "docker")
 
@@ -199,7 +199,7 @@ func TestBuildStartContext_GCPMetadataNoIdentityInputOnDockerDefaultsToBlock(t *
 // different behavior (Workload Identity instead of the emulator), so that
 // case moved to TestBuildStartContext_KubernetesAssign* below.
 func TestBuildStartContext_GCPMetadataPassthroughUnchangedOnKubernetes(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "kubernetes")
 
@@ -230,7 +230,7 @@ func TestBuildStartContext_GCPMetadataPassthroughUnchangedOnKubernetes(t *testin
 // exactly as before — only the Kubernetes runtime's "assign" behavior changes
 // here.
 func TestBuildStartContext_GCPMetadataAssignUnchangedOnDocker(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "docker")
 
@@ -272,7 +272,7 @@ func TestBuildStartContext_GCPMetadataAssignUnchangedOnDocker(t *testing.T) {
 // inversion from the other direction: "block" must remain valid on Docker
 // (and, by extension, any non-Kubernetes runtime).
 func TestBuildStartContext_GCPMetadataBlockUnchangedOnDocker(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContextRuntime(t, cfg, "docker")
 
@@ -321,7 +321,7 @@ func TestBuildStartContext_GCPMetadataUnknownModeRejected(t *testing.T) {
 
 	for name, mode := range modes {
 		t.Run(name, func(t *testing.T) {
-			cfg := DefaultServerConfig()
+			cfg := testServerConfig()
 			cfg.StateDir = t.TempDir()
 			srv := newTestServerForStartContext(t, cfg)
 
@@ -358,7 +358,7 @@ func TestBuildStartContext_GCPMetadataUnknownModeRejected(t *testing.T) {
 // cover it too — a broker that validated only the create path would still accept
 // an unknown mode from a newer or misbehaving hub.
 func TestBuildStartContext_GCPMetadataUnknownModeFromResolvedEnv(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -387,7 +387,7 @@ func TestBuildStartContext_GCPMetadataUnknownModeFromResolvedEnv(t *testing.T) {
 func TestBuildStartContext_GCPMetadataModeFromResolvedEnvStillAccepted(t *testing.T) {
 	for _, mode := range []string{"assign", "block"} {
 		t.Run(mode, func(t *testing.T) {
-			cfg := DefaultServerConfig()
+			cfg := testServerConfig()
 			cfg.StateDir = t.TempDir()
 			srv := newTestServerForStartContext(t, cfg)
 
@@ -420,7 +420,7 @@ func TestBuildStartContext_GCPMetadataModeFromResolvedEnvStillAccepted(t *testin
 // injected by the hub.  This is the code path hit by "Create & Edit" where
 // the agent is provisioned first and then started with updated config.
 func TestBuildStartContext_GCPMetadataFromResolvedEnv(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -459,7 +459,7 @@ func TestBuildStartContext_GCPMetadataFromResolvedEnv(t *testing.T) {
 }
 
 func TestBuildStartContext_GCPMetadataPassthroughFromResolvedEnv(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerForStartContext(t, cfg)
 
@@ -499,7 +499,7 @@ func TestBuildStartContext_GCPMetadataPassthroughFromResolvedEnv(t *testing.T) {
 func TestBuildStartContext_GCPMetadataElevatedModeWithoutSourceMarkerDowngraded(t *testing.T) {
 	for _, mode := range []string{"assign", "passthrough"} {
 		t.Run(mode, func(t *testing.T) {
-			cfg := DefaultServerConfig()
+			cfg := testServerConfig()
 			cfg.StateDir = t.TempDir()
 			srv := newTestServerForStartContext(t, cfg)
 
@@ -530,7 +530,7 @@ func TestBuildStartContext_GCPMetadataElevatedModeWithoutSourceMarkerDowngraded(
 // to different servers. Only tests non-cloudrun-sandbox runtimes since
 // cloudrun-sandbox may fail in CI (no link-local).
 func TestBuildStartContext_GCPMetadataBothVarsAlwaysMatch(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	srv := newTestServerWithRuntime(t, cfg, "mock")
 
@@ -623,7 +623,7 @@ func TestBuildStartContext_GCPIdentityUsesDispatchProfile_Create(t *testing.T) {
 	for _, tt := range gcpIdentityDispatchProfileCases {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Run("no identity configured", func(t *testing.T) {
-				cfg := DefaultServerConfig()
+				cfg := testServerConfig()
 				cfg.StateDir = t.TempDir()
 				srv, _ := newTestServerForStartContextMultiProfile(t, cfg, tt.defaultRuntime, gcpIdentityDispatchOtherProfile, tt.profileRuntime)
 				r := httptest.NewRequest("POST", "/api/v1/agents", nil)
@@ -638,7 +638,7 @@ func TestBuildStartContext_GCPIdentityUsesDispatchProfile_Create(t *testing.T) {
 			})
 
 			t.Run("explicit block", func(t *testing.T) {
-				cfg := DefaultServerConfig()
+				cfg := testServerConfig()
 				cfg.StateDir = t.TempDir()
 				srv, _ := newTestServerForStartContextMultiProfile(t, cfg, tt.defaultRuntime, gcpIdentityDispatchOtherProfile, tt.profileRuntime)
 				r := httptest.NewRequest("POST", "/api/v1/agents", nil)
@@ -672,7 +672,7 @@ func TestBuildStartContext_GCPIdentityUsesDispatchProfile_Create(t *testing.T) {
 // start/restart fall back to the saved profile — see
 // TestBuildStartContext_GCPIdentityUsesDispatchProfile_Start/_Restart below.
 func TestBuildStartContext_GCPIdentityCreateIgnoresSavedProfile(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	// defaultRuntime (the project's active profile) is docker; the
 	// non-default profile resolves to kubernetes.
@@ -704,7 +704,7 @@ func TestBuildStartContext_GCPIdentityUsesDispatchProfile_Start(t *testing.T) {
 	for _, tt := range gcpIdentityDispatchProfileCases {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Run("no identity configured", func(t *testing.T) {
-				cfg := DefaultServerConfig()
+				cfg := testServerConfig()
 				cfg.StateDir = t.TempDir()
 				srv, dotScion := newTestServerForStartContextMultiProfile(t, cfg, tt.defaultRuntime, gcpIdentityDispatchOtherProfile, tt.profileRuntime)
 				writeSavedAgentProfile(t, dotScion, "agent-saved-default", gcpIdentityDispatchOtherProfile)
@@ -719,7 +719,7 @@ func TestBuildStartContext_GCPIdentityUsesDispatchProfile_Start(t *testing.T) {
 			})
 
 			t.Run("explicit block via resolvedEnv", func(t *testing.T) {
-				cfg := DefaultServerConfig()
+				cfg := testServerConfig()
 				cfg.StateDir = t.TempDir()
 				srv, dotScion := newTestServerForStartContextMultiProfile(t, cfg, tt.defaultRuntime, gcpIdentityDispatchOtherProfile, tt.profileRuntime)
 				writeSavedAgentProfile(t, dotScion, "agent-saved-block", gcpIdentityDispatchOtherProfile)
@@ -743,7 +743,7 @@ func TestBuildStartContext_GCPIdentityUsesDispatchProfile_Restart(t *testing.T) 
 	for _, tt := range gcpIdentityDispatchProfileCases {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Run("no identity configured", func(t *testing.T) {
-				cfg := DefaultServerConfig()
+				cfg := testServerConfig()
 				cfg.StateDir = t.TempDir()
 				srv, dotScion := newTestServerForStartContextMultiProfile(t, cfg, tt.defaultRuntime, gcpIdentityDispatchOtherProfile, tt.profileRuntime)
 				writeSavedAgentProfile(t, dotScion, "agent-saved-restart-default", gcpIdentityDispatchOtherProfile)
@@ -758,7 +758,7 @@ func TestBuildStartContext_GCPIdentityUsesDispatchProfile_Restart(t *testing.T) 
 			})
 
 			t.Run("explicit block via resolvedEnv", func(t *testing.T) {
-				cfg := DefaultServerConfig()
+				cfg := testServerConfig()
 				cfg.StateDir = t.TempDir()
 				srv, dotScion := newTestServerForStartContextMultiProfile(t, cfg, tt.defaultRuntime, gcpIdentityDispatchOtherProfile, tt.profileRuntime)
 				writeSavedAgentProfile(t, dotScion, "agent-saved-restart-block", gcpIdentityDispatchOtherProfile)
@@ -782,7 +782,7 @@ func TestBuildStartContext_GCPIdentityUsesDispatchProfile_Restart(t *testing.T) 
 // profile naming a different runtime than an operator's forced runtime must
 // not be able to work around it.
 func TestBuildStartContext_GCPIdentityForceRuntimeOverridesProfile(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.StateDir = t.TempDir()
 	const otherProfile = "other-profile"
 	// Settings declare a "docker" default and a "kubernetes" other profile,

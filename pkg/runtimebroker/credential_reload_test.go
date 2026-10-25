@@ -65,7 +65,7 @@ func TestCredentialReload_TakesEffectAfterReinitialize(t *testing.T) {
 	}
 	writeCreds(oldCreds)
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "broker-1"
 	cfg.BrokerName = "test-host"
 	cfg.HeartbeatEnabled = false
@@ -179,7 +179,7 @@ func TestCredentialReload_InEffectMatchesConnectionAfterFailedStep(t *testing.T)
 	}
 	writeCreds(oldCreds)
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "broker-1"
 	cfg.BrokerName = "test-host"
 	cfg.HeartbeatEnabled = false
@@ -278,7 +278,7 @@ func testRetriesFailedReinitialize(t *testing.T, otherChanged bool) {
 	}
 	writeCreds(oldCreds)
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "broker-1"
 	cfg.BrokerName = "test-host"
 	cfg.HeartbeatEnabled = false

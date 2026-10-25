@@ -65,7 +65,7 @@ func (m *hubDefaultsCapturingManager) Reprovision(ctx context.Context, opts api.
 }
 
 func newHubDefaultsWiringServer() (*Server, *hubDefaultsCapturingManager) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.ForceRuntime = "mock"

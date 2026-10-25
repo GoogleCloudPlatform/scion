@@ -65,7 +65,7 @@ func TestHubConnection_ReinitializeConcurrentReaders(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.BrokerID = "broker-1"
 		cfg.BrokerName = "test-host"
 		cfg.HeartbeatEnabled = false

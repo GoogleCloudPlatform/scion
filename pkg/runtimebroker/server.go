@@ -262,8 +262,8 @@ func DefaultServerConfig() ServerConfig {
 		Host:                 "0.0.0.0",
 		ReadTimeout:          30 * time.Second,
 		WriteTimeout:         120 * time.Second,
-		CORSEnabled:          true,
-		CORSAllowedOrigins:   []string{"*"},
+		CORSEnabled:          false, // off by default: nothing calls the broker from a browser (opt in with server.broker.cors)
+		CORSAllowedOrigins:   []string{},
 		CORSAllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		CORSAllowedHeaders:   []string{"Authorization", "Content-Type", "X-Scion-Broker-Token", "X-API-Key", "X-Scion-Broker-ID", "X-Scion-Timestamp", "X-Scion-Nonce", "X-Scion-Signature", "X-Scion-Signed-Headers"},
 		CORSMaxAge:           3600,
@@ -1307,10 +1307,11 @@ func (s *Server) validateBrokerAuthStartup() error {
 		if !loopbackOnly {
 			return fmt.Errorf("runtime broker API bound to %q in hub mode requires HMAC auth keys; register first on loopback or provide credentials", s.config.Host)
 		}
-		slog.Warn("Runtime Broker starting in hub mode without HMAC keys — pending registration",
+		slog.Warn("Runtime Broker starting in hub mode without HMAC keys — pending registration; only health endpoints are served until keys are loaded",
 			"host", s.config.Host,
 			"hint", "run 'scion runtime-broker register' to complete setup",
 		)
+		s.warnCORSWildcard()
 		return nil
 	}
 
@@ -1329,7 +1330,24 @@ func (s *Server) validateBrokerAuthStartup() error {
 		)
 	}
 
+	s.warnCORSWildcard()
 	return nil
+}
+
+// warnCORSWildcard logs a warning when the broker's CORS settings allow
+// every origin. CORS is off by default; a wildcard is only ever set
+// explicitly by the operator.
+func (s *Server) warnCORSWildcard() {
+	if !s.config.CORSEnabled {
+		return
+	}
+	for _, o := range s.config.CORSAllowedOrigins {
+		if o == "*" {
+			slog.Warn("Runtime Broker CORS allows every origin (server.broker.cors.allowed_origins contains \"*\"); list the origins that need cross-origin access instead",
+				"host", s.config.Host)
+			return
+		}
+	}
 }
 
 // SetWorkspaceDownloader replaces the GCS download used to bootstrap an
@@ -3174,16 +3192,37 @@ func (s *Server) outerMiddleware(h http.Handler) http.Handler {
 }
 
 // currentMiddlewareGate passes each request through the component that
-// buildAuthMiddleware has in place at the time, or straight to next when
-// there is none.
+// buildAuthMiddleware has in place at the time. When broker auth is enabled
+// but no hub keys are loaded yet (pending registration, or a credential
+// that failed to load), only the health endpoints are served and every
+// other request is refused, so the API is never served without auth. With
+// broker auth disabled, requests go straight to next.
 func (s *Server) currentMiddlewareGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if mw := s.loadBrokerMiddleware(); mw != nil {
 			mw.ServeWith(w, r, next)
 			return
 		}
+		if s.config.BrokerAuthEnabled && !isHealthPath(r.URL.Path) {
+			writeBrokerAuthUnavailable(w)
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isHealthPath reports whether path is one of the broker's unauthenticated
+// health endpoints.
+func isHealthPath(path string) bool {
+	return path == "/healthz" || path == "/readyz"
+}
+
+// writeBrokerAuthUnavailable answers a request that arrived while broker
+// auth is enabled but no hub keys are loaded.
+func writeBrokerAuthUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = fmt.Fprint(w, `{"error":{"code":"broker_auth_unavailable","message":"no hub keys are loaded; only health endpoints are served until registration completes"}}`)
 }
 
 // loadBrokerMiddleware returns the middleware in place now, or nil.
