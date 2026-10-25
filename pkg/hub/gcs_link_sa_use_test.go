@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -221,6 +222,106 @@ func TestGCSLink_SAUse_AccessConstraint(t *testing.T) {
 			assert.Nil(t, d.parentProof, "the constraint denies before step 10")
 		})
 	}
+}
+
+// switchedConstraintsStore fails ListAccessConstraints with err once its
+// fault switch is armed, and delegates until then.
+type switchedConstraintsStore struct {
+	store.Store
+	fault *storeFaultSwitch
+	err   error
+}
+
+func (s *switchedConstraintsStore) ListAccessConstraints(ctx context.Context, limit, offset int) ([]*store.AccessConstraint, error) {
+	if s.fault.Active() {
+		return nil, s.err
+	}
+	return s.Store.ListAccessConstraints(ctx, limit, offset)
+}
+
+// TestGCSLink_SAUse_AccessConstraintFailuresDeny: the proxy's use decision
+// fails closed when step 7c cannot be evaluated. A failure to resolve the
+// sending agent's principal closure, or to load the access constraints,
+// denies with resolution_error before step 10, as Decide tags them. Each
+// case is the admitted scenario with one store read failing: the wrapper
+// is installed on the authorization service right after the fixture is
+// built and delegates until its switch is armed.
+func TestGCSLink_SAUse_AccessConstraintFailuresDeny(t *testing.T) {
+	injected := errors.New("injected store failure")
+	for _, tc := range []struct {
+		name   string
+		faulty func(inner store.Store, fault *storeFaultSwitch) store.Store
+		reason string
+	}{
+		{
+			"principal resolution error",
+			func(inner store.Store, fault *storeFaultSwitch) store.Store {
+				return &errorInjectingStore{Store: inner, fault: fault, getEffectiveGroupsForAgentErr: injected}
+			},
+			"principal resolution error (fail-closed)",
+		},
+		{
+			"constraint load error",
+			func(inner store.Store, fault *storeFaultSwitch) store.Store {
+				return &switchedConstraintsStore{Store: inner, fault: fault, err: injected}
+			},
+			"restriction removed permission: access_constraint_error - restriction has no check function (fail closed)",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newGCSFixture(t)
+			fault := &storeFaultSwitch{}
+			f.srv.authzService.store = tc.faulty(f.srv.authzService.store, fault)
+			sc := newGCSUseScenario(t, f, "use-ac-fault")
+			control := sc.useDecision(t, f)
+			require.True(t, control.Allowed, "control: cause=%q reason=%q", control.DenyCause, control.Reason)
+
+			fault.Arm()
+			d := sc.useDecision(t, f)
+			require.False(t, d.Allowed, "reason %q", d.Reason)
+			assert.Equal(t, DenyCauseResolutionError, d.DenyCause, "reason %q", d.Reason)
+			assert.Equal(t, tc.reason, d.Reason)
+			assert.Nil(t, d.parentProof, "the failure denies before step 10")
+		})
+	}
+}
+
+// TestGCSLink_SAUse_AccessConstraintRestrictionsHaveCheck pins why the
+// nil-Check deny in storedAgentAccessConstraintDeny is unreachable from
+// store data: every restriction accessConstraintRestrictions builds for
+// the sending agent carries a Check (ConstraintsToRestrictions sets one on
+// each), so the stored constraint is applied by its maximum permissions.
+// The deny branch stays as a fail-closed guard against a future source of
+// restrictions without one.
+func TestGCSLink_SAUse_AccessConstraintRestrictionsHaveCheck(t *testing.T) {
+	f := newGCSFixture(t)
+	sc := newGCSUseScenario(t, f, "use-ac-check")
+	subjectType, subjectID := "agent", sc.agent.ID
+	_, err := f.store.CreateAccessConstraint(context.Background(), &store.AccessConstraint{
+		Name:                 "use-ac-check-boundary",
+		SubjectKind:          store.ConstraintSubjectPrincipal,
+		SubjectPrincipalType: &subjectType,
+		SubjectPrincipalID:   &subjectID,
+		ScopeType:            "system",
+		MaximumPermissions:   []string{"agent.read", "gcp_service_account.use"},
+		Purpose:              "stored-agent use decision test",
+		CreatedBy:            sc.viewer.ID,
+	})
+	require.NoError(t, err)
+
+	r := gcpServiceAccountResource(sc.sa)
+	restrictions, err := f.srv.authzService.accessConstraintRestrictions(context.Background(),
+		map[string]struct{}{"agent:" + sc.agent.ID: {}},
+		ResourceContext{ResourceType: r.Type, ResourceID: r.ID, OwnerID: r.OwnerID, ProjectID: projectIDForResource(r), Ancestry: r.Ancestry})
+	require.NoError(t, err)
+	require.Len(t, restrictions, 1, "the constraint on the agent applies")
+	for _, rr := range restrictions {
+		require.NotNil(t, rr.Check, "restriction %s", rr.Kind)
+		assert.True(t, rr.Check("gcp_service_account.use"))
+		assert.False(t, rr.Check("agent.delete"))
+	}
+	d := sc.useDecision(t, f)
+	require.True(t, d.Allowed, "cause=%q reason=%q", d.DenyCause, d.Reason)
 }
 
 // TestGCSLink_SAUse_ActAsEnforceMode: in enforce mode the recorded source,
