@@ -31,6 +31,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay/relaytest"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
 
 // Conduit relay internal hop transport policy at the hub ingress: the hub
@@ -158,4 +160,43 @@ func TestConduitIngress_TLSRelay(t *testing.T) {
 			assert.Zero(t, f.relays["relay-a"].hits.Load(), "an unverified relay receives nothing")
 		})
 	}
+}
+
+// TestStartConduitExternal_HopTLSWiring: a hub started in external relay
+// mode with HopTLS verifies relays with it on every hop client: the ingress
+// proxy transport and the relay-peer HTTP client and stream dialer carry
+// the operator CA and server name, and the HTTP client follows no
+// redirect.
+func TestStartConduitExternal_HopTLSWiring(t *testing.T) {
+	const name = "scion-relay.internal"
+	files := relaytest.NewHopTLSFiles(t, name)
+	cli, err := relay.NewHopClientTLS(files.CAFile, name)
+	require.NoError(t, err)
+	f := &externalFixture{conduitFixture: newConduitFixture(t)}
+	f.regStore = entadapter.NewConduitRegistryStore(enttest.NewClient(t))
+	f.reg = registry.New(f.regStore, registry.Config{})
+	opts := externalOptions(t, f)
+	opts.HopTLS = cli
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	f.srv.config.SharedSigningSecret = testRelaySessionSecret
+	require.NoError(t, f.srv.StartConduitExternal(ctx, opts))
+	rt := f.srv.conduitExternal.Load()
+	require.NotNil(t, rt)
+
+	tr, ok := rt.ingressTransport.(*http.Transport)
+	require.True(t, ok, "ingress transport %T", rt.ingressTransport)
+	require.NotNil(t, tr.TLSClientConfig, "the ingress transport verifies relays with the hop TLS")
+	assert.Equal(t, name, tr.TLSClientConfig.ServerName)
+	assert.True(t, tr.TLSClientConfig.RootCAs.Equal(cli.RootCAs), "the ingress transport trusts the operator CA")
+	assert.False(t, tr.TLSClientConfig.InsecureSkipVerify)
+
+	require.NotNil(t, rt.peers.WS, "the relay-peer stream dialer carries the hop TLS")
+	assert.Equal(t, name, rt.peers.WS.TLSClientConfig.ServerName)
+	require.NotNil(t, rt.peers.HTTP)
+	ptr, ok := rt.peers.HTTP.Transport.(*http.Transport)
+	require.True(t, ok)
+	assert.Equal(t, name, ptr.TLSClientConfig.ServerName)
+	require.NotNil(t, rt.peers.HTTP.CheckRedirect)
+	assert.ErrorIs(t, rt.peers.HTTP.CheckRedirect(nil, nil), http.ErrUseLastResponse, "hop clients follow no redirect")
 }
