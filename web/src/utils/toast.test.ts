@@ -221,3 +221,31 @@ describe('showToast auto-dismiss (#1733)', () => {
     expect(document.body.contains(alert)).toBe(true);
   });
 });
+
+describe('showToast action', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('renders an action button that hides the toast and runs the action', () => {
+    const inst = instrumentAlertCreation();
+    const run = vi.fn();
+    showToast('Could not star message', 'danger', { action: { label: 'Retry', run } });
+
+    const alert = inst.lastAlert.element as HTMLElement & { hide?: () => Promise<void> };
+    const hide = vi.fn(() => Promise.resolve());
+    alert.hide = hide;
+    const button = alert.querySelector('.toast-action') as HTMLElement;
+    expect(button).not.toBeNull();
+    expect(button.textContent).toBe('Retry');
+    button.click();
+    expect(hide).toHaveBeenCalledTimes(1);
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders no action button by default', () => {
+    const inst = instrumentAlertCreation();
+    showToast('Plain', 'warning');
+    expect(inst.lastAlert.element.querySelector('.toast-action')).toBeNull();
+  });
+});

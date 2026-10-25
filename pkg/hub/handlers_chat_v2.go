@@ -2953,6 +2953,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 
 	// Authorize.
 	isDM := strings.HasPrefix(key, "dm:")
+	var topic *WebChatTopic
 	// canPost tells the client whether the caller's account may post in a
 	// topic (chatMayPost), so the composer can show a read-only state
 	// before a send. It is left out for a DM.
@@ -2986,20 +2987,12 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 			writeJSON(w, http.StatusOK, chatHistoryResponse{Messages: []store.Message{}})
 			return
 		}
-		topic, err := wcs.GetTopic(ctx, key)
-		if err != nil || topic == nil {
-			NotFound(w, "Thread")
-			return
-		}
-		project, err := s.store.GetProject(ctx, topic.ProjectID)
-		if err != nil {
-			logReferenceRefused(ctx, logging.RequestPath(r), "topic project lookup failed: "+err.Error(), user)
-			NotFound(w, "Thread")
-			return
-		}
-		// A caller who may not read the project gets the same answer as
-		// for a missing thread; authorizeRead logs the denial.
-		if !s.authorizeRead(w, r, projectResource(project), "Thread") {
+		// A missing thread, and one whose project the caller may not read,
+		// both answer "Thread not found"; the resolver logs the denial.
+		var project *store.Project
+		var rerr *chatReadError
+		if topic, project, rerr = s.authorizeChatThreadRead(r, wcs, key); rerr != nil {
+			rerr.writeHistory(w)
 			return
 		}
 		allowed := s.chatMayPost(ctx, user, project).Allowed
@@ -3015,97 +3008,19 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	// historyChannel limits the page to the web chat's channel. A project
-	// visitor (ptone/scion#4603) reads its own DM with an agent through the
-	// hub API, never the web chat, and the DM is admitted only as its own
-	// (admitVisitorSubRoute), so its page lists every message of the
-	// conversation, whatever channel each message came from.
-	historyChannel := "web"
-	if isVisitorIdentity(GetIdentityFromContext(ctx)) {
-		historyChannel = ""
+	// The history selector: the web chat's channel (every channel for a
+	// project visitor's own DM) plus the conversation-ID or legacy
+	// thread-ID match chosen by the read switch (resolveChatReadTarget).
+	target, rerr := s.resolveChatReadTarget(ctx, wcs, key, topic, GetIdentityFromContext(ctx))
+	if rerr != nil {
+		// A never-used DM (chatReadAbsent) is an empty page.
+		rerr.writeHistory(w)
+		return
 	}
-
-	// Phase 8 read-switch: when ConversationReadSwitch is ON, resolve the
-	// conversation and query by ConversationID instead of Channel+ThreadID.
-	// G3: fallback to channel+thread is REMOVED. Unresolved conversations
-	// return a typed 409 error so failures are observable, not silent.
-	var filter store.MessageFilter
+	filter := target.Filter
 	// historyConvID is the conversation the page is listed by, when the
 	// envelope switch resolved one; reply previews are matched against it.
-	var historyConvID string
-	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
-		var convResult *messaging.ConversationResult
-		if isDM {
-			// DM key format: dm:<kind>:<id>:<kind>:<id> — exactly 5 parts.
-			// Strict parse (B-3): never tolerate or normalise a DM key on the
-			// derivation path. A 7-part key silently deriving from the first 5
-			// would be an access path error after the S4 read-switch.
-			parts := strings.Split(key, ":")
-			if len(parts) != 5 {
-				// G3 / AC-G3-4: a DM key with a part count other than 5 is
-				// a parse failure, not a cache miss. Return a distinct error.
-				slog.Warn("read-switch: DM key has invalid part count",
-					"key", key, "parts", len(parts))
-				writeError(w, http.StatusConflict, ErrCodeInvalidDMKey,
-					fmt.Sprintf("DM key must have exactly 5 colon-separated parts, got %d", len(parts)),
-					nil)
-				return
-			}
-			var resolveErr error
-			convResult, resolveErr = messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, parts[1], parts[2], parts[3], parts[4])
-			if resolveErr != nil {
-				// DEF-127a: infrastructure error — return 500, not 409.
-				slog.Error("read-switch: DM conversation lookup failed",
-					"key", key, "error", resolveErr)
-				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-					"Failed to look up conversation", nil)
-				return
-			}
-		} else {
-			// Thread key — look up the topic to get the projectID for the external_ref.
-			if wcs != nil {
-				if topic, err := wcs.GetTopic(ctx, key); err == nil && topic != nil {
-					convResult = messaging.ResolveThreadConversationForRead(ctx, s.store, s.messageLog, key, topic.ProjectID,
-						messaging.WithReadTopicLookup(wcs))
-				}
-			}
-		}
-		if convResult != nil {
-			// G3-d: preserve Channel:"web" — this endpoint serves the web
-			// chat UI. Dropping the channel constraint would widen visibility
-			// to messages from Discord, telegram, etc. that share the same
-			// conversation_id. Widening is not recoverable; narrowing is.
-			filter = store.MessageFilter{
-				Channel:        historyChannel,
-				ConversationID: convResult.ConversationID,
-			}
-			historyConvID = convResult.ConversationID
-		} else if isDM {
-			// DEF-127: a never-used DM is a normal first-use state, not a
-			// defect. Authorization already passed (key-based, line 1825-1832),
-			// so returning empty is safe. Emit counter + WARN for observability.
-			messaging.DMAbsentMetrics.Inc()
-			slog.Warn("read-switch: DM conversation absent, returning empty",
-				"key", key)
-			writeJSON(w, http.StatusOK, chatHistoryResponse{Messages: []store.Message{}})
-			return
-		} else {
-			// G3 / AC-G3-2,5: no fallback — return typed error.
-			// Thread conversations are created by the topic system, so absence
-			// is genuine drift.
-			slog.Warn("read-switch: conversation not resolved, returning error",
-				"key", key, "is_dm", isDM)
-			writeError(w, http.StatusConflict, ErrCodeConversationNotResolved,
-				"Conversation could not be resolved for this key; the read-switch is ON but no matching conversation record exists",
-				nil)
-			return
-		}
-	} else {
-		filter = store.MessageFilter{
-			Channel:  historyChannel,
-			ThreadID: key,
-		}
-	}
+	historyConvID := target.ConversationID
 	opts := store.ListOptions{
 		Limit: limit,
 		// Keyset pagination cursor. The client sends the opaque `nextCursor`
@@ -4054,15 +3969,31 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// The agent supplies the default thread name and the thread's default
+	// agent slug. Only a live agent's DM is promoted. The lookup error and
+	// the refusal of a missing or soft-deleted agent are answered as
+	// handleAddParticipant answers them: 404 "agent not found", or the
+	// lookup error itself.
+	agent, agentErr := s.store.GetAgent(ctx, agentID)
+	if agentErr != nil {
+		if errors.Is(agentErr, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "agent not found", nil)
+			return
+		}
+		writeErrorFromErr(w, agentErr, "")
+		return
+	}
+	if agent == nil || !agent.DeletedAt.IsZero() {
+		writeError(w, http.StatusNotFound, "not_found", "agent not found", nil)
+		return
+	}
+
 	// Default thread name: use agent's display name, or title-case slug
 	if body.Name == "" {
-		agent, agentErr := s.store.GetAgent(ctx, agentID)
-		if agentErr == nil && agent != nil {
-			if agent.Name != "" {
-				body.Name = agent.Name
-			} else if agent.Slug != "" {
-				body.Name = titleCase(agent.Slug)
-			}
+		if agent.Name != "" {
+			body.Name = agent.Name
+		} else if agent.Slug != "" {
+			body.Name = titleCase(agent.Slug)
 		}
 		if body.Name == "" {
 			body.Name = "Promoted Thread"
@@ -4107,14 +4038,20 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	// 11. Build topic struct
+	// 11. Build topic struct. The default agent is stored as the agent
+	// slug, as group create does (setGroupDefaultAgent); the ID is the
+	// fallback when the agent has no slug.
+	defaultAgent := agentID
+	if agent.Slug != "" {
+		defaultAgent = agent.Slug
+	}
 	topicID := uuid.New().String()
 	now := time.Now().UTC()
 	topic := WebChatTopic{
 		ID:             topicID,
 		ProjectID:      projectID,
 		Name:           body.Name,
-		DefaultAgent:   agentID,
+		DefaultAgent:   defaultAgent,
 		DefaultAgentID: agentID, // review round 1 finding #4: agentID is already the UUID here
 		CreatedBy:      user.ID(),
 		CreatedAt:      now,

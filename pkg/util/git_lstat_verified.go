@@ -22,12 +22,16 @@ import (
 // openLstatVerified opens path with open only when it is a regular file,
 // for platforms without O_NOFOLLOW. Lstat must report a regular file, so a
 // symlink is refused before opening. After opening, fstat must report a
-// regular file that os.SameFile matches to the file at path, not followed,
-// so a path swapped between the Lstat and the open is refused. On Windows,
-// os.SameFile reads the Lstat side's identity lazily, by re-opening path
-// without following a reparse point; the check relies on that behaviour of
-// the Go toolchain. On any refusal the opened file is closed and nil is
-// returned.
+// regular file that os.SameFile matches, so a path swapped for a symlink or
+// other link (a name-surrogate reparse point, such as a junction) before
+// the open is refused. On unix the comparison is
+// with the file Lstat saw. On Windows, os.SameFile reads the Lstat side's
+// identity lazily, by re-opening path without following a reparse point, so
+// it compares with the file at path at check time and a regular file renamed
+// over path in between is accepted, as with O_NOFOLLOW. For a non-surrogate
+// reparse point, Lstat records the identity eagerly. These Windows details
+// are behaviour of the Go toolchain. On any refusal the opened file is closed
+// and nil is returned.
 func openLstatVerified(path string, open func(string) (*os.File, error)) (*os.File, error) {
 	before, err := os.Lstat(path)
 	if err != nil {

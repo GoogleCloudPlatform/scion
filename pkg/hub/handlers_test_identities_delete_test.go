@@ -170,7 +170,7 @@ func TestTestIdentity_DeleteOwnsAgentsAndLastOwner(t *testing.T) {
 		} `json:"error"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, ErrCodeConflict, resp.Error.Code)
+	assert.Equal(t, ErrCodeUserDeleteBlocked, resp.Error.Code)
 	require.Len(t, resp.Error.Details.Agents, 1)
 	assert.Equal(t, agentID, resp.Error.Details.Agents[0].ID)
 	assert.Equal(t, projectID, resp.Error.Details.Agents[0].ProjectID)

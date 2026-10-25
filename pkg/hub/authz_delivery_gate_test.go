@@ -23,6 +23,7 @@ package hub
 import (
 	"context"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 
@@ -50,7 +51,7 @@ var deliveryGateKindCases = []struct {
 	{CredentialKindBroker, false},
 	{CredentialKindFederation, false},
 	{CredentialKindDev, false},
-	{CredentialKindHubDelivery, false},
+	{CredentialKindHubDelivery, true},
 	{"unrecognized", false},
 }
 
@@ -337,10 +338,8 @@ func TestDeliveryGate_DeliveryKindReachesGrantEvaluation(t *testing.T) {
 	assertDeliveryGateDenied(t, f.authz.Decide(context.Background(), deliveryGateRequest(admin, adminKind, secret, "secret.deliver")), "interactive")
 }
 
-// The tests below state the ptone/scion#2228 part 2 contract. Those that
-// depend on parts of the contract outside this change are skipped, and are
-// un-skipped together with adding the delivery kind to
-// deliveryCredentialKinds and a delivery=true row to deliveryGateKindCases.
+// The tests below state the ptone/scion#2228 part 2 contract. They run
+// against the production delivery set, which holds the hub_delivery kind.
 
 // A role holding a deliver permission, presented with a valid delivery
 // credential, is denied without the association, progeny or skill-default
@@ -448,11 +447,77 @@ func TestDeliveryGate_Part2WrongBoundAgentDenied(t *testing.T) {
 
 // A valid internal delivery credential, bound to the principal agent, with
 // a valid item grant, is admitted; the same request without the grant is
-// denied.
+// denied. The credential is not a source of attested facts: the item grant
+// comes from the stored agent record (progeny), and the step-10 admission
+// walk checks the recorded delegation chain.
 func TestDeliveryGate_Part2ValidInternalDeliveryAdmitted(t *testing.T) {
-	t.Skip("depends on the internal delivery credential kind, ptone/scion#2228 part 2: " +
-		"assert a delivery credential bound to the principal agent, with a progeny grant on the secret and the " +
-		"section 4.6 deliver ceiling met, is admitted for secret.deliver; the credential is not a source of attested facts")
+	f := newGoldenFixture(t)
+
+	// C descends from the owner of the golden opted-in secret, env var and
+	// skill injection, through a recorded principal edge from that active,
+	// project-admitted user. The admitted targets are the secret and the
+	// env var only: no relationship rule grants skill_injection.deliver to
+	// an agent (permissions/relationship_policy.go), so the skill injection
+	// is a deny row below.
+	agentC := tid("dg-valid-delivery-agent")
+	newHubDeliveryTestAgent(t, f.store, agentC, f.projectAlpha.ID, f.projectOwnerID)
+	h, err := f.authz.newHubDeliveryIdentity(context.Background(), agentC)
+	require.NoError(t, err)
+	assert.False(t, AncestryIsHubAttested(h), "the credential itself attests nothing")
+
+	// The golden env var is as_needed, and only an always env var is a
+	// progeny sharing source (ListProgenyEnvVars), so the env_var target is
+	// an always env var of the same owner, opted in.
+	alwaysEnvVarID := tid("dg-valid-delivery-always-envvar")
+	require.NoError(t, f.store.CreateEnvVar(context.Background(), &store.EnvVar{
+		ID: alwaysEnvVarID, Key: "dg_valid_delivery_always", Value: "v", Scope: "user", ScopeID: f.projectOwnerID,
+		AllowProgeny: true, InjectionMode: store.InjectionModeAlways, CreatedBy: f.projectOwnerID,
+	}))
+	targets := map[string]Resource{
+		"secret.deliver":  {Type: "secret", ID: f.secretID},
+		"env_var.deliver": {Type: "env_var", ID: alwaysEnvVarID},
+	}
+	for perm, res := range targets {
+		t.Run(perm, func(t *testing.T) {
+			d := decidePerm(f.authz, h, res, ActionDeliver, perm, true)
+			assert.True(t, d.Allowed, "reason %q", d.Reason)
+			assert.Equal(t, string(CredentialKindHubDelivery), d.CredentialKind)
+			assert.Equal(t, ScopeTypeRelationship, d.Scope)
+			assert.Empty(t, d.RoleName)
+			r := relationshipResult(t, d, RelationshipRuleProgeny)
+			assert.True(t, r.Accepted, "%+v", r)
+			assert.True(t, hasDecisionStep(d.ExplainTrace, "delegation_ceiling_delivery_hop"), "trace: %+v", d.ExplainTrace)
+			assert.True(t, hasDecisionStep(d.ExplainTrace, "delegation_ceiling_delivery_root"), "trace: %+v", d.ExplainTrace)
+
+			// The identity-only principal (no ID, no Kind in the request)
+			// is admitted the same way.
+			d = f.authz.Decide(context.Background(), AuthzRequest{
+				Principal: PrincipalContext{Identity: h}, Resource: res, Action: ActionDeliver, Permission: perm,
+			})
+			assert.True(t, d.Allowed, "identity-only principal: reason %q", d.Reason)
+		})
+	}
+
+	// The golden skill injection is opted in and owned by C's root user,
+	// but no relationship rule grants skill_injection.deliver to an agent,
+	// so nothing admits it and step 10 never runs.
+	t.Run("skill_injection.deliver_not_granted", func(t *testing.T) {
+		d := decidePerm(f.authz, h, Resource{Type: "skill_injection", ID: f.skillInjectionID}, ActionDeliver, "skill_injection.deliver", true)
+		assert.False(t, d.Allowed, "reason %q", d.Reason)
+		for _, step := range d.ExplainTrace {
+			assert.False(t, strings.HasPrefix(step.Step, "delegation_ceiling_delivery_"), "step 10 must not run: %+v", d.ExplainTrace)
+		}
+	})
+
+	// Without the item grant: an agent whose ancestry names a project
+	// member with no opted-in row is denied, with the same chain shape.
+	t.Run("without_item_grant", func(t *testing.T) {
+		other := newHubDeliveryNoItemGrantIdentity(t, f, tid("dg-valid-delivery-no-item"))
+		d := decidePerm(f.authz, other, Resource{Type: "secret", ID: f.secretID}, ActionDeliver, "secret.deliver", true)
+		assert.False(t, d.Allowed, "reason %q", d.Reason)
+		r := relationshipResult(t, d, RelationshipRuleProgeny)
+		assert.Equal(t, RelationshipRejectFact, r.RejectedBy)
+	})
 }
 
 // The gated kind is bound to the credential type: a request whose supplied
@@ -556,9 +621,101 @@ func derivedCredentialKind(t *testing.T, identity Identity) CredentialKind {
 
 // A progeny deliver pair admitted by the gate is bounded by the F design
 // section 4.6 deliver effect ceiling, not by the generic delegation
-// ceiling.
+// ceiling: the request is denied when the edge's EffectCeiling lacks the
+// exact deliver permission, or when the source authority is not live, even
+// though the delegator holds secret.deliver through a role.
 func TestDeliveryGate_Part2DeliverEffectCeilingRequired(t *testing.T) {
-	t.Skip("depends on the section 4.6 deliver effect ceiling, a precondition of ptone/scion#2228 part 2: " +
-		"assert secret.deliver via progeny is denied when the EffectCeiling lacks the exact deliver permission, " +
-		"or when the source authority is not live, even though the delegator holds secret.deliver")
+	setup := func(t *testing.T, name string, ceiling store.EffectCeiling) (*goldenFixture, *hubDeliveryIdentity) {
+		t.Helper()
+		f := newGoldenFixture(t)
+		ctx := context.Background()
+		// The delegator holds secret.deliver through a system-scope role.
+		rd := newDeliverRoleDefinition(t, f.store)
+		_, err := f.store.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: f.projectOwnerID,
+			ScopeType: store.RoleScopeSystem, CreatedBy: store.SystemReconcileCreatedBy,
+		})
+		require.NoError(t, err)
+
+		agentC := tid("dg-ceiling-" + name)
+		require.NoError(t, f.store.CreateAgent(ctx, &store.Agent{
+			ID: agentC, Slug: "slug-" + agentC[:8], Name: "name-" + agentC[:8],
+			ProjectID: f.projectAlpha.ID, Phase: "running",
+			OwnerID: f.projectOwnerID, CreatedBy: f.projectOwnerID, Ancestry: []string{f.projectOwnerID},
+		}))
+		require.NoError(t, f.store.CreateDelegationEdge(ctx, &store.DelegationEdge{
+			DelegatorType: store.DelegationPrincipalUser, DelegatorID: f.projectOwnerID,
+			DelegateType: store.DelegationPrincipalAgent, DelegateID: agentC,
+			ScopeType: store.RoleScopeProject, ScopeID: f.projectAlpha.ID, Role: string(AgentRoleFull), Active: true,
+			AuthorityProvenance: store.AuthorityProvenance{
+				ProvenanceVersion: 1, SourcePrincipalKind: store.DelegationPrincipalUser,
+				SourcePrincipalID: f.projectOwnerID, SourceCredentialKind: store.SourceCredentialUAT,
+			},
+			EffectCeiling: ceiling,
+		}))
+		h, err := f.authz.newHubDeliveryIdentity(ctx, agentC)
+		require.NoError(t, err)
+		return f, h
+	}
+
+	t.Run("effect_ceiling_lacks_deliver", func(t *testing.T) {
+		f, h := setup(t, "lacks", store.EffectCeiling{
+			Kind: store.EffectCeilingBounded, Version: permissions.CeilingVersionV1, PermissionIDs: []string{"agent.read", "secret.use"},
+		})
+		d := decidePerm(f.authz, h, Resource{Type: "secret", ID: f.secretID}, ActionDeliver, "secret.deliver", true)
+		assert.False(t, d.Allowed, "reason %q", d.Reason)
+		assert.Equal(t, DenyCauseCeilingEffectExceeded, d.DenyCause)
+		assert.Equal(t, DeniedByDelegationCeiling, d.DeniedBy)
+		assert.True(t, relationshipResult(t, d, RelationshipRuleProgeny).Accepted, "the item grant held; the ceiling denied")
+	})
+
+	t.Run("effect_ceiling_holds_deliver", func(t *testing.T) {
+		f, h := setup(t, "holds", store.EffectCeiling{
+			Kind: store.EffectCeilingBounded, Version: permissions.CeilingVersionV1, PermissionIDs: []string{"secret.deliver"},
+		})
+		d := decidePerm(f.authz, h, Resource{Type: "secret", ID: f.secretID}, ActionDeliver, "secret.deliver", true)
+		assert.True(t, d.Allowed, "positive control: reason %q", d.Reason)
+	})
+
+	t.Run("source_authority_not_live", func(t *testing.T) {
+		f, h := setup(t, "not-live", store.EffectCeiling{Kind: store.EffectCeilingPrincipal})
+		setUserStatus(t, f.store, f.projectOwnerID, store.UserStatusSuspended)
+		d := decidePerm(f.authz, h, Resource{Type: "secret", ID: f.secretID}, ActionDeliver, "secret.deliver", true)
+		assert.False(t, d.Allowed, "reason %q", d.Reason)
+		// Through Decide, stage 2b (execution project) denies first: the
+		// source user is the suspended delegator.
+		assert.Equal(t, "relationship grant restricted by "+RelationshipRejectExecutionProject, d.Reason)
+		r := relationshipResult(t, d, RelationshipRuleProgeny)
+		assert.Equal(t, RelationshipRejectExecutionProject, r.RejectedBy)
+		assert.Equal(t, "execution source user is not active", r.Detail)
+
+		// The step-10 arm denies the same fact on its own.
+		var cause DenyCause
+		allowed, reason, err := f.authz.checkDelegationCeiling(context.Background(), AuthzRequest{
+			Principal: PrincipalContext{Identity: h}, Resource: Resource{Type: "secret", ID: f.secretID},
+			Action: ActionDeliver, Permission: "secret.deliver",
+		}, "secret.deliver", h.ID(), nil, &cause)
+		require.NoError(t, err)
+		assert.False(t, allowed)
+		assert.Equal(t, "delegator "+f.projectOwnerID+" is suspended", reason)
+		assert.Equal(t, DenyCauseCeilingDelegatorLacksPermission, cause)
+	})
+}
+
+// With a role binding containing secret.deliver as well as the progeny
+// grant, a non-explain request is allowed by the relationship: the decision
+// names the relationship grant and no role.
+func TestHubDelivery_RoleAndProgenyNonExplainAllowedByRelationship(t *testing.T) {
+	f := newGoldenFixture(t)
+	agentC := tid("dg-role-and-progeny")
+	newHubDeliveryTestAgent(t, f.store, agentC, f.projectAlpha.ID, f.projectOwnerID)
+	bindDeliverRoleToAgent(t, f.store, agentC)
+	h, err := f.authz.newHubDeliveryIdentity(context.Background(), agentC)
+	require.NoError(t, err)
+
+	d := decidePerm(f.authz, h, Resource{Type: "secret", ID: f.secretID}, ActionDeliver, "secret.deliver", false)
+	assert.True(t, d.Allowed, "reason %q", d.Reason)
+	assert.True(t, strings.HasPrefix(d.Reason, "relationship grant: "), "reason %q", d.Reason)
+	assert.Equal(t, ScopeTypeRelationship, d.Scope)
+	assert.Empty(t, d.RoleName)
 }

@@ -1082,6 +1082,14 @@ func (s *Server) handleAddParticipant(w http.ResponseWriter, r *http.Request, id
 			return
 		}
 
+		// A soft-deleted agent is refused as an unknown agent, as group
+		// create and the default-agent path refuse it
+		// (validateDefaultAgent, handleSetDefaultAgent).
+		if agent == nil || !agent.DeletedAt.IsZero() {
+			writeError(w, http.StatusNotFound, "not_found", "agent not found", nil)
+			return
+		}
+
 		// An agent of another project gets the same answer as an
 		// unknown agent; the reason is logged.
 		if conv.ProjectID != nil && agent.ProjectID != *conv.ProjectID {

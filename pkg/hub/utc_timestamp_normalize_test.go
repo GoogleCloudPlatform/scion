@@ -725,3 +725,64 @@ func TestUTCTimestampNormalize_StartupCheckRunsInBackground(t *testing.T) {
 	srv.stopStoredTimestampCheck()
 	assert.NotContains(t, logs.String(), "level=ERROR")
 }
+
+// TestUTCTimestampNormalize_LeavesStarTimesFixedWidth: the star table's
+// starred_at is fixed-width TEXT (nine fraction digits) that the star store
+// parses strictly and compares lexically. The normalizer must leave it
+// byte-identical, while it still rewrites the other webchat time columns.
+func TestUTCTimestampNormalize_LeavesStarTimesFixedWidth(t *testing.T) {
+	wcs, s, db := newEntWebChatStore(t)
+	ctx := context.Background()
+	proj := normProject(t, s, "norm-stars")
+	topicID := tid("norm-star-topic")
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID: topicID, ProjectID: proj.ID, Name: "stars", CreatedBy: "u1", CreatedAt: normBase,
+	}))
+	sel := StarSelector{ConversationKey: topicID, Channel: "web", ThreadID: topicID}
+
+	// One whole-second and one fractional save time: both are stored with
+	// nine fraction digits, so neither is in the trimmed canonical form.
+	whole := normBase
+	frac := normBase.Add(time.Second + 123456*time.Microsecond)
+	ids := []string{tid("norm-star-whole"), tid("norm-star-frac")}
+	for i, at := range []time.Time{whole, frac} {
+		require.NoError(t, s.CreateMessage(ctx, &store.Message{
+			ID: ids[i], ProjectID: proj.ID, Sender: "user:alice", Recipient: "chat",
+			Msg: fmt.Sprintf("star %d", i), Type: "chat", Channel: "web", ThreadID: topicID, CreatedAt: normBase,
+		}))
+		_, changed, err := wcs.AddMessageStar(ctx, "u1", StarTarget{MessageID: ids[i], ProjectID: proj.ID, Selector: sel})
+		require.NoError(t, err)
+		require.True(t, changed)
+		execOne(t, db, "UPDATE webchat_message_star SET starred_at = ? WHERE message_id = ?", sqliteStarTime(at), ids[i])
+	}
+	starsQ := "SELECT group_concat(quote(starred_at), ',') FROM (SELECT starred_at FROM webchat_message_star ORDER BY message_id)"
+	before := rawText(t, db, starsQ)
+	require.Contains(t, before, "'2026-10-01T04:00:00.000000000Z'")
+	require.Contains(t, before, "'2026-10-01T04:00:01.123456000Z'")
+
+	// A non-canonical value in another webchat time column, so the run has
+	// something to rewrite.
+	execOne(t, db, "UPDATE webchat_topic SET created_at = ? WHERE id = ?", "2026-10-01T13:00:03.5+09:00", topicID)
+
+	rep, log := runNormalize(t, db, entadapter.TimestampNormalizeOptions{})
+	assert.Positive(t, rep.Rewritten, log)
+	assert.Equal(t, "'2026-10-01T04:00:03.5Z'", rawText(t, db, "SELECT quote(created_at) FROM webchat_topic WHERE id = ?", topicID),
+		"the other webchat columns are still normalized")
+	assert.Equal(t, before, rawText(t, db, starsQ), "starred_at is left byte-identical")
+	assert.NotContains(t, log, "webchat_message_star")
+
+	// The star store still reads both, in keyset order.
+	rec, err := wcs.GetMessageStar(ctx, "u1", ids[1])
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	requireUTCInstant(t, rec.StarredAt, frac)
+	page, err := wcs.ListMessageStarCandidates(ctx, StarFilter{UserID: "u1", Selector: sel, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, page.Items, 2)
+	assert.Equal(t, ids[1], page.Items[0].MessageID, "newest star first")
+	assert.Equal(t, ids[0], page.Items[1].MessageID)
+	requireUTCInstant(t, page.Items[1].StarredAt, whole)
+	// No CheckStoredTimestamps assertion: the startup check examines ent
+	// tables only, so it could never list a webchat table. The run above,
+	// which normalizes webchat columns, is what must leave starred_at alone.
+}
