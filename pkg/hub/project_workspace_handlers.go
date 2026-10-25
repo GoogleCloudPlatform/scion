@@ -70,7 +70,9 @@ const maxPreviewFileSize = 50 * 1024 * 1024
 // responses. allow-same-origin must never be added: it would undo exactly
 // that isolation. The header has no effect when the response is loaded as a
 // subresource such as an <img>, so inline image previews are unaffected.
-const untrustedContentSandboxCSP = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads"
+// frame-ancestors 'none': these pages are never embedded in other pages,
+// with or without the web frontend in front of the hub.
+const untrustedContentSandboxCSP = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads; frame-ancestors 'none'"
 
 // contentDisposition builds a Content-Disposition header value with
 // mime.FormatMediaType, as the skill and template handlers do, so non-ASCII

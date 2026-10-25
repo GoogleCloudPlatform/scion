@@ -1712,8 +1712,9 @@ authDone:
 	var relayedWarnings []string
 	hostNetWarning, hostNetErr := checkHostNetworkMetadata(opts.Name, m.Runtime.Name(), networkMode, agentEnv)
 	if hostNetErr != nil {
-		slog.Warn("Start: refusing agent start: GCP metadata mode not supported under host networking",
-			"agent", opts.Name, "runtime", m.Runtime.Name(), "network_mode", networkMode)
+		slog.Warn("Start: refusing agent start: GCP metadata mode under host networking",
+			"agent", opts.Name, "runtime", m.Runtime.Name(), "network_mode", networkMode,
+			"reason", hostNetworkRefusalReason(hostNetErr))
 		return nil, hostNetErr
 	}
 	if hostNetWarning != "" {

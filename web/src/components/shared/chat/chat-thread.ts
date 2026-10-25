@@ -55,6 +55,12 @@ import { navigateTo, stateManager } from '../../../client/main.js';
 import { agentIndexOf, agentStore } from '../../../client/agent-store.js';
 import { openTerminal, agentGraphHref } from '../../../client/open-terminal.js';
 import { showToast } from '../../../utils/toast.js';
+import {
+  ChatStarsController,
+  conversationSupportsStars,
+  isStarrableMessageId,
+  starredMessagesEnabled,
+} from '../../../client/chat-stars.js';
 import { isFeatureEnabled } from '../../../utils/feature-flags.js';
 import {
   ARTIFACTS_FLAG,
@@ -588,6 +594,11 @@ export class ScionChatThread extends LitElement {
     return (this.conversationKey?.length ?? 0) > 0;
   }
 
+  /** Whether starred messages are offered in this conversation. */
+  private get starsActive(): boolean {
+    return this.isV2 && conversationSupportsStars(this.conversationKey) && starredMessagesEnabled();
+  }
+
   /**
    * Scroll position to restore when this conversation first loads, carried
    * over from a previous chat page instance (see chat-scroll-anchor.ts).
@@ -777,6 +788,26 @@ export class ScionChatThread extends LitElement {
   /** The open message menu is the mobile bottom sheet, not the popup. */
   @state() private contextMenuAsSheet = false;
 
+  // ---- Starred messages (web.chat_starred_messages) ----
+
+  /** Star state of this conversation's loaded messages (in memory only). */
+  private readonly stars = ((): ChatStarsController => {
+    const c = new ChatStarsController();
+    c.addEventListener('change', () => this.requestUpdate());
+    return c;
+  })();
+
+  /** Coalesces the star-state fetch of one loaded page. */
+  private _starLoadTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Text of the polite live region announcing a star change. */
+  @state() private starAnnouncement = '';
+
+  /** An SSE star invalidation: refetch the state of loaded messages. */
+  private _starsUpdatedHandler = (): void => {
+    if (this.starsActive) void this.stars.invalidate();
+  };
+
   // ---- Path-link file preview state (#1148) ----
 
   /**
@@ -899,6 +930,8 @@ export class ScionChatThread extends LitElement {
       this._sawSseConnect = true;
       return;
     }
+    // Star invalidations sent while the stream was down were lost.
+    this._starsUpdatedHandler();
     if (!this.loaded || this.viewingAroundMessage) return;
     void this.fetchHistoryV2().catch((err) => {
       console.warn('[chat-thread] catch-up fetch after reconnect failed:', err);
@@ -1072,6 +1105,19 @@ export class ScionChatThread extends LitElement {
         flex-direction: column;
         height: 100%;
         min-height: 300px;
+      }
+
+      /* Visually hidden, announced: star changes (polite). */
+      .star-live-region {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        margin: -1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+        border: 0;
       }
 
       .thread-container {
@@ -1624,8 +1670,16 @@ export class ScionChatThread extends LitElement {
     this.cancelRestoreSettleWatch();
     this._scrollAnchor = null;
 
+    // Star state belongs to the conversation we just left.
+    this.stars.setConversation('');
+    if (this._starLoadTimer) {
+      clearTimeout(this._starLoadTimer);
+      this._starLoadTimer = null;
+    }
+
     // Stop any active SSE listener
     stateManager.removeEventListener('connected', this._sseReconnectHandler);
+    stateManager.removeEventListener('chat-stars-updated', this._starsUpdatedHandler);
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
     stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
     stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
@@ -1711,6 +1765,11 @@ export class ScionChatThread extends LitElement {
     this._eventBackfill.cancel();
     // Clean up v2 SSE listeners
     stateManager.removeEventListener('connected', this._sseReconnectHandler);
+    stateManager.removeEventListener('chat-stars-updated', this._starsUpdatedHandler);
+    if (this._starLoadTimer) {
+      clearTimeout(this._starLoadTimer);
+      this._starLoadTimer = null;
+    }
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
     stateManager.removeEventListener('chat-typing-received', this._v2TypingHandler);
     stateManager.removeEventListener('chat-read-state-updated', this._v2ReadStateHandler);
@@ -2278,6 +2337,7 @@ export class ScionChatThread extends LitElement {
       }
 
       this.mergeMessages(items);
+      this.scheduleStarLoad();
       this.recordRecentFilesForHistory(items, recentFilesGeneration);
       return true;
     } catch (err) {
@@ -2290,6 +2350,7 @@ export class ScionChatThread extends LitElement {
   private startStreamV2(): void {
     this._sawSseConnect = stateManager.isConnected;
     stateManager.addEventListener('connected', this._sseReconnectHandler);
+    stateManager.addEventListener('chat-stars-updated', this._starsUpdatedHandler);
     stateManager.addEventListener('chat-message-received', this._v2MessageHandler);
     stateManager.addEventListener('chat-typing-received', this._v2TypingHandler);
     stateManager.addEventListener('chat-read-state-updated', this._v2ReadStateHandler);
@@ -2456,6 +2517,10 @@ export class ScionChatThread extends LitElement {
       }
 
       this.mergeMessages([msg]);
+      // A live message starts unstarred without a state request (one per
+      // arriving message per viewer otherwise); a star made elsewhere
+      // publishes an invalidation that corrects it.
+      if (this.starsActive) this.stars.markLive([msg.id]);
       // A payload with no real createdAt would otherwise record (or, worse,
       // "correct" a pending provisional record with) a fabricated
       // viewing-time timestamp — the recent-files record must use the
@@ -2730,6 +2795,7 @@ export class ScionChatThread extends LitElement {
     }
 
     this.mergeMessages(items);
+    this.scheduleStarLoad();
     this.recordRecentFilesForHistory(items, recentFilesGeneration);
     this.scrollToBottomAfterRender();
     // Advance read watermark if applicable
@@ -3360,6 +3426,8 @@ export class ScionChatThread extends LitElement {
         // non-provisional) correct it — even if the corrected time is
         // earlier.
         if (resData?.id) {
+          // The sent message's server ID: unstarred, without a request.
+          if (this.starsActive) this.stars.markLive([resData.id]);
           this.recordRecentFiles({ ...optimisticMsg, id: resData.id }, resData.attachments ?? [], {
             provisional: true,
             scopeGeneration: recentFilesGeneration,
@@ -4176,6 +4244,15 @@ export class ScionChatThread extends LitElement {
   }
 
   /**
+   * Bumped by every jump to a message (search, reply, deep link, a star):
+   * a caller that resolves a target first can tell whether a newer jump
+   * happened meanwhile.
+   */
+  get jumpSequence(): number {
+    return this._jumpSeq;
+  }
+
+  /**
    * Scroll to a specific message by ID, with optional highlight animation.
    * Can be called externally (e.g. from search navigation on same conversation).
    */
@@ -4538,6 +4615,7 @@ export class ScionChatThread extends LitElement {
       this.viewingAroundMessage = true;
       this.pinnedToBottom = false;
       this.mergeMessages(items);
+      this.scheduleStarLoad();
       this.recordRecentFilesForHistory(items, recentFilesGeneration);
     } catch (err) {
       console.error('Failed to fetch around message:', err);
@@ -4778,6 +4856,8 @@ export class ScionChatThread extends LitElement {
         run: () => this.handleContextMenuCopyLink(),
       }
     );
+    // An unsent local row has no server ID yet, so it cannot be starred.
+    if (this.starsActive && isStarrableMessageId(msg.id)) actions.push(this.starMenuAction(msg));
     if (this.isSenderAgent(msg) && !this.isDM && !this.isDefaultAgentSender(msg)) {
       actions.push({
         id: 'set-default-agent',
@@ -4788,6 +4868,92 @@ export class ScionChatThread extends LitElement {
     }
     if (this.isSenderAgent(msg)) actions.push(...this.agentMenuActions(msg));
     return actions;
+  }
+
+  /**
+   * The Star/Unstar toggle of a message menu. Until the message's state is
+   * known it is disabled with a loading label (never assumed unstarred);
+   * while a change is in flight it is disabled.
+   */
+  private starMenuAction(msg: Message): MenuAction {
+    const state = this.stars.state(msg.id);
+    if (state === 'unknown') {
+      return {
+        id: 'star',
+        label: 'Star message (loading)',
+        icon: 'star',
+        disabled: true,
+        checked: false,
+        run: (): void => {},
+      };
+    }
+    const starred = state === 'starred';
+    return {
+      id: 'star',
+      label: starred ? 'Unstar message' : 'Star message',
+      icon: starred ? 'star-fill' : 'star',
+      checked: starred,
+      disabled: this.stars.isPending(msg.id),
+      run: (): void => {
+        this.closeContextMenu();
+        void this.setMessageStarred(msg.id, !starred);
+      },
+    };
+  }
+
+  /**
+   * Send the desired star state of a message. Success is announced in the
+   * polite live region; a failure restores the prior state, reconciles
+   * from the hub, and offers a retry of the same desired state.
+   */
+  private async setMessageStarred(messageId: string, starred: boolean): Promise<void> {
+    const key = this.conversationKey;
+    if (!key || !this.starsActive) return;
+    try {
+      await this.stars.setStarred(messageId, key, starred);
+      if (key !== this.conversationKey) return;
+      await this.announceStar(starred ? 'Message starred' : 'Message unstarred');
+    } catch {
+      if (key !== this.conversationKey) return;
+      void this.stars.invalidate();
+      showToast(starred ? 'Could not star message' : 'Could not unstar message', 'danger', {
+        action: {
+          label: 'Retry',
+          // Only in the conversation the failure happened in.
+          run: (): void => {
+            if (key !== this.conversationKey) return;
+            void this.setMessageStarred(messageId, starred);
+          },
+        },
+      });
+    }
+  }
+
+  /**
+   * Announce a star change in the polite live region. The region is
+   * emptied first, so the same text (star one message, then another) is
+   * announced again rather than ignored as unchanged.
+   */
+  private async announceStar(text: string): Promise<void> {
+    this.starAnnouncement = '';
+    await this.updateComplete;
+    this.starAnnouncement = text;
+  }
+
+  /**
+   * Fetch the star state of the loaded messages not yet known, once per
+   * history load (the first page, an older page, an around jump, a
+   * catch-up backfill). Live appends are not fetched (markLive).
+   */
+  private scheduleStarLoad(): void {
+    if (!this.starsActive) return;
+    this.stars.setConversation(this.conversationKey);
+    if (this._starLoadTimer) return;
+    this._starLoadTimer = setTimeout(() => {
+      this._starLoadTimer = null;
+      if (!this.starsActive) return;
+      void this.stars.load(this.messages.map((m) => m.id));
+    }, 50);
   }
 
   /** Render the context menu when a message is right-clicked or tapped. */
@@ -4904,6 +5070,8 @@ export class ScionChatThread extends LitElement {
   /** Handle right-click on a message to show context menu. */
   private handleMessageContextMenu(e: MouseEvent, msg: Message): void {
     e.preventDefault();
+    // Star states whose request failed are retried when a menu opens.
+    if (this.starsActive) void this.stars.retryFailed();
     this.contextMenuMessage = msg;
     this.contextMenuPosition = { x: e.clientX, y: e.clientY };
     this.contextMenuAsSheet = shouldUseMenuSheet();
@@ -5794,6 +5962,11 @@ export class ScionChatThread extends LitElement {
         ${this.renderArtifactRefsNotice()} ${this.renderSendError()}
         ${this.isDM || this.canPost ? this.renderComposerV2() : this.renderReadOnlyNotice()}
         ${this.renderContextMenu()} ${this.renderContextMenuSheet()} ${this.renderFilePreview()}
+        ${this.starsActive
+          ? html`<div class="star-live-region" role="status" aria-live="polite">
+              ${this.starAnnouncement}
+            </div>`
+          : nothing}
       </div>
     `;
   }
@@ -6186,6 +6359,7 @@ export class ScionChatThread extends LitElement {
             .replyPreview=${replyPreview}
             editedAt=${ext?.editedAt || ''}
             deletedAt=${ext?.deletedAt || ''}
+            ?starred=${this.starsActive && this.stars.state(msg.id) === 'starred'}
             senderProjectSlug=${msg.senderProjectId
               ? this.resolveProjectSlug(msg.senderProjectId)
               : ''}
