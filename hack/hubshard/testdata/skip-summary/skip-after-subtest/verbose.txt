@@ -1,0 +1,6 @@
+=== RUN   TestSkipAfterSub
+    toy_test.go:159: setup done
+=== RUN   TestSkipAfterSub/probe
+--- SKIP: TestSkipAfterSub (0.00s)
+    --- PASS: TestSkipAfterSub/probe (0.00s)
+PASS
