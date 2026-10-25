@@ -52,6 +52,11 @@ type uspStore struct {
 	failEdges, failAgent, failHold, failUser bool
 	failBindings, failConstraints            bool
 	failProgeny, failGroups                  bool
+	// failGroupsAfterConstraints fails GetEffectiveGroups only once the
+	// access-constraint table has been read, and groupFaults counts the
+	// faults injected that way.
+	failGroupsAfterConstraints bool
+	groupFaults                int
 
 	// failUserID, when set, limits failUser to GetUser(failUserID).
 	failUserID string
@@ -176,6 +181,15 @@ func (s *uspStore) ListProgenySecrets(ctx context.Context, ancestorIDs []string)
 func (s *uspStore) GetEffectiveGroups(ctx context.Context, userID string) ([]string, error) {
 	s.count("GetEffectiveGroups")
 	if s.failGroups {
+		return nil, errUSPFault
+	}
+	s.mu.Lock()
+	late := s.failGroupsAfterConstraints && s.calls["ListAccessConstraints"] > 0
+	if late {
+		s.groupFaults++
+	}
+	s.mu.Unlock()
+	if late {
 		return nil, errUSPFault
 	}
 	return s.Store.GetEffectiveGroups(ctx, userID)
@@ -577,7 +591,8 @@ func TestUserSecretParentCeiling_SingleFaultDenies(t *testing.T) {
 		{"caged test-admin terminal user", func(t *testing.T, f *uspFixture) (AgentIdentity, Resource) {
 			// The admin test tier is on and U reads as an admin-kind test
 			// identity. Declared overlap: the test-identity clamp may also
-			// withdraw U's project admission (S4a), with the same cause.
+			// withdraw U's project admission (S4a), with the same cause, so
+			// the row accepts either step (cagedSteps below).
 			// A fresh service, so no kind read from the base check is cached.
 			f.st.userKind = map[string]string{f.userID: store.UserKindTestHubAdmin}
 			f.a = NewAuthzService(f.st, slog.Default())
@@ -602,6 +617,15 @@ func TestUserSecretParentCeiling_SingleFaultDenies(t *testing.T) {
 			sec := f.userSecret(t, other, "USP_V_KEY", other, true, store.SecretTypeEnvironment)
 			return f.identity(ag, []string{other}), userSecretResource(sec, other)
 		}, DenyCauseCeilingSourceNotAllowed, "source_not_allowed"},
+		// T14b: an agent-authored source (RQ-1b). The creating agent is in the
+		// requesting agent's lineage, so S5 finds the row; S7 refuses it
+		// because its recorded creator is not its owner.
+		{"agent-authored source", func(t *testing.T, f *uspFixture) (AgentIdentity, Resource) {
+			child := f.agentChild(t, "agent-author", []string{f.userID, f.agentID}, AgentRoleFull)
+			f.recordEdge(t, store.DelegationPrincipalAgent, f.agentID, child, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
+			sec := f.userSecret(t, f.userID, "USP_AGENT_AUTHOR_KEY", f.agentID, true, store.SecretTypeEnvironment)
+			return f.identity(child, []string{f.userID, f.agentID}), userSecretResource(sec, f.userID)
+		}, DenyCauseCeilingSourceNotAllowed, "source_not_allowed"},
 		// T26: author = terminal user, but the stored ancestry's head is another user.
 		{"ancestry head is not the terminal user", func(t *testing.T, f *uspFixture) (AgentIdentity, Resource) {
 			other := tid("usp-head")
@@ -611,6 +635,15 @@ func TestUserSecretParentCeiling_SingleFaultDenies(t *testing.T) {
 			return f.identity(ag, []string{other, f.userID}), f.resource()
 		}, DenyCauseCeilingSourceNotAllowed, "source_not_allowed"},
 	}
+	// S7 and S8 share a step name; the reason tells them apart.
+	reasons := map[string]string{
+		"author is not the owner":                "secret author is not its owner",
+		"agent-authored source":                  "secret author is not its owner",
+		"terminal user is not the author":        "recorded source is not the secret's author",
+		"ancestry head is not the terminal user": "recorded source is not the secret's author",
+	}
+	// The caged row lands at S4c, or at S4a under the declared overlap.
+	cagedSteps := []string{"secret_parent_ceiling_source_caged", "secret_parent_ceiling_source_not_admitted"}
 	for _, r := range rows {
 		t.Run(r.name, func(t *testing.T) {
 			f := newUSPFixture(t, "sf-"+strings.ReplaceAll(r.name, " ", "-"))
@@ -620,6 +653,13 @@ func TestUserSecretParentCeiling_SingleFaultDenies(t *testing.T) {
 			p, res := r.mutate(t, f)
 			d, steps := f.evalFor(t, p, res)
 			assertUSPDeny(t, d, steps, r.cause, r.step)
+			if want, ok := reasons[r.name]; ok {
+				assert.Equal(t, want, d.Reason)
+			}
+			if r.name == "caged test-admin terminal user" {
+				assert.True(t, hasDecisionStep(steps, cagedSteps[0]) || hasDecisionStep(steps, cagedSteps[1]),
+					"want one of %v in %+v", cagedSteps, steps)
+			}
 		})
 	}
 }
@@ -1142,6 +1182,17 @@ func TestUserSecretParentCeiling_DecideDenyPoints(t *testing.T) {
 			setAgentRole(t, f.base, f.agentID, AgentRoleNone)
 			return f.identity(child, []string{f.userID, f.agentID}), f.resource()
 		}, true, DenyCauseCeilingDelegatorLacksPermission},
+		{"D5 edge source differs from the ancestry root", func(t *testing.T, f *uspFixture) (AgentIdentity, Resource) {
+			// The agent's one recorded edge names another admitted user V
+			// while its stored ancestry and the secret's creator are U.
+			// Stage 2b admits V; step 10 refuses at S8.
+			other := tid("usp-d5-root")
+			createDCUser(t, f.base, other, "usp-d5-root@test.com", f.projectID, store.ProjectRoleOwner)
+			f.replaceAgentEdge(t, f.agentID, func(e *store.DelegationEdge) {
+				e.DelegatorID, e.SourcePrincipalID = other, other
+			})
+			return base(f)
+		}, true, DenyCauseCeilingSourceNotAllowed},
 		{"D7 dev_local with dev auth off", func(t *testing.T, f *uspFixture) (AgentIdentity, Resource) {
 			createDCUser(t, f.base, DevUserID, "dev@localhost", f.projectID, store.ProjectRoleOwner)
 			f.srv.authzService.setDevLocalAuthorityEnabled(false)
@@ -1175,6 +1226,176 @@ func TestUserSecretParentCeiling_DecideDenyPoints(t *testing.T) {
 				assert.NotEqual(t, DeniedByDelegationCeiling, d.DeniedBy, "denied before step 10; reason %q", d.Reason)
 			}
 		})
+	}
+}
+
+// T28 D1: on a server where the delegation-edge backfill never ran, an
+// agent with no edge is refused before step 10: step 9 stage 2b finds no
+// authoritative source user. The evaluator alone reports S3
+// provenance_missing, which is in the unrecorded set.
+func TestUserSecretParentCeiling_DecidePreBackfillNoEdgeDeniesBeforeStep10(t *testing.T) {
+	f := newUSPFixture(t, "dp-d1")
+	ctx := context.Background()
+	require.NoError(t, f.base.DeleteHubSetting(ctx, "migration_delegation_edge_backfill_v1"))
+	f.deactivateEdges(t, f.agentID)
+	require.False(t, f.srv.authzService.backfillCompleted(ctx), "the server is pre-backfill")
+
+	d := f.decide(t, f.principal(), f.resource())
+	require.False(t, d.Allowed, "reason %q", d.Reason)
+	assert.NotEqual(t, DeniedByDelegationCeiling, d.DeniedBy, "denied before step 10; reason %q", d.Reason)
+
+	chain := f.a.userSecretChainVerdict(ctx, f.principal(), nil)
+	require.False(t, chain.decision.Allowed)
+	assert.Equal(t, DenyCauseCeilingProvenanceMissing, chain.decision.DenyCause, "reason %q", chain.decision.Reason)
+	assert.True(t, chain.unrecorded)
+}
+
+// T28 D6: a user-scope secret in the root's scope whose recorded creator is
+// an agent of the chain (RQ-1b). With a plain-user root, step 9 stage 4
+// refuses it (the creating agent's chain does not hold secret.use), so step
+// 10 is not reached. With a super-admin root stage 4 passes, and step 10
+// refuses it at S7: this is the Decide-level case that reaches S7. In both
+// cases the same chain reads a secret the root created (control).
+func TestUserSecretParentCeiling_DecideAgentAuthoredSource(t *testing.T) {
+	t.Run("plain-user root denies at stage 4", func(t *testing.T) {
+		f := newUSPFixture(t, "dp-d6-plain")
+		child := f.agentChild(t, "d6-plain", []string{f.userID, f.agentID}, AgentRoleFull)
+		f.recordEdge(t, store.DelegationPrincipalAgent, f.agentID, child, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
+		sec := f.userSecret(t, f.userID, "USP_D6_PLAIN_KEY", f.agentID, true, store.SecretTypeEnvironment)
+		ident := f.identity(child, []string{f.userID, f.agentID})
+
+		ctl := f.decide(t, ident, f.resource())
+		require.True(t, ctl.Allowed, "control: the chain reads the root's own secret; reason %q", ctl.Reason)
+
+		d := f.decide(t, ident, userSecretResource(sec, f.userID))
+		require.False(t, d.Allowed, "reason %q", d.Reason)
+		assert.NotEqual(t, DeniedByDelegationCeiling, d.DeniedBy, "denied before step 10; reason %q", d.Reason)
+		r := relationshipResult(t, d, RelationshipRuleProgeny)
+		assert.False(t, r.Accepted)
+		assert.Equal(t, RelationshipRejectSourceInactive, r.RejectedBy, "stage 4; detail %q", r.Detail)
+
+		// The evaluator alone refuses the same request at S7.
+		e, steps := f.evalFor(t, ident, userSecretResource(sec, f.userID))
+		assertUSPDeny(t, e, steps, DenyCauseCeilingSourceNotAllowed, "source_not_allowed")
+		assert.Equal(t, "secret author is not its owner", e.Reason)
+	})
+	t.Run("super-admin root reaches step 10 and denies at S7", func(t *testing.T) {
+		f := newUSPFixture(t, "dp-d6-admin")
+		admin := tid("usp-d6-admin")
+		createTestUserWithRole(t, f.base, admin, "usp-d6-admin@test.com", "member", store.SystemRoleSuperAdmin)
+		createDCUser(t, f.base, admin, "usp-d6-admin@test.com", f.projectID, store.ProjectRoleOwner)
+		parent := f.agentChild(t, "d6-admin-parent", []string{admin}, AgentRoleFull)
+		f.recordEdge(t, store.DelegationPrincipalUser, admin, parent, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
+		child := f.agentChild(t, "d6-admin-child", []string{admin, parent}, AgentRoleFull)
+		f.recordEdge(t, store.DelegationPrincipalAgent, parent, child, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
+		own := f.userSecret(t, admin, "USP_D6_ADMIN_OWN_KEY", admin, true, store.SecretTypeEnvironment)
+		sec := f.userSecret(t, admin, "USP_D6_ADMIN_KEY", parent, true, store.SecretTypeEnvironment)
+		ident := f.identity(child, []string{admin, parent})
+
+		ctl := f.decide(t, ident, userSecretResource(own, admin))
+		require.True(t, ctl.Allowed, "control: the chain reads the root's own secret; reason %q", ctl.Reason)
+
+		d := f.decide(t, ident, userSecretResource(sec, admin))
+		require.False(t, d.Allowed, "reason %q", d.Reason)
+		assert.Equal(t, DeniedByDelegationCeiling, d.DeniedBy, "step 10 ran; reason %q", d.Reason)
+		assert.Equal(t, DenyCauseCeilingSourceNotAllowed, d.DenyCause, "S7; reason %q", d.Reason)
+	})
+}
+
+// T18: a hub_delivery principal with secret.use on a user-scope secret
+// never reaches step 10 through Decide. Step 0b limits the delivery
+// credential to the deliver permissions and refuses the request before any
+// relationship or ceiling evaluation, so the Decide-level form of T18
+// ("takes its own arm at step 10") cannot be shown. What can be shown is
+// pinned here: the Decide refusal is step 0b's, and checkDelegationCeiling
+// called directly routes the principal to the hub_delivery arm, never to
+// the user-scope secret arm. T27 row (g) and T27u cover the arm order and
+// the predicate.
+func TestUserSecretParentCeiling_HubDeliveryStopsBeforeStep10(t *testing.T) {
+	f := newUSPFixture(t, "hd-t18")
+	withDeliveryCredentialKinds(t, CredentialKindHubDelivery)
+	h, err := f.srv.authzService.newHubDeliveryIdentity(context.Background(), f.agentID)
+	require.NoError(t, err)
+
+	d := decidePerm(f.srv.authzService, h, f.resource(), ActionUse, "secret.use", true)
+	assertStep0bDenied(t, d, "delivery credential is limited to deliver permissions", "secret.use")
+	assert.NotEqual(t, DeniedByDelegationCeiling, d.DeniedBy)
+
+	ok, reason, cause, steps, err := f.dispatch(t, h, "secret.use", ActionUse, f.resource(), f.agentID)
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.Equal(t, "delivery credential is limited to deliver permissions", reason)
+	assert.Equal(t, DenyCause(""), cause)
+	assert.True(t, hasDecisionStep(steps, "delegation_ceiling_delivery_denied"), "the hub_delivery arm: %+v", steps)
+	assert.False(t, hasSecretParentStep(steps), "never the user-scope secret arm: %+v", steps)
+}
+
+// T13b: S7 relies on every user-scope secret writer recording the scope
+// owner as the creator (CreatedBy == ScopeID). The writers are pinned by
+// behaviour in TestUserSecretWriters_RecordScopeOwnerAsCreator. This test
+// keeps that list complete: every secret.SetSecretInput literal in the
+// pkg/hub production sources either names a fixed non-user scope or sits in
+// a function reviewed here. The other modules that write secrets
+// (cmd/hub_secret_migrate.go, pkg/secretmigration) copy an existing row's
+// CreatedBy unchanged, as SecretMigrationExecutor.Run does.
+func TestUserSecretWriters_Inventory(t *testing.T) {
+	reviewed := map[string]string{
+		"setEnvVar":               "user scope: scope ID and creator are both the calling user (resolveEnvSecretAccess)",
+		"setSecret":               "user scope: scope ID and creator are both the calling user (resolveEnvSecretAccess)",
+		"handleAgentSecrets":      "user scope: the creator is set to the scope ID (the agent's origin user)",
+		"handleScopedEnvVarByKey": "called with the project and runtime broker scopes only",
+		"handleScopedSecretByKey": "called with the project and runtime broker scopes only",
+		"Run":                     "SecretMigrationExecutor.Run copies an existing row's scope and CreatedBy",
+	}
+	fixedScope := func(e ast.Expr) bool {
+		sel, ok := e.(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		switch sel.Sel.Name {
+		case "ScopeHub", "ScopeProject", "ScopeRuntimeBroker":
+			return true
+		}
+		return false
+	}
+	fset, files := parseHubProduction(t)
+	found := map[string]bool{}
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok {
+				continue
+			}
+			ast.Inspect(fn, func(n ast.Node) bool {
+				lit, ok := n.(*ast.CompositeLit)
+				if !ok {
+					return true
+				}
+				sel, ok := lit.Type.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != "SetSecretInput" {
+					return true
+				}
+				var scope ast.Expr
+				for _, elt := range lit.Elts {
+					if kv, ok := elt.(*ast.KeyValueExpr); ok {
+						if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Scope" {
+							scope = kv.Value
+						}
+					}
+				}
+				if scope != nil && fixedScope(scope) {
+					return true
+				}
+				found[fn.Name.Name] = true
+				_, ok = reviewed[fn.Name.Name]
+				assert.True(t, ok, "%s: %s writes a secret whose scope is not a fixed non-user scope; review its CreatedBy and add it here and to TestUserSecretWriters_RecordScopeOwnerAsCreator",
+					fset.Position(lit.Pos()), fn.Name.Name)
+				return true
+			})
+		}
+	}
+	for _, name := range []string{"setEnvVar", "setSecret", "handleAgentSecrets"} {
+		assert.True(t, found[name], "the user-scope writer %s is still found", name)
 	}
 }
 

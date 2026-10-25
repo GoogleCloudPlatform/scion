@@ -24,6 +24,7 @@ package hub
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"sort"
@@ -46,6 +47,8 @@ const userScopeCeilingKey = "USER_SCOPE_CEILING_KEY"
 // progeny (AllowProgeny, CreatedBy the root).
 type userScopeCeilingFixture struct {
 	*materialFixture
+	// mixedParent is the upper agent of the chain mixedChain builds.
+	mixedParent string
 }
 
 func newUserScopeCeilingFixture(t *testing.T, name string, ceiling store.EffectCeiling) *userScopeCeilingFixture {
@@ -112,6 +115,21 @@ func (f *userScopeCeilingFixture) childAgent(t *testing.T, name string, ancestry
 		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(role)}, Ancestry: ancestry,
 	}))
 	return id, mintRecordedMaterialToken(t, f.Server, f.Store, id, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, ancestry)
+}
+
+// mixedChain builds a chain that mixes recorded and unrecorded hops: an
+// agent P (ancestry [U]) whose edge from U carries no recorded provenance,
+// and below it an agent C (ancestry [U, P]) with a recorded edge from P
+// carrying ceiling. It returns C's ID and token; P's ID is f.mixedParent.
+func (f *userScopeCeilingFixture) mixedChain(t *testing.T, name string, ceiling store.EffectCeiling) (string, string) {
+	t.Helper()
+	parent, _ := f.childAgent(t, name+"-parent", []string{f.UserID}, AgentRoleFull)
+	createDCEdge(t, f.Store, store.DelegationPrincipalUser, f.UserID, store.DelegationPrincipalAgent, parent,
+		store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
+	child, token := f.childAgent(t, name+"-child", []string{f.UserID, parent}, AgentRoleFull)
+	f.recordEdge(t, store.DelegationPrincipalAgent, parent, child, ceiling, nil)
+	f.mixedParent = parent
+	return child, token
 }
 
 // decideSecretUse is the decision check 8 makes for a recorded chain:
@@ -271,15 +289,19 @@ func TestAgentSecretRead_UnrecordedChainKeepsProgenyRule(t *testing.T) {
 		})
 	}
 
-	// A recorded hop below a hop without recorded provenance: the chain as a
-	// whole is not recorded, so the progeny rule applies.
+	// A recorded hop below a hop without recorded provenance: the recorded
+	// hop passes, the walk then reaches the unrecorded hop, so the chain is
+	// not recorded and the progeny rule applies. A failing recorded hop in
+	// the same position is refused instead
+	// (TestAgentSecretRead_MixedChainEnforcesRecordedHops).
 	t.Run("recorded hop below an unrecorded hop", func(t *testing.T) {
 		f := newUserScopeChainFixture(t, "uscl-mixed")
-		parent, _ := f.childAgent(t, "mixed-parent", []string{f.UserID}, AgentRoleFull)
-		createDCEdge(t, f.Store, store.DelegationPrincipalUser, f.UserID, store.DelegationPrincipalAgent, parent,
-			store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
-		child, token := f.childAgent(t, "mixed-child", []string{f.UserID, parent}, AgentRoleFull)
-		f.recordEdge(t, store.DelegationPrincipalAgent, parent, child, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
+		child, token := f.mixedChain(t, "mixed", store.EffectCeiling{Kind: store.EffectCeilingPrincipal})
+		chain := f.Server.authzService.userSecretChainVerdict(context.Background(),
+			newFullAgentIdentity(child, f.ProjectID, []string{f.UserID, f.mixedParent}, []AgentTokenScope{ScopeProjectSecretRead}), nil)
+		require.False(t, chain.decision.Allowed)
+		assert.True(t, chain.unrecorded, "the deny is the unrecorded upper hop: %q", chain.decision.Reason)
+		assert.Equal(t, DenyCauseCeilingUnrecorded, chain.decision.DenyCause, "reason %q", chain.decision.Reason)
 		f.assertReadAndListAgree(t, child, token, userScopeCeilingKey, true)
 	})
 
@@ -294,6 +316,91 @@ func TestAgentSecretRead_UnrecordedChainKeepsProgenyRule(t *testing.T) {
 		})
 		require.NoError(t, err)
 		f.assertReadAndListAgree(t, f.AgentID, f.Token, userScopeCeilingKey, false)
+	})
+}
+
+// TestAgentSecretRead_MixedChainEnforcesRecordedHops pins the boundary for
+// a chain that mixes recorded and unrecorded hops. The chain verdict stops
+// at its first failing clause, so a recorded hop below the first unrecorded
+// hop is enforced: S3b, S3c and S3d run on it before the walk reaches the
+// unrecorded hop. When that recorded hop fails, the read and the list
+// refuse the secret and the chain is not classed unrecorded. An unrecorded
+// hop by itself never refuses (the passing case is "recorded hop below an
+// unrecorded hop" in TestAgentSecretRead_UnrecordedChainKeepsProgenyRule).
+func TestAgentSecretRead_MixedChainEnforcesRecordedHops(t *testing.T) {
+	cases := []struct {
+		name    string
+		ceiling store.EffectCeiling
+		after   func(t *testing.T, f *userScopeCeilingFixture)
+		cause   DenyCause
+	}{
+		{"recorded bounded hop without secret.use", boundedCeiling("project.read", "agent.read", "project.secret_read"),
+			func(t *testing.T, f *userScopeCeilingFixture) {}, DenyCauseCeilingEffectExceeded},
+		{"upper agent held", store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+			func(t *testing.T, f *userScopeCeilingFixture) {
+				holdAgent(t, f.Store, f.mixedParent, f.ProjectID, f.UserID)
+			}, DenyCauseCeilingOrphaned},
+		{"upper agent role without the scope", store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+			func(t *testing.T, f *userScopeCeilingFixture) {
+				setAgentRole(t, f.Store, f.mixedParent, AgentRoleNone)
+			}, DenyCauseCeilingDelegatorLacksPermission},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			name := "uscm-" + strings.ReplaceAll(tc.name, " ", "-")
+			f := newUserScopeChainFixture(t, name)
+			child, token := f.mixedChain(t, name, tc.ceiling)
+			tc.after(t, f)
+
+			chain := f.Server.authzService.userSecretChainVerdict(context.Background(),
+				newFullAgentIdentity(child, f.ProjectID, []string{f.UserID, f.mixedParent}, []AgentTokenScope{ScopeProjectSecretRead}), nil)
+			require.False(t, chain.decision.Allowed)
+			assert.False(t, chain.unrecorded, "the deny is the recorded lower hop: %q", chain.decision.Reason)
+			assert.Equal(t, tc.cause, chain.decision.DenyCause, "reason %q", chain.decision.Reason)
+
+			f.assertReadAndListAgree(t, child, token, userScopeCeilingKey, false)
+		})
+	}
+}
+
+// TestUserSecretWriters_RecordScopeOwnerAsCreator (T13b): every writer of a
+// user-scope secret records the scope owner as the creator (CreatedBy ==
+// ScopeID), the attribution S7 relies on. The writers are the user secret
+// endpoint, the user env endpoint with secret storage, and the agent
+// secret endpoint (harness credential capture); TestUserSecretWriters_Inventory
+// keeps the list complete.
+func TestUserSecretWriters_RecordScopeOwnerAsCreator(t *testing.T) {
+	f := newUserScopeChainFixture(t, "uscw-writers")
+	ctx := context.Background()
+	assertOwnerCreated := func(t *testing.T, key, scopeID string) {
+		t.Helper()
+		meta, err := f.Server.secretBackend.GetMeta(ctx, key, store.ScopeUser, scopeID)
+		require.NoError(t, err)
+		require.NotNil(t, meta)
+		assert.Equal(t, scopeID, meta.ScopeID)
+		assert.Equal(t, meta.ScopeID, meta.CreatedBy, "%s: the creator is the scope owner", key)
+	}
+
+	t.Run("user secret endpoint", func(t *testing.T) {
+		rec := doRequest(t, f.Server, http.MethodPut, "/api/v1/secrets/USCW_USER_SECRET", SetSecretRequest{
+			Value: base64.StdEncoding.EncodeToString([]byte("v")), Scope: store.ScopeUser, AllowProgeny: true,
+		})
+		require.Contains(t, []int{http.StatusOK, http.StatusCreated}, rec.Code, rec.Body.String())
+		assertOwnerCreated(t, "USCW_USER_SECRET", DevUserID)
+	})
+	t.Run("user env endpoint with secret storage", func(t *testing.T) {
+		rec := doRequest(t, f.Server, http.MethodPut, "/api/v1/env/USCW_USER_ENV_SECRET", SetEnvVarRequest{
+			Value: "v", Scope: store.ScopeUser, Secret: true,
+		})
+		require.Contains(t, []int{http.StatusOK, http.StatusCreated}, rec.Code, rec.Body.String())
+		assertOwnerCreated(t, "USCW_USER_ENV_SECRET", DevUserID)
+	})
+	t.Run("agent secret endpoint", func(t *testing.T) {
+		allow := true
+		rec := doRequestWithAgentToken(t, f.Server, http.MethodPut, "/api/v1/agents/"+f.AgentID+"/secrets/USCW_AGENT_SECRET",
+			AgentSetSecretRequest{Value: base64.StdEncoding.EncodeToString([]byte("v")), Scope: store.ScopeUser, AllowProgeny: &allow}, f.Token)
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		assertOwnerCreated(t, "USCW_AGENT_SECRET", f.UserID)
 	})
 }
 
@@ -431,18 +538,22 @@ func TestAgentSecretList_AgreesWithReadForRecordedChains(t *testing.T) {
 
 // TestAgentSecretList_RecordedChainLoads (T31): the constraint table is
 // loaded once per list request for the user part, whatever the number of
-// candidates, and a request-level load failure lists no user key.
+// candidates, and a request-level load failure (the constraint table, or the
+// terminal user's principal closure) lists no user key.
 //
 // The source check and the per-item constraint check do no load of their
 // own, so there is no per-item load fault to inject: a per-item
 // ceiling_error can only come from an inconsistent call and is covered by
 // userSecretSourceCheck's own guard.
 func TestAgentSecretList_RecordedChainLoads(t *testing.T) {
+	// walks lists the agent's secrets with n shared user-scope candidates
+	// and returns the number of constraint-table loads.
 	walks := func(t *testing.T, n int, scope string) int {
 		t.Helper()
-		f := newUserScopeCeilingFixture(t, "uscw-"+scope+"-"+string(rune('0'+n)), store.EffectCeiling{Kind: store.EffectCeilingPrincipal})
-		// The fixture already shares one key; add n-1 more.
-		for i := 1; i < n; i++ {
+		f := &userScopeCeilingFixture{materialFixture: newMaterialFixture(t, "uscw-"+scope+"-"+string(rune('0'+n)))}
+		setBackfillCompleted(t, f.Store)
+		f.recordEdge(t, store.DelegationPrincipalUser, f.UserID, f.AgentID, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, nil)
+		for i := 0; i < n; i++ {
 			f.shareUserSecret(t, f.UserID, "USCW_KEY_"+string(rune('A'+i)), f.UserID)
 		}
 		counter := &uspStore{Store: f.Server.authzService.store}
@@ -451,7 +562,7 @@ func TestAgentSecretList_RecordedChainLoads(t *testing.T) {
 		require.Equal(t, http.StatusOK, code)
 		userKeys := 0
 		for _, k := range keys {
-			if k == userScopeCeilingKey || strings.HasPrefix(k, "USCW_KEY_") {
+			if strings.HasPrefix(k, "USCW_KEY_") {
 				userKeys++
 			}
 		}
@@ -464,12 +575,10 @@ func TestAgentSecretList_RecordedChainLoads(t *testing.T) {
 		assert.Positive(t, w5)
 	}
 	t.Run("user section adds at most one load", func(t *testing.T) {
-		f := newUserScopeCeilingFixture(t, "uscw-zero", store.EffectCeiling{Kind: store.EffectCeilingPrincipal})
-		counter := &uspStore{Store: f.Server.authzService.store}
-		f.Server.authzService.store = counter
-		_, _ = f.listKeys(t, f.AgentID, f.Token, store.ScopeUser)
-		withOne := counter.callCount("ListAccessConstraints")
-		assert.LessOrEqual(t, withOne, 1, "the user part loads the constraint table at most once")
+		// The root user is a member of the agent's project, so nothing
+		// before the user section walks the table on ?scope=user.
+		w0, w5 := walks(t, 0, store.ScopeUser), walks(t, 5, store.ScopeUser)
+		assert.LessOrEqual(t, w5-w0, 1, "the user part loads the constraint table at most once (N=0: %d, N=5: %d)", w0, w5)
 	})
 	t.Run("constraint load failure lists no user key", func(t *testing.T) {
 		f := newUserScopeCeilingFixture(t, "uscw-fault", store.EffectCeiling{Kind: store.EffectCeilingPrincipal})
@@ -477,5 +586,20 @@ func TestAgentSecretList_RecordedChainLoads(t *testing.T) {
 		code, keys := f.listKeys(t, f.AgentID, f.Token, store.ScopeUser)
 		assert.Equal(t, http.StatusInternalServerError, code)
 		assert.Empty(t, keys)
+	})
+	t.Run("terminal user closure failure lists no user key", func(t *testing.T) {
+		// The group lookup fails only after the constraint table is read:
+		// the request-scoped load reads the table, then builds the terminal
+		// user's closure, so the fault lands there and nowhere earlier.
+		f := newUserScopeCeilingFixture(t, "uscw-closure-fault", store.EffectCeiling{Kind: store.EffectCeilingPrincipal})
+		counter := &uspStore{Store: f.Server.authzService.store, failGroupsAfterConstraints: true}
+		f.Server.authzService.store = counter
+		code, keys := f.listKeys(t, f.AgentID, f.Token, store.ScopeUser)
+		assert.Equal(t, http.StatusInternalServerError, code)
+		assert.Empty(t, keys)
+		counter.mu.Lock()
+		faults := counter.groupFaults
+		counter.mu.Unlock()
+		assert.Positive(t, faults, "the closure fault was injected")
 	})
 }
