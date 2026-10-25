@@ -129,10 +129,20 @@ func snapRows(t *testing.T, st store.Store, keys ...string) map[string]rowSnap {
 }
 
 func signingKeyBytes(srv *Server) map[string][]byte {
+	// The download key is held by srv.downloadKeys (capability_keys.go).
+	// These test servers run without a keyring file, so it is the fixed
+	// legacy key resolved from the signing-key backup, and the active key
+	// of that one-key ring is exactly those bytes.
+	var download []byte
+	if srv.downloadKeys.ring != nil {
+		if k, err := srv.downloadKeys.ring.Active(srv.downloadKeys.purpose, time.Now()); err == nil {
+			download = append([]byte{}, k.Bytes()...)
+		}
+	}
 	return map[string][]byte{
 		SecretKeyAgentSigningKey:    append([]byte{}, srv.agentTokenService.config.SigningKey...),
 		SecretKeyUserSigningKey:     append([]byte{}, srv.userTokenService.config.SigningKey...),
-		SecretKeyDownloadSigningKey: append([]byte{}, srv.downloadSigningKey...),
+		SecretKeyDownloadSigningKey: download,
 	}
 }
 
