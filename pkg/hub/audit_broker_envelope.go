@@ -223,6 +223,11 @@ func brokerAuthFailureCode(err error) auditevent.BrokerFailureCode {
 		return auditevent.BrokerFailureMissingCredentials
 	case errors.Is(err, errBrokerAuthMalformedTimestamp), errors.Is(err, apiclient.ErrUnsizedSignedBody):
 		return auditevent.BrokerFailureMalformed
+	case errors.Is(err, errBrokerAuthBodyTooLarge):
+		// D298: a body over apiclient.MaxSignedRequestBodyBytes (answered
+		// 413 payload_too_large) is recorded as malformed, so the closed
+		// failure_code enum of audit ruling R12 is not reopened.
+		return auditevent.BrokerFailureMalformed
 	case errors.Is(err, errBrokerAuthClockSkew):
 		return auditevent.BrokerFailureClockSkew
 	case errors.Is(err, errBrokerAuthReplay):
