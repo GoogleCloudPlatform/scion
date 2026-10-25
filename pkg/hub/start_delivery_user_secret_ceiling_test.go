@@ -448,9 +448,11 @@ func newSDReincarnation(t *testing.T) *sdReincarnation {
 	srv, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())
 	setBackfillCompleted(t, s)
 	srv.SetSecretBackend(secret.NewLocalBackend(s, "test-hub-id", "test-secret"))
-	// newReincarnateTestAgent records this user as the agent's creator.
+	// newReincarnateTestAgent records this user as the agent's creator. It
+	// owns the project (its only built-in membership), so the later standing
+	// checks find a project binding and add none.
 	creator := tid("user-creator")
-	ensureStandingRoot(t, s, project.ID, creator)
+	ensureActiveUser(t, s, creator)
 	grantProjectRole(t, s, creator, project.ID, store.ProjectRoleOwner)
 	sdShareOwnerSecrets(t, srv.secretBackend, creator)
 	return &sdReincarnation{srv: srv, s: s, project: project, broker: broker, disp: sdDispatcher(srv, s), creator: creator}
