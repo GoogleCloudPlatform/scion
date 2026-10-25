@@ -23,6 +23,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -39,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
+	"github.com/gorilla/websocket"
 )
 
 // World is a registry plus any number of relay nodes sharing it.
@@ -49,6 +51,10 @@ type World struct {
 	Registry   *registry.Registry
 	PeerSecret []byte // shared relay-peer secret (the MAC key is HKDF-derived from it)
 	GrantKey   *conduitv1.GrantKey
+	// HopTLS, when set before a node is built, serves that node's
+	// internal API over TLS and makes its hop clients verify peers with
+	// HopTLS.Client.
+	HopTLS *HopTLS
 
 	now   atomic.Int64 // registry clock, unix nanos
 	fault atomic.Pointer[func(op string) error]
@@ -151,7 +157,7 @@ func (w *World) NewNode(id string, mod func(*relay.Config)) (*Node, error) {
 	t := w.T
 	n := &Node{W: w, Clock: clock.NewFake(time.Now()), Served: make(chan error, 64)}
 	var internal atomic.Pointer[http.Handler]
-	n.Internal = httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+	n.Internal = httptest.NewUnstartedServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		h := internal.Load()
 		if h == nil {
 			http.Error(rw, "not ready", http.StatusServiceUnavailable)
@@ -159,9 +165,22 @@ func (w *World) NewNode(id string, mod func(*relay.Config)) (*Node, error) {
 		}
 		(*h).ServeHTTP(rw, r)
 	}))
+	hc := n.Internal.Client()
+	var wsd *websocket.Dialer
+	if w.HopTLS != nil {
+		// As the internal listener does in production: the operator's
+		// certificate on a TLS listener, not httptest's own.
+		n.Internal.Listener = tls.NewListener(n.Internal.Listener, w.HopTLS.Server)
+		n.Internal.Start()
+		n.Internal.URL = "https://" + n.Internal.Listener.Addr().String()
+		hc = relay.NewHopHTTPClient(w.HopTLS.Client)
+		wsd = relay.NewHopWSDialer(w.HopTLS.Client)
+	} else {
+		n.Internal.Start()
+	}
 	t.Cleanup(n.Internal.Close)
 	auth := w.PeerAuth(id)
-	n.Peers = &relay.PeerClient{HTTP: n.Internal.Client(), Auth: auth}
+	n.Peers = &relay.PeerClient{HTTP: hc, WS: wsd, Auth: auth}
 	cfg := relay.Config{
 		InstanceID:       id,
 		InternalEndpoint: n.Internal.URL,
@@ -173,7 +192,8 @@ func (w *World) NewNode(id string, mod func(*relay.Config)) (*Node, error) {
 		},
 		PeerAuth:   auth,
 		Store:      w.Store,
-		HTTPClient: n.Internal.Client(),
+		HTTPClient: hc,
+		WSDialer:   wsd,
 		Clock:      n.Clock,
 	}
 	if mod != nil {
