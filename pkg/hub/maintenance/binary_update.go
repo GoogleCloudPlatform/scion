@@ -508,9 +508,12 @@ func (e *BinaryUpdateExecutor) undoActivation(ctx context.Context, logger io.Wri
 		return fmt.Errorf("%w; %s cannot be rolled back by the %s installer (no backup of the previous binary is kept): %s stays installed and will run after the hub's next restart",
 			cause, target, e.installer.Name(), target)
 	}
-	// The rollback must run even when ctx is what failed (the hook or the
-	// restart hit its deadline, or the run was cancelled): detach from its
-	// cancellation, keep its values (logging, trace), and bound it on its own.
+	// ctx is the run's context, not the hook's or Restart's (their own
+	// deadlines never reach here). It may still have ended: the run's
+	// overall deadline (the 20-minute update-binary backstop) or a
+	// cancellation. The rollback must run regardless, so it is detached from
+	// that cancellation, keeps ctx's values (logging, trace) and is bounded
+	// on its own.
 	undoCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.installTimeout)
 	defer cancel()
 	if err := d.Deactivate(undoCtx); err != nil {

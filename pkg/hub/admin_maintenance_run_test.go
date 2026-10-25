@@ -376,3 +376,49 @@ func TestClearPendingUpdateAfterFailure_OtherRunKept(t *testing.T) {
 		t.Fatalf("another run's pending_update was cleared: %v", err)
 	}
 }
+
+// cancelOnRestartingStore fails the run write that records "restarting": it
+// first cancels the hook's ctx (as a shutdown or deadline would) and then
+// returns that ctx's error, so the failure path runs with a dead ctx.
+type cancelOnRestartingStore struct {
+	store.Store
+	fault  *storeFaultSwitch
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnRestartingStore) UpdateMaintenanceRun(ctx context.Context, run *store.MaintenanceOperationRun) error {
+	if c.fault.Active() && run.Status == store.MaintenanceStatusRestarting {
+		c.cancel()
+		return ctx.Err()
+	}
+	return c.Store.UpdateMaintenanceRun(ctx, run)
+}
+
+// Regression test at the call site Gemini flagged: when markRunRestarting's
+// run write fails because its ctx was cancelled, the pending update it has
+// just written is still cleared (the runner's own clear does not run, as
+// the run never became "restarting").
+func TestMarkRunRestarting_FailureOnCancelledCtxClearsPendingUpdate(t *testing.T) {
+	srv, s := newTestServerWithStore(t)
+	run := newRun(t, s)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *cancelOnRestartingStore {
+		return &cancelOnRestartingStore{Store: inner, fault: f, cancel: cancel}
+	})
+	fault.Arm()
+
+	err := srv.markRunRestarting(ctx, run, &runLogBuffer{}, maintenance.PendingRestart{
+		From: "nightly-20261023", To: "nightly-20261024", Strategy: "symlink",
+	})
+	if err == nil || !strings.Contains(err.Error(), "record run as restarting") {
+		t.Fatalf("markRunRestarting = %v, want the run write failure", err)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("test setup: the hook ctx was not cancelled by the failing write")
+	}
+	requireNoPendingUpdate(t, s)
+	if run.Status == store.MaintenanceStatusRestarting {
+		t.Fatalf("run left as restarting after a failed write: %+v", run)
+	}
+}
