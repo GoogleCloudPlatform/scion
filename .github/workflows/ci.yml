@@ -163,6 +163,30 @@ jobs:
             echo "go=false" >> "$GITHUB_OUTPUT"
           fi
 
+  # Runner routing (hack/check-runner-routing.sh). A fork can route jobs to its
+  # cr-ci Cloud Run runner by setting the SCION_LARGE_RUNNER variable, which is
+  # unset here, so every job runs on ubuntu-latest. This keeps every routed
+  # runs-on byte-identical to the canonical, fork-PR-guarded expression, keeps
+  # jobs that cannot or must not run there (services, container, docker://
+  # steps, write permissions, pull_request_target, literal self-hosted labels)
+  # off it, and requires a timeout of at most 35 min. Its own job, so a failure
+  # here does not touch the path detection in changes (which fails open).
+  runner-routing-check:
+    name: Runner routing check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Check runner routing (selftest, then the workflows)
+        run: |
+          ./hack/check-runner-routing.sh --selftest
+          ./hack/check-runner-routing.sh
+
   build-and-test:
     name: Build & Test
     runs-on: ubuntu-latest
@@ -618,6 +642,28 @@ jobs:
           esac
           exit "$rc"
 
+      # Windows file-protection guard: pure bash plus
+      # `go list` (no compile). Exit 1 = findings, 2 = tool or list error.
+      - name: Check Windows File Protection (winsec-guard)
+        run: |
+          set +e
+          bash hack/winsec-guard.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=winsec-guard NOT checked::winsec-guard --self-test failed (exit $rc) — the guard itself is broken, so nothing was analysed."
+            exit "$rc"
+          fi
+          bash hack/winsec-guard.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=winsec-guard::A Windows-reachable file uses Chmod as protection, string containment, a zero no-follow flag or a nil privacy check; see the step log and the header of hack/winsec-guard.sh." ;;
+            *) echo "::error title=winsec-guard NOT checked::winsec-guard could not run (exit $rc) — NOTHING WAS ANALYSED." ;;
+          esac
+          exit "$rc"
+
       # Run Tests with a diagnostic hang watchdog (ptone/scion#3183). It is
       # diagnostic only: no retries, and on a normal pass or fail the step
       # exits with make test-fast-ci's own exit code. If the tests are still
@@ -816,6 +862,46 @@ jobs:
 
       - name: Build Binary
         run: make build
+
+      - name: Save Go cache
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
+
+  # The Windows CLI must keep compiling. This is its own ubuntu job rather
+  # than a step in Build & Test: in Build & Test the step measured 9m05s
+  # cold (GOOS=windows compiles pkg/hub and its dependencies with no cached
+  # objects, and only pushes to main save this workload's cache), which put
+  # that job at 28m of its 30m timeout. Non-test builds only (pkg/hub compiles as a dependency,
+  # never its test package), so no Web UI build is needed: web/dist/client
+  # holds a committed .gitkeep for the embed. winsec-guard runs in Build &
+  # Test. No needs/if and no path gating: it runs on every PR and push to
+  # main, so the check is always reported.
+  windows-cross-build:
+    name: Windows cross-build (guard)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        id: go
+        uses: ./.github/actions/setup-go-cache
+        with:
+          workload: windows-cross-build
+
+      - name: Cross-build for Windows (guard)
+        env:
+          GOTOOLCHAIN: local
+          GOGC: '50'
+        run: |
+          GOOS=windows GOARCH=amd64 go build -buildvcs=false -o /dev/null ./cmd/scion
+          GOOS=windows GOARCH=arm64 go build -buildvcs=false -o /dev/null ./cmd/scion
+          GOOS=windows GOARCH=amd64 go vet ./pkg/util/privatefs/... ./pkg/util/pathcanon/... ./pkg/util/filelock/... ./pkg/tunnelclient/...
 
       - name: Save Go cache
         uses: ./.github/actions/save-go-cache
@@ -1395,7 +1481,7 @@ jobs:
 
   lint:
     name: golangci-lint
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     # Bounds a hang only. With the patched golangci-lint and the two-pass
     # split (hack/golangci-lint-split.sh) the whole job took 4m40s-4m53s on
     # ubuntu-latest (lint step 166-177 s, plus a 46-58 s cold build of the
@@ -1758,7 +1844,7 @@ jobs:
     # always on push to main. Fails open: if the changes job did not succeed,
     # the tests run anyway.
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.starter_hub == 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Checkout code

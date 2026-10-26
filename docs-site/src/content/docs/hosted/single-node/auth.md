@@ -477,6 +477,19 @@ GCP identity passthrough mode does not work inside Cloud Run Sandbox (gVisor) ru
 While the Hub automatically translates passthrough to assign mode at agent creation and PATCH time (using the broker's host service account), explicitly configuring assign mode is recommended for clarity and consistency.
 :::
 
+#### Host networking on Docker and Podman
+
+On the Docker runtime, an agent container runs with `--network=host` when its Hub endpoint is on loopback (`localhost`, `127.0.0.1`, `::1`, or `host.docker.internal`). On Docker and Podman, it also runs with `--network=host` whenever `SCION_FORCE_HOST_NETWORK` is set on the Runtime Broker. Because the container shares the host network namespace, `sciontool` cannot install its `iptables` rule for `169.254.169.254` without altering the host's own networking:
+
+- **`assign`** is always refused under host networking.
+- **`block`** is governed by the Runtime Broker's [`SCION_HOST_NETWORK_BLOCK_POLICY`](/scion/reference/server-config/#runtime-broker-environment-variables) environment variable:
+  - `auto` (default when unset): refuses agent start when the Runtime Broker runs on a detected Linux cloud host (GCE, AWS EC2, Azure, Oracle Cloud, Alibaba Cloud, OpenStack, DigitalOcean, or Hetzner, identified from local DMI files under `/sys/class/dmi/id/`, `/run/cloud-init/instance-data.json`, or GCE guest-agent files with no network calls). On other hosts (such as a local workstation), the agent starts and the Runtime Broker logs and returns a warning that `169.254.169.254` is not blocked.
+  - `strict`: always refuses agent start when `block` combines with host networking, even off-cloud.
+  - `allow`: allows agent start under host networking even on a detected cloud host, logging a warning and appending an acknowledgement to the start warning.
+  - Any unrecognized value is logged at `ERROR` and treated as `strict`.
+
+To run agents with `block` or `assign` on a cloud VM, configure a non-loopback, bridge-reachable Hub URL (`SCION_SERVER_BASE_URL` or `server.hub.public_url`) so containers run on bridge networking, and leave `SCION_FORCE_HOST_NETWORK` unset on the Runtime Broker.
+
 ### Management UI & Hub-Minted Service Accounts
 
 Administrators can manage available Service Accounts through the **Service Accounts** section in the Admin dashboard. 

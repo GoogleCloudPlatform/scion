@@ -18,7 +18,7 @@ The Experiments tab lists every experiment this hub version knows about: its tit
 
 ## For agents
 
-An agent can see which experiments are on with `scion whoami --full`, which reads `GET /api/v1/experiments` live (see [`scion whoami`](/scion/reference/cli/#scion-whoami)). That includes `hub.artifacts`. The environment variable `SCION_HUB_EXPERIMENTS` covers only the experiments dispatched to agents (currently `hub.conduit`), fixed when the agent starts; it is not the list of enabled experiments.
+An agent can see which experiments are on with `scion whoami --full`, which reads `GET /api/v1/experiments` live (see [`scion whoami`](/scion/reference/cli/#scion-whoami)). That includes `hub.artifacts` (and web-only experiments such as `web.artifact_review_editor`, the graphical review editor for Markdown artifacts; see [Artifacts](/scion/reference/artifacts/#web-pages)). The environment variable `SCION_HUB_EXPERIMENTS` covers only the experiments dispatched to agents (currently `hub.conduit`), fixed when the agent starts; it is not the list of enabled experiments.
 
 ## For developers: launching an experiment
 

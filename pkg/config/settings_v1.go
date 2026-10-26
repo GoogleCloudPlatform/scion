@@ -1590,6 +1590,13 @@ type V1ServerHubConfig struct {
 	// HubServerConfig.TestIdentities). It is file/env only: the
 	// server-config API refuses it in every mode.
 	TestIdentities *V1TestIdentitiesConfig `json:"test_identities,omitempty" yaml:"test_identities,omitempty" koanf:"test_identities"`
+	// GCPProjectID is server.hub.gcp_project_id (see
+	// HubServerConfig.GCPProjectID): the hub's own GCP project, used for
+	// service-account minting, the Policy Troubleshooter quota project and
+	// the hub's metrics and trace export. Read once at startup. It is
+	// file/env only: the server-config API refuses it in every mode and GET
+	// leaves it out (HubGCPProjectIDKey).
+	GCPProjectID string `json:"gcp_project_id,omitempty" yaml:"gcp_project_id,omitempty" koanf:"gcp_project_id"`
 	// AgentEndpoint optionally overrides the Hub URL injected into agents as
 	// SCION_HUB_ENDPOINT, without changing PublicURL's other uses (invite
 	// links, chat-bridge links, the OIDC issuer default, the cloudrun_invoker
@@ -4118,6 +4125,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.HubClass != "" {
 			gc.Hub.HubClass = v1.Hub.HubClass
 		}
+		if v1.Hub.GCPProjectID != "" {
+			gc.Hub.GCPProjectID = v1.Hub.GCPProjectID
+		}
 		if v1.Hub.TestIdentities != nil {
 			ti := &TestIdentitiesConfig{AdminWebSessions: v1.Hub.TestIdentities.AdminWebSessions}
 			for _, e := range v1.Hub.TestIdentities.WorkloadIssuers {
@@ -4580,6 +4590,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		AgentEndpoint:          gc.Hub.AgentEndpoint,
 		MonitoringDashboardURL: gc.Hub.MonitoringDashboardURL,
 		HubClass:               gc.Hub.HubClass,
+		GCPProjectID:           gc.Hub.GCPProjectID,
 		ReadTimeout:            gc.Hub.ReadTimeout.String(),
 		WriteTimeout:           gc.Hub.WriteTimeout.String(),
 		AdminEmails:            gc.Hub.AdminEmails,
@@ -6764,7 +6775,9 @@ func replaceSettingsFileByName(lock *SettingsLock, path string, data []byte) err
 // backupSettingsFile makes backupPath a backup of the settings file at path
 // without moving path: a symlink is copied as a new symlink with the same
 // target (as renaming it would have kept it), and a regular file is hard
-// linked, or copied with its mode where hard links are not supported.
+// linked, or copied where hard links are not supported: with its mode on
+// unix, privately on Windows when the original is private (see
+// copySettingsBackup).
 func backupSettingsFile(path, backupPath string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -6780,25 +6793,7 @@ func backupSettingsFile(path, backupPath string) error {
 	if err := os.Link(path, backupPath); err == nil {
 		return nil
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	f, err := os.OpenFile(backupPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		_ = os.Remove(backupPath)
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(backupPath)
-		return err
-	}
-	return f.Close()
+	return copySettingsBackup(path, backupPath, info)
 }
 
 // loadServerConfigOnly loads a GlobalConfig from a single server.yaml file

@@ -21,7 +21,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
@@ -188,8 +187,8 @@ func writeAs(homeDir string, staged *Staged, uid, gid int) error {
 		// created file over a bind-mounted regular file's directory entry
 		// fails EBUSY, so this leaf is written in place when it already
 		// exists as a regular file rather than replaced via create+rename.
-		werr := dirfd.WriteAtNoFollowWithChown(dirFd, filepath.Base(target), target, data, 0600, fileUID, fileGID, dirfd.TruncateInPlaceOrCreate, syscall.Fchown)
-		_ = syscall.Close(dirFd)
+		werr := dirfd.WriteAtNoFollowWithChown(dirFd, filepath.Base(target), target, data, 0600, fileUID, fileGID, dirfd.TruncateInPlaceOrCreate, dirfd.Fchown)
+		_ = dirfd.Close(dirFd)
 		if werr != nil {
 			return fmt.Errorf("failed to write secret file %s: %w", fs.Name, werr)
 		}
@@ -203,14 +202,14 @@ func writeAs(homeDir string, staged *Staged, uid, gid int) error {
 		}
 		data, err := json.Marshal(staged.VariableSecrets)
 		if err != nil {
-			_ = syscall.Close(scionDirFd)
+			_ = dirfd.Close(scionDirFd)
 			return fmt.Errorf("failed to marshal secrets.json: %w", err)
 		}
 		// Anchored at scionDirFd (which may have resolved homeDir through a
 		// trusted ancestor symlink), not by re-resolving secretsPath as a
 		// string — see the file-secret leaf write above for why.
-		werr := dirfd.WriteAtNoFollowWithChown(scionDirFd, "secrets.json", filepath.Join(scionDir, "secrets.json"), data, 0600, uid, gid, dirfd.RefuseSymlink, syscall.Fchown)
-		_ = syscall.Close(scionDirFd)
+		werr := dirfd.WriteAtNoFollowWithChown(scionDirFd, "secrets.json", filepath.Join(scionDir, "secrets.json"), data, 0600, uid, gid, dirfd.RefuseSymlink, dirfd.Fchown)
+		_ = dirfd.Close(scionDirFd)
 		if werr != nil {
 			return fmt.Errorf("failed to write secrets.json: %w", werr)
 		}

@@ -572,6 +572,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.SecretRotation:               testAdminPolicyDeny,
 	experiments.ContentHashV2:                testAdminPolicyDeny,
 	experiments.ArtifactReviewEditor:         testAdminPolicyDeny,
+	experiments.SkillContentHashV2:           testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.

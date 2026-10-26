@@ -82,9 +82,7 @@ func StartComponent(component, executable string, args []string, globalDir strin
 	cmd.Stderr = logFile
 	cmd.Stdin = nil // prevent credential prompts leaking to user's terminal
 	cmd.Dir = globalDir
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true, // new process group; Setsid omitted — fails with EPERM on macOS for Homebrew binaries
-	}
+	cmd.SysProcAttr = detachedSysProcAttr()
 
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()

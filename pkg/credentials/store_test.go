@@ -53,14 +53,8 @@ func TestStoreAndLoad(t *testing.T) {
 		t.Fatalf("Store failed: %v", err)
 	}
 
-	// Verify file was created with correct permissions
-	info, err := os.Stat(filepath.Join(tmpDir, CredentialsFile))
-	if err != nil {
-		t.Fatalf("credentials file not found: %v", err)
-	}
-	if info.Mode().Perm() != FileMode {
-		t.Errorf("wrong file permissions: got %o, want %o", info.Mode().Perm(), FileMode)
-	}
+	// Verify file was created private (mode 0600; on Windows an owner-only ACL)
+	assertPrivateFile(t, filepath.Join(tmpDir, CredentialsFile))
 
 	// Load credentials
 	creds, err := Load(hubURL)
