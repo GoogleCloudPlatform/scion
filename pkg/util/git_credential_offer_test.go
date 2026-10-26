@@ -389,18 +389,20 @@ func TestNoCredentialHelpers_ResetsURLScopedHelpers(t *testing.T) {
 			}
 			cs.useAmbientConfig(t, "[credential \""+url+"\"]\n\thelper = store --file="+store+"\n")
 
-			_ = CloneSharedWorkspace(filepath.Join(t.TempDir(), "ws"), cs.repoURL(), "", "")
-			if got := cs.seen(); len(got) == 0 || got[0] != "scoped:scoped-secret" {
-				t.Fatalf("a plain clone must use the scoped helper (harness), got %q", got)
-			}
-			m := len(cs.seen())
+			// The checks run before the contrast: when the endpoint rejects a
+			// stored credential, git erases it from the store, so a plain
+			// clone first would leave nothing for the checks to find.
 			_ = CloneSharedWorkspaceHardened(filepath.Join(t.TempDir(), "ws"), cs.repoURL(), "", "", HostGitHardening{NoCredentialHelpers: true})
 			_, _ = PullSharedWorkspaceHardened(workspace, cs.repoURL(), "", HostGitHardening{NoCredentialHelpers: true})
-			if extra := cs.seen()[m:]; len(extra) != 0 {
-				t.Errorf("NoCredentialHelpers offered %q", extra)
+			if got := cs.seen(); len(got) != 0 {
+				t.Errorf("NoCredentialHelpers offered %q", got)
 			}
 			if runs := cs.askpassRuns(); runs != "" {
 				t.Errorf("git ran GIT_ASKPASS:\n%s", runs)
+			}
+			_ = CloneSharedWorkspace(filepath.Join(t.TempDir(), "ws"), cs.repoURL(), "", "")
+			if got := cs.seen(); len(got) == 0 || got[0] != "scoped:scoped-secret" {
+				t.Fatalf("a plain clone must use the scoped helper (harness), got %q", got)
 			}
 		})
 	}
