@@ -29,6 +29,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import scion_harness as sh
+from json_depth_testutil import SIMULATED_DECODER_DEPTH_LIMIT, simulated_decoder_depth_limit
 
 
 class TestVersionContract(unittest.TestCase):
@@ -1665,6 +1666,52 @@ class TestAtomicWriteText(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# simulated JSON decoder depth limit (test helper, json_depth_testutil)
+# ---------------------------------------------------------------------------
+
+
+class TestSimulatedDecoderDepthLimit(unittest.TestCase):
+    """json_depth_testutil.simulated_decoder_depth_limit behaves like a real
+    decoder at its nesting limit (ptone/scion#6254)."""
+
+    def _loads(self, text, limit=2, **kwargs):
+        with simulated_decoder_depth_limit(limit):
+            return json.loads(text, **kwargs)
+
+    def test_within_limit_decodes_for_real(self):
+        n = SIMULATED_DECODER_DEPTH_LIMIT
+        self.assertEqual(self._loads("[" * n + "]" * n, limit=n), json.loads("[" * n + "]" * n))
+        self.assertEqual(self._loads('{"a": [1]}'), {"a": [1]})
+
+    def test_bracket_at_value_position_raises_recursion_error(self):
+        for text in ("[[[]]]", '{"a": {"b": {}}}', "[1, [[]]]", '["x", [ []]]', b"[[[]]]"):
+            with self.subTest(text=text), self.assertRaises(RecursionError):
+                self._loads(text)
+
+    def test_bracket_where_no_value_can_go_raises_decode_error(self):
+        for text, msg in (("[[1[]]]", "Expecting ',' delimiter"),
+                          ("[{{}}]", "Expecting property name enclosed in double quotes"),
+                          ('[{"a" []}]', "Expecting ':' delimiter")):
+            with self.subTest(text=text), self.assertRaises(json.JSONDecodeError) as cm:
+                self._loads(text)
+            self.assertEqual(cm.exception.msg, msg)
+
+    def test_errors_before_the_deep_part_are_raised_first(self):
+        with self.assertRaises(json.JSONDecodeError):
+            self._loads('{"a": 1,, "b": [[[]]]}')
+
+        def reject(_):
+            raise ValueError("hook")
+
+        with self.assertRaisesRegex(ValueError, "^hook$"):
+            self._loads('[NaN, [[]]]', parse_constant=reject)
+
+    def test_brackets_inside_strings_do_not_count(self):
+        text = '["[[[{{{", "\\\"[[[", ["x"]]'
+        self.assertEqual(self._loads(text), json.loads(text))
+
+
+# ---------------------------------------------------------------------------
 # read_json_skipping_comment_lines
 # ---------------------------------------------------------------------------
 
@@ -1718,9 +1765,18 @@ class TestReadJsonSkippingComments(unittest.TestCase):
         self._assert_provision_error(raw, "not valid JSON")
 
     def test_too_deep_raises_provision_error(self):
-        raw = ('{"key": "' + self.MARKER + '", "n": ' + "[" * 100000
-               + "]" * 100000 + "}").encode()
-        self._assert_provision_error(raw, "nested too deeply")
+        n = SIMULATED_DECODER_DEPTH_LIMIT
+        raw = ('{"key": "' + self.MARKER + '", "n": ' + "[" * n
+               + "]" * n + "}").encode()
+        with simulated_decoder_depth_limit():
+            self._assert_provision_error(raw, "nested too deeply")
+
+    def test_depth_within_limit_parses(self):
+        # Guards the simulation: one level shallower is decoded for real.
+        n = SIMULATED_DECODER_DEPTH_LIMIT - 1
+        path = self._write_raw(('{"n": ' + "[" * n + "]" * n + "}").encode())
+        with simulated_decoder_depth_limit():
+            self.assertIn("n", sh.read_json_skipping_comment_lines(path))
 
     def test_missing_file_raises_os_error(self):
         with self.assertRaises(FileNotFoundError):

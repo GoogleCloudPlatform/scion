@@ -467,24 +467,6 @@ func dmParticipantBounds(userID string) (prefix, suffix string) {
 	return "dm:user:" + userID + ":", ":user:" + userID
 }
 
-// filterSearchDMs drops DM results the filter's participant may not see. The
-// SQL condition already enforces this; this is a defensive second check using
-// the canonical isDMParticipant, so it never trims a page for well-formed keys.
-func filterSearchDMs(results []ChatSearchResult, filter ChatSearchFilter) []ChatSearchResult {
-	if filter.ConversationKey != "" {
-		return results
-	}
-	kept := results[:0]
-	for _, r := range results {
-		if strings.HasPrefix(r.ConversationKey, "dm:") &&
-			(filter.DMParticipantUserID == "" || !isDMParticipant(r.ConversationKey, filter.DMParticipantUserID)) {
-			continue
-		}
-		kept = append(kept, r)
-	}
-	return kept
-}
-
 // ChatSearchResult represents a single search result.
 type ChatSearchResult struct {
 	MessageID       string    `json:"messageId"`
@@ -2939,4 +2921,15 @@ DELETE FROM webchat_mention
 	}
 	n, _ := res.RowsAffected()
 	return int(n), nil
+}
+
+// AttachmentMeta holds metadata about a stored attachment.
+type AttachmentMeta struct {
+	ID         string    `json:"id"`
+	ProjectID  string    `json:"projectId"`
+	Filename   string    `json:"name"`
+	MimeType   string    `json:"mime"`
+	Size       int64     `json:"size"`
+	UploadedBy string    `json:"uploadedBy"`
+	CreatedAt  time.Time `json:"createdAt"`
 }

@@ -5493,6 +5493,41 @@ describe('settings the page must not write unless changed (ptone/scion#3913)', (
     expect(bodies[0]!.telemetry.hub).toEqual({ enabled: false });
   });
 
+  it.each([
+    ['db', false],
+    ['db', true],
+  ] as const)(
+    'cloud_logging is read-only and never sent on a database-backed hub (settings_tier=%s, layer0_editable=%s)',
+    async (tier, layer0Editable) => {
+      const bodies: Array<Record<string, any>> = [];
+      const cfg = unsetConfig(tier, { layer0_editable: layer0Editable });
+      cfg.telemetry = { cloud: { enabled: true, cloud_logging: true } };
+      element = await render(cfg, bodies);
+      const el = element as any;
+      expect(el.telemetryCloudCloudLogging).toBe(true);
+      expect(el.readOnlyReason('telemetry.cloud.cloud_logging')).toBe('startup');
+      // Even a changed value is left out of the save (ptone/scion#5664).
+      el.telemetryCloudCloudLogging = false;
+      el.telemetryCloudEnabled = false;
+      await save(element);
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0]!.telemetry.cloud.enabled).toBe(false);
+      expect(bodies[0]!.telemetry.cloud).not.toHaveProperty('cloud_logging');
+    }
+  );
+
+  it('cloud_logging stays editable and is sent when changed in settings.yaml mode', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    const cfg = unsetConfig('file');
+    cfg.telemetry = { cloud: { enabled: true, cloud_logging: true } };
+    element = await render(cfg, bodies);
+    const el = element as any;
+    expect(el.readOnlyReason('telemetry.cloud.cloud_logging')).toBeNull();
+    el.telemetryCloudCloudLogging = false;
+    await save(element);
+    expect(bodies[0]!.telemetry.cloud.cloud_logging).toBe(false);
+  });
+
   it('an unset switch says it is not set; toggling it twice leaves it unset', async () => {
     const bodies: Array<Record<string, any>> = [];
     element = await render(unsetConfig('db'), bodies);

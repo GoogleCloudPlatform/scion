@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -135,14 +136,14 @@ func assertListTopicsByProjectsParity(t *testing.T, db *sql.DB, dialect string, 
 }
 
 func TestListTopicsByProjects_SQLite(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	assertListTopicsByProjectsParity(t, db, "sqlite", wcs)
 }
 
 func TestListTopicsByProjects_Postgres(t *testing.T) {
-	dsn := requirePostgresDSN(t)
+	dsn := hubtestutil.RequirePostgresDSN(t)
 	db, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })

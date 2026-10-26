@@ -303,6 +303,7 @@ func (m *mockProdHubClient) Messaging() hubclient.MessagingService              
 func (m *mockProdHubClient) TestIdentityDelegations() hubclient.TestIdentityDelegationService {
 	return nil
 }
+func (m *mockProdHubClient) AgentDelegations() hubclient.AgentDelegationService { return nil }
 func (m *mockProdHubClient) Health(ctx context.Context) (*hubclient.HealthResponse, error) {
 	return &hubclient.HealthResponse{}, nil
 }

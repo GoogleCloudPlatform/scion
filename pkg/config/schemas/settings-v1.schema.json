@@ -1397,6 +1397,11 @@
           "description": "Deploy-time class of this hub. The only recognised value is \"test\"; unset means the hub is not a test hub. Read once at startup by the --test-mode gate: every level other than off requires \"test\". Settable only in the settings file or environment: the server-config API refuses this key in every mode.",
           "x-env-var": "SCION_SERVER_HUB_CLASS"
         },
+        "gcp_project_id": {
+          "type": "string",
+          "description": "The hub's own GCP project: the project for service-account minting, the Policy Troubleshooter quota project, and the export project of the hub's metrics and traces (server.hub.observability). When unset, those uses fall back to the project of the Google Cloud metadata server where there is one. The environment variable wins over the settings file. Read once at startup; restart required to change. Settable only in the settings file or environment: the server-config API refuses this key in every mode.",
+          "x-env-var": "SCION_SERVER_HUB_GCPPROJECTID"
+        },
         "test_identities": {
           "type": "object",
           "description": "Startup-only settings of hub-issued test identities. Settable only in the settings file: the server-config API refuses this key, and every key under it, in every mode.",

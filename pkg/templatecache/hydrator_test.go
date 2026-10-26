@@ -140,6 +140,7 @@ func (m *mockHubClient) TestIdentities() hubclient.TestIdentityService      { re
 func (m *mockHubClient) TestIdentityDelegations() hubclient.TestIdentityDelegationService {
 	return nil
 }
+func (m *mockHubClient) AgentDelegations() hubclient.AgentDelegationService { return nil }
 func (m *mockHubClient) DiscoverSkillsDirectory(ctx context.Context, req hubclient.DiscoverSkillsDirectoryRequest) (*hubclient.DiscoverSkillsDirectoryResponse, error) {
 	return nil, nil
 }
