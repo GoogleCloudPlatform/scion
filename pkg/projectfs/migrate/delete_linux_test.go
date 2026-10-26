@@ -206,3 +206,25 @@ func TestDeleteLegacyProjectTrees_LocalAndValidation(t *testing.T) {
 		t.Fatalf("nothing present: %+v %v", ds, err)
 	}
 }
+
+// A host-local .migrated-<ts> copy is identified by its own markers only:
+// the slug-keyed workspace record naming the project does not verify a
+// copy without markers.
+func TestDeleteLegacyProjectTrees_CopyIgnoresSlugRecord(t *testing.T) {
+	f := newHubFixture(t)
+	copyDir := filepath.Join(f.global, "projects", "demo"+MigratedSuffix+"20261002T120000Z")
+	legacyTree(t, copyDir, "")
+	if err := os.MkdirAll(filepath.Join(f.global, "hub-workspaces"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(f.global, "hub-workspaces", "demo"), []byte(pid1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ds, err := DeleteLegacyProjectTrees(f.layout, f.global, "demo", pid1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := outcomes(ds)[copyDir]; got != projectfs.OutcomeKept {
+		t.Fatalf("markerless copy: %q, want kept", got)
+	}
+}

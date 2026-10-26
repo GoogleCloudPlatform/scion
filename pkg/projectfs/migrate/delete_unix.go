@@ -39,7 +39,7 @@ import (
 // A tree is removed only when the identity markers it carries name
 // projectID (the migration's identity binding: .scion/project-id and its
 // pre-rename name, the project ID keys of .scion/settings.yaml, and, for
-// the host-local tree, the workspace records). A tree that carries no marker
+// the host-local tree itself but not its copies, the workspace records). A tree that carries no marker
 // or names another project is kept (OutcomeKept, with the markers read as
 // the reason): a slug alone never deletes anything, since a slug can be reused by
 // another project. The removal is shareddirs.DeleteTree's confined walk
@@ -87,7 +87,11 @@ func DeleteLegacyProjectTrees(l projectfs.Layout, globalDir, slug, projectID str
 		}
 		for _, name := range legacyTreeNames(names, slug) {
 			t := Tree{Base: r.tree.Base, Rel: filepath.Join(r.tree.Rel, name)}
-			out = append(out, deleteLegacyTree(r.kind, t, r.local, globalDir, slug, projectID))
+			// The host's workspace records are keyed by the live slug, not
+			// by a copy's name: a .migrated-<ts> copy is identified by the
+			// markers inside it only.
+			local := r.local && name == slug
+			out = append(out, deleteLegacyTree(r.kind, t, local, globalDir, slug, projectID))
 		}
 	}
 	return out, nil

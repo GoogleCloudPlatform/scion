@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 )
@@ -55,6 +56,41 @@ func (l Layout) checkShareHostBase() error {
 		return fmt.Errorf("%w: nfs share %q does not give a host base below the mount root (host base %q)", ErrRefused, id, l.HostBase)
 	}
 	return nil
+}
+
+// CheckTreeMounted refuses a shared Layout whose subpath root does not
+// exist below its host base (the hub's health reports it too): every project on a shared backend has its
+// tree there from create on, so a missing subpath root means the share is
+// not mounted (only the mount point is), and a deletion must report that,
+// never "absent".
+func (l Layout) CheckTreeMounted() error {
+	root, err := l.subPathRoot()
+	if err != nil {
+		return err
+	}
+	r := Resolved{Backend: l.Backend, HostBase: l.HostBase, RelPath: root}
+	base, err := r.resolvedHostBase()
+	if err != nil {
+		return fmt.Errorf("%w: share not mounted: host base %s: %w", ErrRefused, l.HostBase, err)
+	}
+	if ok, err := shareddirs.DirExistsInTree(base, root); err != nil {
+		return fmt.Errorf("%w: %w", ErrRefused, err)
+	} else if !ok {
+		return fmt.Errorf("%w: share not mounted: %s has no %s directory", ErrRefused, l.HostBase, root)
+	}
+	return nil
+}
+
+// CheckTreesMounted runs CheckTreeMounted on every shared Layout of l (l
+// and its transitional shared-dir split); nil on the local backend.
+func (l Layout) CheckTreesMounted() error {
+	var errs []error
+	for _, sl := range l.sharedLayouts() {
+		if err := sl.CheckTreeMounted(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // deleteShared removes r (a directory resolved on a shared Layout) with
@@ -101,29 +137,58 @@ func (l Layout) DeleteProject(projectID string) ([]Deletion, error) {
 			out = append(out, deletion(TreeProjectRoot, r.HostPath, false, err))
 			continue
 		}
+		if err := sl.CheckTreeMounted(); err != nil {
+			out = append(out, deletion(TreeProjectRoot, r.HostPath, false, err))
+			continue
+		}
 		out = append(out, deleteShared(TreeProjectRoot, r))
 	}
 	return out, nil
 }
 
-// DeleteAgent removes agent's directory <SubPathRoot>/<projectID>/agents/
-// <agent slug> (its own workspace in the per-agent modes, its homes and
-// secrets) from every shared Layout of l, with DeleteProject's confinement,
-// and reports one Deletion per directory. An invalid project ID or agent
-// slug is refused before anything is touched; a missing directory is
-// OutcomeAbsent. On the local backend it removes nothing.
-//
-// The directory is keyed by slug, so a caller must not use it while
-// another agent of the project with the same slug may still use it; it
-// then deletes only this agent's own leaves (DeleteAgentLeaves).
-func (l Layout) DeleteAgent(projectID, agent string) ([]Deletion, error) {
+// AgentWorkspacePendingReason is the reason of a kept agent directory: it
+// still holds entries the hub does not own, normally the agent's own
+// workspace, which only the broker removes.
+const AgentWorkspacePendingReason = "the agent directory is not empty: workspace pending broker removal"
+
+// DeleteAgent removes what the hub owns of agent agentID (the hub agent ID,
+// ValidAgentID) with slug agent: its home-<agentID> and secrets-<agentID>
+// below agents/<slug> on the Layout homes resolve on, then the directory
+// agents/<slug> itself on every shared Layout of l, but only when it is
+// empty. It never removes anything else below agents/<slug>: the agent's
+// own workspace (and its worktree under workspace/worktrees/) is the
+// broker's to remove, under the provisioning lock and with its git
+// bookkeeping. A directory that still has entries is kept
+// (OutcomeKept, AgentWorkspacePendingReason). Confinement is DeleteProject's.
+// An invalid project ID, slug or agent ID is refused before anything is
+// touched; what is missing is OutcomeAbsent. On the local backend it
+// removes nothing.
+func (l Layout) DeleteAgent(projectID, agent, agentID string) ([]Deletion, error) {
 	if err := validProjectID(projectID); err != nil {
 		return nil, err
 	}
 	if err := validAgentSlug(agent); err != nil {
 		return nil, err
 	}
+	if !ValidAgentID(agentID) || agentID == agent {
+		return nil, fmt.Errorf("projectfs: invalid agent ID %q", agentID)
+	}
 	var out []Deletion
+	if hl := l.SharedDirLayout(); hl.Backend.Shared() {
+		home, err := l.AgentHome(projectID, agent, agentID)
+		if err != nil {
+			return nil, err
+		}
+		secrets, err := l.AgentSecrets(projectID, agent, agentID)
+		if err != nil {
+			return nil, err
+		}
+		if err := hl.checkShareHostBase(); err != nil {
+			out = append(out, deletion(TreeAgentHome, home.HostPath, false, err), deletion(TreeAgentSecrets, secrets.HostPath, false, err))
+		} else {
+			out = append(out, deleteShared(TreeAgentHome, home), deleteShared(TreeAgentSecrets, secrets))
+		}
+	}
 	for _, sl := range l.sharedLayouts() {
 		r, err := sl.AgentRoot(projectID, agent)
 		if err != nil {
@@ -133,32 +198,174 @@ func (l Layout) DeleteAgent(projectID, agent string) ([]Deletion, error) {
 			out = append(out, deletion(TreeAgentRoot, r.HostPath, false, err))
 			continue
 		}
-		out = append(out, deleteShared(TreeAgentRoot, r))
+		out = append(out, removeEmptyShared(TreeAgentRoot, r))
 	}
 	return out, nil
 }
 
-// DeleteAgentLeaves removes only the leaves keyed by the agent's ID below
-// its agent directory, home-<agentID> and secrets-<agentID> (AgentHome,
-// AgentSecrets), on the Layout homes resolve on. It is the agent delete
-// for an agent directory another agent of the same slug still uses.
-func (l Layout) DeleteAgentLeaves(projectID, agent, agentID string) ([]Deletion, error) {
-	if !l.SharedDirLayout().Backend.Shared() {
-		if err := validProjectID(projectID); err != nil {
-			return nil, err
+// removeEmptyShared removes r (a directory on a shared Layout) only when it
+// is empty (shareddirs.RemoveDirIfEmpty); a directory with entries is kept.
+func removeEmptyShared(tree TreeKind, r Resolved) Deletion {
+	base, err := r.resolvedHostBase()
+	if err != nil {
+		return deletion(tree, r.HostPath, false, fmt.Errorf("%w: host base of %s: %w", ErrRefused, r.HostPath, err))
+	}
+	existed, notEmpty, err := shareddirs.RemoveDirIfEmpty(base, r.RelPath)
+	if errors.Is(err, shareddirs.ErrTreeRefused) {
+		err = fmt.Errorf("%w: %w", ErrRefused, err)
+	}
+	d := deletion(tree, r.HostPath, existed, err)
+	if err == nil && notEmpty {
+		d.Outcome, d.Reason = OutcomeKept, AgentWorkspacePendingReason
+	}
+	return d
+}
+
+// Deferred project deletion (forced deletes, ptone/scion#5835): instead of
+// removing a project root at once, the hub records in the tree the time
+// after which it may be removed, in the authority's project-scoped state
+// directory (provision/, inside no agent Mount), and its maintenance pass
+// removes the tree once that time has passed.
+
+// DeleteAfterFile is the deferred-deletion tombstone in a project's
+// provision/ directory: an RFC 3339 UTC time.
+const DeleteAfterFile = ".scion-delete-after"
+
+// provisionDir is a project's state directory below its project root.
+const provisionDir = "provision"
+
+// DeleteAfterPath resolves the tombstone's directory, <ProjectRoot>/provision,
+// on a shared Layout.
+func (l Layout) DeleteAfterPath(projectID string) (Resolved, error) {
+	pr, err := l.ProjectRoot(projectID)
+	if err != nil {
+		return Resolved{}, err
+	}
+	return l.shared(filepath.Join(pr.RelPath, provisionDir), Mount{}), nil
+}
+
+// MarkDeleteAfter writes the tombstone with time after on every shared
+// Layout of l that holds the project root, without following a symlink at
+// any component, and reports one Deletion per root (OutcomeKept with the
+// deferral as the reason, or OutcomeFailed; a root that does not exist
+// needs no tombstone and is OutcomeAbsent).
+func (l Layout) MarkDeleteAfter(projectID string, after time.Time) ([]Deletion, error) {
+	if err := validProjectID(projectID); err != nil {
+		return nil, err
+	}
+	reason := "forced delete: deletion deferred until " + after.UTC().Format(time.RFC3339)
+	var out []Deletion
+	for _, sl := range l.sharedLayouts() {
+		pr, err := sl.ProjectRoot(projectID)
+		if err != nil {
+			return out, err
 		}
-		return nil, nil
+		if err := sl.checkShareHostBase(); err != nil {
+			out = append(out, deletion(TreeProjectRoot, pr.HostPath, false, err))
+			continue
+		}
+		base, err := pr.resolvedHostBase()
+		if err != nil {
+			out = append(out, deletion(TreeProjectRoot, pr.HostPath, false, fmt.Errorf("%w: host base of %s: %w", ErrRefused, pr.HostPath, err)))
+			continue
+		}
+		if ok, err := shareddirs.DirExistsInTree(base, pr.RelPath); err != nil || !ok {
+			if err != nil {
+				out = append(out, deletion(TreeProjectRoot, pr.HostPath, false, err))
+			} else {
+				out = append(out, deletion(TreeProjectRoot, pr.HostPath, false, nil))
+			}
+			continue
+		}
+		rel := filepath.Join(pr.RelPath, provisionDir)
+		if err := shareddirs.WriteFileInTree(base, rel, DeleteAfterFile, []byte(after.UTC().Format(time.RFC3339)+"\n"), true); err != nil {
+			out = append(out, deletion(TreeProjectRoot, pr.HostPath, true, err))
+			continue
+		}
+		out = append(out, Deletion{Tree: TreeProjectRoot, Path: pr.HostPath, Outcome: OutcomeKept, Reason: reason})
 	}
-	home, err := l.AgentHome(projectID, agent, agentID)
-	if err != nil {
-		return nil, err
+	return out, nil
+}
+
+// DeferredDeletion is a project root that carries a tombstone.
+type DeferredDeletion struct {
+	ProjectID string
+	// After is the tombstone's time; zero when it cannot be parsed (the
+	// tree is then treated as due).
+	After time.Time
+	// Layout is the shared Layout the root is on.
+	Layout Layout
+	// Path is the project root's host path.
+	Path string
+}
+
+// DeferredDeletions lists the project roots on every shared Layout of l
+// that carry a tombstone: one listing of the subpath root and one tombstone
+// read per entry, none of them following a symlink. A subpath root that
+// does not exist is an error (the share may not be mounted).
+func (l Layout) DeferredDeletions() ([]DeferredDeletion, error) {
+	var out []DeferredDeletion
+	var errs []error
+	for _, sl := range l.sharedLayouts() {
+		root, err := sl.subPathRoot()
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if err := sl.checkShareHostBase(); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		r := Resolved{Backend: sl.Backend, HostBase: sl.HostBase, RelPath: root}
+		base, err := r.resolvedHostBase()
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%w: host base %s: %w", ErrRefused, sl.HostBase, err))
+			continue
+		}
+		names, ok, err := shareddirs.ListDirInTree(base, root)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if !ok {
+			errs = append(errs, fmt.Errorf("%w: %s has no %s directory; the share may not be mounted", ErrRefused, sl.HostBase, root))
+			continue
+		}
+		for _, name := range names {
+			if validProjectID(name) != nil {
+				continue
+			}
+			data, ok, err := shareddirs.ReadFileInTree(base, filepath.Join(root, name, provisionDir), DeleteAfterFile, 256)
+			if err != nil || !ok {
+				continue
+			}
+			after, _ := time.Parse(time.RFC3339, strings.TrimSpace(string(data)))
+			out = append(out, DeferredDeletion{ProjectID: name, After: after, Layout: sl, Path: filepath.Join(sl.HostBase, root, name)})
+		}
 	}
-	secrets, err := l.AgentSecrets(projectID, agent, agentID)
-	if err != nil {
-		return nil, err
+	return out, errors.Join(errs...)
+}
+
+// ClearDeleteAfter removes the tombstone of projectID on every shared
+// Layout of l (a project that exists again keeps its tree).
+func (l Layout) ClearDeleteAfter(projectID string) error {
+	if err := validProjectID(projectID); err != nil {
+		return err
 	}
-	if err := l.SharedDirLayout().checkShareHostBase(); err != nil {
-		return []Deletion{deletion(TreeAgentHome, home.HostPath, false, err), deletion(TreeAgentSecrets, secrets.HostPath, false, err)}, nil
+	var errs []error
+	for _, sl := range l.sharedLayouts() {
+		r, err := sl.DeleteAfterPath(projectID)
+		if err != nil {
+			return err
+		}
+		base, err := r.resolvedHostBase()
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if err := shareddirs.RemoveFileInTree(base, r.RelPath, DeleteAfterFile); err != nil {
+			errs = append(errs, err)
+		}
 	}
-	return []Deletion{deleteShared(TreeAgentHome, home), deleteShared(TreeAgentSecrets, secrets)}, nil
+	return errors.Join(errs...)
 }
