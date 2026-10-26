@@ -16,11 +16,12 @@
 
 import { createInstance } from 'i18next';
 import { DEFAULT_LOCALE, locales } from './locales.js';
-import type { MessageKey } from './locales/en.js';
+import { en, type MessageKey } from './locales/en.js';
 
 export interface MessageEngine {
   translate: (key: MessageKey, values: Record<string, string | number>) => string;
   setLocale: (locale: string) => void;
+  loadLocale: (locale: string) => Promise<void>;
 }
 
 /** Single-flight load, reachable only after opting into the registered experiment. */
@@ -29,29 +30,38 @@ let loading: Promise<MessageEngine> | undefined;
 export function loadEngine(): Promise<MessageEngine> {
   if (loading) return loading;
   loading = (async () => {
-    const resources = await Promise.all(
-      locales.map(
-        async (locale) => [locale.code, { translation: await locale.loadMessages() }] as const
-      )
-    );
     const messages = createInstance();
     await messages.init({
       initAsync: false,
       showSupportNotice: false,
       lng: DEFAULT_LOCALE,
       fallbackLng: DEFAULT_LOCALE,
-      resources: Object.fromEntries(resources),
+      resources: { [DEFAULT_LOCALE]: { translation: en } },
       keySeparator: false,
       nsSeparator: false,
       returnNull: false,
       returnEmptyString: false,
       interpolation: { escapeValue: false }, // Lit escapes text/attribute bindings.
     });
+    const catalogs = new Map<string, Promise<void>>();
     return {
       translate: (key, values) => messages.t(key, values),
-      // All catalogs are loaded before the engine is published: synchronous.
+      // Call only after loadLocale succeeds; resources are already in memory.
       setLocale: (locale) => {
         void messages.changeLanguage(locale);
+      },
+      loadLocale: (code) => {
+        if (code === DEFAULT_LOCALE) return Promise.resolve();
+        const existing = catalogs.get(code);
+        if (existing) return existing;
+        const locale = locales.find((locale) => locale.code === code);
+        if (!locale) return Promise.reject(new Error(`Unknown locale: ${code}`));
+        const catalog = locale.loadMessages().then((translation) => {
+          messages.addResourceBundle(code, 'translation', translation);
+        });
+        catalogs.set(code, catalog);
+        void catalog.catch(() => catalogs.delete(code));
+        return catalog;
       },
     };
   })();

@@ -16,7 +16,12 @@
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type LitElement } from 'lit';
-import { getLocale, initializeLocalization, setLocalePreference } from '../../i18n/index.js';
+import {
+  getLocale,
+  initializeLocalization,
+  LOCALE_STORAGE_KEY,
+  setLocalePreference,
+} from '../../i18n/index.js';
 import { PAGE_TITLE_EVENT } from '../../client/page-title.js';
 import type { User } from '../../shared/types.js';
 
@@ -72,7 +77,7 @@ describe('localized application shell', () => {
       [...nav.shadowRoot!.querySelectorAll('a')].map((link) => link.getAttribute('href')!);
     const beforeLinks = links();
     expect(document.title).toBe('Projects — Scion');
-    setLocalePreference('zh-CN');
+    await setLocalePreference('zh-CN');
     await settle(shell);
     expect(nav.shadowRoot!.textContent).toContain('项目');
     expect(nav.shadowRoot!.textContent).toContain('服务器配置');
@@ -95,10 +100,45 @@ describe('localized application shell', () => {
     expect(select.value).toBe('zh-CN');
     select.value = 'en';
     select.dispatchEvent(new Event('change'));
+    await vi.waitFor(() => expect(getLocale()).toBe('en'));
     await settle(shell);
     expect(getLocale()).toBe('en');
     expect(document.title).toBe('Projects — Scion');
     expect(nav.shadowRoot!.textContent).toContain('Projects');
+  });
+
+  it('updates a previously interacted native selector after another tab changes the preference', async () => {
+    const shell = await mountedShell();
+    const header = shell.shadowRoot!.querySelector<LitElement>('scion-header')!;
+    const selector = header.shadowRoot!.querySelector<LitElement>('scion-language-select')!;
+    const select = selector.shadowRoot!.querySelector('select')!;
+    select.value = 'en';
+    select.dispatchEvent(new Event('change'));
+    await vi.waitFor(() => expect(localStorage.getItem(LOCALE_STORAGE_KEY)).toBe('en'));
+    await settle(shell);
+    localStorage.setItem(LOCALE_STORAGE_KEY, 'zh-CN');
+    window.dispatchEvent(new StorageEvent('storage', { key: LOCALE_STORAGE_KEY }));
+    await vi.waitFor(() => expect(getLocale()).toBe('zh-CN'));
+    await settle(shell);
+    expect(select.value).toBe('zh-CN');
+    localStorage.removeItem(LOCALE_STORAGE_KEY);
+    window.dispatchEvent(new StorageEvent('storage', { key: LOCALE_STORAGE_KEY }));
+    await vi.waitFor(() => expect(getLocale()).toBe('en'));
+    await settle(shell);
+    expect(select.value).toBe('');
+  });
+
+  it('translates static admin breadcrumb segments while preserving entity labels', async () => {
+    const breadcrumb = document.createElement('scion-breadcrumb');
+    breadcrumb.path = '/admin/users/12345';
+    breadcrumb.currentLabel = 'user-name';
+    document.body.append(breadcrumb);
+    await setLocalePreference('zh-CN');
+    await breadcrumb.updateComplete;
+    const labels = [...breadcrumb.shadowRoot!.querySelectorAll('sl-breadcrumb-item')].map((item) =>
+      item.textContent!.trim()
+    );
+    expect(labels).toEqual(['首页', '系统管理', '用户', 'user-name']);
   });
 
   it('preserves entity title segments and stops updating a detached shell', async () => {
@@ -106,17 +146,17 @@ describe('localized application shell', () => {
     shell.dispatchEvent(
       new CustomEvent(PAGE_TITLE_EVENT, { detail: { segments: ['my-agent', 'my-project'] } })
     );
-    setLocalePreference('zh-CN');
+    await setLocalePreference('zh-CN');
     await settle(shell);
     expect(document.title).toBe('my-agent — my-project — Scion');
     const update = vi.spyOn(shell, 'requestUpdate');
     shell.remove();
-    setLocalePreference('en');
+    await setLocalePreference('en');
     expect(update).not.toHaveBeenCalled();
   });
 
   it('hides language controls and restores English when the experiment is disabled', async () => {
-    setLocalePreference('zh-CN');
+    await setLocalePreference('zh-CN');
     await initializeLocalization(false);
     const shell = await mountedShell();
     const header = shell.shadowRoot!.querySelector<LitElement>('scion-header')!;

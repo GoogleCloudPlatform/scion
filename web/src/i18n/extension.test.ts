@@ -56,7 +56,7 @@ afterEach(async () => {
 
 it('supports a third language, RTL metadata, six plural forms and English fallback', async () => {
   await initializeLocalization(true);
-  setLocalePreference('ar');
+  await setLocalePreference('ar');
   expect(document.documentElement.lang).toBe('ar');
   expect(document.documentElement.dir).toBe('rtl');
   for (const [count, word] of [
@@ -71,6 +71,6 @@ it('supports a third language, RTL metadata, six plural forms and English fallba
   }
   expect(t('page.dashboard')).toBe('Dashboard');
   expect(t('header.help')).toBe('Help');
-  setLocalePreference('en');
+  await setLocalePreference('en');
   expect(document.documentElement.dir).toBe('ltr');
 });

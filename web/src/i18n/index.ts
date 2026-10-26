@@ -18,9 +18,9 @@ import { en } from './locales/en.js';
 import type { MessageKey } from './locales/en.js';
 import type { LocalizationRuntime } from './runtime.js';
 import { LOCALE_CHANGED_EVENT } from './events.js';
+import { withTimeout } from '../client/with-timeout.js';
 
 export type { MessageKey } from './locales/en.js';
-export { locales } from './locales.js';
 export { LOCALE_CHANGED_EVENT, LOCALE_STORAGE_KEY } from './events.js';
 
 let runtime: LocalizationRuntime | undefined;
@@ -43,7 +43,7 @@ export function t(key: MessageKey, values: Record<string, string | number> = {})
   if (runtime) return runtime.translate(key, values);
   const pluralKey = `${key}_${values.count === 1 ? 'one' : 'other'}`;
   const source = en[key as keyof typeof en] ?? en[pluralKey as keyof typeof en];
-  if (source === undefined) return key;
+  if (typeof source !== 'string') return key;
   return source.replace(/\{\{(\w+)\}\}/g, (_match, name: string) => String(values[name] ?? ''));
 }
 
@@ -65,15 +65,17 @@ export async function initializeLocalization(enabled: boolean): Promise<() => vo
     return () => {};
   }
   try {
-    const [{ createRuntime }] = await Promise.all([
-      import('./runtime.js'),
-      import('../components/shared/language-select.js'),
-    ]);
-    const loaded = await createRuntime();
-    if (current !== generation) return () => {};
-    runtime = loaded;
-    runtime.initialize();
-    return runtime.dispose;
+    const load = async (): Promise<() => void> => {
+      const { createRuntime } = await import('./runtime.js');
+      const loaded = await createRuntime();
+      if (current !== generation) return () => {};
+      runtime = loaded;
+      await loaded.initialize();
+      return loaded.dispose;
+    };
+    const initialized = await withTimeout(load(), 1500);
+    if (!initialized && current === generation) return initializeLocalization(false);
+    return initialized ?? (() => {});
   } catch (error) {
     if (current === generation) {
       console.warn('[i18n] Unable to load localization; using English.', error);
@@ -83,6 +85,6 @@ export async function initializeLocalization(enabled: boolean): Promise<() => vo
   }
 }
 
-export function setLocalePreference(value: string): void {
-  runtime?.setPreference(value);
+export async function setLocalePreference(value: string): Promise<void> {
+  await runtime?.setPreference(value);
 }

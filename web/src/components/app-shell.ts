@@ -25,7 +25,8 @@ import { LitElement, html, css, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { keyed } from 'lit/directives/keyed.js';
 
-import { t, type MessageKey } from '../i18n/index.js';
+import { t } from '../i18n/index.js';
+import { PAGE_TITLES } from '../i18n/page-titles.js';
 import { LocaleController } from '../i18n/controller.js';
 
 // Import shared components
@@ -47,32 +48,6 @@ import {
   testHubBannerStyles,
 } from './shared/test-hub-banner.js';
 import { renderTestIdentityChip, testIdentityChipStyles } from './shared/test-identity-chip.js';
-
-/**
- * Page title configuration
- */
-const PAGE_TITLES: Record<string, MessageKey> = {
-  '/': 'page.dashboard',
-  '/projects': 'page.projects',
-  '/agents': 'page.agents',
-  '/terminals': 'page.terminals',
-  '/brokers': 'page.brokers',
-  '/settings': 'page.settings',
-  '/admin/scheduler': 'page.scheduler',
-  '/admin/users': 'page.users',
-  '/admin/groups': 'page.groups',
-  '/admin/server-config': 'page.serverConfig',
-  '/admin/federation': 'page.federation',
-  '/admin/integrations': 'page.integrations',
-  '/admin/roles': 'page.roles',
-  '/admin/role-bindings': 'page.roleBindings',
-  '/admin/quotas': 'page.quotas',
-  '/metrics': 'page.metrics',
-  '/admin/skill-registries': 'page.skillRegistries',
-  '/skills': 'page.skills',
-  '/github-app/installed': 'page.githubSetup',
-  '/onboarding': 'page.setup',
-};
 
 @customElement('scion-app')
 export class ScionApp extends LitElement {

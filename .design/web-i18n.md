@@ -1,7 +1,8 @@
 # Web UI internationalization
 
 Tracking: GoogleCloudPlatform/scion#4085. Initial slice; the translated UI is
-experimental and incomplete.
+experimental and incomplete. Adoption and ongoing translation ownership require
+maintainer agreement on #4085.
 
 ## Scope and activation
 
@@ -25,11 +26,15 @@ direction, accepted aliases and message-catalog loader. `index.ts` exposes a sou
 active locale, preference persistence and document metadata, using an isolated
 i18next instance from `engine.ts`.
 The default-off shell uses the English source catalog without loading the engine.
-After opt-in, boot loads the runtime, language selector, engine and all registered catalogs through local Vite
-chunks before rendering. A shared promise prevents duplicate loads; an initialization
-generation prevents an older load from overriding a newer disable/reinitialization.
-A failed load leaves the page in English with the selector disabled. Subsequent
-language switching is synchronous because the catalogs are already available.
+After opt-in, boot loads the runtime, language selector, engine, English fallback
+and only the resolved locale through local Vite chunks. Other catalogs and their
+Shoelace translations load on first selection, with per-locale single-flight
+caching and retry after a failed fetch. The startup wait is bounded to 1.5 seconds.
+A failed or timed-out initial load leaves the page in English with the selector
+hidden; pending loads are invalidated so they cannot re-enable localization later.
+Language switches are asynchronous: callers can await `setLocalePreference()`.
+The previous language and preference remain active if a switch fails, and a late
+switch cannot override a newer choice or a disabled experiment.
 Vite keeps non-English Shoelace translations in separate locale chunks; otherwise
 its shared vendor chunk would load those translations even while the experiment is off.
 
@@ -55,6 +60,12 @@ order. Invalid/unsupported explicit preferences fall back to English. Auto remov
 the preference. Storage failures leave the current tab usable. Storage events and
 browser-language changes update connected components. Matching does not silently
 turn `zh-TW`/`zh-Hant` into Simplified Chinese.
+
+The selector uses a native control deliberately for the platform mobile picker
+and built-in keyboard/accessibility behavior. Its live `.value` binding keeps an
+interacted control synchronized with storage events; option defaults alone do not.
+The application header and breadcrumbs share the static route-to-message table in
+`page-titles.ts`, including administrative routes, while entity labels stay opaque.
 
 ## Adding a language or message
 
@@ -93,3 +104,13 @@ Lit performs escaping at the binding boundary (avoiding double escaping).
   The initial implementation requires no preference schema or API changes.
 - Shoelace locale resources are adapted in the registry, not in feature components,
   so a future UI-library replacement has one localization integration point.
+
+## Maintenance expectations
+
+Adopting localization adds a runtime dependency, source/target catalog parity,
+translation review and locale-specific regression checks. The parity tests make
+new shell strings require matching entries in every shipped catalog. Before
+extending this slice or enabling additional languages, maintainers need to agree
+on translation ownership, review policy and the dependency choice in #4085.
+Keeping the experiment default-off provides an evaluation boundary; it does not
+remove these ongoing maintenance costs.

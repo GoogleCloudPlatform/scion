@@ -7,6 +7,7 @@
   // checked once it has been made to pass.
   "include": [
     "../i18n/index.test.ts",
+    "../i18n/engine.test.ts",
     "../i18n/extension.test.ts",
     "../i18n/loading.test.ts",
     "../i18n/locales.test.ts",

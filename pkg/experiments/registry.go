@@ -286,7 +286,7 @@ var compiled = []Experiment{
 		Layers:      []Layer{LayerWeb},
 		Stage:       StageAlpha,
 		Issue:       "GoogleCloudPlatform/scion#4085",
-		Owner:       "cy2s",
+		Owner:       "web",
 		ReviewBy:    "2027-01-23",
 	},
 	{

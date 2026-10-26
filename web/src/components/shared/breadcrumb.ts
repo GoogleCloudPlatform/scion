@@ -22,6 +22,7 @@
 
 import { LitElement, html, css } from 'lit';
 import { t, type MessageKey } from '../../i18n/index.js';
+import { PAGE_TITLES } from '../../i18n/page-titles.js';
 import { LocaleController } from '../../i18n/controller.js';
 import { customElement, property } from 'lit/decorators.js';
 
@@ -29,10 +30,8 @@ import { customElement, property } from 'lit/decorators.js';
  * Route label configuration
  */
 const ROUTE_LABELS: Record<string, MessageKey> = {
-  '/': 'page.dashboard',
-  '/projects': 'page.projects',
-  '/agents': 'page.agents',
-  '/settings': 'page.settings',
+  ...PAGE_TITLES,
+  '/admin': 'nav.admin',
 };
 
 /**

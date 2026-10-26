@@ -16,11 +16,12 @@
 
 import { css, html, LitElement, nothing } from 'lit';
 import { customElement } from 'lit/decorators.js';
+import { live } from 'lit/directives/live.js';
 import { LocaleController } from '../../i18n/controller.js';
+import { locales } from '../../i18n/locales.js';
 import {
   getLocalePreference,
   isLocalizationEnabled,
-  locales,
   setLocalePreference,
   t,
 } from '../../i18n/index.js';
@@ -57,10 +58,12 @@ export class ScionLanguageSelect extends LitElement {
     const preference = getLocalePreference();
     return html`
       <select
+        .value=${live(preference)}
         aria-label=${t('language.label')}
         title=${t('language.label')}
-        @change=${(event: Event): void =>
-          setLocalePreference((event.target as HTMLSelectElement).value)}
+        @change=${(event: Event): void => {
+          void setLocalePreference((event.target as HTMLSelectElement).value);
+        }}
       >
         <option value="" ?selected=${!preference}>${t('language.auto')}</option>
         ${locales.map(

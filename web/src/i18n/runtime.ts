@@ -18,16 +18,17 @@ import { loadEngine } from './engine.js';
 import { DEFAULT_LOCALE, locales, resolveLocale } from './locales.js';
 import { LOCALE_CHANGED_EVENT, LOCALE_STORAGE_KEY } from './events.js';
 import type { MessageKey } from './locales/en.js';
+import '../components/shared/language-select.js';
 
 export interface LocalizationRuntime {
   readonly enabled: boolean;
   getLocale: () => string;
   getPreference: () => string;
   translate: (key: MessageKey, values: Record<string, string | number>) => string;
-  initialize: () => void;
+  initialize: () => Promise<void>;
   disable: () => void;
   dispose: () => void;
-  setPreference: (value: string) => void;
+  setPreference: (value: string) => Promise<void>;
 }
 
 function readPreference(): string {
@@ -45,16 +46,45 @@ export async function createRuntime(): Promise<LocalizationRuntime> {
   let enabled = false;
   let preference = '';
   let activeLocale = DEFAULT_LOCALE;
+  let generation = 0;
 
-  const applyLocale = (): void => {
-    const locale = resolveLocale(
-      enabled ? (preference ? [preference] : navigator.languages) : [DEFAULT_LOCALE]
-    );
+  const publishLocale = (code: string): void => {
+    const locale = resolveLocale([code]);
     activeLocale = locale.code;
     engine.setLocale(locale.code);
     document.documentElement.lang = locale.code;
     document.documentElement.dir = locale.dir;
     window.dispatchEvent(new Event(LOCALE_CHANGED_EVENT));
+  };
+  const applyLocale = async (value: string, persist = false): Promise<void> => {
+    const current = ++generation;
+    const locale = resolveLocale(value ? [value] : navigator.languages);
+    try {
+      await engine.loadLocale(locale.code);
+    } catch (error) {
+      if (!enabled || current !== generation) return;
+      throw error;
+    }
+    if (!enabled || current !== generation) return;
+    preference = value;
+    if (persist) {
+      try {
+        if (value) localStorage.setItem(LOCALE_STORAGE_KEY, value);
+        else localStorage.removeItem(LOCALE_STORAGE_KEY);
+      } catch {
+        // Browser storage failures must not prevent using the current tab.
+      }
+    }
+    publishLocale(locale.code);
+  };
+  const changeLocale = async (value: string, persist = false): Promise<void> => {
+    try {
+      await applyLocale(value, persist);
+    } catch (error) {
+      if (!enabled) return;
+      console.warn('[i18n] Unable to switch language; keeping the current language.', error);
+      window.dispatchEvent(new Event(LOCALE_CHANGED_EVENT));
+    }
   };
   const handleStorage = (event: StorageEvent): void => {
     if (event.key !== LOCALE_STORAGE_KEY && event.key !== null) return;
@@ -64,13 +94,14 @@ export async function createRuntime(): Promise<LocalizationRuntime> {
       // Storage access may be revoked after initialization; keep the tab's choice.
       return;
     }
-    preference = readPreference();
-    applyLocale();
+    void changeLocale(readPreference());
   };
   const handleLanguage = (): void => {
-    if (!preference) applyLocale();
+    if (!preference) void changeLocale('');
   };
   const dispose = (): void => {
+    enabled = false;
+    generation++;
     window.removeEventListener('storage', handleStorage);
     window.removeEventListener('languagechange', handleLanguage);
   };
@@ -82,31 +113,22 @@ export async function createRuntime(): Promise<LocalizationRuntime> {
     getLocale: () => activeLocale,
     getPreference: () => preference,
     translate: engine.translate,
-    initialize: () => {
+    initialize: async () => {
       enabled = true;
-      preference = readPreference();
-      applyLocale();
       window.addEventListener('storage', handleStorage);
       window.addEventListener('languagechange', handleLanguage);
+      await applyLocale(readPreference());
     },
     disable: () => {
       dispose();
-      enabled = false;
       preference = '';
-      applyLocale();
+      publishLocale(DEFAULT_LOCALE);
     },
     dispose,
-    setPreference: (value) => {
+    setPreference: async (value) => {
       if (!enabled) return;
       if (value && !locales.some((locale) => locale.code === value)) return;
-      preference = value;
-      try {
-        if (value) localStorage.setItem(LOCALE_STORAGE_KEY, value);
-        else localStorage.removeItem(LOCALE_STORAGE_KEY);
-      } catch {
-        // Browser storage failures must not prevent using the current tab.
-      }
-      applyLocale();
+      await changeLocale(value, true);
     },
   };
 }
