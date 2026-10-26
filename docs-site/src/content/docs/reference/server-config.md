@@ -1436,6 +1436,8 @@ Settings that can be changed at runtime and are shared across all replicas. Stor
 
 `agent_defaults.default_timezone` is the Hub default `TZ` for agent containers: an IANA zone name, used only when the agent has no pin and no `TZ` environment variable applies. Empty means no default (the image default, UTC). An invalid name or `Local` is rejected with `422`. In `settings.yaml`, and in the `PUT /api/v1/admin/server-config` request body, it is the top-level `default_timezone` field. It does not change how times are stored or displayed. See [Times and Timezones](/scion/reference/times-and-timezones/#hub-default-timezone).
 
+A saved change to `agent_delegation_policy` can briefly not be in effect on the Hub that saved it: when that Hub cannot re-read the settings right after the write, it applies the change on its next settings refresh (the settings event or the 60-second poll), as the other replicas do.
+
 ### Precedence
 
 On every driver, the effective value for any Layer-1 key is resolved in this order (highest priority first):

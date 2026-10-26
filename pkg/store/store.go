@@ -3586,7 +3586,11 @@ type HubSettingStore interface {
 
 	// UpsertHubSetting creates or updates a hub setting with CAS semantics.
 	//   expectedRevision == 0:  create-only; returns ErrRevisionConflict if the section already exists.
-	//   expectedRevision == -1: unconditional upsert (used for seeding); always succeeds.
+	//   expectedRevision == -1: unconditional upsert (used for seeding). A create that loses a
+	//                           concurrent create of the same section is retried a bounded number
+	//                           of times; if every attempt loses, it returns a wrapped
+	//                           ErrRevisionConflict. Other errors (a different constraint
+	//                           error included) are returned as they are.
 	//   expectedRevision > 0:   CAS update; returns ErrRevisionConflict if current revision != expectedRevision.
 	// origin must be "seeded" or "managed" — seed-writes pass "seeded", admin-PUT writes pass "managed".
 	// A write of an operational section bumps the HubSettingsRevisionSection

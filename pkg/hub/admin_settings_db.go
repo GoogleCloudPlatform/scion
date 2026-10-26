@@ -383,11 +383,14 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 		}
 	}
 
-	// Federation — populate from snapshot's FederationConfig.
+	// Federation — populate from snapshot's FederationConfig, which is set
+	// whenever the stored (or bootstrap) federation settings have enabled or
+	// trusted_issuers. It is reported in full, also when it is disabled and
+	// has no trusted issuers, so a stored section with only algorithms or
+	// intervals is shown (ptone/scion#5694).
 	if snap.FederationConfig != nil {
-		gc := &config.GlobalConfig{Federation: *snap.FederationConfig}
-		v1Server := config.ConvertGlobalToV1ServerConfig(gc)
-		resp.Federation = v1Server.Federation
+		fc := *snap.FederationConfig
+		resp.Federation = config.ConvertFederationToV1(&fc)
 	}
 	// server.federation reports the same value, the one in effect, never
 	// the settings.yaml seed (ptone/scion#4326). resp.Server is set above;
@@ -1689,6 +1692,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 
 	applied := make(map[string]int64)
 	var unchanged []string // sections whose write was skipped (unchangedManagedRow)
+	// Sections written but not in this hub's self-apply (the post-write
+	// re-read failed or kept losing; ptone/scion#5691).
+	notInEffect := map[string]bool{}
 	var conflicted []map[string]interface{}
 
 	sortedSections := make([]string, 0, len(sectionDocs))
@@ -1761,7 +1767,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			}
 		}
 
-		newRev, err := ops.Update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
+		newRev, inEffect, err := ops.update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
 		if publicURLChange && err != nil {
 			s.auditPublicURLNotApplied(r.Context(), gcpIAMSurfaceSave, publicURLBefore, publicURLAfter, err)
 		}
@@ -1791,6 +1797,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		applied[secName] = newRev
+		if !inEffect {
+			notInEffect[secName] = true
+		}
 	}
 
 	sort.Strings(unchanged)
@@ -1827,8 +1836,21 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		writtenDocs["endpoints"] = hubNameInEffectDoc(writtenDocs["endpoints"], bootstrapName)
 	}
 	// The keys the write's self-apply skipped are reported as skipped, not
-	// applied (ptone/scion#4466).
-	keyReport := reportSavedKeys(beforeDocs, writtenDocs).withSkipped(s.layer1ApplySkips())
+	// applied (ptone/scion#4466). So are the keys of a section the
+	// self-apply did not include (ptone/scion#5691).
+	inEffectDocs := make(map[string]json.RawMessage, len(writtenDocs))
+	notInEffectDocs := make(map[string]json.RawMessage)
+	for sec, doc := range writtenDocs {
+		if notInEffect[sec] {
+			notInEffectDocs[sec] = doc
+		} else {
+			inEffectDocs[sec] = doc
+		}
+	}
+	keyReport := reportSavedKeys(beforeDocs, inEffectDocs).withSkipped(s.layer1ApplySkips())
+	if len(notInEffectDocs) > 0 {
+		keyReport = keyReport.withNotYetApplied(reportSavedKeys(beforeDocs, notInEffectDocs))
+	}
 
 	if len(conflicted) > 0 {
 		fileTxn.abort()
