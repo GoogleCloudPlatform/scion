@@ -44,6 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -3290,6 +3291,15 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 			if paths, rmErr := remover.RemoveNFSAgentFiles(ctx, projectPath, agentProjectID, target.name); rmErr != nil {
 				s.agentLifecycleLog.Warn("Agent delete: could not remove the agent's files on the NFS workspace; left in place",
 					"agent_id", id, "project_id", agentProjectID, "paths", paths, "error", rmErr)
+				projectfs.Audit(ctx, s.agentLifecycleLog, projectfs.DeleterBroker, agentProjectID, target.name, projectfs.Deletion{
+					Tree: projectfs.TreeAgentWorkspace, Path: strings.Join(paths, ","), Outcome: projectfs.OutcomeFailed, Err: rmErr,
+				})
+			} else {
+				for _, p := range paths {
+					projectfs.Audit(ctx, s.agentLifecycleLog, projectfs.DeleterBroker, agentProjectID, target.name, projectfs.Deletion{
+						Tree: projectfs.TreeAgentWorkspace, Path: p, Outcome: projectfs.OutcomeDeleted,
+					})
+				}
 			}
 		}
 	}
@@ -7803,13 +7813,13 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 		return
 	}
 
-	// Start removing the project's tree on the NFS workspace export
-	// (ptone/scion#2569) before the local-directory check below: the tree
-	// exists whether or not this broker has a local project directory, as
-	// for git projects whose agents run on Kubernetes. It runs in the
-	// background with its own context and timeout, so a large tree never
-	// holds up this response; every outcome is logged and none changes it.
-	s.startNFSProjectTreeCleanup(r.Context(), slug, r.URL.Query().Get("project_id"))
+	// The project's tree on the shared project storage (projects/<id>) is
+	// not this broker's to remove: the hub removes it, from its own mount
+	// of the share, once the project delete has committed
+	// (ptone/scion#5835). This broker releases the per-dir shared-dir
+	// claims of its Kubernetes runtimes, best-effort: a failure is logged
+	// and never fails or rolls back the project delete.
+	s.releaseProjectSharedDirClaims(r.Context(), slug, r.URL.Query().Get("project_id"))
 
 	if _, err := os.Stat(projectPath); os.IsNotExist(err) {
 		// The project directory is already gone (an earlier delete got
@@ -7828,6 +7838,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 				return
 			}
 			s.agentLifecycleLog.Info("Removed hub-managed project config directory left by an earlier delete", "slug", slug, "path", dir)
+			s.auditBrokerDeletion(r.Context(), requestedID, projectfs.TreeProjectConfig, dir)
 		}
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -7889,6 +7900,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 	}
 
 	s.agentLifecycleLog.Info("Removed hub-managed project directory", "slug", slug, "path", projectPath)
+	s.auditBrokerDeletion(r.Context(), r.URL.Query().Get("project_id"), projectfs.TreeProjectDir, projectPath)
 	if configDir != "" {
 		// A failure fails the delete: the project directory is gone, so a
 		// repeated delete removes the entry by its canonical name
@@ -7898,95 +7910,9 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 			return
 		}
 		s.agentLifecycleLog.Info("Removed hub-managed project config directory", "slug", slug, "path", configDir)
+		s.auditBrokerDeletion(r.Context(), r.URL.Query().Get("project_id"), projectfs.TreeProjectConfig, configDir)
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// nfsProjectCleanupRetryDelay is how long a failed NFS project tree removal
-// waits before its one retry (agent pods may still be terminating), and
-// nfsProjectCleanupTimeout bounds the whole background cleanup. Variables so
-// tests can shorten them.
-var (
-	nfsProjectCleanupRetryDelay = 30 * time.Second
-	nfsProjectCleanupTimeout    = 15 * time.Minute
-)
-
-// nfsCleanupAttemptHook, when set, is called with the attempt number (1 or
-// 2) just before each attempt's still-deleted check. Tests only.
-var nfsCleanupAttemptHook func(attempt int)
-
-// startNFSProjectTreeCleanup starts, in the background, the removal of the
-// deleted project's directory on the NFS workspace export,
-// <MountRoot>/<shareID>/<SubPathRoot>/<projectID>, with its workspace,
-// shared-dirs, provisioning state, worktrees and agent directories
-// (scionrt.CleanupNFSProjectRetry, which guards the path and retries a failed
-// removal once). It does nothing when this broker has no NFS workspace
-// storage or the request carries no project ID. The cleanup has its own
-// context with nfsProjectCleanupTimeout, not the request's.
-//
-// Project IDs can be reused (re-linking the same checkout brings the same ID
-// back), so immediately before each attempt the cleanup checks that no agent
-// of the project that this broker did not already know when the delete
-// arrived is in use (newProjectAgentsInUseReason; a listing error counts as in
-// use; on a flat Runtime Broker instance, another instance of the host with
-// live agents in the project, or that cannot say, counts too) and otherwise
-// keeps the tree, logged at Info with the reason. The deleted project's own
-// agents, still terminating, do not block it; a removal that fails because
-// they are still writing is retried after nfsProjectCleanupRetryDelay. A
-// missing tree is success; a final failure is logged for an operator, never
-// returned.
-func (s *Server) startNFSProjectTreeCleanup(reqCtx context.Context, slug, projectID string) {
-	nfs := s.config.NFSConfig
-	if nfs == nil || len(nfs.Shares) == 0 {
-		return
-	}
-	if projectID == "" {
-		s.agentLifecycleLog.Warn("project delete without project_id: NFS workspace tree not removed", "slug", slug)
-		return
-	}
-	retryDelay, timeout, hook := nfsProjectCleanupRetryDelay, nfsProjectCleanupTimeout, nfsCleanupAttemptHook
-	// The project's agents known now belong to the project being deleted:
-	// the hub dispatched their deletes just before this cleanup, and on
-	// Kubernetes their pods keep listing as running until their grace
-	// period ends. Only agents not in this snapshot can belong to a project
-	// that came back with the same ID (the hub gives re-registered agents
-	// new IDs). A snapshot listing error leaves the snapshot empty, so every
-	// listed agent then counts.
-	deleting, err := s.projectAgentIDs(reqCtx, projectID)
-	if err != nil {
-		s.agentLifecycleLog.Info("NFS workspace tree cleanup: could not list the project's agents at delete time",
-			"slug", slug, "project_id", projectID, "error", err)
-	}
-	s.nfsCleanupWG.Add(1)
-	go func() {
-		defer s.nfsCleanupWG.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		defer cancel()
-		keptBecause := ""
-		stillDeleted := func(ctx context.Context, attempt int) bool {
-			if hook != nil {
-				hook(attempt)
-			}
-			inUse, reason, err := s.newProjectAgentsInUseReason(ctx, projectID, deleting)
-			keptBecause = reason
-			if err != nil {
-				s.agentLifecycleLog.Info("NFS workspace tree cleanup: could not list the project's agents; keeping the tree",
-					"slug", slug, "project_id", projectID, "attempt", attempt, "error", err)
-			}
-			return !inUse
-		}
-		err := scionrt.CleanupNFSProjectRetry(ctx, nfs, projectID, retryDelay, stillDeleted)
-		switch {
-		case errors.Is(err, scionrt.ErrNFSCleanupSkipped):
-			s.agentLifecycleLog.Info("NFS workspace tree kept: the project is in use",
-				"slug", slug, "project_id", projectID, "reason", keptBecause)
-		case err != nil:
-			s.agentLifecycleLog.Error("project's NFS workspace tree was not removed after project delete; an operator must remove it",
-				"slug", slug, "project_id", projectID, "error", err)
-		default:
-			s.agentLifecycleLog.Info("Removed project's NFS workspace tree (if present)", "slug", slug, "project_id", projectID)
-		}
-	}()
 }
 
 // brokerProjectDirOwner returns the project ID recorded for the hub-managed
