@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -458,7 +459,7 @@ func TestAgentInfoToResponseProfile(t *testing.T) {
 	}
 }
 
-// TestAgentInfoToResponseWarnings checks only the hub-relayed start
+// TestAgentInfoToResponseWarnings checks only the hub-only env drop
 // warnings reach the hub-facing response, and the field is omitted when
 // there are none (older hubs see no new key).
 func TestAgentInfoToResponseWarnings(t *testing.T) {
@@ -466,7 +467,7 @@ func TestAgentInfoToResponseWarnings(t *testing.T) {
 		Name:               "agent-warn",
 		Phase:              "running",
 		Warnings:           []string{"some local-only warning", "Warning: TZ dropped"},
-		HubRelayedWarnings: []string{"Warning: TZ dropped"},
+		HubOnlyEnvWarnings: []string{"Warning: TZ dropped"},
 	}
 	resp := AgentInfoToResponse(info)
 	if len(resp.Warnings) != 1 || resp.Warnings[0] != "Warning: TZ dropped" {
@@ -479,6 +480,30 @@ func TestAgentInfoToResponseWarnings(t *testing.T) {
 	}
 	if strings.Contains(string(data), `"warnings"`) {
 		t.Errorf("warnings must be omitted when empty, got %s", data)
+	}
+}
+
+// TestAgentInfoToResponseRelayedWarnings checks that start warnings meant
+// for the user reach the hub-facing response after the hub-only env
+// warnings, while local-only warnings stay out.
+func TestAgentInfoToResponseRelayedWarnings(t *testing.T) {
+	relayed := "Warning: relayed to the user"
+	info := api.AgentInfo{
+		Name:               "agent-relay",
+		Phase:              "running",
+		Warnings:           []string{"some local-only warning", "Warning: TZ dropped", relayed},
+		HubOnlyEnvWarnings: []string{"Warning: TZ dropped"},
+		RelayedWarnings:    []string{relayed},
+	}
+	resp := AgentInfoToResponse(info)
+	want := []string{"Warning: TZ dropped", relayed}
+	if !reflect.DeepEqual(resp.Warnings, want) {
+		t.Errorf("Warnings = %v, want %v", resp.Warnings, want)
+	}
+
+	resp = AgentInfoToResponse(api.AgentInfo{Name: "only-relayed", Phase: "running", RelayedWarnings: []string{relayed}})
+	if !reflect.DeepEqual(resp.Warnings, []string{relayed}) {
+		t.Errorf("Warnings = %v, want only the relayed warning", resp.Warnings)
 	}
 }
 

@@ -58,8 +58,9 @@ func routeRegistrationExperiments(t *testing.T) []experiments.Experiment {
 // on), web.only_thing (web-only, default on), and hub.server_only
 // (server-only, default on, so a test asserting web-layer filtering has a
 // name that must NOT appear in a web-facing result), per ptone/scion#2217,
-// plus routeRegistrationExperiments (server-only, default off) so a server
-// built by New() with this registry can register its routes.
+// plus routeRegistrationExperiments (the production definitions, default
+// off; federation.project_visitors has both layers) so a server built by
+// New() with this registry can register its routes.
 func testRegistry(t *testing.T) *experiments.Registry {
 	t.Helper()
 	reg, err := experiments.NewRegistry(append([]experiments.Experiment{

@@ -37,7 +37,7 @@ async function setup(page: Page) {
           ? { exitCode: 1, output: 'secret "TOKEN" already exists' }
           : { exitCode: 0, output: '' };
     } else if (request.url().endsWith('/shared-dirs')) {
-      body = { sharedDirs: [{ name: 'scratchpad' }] };
+      body = { sharedDirs: [{ name: 'scratchpad', target: '/scion-volumes/scratchpad' }] };
     } else if (request.url().endsWith(`/agents/${agentId}`)) {
       body = {
         id: agentId,

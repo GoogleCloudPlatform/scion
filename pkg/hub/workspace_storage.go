@@ -36,7 +36,7 @@ var containerRootPath = "/"
 // workspaceMountRoot returns the absolute path at which the configured
 // workspace storage backend is mounted, or "" when the config does not name
 // one. It is the single place the mount location is derived, so the readiness
-// check and the hub's workspace Layout (workspaceLayoutFor) cannot drift
+// check and the hub's workspace Layout (config.ProjectStorageLayout, with volumeMountBase) cannot drift
 // apart.
 //
 // For the volume backends the mount root is <volumeMountBase>/<volume_name>;

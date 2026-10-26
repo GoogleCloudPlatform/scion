@@ -1,0 +1,13 @@
+# P1-7 wave 2, partial (ptone/scion#4361), step 1 of 2: gather the generic
+# database helpers of the web chat store tests into one helper file, so
+# step 2 (hubtestutil-wave2-webchat.txt) can export them to
+# pkg/hub/internal/hubtestutil, where both pkg/hub and the future
+# pkg/hub/webchat tests can use them (ptone/scion#4269).
+#
+#   extract move -dir pkg/hub -family hack/hubshard/extract/families/hubtestutil-wave2-webchat-move.txt
+dest chatdb_helpers_test.go
+conversationsTableDDL
+getTopicConvID
+rawText
+requireUTCInstant
+requirePostgresDSN

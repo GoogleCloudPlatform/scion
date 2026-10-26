@@ -54,7 +54,7 @@ func newExecSkillFixture(t *testing.T, modes map[string]string) *execSkillFixtur
 	for p, c := range fx.files {
 		infos = append(infos, transfer.FileInfo{Path: p, Hash: transfer.HashBytes(c)})
 	}
-	fx.bundleHash = transfer.ComputeContentHash(infos)
+	fx.bundleHash = transfer.ComputeContentHashV1(infos)
 	fx.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fx.downloads.Add(1)
 		c, ok := fx.files[r.URL.Path[1:]]

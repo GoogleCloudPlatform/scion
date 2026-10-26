@@ -238,10 +238,14 @@ func (s *Server) recoveryCleanup(ctx context.Context, jr *journalRecord, rec *la
 		// recorded resources, as the live clean-up did.
 		return s.cleanupLaunchResources(mgr, rec)
 	}
-	return errors.Join(
+	err := errors.Join(
 		s.cleanupLaunchResources(mgr, rec),
 		s.recoveryNameCleanup(ctx, mgr, jr, rec),
 	)
+	// A flat create whose recovered cleanup ended its run and proved its
+	// files removed releases its slug (ptone/scion#5768).
+	s.retireCleanedCreateLaunch(rec, err, nil)
+	return err
 }
 
 // recoveryManager resolves the manager of the exact runtime a launch ran on,
@@ -377,7 +381,7 @@ func (s *Server) deleteRecoveredRun(ctx context.Context, mgr agent.Manager, jr *
 		return nil
 	}
 	ref := scionrt.RunRef{ID: scionrt.AgentOperationID(target), RunID: target.RunID}
-	if _, err := mgr.DeleteTarget(ctx, jr.AgentName, ref, false, jr.ProjectPath, false); err != nil {
+	if _, err := mgr.DeleteTarget(ctx, jr.AgentName, "", ref, false, jr.ProjectPath, false); err != nil {
 		s.agentLifecycleLog.Warn("Launch recovery: failed to delete the launch's runtime entry",
 			"agent_id", jr.AgentID, "launch_id", jr.LaunchID, "run_id", jr.RunID, "error", err)
 		return failCleanup(nil, cleanupFailRunDelete)

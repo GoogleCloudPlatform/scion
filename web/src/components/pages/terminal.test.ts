@@ -54,6 +54,15 @@ interface SharedDir {
   name: string;
   read_only?: boolean;
   in_workspace?: boolean;
+  target?: string;
+}
+
+/** A shared dir as the hub lists it: with its container target. */
+function dir(name: string, extra: Partial<SharedDir> = {}): SharedDir {
+  const target = extra.in_workspace
+    ? `/workspace/.scion-volumes/${name}`
+    : `/scion-volumes/${name}`;
+  return { name, target, ...extra };
 }
 
 interface MockOptions {
@@ -261,24 +270,24 @@ describe('terminal — resolveUploadTarget', () => {
   it('prefers scratchpad when available', async () => {
     const calls: Call[] = [];
     const el = await createForUploadTest(calls, {
-      sharedDirs: [{ name: 'data' }, { name: 'scratchpad' }, { name: 'other' }],
+      sharedDirs: [
+        dir('data'),
+        dir('scratchpad', { target: '/mnt/hub-computed/scratchpad' }),
+        dir('other'),
+      ],
     });
 
     await (el as any).resolveUploadTarget();
 
     expect(el.uploadEnabled).toBe(true);
     expect(el.uploadTargetDir).toBe('scratchpad');
-    expect(el.uploadBasePath).toBe('/scion-volumes/scratchpad');
+    expect(el.uploadBasePath).toBe('/mnt/hub-computed/scratchpad');
   });
 
   it('falls back to first writable non-in_workspace dir', async () => {
     const calls: Call[] = [];
     const el = await createForUploadTest(calls, {
-      sharedDirs: [
-        { name: 'workspace-dir', in_workspace: true },
-        { name: 'data' },
-        { name: 'other' },
-      ],
+      sharedDirs: [dir('workspace-dir', { in_workspace: true }), dir('data'), dir('other')],
     });
 
     await (el as any).resolveUploadTarget();
@@ -291,8 +300,8 @@ describe('terminal — resolveUploadTarget', () => {
     const calls: Call[] = [];
     const el = await createForUploadTest(calls, {
       sharedDirs: [
-        { name: 'readonly-dir', read_only: true },
-        { name: 'workspace-dir', in_workspace: true },
+        dir('readonly-dir', { read_only: true }),
+        dir('workspace-dir', { in_workspace: true }),
       ],
     });
 
@@ -306,11 +315,33 @@ describe('terminal — resolveUploadTarget', () => {
     const calls: Call[] = [];
     const el = await createForUploadTest(calls, {
       sharedDirs: [
-        { name: 'ro', read_only: true },
-        { name: 'iw', in_workspace: true },
-        { name: 'ro-iw', read_only: true, in_workspace: true },
+        dir('ro', { read_only: true }),
+        dir('iw', { in_workspace: true }),
+        dir('ro-iw', { read_only: true, in_workspace: true }),
       ],
     });
+
+    await (el as any).resolveUploadTarget();
+
+    expect(el.uploadEnabled).toBe(false);
+  });
+
+  it('skips dirs without a hub-computed target', async () => {
+    const calls: Call[] = [];
+    const el = await createForUploadTest(calls, {
+      sharedDirs: [{ name: 'scratchpad' }, dir('data')],
+    });
+
+    await (el as any).resolveUploadTarget();
+
+    expect(el.uploadEnabled).toBe(true);
+    expect(el.uploadTargetDir).toBe('data');
+    expect(el.uploadBasePath).toBe('/scion-volumes/data');
+  });
+
+  it('disables upload when no dir has a target', async () => {
+    const calls: Call[] = [];
+    const el = await createForUploadTest(calls, { sharedDirs: [{ name: 'scratchpad' }] });
 
     await (el as any).resolveUploadTarget();
 

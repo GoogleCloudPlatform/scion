@@ -1580,12 +1580,31 @@ func TestGoogleIDTokenValidator_FirstCallerCancellationDoesNotAbortSharedFetch(t
 }
 
 func TestGoogleIDTokenValidator_AllCallersCanceledFetchStillStops(t *testing.T) {
+	// The first key-set fetch has a short detached timeout, so on a slow
+	// runner it can fail before the request ever reaches the test server.
+	// Such an attempt cannot exercise cancellation; retry it on a fresh
+	// server and validator rather than waiting forever for the handler.
+	const maxAttempts = 5
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if runAllCallersCanceledFetchAttempt(t) {
+			return
+		}
+		t.Logf("attempt %d: first key-set fetch failed before reaching the test server; retrying", attempt)
+	}
+	t.Fatalf("first key-set fetch never reached the test server in %d attempts", maxAttempts)
+}
+
+// runAllCallersCanceledFetchAttempt reports false when the first fetch failed
+// before its request reached the test server, so the scenario never started.
+func runAllCallersCanceledFetchAttempt(t *testing.T) bool {
+	t.Helper()
 	requestStarted := make(chan struct{})
 	requestStopped := make(chan struct{})
+	var startOnce, stopOnce sync.Once
 	jwksServer := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-		close(requestStarted)
+		startOnce.Do(func() { close(requestStarted) })
 		<-r.Context().Done()
-		close(requestStopped)
+		stopOnce.Do(func() { close(requestStopped) })
 	}))
 	defer jwksServer.Close()
 
@@ -1597,13 +1616,22 @@ func TestGoogleIDTokenValidator_AllCallersCanceledFetchStillStops(t *testing.T) 
 	validator.jwksFetchTimeout = 75 * time.Millisecond
 
 	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	defer cancelFirst()
 	secondCtx, cancelSecond := context.WithCancel(context.Background())
+	defer cancelSecond()
 	results := make(chan error, 2)
 	go func() {
 		_, err := validator.getSigningKey(firstCtx, "missing-key")
 		results <- err
 	}()
-	<-requestStarted
+	select {
+	case <-requestStarted:
+	case err := <-results:
+		t.Logf("first key-set fetch ended before reaching the server: %v", err)
+		return false
+	case <-time.After(5 * time.Second):
+		t.Fatal("first key-set fetch neither reached the test server nor failed")
+	}
 	go func() {
 		_, err := validator.getSigningKey(secondCtx, "missing-key")
 		results <- err
@@ -1626,6 +1654,7 @@ func TestGoogleIDTokenValidator_AllCallersCanceledFetchStillStops(t *testing.T) 
 	case <-time.After(time.Second):
 		t.Fatal("detached JWKS fetch outlived its configured timeout")
 	}
+	return true
 }
 
 func TestGoogleIDTokenValidator_JWKSFetchTimeoutBoundsWork(t *testing.T) {

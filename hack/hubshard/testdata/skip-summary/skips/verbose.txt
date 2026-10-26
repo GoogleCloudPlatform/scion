@@ -1,0 +1,22 @@
+=== RUN   TestSkipTop
+    toy_test.go:42: needs postgres
+--- SKIP: TestSkipTop (0.00s)
+=== RUN   TestSkipSub
+=== RUN   TestSkipSub/ok
+    toy_test.go:45: fine
+=== RUN   TestSkipSub/two
+    toy_test.go:46: no docker
+=== RUN   TestSkipSub/three
+    toy_test.go:47: no k8s
+--- PASS: TestSkipSub (0.00s)
+    --- PASS: TestSkipSub/ok (0.00s)
+    --- SKIP: TestSkipSub/two (0.00s)
+    --- SKIP: TestSkipSub/three (0.00s)
+=== RUN   TestSkipNow
+    toy_test.go:51: some log
+direct before skip
+--- SKIP: TestSkipNow (0.00s)
+=== RUN   TestSkipEmpty
+    toy_test.go:56: 
+--- SKIP: TestSkipEmpty (0.00s)
+PASS

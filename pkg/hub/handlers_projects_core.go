@@ -3236,6 +3236,9 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 				"This action requires user or agent authentication", nil)
 			return
 		}
+		if !admitDelegatedAgentHandler(w, r, opAgentActionMessage, agent) {
+			return
+		}
 		// Raw keystroke delivery through /message has been removed; see
 		// the matching tombstone on the top-level route.
 		if s.rejectRetiredRawMessageBody(w, r, rawIngressProjectAgentMessage,
@@ -4051,7 +4054,7 @@ var hubNFSCleanupAttemptHook func(attempt int)
 // result keeps the tree, logged at Info). A final failure is logged for an
 // operator, never returned.
 func (s *Server) startHubNFSProjectTreeCleanup(projectID string) {
-	wsCfg := s.config.WorkspaceStorageConfig
+	wsCfg := s.config.ProjectStorageConfig.WorkspaceStorage()
 	if wsCfg == nil || wsCfg.Backend != "nfs" || wsCfg.NFS == nil || len(wsCfg.NFS.Shares) == 0 {
 		return
 	}

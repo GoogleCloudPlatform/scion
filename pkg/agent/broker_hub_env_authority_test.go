@@ -288,12 +288,12 @@ func TestStart_BrokerMode_HubIsOnlyTZSource(t *testing.T) {
 		}
 	}
 	// The same drop warnings, and only those, are carried for the hub.
-	if len(info.HubRelayedWarnings) != len(tzWarnings) {
-		t.Errorf("HubRelayedWarnings = %v, want the %d TZ drop warnings", info.HubRelayedWarnings, len(tzWarnings))
+	if len(info.HubOnlyEnvWarnings) != len(tzWarnings) {
+		t.Errorf("HubOnlyEnvWarnings = %v, want the %d TZ drop warnings", info.HubOnlyEnvWarnings, len(tzWarnings))
 	}
-	for _, w := range info.HubRelayedWarnings {
+	for _, w := range info.HubOnlyEnvWarnings {
 		if !strings.Contains(w, "TZ=") {
-			t.Errorf("HubRelayedWarnings carries a non-TZ warning %q", w)
+			t.Errorf("HubOnlyEnvWarnings carries a non-TZ warning %q", w)
 		}
 	}
 

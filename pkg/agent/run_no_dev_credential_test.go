@@ -314,7 +314,7 @@ func TestStartHubCredentialIsHubIssuedOnly(t *testing.T) {
 				}
 			}
 
-			for _, w := range append(append([]string(nil), info.Warnings...), info.HubRelayedWarnings...) {
+			for _, w := range append(append([]string(nil), info.Warnings...), info.RelayedWarnings...) {
 				if strings.Contains(w, fakeHostDevToken) || strings.Contains(w, fakeHubIssuedToken) {
 					t.Errorf("start warning carries a token value: %q", w)
 				}
@@ -330,8 +330,8 @@ func TestStartHubCredentialIsHubIssuedOnly(t *testing.T) {
 			if got := hasNoCredential(info.Warnings); got != tt.wantWarning {
 				t.Errorf("no-hub-credential start warning present = %v, want %v; warnings: %v", got, tt.wantWarning, info.Warnings)
 			}
-			if got := hasNoCredential(info.HubRelayedWarnings); got != tt.wantWarning {
-				t.Errorf("no-hub-credential warning relayed to the hub = %v, want %v; relayed: %v", got, tt.wantWarning, info.HubRelayedWarnings)
+			if got := hasNoCredential(info.RelayedWarnings); got != tt.wantWarning {
+				t.Errorf("no-hub-credential warning relayed to the hub = %v, want %v; relayed: %v", got, tt.wantWarning, info.RelayedWarnings)
 			}
 		})
 	}

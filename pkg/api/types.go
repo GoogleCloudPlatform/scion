@@ -742,13 +742,16 @@ type AgentInfo struct {
 	// already running).
 	WorkspacePlacement string   `json:"workspacePlacement,omitempty"`
 	Warnings           []string `json:"warnings,omitempty"`
-	// HubRelayedWarnings carries only the start warnings the broker relays
-	// to the hub for its create and start responses: broker-local values of
-	// hub-only env keys (TZ) dropped for a hub-dispatched agent, and a
-	// hub-dispatched agent starting with no hub credential. They are also
-	// included in Warnings; this field lets the broker relay just these to
-	// the hub without leaking its other local warnings.
-	HubRelayedWarnings []string `json:"hubRelayedWarnings,omitempty"`
+	// HubOnlyEnvWarnings carries only the warnings for broker-local values
+	// of hub-only env keys (TZ) that the broker dropped for a hub-dispatched
+	// agent. They are also included in Warnings; this field lets the broker
+	// relay just these to the hub without leaking its other local warnings.
+	HubOnlyEnvWarnings []string `json:"hubOnlyEnvWarnings,omitempty"`
+	// RelayedWarnings carries start warnings meant for the user that the
+	// broker relays to the hub alongside HubOnlyEnvWarnings, for example a GCP
+	// metadata mode that is not enforced under the agent's network mode. They
+	// are also included in Warnings.
+	RelayedWarnings []string `json:"relayedWarnings,omitempty"`
 
 	// ExplicitImage and ExplicitImagePullPolicy record the image /
 	// kubernetes.imagePullPolicy that the INLINE config (--config), not a
@@ -972,6 +975,22 @@ func ContextWithGitClone(ctx context.Context, gc *GitCloneConfig) context.Contex
 func GitCloneFromContext(ctx context.Context) *GitCloneConfig {
 	gc, _ := ctx.Value(gitCloneContextKey{}).(*GitCloneConfig)
 	return gc
+}
+
+type recordedOriginContextKey struct{}
+
+// ContextWithRecordedOrigin attaches the broker-recorded origin URL (the hub
+// project's repository), used to pin the git-lfs endpoint for a linked-checkout
+// worktree whose GitClone was cleared on the linked route. Prefer this over the
+// live remote.origin.url, which an agent can rewrite.
+func ContextWithRecordedOrigin(ctx context.Context, url string) context.Context {
+	return context.WithValue(ctx, recordedOriginContextKey{}, url)
+}
+
+// RecordedOriginFromContext returns the broker-recorded origin URL, or "" if unset.
+func RecordedOriginFromContext(ctx context.Context) string {
+	s, _ := ctx.Value(recordedOriginContextKey{}).(string)
+	return s
 }
 
 type freshProvisionContextKey struct{}
@@ -1356,6 +1375,12 @@ type StartOptions struct {
 	Env               map[string]string
 	ResolvedSecrets   []ResolvedSecret
 	BrokerMode        bool // When true, auth gathering skips local sources (broker env + filesystem)
+	// RecordedOriginURL is the broker-recorded origin for the project (the hub
+	// project's repository), captured from GitClone before the linked-checkout
+	// route clears GitClone. It is threaded to worktree creation so the git-lfs
+	// endpoint is pinned from this trusted origin rather than the live,
+	// agent-writable remote.origin.url. Empty when there is no recorded origin.
+	RecordedOriginURL string
 	// TrustedHubEndpoint is the broker's own operator-derived resolution of
 	// the hub endpoint — set only in BrokerMode, only from the request
 	// HubEndpoint, the hub connection endpoint, or this broker's configured
@@ -1395,16 +1420,7 @@ type StartOptions struct {
 	TelemetryOverride *bool        // Explicit telemetry override from CLI flags (--enable-telemetry / --disable-telemetry)
 	InlineConfig      *ScionConfig // Inline config from --config flag, merged over template config
 	SharedDirs        []SharedDir  // Project-level shared directories (from Hub, merged with settings)
-	// SharedDirBackendChanges asks a Reprovision to change the recorded
-	// shared-dir storage backend of the named shared dirs (dir name to
-	// backend, "nfs" or "local"). Only the agent's record changes;
-	// no data is copied, moved or deleted. Ignored outside Reprovision.
-	SharedDirBackendChanges map[string]string
-	// AllowEmptySharedDir, with SharedDirBackendChanges, skips the start
-	// check that refuses an empty directory on the new backend while the
-	// dir's directory on its previous backend is not empty.
-	AllowEmptySharedDir bool
-	ExtraHosts          []string // Extra --add-host entries for container networking (e.g. "example.com:host-gateway")
+	ExtraHosts        []string     // Extra --add-host entries for container networking (e.g. "example.com:host-gateway")
 
 	// EmptyPerAgentWorkspace gives the agent a private, initially empty,
 	// non-git workspace at <projectDir>/agents/<slug>/workspace (design

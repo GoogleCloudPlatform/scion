@@ -16,10 +16,7 @@ package provision
 
 import (
 	"errors"
-	"fmt"
 	"net/url"
-	"os"
-	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -48,44 +45,14 @@ func HostCloneGitArgs() []string {
 	)
 }
 
-// hostGitArgs returns the -c settings every host-side git invocation in a
-// repository that agents can write carries, ahead of the subcommand:
-//
-//   - core.hooksPath=/dev/null: no hook runs (post-checkout,
-//     reference-transaction, post-merge, ...). Hooks are repository content
-//     here, not host configuration.
-//   - core.fsmonitor=false: no file-system monitor command runs when git
-//     reads the index.
-//   - core.pager=cat: never starts a configured pager.
-//   - protocol.ext.allow=never: the ext:: transport, which runs a command,
-//     is never used, whatever a config file allows.
-//   - submodule.recurse=false, fetch.recurseSubmodules=false: git never
-//     works inside submodules, whose own config (.git/modules/<name>) is not
-//     part of the checks here, and never fetches from submodule URLs.
-//   - merge.verifySignatures=false, commit.gpgsign=false, tag.gpgsign=false:
-//     no git invocation runs gpg.program to verify or make a signature.
-//   - protocol.file.allow=user: the file:// and local-path transports are
-//     allowed for a top-level operation the user drives directly (git treats
-//     those as GIT_PROTOCOL_FROM_USER=1), which includes a hub clone URL that is
-//     a local path, but are blocked for git's own indirect uses such as
-//     submodule fetches. It is not restricted to command-line URLs: a top-level
-//     fetch of a configured file:// remote is still allowed.
-//
-// TODO(ptone/scion#5865): replace with util.HostGitArgs() and delete this
-// copy once it is available.
+// hostGitArgs returns the base -c settings every host-side git invocation in a
+// repository that agents can write carries, ahead of the subcommand. It
+// delegates to util.HostGitArgs so there is a single source of truth for the
+// base pins (no hooks, no fsmonitor, no pager, restricted ext/file transports,
+// no submodule recursion, no signature verification or signing); see
+// util.HostGitArgs for the per-setting rationale.
 func hostGitArgs() []string {
-	return []string{
-		"-c", "core.hooksPath=" + os.DevNull,
-		"-c", "core.fsmonitor=false",
-		"-c", "core.pager=cat",
-		"-c", "protocol.ext.allow=never",
-		"-c", "protocol.file.allow=user",
-		"-c", "submodule.recurse=false",
-		"-c", "fetch.recurseSubmodules=false",
-		"-c", "merge.verifySignatures=false",
-		"-c", "commit.gpgsign=false",
-		"-c", "tag.gpgsign=false",
-	}
+	return util.HostGitArgs()
 }
 
 // ErrHostCloneURLRefused is returned by CheckHostCloneURL. Its text names no
@@ -179,34 +146,4 @@ func cloneTokenHost(projectRemote, cloneURL string) (string, bool) {
 		return "", false
 	}
 	return strings.ToLower(u.Host), true
-}
-
-// hostScopedTokenHelperEnv returns the GIT_CONFIG_COUNT/KEY/VALUE entries to
-// append to env, the environment of one git command, so that the command
-// offers the token in GitTokenEnv only to https://<host>: the first entry
-// clears the credential helpers from git's config files (none of them sees
-// or stores the credential), the second installs GitTokenCredentialHelper as
-// credential.https://<host>.helper. git uses no helper for any other host,
-// including a redirect target. Entries already counted in env are kept.
-//
-// TODO: replace with util.ScopedCredentialHelperEnv after rebasing onto the
-// upstream credential helper change.
-func hostScopedTokenHelperEnv(env []string, host string) []string {
-	base := 0
-	for _, e := range env {
-		if v, ok := strings.CutPrefix(e, "GIT_CONFIG_COUNT="); ok {
-			// The last entry is the one exec uses.
-			base = 0
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				base = n
-			}
-		}
-	}
-	return []string{
-		"GIT_CONFIG_COUNT=" + strconv.Itoa(base+2),
-		fmt.Sprintf("GIT_CONFIG_KEY_%d=credential.helper", base),
-		fmt.Sprintf("GIT_CONFIG_VALUE_%d=", base),
-		fmt.Sprintf("GIT_CONFIG_KEY_%d=credential.https://%s.helper", base+1, host),
-		fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", base+1, GitTokenCredentialHelper),
-	}
 }

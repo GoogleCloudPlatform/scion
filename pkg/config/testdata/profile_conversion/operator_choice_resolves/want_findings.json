@@ -49,15 +49,15 @@
     {
       "code": "profile_conflict_resolved",
       "severity": "notice",
-      "path": "profiles.*.shared_dir_storage_backend",
+      "path": "profiles.*.shared_dir_storage_class",
       "profiles": [
         "fast",
         "slow"
       ],
       "message_contains": [
-        "instance k8s-agents takes profile fast's shared_dir_storage_backend",
-        "fast: nfs from profiles.fast.shared_dir_storage_backend",
-        "slow: local from profiles.slow.shared_dir_storage_backend"
+        "instance k8s-agents takes profile fast's shared_dir_storage_class",
+        "fast: standard-rwx from profiles.fast.shared_dir_storage_class",
+        "slow: standard-rwo from profiles.slow.shared_dir_storage_class"
       ]
     }
   ]

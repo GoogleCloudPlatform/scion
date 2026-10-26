@@ -189,3 +189,12 @@ export const AGENT_BADGES_FLAG = 'web.agent_badges';
  * the hub behaves the same either way. Default OFF.
  */
 export const SSE_HIDDEN_TAB_CLOSE_FLAG = 'web.sse_hidden_tab_close';
+
+/**
+ * Graphical review editor (ptone/scion#5913): a Markdown artifact review
+ * opens in a graphical editor with marks inline, where typing is recorded
+ * as suggestions, with a Graphical and Source toggle. Presentation only:
+ * every save goes through the unchanged review publish, which the hub
+ * checks. Default OFF.
+ */
+export const ARTIFACT_REVIEW_EDITOR_FLAG = 'web.artifact_review_editor';

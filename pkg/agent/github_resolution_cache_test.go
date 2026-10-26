@@ -776,10 +776,8 @@ func TestGitHubResolutionCache_ResolveWithFetch_StaleServesImmediately(t *testin
 		// this, t.TempDir()'s RemoveAll can race the refresh goroutine's
 		// putEntry -> save(), which writes github-resolution-cache.json.tmp
 		// into the directory while it is being removed ("directory not
-		// empty"). Do joins the already-running flight (started by
-		// ResolveWithFetch's own background refresh) rather than starting a
-		// new one.
-		_, _, _ = cache.flight.Do("stale-flight", func() (interface{}, error) { return nil, nil })
+		// empty"). refreshWG counts that background refresh goroutine.
+		cache.refreshWG.Wait()
 	})
 	fetch := func(ctx context.Context) (ResolvedSkill, error) {
 		close(entered)

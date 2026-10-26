@@ -16,7 +16,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -112,7 +111,10 @@ func TestGitHubResolutionCache_StaleEntryWinsOverRememberedFailure(t *testing.T)
 	cache.recordFailure(key, notFound)
 	t.Cleanup(func() {
 		// Let any background refresh finish before the temp dir goes away.
-		_, _, _ = cache.flight.Do(flightKey, func() (interface{}, error) { return nil, nil })
+		// Wait on refreshWG, not on a flight.Do barrier: the refresh may not
+		// have joined its flight yet, and would then join the barrier's
+		// result-less flight instead (ptone/scion#6181).
+		cache.refreshWG.Wait()
 	})
 
 	skill, err := cache.ResolveWithFetch(context.Background(), key, flightKey, "cred", "ref", true, nil,
@@ -133,8 +135,8 @@ func TestGitHubSkillResolver_RawDownloadNotFoundIsNotRemembered(t *testing.T) {
 	mux.HandleFunc("/repos/acme/tools/commits/main", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/acme/tools/contents/skills/lagging", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+	mux.HandleFunc("/repos/acme/tools/git/trees/"+testCommitSHA+":skills/lagging", func(w http.ResponseWriter, _ *http.Request) {
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/lagging/SKILL.md", Type: "file", Size: 4},
 		})
 	})

@@ -17,14 +17,56 @@ package hubclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestArtifactWrite_AuthErrorClosesFile(t *testing.T) {
+	for _, operation := range []string{"Publish", "UploadFile"} {
+		t.Run(operation, func(t *testing.T) {
+			file, err := os.CreateTemp(t.TempDir(), "artifact-body-*")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = file.Close() })
+			if _, err := file.WriteString("payload"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := file.Seek(0, io.SeekStart); err != nil {
+				t.Fatal(err)
+			}
+			rt := &countingErrorRoundTripper{err: errors.New("unexpected transport call")}
+			client, err := New("https://hub.invalid", WithHMACAuth("", nil), WithRetry(3, 0),
+				WithHTTPClient(&http.Client{Transport: rt}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if operation == "Publish" {
+				_, err = client.Artifacts().Publish(t.Context(), &PublishArtifactRequest{
+					Name: "notes.txt", Content: file, Size: 7,
+				})
+			} else {
+				err = client.Artifacts().UploadFile(t.Context(), "artifact-1", 1, "notes.txt", file, 7, "")
+			}
+			if err == nil || !strings.Contains(err.Error(), "HMAC auth requires brokerID and secretKey") {
+				t.Fatalf("error = %v; want HMAC validation error", err)
+			}
+			if calls := atomic.LoadInt32(&rt.calls); calls != 0 {
+				t.Errorf("transport calls = %d; want 0", calls)
+			}
+			if _, err := file.Read(make([]byte, 1)); !errors.Is(err, os.ErrClosed) {
+				t.Errorf("reading artifact file after auth failure: %v; want os.ErrClosed", err)
+			}
+		})
+	}
+}
 
 func TestArtifactPublish(t *testing.T) {
 	var calls atomic.Int32

@@ -1311,7 +1311,7 @@ func TestPullSharedWorkspace(t *testing.T) {
 	}
 
 	t.Run("PullNoChanges", func(t *testing.T) {
-		result, err := PullSharedWorkspace(cloneDir, "")
+		result, err := PullSharedWorkspace(cloneDir, sourceDir, "")
 		if err != nil {
 			t.Fatalf("Pull failed: %v", err)
 		}
@@ -1336,7 +1336,7 @@ func TestPullSharedWorkspace(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		result, err := PullSharedWorkspace(cloneDir, "")
+		result, err := PullSharedWorkspace(cloneDir, sourceDir, "")
 		if err != nil {
 			t.Fatalf("Pull failed: %v", err)
 		}
@@ -1362,7 +1362,7 @@ func TestPullSharedWorkspace(t *testing.T) {
 
 	t.Run("PullFailure_NotARepo", func(t *testing.T) {
 		notARepo := t.TempDir()
-		_, err := PullSharedWorkspace(notARepo, "")
+		_, err := PullSharedWorkspace(notARepo, sourceDir, "")
 		if err == nil {
 			t.Fatal("expected pull to fail for non-repo directory")
 		}
@@ -1470,84 +1470,6 @@ func TestGitError_UserGuidance(t *testing.T) {
 	}
 }
 
-func TestAuthenticatedCloneURL(t *testing.T) {
-	const token = "ghp_exampletoken"
-
-	tests := []struct {
-		name     string
-		cloneURL string
-		token    string
-		want     string
-	}{
-		{
-			name:     "plain https remote gets credentials",
-			cloneURL: "https://github.com/org/repo.git",
-			token:    token,
-			want:     "https://oauth2:" + token + "@github.com/org/repo.git",
-		},
-		{
-			name:     "remote that already carries userinfo is not doubled up",
-			cloneURL: "https://org@dev.azure.com/org/project/_git/repo",
-			token:    token,
-			want:     "https://oauth2:" + token + "@dev.azure.com/org/project/_git/repo",
-		},
-		{
-			name:     "empty token leaves the URL alone",
-			cloneURL: "https://github.com/org/repo.git",
-			token:    "",
-			want:     "https://github.com/org/repo.git",
-		},
-		{
-			name:     "token with reserved characters is escaped",
-			cloneURL: "https://github.com/org/repo.git",
-			token:    "p@ss/word",
-			want:     "https://oauth2:p%40ss%2Fword@github.com/org/repo.git",
-		},
-		{
-			name:     "non-default port is preserved",
-			cloneURL: "https://host.example.com:8443/org/repo.git",
-			token:    token,
-			want:     "https://oauth2:" + token + "@host.example.com:8443/org/repo.git",
-		},
-		{
-			name:     "scp-style ssh remote is left alone",
-			cloneURL: "git@github.com:org/repo.git",
-			token:    token,
-			want:     "git@github.com:org/repo.git",
-		},
-		{
-			name:     "ssh scheme is left alone rather than given an oauth token",
-			cloneURL: "ssh://git@github.com/org/repo.git",
-			token:    token,
-			want:     "ssh://git@github.com/org/repo.git",
-		},
-		{
-			name:     "plain http is left alone",
-			cloneURL: "http://internal.example.com/org/repo.git",
-			token:    token,
-			want:     "http://internal.example.com/org/repo.git",
-		},
-		{
-			name:     "unparseable remote is returned unchanged",
-			cloneURL: "not a url",
-			token:    token,
-			want:     "not a url",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := authenticatedCloneURL(tt.cloneURL, tt.token)
-			if got != tt.want {
-				t.Errorf("authenticatedCloneURL(%q, token) = %q, want %q", tt.cloneURL, got, tt.want)
-			}
-			if tt.token != "" && strings.Count(got, "@") > 1 {
-				t.Errorf("result contains more than one @ separator: %q", got)
-			}
-		})
-	}
-}
-
 // fakeGitBinary writes a shell script that reports the given `git --version`
 // output and returns its path, for pointing SCION_GIT_BINARY at a specific
 // version without depending on whatever git happens to be installed on the
@@ -1641,5 +1563,95 @@ func TestStripGitURLCredentials(t *testing.T) {
 				t.Errorf("StripGitURLCredentials(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+// After CloneSharedWorkspace, no credential remains anywhere in the clone's
+// .git/config (the remote URL included): the token is supplied through a scoped
+// credential helper in the environment, never embedded in the URL.
+func TestCloneSharedWorkspace_NoCredentialInConfig(t *testing.T) {
+	source := setupGitRepo(t)
+	if err := os.WriteFile(filepath.Join(source, "hello.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range [][]string{{"add", "hello.txt"}, {"commit", "-m", "c"}} {
+		c := exec.Command("git", a...)
+		c.Dir = source
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", a, err, out)
+		}
+	}
+	const token = "shared-clone-secret-token"
+	dest := filepath.Join(t.TempDir(), "workspace")
+	if err := CloneSharedWorkspace(dest, source, "", token); err != nil {
+		t.Fatalf("CloneSharedWorkspace: %v", err)
+	}
+	cfg, err := os.ReadFile(filepath.Join(dest, ".git", "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(cfg), token) || strings.Contains(string(cfg), "oauth2:") {
+		t.Errorf(".git/config must carry no credential, got:\n%s", cfg)
+	}
+}
+
+// CloneSharedWorkspace with an https URL, run through a PATH-first fake git.
+// Asserts (i) the clone env carries the host-scoped credential helper, (ii) no
+// token appears on any git argv or in a GIT_CONFIG_VALUE, and (iii) the resulting
+// .git/config is credential-free (the token is supplied only via the env helper,
+// never embedded in the URL).
+func TestCloneSharedWorkspace_HTTPS_NoCredentialOnArgvOrConfig(t *testing.T) {
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("git not installed")
+	}
+	const token = "shared-https-secret-token"
+	root := t.TempDir()
+	argvLog := filepath.Join(root, "argv.log")
+	envLog := filepath.Join(root, "env.log")
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Fake git: record argv + the credential-relevant env; a clone becomes a local
+	// init + remote add of the (credential-free) URL; config passes through.
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> '" + argvLog + "'\n" +
+		"env | grep -E '^(GIT_CONFIG_|SCION_SCOPED_GIT_CREDENTIAL)' >> '" + envLog + "'\n" +
+		"a1=''; a2=''; for a in \"$@\"; do a1=\"$a2\"; a2=\"$a\"; done\n" +
+		"case \" $* \" in\n" +
+		"  *' clone '*) '" + realGit + "' init -q \"$a2\" >/dev/null 2>&1; '" + realGit + "' -C \"$a2\" remote add origin \"$a1\" >/dev/null 2>&1; exit 0 ;;\n" +
+		"  *) exec '" + realGit + "' \"$@\" ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	dest := filepath.Join(root, "workspace")
+	if err := CloneSharedWorkspace(dest, "https://github.com/org/repo.git", "", token); err != nil {
+		t.Fatalf("CloneSharedWorkspace: %v", err)
+	}
+	argv, _ := os.ReadFile(argvLog)
+	envDump, _ := os.ReadFile(envLog)
+	cfg, _ := os.ReadFile(filepath.Join(dest, ".git", "config"))
+
+	// (i) the env carries the host-scoped credential helper.
+	if !strings.Contains(string(envDump), "credential.https://github.com.helper") {
+		t.Errorf("clone env is missing the host-scoped credential helper:\n%s", envDump)
+	}
+	// (ii) no token on any argv, and no GIT_CONFIG_VALUE carries it (the helper
+	// text is the constant; the token lives only in SCION_SCOPED_GIT_CREDENTIAL).
+	if strings.Contains(string(argv), token) {
+		t.Errorf("token appeared on a git argv:\n%s", argv)
+	}
+	for _, line := range strings.Split(string(envDump), "\n") {
+		if strings.HasPrefix(line, "GIT_CONFIG_VALUE_") && strings.Contains(line, token) {
+			t.Errorf("a GIT_CONFIG_VALUE carried the token: %q", line)
+		}
+	}
+	// (iii) .git/config ends credential-free.
+	if strings.Contains(string(cfg), token) || strings.Contains(string(cfg), "oauth2:") {
+		t.Errorf(".git/config must be credential-free, got:\n%s", cfg)
 	}
 }
