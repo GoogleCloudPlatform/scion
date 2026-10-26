@@ -1,0 +1,3 @@
+# Recorded test binary output: keep it byte for byte (t.Skip() with no
+# message logs a line ending in a space).
+* -whitespace

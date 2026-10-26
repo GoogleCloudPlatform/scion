@@ -83,12 +83,15 @@ func TestReportingAPIReportIsLogged(t *testing.T) {
 		"blocked_uri": "trusted-types-sink",
 		"source_file": "https://hub.example/assets/main.js",
 		"line":        float64(42),
-		"sample":      "Element innerHTML|<b>x</b>",
+		"sink":        "Element innerHTML",
 	}
 	for k, v := range want {
 		if r[k] != v {
 			t.Errorf("record[%q] = %v, want %v", k, r[k], v)
 		}
+	}
+	if _, ok := r["sample"]; ok {
+		t.Errorf("record has a sample by default: %v", r["sample"])
 	}
 }
 
@@ -110,11 +113,15 @@ func TestLegacyReportIsLogged(t *testing.T) {
 		"blocked_uri": "inline",
 		"source_file": "https://hub.example/",
 		"line":        float64(9),
-		"sample":      "alert(1)",
 	}
 	for k, v := range want {
 		if r[k] != v {
 			t.Errorf("record[%q] = %v, want %v", k, r[k], v)
+		}
+	}
+	for _, k := range []string{"sample", "sink"} {
+		if _, ok := r[k]; ok {
+			t.Errorf("record has %q: %v", k, r[k])
 		}
 	}
 }
@@ -140,7 +147,7 @@ func TestSampleIsTruncated(t *testing.T) {
 	long := strings.Repeat("é", MaxSampleRunes+30)
 	body := `[{"type":"csp-violation","body":{"effectiveDirective":"script-src","sample":"` + long + `"}}]`
 	var buf bytes.Buffer
-	h := &Handler{Log: recordingLog(&buf)}
+	h := &Handler{Log: recordingLog(&buf), RawSamples: true}
 	if rec := post(h, "application/reports+json", body); rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204", rec.Code)
 	}
@@ -234,7 +241,10 @@ func TestMalformedReports(t *testing.T) {
 		{"wrong field type", "application/csp-report", `{"csp-report":{"line-number":"nine"}}`, http.StatusBadRequest},
 		{"plain json content type", "application/json", reportingAPIBody, http.StatusUnsupportedMediaType},
 		{"no content type", "", reportingAPIBody, http.StatusUnsupportedMediaType},
-		{"shapes swapped", "application/csp-report", reportingAPIBody, http.StatusBadRequest},
+		{"single report of another type", "application/csp-report", `{"type":"deprecation","body":{}}`, http.StatusBadRequest},
+		{"single report without body", "application/csp-report", `{"type":"csp-violation","url":"https://hub.example/"}`, http.StatusBadRequest},
+		{"string body", "application/csp-report", `"csp-report"`, http.StatusBadRequest},
+		{"empty body", "application/csp-report", ``, http.StatusBadRequest},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -466,6 +476,10 @@ func TestPackageStoresNothing(t *testing.T) {
 	allowed := map[string]bool{
 		"encoding/json": true, "errors": true, "io": true, "log/slog": true, "mime": true,
 		"net/http": true, "strconv": true, "strings": true, "unicode": true, "unicode/utf8": true,
+		// Dedupe keeps its counts in memory only.
+		"sync": true, "time": true,
+		// Summary records are logged without a request's context.
+		"context": true,
 	}
 	if len(pkg.Imports) == 0 {
 		t.Fatal("no imports read; the check would pass vacuously")
@@ -488,7 +502,7 @@ func TestRecordsHoldPrintableTextOnly(t *testing.T) {
 		`"sourceFile":"https://hub.example/a\u202eb.js","blockedURL":"x\u200by",` +
 		`"sample":"caf\u00e9 \u65e5\u672c \u0007\u0085\u2066\u2028\ue000z"}}]`
 	var buf bytes.Buffer
-	h := &Handler{Log: recordingLog(&buf)}
+	h := &Handler{Log: recordingLog(&buf), RawSamples: true}
 	if rec := post(h, "application/reports+json", body); rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204", rec.Code)
 	}
@@ -505,6 +519,190 @@ func TestRecordsHoldPrintableTextOnly(t *testing.T) {
 	for k, v := range want {
 		if got[0][k] != v {
 			t.Errorf("%s = %q, want %q", k, got[0][k], v)
+		}
+	}
+}
+
+// secretMarker stands for private page content (a chat message, a token)
+// that a browser can put into a report.
+const secretMarker = "PRIVATE-MARKER-9e41c7"
+
+// markerReports carries secretMarker in every place a browser can put
+// page data: a Trusted Types sample, a script sample, a data: URL, URL
+// user information, queries and fragments.
+const markerReports = `[` +
+	`{"type":"csp-violation","body":{"effectiveDirective":"require-trusted-types-for","blockedURL":"trusted-types-sink",` +
+	`"sourceFile":"https://hub.example/assets/chat.js?k=` + secretMarker + `","lineNumber":583,` +
+	`"sample":"Element innerHTML|<p>` + secretMarker + ` hello</p>"}},` +
+	`{"type":"csp-violation","body":{"effectiveDirective":"img-src","blockedURL":"data:text/html,` + secretMarker + `",` +
+	`"sourceFile":"https://hub.example/projects","lineNumber":1}},` +
+	`{"type":"csp-violation","body":{"effectiveDirective":"connect-src",` +
+	`"blockedURL":"https://user:` + secretMarker + `@files.example/dl/report.pdf?token=` + secretMarker + `#` + secretMarker + `",` +
+	`"sourceFile":"wss://` + secretMarker + `@hub.example/ws#` + secretMarker + `","lineNumber":7}},` +
+	`{"type":"csp-violation","body":{"effectiveDirective":"script-src-elem","blockedURL":"blob:https://hub.example/` + secretMarker + `",` +
+	`"sourceFile":"javascript:` + secretMarker + `","sample":"` + secretMarker + `"}},` +
+	`{"type":"csp-violation","body":{"effectiveDirective":"img-src",` +
+	`"blockedURL":"//u:` + secretMarker + `@cdn.example/i.png?t=` + secretMarker + `#` + secretMarker + `",` +
+	`"sourceFile":"https://hub.example/projects","lineNumber":2}}` +
+	`]`
+
+func TestSamplesAndURLDataAreNotLoggedByDefault(t *testing.T) {
+	var buf bytes.Buffer
+	h := &Handler{Log: recordingLog(&buf)}
+	if rec := post(h, "application/reports+json", markerReports); rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body %q", rec.Code, rec.Body.String())
+	}
+	legacy := `{"csp-report":{"effective-directive":"script-src-elem","blocked-uri":"inline",` +
+		`"source-file":"https://hub.example/chat?m=` + secretMarker + `","line-number":3,` +
+		`"script-sample":"` + secretMarker + `"}}`
+	if rec := post(h, "application/csp-report", legacy); rec.Code != http.StatusNoContent {
+		t.Fatalf("legacy status = %d, want 204", rec.Code)
+	}
+	raw := buf.String()
+	if strings.Contains(raw, secretMarker) {
+		t.Fatalf("the log holds the planted marker:\n%s", raw)
+	}
+	got := records(t, &buf)
+	if len(got) != 6 {
+		t.Fatalf("got %d records, want 6: %v", len(got), got)
+	}
+	// Positive control: the fields that locate the cause are kept.
+	want := []map[string]any{
+		{"directive": "require-trusted-types-for", "sink": "Element innerHTML", "blocked_uri": "trusted-types-sink",
+			"source_file": "https://hub.example/assets/chat.js", "line": float64(583)},
+		{"directive": "img-src", "blocked_uri": "data:", "source_file": "https://hub.example/projects", "line": float64(1)},
+		{"directive": "connect-src", "blocked_uri": "https://files.example/dl/report.pdf",
+			"source_file": "wss://hub.example/ws", "line": float64(7)},
+		{"directive": "script-src-elem", "blocked_uri": "blob:", "source_file": "javascript:"},
+		{"directive": "img-src", "blocked_uri": "//cdn.example/i.png", "source_file": "https://hub.example/projects", "line": float64(2)},
+		{"directive": "script-src-elem", "blocked_uri": "inline", "source_file": "https://hub.example/chat", "line": float64(3)},
+	}
+	for i, w := range want {
+		for k, v := range w {
+			if got[i][k] != v {
+				t.Errorf("record %d: %s = %v, want %v", i, k, got[i][k], v)
+			}
+		}
+		if _, ok := got[i]["sample"]; ok {
+			t.Errorf("record %d has a sample", i)
+		}
+	}
+}
+
+func TestRawSamplesAreLoggedOnlyWhenTurnedOn(t *testing.T) {
+	// Positive control for the test above: with RawSamples the same
+	// reports do put the sample, marker included, into the log, so the
+	// default's absence of the marker is not an accident of the input.
+	var buf bytes.Buffer
+	h := &Handler{Log: recordingLog(&buf), RawSamples: true}
+	if rec := post(h, "application/reports+json", markerReports); rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+	got := records(t, &buf)
+	if len(got) != 5 {
+		t.Fatalf("got %d records, want 5", len(got))
+	}
+	if s, _ := got[0]["sample"].(string); s != "Element innerHTML|<p>"+secretMarker+" hello</p>" {
+		t.Errorf("sample = %q, want the Trusted Types sample", s)
+	}
+	// URLs are reduced whether or not samples are logged.
+	if got[2]["blocked_uri"] != "https://files.example/dl/report.pdf" {
+		t.Errorf("blocked_uri = %v, want the reduced URL", got[2]["blocked_uri"])
+	}
+
+	// The same for the older single-report form: its script-sample is the
+	// sample that is logged when RawSamples is on.
+	buf.Reset()
+	legacy := `{"csp-report":{"effective-directive":"script-src-elem","blocked-uri":"inline",` +
+		`"source-file":"https://hub.example/chat","line-number":3,"script-sample":"` + secretMarker + `"}}`
+	if rec := post(h, "application/csp-report", legacy); rec.Code != http.StatusNoContent {
+		t.Fatalf("legacy status = %d, want 204", rec.Code)
+	}
+	got = records(t, &buf)
+	if len(got) != 1 || got[0]["sample"] != secretMarker {
+		t.Errorf("legacy records = %v, want one with sample %q", got, secretMarker)
+	}
+}
+
+func TestReduceURL(t *testing.T) {
+	for _, c := range []struct{ in, want string }{
+		{"inline", "inline"},
+		{"eval", "eval"},
+		{"trusted-types-sink", "trusted-types-sink"},
+		{"/assets/main.js?v=1#f", "/assets/main.js"},
+		{"https://hub.example/assets/main.js?v=1#f", "https://hub.example/assets/main.js"},
+		{"https://u:p@hub.example:8443/a/b", "https://hub.example:8443/a/b"},
+		{"HTTPS://hub.example/a", "HTTPS://hub.example/a"},
+		{"wss://hub.example/ws?t=1", "wss://hub.example/ws"},
+		{"https://hub.example", "https://hub.example"},
+		{"https:no-slashes", "https:"},
+		{"data:text/html,<b>x</b>", "data:"},
+		{"DATA:text/plain;base64,eA==", "data:"},
+		{"blob:https://hub.example/9b1e", "blob:"},
+		{"javascript:alert(1)", "javascript:"},
+		{"about:blank", "about:"},
+		{"user:pw@host/x", "user:"},
+		{"//user:pass@host.example/path?x#y", "//host.example/path"},
+		{"//host.example/a.js", "//host.example/a.js"},
+		{"", ""},
+	} {
+		if got := reduceURL(c.in); got != c.want {
+			t.Errorf("reduceURL(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestSinkName(t *testing.T) {
+	for _, c := range []struct{ directive, sample, want string }{
+		{"require-trusted-types-for", "Element innerHTML|<p>x</p>", "Element innerHTML"},
+		{"require-trusted-types-for", "HTMLScriptElement src|/a.js", "HTMLScriptElement src"},
+		{"require-trusted-types-for", "Function|return 1", "Function"},
+		{"require-trusted-types-for", "eval|1+1", "eval"},
+		// Not on the closed list: dropped even when shaped like a sink name.
+		{"require-trusted-types-for", "Element fooBar|x", ""},
+		{"require-trusted-types-for", "Private note|x", ""},
+		{"require-trusted-types-for", "element innerHTML|x", ""},
+		// No '|', an empty name, or other text before it.
+		{"require-trusted-types-for", "Element innerHTML", ""},
+		{"require-trusted-types-for", "|x", ""},
+		{"require-trusted-types-for", "<p>a|b", ""},
+		// Other directives never give a sink.
+		{"script-src-elem", "Element innerHTML|x", ""},
+	} {
+		if got := sinkName(c.directive, c.sample); got != c.want {
+			t.Errorf("sinkName(%q, %q) = %q, want %q", c.directive, c.sample, got, c.want)
+		}
+	}
+}
+
+func TestLegacyScriptSampleFollowsSetting(t *testing.T) {
+	// Through the handler (content type, body read, parse, log): the older
+	// single-report form's script-sample is absent from the log with the
+	// setting off, and is the logged sample with it on.
+	legacy := `{"csp-report":{"effective-directive":"script-src-elem","blocked-uri":"inline",` +
+		`"source-file":"https://hub.example/chat","line-number":3,"script-sample":"` + secretMarker + `"}}`
+	for _, on := range []bool{false, true} {
+		var buf bytes.Buffer
+		h := &Handler{Log: recordingLog(&buf), RawSamples: on}
+		if rec := post(h, "application/csp-report", legacy); rec.Code != http.StatusNoContent {
+			t.Fatalf("RawSamples=%v: status = %d, want 204", on, rec.Code)
+		}
+		raw := buf.String()
+		got := records(t, &buf)
+		if len(got) != 1 {
+			t.Fatalf("RawSamples=%v: got %d records, want 1", on, len(got))
+		}
+		if on {
+			if got[0]["sample"] != secretMarker {
+				t.Errorf("RawSamples=true: sample = %v, want %q", got[0]["sample"], secretMarker)
+			}
+			continue
+		}
+		if strings.Contains(raw, secretMarker) {
+			t.Errorf("RawSamples=false: the log holds the marker:\n%s", raw)
+		}
+		if _, ok := got[0]["sample"]; ok {
+			t.Errorf("RawSamples=false: record has a sample")
 		}
 	}
 }

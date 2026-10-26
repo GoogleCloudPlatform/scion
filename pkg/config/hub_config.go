@@ -179,6 +179,11 @@ type HubServerConfig struct {
 	// Off by default; observe only; read at startup.
 	PerfTrace bool `json:"perfTrace" yaml:"perfTrace" koanf:"perfTrace"`
 
+	// CSPReportRawSamples adds each browser policy report's sample to its
+	// csp_violation log record. Off by default (a sample can hold page
+	// content); for diagnosis; read at startup.
+	CSPReportRawSamples bool `json:"cspReportRawSamples" yaml:"cspReportRawSamples" koanf:"cspReportRawSamples"`
+
 	// MembershipSweepReportOnly puts the membership-standing sweep in
 	// report-only mode: it logs and audits the agents it would hold and
 	// stop, and holds and stops none of them. Off by default (the sweep
@@ -1220,6 +1225,20 @@ type GlobalConfig struct {
 	// project workspaces. Nil or Backend=="" / "local" preserves the legacy
 	// node-local behavior. Populated from server.workspace_storage in settings.yaml.
 	WorkspaceStorage *V1WorkspaceStorageConfig `json:"-" yaml:"-" koanf:"-"`
+
+	// ProjectStorage is server.project_storage as written (file, then
+	// SCION_SERVER_PROJECT_STORAGE_* env). SharedDirStorage and HomeStorage
+	// are server.shared_dir_storage and server.home_storage from the file
+	// only. ResolveProjectStorage turns the four blocks into the one block
+	// the hub uses.
+	ProjectStorage   *V1ProjectStorageConfig   `json:"-" yaml:"-" koanf:"-"`
+	SharedDirStorage *V1SharedDirStorageConfig `json:"-" yaml:"-" koanf:"-"`
+	HomeStorage      *V1HomeStorageConfig      `json:"-" yaml:"-" koanf:"-"`
+	// EffectiveProjectStorage is the block ResolveGlobalProjectStorage
+	// returned at hub startup; nil means the local backend.
+	EffectiveProjectStorage *V1ProjectStorageConfig `json:"-" yaml:"-" koanf:"-"`
+	// EffectiveProjectStorageWarnings are that resolution's warnings.
+	EffectiveProjectStorageWarnings []string `json:"-" yaml:"-" koanf:"-"`
 
 	// NativeChat controls the built-in chat feature. Nil (absent) means
 	// enabled. Populated from server.native_chat in settings.yaml.
@@ -2340,6 +2359,7 @@ type globalConfigEnvOverlay struct {
 	DefaultGCPIdentityServiceAccountID *string `koanf:"default_gcp_identity_service_account_id"`
 	Server                             struct {
 		WorkspaceStorage *V1WorkspaceStorageConfig `koanf:"workspace_storage"`
+		ProjectStorage   *V1ProjectStorageConfig   `koanf:"project_storage"`
 		NativeChat       *V1NativeChatConfig       `koanf:"native_chat"`
 	} `koanf:"server"`
 }
@@ -2363,12 +2383,14 @@ func applyEnvToOutsideKoanfFields(gc *GlobalConfig) error {
 	var ov globalConfigEnvOverlay
 	ov.Telemetry = gc.TelemetryConfig
 	ov.Server.WorkspaceStorage = gc.WorkspaceStorage
+	ov.Server.ProjectStorage = gc.ProjectStorage
 	ov.Server.NativeChat = gc.NativeChat
 	if err := k.Unmarshal("", &ov); err != nil {
 		return fmt.Errorf("SCION_SERVER_* environment: %w", err)
 	}
 	gc.TelemetryConfig = ov.Telemetry
 	gc.WorkspaceStorage = ov.Server.WorkspaceStorage
+	gc.ProjectStorage = ov.Server.ProjectStorage
 	gc.NativeChat = ov.Server.NativeChat
 	if v := ov.ProjectDefaults.DefaultScratchpad; v != nil {
 		gc.DefaultScratchpad = v
