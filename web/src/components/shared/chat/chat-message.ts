@@ -35,6 +35,7 @@ import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { styleMap } from 'lit/directives/style-map.js';
 import { apiFetch } from '../../../client/api.js';
+import { peekUser, resolveUser, userDisplayName } from '../../../client/user-directory.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
 import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
 import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
@@ -832,6 +833,22 @@ export class ScionChatMessage extends LitElement {
   @property()
   senderProjectSlug = '';
 
+  /**
+   * The user who authorized a message sent with an agent delegated
+   * credential (.design/agent-delegation.md §14.5). The sender stays the
+   * agent; the message shows "authorized by <user>". Empty otherwise.
+   */
+  @property()
+  authorizingUserId = '';
+
+  /** The delegation grant of a message sent with an agent delegated credential. */
+  @property()
+  delegationGrantId = '';
+
+  /** The authorizing user's display name, email or ID, once resolved. */
+  @state()
+  private authorizerName = '';
+
   /** The signed-in user's id; the artifact preview shows their artifacts' owner as "You". */
   @property()
   currentUserId = '';
@@ -947,6 +964,13 @@ export class ScionChatMessage extends LitElement {
       color: var(--scion-text-muted, #64748b);
       font-size: var(--chat-fs-sm);
       font-weight: 400;
+    }
+
+    .authorized-by {
+      font-size: var(--chat-fs-sm);
+      font-weight: 400;
+      color: var(--scion-text-muted, #64748b);
+      margin-bottom: 0.125rem;
     }
 
     .cross-project-label {
@@ -1867,6 +1891,40 @@ export class ScionChatMessage extends LitElement {
     this.observedPreviews = new WeakSet();
   }
 
+  override willUpdate(changed: Map<string, unknown>): void {
+    super.willUpdate(changed);
+    if (changed.has('authorizingUserId')) {
+      this.resolveAuthorizer();
+    }
+  }
+
+  /**
+   * Names the authorizing user: a cached user row at once, else the ID
+   * until `resolveUser` answers (display name, else email, else the ID).
+   */
+  private resolveAuthorizer(): void {
+    const id = this.authorizingUserId;
+    if (!id) {
+      this.authorizerName = '';
+      return;
+    }
+    const cached = peekUser(id);
+    this.authorizerName = cached ? userDisplayName(cached) : id;
+    if (cached) return;
+    void resolveUser(id).then((user) => {
+      if (user && this.authorizingUserId === id) {
+        this.authorizerName = userDisplayName(user);
+      }
+    });
+  }
+
+  private renderAuthorizedBy() {
+    if (!this.authorizingUserId) return nothing;
+    const name = this.authorizerName || this.authorizingUserId;
+    const title = this.delegationGrantId ? `via delegation ${this.delegationGrantId}` : nothing;
+    return html`<div class="authorized-by" title=${title}>authorized by ${name}</div>`;
+  }
+
   override updated(changed: Map<string, unknown>): void {
     if (changed.has('body') || changed.has('plain')) {
       void this.renderContent();
@@ -2371,7 +2429,7 @@ export class ScionChatMessage extends LitElement {
                 </div>
               `
             : nothing}
-          ${this.replyPreview ? this.renderReplyPreview() : nothing}
+          ${this.renderAuthorizedBy()} ${this.replyPreview ? this.renderReplyPreview() : nothing}
           ${isDeleted
             ? html`<div class="bubble-content">
                 <span class="deleted-message">This message was deleted</span>
