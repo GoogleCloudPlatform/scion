@@ -3331,7 +3331,14 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 	// recorded remote, gets no helper, so later fetches and pushes to that
 	// origin are never offered the token. An unscoped credential.helper (an
 	// earlier version wrote one) is removed first in every case.
-	unsetCmd := exec.Command("git", "config", "--file", gitconfigPath, "--unset-all", "credential.helper")
+	// Both git config calls run a trusted git binary from rootexec's fixed
+	// search path (never $PATH), as configureSharedWorkspaceGit does; without
+	// one the clone fails closed.
+	gitPath, err := rootexec.Resolve("git")
+	if err != nil {
+		return fmt.Errorf("failed to resolve a trusted git binary for the credential helper: %w", err)
+	}
+	unsetCmd := exec.Command(gitPath, "config", "--file", gitconfigPath, "--unset-all", "credential.helper")
 	setupGitCmd(unsetCmd)
 	if err := procreap.RunManaged(unsetCmd); err != nil {
 		var exitErr *exec.ExitError
@@ -3347,7 +3354,7 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 		} else {
 			credentialHelper = provision.GitTokenCredentialHelper
 		}
-		credCmd := exec.Command("git", "config", "--file", gitconfigPath, "--replace-all", "credential."+scope+".helper", credentialHelper)
+		credCmd := exec.Command(gitPath, "config", "--file", gitconfigPath, "--replace-all", "credential."+scope+".helper", credentialHelper)
 		setupGitCmd(credCmd)
 		if err := procreap.RunManaged(credCmd); err != nil {
 			return fmt.Errorf("failed to configure git credential helper: %w", err)
