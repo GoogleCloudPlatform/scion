@@ -763,8 +763,8 @@ With the `nfs` backend, deleting a project also removes its `<subpath_root>/<pro
 
 To protect deployments from silent data loss, the Hub implements a strict **503 Safety Gate**:
 * If the Hub is deployed on serverless environments like Google Cloud Run with the `local` backend selected, its local workspace paths map to ephemeral, non-durable container storage.
-* The Hub detects this non-durable state and automatically intercepts all file write and modification endpoints (including inline file editing and git cloning).
-* Affected endpoints will return `503 Service Unavailable` with a descriptive message rather than allowing writes to persist ephemerally on the container's scratch space, enforcing the transition to a durable backend (`nfs`, `cloudrun-volume`, or `gke-shared-volume`) for production.
+* The Hub detects this non-durable state and refuses the project workspace file endpoints that change files (upload, inline file editing, and delete) and the shared-workspace `git pull` endpoint.
+* These endpoints return `503 Service Unavailable` with error code `workspace_writes_unavailable` and a descriptive message rather than allowing writes to persist ephemerally on the container's scratch space, enforcing the transition to a durable backend (`nfs`, `cloudrun-volume`, or `gke-shared-volume`) for production.
 * Shared-directory writes follow the same rule: on a Cloud Run Hub whose shared directories are not on a shared backend, they return `503` with error code `shared_dir_writes_unavailable`, and the message names `server.project_storage`.
 
 ### Shared Directory Storage (`server.shared_dir_storage`)

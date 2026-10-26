@@ -1664,7 +1664,21 @@ func ExtractOrgRepo(gitURL string) (org, repo string) {
 // If the requested branch does not exist on the remote, the clone falls back to
 // the remote's default branch and creates the requested branch locally.
 func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
+	return cloneSharedWorkspace(workspacePath, cloneURL, branch, token, nil, nil)
+}
+
+// CloneSharedWorkspaceHardened is CloneSharedWorkspace for a clone URL the
+// host does not choose itself: gitArgs (-c settings, such as a transport
+// allow-list) go ahead of every clone subcommand, after HostGitArgs, so a
+// later setting overrides the base pin of the same key; env is appended to
+// the clone environment.
+func CloneSharedWorkspaceHardened(workspacePath, cloneURL, branch, token string, gitArgs, env []string) error {
+	return cloneSharedWorkspace(workspacePath, cloneURL, branch, token, gitArgs, env)
+}
+
+func cloneSharedWorkspace(workspacePath, cloneURL, branch, token string, gitArgs, extraEnv []string) error {
 	baseEnv := append(HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1")
+	baseEnv = append(baseEnv, extraEnv...)
 	env := baseEnv
 	if token != "" {
 		if scoped, ok := ScopedCredentialHelperEnv(baseEnv, cloneURL, token); ok {
@@ -1680,18 +1694,20 @@ func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
 		return cmd.CombinedOutput()
 	}
 
-	args := []string{"clone"}
+	// "--" ends the options: a URL or path starting with "-" is never read
+	// as one.
+	args := append(append([]string{}, gitArgs...), "clone")
 	if branch != "" {
 		args = append(args, "--branch", branch)
 	}
-	args = append(args, cloneURL, workspacePath)
+	args = append(args, "--", cloneURL, workspacePath)
 	output, err := runClone(args...)
 
 	if err != nil && branch != "" && isRemoteBranchNotFound(string(output)) {
 		// The branch doesn't exist on the remote yet. Clone the default branch
 		// instead and create the requested branch locally.
 		_ = os.RemoveAll(workspacePath)
-		output, err = runClone("clone", cloneURL, workspacePath)
+		output, err = runClone(append(append([]string{}, gitArgs...), "clone", "--", cloneURL, workspacePath)...)
 		if err != nil {
 			sanitized := strings.TrimSpace(sanitizeGitOutput(string(output), token))
 			gitErr := ClassifyGitError(sanitized)

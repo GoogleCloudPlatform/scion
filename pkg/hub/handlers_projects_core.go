@@ -1469,7 +1469,10 @@ func (s *Server) updateSharedProjectSlugFile(project *store.Project, newSlug str
 // On the local workspace backend it performs the host-side git clone into
 // the hub-managed workspace (~/.scion/projects/<slug>) and seeds the .scion
 // project structure on top; if the clone fails, the workspace directory is
-// cleaned up and an error is returned (unchanged).
+// cleaned up and an error is returned (unchanged). The clone URL is checked
+// first (provision.CheckHostCloneURL, refused with
+// provision.ErrHostCloneURLRefused) and cloned with the hardened transport
+// settings, as on a shared backend.
 //
 // On a shared backend the hub provisions the uuid workspace agents mount
 // (provisionSharedWorkspace: the provisioning lock, the clone and the
@@ -1492,15 +1495,23 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 		return s.seedHubProjectSettings(project, scionDir)
 	}
 
+	// The clone URL comes from the clone-url label or the project's git
+	// remote, and the clone runs on the hub host: as on a shared backend it
+	// is checked before any filesystem work, refused (never rewritten)
+	// unless it is an https, ssh or git URL, and cloned with the hardened
+	// transport settings.
+	cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
+	localFixture := localCloneFixtureAllowed(cloneURL)
+	if !localFixture {
+		if err := provision.CheckHostCloneURL(cloneURL); err != nil {
+			return err
+		}
+	}
+
 	workspacePath, err := localProjectPath(project.Slug)
 	if err != nil {
 		return err
 	}
-
-	// Build clone URL from the project's git remote.
-	// The clone-url label may be an explicit override (e.g. local path for testing).
-	// Only convert to HTTPS if the URL looks like a remote git URL.
-	cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
 
 	defaultBranch := project.Labels[store.LabelDefaultBranch]
 	if defaultBranch == "" {
@@ -1511,10 +1522,17 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 	token := s.resolveCloneToken(ctx, project)
 
 	// Perform the clone
-	if err := util.CloneSharedWorkspace(workspacePath, cloneURL, defaultBranch, token); err != nil {
+	var cloneErr error
+	if localFixture {
+		cloneErr = util.CloneSharedWorkspace(workspacePath, cloneURL, defaultBranch, token)
+	} else {
+		cloneErr = util.CloneSharedWorkspaceHardened(workspacePath, cloneURL, defaultBranch, token,
+			provision.HostCloneGitArgs(), []string{"GIT_ALLOW_PROTOCOL=" + provision.HostCloneProtocols})
+	}
+	if cloneErr != nil {
 		// Clean up the workspace directory on failure — return to pre-creation state
 		_ = util.RemoveAllSafe(workspacePath)
-		return fmt.Errorf("shared workspace clone failed: %w", err)
+		return fmt.Errorf("shared workspace clone failed: %w", cloneErr)
 	}
 
 	// Agents provision from this clone, and provisioning requires
