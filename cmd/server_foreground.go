@@ -333,6 +333,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if err := checkServerPorts(cfg); err != nil {
 		return err
 	}
+	// A standalone Hub API (web disabled) refuses dev auth on a
+	// non-loopback host; the web path does the same in webStartupPreflight.
+	if err := hubAPIStartupPreflight(cfg, enableHub, enableWeb); err != nil {
+		return err
+	}
 	// The web server's listener checks (dev auth bind, then the web base
 	// URL; ptone/scion#5364) run here, before the store, dev auth and the
 	// hub are initialised. The base URL is resolved once, here.
