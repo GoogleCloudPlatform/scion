@@ -151,7 +151,8 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/users/me/templates/":       "authenticated", // User-scoped template by ID
 
 	// ── Agent delegation grants the caller issued ──────────────────────
-	"/api/v1/users/me/delegations": "authenticated", // GET: caller's issued grants; session/dev credential only (requireSessionCredentialFor)
+	"/api/v1/users/me/delegations":            "authenticated", // GET: caller's issued grants; session/dev credential only (requireSessionCredentialFor)
+	"/api/v1/users/me/delegations/revoke-all": "authenticated", // POST: revoke every grant the caller issued; session/dev credential only (requireSessionCredentialFor)
 
 	// ── User-scoped terminal workspace ─────────────────────────────────
 	"/api/v1/users/me/terminal-workspace": "authenticated", // GET/PUT: caller's own list; session/dev credential only (requireSessionCredentialFor)
@@ -263,6 +264,8 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/chat/user-prefs":     "authenticated", // Chat user preferences
 	"/api/v1/chat/presence":       "authenticated", // Chat presence
 	"/api/v1/chat/search":         "authenticated", // Chat search
+	"/api/v1/chat/stars":          "authenticated", // Caller's starred messages in one conversation; 404 when the experiment is off
+	"/api/v1/chat/stars/":         "authenticated", // Star state, star detail, star add/remove (caller's own); 404 when the experiment is off
 	"/api/v1/chat/attachments":    "authenticated", // Chat attachments (agents: POST upload and GET probe only, chatAttachmentRoute)
 	"/api/v1/chat/attachments/":   "authenticated", // Chat attachment by ID (never agents)
 
@@ -287,6 +290,7 @@ var routeAuthzManifest = map[string]string{
 	// ── Public settings ────────────────────────────────────────────────
 	"/api/v1/settings/public":       "authenticated", // Public settings — requires session despite name
 	"GET /api/v1/test-infra/status": "public",        // Test-identity gate status for the web banner — no auth (ptone/scion#4240)
+	"POST /api/v1/csp-reports":      "public",        // Browser policy reports for the web pages — no auth, rate limited, log only (ptone/scion#5912)
 	"/api/v1/experiments":           "authenticated", // Resolved experiment map — any signed-in identity (#2217)
 	"/api/v1/profiling":             "authenticated", // Profiling switches the web client acts on — any signed-in identity
 

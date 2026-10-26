@@ -665,6 +665,9 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 	s.forgetBrokerBackfill(id)
+	// The broker's reservations are released after its row is gone (the
+	// release requires that), audited as the sweep does (ptone/scion#3994).
+	s.releaseDeletedBrokerReservations(ctx, broker.ID)
 
 	// Clean up the broker's HMAC secret (best-effort, post-delete).
 	if err := s.store.DeleteBrokerSecret(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -1096,6 +1099,15 @@ type brokerAgentHeartbeat struct {
 	Profile         string `json:"profile,omitempty"`     // Settings profile used
 	ExitCode        *int   `json:"exitCode,omitempty"`    // Structured exit code from runtime (nil = unknown)
 	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed", "limits_exceeded", "preempted", "evicted", or "oom_killed" (see state.ExitReason)
+	// Template, HarnessConfig, HarnessConfigSource, Image and Runtime are
+	// the agent config the runtime resolved for the listed entry
+	// (hubclient.AgentHeartbeat). Read only for a create kept after an
+	// unknown dispatch outcome (heartbeatAppliesResolvedConfig).
+	Template            string `json:"template,omitempty"`
+	HarnessConfig       string `json:"harnessConfig,omitempty"`
+	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
+	Image               string `json:"image,omitempty"`
+	Runtime             string `json:"runtime,omitempty"`
 	// RunID is the entry's scion.run_id label (hubclient.AgentHeartbeat.RunID);
 	// empty for an unlabelled entry or an older broker. OtherEntries are
 	// the agent's entries on the broker's other targets
@@ -1110,6 +1122,48 @@ type brokerAgentHeartbeat struct {
 type brokerAgentRuntimeEntry struct {
 	RuntimeTarget string `json:"runtimeTarget,omitempty"`
 	RunID         string `json:"runId,omitempty"`
+}
+
+// heartbeatAppliesResolvedConfig reports whether a heartbeat entry's
+// resolved agent config is recorded on agent: agent is a create the Hub kept
+// after an unknown dispatch outcome (keepUnknownOutcomeStart; its create
+// claim is unconfirmed), and the entry is of the create's own run. Such a
+// create never got the dispatch answer that records the config, so
+// otherwise its applied config would stay empty (ptone/scion#4987).
+func heartbeatAppliesResolvedConfig(agent *store.Agent, hb brokerAgentHeartbeat) bool {
+	return agent.StartClaimKind == store.StartClaimCreate &&
+		agent.StartClaimState == store.StartClaimUnconfirmed &&
+		hb.RunID != "" && hb.RunID == agent.RunID
+}
+
+// heartbeatResolvedConfig is the resolved agent config a heartbeat entry
+// carries, in the form a dispatch answer converts to (brokerAgentConfigOf).
+func heartbeatResolvedConfig(hb brokerAgentHeartbeat) store.BrokerAgentConfig {
+	return store.BrokerAgentConfig{
+		Template:            hb.Template,
+		HarnessConfig:       hb.HarnessConfig,
+		HarnessAuth:         hb.HarnessAuth,
+		HarnessConfigSource: hb.HarnessConfigSource,
+		Image:               hb.Image,
+		Profile:             hb.Profile,
+		Runtime:             hb.Runtime,
+	}
+}
+
+// resolvedConfigSnapshot holds the agent fields store.ApplyBrokerAgentConfig
+// writes, so a caller can tell whether applying changed anything.
+type resolvedConfigSnapshot struct {
+	template, runtime                                               string
+	harnessConfig, harnessAuth, harnessConfigSource, image, profile string
+}
+
+func agentResolvedConfigSnapshot(a *store.Agent) resolvedConfigSnapshot {
+	snap := resolvedConfigSnapshot{template: a.Template, runtime: a.Runtime}
+	if c := a.AppliedConfig; c != nil {
+		snap.harnessConfig, snap.harnessAuth, snap.harnessConfigSource = c.HarnessConfig, c.HarnessAuth, c.HarnessConfigSource
+		snap.image, snap.profile = c.Image, c.Profile
+	}
+	return snap
 }
 
 // heartbeatBrokerIsFlat reports whether the Runtime Broker sending a
@@ -1253,48 +1307,62 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			// A broker older than templateTiers ignores the telemetry tiers
 			// dispatch sends; warn once (ptone/scion#4224).
 			s.warnBrokerWithoutTemplateTiers(id, broker.Name, heartbeat.Capabilities)
-			changed := false
-			if heartbeat.Capabilities != nil && !reflect.DeepEqual(broker.Capabilities, heartbeat.Capabilities) {
-				broker.Capabilities = heartbeat.Capabilities
-				changed = true
-			}
-			if heartbeat.WorkspaceStorage != nil && !reflect.DeepEqual(broker.WorkspaceStorage, heartbeat.WorkspaceStorage) {
-				broker.WorkspaceStorage = heartbeat.WorkspaceStorage
-				changed = true
-			}
-			if heartbeat.DefaultProfile != nil && broker.DefaultProfile != *heartbeat.DefaultProfile {
-				broker.DefaultProfile = *heartbeat.DefaultProfile
-				changed = true
-			}
+			// The refresh runs on a fresh read of the row and stores only
+			// the fields it changes, so a re-registration or other write
+			// that lands after the read above is kept (ptone/scion#3169).
+			// It can run more than once, so its outputs are reset on
+			// each run and only the last run's values are used.
+			var health *api.BrokerHealthReport
 			if heartbeat.Health != nil {
-				if health := api.NormalizeBrokerHealthReport(heartbeat.Health); !reflect.DeepEqual(broker.Health, health) {
-					// Logged only when the stored report changes, so at
-					// most once per distinct report, with counts only.
-					if n := countBrokerHealthNormalization(heartbeat.Health, health); n.any() {
-						s.agentLifecycleLog.Info("heartbeat: broker health report normalised",
-							"broker_id", id,
-							"dropped_checks", n.DroppedChecks,
-							"unrecognised_values", n.UnrecognisedValues,
-							"unrecognised_status", n.UnrecognisedStatus)
-					}
-					broker.Health = health
+				health = api.NormalizeBrokerHealthReport(heartbeat.Health)
+			}
+			healthChanged := false
+			saRequested := false
+			refresh := func(b *store.RuntimeBroker) bool {
+				healthChanged, saRequested = false, false
+				changed := false
+				if heartbeat.Capabilities != nil && !reflect.DeepEqual(b.Capabilities, heartbeat.Capabilities) {
+					b.Capabilities = heartbeat.Capabilities
 					changed = true
 				}
+				if heartbeat.WorkspaceStorage != nil && !reflect.DeepEqual(b.WorkspaceStorage, heartbeat.WorkspaceStorage) {
+					b.WorkspaceStorage = heartbeat.WorkspaceStorage
+					changed = true
+				}
+				if heartbeat.DefaultProfile != nil && b.DefaultProfile != *heartbeat.DefaultProfile {
+					b.DefaultProfile = *heartbeat.DefaultProfile
+					changed = true
+				}
+				if heartbeat.Health != nil && !reflect.DeepEqual(b.Health, health) {
+					b.Health = health
+					healthChanged = true
+					changed = true
+				}
+				if applyProfileAttach(b.Profiles, heartbeat.ProfileAttach) {
+					changed = true
+				}
+				saChanged, requested := applyProfileSAMappings(b.Profiles, heartbeat.ProfileSAMappings, heartbeat.ProfileSAMappingsHashes, time.Now())
+				saRequested = requested
+				if saChanged {
+					changed = true
+				}
+				return changed
 			}
-			if applyProfileAttach(broker.Profiles, heartbeat.ProfileAttach) {
-				changed = true
-			}
-			saChanged, saRequested := applyProfileSAMappings(broker.Profiles, heartbeat.ProfileSAMappings, heartbeat.ProfileSAMappingsHashes, time.Now())
-			if saChanged {
-				changed = true
-			}
-			heartbeatResp.ProfileSAMappingsRequested = saRequested
-			if changed {
-				if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
-					s.agentLifecycleLog.Warn("heartbeat: failed to persist refreshed broker state",
-						"broker_id", id, "error", err)
+			if err := s.store.RefreshRuntimeBrokerState(ctx, id, refresh); err != nil {
+				s.agentLifecycleLog.Warn("heartbeat: failed to persist refreshed broker state",
+					"broker_id", id, "error", err)
+			} else if healthChanged {
+				// Logged only when the stored report changes, so at
+				// most once per distinct report, with counts only.
+				if n := countBrokerHealthNormalization(heartbeat.Health, health); n.any() {
+					s.agentLifecycleLog.Info("heartbeat: broker health report normalised",
+						"broker_id", id,
+						"dropped_checks", n.DroppedChecks,
+						"unrecognised_values", n.UnrecognisedValues,
+						"unrecognised_status", n.UnrecognisedStatus)
 				}
 			}
+			heartbeatResp.ProfileSAMappingsRequested = saRequested
 		}
 	}
 
@@ -1362,6 +1430,10 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				ReportSource:    store.StatusReportSourceRuntime,
 				ReportRunID:     agentHB.RunID,
 				Result:          &statusResult,
+				// A reincarnation claimed after the read above must still
+				// win: the store re-checks Guard 0b on the row it locks, as
+				// for the agent's own status report (ptone/scion#5385).
+				GuardReincarnation: true,
 			}
 			// A stop queued while the broker was offline keeps its
 			// stop_queued status and notice while it is still the agent's
@@ -1758,6 +1830,24 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			// reports write it (the dispatch response, the launch report,
 			// a reincarnation move); a guess resolved from the profile is
 			// display-only (enrichAgentRuntime) (ptone/scion#4853).
+			//
+			// The one exception is a create kept after an unknown dispatch
+			// outcome (heartbeatAppliesResolvedConfig: an unconfirmed create
+			// claim AND the entry's non-empty run ID equal to the agent's).
+			// The dispatch answer that would have carried the resolved config
+			// was lost, and the synchronous answer is itself the runtime's
+			// listing of the started entry, so the listing of the create's
+			// own run is the same broker report from the same source. An
+			// empty value never clears a field (ApplyBrokerAgentConfig). For
+			// every other agent and run, the heartbeat never writes the
+			// runtime (ptone/scion#4987).
+			if heartbeatAppliesResolvedConfig(agent, agentHB) {
+				before := agentResolvedConfigSnapshot(agent)
+				store.ApplyBrokerAgentConfig(agent, heartbeatResolvedConfig(agentHB))
+				if agentResolvedConfigSnapshot(agent) != before {
+					needsUpdate = true
+				}
+			}
 			if needsUpdate {
 				if err := s.store.UpdateAgent(ctx, agent); err != nil {
 					slog.Warn("Failed to backfill agent config from heartbeat",
@@ -1846,6 +1936,9 @@ type BrokerProjectInfo struct {
 	GitRemote   string `json:"gitRemote,omitempty"`
 	AgentCount  int    `json:"agentCount"`
 	LocalPath   string `json:"localPath,omitempty"`
+	// IsDefault reports whether this broker is the project's default
+	// Runtime Broker. False when the project record is missing.
+	IsDefault bool `json:"isDefault"`
 }
 
 // ListBrokerProjectsResponse is the response for listing projects a broker provides.
@@ -1977,6 +2070,7 @@ func (s *Server) getBrokerProjects(w http.ResponseWriter, r *http.Request, broke
 		if project, ok := projectsByID[p.ProjectID]; ok {
 			info.ProjectName = project.Name
 			info.GitRemote = project.GitRemote
+			info.IsDefault = project.DefaultRuntimeBrokerID == brokerID
 		}
 
 		// Count agents for this project on this broker

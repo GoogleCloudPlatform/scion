@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubsetting"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/stretchr/testify/require"
 )
@@ -47,6 +48,9 @@ func TestBackfillOrigin_AgreesWithEffectiveOrigin(t *testing.T) {
 		{"harness_configs", "managed", str("seed")},
 		{"notifications", "managed", nil},
 		{"_meta", "seeded", str("admin@example.com")},
+		// The reserved revision row is exempt by name, even with an
+		// updated_by set (ptone/scion#5666).
+		{store.HubSettingsRevisionSection, "seeded", str("admin@example.com")},
 	}
 	for _, r := range rows {
 		c := client.HubSetting.Create().SetSection(r.section).SetValue(json.RawMessage(`{}`)).SetOrigin(hubsetting.Origin(r.origin))
@@ -68,4 +72,10 @@ func TestBackfillOrigin_AgreesWithEffectiveOrigin(t *testing.T) {
 				r.section, r.origin, r.updatedBy, got.Origin, want)
 		}
 	}
+}
+
+// The opsettings copy of the reserved revision section name matches the
+// store's (ptone/scion#5666).
+func TestSettingsRevisionSectionNameAgrees(t *testing.T) {
+	require.Equal(t, store.HubSettingsRevisionSection, opsettings.SettingsRevisionSection)
 }

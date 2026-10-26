@@ -26,6 +26,7 @@ import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { repeat } from 'lit/directives/repeat.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { peekUser, resolveUser, userDisplayName } from '../../client/user-directory.js';
 import { FrameBatcher, SortedLogBuffer } from '../../client/sorted-log-buffer.js';
 import { getDenialMessage } from '../../shared/message-mode.js';
 import type { Message } from '../../shared/types.js';
@@ -68,6 +69,13 @@ interface ParsedMessage {
   recipientProjectId?: string | undefined;
   /** Whether this message crossed project boundaries. */
   crossProject?: boolean | undefined;
+  /**
+   * The user who authorized a message sent with an agent delegated
+   * credential, and the grant (.design/agent-delegation.md §14.5). The
+   * sender stays the agent. Absent on every other message.
+   */
+  authorizingUserId?: string | undefined;
+  delegationGrantId?: string | undefined;
 }
 
 /**
@@ -416,6 +424,10 @@ export class ScionAgentMessageViewer extends LitElement {
       color: var(--sl-color-success-700, #15803d);
     }
 
+    .msg-authorized-by {
+      font-size: 0.6875rem;
+      color: var(--scion-text-muted, #64748b);
+    }
     .msg-body {
       font-size: 0.8125rem;
       color: var(--scion-text-secondary, #475569);
@@ -600,6 +612,8 @@ export class ScionAgentMessageViewer extends LitElement {
       senderProjectId: msg.senderProjectId,
       recipientProjectId: msg.recipientProjectId,
       crossProject,
+      authorizingUserId: msg.authorizingUserId || undefined,
+      delegationGrantId: msg.delegationGrantId || undefined,
     };
   }
 
@@ -1049,12 +1063,38 @@ export class ScionAgentMessageViewer extends LitElement {
               </div>
               <span class="msg-time">${timeStr}</span>
             </div>
+            ${this.renderAuthorizedBy(msg)}
             <div class="msg-body">${this.truncateBody(msg.body)}</div>
             ${isExpanded ? this.renderDetail(msg) : nothing}
           </div>
         </div>
       `;
   }
+
+  /**
+   * The "authorized by <user> via delegation <grant>" line of a message sent
+   * with an agent delegated credential; nothing for any other message. The
+   * user is shown by display name, else email, else ID. An uncached user is
+   * looked up at most once per viewer (a failed lookup is not retried on
+   * later renders), and the list re-renders when a name arrives.
+   */
+  private renderAuthorizedBy(msg: ParsedMessage) {
+    const id = msg.authorizingUserId;
+    if (!id) return nothing;
+    const cached = peekUser(id);
+    if (!cached && !this.authorizerLookups.has(id)) {
+      this.authorizerLookups.add(id);
+      void resolveUser(id).then((user) => {
+        if (user) this.requestUpdate();
+      });
+    }
+    const name = cached ? userDisplayName(cached) : id;
+    const grant = msg.delegationGrantId ? ` via delegation ${msg.delegationGrantId}` : '';
+    return html`<div class="msg-authorized-by">authorized by ${name}${grant}</div>`;
+  }
+
+  /** Authorizing user IDs this viewer has already looked up. */
+  private readonly authorizerLookups = new Set<string>();
 
   private truncateBody(body: string): string {
     if (body.length > 300) {
@@ -1073,6 +1113,10 @@ export class ScionAgentMessageViewer extends LitElement {
       broadcasted: msg.broadcasted,
       message: msg.body,
     };
+    if (msg.authorizingUserId) {
+      detail['authorizingUserId'] = msg.authorizingUserId;
+      if (msg.delegationGrantId) detail['delegationGrantId'] = msg.delegationGrantId;
+    }
     if (msg.crossProject) {
       detail['crossProject'] = true;
       if (msg.senderProjectId) detail['senderProjectId'] = msg.senderProjectId;

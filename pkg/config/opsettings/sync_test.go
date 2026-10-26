@@ -32,6 +32,8 @@ func TestEffectiveOrigin(t *testing.T) {
 		{"profiles", OriginSeeded, nil, OriginSeeded},
 		{"profiles", OriginManaged, str("seed"), OriginManaged},
 		{"_meta", OriginSeeded, str("admin@example.com"), OriginSeeded},
+		{SettingsRevisionSection, OriginSeeded, str("admin@example.com"), OriginSeeded},
+		{SettingsRevisionSection, OriginSeeded, nil, OriginSeeded},
 	}
 	for _, c := range cases {
 		if got := EffectiveOrigin(c.section, c.origin, c.updatedBy); got != c.want {

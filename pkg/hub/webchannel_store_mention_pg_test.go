@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/require"
@@ -37,7 +38,7 @@ import (
 // It runs in a throwaway schema with a minimal messages table, so it never
 // touches an existing messages table in the target database.
 func TestUnreadMentionKeys_Postgres(t *testing.T) {
-	dsn := requirePostgresDSN(t)
+	dsn := hubtestutil.RequirePostgresDSN(t)
 	ctx := context.Background()
 	schema := fmt.Sprintf("mention_dot_test_%d", time.Now().UnixNano())
 

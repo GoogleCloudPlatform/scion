@@ -71,6 +71,7 @@ func (d *lockProbeDriver) Query(ctx context.Context, query string, args, v any) 
 func TestAutoMigrate_HoldsProcessLock(t *testing.T) {
 	db, err := sql.Open("sqlite", "file:"+t.Name()+"?mode=memory&cache=shared&_pragma=foreign_keys(1)")
 	require.NoError(t, err)
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 
 	probe := &lockProbeDriver{Driver: entsql.OpenDB(dialect.SQLite, db)}

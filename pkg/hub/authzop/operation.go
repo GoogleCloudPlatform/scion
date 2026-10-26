@@ -652,6 +652,7 @@ const (
 	DenialUserSuspended           DenialCode = "user_suspended"
 	DenialResourceNotFound        DenialCode = "not_found"
 	DenialConflict                DenialCode = "conflict"
+	DenialUserDeleteBlocked       DenialCode = "user_delete_blocked"
 )
 
 // TestRef references an executable test that proves part of the contract.

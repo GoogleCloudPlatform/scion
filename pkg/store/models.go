@@ -425,16 +425,6 @@ type AgentAppliedConfig struct {
 	Workspace     string              `json:"workspace,omitempty"` // Host path to mount as /workspace (overrides default project root)
 	GitClone      *api.GitCloneConfig `json:"gitClone,omitempty"`
 
-	// SharedDirBackendChanges and AllowEmptySharedDir are a reincarnation's
-	// explicit shared dir backend change (`scion reincarnate
-	// --shared-dir-backend`), set on that generation's config only and sent
-	// to the broker on its reprovision. They are one-shot: the hub drops
-	// them once the broker confirms the change (a stored config can still
-	// hold them after some failures), and neither a later reincarnation nor
-	// a re-render of this config sends them again.
-	SharedDirBackendChanges map[string]string `json:"sharedDirBackendChanges,omitempty"`
-	AllowEmptySharedDir     bool              `json:"allowEmptySharedDir,omitempty"`
-
 	// Template info for Runtime Broker hydration
 	TemplateID   string `json:"templateId,omitempty"`   // Hub template ID for fetching
 	TemplateHash string `json:"templateHash,omitempty"` // Content hash for cache validation
@@ -2416,6 +2406,19 @@ const (
 	MessageDispatchNoRecipient = "no_recipient"
 )
 
+// MessageEnteredPendingLogMsg is the text of the one structured log line
+// written whenever a message row is persisted in dispatch_state "pending"
+// (ptone/scion#4827). The line carries message_id, sender, recipient, type
+// (messages.LogType) and creation_path, and never the body. The hub call
+// sites and the store-level default share this text so a row reported by
+// the stuck-pending sweep can be traced to its writer with one search.
+const MessageEnteredPendingLogMsg = "message dispatch: row entered pending"
+
+// MessagePendingPathStoreDefault is the creation_path logged when a writer
+// left Message.DispatchState empty and the store schema default ("pending")
+// applied. No current hub writer should reach it.
+const MessagePendingPathStoreDefault = "store_default"
+
 // MessageExpiredStuckPendingReason is the exact DispatchFailureReason the
 // stuck-message sweep (pkg/hub/sweep.go's brokerMessageSweepHandler) writes
 // when ExpireStuckPendingMessages flips a stuck-pending row to "failed". The
@@ -3328,6 +3331,14 @@ type Message struct {
 	// humans and legacy records. Names are display metadata; IDs are authority.
 	SenderProjectID    *string `json:"senderProjectId,omitempty"`
 	RecipientProjectID *string `json:"recipientProjectId,omitempty"`
+
+	// AuthorizingUserID and DelegationGrantID attribute a message sent
+	// with an agent delegated credential (.design/agent-delegation.md
+	// §14.5): the user who issued the grant and the grant. Sender and
+	// SenderID name the actor agent, never the issuer. Empty for every
+	// other message.
+	AuthorizingUserID string `json:"authorizingUserId,omitempty"`
+	DelegationGrantID string `json:"delegationGrantId,omitempty"`
 
 	// DispatchState tracks cross-node delivery of the message to the broker:
 	// pending|dispatched|failed. The message row is its own durable dispatch
@@ -4375,7 +4386,8 @@ type EdgeDeactivationCause string
 const (
 	EdgeDeactivationAgentSoftDelete EdgeDeactivationCause = "agent_soft_delete"
 	EdgeDeactivationAgentHardDelete EdgeDeactivationCause = "agent_hard_delete"
-	// EdgeDeactivationDelegatorDeleted is reserved: no path records it.
+	// EdgeDeactivationDelegatorDeleted is recorded by a user delete on the
+	// edges where the deleted user is the delegator (ptone/scion#2143).
 	// Agent deletes deactivate only the edges where the agent is the
 	// delegate, and a project delete records agent_hard_delete on both
 	// sides. ValidEdgeDeactivationCause accepts it.

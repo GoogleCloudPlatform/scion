@@ -362,9 +362,6 @@ func TestFlatBranches_NeverReachProfileTier(t *testing.T) {
 	for _, want := range []string{
 		"VersionedSettings.ResolveSharedDirDefaultsWithSource",
 		"VersionedSettings.ResolveSafeToEvictWithSource",
-		"VersionedSettings.ResolveSharedDirStorage",
-		"VersionedSettings.ResolveSharedDirStorageBackend",
-		"VersionedSettings.ResolveHomeStorage",
 		// agent_defaults
 		"VersionedSettings.ResolveHarnessConfig",
 		"VersionedSettings.ResolveCloneDepthWithSource",

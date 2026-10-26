@@ -1069,7 +1069,7 @@ func (s *AgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, o
 	// than ignore it, so a caller that passes one (alone or alongside
 	// SortCursor) gets an error instead of a silently different page.
 	if opts.Cursor != "" {
-		return nil, fmt.Errorf("ListAgents: legacy cursor is not valid in sorted mode: %w", store.ErrInvalidInput)
+		return nil, fmt.Errorf("ListAgents: legacy cursor is not valid in sorted mode: %w", store.ErrInvalidCursor)
 	}
 	if opts.SortCursor != nil {
 		query.Where(agentAfterCursor(opts.SortBy, opts.SortDir, *opts.SortCursor))

@@ -27,15 +27,17 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
-// TestValidateHubWorkspaceStorage_FromSettings exercises the hub-load path:
+// TestResolveHubProjectStorage_FromSettings exercises the hub-load path:
 // settings.yaml is read by the real loader (config.LoadGlobalConfig) and
-// handed to validateHubWorkspaceStorage, which runServerStart calls before
+// handed to resolveHubProjectStorage, which runServerStart calls before
 // the hub starts. An unusable workspace_storage block must fail startup.
-func TestValidateHubWorkspaceStorage_FromSettings(t *testing.T) {
+func TestResolveHubProjectStorage_FromSettings(t *testing.T) {
 	tests := []struct {
 		name    string
 		storage string // YAML under server.workspace_storage; empty omits the block
+		extra   string // further YAML under server (other storage blocks)
 		wantErr string // empty means startup proceeds
+		want    string // expected effective backend when startup proceeds
 	}{
 		{name: "no workspace_storage block"},
 		{name: "local", storage: "backend: local"},
@@ -73,6 +75,33 @@ func TestValidateHubWorkspaceStorage_FromSettings(t *testing.T) {
 			wantErr: "gke_shared_volume.subpath_root",
 		},
 		{name: "unknown backend", storage: "backend: s3", wantErr: `backend "s3" is not supported`},
+		{
+			name:  "project_storage nfs",
+			extra: "  project_storage:\n    backend: nfs\n    nfs:\n      mount_root: /mnt/nfs\n      shares:\n        - id: ws1\n          server: 10.0.0.2\n          export: /x\n",
+			want:  "nfs",
+		},
+		{
+			name:    "project_storage with workspace_storage",
+			storage: "backend: local",
+			extra:   "  project_storage:\n    backend: local\n",
+			wantErr: "exactly one storage block",
+		},
+		{
+			name:    "project_storage with a relative mount_root",
+			extra:   "  project_storage:\n    backend: nfs\n    nfs:\n      mount_root: mnt/nfs\n      shares:\n        - id: ws1\n          server: 10.0.0.2\n          export: /x\n",
+			wantErr: "absolute path",
+		},
+		{
+			name:    "project_storage without shares",
+			extra:   "  project_storage:\n    backend: nfs\n",
+			wantErr: "server.project_storage.backend is \"nfs\" but no NFS shares",
+		},
+		{
+			name:    "nfs blocks naming different trees",
+			storage: "backend: nfs\n    nfs:\n      mount_root: /mnt/nfs\n      shares:\n        - id: ws1\n          server: 10.0.0.2\n          export: /x",
+			extra:   "  shared_dir_storage:\n    backend: nfs\n    nfs:\n      mount_root: /mnt/nfs\n      shares:\n        - id: sd1\n          server: 10.0.0.3\n          export: /y\n",
+			wantErr: "name different trees",
+		},
 	}
 
 	for _, tt := range tests {
@@ -84,6 +113,7 @@ func TestValidateHubWorkspaceStorage_FromSettings(t *testing.T) {
 			if tt.storage != "" {
 				settings += "  workspace_storage:\n    " + tt.storage + "\n"
 			}
+			settings += tt.extra
 			dir := t.TempDir()
 			if err := os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(settings), 0o600); err != nil {
 				t.Fatal(err)
@@ -97,28 +127,31 @@ func TestValidateHubWorkspaceStorage_FromSettings(t *testing.T) {
 				t.Fatal("workspace_storage was not loaded; the test would pass vacuously")
 			}
 
-			err = validateHubWorkspaceStorage(cfg)
+			err = resolveHubProjectStorage(cfg)
 			if tt.wantErr == "" {
 				if err != nil {
-					t.Fatalf("validateHubWorkspaceStorage: unexpected error %v", err)
+					t.Fatalf("resolveHubProjectStorage: unexpected error %v", err)
+				}
+				if tt.want != "" && cfg.EffectiveProjectStorage.EffectiveBackend() != tt.want {
+					t.Fatalf("effective backend = %q, want %q", cfg.EffectiveProjectStorage.EffectiveBackend(), tt.want)
 				}
 				return
 			}
 			if err == nil {
-				t.Fatalf("validateHubWorkspaceStorage: expected error containing %q", tt.wantErr)
+				t.Fatalf("resolveHubProjectStorage: expected error containing %q", tt.wantErr)
 			}
-			if !strings.Contains(err.Error(), "invalid workspace storage settings") || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("error = %q, want it to name server.workspace_storage and contain %q", err, tt.wantErr)
+			if !strings.Contains(err.Error(), "invalid project storage settings") || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %q, want it to name project storage and contain %q", err, tt.wantErr)
 			}
 		})
 	}
 }
 
-// TestServerForeground_WiresHubWorkspaceStorageValidation pins the call that
+// TestServerForeground_WiresHubProjectStorageResolution pins the call that
 // makes the check above matter: runServerStart must call
-// validateHubWorkspaceStorage, under `if enableHub`, so a broker-only
+// resolveHubProjectStorage, under `if enableHub`, so a broker-only
 // process keeps its warn-and-skip NFS behaviour.
-func TestServerForeground_WiresHubWorkspaceStorageValidation(t *testing.T) {
+func TestServerForeground_WiresHubProjectStorageResolution(t *testing.T) {
 	file, err := parser.ParseFile(token.NewFileSet(), "server_foreground.go", nil, 0)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -141,7 +174,7 @@ func TestServerForeground_WiresHubWorkspaceStorageValidation(t *testing.T) {
 			}
 			ast.Inspect(ifStmt.Body, func(m ast.Node) bool {
 				if call, ok := m.(*ast.CallExpr); ok {
-					if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "validateHubWorkspaceStorage" {
+					if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "resolveHubProjectStorage" {
 						gated++
 					}
 				}
@@ -151,7 +184,7 @@ func TestServerForeground_WiresHubWorkspaceStorageValidation(t *testing.T) {
 		})
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			if call, ok := n.(*ast.CallExpr); ok {
-				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "validateHubWorkspaceStorage" {
+				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "resolveHubProjectStorage" {
 					calls++
 				}
 			}
@@ -160,7 +193,7 @@ func TestServerForeground_WiresHubWorkspaceStorageValidation(t *testing.T) {
 	}
 
 	if calls != 1 || gated != 1 {
-		t.Fatalf("runServerStart calls validateHubWorkspaceStorage %d time(s), %d under `if enableHub`; want exactly one, gated", calls, gated)
+		t.Fatalf("runServerStart calls resolveHubProjectStorage %d time(s), %d under `if enableHub`; want exactly one, gated", calls, gated)
 	}
 }
 

@@ -131,7 +131,7 @@ func (s *Server) attachmentService() *artifacts.Service {
 func (s *Server) artifactBackend() artifacts.Backend {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return artifacts.Backend{Store: s.artifactStore, Blobs: s.storage, HubID: s.hubID, ViewKey: s.artifactViewKey}
+	return artifacts.Backend{Store: s.artifactStore, Blobs: s.storage, HubID: s.hubID, ViewKeys: s.artifactViewKeys.viewKeys()}
 }
 
 // artifactReapInterval is how often the hub reaps abandoned pending
@@ -169,6 +169,9 @@ func (s *Server) startArtifactReaper(ctx context.Context) {
 // attachments of messages that are gone are retired; a failure in either is
 // logged once and does not stop the rest of the pass.
 func (s *Server) reapArtifactVersions(ctx context.Context) {
+	// Attachment retention (scratchpad projections, legacy blobs) does not
+	// depend on the artifact store; it paces itself to once an hour.
+	s.sweepAttachmentRetention(ctx, time.Now())
 	st := s.ArtifactStore()
 	if st == nil {
 		return
@@ -258,7 +261,20 @@ const SecretKeyArtifactViewKey = "artifact_view_signing_key"
 // with the same stable-key policy as the download signing key: required
 // on deployments that need stable keys, otherwise an in-memory key, since
 // losing it only ends views within artifacts.ViewTTL.
+//
+// In keyring mode the keys come from the signing ring instead (see
+// capability_keys.go) and nothing is read from the secret backend.
 func (s *Server) initArtifactViewKey(ctx context.Context) error {
+	if s.keyringManaged() {
+		keys, err := s.managedCapabilityKeys(SecretKeyArtifactViewKey)
+		if err != nil {
+			return err
+		}
+		s.mu.Lock()
+		s.artifactViewKeys = keys
+		s.mu.Unlock()
+		return nil
+	}
 	key, err := s.ensureSigningKey(ctx, SecretKeyArtifactViewKey, nil)
 	if err == nil && len(key) == 0 {
 		err = fmt.Errorf("artifact view key resolved to an empty value")
@@ -277,7 +293,7 @@ func (s *Server) initArtifactViewKey(ctx context.Context) error {
 		s.recordSigningKeySource(SecretKeyArtifactViewKey, signingKeySourceEphemeral)
 	}
 	s.mu.Lock()
-	s.artifactViewKey = key
+	s.artifactViewKeys = fixedCapabilityKeys(key)
 	s.mu.Unlock()
 	return nil
 }

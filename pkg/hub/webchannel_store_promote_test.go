@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -29,7 +30,7 @@ import (
 // includes a messages table (Ent-managed in production, manually created here).
 func newPromoteTestStore(t *testing.T) (WebChatStore, *sql.DB) {
 	t.Helper()
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 
 	// Create the Ent messages table manually — in production it's managed by Ent.
 	_, err := db.Exec(`

@@ -653,12 +653,22 @@ func TestAgentDelegation_RouteGateDeniesEverythingElse(t *testing.T) {
 		{http.MethodPatch, "/api/v1/agents/" + f.agentB.ID},
 		{http.MethodDelete, "/api/v1/agents/" + f.agentB.ID},
 		{http.MethodGet, "/api/v1/agents"},
-		{http.MethodGet, "/api/v1/agents/" + f.agentB.ID + "/pty"},
+		{http.MethodPost, "/api/v1/agents/" + f.agentB.ID + "/pty"},
+		{http.MethodGet, "/api/v1/agents/" + f.agentB.ID + "/pty/"},
 		{http.MethodPost, "/api/v1/agents/" + f.agentB.ID + "/env"},
 		{http.MethodPost, "/api/v1/agents/" + f.agentB.ID + "/exec"},
+		{http.MethodPost, "/api/v1/agents/" + f.agentB.ID + "/reset-auth"},
+		{http.MethodPost, "/api/v1/agents/" + f.agentB.ID + "/keys"},
 		{http.MethodPost, "/api/v1/agents/" + f.agentB.ID + "/stop"},
-		{http.MethodPost, "/api/v1/agents/" + f.agentB.ID + "/message"},
+		{http.MethodGet, "/api/v1/agents/" + f.agentB.ID + "/message"},
+		{http.MethodPost, "/api/v1/agents/" + f.agentB.ID + "/message/"},
+		{http.MethodPost, "/api/v1/agents/" + f.agentB.ID + "/outbound-message"},
+		{http.MethodPost, "/api/v1/agents/" + f.agentB.ID + "/set_message_mode"},
 		{http.MethodGet, "/api/v1/agents/" + f.agentB.ID + "/messages"},
+		{http.MethodGet, "/api/v1/agents/" + f.agentB.ID + "/messages/stream"},
+		{http.MethodGet, "/api/v1/projects/" + f.other.ID + "/agents/" + f.agentB.ID + "/message"},
+		{http.MethodPost, "/api/v1/projects/" + f.other.ID + "/agents/" + f.agentB.ID + "/exec"},
+		{http.MethodGet, "/api/v1/projects/" + f.other.ID + "/agents/" + f.agentB.ID + "/pty"},
 		{http.MethodGet, "/api/v1/projects/" + f.other.ID + "/"},
 		{http.MethodPatch, "/api/v1/projects/" + f.other.ID},
 		{http.MethodDelete, "/api/v1/projects/" + f.other.ID},
@@ -671,6 +681,12 @@ func TestAgentDelegation_RouteGateDeniesEverythingElse(t *testing.T) {
 		{http.MethodPost, "/api/v1/agents/" + f.agentA.ID + "/delegations"},
 		{http.MethodPost, "/api/v1/agents/" + f.agentA.ID + "/delegations/" + grant.ID + "/exchange"},
 		{http.MethodGet, "/api/v1/agents/" + f.agentB.ID + "/no-such-route"},
+		// A durable effect (§17.2 flow 21): agent creation, in both forms.
+		{http.MethodPost, "/api/v1/agents"},
+		{http.MethodPost, "/api/v1/projects/" + f.proj.ID + "/agents"},
+		// Grant management, revoke-all included.
+		{http.MethodPost, "/api/v1/users/me/delegations/revoke-all"},
+		{http.MethodPost, "/api/v1/agents/" + f.agentA.ID + "/delegations/revoke-all"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
@@ -680,6 +696,9 @@ func TestAgentDelegation_RouteGateDeniesEverythingElse(t *testing.T) {
 		})
 	}
 	assert.Len(t, adtAudits(t, f.store, mutationAgentDelegationCredentialIssue), rowsBefore, "no denied request issued a credential")
+	g, err := f.store.GetAgentDelegationGrant(context.Background(), grant.ID)
+	require.NoError(t, err)
+	assert.Nil(t, g.RevokedAt, "no denied request revoked the grant")
 }
 
 func TestAgentDelegation_RevocationChainAndExperimentGate(t *testing.T) {

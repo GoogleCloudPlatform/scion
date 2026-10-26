@@ -45,6 +45,10 @@ export interface AccountTeardownDetail {
  */
 export function performLogout(): void {
   dispatchTeardown('logout');
+  // Direct: client/api.ts imports this module for dispatchTeardown, so
+  // using apiFetch here would make an import cycle, and a logout must
+  // not run the helper's 401 redirect.
+  // eslint-disable-next-line no-restricted-globals -- client/api.ts imports this module (import cycle)
   fetch(browserPath('/auth/logout'), {
     method: 'POST',
     credentials: 'include',

@@ -1,6 +1,6 @@
-# The profile's single backend (nfs) shadows the runtime entry's per-dir
-# entry for x, so legacy agents of batch put dir x on nfs. The instance must
-# not carry {x: local}: that would put dir x on local.
+# The profile's single backend (nfs) and the runtime entry's per-dir entry
+# for x are removed storage overrides: server.project_storage places every
+# shared dir. Neither is converted; each is reported as removed.
 schema_version: "1"
 server:
   shared_dir_storage:

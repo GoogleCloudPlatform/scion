@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -172,6 +173,9 @@ type HTTPAgentDispatcher struct {
 	transportMode     string               // Transport auth mode (iap, cloudrun_invoker)
 	debug             bool
 	log               *slog.Logger
+	// storageLayout is the hub's projectfs Layout source for
+	// storageLayoutPrecheck (SetStorageLayout); nil disables the check.
+	storageLayout func() (projectfs.Layout, error)
 
 	// attachmentIssuer issues the attachment delivery capabilities of a
 	// message on every dispatch attempt (ptone/scion#4596). Nil issues none.
@@ -823,6 +827,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		ProjectSlug:   projectInfo.projectSlug,
 		SharedDirs:    projectInfo.sharedDirs,
 		WorkspaceMode: projectInfo.workspaceMode,
+		// A resume after a re-link reaches the broker as a create: the
+		// earlier agent row went with the earlier project (ptone/scion#4476).
+		PreviousProjectIDs: d.previousProjectIDs(ctx, projectInfo),
 	}
 	// The single setter of the expected runtime target on create-shaped
 	// requests: any non-NULL pin. A stale pin sends the old target, which the
@@ -1372,6 +1379,10 @@ type projectDispatchInfo struct {
 	// telemetryPolicy is the project's projectSettingTelemetryEnabled policy
 	// (projectTelemetryPolicy); nil when unset or unparsable.
 	telemetryPolicy *bool
+	// projectID and gitRemote are the project's ID and stored (normalized)
+	// git remote, for previousProjectIDs.
+	projectID string
+	gitRemote string
 }
 
 // resolveDispatchProjectInfo resolves the project facts a dispatch carries.
@@ -1406,6 +1417,8 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	info.workspaceMode = dispatchWorkspaceMode(project)
 	info.sharedWorkspaceClone = sharedWorkspaceCloneConfig(project)
 	info.telemetryPolicy = projectTelemetryPolicy(project)
+	info.projectID = project.ID
+	info.gitRemote = project.GitRemote
 
 	// First check if the broker has a registered local path for this project.
 	localPath := ""
@@ -1847,6 +1860,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
+	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
 
 	req, err := d.buildCreateRequestFor(ctx, agent, "DispatchAgentCreate", failOnSecretResolutionError)
 	if err != nil {
@@ -1973,6 +1990,9 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
 		return err
 	}
+	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
+		return err
+	}
 
 	// Provision and reprovision keep going on a secret resolution error:
 	// the broker's provision never reads the resolved secrets, and the
@@ -2006,12 +2026,6 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	req.ExpectExistingNFSWorkspace = expectNFSWorkspace
 	req.MoveReincarnationID = moveReincarnationID
 	req.GatherEnv = true
-	wantSharedDirChange := false
-	if reprovision && agent.AppliedConfig != nil && len(agent.AppliedConfig.SharedDirBackendChanges) > 0 {
-		req.SharedDirBackendChanges = agent.AppliedConfig.SharedDirBackendChanges
-		req.AllowEmptySharedDir = agent.AppliedConfig.AllowEmptySharedDir
-		wantSharedDirChange = true
-	}
 
 	// Track which scope provided each key
 	req.EnvSources = d.buildEnvSources(ctx, agent, req.ResolvedEnv)
@@ -2117,11 +2131,6 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 		if !finalResp.Reprovisioned {
 			return fmt.Errorf("%s: broker did not confirm the reprovision (it may not support reincarnate; its reported capabilities may be stale)", callerName)
 		}
-		// A broker that predates shared dir backend changes ignores the
-		// field and reprovisions without changing the record.
-		if wantSharedDirChange && !finalResp.SharedDirBackendsChanged {
-			return fmt.Errorf("%s: broker did not confirm the shared dir backend change (it may not support --shared-dir-backend; upgrade the broker)", callerName)
-		}
 	}
 
 	// Merge resolved storage env vars back into AppliedConfig so they are
@@ -2176,6 +2185,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 
 	// Hub check before dispatch (see DispatchAgentCreate).
 	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
+		return nil, err
+	}
+	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
 		return nil, err
 	}
 
@@ -2370,6 +2382,9 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 	// Hub check before dispatch (see DispatchAgentCreate): the gather pass
 	// can be minutes old, and this pass mints a token and records a run.
 	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
+		return nil, err
+	}
+	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
 		return nil, err
 	}
 
@@ -3563,6 +3578,10 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
+	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
 
 	// Capture the phase and launch-error this dispatch found the agent in,
 	// before buildStartEnv/applyBrokerResponse can change either. The
@@ -3713,6 +3732,7 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		TelemetryPolicy:      tel.telemetryPolicy(),
 		Image:                d.dispatchImageForBroker(agent),
 		TemplateName:         agent.Template,
+		PreviousProjectIDs:   d.previousProjectIDs(ctx, projectInfo),
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
 	extras.Profile = dispatchProfile(agent)
@@ -3934,6 +3954,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
 		return err
 	}
+	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
+		return err
+	}
 
 	// Build resolved env with all env vars, secrets, and a fresh auth token
 	// so the restarted container has full credentials and Hub connectivity.
@@ -3988,6 +4011,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		ProjectSlug:          projectInfo.projectSlug,
 		SharedDirs:           projectInfo.sharedDirs,
 		ResolvedSecrets:      startEnv.secrets,
+		PreviousProjectIDs:   d.previousProjectIDs(ctx, projectInfo),
 	}
 	extras.TemplateID, extras.TemplateHash = dispatchTemplateIdentity(agent)
 	extras.Profile = dispatchProfile(agent)

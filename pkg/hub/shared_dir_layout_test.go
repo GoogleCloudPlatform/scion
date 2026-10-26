@@ -19,7 +19,6 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -36,52 +35,41 @@ import (
 
 // Phase 1 of the project storage cleanup (ptone/scion#5806): the hub's
 // shared-dir browser resolves through pkg/projectfs on a Layout built from
-// its in-memory server config, so on a hub configured with only
-// server.workspace_storage: nfs (the Cloud Run hub + GKE + Filestore
-// topology) a web upload lands in the uuid tree agents mount, and on a
-// workstation (local) hub the slug-keyed paths are unchanged.
+// its in-memory server config (server.project_storage since phase 3), so on
+// a hub with an nfs backend (the Cloud Run hub + GKE + Filestore topology)
+// a web upload lands in the uuid tree agents mount, and on a workstation
+// (local) hub the slug-keyed paths are unchanged.
 
-func sharedDirNFSStorage(mountRoot, shareID string) *config.V1SharedDirStorageConfig {
-	return &config.V1SharedDirStorageConfig{
-		Backend: "nfs",
-		NFS: &config.V1NFSConfig{
-			MountRoot: mountRoot,
-			Shares:    []config.V1NFSShare{{ID: shareID, PVName: shareID + "-pv"}},
-		},
-	}
-}
-
-func TestSharedDirLayout_Precedence(t *testing.T) {
-	ws := nfsConfig("/mnt/ws")                     // share1, default subpath root
-	sd := sharedDirNFSStorage("/mnt/sd", "shared") // shared_dir_storage nfs
+// TestSharedDirLayout_ProjectStorage: the hub builds its shared-dir Layout
+// from server.project_storage alone (phase 3, ptone/scion#5821): one
+// backend places the workspace and the shared dirs, the volume backends put
+// shared dirs on the volume's UUID tree (durable), and an unusable block
+// fails closed.
+func TestSharedDirLayout_ProjectStorage(t *testing.T) {
+	saved := volumeMountBase
+	volumeMountBase = "/vol"
+	t.Cleanup(func() { volumeMountBase = saved })
+	ws := projectStorageFromWorkspace(nfsConfig("/mnt/ws")) // share1, default subpath root
 	tests := []struct {
-		name       string
-		ws         *config.V1WorkspaceStorageConfig
-		sd         *config.V1SharedDirStorageConfig
-		wantSource sharedDirLayoutSource
-		wantBase   string
-		wantErr    string
+		name        string
+		ps          *config.V1ProjectStorageConfig
+		wantSource  sharedDirLayoutSource
+		wantBackend projectfs.Backend
+		wantBase    string
+		wantErr     string
 	}{
-		{"nothing configured", nil, nil, sharedDirLayoutLocal, "", ""},
-		{"workspace nfs only (T4)", ws, nil, sharedDirLayoutFromWorkspaceStorage, "/mnt/ws/share1", ""},
-		{"shared_dir_storage nfs only (T3)", nil, sd, sharedDirLayoutFromSharedDirStorage, "/mnt/sd/shared", ""},
-		{"both nfs: shared_dir_storage wins", ws, sd, sharedDirLayoutFromSharedDirStorage, "/mnt/sd/shared", ""},
-		{"shared_dir_storage local, workspace nfs", ws, &config.V1SharedDirStorageConfig{Backend: "local"}, sharedDirLayoutFromWorkspaceStorage, "/mnt/ws/share1", ""},
-		{"shared_dir_storage empty backend, workspace nfs", ws, &config.V1SharedDirStorageConfig{NFS: sd.NFS}, sharedDirLayoutFromWorkspaceStorage, "/mnt/ws/share1", ""},
-		{"workspace cloudrun-volume stays local", &config.V1WorkspaceStorageConfig{Backend: "cloudrun-volume", CloudRunVolume: &config.V1CloudRunVolumeConfig{VolumeName: "v"}}, nil, sharedDirLayoutLocal, "", ""},
-		{"workspace gke-shared-volume stays local", &config.V1WorkspaceStorageConfig{Backend: "gke-shared-volume", GKESharedVolume: &config.V1GKESharedVolumeConfig{VolumeName: "v"}}, nil, sharedDirLayoutLocal, "", ""},
-		{"workspace local", &config.V1WorkspaceStorageConfig{Backend: "local"}, nil, sharedDirLayoutLocal, "", ""},
-		{"invalid shared_dir_storage fails closed", ws, invalidNFSSharedDirStorageTestConfig(), sharedDirLayoutFromSharedDirStorage, "", "server.shared_dir_storage"},
-		{"unloadable settings file fails closed", ws, nil, sharedDirLayoutFromSharedDirStorage, "", "global settings unreadable"},
-		{"workspace nfs without shares", &config.V1WorkspaceStorageConfig{Backend: "nfs", NFS: &config.V1NFSConfig{MountRoot: "/mnt"}}, nil, sharedDirLayoutFromWorkspaceStorage, "", "no NFS shares"},
-		{"workspace nfs without mount_root", &config.V1WorkspaceStorageConfig{Backend: "nfs", NFS: &config.V1NFSConfig{Shares: []config.V1NFSShare{{ID: "s"}}}}, nil, sharedDirLayoutFromWorkspaceStorage, "", "mount_root must be an absolute path"},
+		{"nothing configured", nil, sharedDirLayoutLocal, projectfs.BackendLocal, "", ""},
+		{"nfs (T4)", ws, sharedDirLayoutFromProjectStorage, projectfs.BackendNFS, "/mnt/ws/share1", ""},
+		{"cloudrun-volume", &config.V1ProjectStorageConfig{Backend: "cloudrun-volume", CloudRunVolume: &config.V1CloudRunVolumeConfig{VolumeName: "v"}}, sharedDirLayoutFromProjectStorage, projectfs.BackendCloudRunVolume, "/vol/v", ""},
+		{"gke-shared-volume", &config.V1ProjectStorageConfig{Backend: "gke-shared-volume", GKESharedVolume: &config.V1GKESharedVolumeConfig{VolumeName: "v"}}, sharedDirLayoutFromProjectStorage, projectfs.BackendGKESharedVolume, "/vol/v", ""},
+		{"local", &config.V1ProjectStorageConfig{Backend: "local"}, sharedDirLayoutLocal, projectfs.BackendLocal, "", ""},
+		{"invalid block fails closed", invalidNFSSharedDirStorageTestConfig(), sharedDirLayoutFromProjectStorage, "", "", "absolute path on the hub"},
+		{"nfs without shares", &config.V1ProjectStorageConfig{Backend: "nfs", NFS: &config.V1NFSConfig{MountRoot: "/mnt"}}, sharedDirLayoutFromProjectStorage, "", "", "no NFS shares"},
+		{"volume without block", &config.V1ProjectStorageConfig{Backend: "cloudrun-volume"}, sharedDirLayoutFromProjectStorage, "", "", "volume_name is not set"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := &Server{config: ServerConfig{WorkspaceStorageConfig: tt.ws, SharedDirStorageConfig: tt.sd}}
-			if tt.name == "unloadable settings file fails closed" {
-				srv.config.SharedDirStorageError = errors.New("server.shared_dir_storage: global settings unreadable")
-			}
+			srv := &Server{config: ServerConfig{ProjectStorageConfig: tt.ps}}
 			layout, source, err := srv.sharedDirLayout()
 			assert.Equal(t, tt.wantSource, source)
 			if tt.wantErr != "" {
@@ -89,29 +77,15 @@ func TestSharedDirLayout_Precedence(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
+			assert.Equal(t, tt.wantBackend, layout.Backend)
 			if tt.wantBase == "" {
-				assert.Equal(t, projectfs.BackendLocal, layout.Backend)
 				return
 			}
-			assert.Equal(t, projectfs.BackendNFS, layout.Backend)
 			assert.Equal(t, tt.wantBase, layout.HostBase)
 			assert.Equal(t, "projects", layout.SubPathRoot)
+			assert.True(t, layout.Backend.Durable(), "a shared backend is durable, so the Cloud Run write gate opens")
 		})
 	}
-}
-
-func TestSharedDirLayoutWarnings(t *testing.T) {
-	ws := nfsConfig("/mnt/ws")
-	assert.Empty(t, sharedDirLayoutWarnings(ws, nil))
-	assert.Empty(t, sharedDirLayoutWarnings(nil, sharedDirNFSStorage("/mnt/sd", "shared")))
-	same := &config.V1SharedDirStorageConfig{Backend: "nfs", NFS: ws.NFS}
-	assert.Empty(t, sharedDirLayoutWarnings(ws, same), "identical blocks do not disagree")
-
-	got := sharedDirLayoutWarnings(ws, sharedDirNFSStorage("/mnt/sd", "shared"))
-	require.Len(t, got, 1)
-	assert.Contains(t, got[0], "the hub serves shared dirs from server.shared_dir_storage and workspaces from server.workspace_storage")
-	assert.Contains(t, got[0], "/mnt/sd/shared")
-	assert.Contains(t, got[0], "/mnt/ws/share1")
 }
 
 // declareSharedDir declares shared dir name on the project unless it is
@@ -162,7 +136,7 @@ func (f sharedDirLayoutFixture) filesURL(projectID, dir string) string {
 func TestSharedDirFiles_WorkspaceStorageNFS_UUIDTree(t *testing.T) {
 	f := newSharedDirLayoutFixture(t)
 	t.Setenv("K_SERVICE", "scion-hub") // a Cloud Run Service: the write gate must pass on NFS
-	f.srv.config.WorkspaceStorageConfig = nfsConfig(f.mountRoot)
+	f.srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(f.mountRoot))
 	require.NoError(t, os.MkdirAll(filepath.Join(f.mountRoot, "share1"), 0o755))
 
 	for _, dir := range []string{"scratchpad", "custom"} {
@@ -207,7 +181,7 @@ func TestSharedDirFiles_WorkspaceStorageNFS_RemoteLinkedProject(t *testing.T) {
 	rec := doRequest(t, f.srv, http.MethodGet, f.filesURL(project.ID, "scratchpad"), nil)
 	require.Equal(t, http.StatusConflict, rec.Code, "sanity: the local layout cannot serve a remote-only project")
 
-	f.srv.config.WorkspaceStorageConfig = nfsConfig(f.mountRoot)
+	f.srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(f.mountRoot))
 	require.NoError(t, os.MkdirAll(filepath.Join(f.mountRoot, "share1"), 0o755))
 	rec = doRequest(t, f.srv, http.MethodPut, f.filesURL(project.ID, "scratchpad")+"/note.txt",
 		ProjectWorkspaceWriteRequest{Content: "hello"})
@@ -242,7 +216,7 @@ func TestSharedDirFiles_WorkspaceStorageNFS_EmbeddedProvidedProjects(t *testing.
 		ProjectID: f.project.ID, BrokerID: b.ID, BrokerName: b.Name, Status: b.Status,
 	}))
 
-	f.srv.config.WorkspaceStorageConfig = nfsConfig(f.mountRoot)
+	f.srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(f.mountRoot))
 	require.NoError(t, os.MkdirAll(filepath.Join(f.mountRoot, "share1"), 0o755))
 
 	for name, project := range map[string]*store.Project{"git linked": linked, "hub-native": f.project} {
@@ -260,15 +234,14 @@ func TestSharedDirFiles_WorkspaceStorageNFS_EmbeddedProvidedProjects(t *testing.
 	assert.True(t, os.IsNotExist(err), "the hub's local slug tree is not used")
 }
 
-// TestSharedDirConfigDelete_WorkspaceStorageNFS_LeafKept: removing a shared
-// dir declaration on a hub whose shared dirs are on the workspace export
-// (only server.workspace_storage nfs) removes the declaration but leaves the
-// leaf, which agents mount, in place until the lifecycle phase owns that
-// deletion (ptone/scion#5835). Sibling shared dirs and the slug tree are
-// untouched.
-func TestSharedDirConfigDelete_WorkspaceStorageNFS_LeafKept(t *testing.T) {
+// TestSharedDirConfigDelete_ProjectStorageNFS_LeafRemoved: with one storage
+// block, removing a shared dir declaration removes exactly that leaf from
+// the project's shared tree, as on the local backend and as
+// server.shared_dir_storage nfs did; sibling shared dirs and the slug tree
+// are untouched.
+func TestSharedDirConfigDelete_ProjectStorageNFS_LeafRemoved(t *testing.T) {
 	f := newSharedDirLayoutFixture(t)
-	f.srv.config.WorkspaceStorageConfig = nfsConfig(f.mountRoot)
+	f.srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(f.mountRoot))
 	sharedDirs := filepath.Join(f.mountRoot, "share1", "projects", f.project.ID, "shared-dirs")
 	for _, dir := range []string{"scratchpad", "custom"} {
 		require.NoError(t, os.MkdirAll(filepath.Join(sharedDirs, dir), 0o2775))
@@ -283,49 +256,25 @@ func TestSharedDirConfigDelete_WorkspaceStorageNFS_LeafKept(t *testing.T) {
 	for _, d := range got.SharedDirs {
 		assert.NotEqual(t, "custom", d.Name, "the declaration is removed")
 	}
-	for _, dir := range []string{"scratchpad", "custom"} {
-		b, err := os.ReadFile(filepath.Join(sharedDirs, dir, "data.txt"))
-		require.NoError(t, err, "%s: agent data on the workspace export must survive", dir)
-		assert.Equal(t, dir, string(b))
-	}
+	_, err = os.Stat(filepath.Join(sharedDirs, "custom"))
+	assert.True(t, os.IsNotExist(err), "the removed declaration's leaf is deleted")
+	b, err := os.ReadFile(filepath.Join(sharedDirs, "scratchpad", "data.txt"))
+	require.NoError(t, err, "sibling shared dirs are untouched")
+	assert.Equal(t, "scratchpad", string(b))
 	_, err = os.Stat(resolveTestSharedDirPath(t, f.project, "custom"))
 	assert.True(t, os.IsNotExist(err), "nothing is created or removed under the slug tree")
 }
 
-// TestSharedDirConfigDelete_SharedDirStorageNFS_LeafRemoved: with
-// server.shared_dir_storage nfs the declaration DELETE still removes exactly
-// that leaf (unchanged behaviour), leaving its siblings.
-func TestSharedDirConfigDelete_SharedDirStorageNFS_LeafRemoved(t *testing.T) {
-	f := newSharedDirLayoutFixture(t)
-	f.srv.config.SharedDirStorageConfig = sharedDirNFSStorage(f.mountRoot, "sdshare")
-	sharedDirs := filepath.Join(f.mountRoot, "sdshare", "projects", f.project.ID, "shared-dirs")
-	for _, dir := range []string{"scratchpad", "custom"} {
-		require.NoError(t, os.MkdirAll(filepath.Join(sharedDirs, dir), 0o2775))
-		require.NoError(t, os.WriteFile(filepath.Join(sharedDirs, dir, "data.txt"), []byte(dir), 0o644))
-	}
-
-	rec := doRequest(t, f.srv, http.MethodDelete, fmt.Sprintf("/api/v1/projects/%s/shared-dirs/custom", f.project.ID), nil)
-	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
-
-	_, err := os.Stat(filepath.Join(sharedDirs, "custom"))
-	assert.True(t, os.IsNotExist(err), "the removed declaration's leaf is deleted")
-	_, err = os.Stat(filepath.Join(sharedDirs, "scratchpad", "data.txt"))
-	assert.NoError(t, err, "sibling shared dirs are untouched")
-}
-
 // TestSharedDirFiles_CloudRun_NonDurableSharedDirRefused pins the write gate
 // on the resolved Mount (ptone/scion#5811): on a Cloud Run Service whose
-// workspace is durable (a cloudrun-volume) but whose shared dirs resolve to
-// instance-local disk, shared-dir writes (upload, write, delete) answer 503
-// with a shared-dir specific error and create nothing; reads still work.
+// shared dirs resolve to instance-local disk (no shared project_storage
+// backend), shared-dir writes (upload, write, delete) answer 503 with a
+// shared-dir specific error naming server.project_storage and create
+// nothing; reads still work.
 func TestSharedDirFiles_CloudRun_NonDurableSharedDirRefused(t *testing.T) {
 	f := newSharedDirLayoutFixture(t)
 	t.Setenv("K_SERVICE", "scion-hub")
-	f.srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
-		Backend:        "cloudrun-volume",
-		CloudRunVolume: &config.V1CloudRunVolumeConfig{VolumeName: "ws"},
-	}
-	require.False(t, f.srv.workspaceWriteBlocked(), "sanity: workspace writes pass on the durable volume")
+	f.srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{Backend: "local"}
 
 	url := f.filesURL(f.project.ID, "scratchpad")
 	for name, do := range map[string]func() int{
@@ -344,6 +293,7 @@ func TestSharedDirFiles_CloudRun_NonDurableSharedDirRefused(t *testing.T) {
 	rec := doRequest(t, f.srv, http.MethodPut, url+"/a.txt", ProjectWorkspaceWriteRequest{Content: "a"})
 	assert.Contains(t, rec.Body.String(), "shared_dir_writes_unavailable")
 	assert.Contains(t, rec.Body.String(), "not on durable storage")
+	assert.Contains(t, rec.Body.String(), "server.project_storage")
 	_, err := os.Stat(resolveTestSharedDirPath(t, f.project, "scratchpad"))
 	assert.True(t, os.IsNotExist(err), "refused writes must not create the local directory")
 
@@ -362,8 +312,7 @@ func TestSharedDirFiles_CloudRun_NonDurableSharedDirRefused(t *testing.T) {
 func TestSharedDirFiles_CloudRun_NoWorkspaceStorageRefused(t *testing.T) {
 	f := newSharedDirLayoutFixture(t)
 	t.Setenv("K_SERVICE", "scion-hub")
-	f.srv.config.WorkspaceStorageConfig = nil
-	f.srv.config.SharedDirStorageConfig = nil
+	f.srv.config.ProjectStorageConfig = nil
 
 	url := f.filesURL(f.project.ID, "scratchpad")
 	for name, do := range map[string]func() *httptest.ResponseRecorder{
@@ -403,20 +352,28 @@ func TestSharedDirFiles_LocalLayout_SlugPathUnchanged(t *testing.T) {
 	}
 }
 
-// TestSharedDirFiles_BothNFS_SharedDirStorageWins: when both blocks are nfs,
-// shared dirs follow server.shared_dir_storage (as brokers do today).
-func TestSharedDirFiles_BothNFS_SharedDirStorageWins(t *testing.T) {
+// TestSharedDirFiles_CloudRunVolume_SharedDirsOnVolume: with
+// server.project_storage backend cloudrun-volume the shared dirs are on the
+// volume's UUID tree (one backend for workspace and shared dirs), so the
+// Cloud Run write gate opens and a web upload lands where agents mount it (ptone/scion#5823 note).
+func TestSharedDirFiles_CloudRunVolume_SharedDirsOnVolume(t *testing.T) {
 	f := newSharedDirLayoutFixture(t)
-	f.srv.config.WorkspaceStorageConfig = nfsConfig(f.mountRoot)
-	f.srv.config.SharedDirStorageConfig = sharedDirNFSStorage(f.mountRoot, "sdshare")
-	require.NoError(t, os.MkdirAll(filepath.Join(f.mountRoot, "share1"), 0o755))
-	require.NoError(t, os.MkdirAll(filepath.Join(f.mountRoot, "sdshare"), 0o755))
+	t.Setenv("K_SERVICE", "scion-hub")
+	saved := volumeMountBase
+	volumeMountBase = f.mountRoot
+	t.Cleanup(func() { volumeMountBase = saved })
+	require.NoError(t, os.MkdirAll(filepath.Join(f.mountRoot, "ws"), 0o755))
+	f.srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
+		Backend:        "cloudrun-volume",
+		CloudRunVolume: &config.V1CloudRunVolumeConfig{VolumeName: "ws"},
+	}
 
 	rec := doRequest(t, f.srv, http.MethodPut, f.filesURL(f.project.ID, "scratchpad")+"/note.txt",
 		ProjectWorkspaceWriteRequest{Content: "hello"})
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
-	_, err := os.Stat(filepath.Join(f.mountRoot, "sdshare", "projects", f.project.ID, "shared-dirs", "scratchpad", "note.txt"))
-	require.NoError(t, err)
-	_, err = os.Stat(filepath.Join(f.mountRoot, "share1", "projects"))
-	assert.True(t, os.IsNotExist(err))
+	got, err := os.ReadFile(filepath.Join(f.mountRoot, "ws", "projects", f.project.ID, "shared-dirs", "scratchpad", "note.txt"))
+	require.NoError(t, err, "the write lands in the volume's uuid tree")
+	assert.Equal(t, "hello", string(got))
+	_, err = os.Stat(resolveTestSharedDirPath(t, f.project, "scratchpad"))
+	assert.True(t, os.IsNotExist(err), "nothing is written to the hub's local slug-keyed tree")
 }

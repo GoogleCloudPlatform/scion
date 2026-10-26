@@ -1236,6 +1236,11 @@ export interface SharedDir {
   name: string;
   read_only?: boolean;
   in_workspace?: boolean;
+  /**
+   * Container path agents mount the dir at, computed by the hub's layout
+   * authority. Present in GET /projects/{id}/shared-dirs responses only.
+   */
+  target?: string;
 }
 
 export type BrokerStatus = 'online' | 'offline' | 'degraded';
@@ -1584,6 +1589,14 @@ export interface Message {
   senderProjectId?: string;
   /** Server-derived recipient project ID for cross-project provenance. */
   recipientProjectId?: string;
+  /**
+   * The user who authorized a message sent with an agent delegated
+   * credential (.design/agent-delegation.md §14.5). The sender is still the
+   * agent. Absent on every other message.
+   */
+  authorizingUserId?: string;
+  /** The delegation grant of a message sent with an agent delegated credential. */
+  delegationGrantId?: string;
 }
 
 // ---------------------------------------------------------------------------

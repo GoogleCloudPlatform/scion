@@ -107,8 +107,8 @@ type agentHomeOwner struct {
 func advertisedAgentHomeOwner(settings *config.VersionedSettings) agentHomeOwner {
 	backend := ""
 	nfsUID, nfsGID := 0, 0
-	if settings != nil && settings.Server != nil && settings.Server.WorkspaceStorage != nil {
-		ws := settings.Server.WorkspaceStorage
+	if settings != nil && settings.Server != nil && settings.Server.EffectiveWorkspaceStorage() != nil {
+		ws := settings.Server.EffectiveWorkspaceStorage()
 		backend = ws.Backend
 		if ws.NFS != nil {
 			nfsUID, nfsGID = ws.NFS.UID, ws.NFS.GID

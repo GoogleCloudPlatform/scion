@@ -253,7 +253,7 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	cursor := query.Get("cursor")
 	if cursor != "" {
 		if err := validateAuthorizedListCursor(cursor, cursorBinding); err != nil {
-			BadRequest(w, err.Error())
+			writeInvalidCursor(w)
 			return
 		}
 	}
@@ -2910,7 +2910,7 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	cursor := query.Get("cursor")
 	if cursor != "" {
 		if err := validateAuthorizedListCursor(cursor, cursorBinding); err != nil {
-			BadRequest(w, err.Error())
+			writeInvalidCursor(w)
 			return
 		}
 	}
@@ -3234,6 +3234,9 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 		if identity == nil {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"This action requires user or agent authentication", nil)
+			return
+		}
+		if !admitDelegatedAgentHandler(w, r, opAgentActionMessage, agent) {
 			return
 		}
 		// Raw keystroke delivery through /message has been removed; see
@@ -4051,7 +4054,7 @@ var hubNFSCleanupAttemptHook func(attempt int)
 // result keeps the tree, logged at Info). A final failure is logged for an
 // operator, never returned.
 func (s *Server) startHubNFSProjectTreeCleanup(projectID string) {
-	wsCfg := s.config.WorkspaceStorageConfig
+	wsCfg := s.config.ProjectStorageConfig.WorkspaceStorage()
 	if wsCfg == nil || wsCfg.Backend != "nfs" || wsCfg.NFS == nil || len(wsCfg.NFS.Shares) == 0 {
 		return
 	}
