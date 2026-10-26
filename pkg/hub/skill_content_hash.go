@@ -139,9 +139,10 @@ func (s *Server) listAllSkillVersions(ctx context.Context, skillID string) ([]st
 // per-file hashes and modes; a missing mode is "0644", as the broker
 // installs it). A claimed v1, or a claimed v2, that disagrees fails
 // closed, at every trust level. A skill with no claimed contentHash whose
-// hashes cannot be recomputed fails too, since nothing would verify it. A pinned registry additionally needs a file list it can
-// recompute from, and its pin must equal the recomputed v1 or v2. The
-// recomputed v2 is then sent as contentHashV2. Because the broker checks
+// hashes cannot be recomputed fails too, since nothing would verify it. A
+// pinned registry additionally needs a file list it can recompute from,
+// and its pin must equal the recomputed v1 or v2. The recomputed v2 is
+// then sent as contentHashV2. Because the broker checks
 // every file against its per-file hash and installs it with the listed
 // mode, the installed files match what the pin was matched against, also
 // on a broker that checks v1 only.
