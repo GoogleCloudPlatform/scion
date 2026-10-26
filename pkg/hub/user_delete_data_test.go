@@ -57,8 +57,9 @@ func createOwnedAgent(t *testing.T, s store.Store, slug, projectID, ownerID stri
 	return a
 }
 
-// requireOwnsAgentsDenial asserts a 409 conflict whose details.agents lists
-// exactly the given agents.
+// requireOwnsAgentsDenial asserts a 409 user_delete_blocked whose
+// details.agents lists exactly the given agents and whose details.edges is
+// empty.
 func requireOwnsAgentsDenial(t *testing.T, rec *httptest.ResponseRecorder, agents ...*store.Agent) {
 	t.Helper()
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
@@ -67,16 +68,20 @@ func requireOwnsAgentsDenial(t *testing.T, rec *httptest.ResponseRecorder, agent
 			Code    string `json:"code"`
 			Message string `json:"message"`
 			Details struct {
-				Agents []ownedAgentRef `json:"agents"`
+				Agents    []ownedAgentRef    `json:"agents"`
+				Edges     []delegatorEdgeRef `json:"edges"`
+				Truncated bool               `json:"truncated"`
 			} `json:"details"`
 		} `json:"error"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
-	assert.Equal(t, ErrCodeConflict, resp.Error.Code)
+	assert.Equal(t, ErrCodeUserDeleteBlocked, resp.Error.Code)
+	assert.Empty(t, resp.Error.Details.Edges)
+	assert.False(t, resp.Error.Details.Truncated)
 	assert.Equal(t, userOwnsAgentsDeleteMessage, resp.Error.Message)
 	want := make([]ownedAgentRef, 0, len(agents))
 	for _, a := range agents {
-		want = append(want, ownedAgentRef{ID: a.ID, Slug: a.Slug, ProjectID: a.ProjectID})
+		want = append(want, ownedAgentRef{ID: a.ID, Slug: a.Slug, ProjectID: a.ProjectID, DeletionState: a.DeletionState})
 	}
 	assert.ElementsMatch(t, want, resp.Error.Details.Agents)
 }
@@ -959,6 +964,16 @@ func (r *userLockRecordingStore) ListAgents(ctx context.Context, f store.AgentFi
 	return r.Store.ListAgents(ctx, f, opts)
 }
 
+func (r *userLockRecordingStore) GetDelegationEdgesForDelegator(ctx context.Context, delegatorType, delegatorID string) ([]*store.DelegationEdge, error) {
+	r.record("edges:" + delegatorType + ":" + delegatorID)
+	return r.Store.GetDelegationEdgesForDelegator(ctx, delegatorType, delegatorID)
+}
+
+func (r *userLockRecordingStore) DeactivateDelegationEdgesForDelegator(ctx context.Context, delegatorType, delegatorID string, d store.Deactivation) (int, error) {
+	r.record("sweep:" + delegatorType + ":" + delegatorID)
+	return r.Store.DeactivateDelegationEdgesForDelegator(ctx, delegatorType, delegatorID, d)
+}
+
 func (r *userLockRecordingStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 	r.record("create:" + a.Slug)
 	return r.Store.CreateAgent(ctx, a)
@@ -980,7 +995,8 @@ func requireBefore(t *testing.T, r *userLockRecordingStore, first, second string
 
 // TestUserRowLocks_DeleteExclusiveCreateRestoreShared pins where the hub
 // takes the user-row lock (ptone/scion#2769): both delete paths lock the
-// user's row exclusively before listing the user's agents, and agent create
+// user's row exclusively before listing the user's agents and delegator
+// edges, and sweep those edges after the check, and agent create
 // and restore lock the guard user's row (owner, ancestry root, or schedule
 // creator; lockAgentGuardUserTx) shared before writing the agent. On
 // SQLite the lock is a plain read, so only the call order is checked here;
@@ -996,6 +1012,8 @@ func TestUserRowLocks_DeleteExclusiveCreateRestoreShared(t *testing.T) {
 		requireBefore(t, r, "lock:"+dave.ID+":true", "list:owner:"+dave.ID)
 		requireBefore(t, r, "lock:"+dave.ID+":true", "list:ancestor:"+dave.ID)
 		requireBefore(t, r, "lock:"+dave.ID+":true", "list:createdby:"+dave.ID)
+		requireBefore(t, r, "lock:"+dave.ID+":true", "edges:user:"+dave.ID)
+		requireBefore(t, r, "edges:user:"+dave.ID, "sweep:user:"+dave.ID)
 	})
 	t.Run("allow-list delete", func(t *testing.T) {
 		srv, s, _, _, _ := setupDemoPolicyTest(t)
@@ -1007,6 +1025,8 @@ func TestUserRowLocks_DeleteExclusiveCreateRestoreShared(t *testing.T) {
 		requireBefore(t, r, "lock:"+carol.ID+":true", "list:owner:"+carol.ID)
 		requireBefore(t, r, "lock:"+carol.ID+":true", "list:ancestor:"+carol.ID)
 		requireBefore(t, r, "lock:"+carol.ID+":true", "list:createdby:"+carol.ID)
+		requireBefore(t, r, "lock:"+carol.ID+":true", "edges:user:"+carol.ID)
+		requireBefore(t, r, "edges:user:"+carol.ID, "sweep:user:"+carol.ID)
 	})
 	t.Run("create", func(t *testing.T) {
 		f := newUATCreateFixture(t, "lock-create")

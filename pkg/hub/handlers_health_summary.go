@@ -240,6 +240,11 @@ type HealthBrokerStorage struct {
 	Backend string `json:"backend"`
 	// NFSHealthy is set only when Backend is "nfs".
 	NFSHealthy *bool `json:"nfs_healthy,omitempty"`
+	// LayoutMismatch lists how the broker's reported storage layout
+	// disagrees with this hub's (projectfs.Layout.DescriptorDiff), when the
+	// hub's layout is shared and they disagree. The hub refuses
+	// shared-mode dispatches to such a broker.
+	LayoutMismatch []string `json:"layout_mismatch,omitempty"`
 }
 
 // HealthSummaryAgents is the agents section of the health summary. It
@@ -557,6 +562,7 @@ func (s *Server) healthSummaryBrokers(ctx context.Context, agentAgg *store.Agent
 	list := HealthSummaryBrokers{Items: []HealthSummaryBroker{}}
 	var pluginNames []string
 	opts := store.ListOptions{Limit: healthSummaryBrokerPageSize}
+	hubLayout, layoutErr := s.projectStorageLayout()
 	for {
 		page, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, opts)
 		if err != nil {
@@ -570,7 +576,11 @@ func (s *Server) healthSummaryBrokers(ctx context.Context, agentAgg *store.Agent
 				}
 				continue
 			}
-			list.Items = append(list.Items, healthSummaryBroker(b, agentAgg, hubVersion))
+			row := healthSummaryBroker(b, agentAgg, hubVersion)
+			if layoutErr == nil && row.WorkspaceStorage != nil {
+				row.WorkspaceStorage.LayoutMismatch = hubLayout.DescriptorDiff(b.WorkspaceStorage, "")
+			}
+			list.Items = append(list.Items, row)
 		}
 		if page.NextCursor == "" || page.NextCursor == opts.Cursor {
 			break
@@ -600,7 +610,7 @@ func healthSummaryBrokerHasProblem(b HealthSummaryBroker) bool {
 		return true
 	}
 	ws := b.WorkspaceStorage
-	return ws != nil && ws.NFSHealthy != nil && !*ws.NFSHealthy
+	return ws != nil && ((ws.NFSHealthy != nil && !*ws.NFSHealthy) || len(ws.LayoutMismatch) > 0)
 }
 
 // healthSummaryBrokerKeepWhenCapped is the sort key that decides which

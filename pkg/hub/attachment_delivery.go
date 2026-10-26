@@ -26,6 +26,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
@@ -63,6 +64,12 @@ const (
 	// attachmentDeliveryDomain separates the signed message from every
 	// other signature of the hub.
 	attachmentDeliveryDomain = "attachment-delivery"
+	// attachmentDeliveryDomainV2 is the domain of the versioned token's
+	// signed message (ptone/scion#1530 Phase 4).
+	attachmentDeliveryDomainV2 = "attachment-delivery-v2"
+	// attachmentDeliveryVersion2 is the first part of a versioned token:
+	// "ad2.<kid>.<base64url(payload)>.<base64url(MAC)>".
+	attachmentDeliveryVersion2 = "ad2"
 	// attachmentDeliveriesPrefix is the redemption route.
 	attachmentDeliveriesPrefix = "/api/v1/attachment-deliveries/"
 	// attachmentInboxDir is where delivered attachments land in an agent's
@@ -79,7 +86,20 @@ const (
 // signing key, with the same stable-key policy as the artifact view key:
 // required on deployments that need stable keys, otherwise an in-memory key,
 // since losing it only ends capabilities within attachmentDeliveryTTL.
+//
+// In keyring mode the keys come from the signing ring instead (see
+// capability_keys.go) and nothing is read from the secret backend.
 func (s *Server) initAttachmentDeliveryKey(ctx context.Context) error {
+	if s.keyringManaged() {
+		keys, err := s.managedCapabilityKeys(SecretKeyAttachmentDeliveryKey)
+		if err != nil {
+			return err
+		}
+		s.mu.Lock()
+		s.attachmentDeliveryKeys = keys
+		s.mu.Unlock()
+		return nil
+	}
 	key, err := s.ensureSigningKey(ctx, SecretKeyAttachmentDeliveryKey, nil)
 	if err == nil && len(key) == 0 {
 		err = fmt.Errorf("attachment delivery key resolved to an empty value")
@@ -98,10 +118,14 @@ func (s *Server) initAttachmentDeliveryKey(ctx context.Context) error {
 		s.recordSigningKeySource(SecretKeyAttachmentDeliveryKey, signingKeySourceEphemeral)
 	}
 	s.mu.Lock()
-	s.attachmentDeliveryKey = key
+	s.attachmentDeliveryKeys = fixedCapabilityKeys(key)
 	s.mu.Unlock()
 	return nil
 }
+
+// deliveryIssuanceClosedLogged makes the issuance-closed signing failure
+// of Issue appear once per process.
+var deliveryIssuanceClosedLogged atomic.Bool
 
 // deliveryCapability is the signed content of one delivery capability: one
 // attachment of one message, for one recipient agent on one broker, until
@@ -126,33 +150,74 @@ func deliveryMAC(key, payload []byte) []byte {
 	return m.Sum(nil)
 }
 
-// deliveryKey returns the delivery signing key, or nil.
-func (s *Server) deliveryKey() []byte {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.attachmentDeliveryKey
+// deliveryMACv2 is deliveryMAC for a versioned token signed by generation
+// kid: the message is "attachment-delivery-v2\n" || kid || "\n" || payload.
+func deliveryMACv2(key []byte, kid string, payload []byte) []byte {
+	m := hmac.New(sha256.New, key)
+	m.Write([]byte(attachmentDeliveryDomainV2 + "\n" + kid + "\n"))
+	m.Write(payload)
+	return m.Sum(nil)
 }
 
-// signDeliveryCapability returns the token of c: base64url(JSON) "." base64url(MAC).
+// deliveryKeys returns the delivery signing keys.
+func (s *Server) deliveryKeys() capabilityKeys {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.attachmentDeliveryKeys
+}
+
+// signDeliveryCapability returns the token of c, signed by the active
+// generation: base64url(JSON) "." base64url(MAC), or, when the signing ring
+// emits versioned values, "ad2." kid "." base64url(JSON) "." base64url(MAC).
+// It fails when no key is configured or none may sign now (the active
+// generation reached its sign_until); the error names no key.
 func (s *Server) signDeliveryCapability(c deliveryCapability) (string, error) {
-	key := s.deliveryKey()
-	if len(key) == 0 {
+	keys := s.deliveryKeys()
+	if !keys.configured() {
 		return "", errors.New("no attachment delivery key")
+	}
+	key, versioned, err := keys.issue()
+	if err != nil {
+		return "", err
 	}
 	payload, err := json.Marshal(c)
 	if err != nil {
 		return "", err
 	}
-	return base64.RawURLEncoding.EncodeToString(payload) + "." + base64.RawURLEncoding.EncodeToString(deliveryMAC(key, payload)), nil
+	enc := base64.RawURLEncoding.EncodeToString(payload)
+	if versioned {
+		return attachmentDeliveryVersion2 + "." + key.ID + "." + enc + "." +
+			base64.RawURLEncoding.EncodeToString(deliveryMACv2(key.Bytes(), key.ID, payload)), nil
+	}
+	return enc + "." + base64.RawURLEncoding.EncodeToString(deliveryMAC(key.Bytes(), payload)), nil
 }
 
 // verifyDeliveryCapability returns the capability of token when its MAC
 // verifies and it has not expired at now. Every failure answers false.
+//
+// Dispatch is exact: two parts are the legacy token, checked with the
+// signing ring's legacy readers; four parts whose first is "ad2" are the
+// versioned token, checked with generation kid only (an unknown or retired
+// kid fails, never trying another key or the legacy form). The MAC is
+// checked over the payload bytes before they are parsed.
 func (s *Server) verifyDeliveryCapability(token string, now time.Time) (deliveryCapability, bool) {
 	var c deliveryCapability
-	key := s.deliveryKey()
-	payloadPart, macPart, ok := strings.Cut(token, ".")
-	if len(key) == 0 || !ok || payloadPart == "" || macPart == "" {
+	keys := s.deliveryKeys()
+	if !keys.configured() {
+		return c, false
+	}
+	parts := strings.Split(token, ".")
+	kid := ""
+	switch {
+	case len(parts) == 2:
+	case len(parts) == 4 && parts[0] == attachmentDeliveryVersion2 && capabilityKeyIDPattern.MatchString(parts[1]):
+		kid = parts[1]
+		parts = parts[2:]
+	default:
+		return c, false
+	}
+	payloadPart, macPart := parts[0], parts[1]
+	if payloadPart == "" || macPart == "" {
 		return c, false
 	}
 	payload, err := base64.RawURLEncoding.Strict().DecodeString(payloadPart)
@@ -164,7 +229,20 @@ func (s *Server) verifyDeliveryCapability(token string, now time.Time) (delivery
 		return c, false
 	}
 	// The MAC is checked over the payload bytes before they are parsed.
-	if !hmac.Equal(got, deliveryMAC(key, payload)) {
+	matched := false
+	for _, k := range keys.candidates(kid) {
+		var want []byte
+		if kid == "" {
+			want = deliveryMAC(k.Bytes(), payload)
+		} else {
+			want = deliveryMACv2(k.Bytes(), kid, payload)
+		}
+		if hmac.Equal(got, want) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
 		return deliveryCapability{}, false
 	}
 	if err := json.Unmarshal(payload, &c); err != nil {
@@ -325,9 +403,17 @@ func (d *attachmentDelivery) Issue(ctx context.Context, recipient *store.Agent, 
 					Exp:   time.Now().Add(attachmentDeliveryTTL).Unix(),
 					Nonce: base64.RawURLEncoding.EncodeToString(nonce),
 				})
-				if err == nil {
+				switch {
+				case err == nil:
 					w.URL = attachmentDeliveriesPrefix + token
-				} else {
+				case errors.Is(err, errCapabilityIssuanceClosed):
+					// The active generation reached its sign_until: the
+					// instance is already not ready, so say it once
+					// rather than on every dispatch attempt.
+					if deliveryIssuanceClosedLogged.CompareAndSwap(false, true) {
+						d.s.messageLog.Error("Failed to sign an attachment delivery capability", "error", err)
+					}
+				default:
 					d.s.messageLog.Error("Failed to sign an attachment delivery capability", "error", err)
 				}
 			}

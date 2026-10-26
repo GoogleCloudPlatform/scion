@@ -17,7 +17,6 @@ package hub
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 
@@ -114,7 +113,9 @@ func (s *Server) storageMigrationLayoutKey() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%#v|%#v", ws, sd), nil
+	// Value keys: a Layout holds the SharedDirs pointer, so %#v would differ
+	// on every call for the split configurations.
+	return ws.Key() + "||" + sd.Key(), nil
 }
 
 // noticeReasonIdentity marks a project whose legacy tree failed the

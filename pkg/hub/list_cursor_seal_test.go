@@ -121,7 +121,7 @@ func TestListCursorSealer_SealUsesFreshNoncePerCall(t *testing.T) {
 	require.NoError(t, err)
 	rawB, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(sealedB, listCursorPrefix))
 	require.NoError(t, err)
-	nonceSize := sealer.aead.NonceSize()
+	nonceSize := testSealerAEAD(t, sealer).NonceSize()
 	require.True(t, len(rawA) >= nonceSize && len(rawB) >= nonceSize)
 	assert.NotEqual(t, rawA[:nonceSize], rawB[:nonceSize], "each Seal call must use a fresh nonce")
 
@@ -301,10 +301,10 @@ func TestListCursorSealer_DomainVersionMismatchRejected(t *testing.T) {
 	sealer := mustNewListCursorSealer(t)
 	inner := authorizedListCursor(time.Now(), "77777777-7777-7777-7777-777777777777", "binding-x")
 
-	nonce := make([]byte, sealer.aead.NonceSize())
+	nonce := make([]byte, testSealerAEAD(t, sealer).NonceSize())
 	_, err := rand.Read(nonce)
 	require.NoError(t, err)
-	ciphertext := sealer.aead.Seal(nil, nonce, []byte(inner), []byte("scion-list-cursor-v2:binding-x"))
+	ciphertext := testSealerAEAD(t, sealer).Seal(nil, nonce, []byte(inner), []byte("scion-list-cursor-v2:binding-x"))
 	sealedUnderOtherVersion := listCursorPrefix + base64.RawURLEncoding.EncodeToString(append(nonce, ciphertext...))
 
 	_, err = sealer.Open(sealedUnderOtherVersion, "binding-x")
@@ -422,11 +422,11 @@ func TestListCursorKey_ProvisionedAndPersisted(t *testing.T) {
 	// not open under a sealer built from the download-signing key either.
 	listKey, err := srv.ensureSigningKey(context.Background(), SecretKeyListCursorKey, nil)
 	require.NoError(t, err)
-	require.NotEmpty(t, srv.downloadSigningKey)
-	assert.False(t, bytes.Equal(listKey, srv.downloadSigningKey),
+	require.NotEmpty(t, fixedKeyBytes(srv.downloadKeys))
+	assert.False(t, bytes.Equal(listKey, fixedKeyBytes(srv.downloadKeys)),
 		"list_cursor_key must not equal the download-signing key")
 
-	other, err := newListCursorSealer(srv.downloadSigningKey)
+	other, err := newListCursorSealer(fixedKeyBytes(srv.downloadKeys))
 	require.NoError(t, err)
 	inner := authorizedListCursor(time.Now(), "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "b")
 	sealed, err := srv.listCursorSealer.Seal(inner, "b")

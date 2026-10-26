@@ -263,6 +263,12 @@ const SecretRotation = "server.secret_rotation"
 // ptone/scion#5995 makes it the default and removes the gate.
 const ContentHashV2 = "hub.content_hash_v2"
 
+// ArtifactReviewEditor gates the graphical review editor for Markdown
+// artifacts (ptone/scion#5913). It is web-only: every save goes through the
+// unchanged review publish, and the hub's review checks are the same
+// whether or not it is on.
+const ArtifactReviewEditor = "web.artifact_review_editor"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -456,6 +462,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#5235",
 		Owner:       "web",
 		ReviewBy:    "2027-01-22",
+	},
+	{
+		Name:        ArtifactReviewEditor,
+		Title:       "Graphical review editor",
+		Description: "Opens a Markdown artifact review in a graphical editor that shows marks inline, records typing, deleting and replacing as suggestions, and has a Graphical and Source toggle. Needs hub.artifacts. Web only; the hub saves and checks reviews the same way whether or not it is on. Do not turn it on before the page script policy (ptone/scion#5912) is deployed on the hub.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#5913",
+		Owner:       "artifacts",
+		ReviewBy:    "2027-01-21",
 	},
 	{
 		Name:        AgentPlugins,

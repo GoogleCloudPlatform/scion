@@ -238,7 +238,7 @@ func TestProvisionShared_CloneWithToken_GitOutputRedacted(t *testing.T) {
 	require.NoError(t, err)
 	binDir := t.TempDir()
 	script := "#!/bin/sh\n" +
-		"if [ \"$1\" = clone ]; then echo \"fatal: unexpected server response for $GITHUB_TOKEN\" >&2; exit 128; fi\n" +
+		"for a in \"$@\"; do if [ \"$a\" = clone ]; then echo \"fatal: unexpected server response for $GITHUB_TOKEN\" >&2; exit 128; fi; done\n" +
 		"exec '" + realGit + "' \"$@\"\n"
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755))
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))

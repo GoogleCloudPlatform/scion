@@ -293,8 +293,21 @@ func IsIgnored(dir, path string) bool {
 	return err == nil
 }
 
-// CreateWorktree creates a new git worktree at the specified path with a new branch.
+// CreateWorktree creates a new git worktree at the specified path with a new
+// branch, with no broker-recorded origin for the git-lfs endpoint pin (the
+// endpoint is derived from the live remote.origin.url).
+// Prefer CreateWorktreeWithOrigin from broker/hub start paths, which pass the
+// recorded origin.
 func CreateWorktree(path, branch string) error {
+	return CreateWorktreeWithOrigin(path, branch, "")
+}
+
+// CreateWorktreeWithOrigin is CreateWorktree with the broker-recorded origin URL
+// for the project (the hub project's repository). It is used to pin the git-lfs
+// endpoint from a trusted source rather than the live, agent-writable
+// remote.origin.url, and to skip the smudge when the live origin no longer
+// matches the recorded one. Pass "" when no recorded origin is available.
+func CreateWorktreeWithOrigin(path, branch, recordedOrigin string) error {
 	// Guard: refuse to create worktrees inside an agent container.
 	// SCION_HOST_UID is set by the runtime when launching containers.
 	// Creating worktrees inside containers produces path-identity mismatches
@@ -322,10 +335,11 @@ func CreateWorktree(path, branch string) error {
 	gitEnv := append(HostGitEnv(os.Environ()), "LC_ALL=C")
 	ctx := context.Background()
 	// git-lfs on a host-side checkout would otherwise take its endpoint from
-	// a tracked .lfsconfig; pin the endpoint from the trusted origin remote
-	// instead (lfs.url via -c outranks .lfsconfig). When the endpoint cannot
-	// be derived (for example an ssh remote), skip the smudge and warn.
-	lfsOpt := lfsOptionForLinkedCheckout(root)
+	// a tracked .lfsconfig; pin the endpoint from the trusted (broker-recorded)
+	// origin instead (lfs.url via -c outranks .lfsconfig). When the endpoint
+	// cannot be derived (for example an ssh remote) or the live origin no longer
+	// matches the recorded one, skip the smudge and warn.
+	lfsOpt := lfsOptionForLinkedCheckout(root, branch, recordedOrigin)
 	opts := HostGitOptions{Env: gitEnv, Policy: RepoPolicyLinked, SkipLFSSmudge: lfsOpt.skipSmudge, LFSURL: lfsOpt.url}
 	cmd, err := HostGitCommand(ctx, root, opts, "worktree", "add", "--relative-paths", "-b", branch, path)
 	if err != nil {
@@ -368,42 +382,89 @@ type lfsCheckoutOption struct {
 
 // lfsOptionForLinkedCheckout decides the git-lfs handling for a linked
 // checkout at root:
-//   - pin the endpoint (and its auth mode to basic) derived from the origin
-//     remote URL when the origin is http(s) AND the checked-out .lfsconfig
-//     neither names its own endpoint nor sets any lfs.<url>.access; otherwise
-//   - skip the smudge (an ssh/scp or absent origin, or a tracked .lfsconfig
-//     that names an endpoint or an access mode — its objects may legitimately
-//     live on a separate server, or it may select an auth mode we will not
-//     use; either way we do not pin and never contact it).
-func lfsOptionForLinkedCheckout(root string) lfsCheckoutOption {
-	// A tracked .lfsconfig that sets an endpoint or an access mode: do not pin
-	// (the origin endpoint may not serve these objects, and an access key could
-	// select ambient credentials) and do not contact it; skip.
-	if lfsConfigNamesEndpoint(root) {
+//   - pin the endpoint (and its auth mode to basic) derived from the
+//     broker-recorded origin when it is http(s), the live remote.origin.url
+//     still matches it, AND the checked-out .lfsconfig neither names its own
+//     endpoint nor sets any lfs.<url>.access; otherwise
+//   - skip the smudge (an ssh/scp or absent/mismatched origin, or a tracked
+//     .lfsconfig that names an endpoint or an access mode — its objects may
+//     legitimately live on a separate server, or it may select an auth mode we
+//     will not use; either way we do not pin and never contact it).
+//
+// recordedOrigin is the broker-recorded origin for the project. The live
+// remote.origin.url is agent-writable in the shared repository config until the
+// config narrowing applies, and host-side CreateWorktree runs before the
+// container in any case, so the endpoint is derived from the recorded origin and
+// we refuse to pin when the live origin has been pointed elsewhere. When
+// recordedOrigin is empty (no hub record available) we fall back to the live
+// origin.
+func lfsOptionForLinkedCheckout(root, branch, recordedOrigin string) lfsCheckoutOption {
+	// Read the .lfsconfig of the ref actually being checked out: the existing
+	// branch when it already exists, otherwise HEAD (a new branch is created
+	// from HEAD, so it has HEAD's tree).
+	ref := "HEAD"
+	if branch != "" && BranchExistsIn(root, branch) {
+		ref = "refs/heads/" + branch
+	}
+	// A tracked .lfsconfig that sets an endpoint or an access mode (or is
+	// unparseable): do not pin (the origin endpoint may not serve these objects,
+	// and an access key could select ambient credentials) and do not contact it;
+	// skip.
+	if lfsConfigNamesEndpoint(root, ref) {
 		return lfsCheckoutOption{skipSmudge: true}
 	}
-	remote := strings.TrimSpace(GetGitRemoteDir(root))
-	if remote == "" {
+	// Derive from the broker-recorded origin, never trust the live origin
+	// alone. If a recorded origin is present but the live origin no longer
+	// normalises to it, the repository the agent points at is not the one the
+	// hub recorded — skip rather than pin.
+	origin := strings.TrimSpace(recordedOrigin)
+	if origin == "" {
+		origin = strings.TrimSpace(GetGitRemoteDir(root))
+	} else {
+		live := strings.TrimSpace(GetGitRemoteDir(root))
+		if live == "" || NormalizeGitRemote(live) != NormalizeGitRemote(origin) {
+			return lfsCheckoutOption{skipSmudge: true}
+		}
+	}
+	if origin == "" {
 		return lfsCheckoutOption{skipSmudge: true}
 	}
-	if endpoint, ok := DeriveLFSEndpoint(remote); ok {
+	if endpoint, ok := DeriveLFSEndpoint(origin); ok {
 		return lfsCheckoutOption{url: endpoint}
 	}
 	return lfsCheckoutOption{skipSmudge: true}
 }
 
-// lfsConfigNamesEndpoint reports whether the committed .lfsconfig at HEAD names
-// an LFS endpoint (lfs.url, lfs.pushurl or remote.<name>.lfsurl) or sets any
-// per-endpoint lfs.<url>.access. It reads HEAD:.lfsconfig as data (host-side
-// git with the fixed pins); a missing file means no endpoint.
-func lfsConfigNamesEndpoint(root string) bool {
-	out, err := hostGit("-C", root, "show", "HEAD:.lfsconfig").Output()
+// lfsConfigNamesEndpoint reports whether the .lfsconfig committed at ref sets
+// an LFS endpoint (lfs.url, lfs.pushurl or remote.<name>.lfsurl) or any
+// per-endpoint lfs.<url>.access. It reads <ref>:.lfsconfig as data (host-side
+// git with the fixed pins). Only a genuinely absent file is "no endpoint"
+// (false). A file that is present but unreadable or unparseable, or an entry that
+// is not a blob, is treated as naming an endpoint (true, fail closed: skip-smudge
+// rather than pin against an endpoint we could not vet). "Absent" and
+// "unreadable" are distinguished with ls-tree, because `git show` reports the
+// same error for both.
+func lfsConfigNamesEndpoint(root, ref string) bool {
+	ls, err := hostGit("-C", root, "ls-tree", ref, "--", ".lfsconfig").Output()
 	if err != nil {
-		return false
+		return true // cannot read the tree entry: fail closed (skip)
+	}
+	entry := strings.TrimSpace(string(ls))
+	if entry == "" {
+		return false // no committed .lfsconfig at this ref (genuinely absent)
+	}
+	// The entry exists. It must be a blob to be a real .lfsconfig; a tree or a
+	// gitlink (submodule) at that path is unexpected — fail closed.
+	if fields := strings.Fields(entry); len(fields) < 2 || fields[1] != "blob" {
+		return true
+	}
+	out, err := hostGit("-C", root, "show", ref+":.lfsconfig").Output()
+	if err != nil {
+		return true // present but unreadable: fail closed (skip)
 	}
 	vars, err := parseGitConfigFile(out)
 	if err != nil {
-		return false
+		return true // present but unparseable: fail closed (skip)
 	}
 	for _, v := range vars {
 		if v.Section == "lfs" && !v.HasSubsection && (v.Name == "url" || v.Name == "pushurl") {
@@ -448,7 +509,10 @@ func warnLFSPointersNotFetched(path string) {
 			return nil
 		}
 		// Regular files only: WalkDir's DirEntry is lstat-based, so a symlink
-		// reports a non-regular type and is skipped without being followed.
+		// reports a non-regular type and is skipped without being followed. If a
+		// regular file is swapped for a symlink/FIFO after this lstat but before
+		// the read, isLFSPointerFile opens with O_NOFOLLOW|O_NONBLOCK and an fstat
+		// regular-file check, so the swap is not followed either.
 		if !d.Type().IsRegular() {
 			return nil
 		}

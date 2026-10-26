@@ -3816,6 +3816,8 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		s.handleAgentDelegationItem(w, r, id, route.Suffix.Param)
 	case AgentRouteDelegationCredential:
 		s.handleAgentDelegationCredential(w, r, id, route.Suffix.Param, route.Suffix.SecondParam)
+	case AgentRouteDelegationRevokeAll:
+		s.handleAgentDelegationsRevokeAll(w, r, id)
 
 	case AgentRouteActionStatus:
 		s.handleAgentAction(w, r, id, api.AgentActionStatus)

@@ -189,6 +189,10 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 		}
 	}
 
+	// The settings.yaml values, for env_values' saved_differs (taken before
+	// the response below shares and changes vs.Server; never returned).
+	fileStored := fileStoredValues(&vs)
+
 	// Start with file-based response for Layer-0 fields.
 	resp := ServerConfigDBResponse{
 		ServerConfigResponse: ServerConfigResponse{
@@ -226,22 +230,10 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	iam := s.currentGCPIAMSettings()
 	resp.Server.Hub.GCPIAMCheckMode = iam.CheckMode
 	resp.Server.Hub.GCPIAMDenyUnknownPolicy = iam.denyUnknownPolicy()
-	// server.hub.class and server.hub.test_identities are never
-	// API-writable, so they are not shown either: a client that echoes
-	// this body back must not send them.
-	resp.Server.Hub.HubClass = ""
-	resp.Server.Hub.TestIdentities = nil
-	// Nor is the relay-peer secret, which is never returned.
-	if c := resp.Server.Hub.Conduit; c != nil {
-		c.PeerSecret = ""
-	}
-	// Likewise the proxy driver settings (WS2).
-	hideNeverAPIWritableProxyKeys(resp.Server)
-	// And the server keyring file path (ptone/scion#1530).
-	if resp.Server != nil {
-		resp.Server.KeyringFile = ""
-		resp.Server.KeyringFileAllowWorldReadable = false
-	}
+	// The keys GET never returns: the hub class, test identities, the
+	// relay-peer secret, the proxy driver settings (WS2) and the server
+	// keyring file path (ptone/scion#1530).
+	hideNeverShownServerKeys(resp.Server)
 
 	// Build section metadata from the cache.
 	resp.SectionMeta = s.buildSectionMetadata(ctx, ops)
@@ -269,6 +261,12 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	// (ptone/scion#5113): the overlay-level set, read-only.
 	if overlay, _, _ := s.profileRefs.target(); overlay != nil {
 		resp.RetainedBuiltinProfiles, resp.RetainedBuiltinRuntimes = overlay.RetainedState()
+	}
+
+	// The environment values of the overridden keys and whether each is in
+	// effect, compared with the unmasked view built above.
+	if ops.envKoanf != nil {
+		resp.EnvValues = s.dbTierEnvValues(ops.envKoanf, resp.EnvOverrides, &resp.ServerConfigResponse, dbStoredValues(fileStored, ops))
 	}
 
 	// Mask sensitive fields — same logic as file mode.
@@ -527,6 +525,12 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 
 		var superseded []SupersededKey
 		for key, bootstrapVal := range bootstrapMap {
+			if koanfPath := opsettings.KoanfPathFromSectionKey(sec.Name, key); startupOnlyLayer1Keys[koanfPath] != nil {
+				// The hub does not apply the saved value of this key, so it
+				// supersedes nothing: the startup value stays in effect
+				// (ptone/scion#6000).
+				continue
+			}
 			if sec.Name == "endpoints" && key == "public_url" && publicURLPinned {
 				// An operator setting pins the endpoint on this node, so
 				// the database value does not supersede it; the field's
@@ -1540,24 +1544,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
 			return
 		}
-		if errs := config.ValidateHomeStorageOverrides(runtimes, profiles); len(errs) > 0 {
+		// The per-runtime and per-profile storage overrides are removed
+		// (server.project_storage decides storage; volumes: replaces
+		// node-local overrides).
+		if errs := config.RemovedStorageOverrideErrors(runtimes, profiles, nil); len(errs) > 0 {
 			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
 			return
-		}
-		// shared_dir_storage_backend "nfs" needs a complete
-		// server.shared_dir_storage.nfs block, which lives only in the
-		// global settings file. Configuration only; no mount is checked.
-		if len(runtimes) > 0 || len(profiles) > 0 {
-			if gs, _, gErr := config.LoadGlobalSettings(); gErr == nil {
-				var sdGlobal *config.V1SharedDirStorageConfig
-				if gs != nil && gs.Server != nil {
-					sdGlobal = gs.Server.SharedDirStorage
-				}
-				if errs := config.ValidateSharedDirStorageBackends(runtimes, profiles, sdGlobal); len(errs) > 0 {
-					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
-					return
-				}
-			}
 		}
 		// safe_to_evict on a non-Kubernetes runtime is accepted and ignored,
 		// with the same warning as config validate. A section missing from
@@ -2217,6 +2209,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.PerfTrace != nil {
 				keys = append(keys, "server.hub.perf_trace")
 			}
+			if hub.CSPReportRawSamples != nil {
+				keys = append(keys, "server.hub.csp_report_raw_samples")
+			}
 			if hub.MembershipSweepReportOnly != nil {
 				keys = append(keys, "server.hub.membership_sweep_report_only")
 			}
@@ -2289,6 +2284,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 		}
 		if srv.Secrets != nil && !isZeroStruct(srv.Secrets) {
 			keys = append(keys, "server.secrets")
+		}
+		if srv.ProjectStorage != nil && !isZeroStruct(srv.ProjectStorage) {
+			keys = append(keys, "server.project_storage")
 		}
 		if srv.WorkspaceStorage != nil && !isZeroStruct(srv.WorkspaceStorage) {
 			keys = append(keys, "server.workspace_storage")
