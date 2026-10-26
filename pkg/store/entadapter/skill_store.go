@@ -487,6 +487,13 @@ func (s *SkillStore) DeleteSkillVersion(ctx context.Context, id string) error {
 }
 
 // ResolveSkillVersion resolves a version constraint to a specific published version.
+//
+// A content-addressed constraint ("sha256:...") matches a version's stored
+// (v1) content hash in any status. When several versions share that hash (the
+// same files republished under a new version number), the oldest wins:
+// created ascending, then ID ascending. This is the same order as the hub's v2
+// content-hash lookup, so v1 and v2 lookups pick the same version
+// (ptone/scion#6248).
 func (s *SkillStore) ResolveSkillVersion(ctx context.Context, skillID, constraint string) (*store.SkillVersion, error) {
 	// Content-addressed lookup
 	if len(constraint) > 7 && constraint[:7] == "sha256:" {
@@ -495,6 +502,7 @@ func (s *SkillStore) ResolveSkillVersion(ctx context.Context, skillID, constrain
 				entskillversion.SkillIDEQ(skillID),
 				entskillversion.ContentHashEQ(constraint),
 			).
+			Order(entskillversion.ByCreated(entsql.OrderAsc()), entskillversion.ByID(entsql.OrderAsc())).
 			First(ctx)
 		if err != nil {
 			return nil, mapError(err)
