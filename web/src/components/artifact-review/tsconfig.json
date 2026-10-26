@@ -1,0 +1,18 @@
+{
+  // The review editor is type-checked as its own project. Its Milkdown
+  // dependencies publish declarations with extensionless relative
+  // re-exports, which only bundler-style resolution reads; the web
+  // project's NodeNext resolution would see them as empty. The page loads
+  // the editor through review-editor-loader.ts (import.meta.glob), so the
+  // root project never imports these files.
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true,
+    "rootDir": "../..",
+    "types": ["vite/client", "node"]
+  },
+  "include": ["./**/*.ts", "../../vite-env.d.ts"],
+  "exclude": []
+}

@@ -121,6 +121,9 @@ const (
 	ActionDelegationCredentialRevoke = "delegation_credential_revoke"
 	ActionDelegationList             = "delegation_list"
 	ActionDelegationRead             = "delegation_read"
+	// ActionDelegationRevokeAll is the bulk agent delegation grant
+	// revocation action (.design/agent-delegation.md §7).
+	ActionDelegationRevokeAll = "delegation_revoke_all"
 
 	// PermissionGCPServiceAccountUse is the gcp_service_account.use
 	// permission ID. Named so pkg/hub/authz.go's agent-scope handling for
@@ -224,6 +227,7 @@ var Registry = []Permission{
 	{ID: "agent.delegation.credential.revoke", Resource: ResourceAgent, Action: ActionDelegationCredentialRevoke, Description: "Revoke one delegated credential of an agent delegation grant: on the hub for any grant, on a project for grants bounded to that project", Enforcement: []string{"pkg/hub/handlers_agent_delegation_manage.go:agentDelegationControlAllowed"}},
 	{ID: "agent.delegation.list", Resource: ResourceAgent, Action: ActionDelegationList, Description: "List agent delegation grants: on the hub for any grant, on a project for grants bounded to that project", Enforcement: []string{"pkg/hub/handlers_agent_delegation_manage.go:agentDelegationControlAllowed"}},
 	{ID: "agent.delegation.read", Resource: ResourceAgent, Action: ActionDelegationRead, Description: "Read an agent delegation grant: on the hub for any grant, on a project for grants bounded to that project", Enforcement: []string{"pkg/hub/handlers_agent_delegation_manage.go:agentDelegationControlAllowed"}},
+	{ID: "agent.delegation.revoke_all", Resource: ResourceAgent, Action: ActionDelegationRevokeAll, Description: "Revoke every agent delegation grant of an agent in one call: on the hub for any grant, on a project for grants bounded to that project. The issuer and the agent's current owner need no permission for their own grants", Enforcement: []string{"pkg/hub/handlers_agent_delegation_manage.go:agentDelegationControlAllowed"}},
 
 	{ID: "project.create", Resource: ResourceProject, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "project:create", Description: "Create projects: project create, project register, and the new project of a clone", Enforcement: []string{"pkg/hub/handlers_projects_core.go:createProject", "pkg/hub/handlers_projects_core.go:handleProjectRegister", "pkg/hub/project_clone.go:authorizeProjectClone"}},
 	{ID: "project.read", Resource: ResourceProject, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "project:read", AgentScopes: []string{"project:read"}, Description: "Read project metadata", Enforcement: []string{"pkg/hub/handlers_projects_core.go", "pkg/hub/authz.go"}},
@@ -387,7 +391,7 @@ var Registry = []Permission{
 	{ID: "scheduled_event.update", Resource: ResourceScheduledEvent, Action: ActionUpdate, CapabilityKind: CapabilityResource, UATScope: "scheduled_event:update", Description: "Update, pause or resume a recurring schedule", Enforcement: []string{"pkg/hub/handlers_schedules.go"}},
 
 	// Extensions to existing resource types (Phase 2 D4 resolution)
-	{ID: "user.invite", Resource: ResourceUser, Action: ActionInvite, CapabilityKind: CapabilityScope, UATScope: "user:invite", Description: "Invite users", Enforcement: []string{"pkg/hub/handlers_users_provision.go:handleProvisionUser"}, NonRouteUse: []string{"Phase 2 D4 route guard conversion"}},
+	{ID: "user.invite", Resource: ResourceUser, Action: ActionInvite, CapabilityKind: CapabilityScope, UATScope: "user:invite", Description: "Invite users", Enforcement: []string{"pkg/hub/route_metadata.go:admin.users.invite", "pkg/hub/route_metadata.go:admin.users.invite.bulk", "pkg/hub/route_metadata.go:admin.invites", "pkg/hub/route_metadata.go:admin.invites.byId", "pkg/hub/handlers_users_provision.go:handleProvisionUser"}},
 	{ID: "user.suspend", Resource: ResourceUser, Action: ActionSuspend, CapabilityKind: CapabilityResource, UATScope: "user:suspend", Description: "Suspend users", Enforcement: []string{"pkg/hub/handlers_users_core.go"}},
 	{ID: "user.promote", Resource: ResourceUser, Action: ActionPromote, CapabilityKind: CapabilityResource, Description: "Promote or demote users", Enforcement: []string{"pkg/hub/handlers_users_core.go"}},
 	{ID: "user.delete", Resource: ResourceUser, Action: ActionDelete, CapabilityKind: CapabilityResource, Description: "Delete users", Enforcement: []string{"pkg/hub/handlers_users_core.go"}},

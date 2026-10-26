@@ -20,8 +20,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -107,30 +105,17 @@ func clearPerAgentFields(cfg *api.ScionConfig) {
 	cfg.Info = nil
 }
 
-// deriveTemplateIndexFromDir is the directory variant of deriveTemplateIndex:
-// it reads the same agent config file from a local template directory (the
-// import and bootstrap paths).
-func deriveTemplateIndexFromDir(dir, templateName string) templateIndex {
-	data, name, err := readTemplateAgentConfig(context.Background(), dirFileReader(dir), manifestFromDir(dir))
+// deriveTemplateIndexFromCollected is the collected-directory variant of
+// deriveTemplateIndex (the import and bootstrap paths): it reads the same
+// agent config file, chosen among the collected entries only, through the
+// collected directory's root. A collected agent config that no longer
+// matches its collected entry (changed, replaced or removed) is an error.
+func deriveTemplateIndexFromCollected(cd *collectedDir, templateName string) (templateIndex, error) {
+	data, name, err := readTemplateAgentConfig(context.Background(), cd.fileReader(), cd.agentConfigManifest())
 	if err != nil {
-		slog.Warn("template commit: cannot read agent config; deriving from the template name",
-			"template", templateName, "dir", dir, "error", err)
-		return deriveTemplateIndex(nil, "", templateName)
+		return templateIndex{}, fmt.Errorf("read agent config: %w", err)
 	}
-	return deriveTemplateIndex(data, name, templateName)
-}
-
-// manifestFromDir lists the agent config candidates present in dir as a
-// minimal manifest, so the directory variant uses the same lookup as the
-// storage path.
-func manifestFromDir(dir string) []store.TemplateFile {
-	var files []store.TemplateFile
-	for _, name := range scionAgentConfigNames {
-		if fi, err := os.Stat(filepath.Join(dir, name)); err == nil && fi.Mode().IsRegular() {
-			files = append(files, store.TemplateFile{Path: name})
-		}
-	}
-	return files
+	return deriveTemplateIndex(data, name, templateName), nil
 }
 
 // templateFileReader reads one template file by its manifest path.
@@ -138,20 +123,6 @@ type templateFileReader func(ctx context.Context, path string) ([]byte, error)
 
 // errTemplateFileTooLarge marks a file too large to parse for derivation.
 var errTemplateFileTooLarge = errors.New("file too large to parse")
-
-func dirFileReader(dir string) templateFileReader {
-	return func(_ context.Context, p string) ([]byte, error) {
-		fp := filepath.Join(dir, filepath.FromSlash(p))
-		fi, err := os.Stat(fp)
-		if err != nil {
-			return nil, err
-		}
-		if fi.Size() > maxTemplateFileSize {
-			return nil, errTemplateFileTooLarge
-		}
-		return os.ReadFile(fp)
-	}
-}
 
 // readTemplateAgentConfig returns the bytes and name of the first agent
 // config file listed in files (scionAgentConfigNames order). name is "" when
@@ -251,11 +222,11 @@ func refuseUnusableBundledHarnessConfig(w http.ResponseWriter, p string, data []
 
 // commitOpts selects where a commit reads file content and how it persists.
 type commitOpts struct {
-	// dir, when set, is a local directory holding the same files as the new
-	// manifest (import, reimport, bootstrap). Derivation and the bundled
-	// harness-config check read from it instead of storage, and a blob the
-	// commit is missing is written from it.
-	dir string
+	// collected, when set, is the collected directory holding the same files
+	// as the new manifest (import, reimport, bootstrap). Derivation and the
+	// bundled harness-config check read from it, through its root, instead
+	// of storage, and a blob the commit is missing is written from it.
+	collected *collectedDir
 	// create persists the template with CreateTemplate instead of
 	// UpdateTemplateContent (template and project clone).
 	create bool
@@ -333,12 +304,15 @@ func (s *Server) commitTemplateFiles(ctx context.Context, tmpl *store.Template, 
 
 	// 3. Derive the index from the template's own agent config.
 	read := blobFileReader(stor, base, next)
-	if opts.dir != "" {
-		read = dirFileReader(opts.dir)
+	if opts.collected != nil {
+		read = opts.collected.fileReader()
 	}
 	var idx templateIndex
-	if opts.dir != "" {
-		idx = deriveTemplateIndexFromDir(opts.dir, tmpl.Name)
+	if opts.collected != nil {
+		idx, err = deriveTemplateIndexFromCollected(opts.collected, tmpl.Name)
+		if err != nil {
+			return fmt.Errorf("template commit: %w", err)
+		}
 	} else {
 		data, name, err := readTemplateAgentConfig(ctx, read, next)
 		if err != nil {

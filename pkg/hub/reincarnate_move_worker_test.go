@@ -291,9 +291,9 @@ func TestReincarnateMove_SelfMoveRealPassthroughRefused(t *testing.T) {
 	f.assertNoMoveSideEffects(t, count)
 }
 
-// moveBrokerQuota: when the target has no room, the source reservation is
-// restored and the error returned.
-func TestMoveBrokerQuota_TargetFullRestoresSource(t *testing.T) {
+// moveBrokerQuota: when the target has no room, the error is returned and
+// the source reservation is kept.
+func TestMoveBrokerQuota_TargetFullKeepsSource(t *testing.T) {
 	f := setupMoveFixture(t, true, nil)
 	setBrokerAgentCeiling(t, f.s, 1)
 	reserveBrokerSlot(t, f.s, f.src, f.agent.ID)
@@ -301,7 +301,7 @@ func TestMoveBrokerQuota_TargetFullRestoresSource(t *testing.T) {
 
 	err := f.srv.moveBrokerQuota(context.Background(), f.agent, &reincarnationMove{SourceBrokerID: f.src.ID, TargetBrokerID: f.dst.ID})
 	require.Error(t, err)
-	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "the source reservation is restored")
+	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "the source reservation is kept")
 	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.dst.ID), "only the occupant")
 }
 

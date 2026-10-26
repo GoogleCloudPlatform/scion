@@ -1051,7 +1051,15 @@ func (c *GitHubResolutionCache) coalesceFetchAccept(
 		if res.Err != nil {
 			return ResolvedSkill{}, res.Err
 		}
-		return res.Val.(ResolvedSkill), nil
+		// The function above always returns a ResolvedSkill, but a flight
+		// started elsewhere under the same key (for example a test joining
+		// the group with its own function) can deliver anything, including
+		// nil. Fail that caller instead of panicking (ptone/scion#6181).
+		skill, ok := res.Val.(ResolvedSkill)
+		if !ok {
+			return ResolvedSkill{}, fmt.Errorf("GitHub skill resolution of %s returned no result", logRef)
+		}
+		return skill, nil
 	case <-ctx.Done():
 		// A waiter whose own deadline (e.g. the resolve budget) expires
 		// before the shared flight finishes is a timeout, so classify it as

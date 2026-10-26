@@ -637,9 +637,9 @@ func TestDeriveTemplateIndexFromDir_NameBased(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			got := deriveTemplateIndexFromDir(dir, tt.name)
+			got := deriveTemplateIndexForTest(t, dir, tt.name)
 			if got.Harness != tt.expected {
-				t.Errorf("deriveTemplateIndexFromDir(%q, %q).Harness = %q, want %q", dir, tt.name, got.Harness, tt.expected)
+				t.Errorf("deriveTemplateIndexFromCollected(%q, %q).Harness = %q, want %q", dir, tt.name, got.Harness, tt.expected)
 			}
 			if got.DefaultHarnessConfig != "" {
 				t.Errorf("expected empty DefaultHarnessConfig for name-based, got %q", got.DefaultHarnessConfig)
@@ -657,7 +657,7 @@ func TestDeriveTemplateIndexFromDir_FromConfigFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := deriveTemplateIndexFromDir(dir, "my-template")
+	got := deriveTemplateIndexForTest(t, dir, "my-template")
 	if got.Harness != "claude" {
 		t.Errorf("expected Harness 'claude' from config, got %q", got.Harness)
 	}
@@ -675,7 +675,7 @@ func TestDeriveTemplateIndexFromDir_DefaultHarnessConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := deriveTemplateIndexFromDir(dir, "my-template")
+	got := deriveTemplateIndexForTest(t, dir, "my-template")
 	if got.Harness != "gemini-cli" {
 		t.Errorf("expected Harness 'gemini-cli', got %q", got.Harness)
 	}
@@ -693,7 +693,7 @@ func TestDeriveTemplateIndexFromDir_HarnessField(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := deriveTemplateIndexFromDir(dir, "my-template")
+	got := deriveTemplateIndexForTest(t, dir, "my-template")
 	if got.Harness != "codex" {
 		t.Errorf("expected Harness 'codex' from config, got %q", got.Harness)
 	}
@@ -711,7 +711,7 @@ func TestDeriveTemplateIndexFromDir_CustomDefaultHarnessConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := deriveTemplateIndexFromDir(dir, "my-template")
+	got := deriveTemplateIndexForTest(t, dir, "my-template")
 	if got.Harness != "" {
 		t.Errorf("expected empty Harness for unknown config name 'adk', got %q", got.Harness)
 	}

@@ -47,6 +47,7 @@ var ProjectTargetApplicability = map[string]bool{
 	// Grant management is held on a project for grants bounded to it.
 	"agent.delegation.revoke": true, "agent.delegation.credential.revoke": true,
 	"agent.delegation.list": true, "agent.delegation.read": true,
+	"agent.delegation.revoke_all": true,
 
 	// project.* — read/update/delete/manage/set_messaging_policy target an
 	// existing project; create/register/clone/list are hub-level collection
