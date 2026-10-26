@@ -729,6 +729,22 @@ func (c *GitHubResolutionCache) getStale(uri string) (ResolvedSkill, bool) {
 	return skill, true
 }
 
+// legacyModelessEntry returns the entry under uri if it is one recorded
+// before file modes were carried (some file has no Mode) and could still
+// be served: fresh, or, for a branch ref, within MaxResolutionStaleAge.
+// GitHubSkillResolver serves it only when re-resolving the ref failed
+// (ptone/scion#5781).
+func (c *GitHubResolutionCache) legacyModelessEntry(uri string, isBranchRef bool) (ResolvedSkill, bool) {
+	skill, ok := c.Get(uri)
+	if !ok && isBranchRef {
+		skill, ok = c.getStale(uri)
+	}
+	if !ok || skillFilesHaveModes(skill.Files) {
+		return ResolvedSkill{}, false
+	}
+	return skill, true
+}
+
 // credSlot is a per-credentialID semaphore plus a reference count of callers
 // currently holding or waiting on it, so acquireCredentialSlot can delete the
 // entry once nothing needs it anymore (see the map-growth comment there).
@@ -1035,7 +1051,15 @@ func (c *GitHubResolutionCache) coalesceFetchAccept(
 		if res.Err != nil {
 			return ResolvedSkill{}, res.Err
 		}
-		return res.Val.(ResolvedSkill), nil
+		// The function above always returns a ResolvedSkill, but a flight
+		// started elsewhere under the same key (for example a test joining
+		// the group with its own function) can deliver anything, including
+		// nil. Fail that caller instead of panicking (ptone/scion#6181).
+		skill, ok := res.Val.(ResolvedSkill)
+		if !ok {
+			return ResolvedSkill{}, fmt.Errorf("GitHub skill resolution of %s returned no result", logRef)
+		}
+		return skill, nil
 	case <-ctx.Done():
 		// A waiter whose own deadline (e.g. the resolve budget) expires
 		// before the shared flight finishes is a timeout, so classify it as

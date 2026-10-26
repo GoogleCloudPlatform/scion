@@ -137,6 +137,15 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 			"use rootful Docker or Podman for NFS-backed projects")
 	}
 
+	// Rootless Podman runs PID 1 as the keep-id user (SCION_KEEPID_UID below),
+	// which drops privileges before the metadata server starts, so the
+	// in-container interception cannot be installed. Do not grant NET_ADMIN
+	// or mark the interception required there; the metadata env vars remain
+	// the mechanism.
+	if r.Rootless {
+		config.MetadataInterception = false
+	}
+
 	if err := prepareContainerSecretEnv(&config); err != nil {
 		return "", err
 	}

@@ -2203,7 +2203,8 @@ server.storage.local_path"
       expected_leaves="$(printf '%s\n%s\n%s' "$common_leaves" \
         "server.auth.proxy.iap.audience" "server.auth.proxy.provider" | LC_ALL=C sort)"
     else
-      expected_leaves="$(printf '%s' "$common_leaves" | LC_ALL=C sort)"
+      # The bootstrap write alone binds to loopback (ptone/scion#6150).
+      expected_leaves="$(printf '%s\n%s' "$common_leaves" "server.hub.host" | LC_ALL=C sort)"
     fi
     assert_eq "$expected_leaves" "$(_json_leaf_paths "$json")" \
       "tier-off ${mode}-mode write: exactly the expected set of keys"
@@ -2739,4 +2740,123 @@ test_deploy_create_service_iap_binding_failure_warns_with_gcloud_error_and_falls
     "gcloud's error text must follow the warning and precede the fallback's result"
   assert_eq "1" "$(gcloud_log | grep '^projects add-iam-policy-binding ' | grep -c -- '--role=roles/iap.httpsResourceAccessor' || true)" \
     "the project-level fallback must run once"
+}
+
+# =====================================================================
+# Bootstrap listen host (ptone/scion#6150)
+# =====================================================================
+#
+# The server refuses to start a web server that listens on a non-loopback
+# address with a base URL that is not https (checkWebBaseURLListener in
+# cmd/server_web_base_url.go). On a fresh VM nothing sets a base URL
+# before Phase 5 writes the IAP audience the https URL is derived from,
+# so the Phase 3 first start must bind to loopback. Phase 5 drops the
+# bind, and the hub then starts on 0.0.0.0 with the IAP-derived URL.
+
+BOOTSTRAP_HOST_LINE='    host: "127.0.0.1"'
+BOOTSTRAP_IAP_AUDIENCE="/projects/123456789012/locations/us-central1/services/scion-hub-${HUB}-iap-proxy"
+
+# _last_line_number PATTERN TEXT -- like line_number, but the last match.
+_last_line_number() {
+  printf '%s\n' "$2" | grep -n -F -- "$1" | tail -1 | cut -d: -f1
+}
+
+# _lt A B -- "true" if A and B are both non-empty and A < B.
+_lt() {
+  [[ -n "$1" && -n "$2" && "$1" -lt "$2" ]] && echo true || echo false
+}
+
+# A full fresh create, in log order: the bootstrap settings.yaml with the
+# loopback bind is written before the first `systemctl start` and the
+# first health check poll. Phase 5 then rewrites settings.yaml without
+# the bind (and with the IAP audience), before the restart and its
+# health check.
+test_deploy_create_fresh_bootstrap_binds_loopback_before_first_start() {
+  fresh_gcloud_state
+  local deploy_tmpdir
+  deploy_tmpdir="$(mktemp -d)"
+  run_deploy_create_until_exit \
+    "$(base_config_json "$HUB" "" "registry" "us-docker.pkg.dev/demo-project/scion")" "$deploy_tmpdir"
+  rm -rf "$deploy_tmpdir"
+  assert_eq "true" "$EXITED_ON_OWN" "deploy.sh must exit on its own: ${DEPLOY_LOG}"
+  assert_eq "0" "$DEPLOY_RC" "a full fresh create against the stub must exit 0: ${DEPLOY_LOG}"
+  local log
+  log="$(gcloud_log)"
+  assert_eq "2" "$(printf '%s\n' "$log" | grep -c "<< 'SETTINGSEOF'" || true)" \
+    "a full create writes settings.yaml twice (Phase 3 bootstrap, Phase 5 proxy)"
+  assert_eq "1" "$(printf '%s\n' "$log" | grep -cxF -- "$BOOTSTRAP_HOST_LINE" || true)" \
+    "exactly one settings.yaml write (the bootstrap one) sets the loopback bind"
+
+  local dev_at host_at start_at first_health_at proxy_at restart_at last_health_at
+  dev_at="$(line_number "<< 'SETTINGSEOF'" "$log")"
+  host_at="$(line_number "$BOOTSTRAP_HOST_LINE" "$log")"
+  start_at="$(line_number 'sudo systemctl start scion-hub.service' "$log")"
+  first_health_at="$(line_number 'curl -s http://localhost:8080/healthz' "$log")"
+  proxy_at="$(_last_line_number "<< 'SETTINGSEOF'" "$log")"
+  restart_at="$(line_number 'sudo systemctl restart scion-hub.service' "$log")"
+  last_health_at="$(_last_line_number 'curl -s http://localhost:8080/healthz' "$log")"
+  assert_true "$(_lt "$dev_at" "$host_at")" \
+    "the loopback bind must be inside the bootstrap settings.yaml write (dev ${dev_at}, host ${host_at})"
+  assert_true "$(_lt "$host_at" "$start_at")" \
+    "the loopback bind must be written before the first systemctl start (host ${host_at}, start ${start_at})"
+  assert_true "$(_lt "$start_at" "$first_health_at")" \
+    "the first health check must follow the first start (start ${start_at}, health ${first_health_at})"
+  assert_true "$(_lt "$first_health_at" "$proxy_at")" \
+    "the Phase 5 settings.yaml write must follow the first health check (health ${first_health_at}, proxy ${proxy_at})"
+  assert_true "$(_lt "$proxy_at" "$restart_at")" \
+    "the Phase 5 settings.yaml write must precede the restart (proxy ${proxy_at}, restart ${restart_at})"
+  assert_true "$(_lt "$restart_at" "$last_health_at")" \
+    "a health check must follow the Phase 5 restart (restart ${restart_at}, health ${last_health_at})"
+  assert_true "$(_lt "$host_at" "$proxy_at")" \
+    "the only loopback bind must come before the Phase 5 write"
+
+  # What the hub parses from each write (the hub's own koanf parser).
+  local dev_json proxy_json
+  dev_json="$(_settings_yaml_json "$(_settings_heredoc_nth "$log" 1)")"
+  assert_eq "0" "$?" "the bootstrap settings.yaml write must parse as YAML"
+  assert_eq "127.0.0.1" "$(_json_get "$dev_json" server.hub.host)" \
+    "the bootstrap write binds the hub and web listener to loopback, which the base-URL guard accepts with any base URL"
+  proxy_json="$(_settings_yaml_json "$(_settings_heredoc_nth "$log" 2)")"
+  assert_eq "0" "$?" "the Phase 5 settings.yaml write must parse as YAML"
+  assert_eq "<missing>" "$(_json_get "$proxy_json" server.hub.host)" \
+    "the Phase 5 write drops the bind, so the hub listens on the default 0.0.0.0 for the Cloud Run proxy"
+  assert_eq "$BOOTSTRAP_IAP_AUDIENCE" "$(_json_get "$proxy_json" server.auth.proxy.iap.audience)" \
+    "the Phase 5 write carries the IAP audience, from which the hub derives its https base URL"
+  assert_eq "<missing>" "$(_json_get "$proxy_json" server.hub.public_url)" \
+    "deploy.sh writes no explicit base URL"
+}
+
+# A re-run on a VM that already has hub.env (where an operator's
+# SCION_SERVER_BASE_URL lives): deploy.sh keeps hub.env and writes no
+# base URL of its own, so the base URL the hub uses after Phase 5 is
+# unchanged. The bootstrap loopback bind still applies, since the hub is
+# stopped and started again in Phase 3.
+test_deploy_rerun_existing_hub_env_keeps_base_url_sources() {
+  fresh_gcloud_state
+  local deploy_tmpdir
+  deploy_tmpdir="$(mktemp -d)"
+  run_deploy_create_until_exit \
+    "$(base_config_json "$HUB" "" "registry" "us-docker.pkg.dev/demo-project/scion")" "$deploy_tmpdir" \
+    GCLOUD_STUB_HUB_ENV_EXISTS=true
+  rm -rf "$deploy_tmpdir"
+  assert_eq "true" "$EXITED_ON_OWN" "deploy.sh must exit on its own: ${DEPLOY_LOG}"
+  assert_eq "0" "$DEPLOY_RC" "a full re-run against the stub must exit 0: ${DEPLOY_LOG}"
+  assert_contains "$DEPLOY_LOG" "hub.env already exists, preserving existing SCION_SERVER_SESSION_SECRET." \
+    "the re-run must take the existing-hub.env branch"
+  local log
+  log="$(gcloud_log)"
+  assert_not_contains "$log" "/tmp/hub.env" "a re-run must not copy or move a new hub.env onto the VM"
+  # Regression guards, not discriminators: deploy.sh has never written
+  # either base URL source. They fail if a later change starts to, which
+  # could change the base URL of an existing VM on a re-run (#6150 brief:
+  # a re-run must not change it).
+  assert_not_contains "$log" "SCION_SERVER_BASE_URL" "deploy.sh must not set SCION_SERVER_BASE_URL"
+  assert_not_contains "$log" "public_url" "deploy.sh must not set server.hub.public_url"
+  assert_true "$(_lt "$(line_number "$BOOTSTRAP_HOST_LINE" "$log")" "$(line_number 'sudo systemctl start scion-hub.service' "$log")")" \
+    "on a re-run, too, the loopback bind is written before the Phase 3 start"
+  local proxy_json
+  proxy_json="$(_settings_yaml_json "$(_settings_heredoc_nth "$log" 2)")"
+  assert_eq "0" "$?" "the Phase 5 settings.yaml write must parse as YAML"
+  assert_eq "<missing>" "$(_json_get "$proxy_json" server.hub.host)" \
+    "the Phase 5 write on a re-run drops the bind as well"
 }

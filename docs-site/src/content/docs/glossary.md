@@ -84,7 +84,7 @@ A workspace sharing mode where each agent gets its own full git clone of the rep
 A workspace sharing mode for Hub-managed projects without git, where each agent gets its own private directory that starts empty and is not a git repository. It is kept across suspend/resume where storage allows and deleted with the agent. Selected with workspace mode `per-agent` on a project without a git remote.
 
 ### Shared directory
-A persistent, mutable volume shared by the agents within one project. Backed by host filesystem directories (local) or Kubernetes PersistentVolumeClaims (K8s). In hosted deployments, `server.shared_dir_storage` can place them on a shared NFS export so they span Runtime Brokers.
+A persistent, mutable volume shared by the agents within one project. Backed by host filesystem directories (local) or Kubernetes PersistentVolumeClaims (K8s). In hosted deployments, `server.project_storage` can place them (with the workspaces) on a shared NFS export or volume so they span Runtime Brokers.
 
 ### Agent home
 The directory mounted as the container user's home folder, holding that agent's unique config and history.

@@ -1,0 +1,20 @@
+=== RUN   TestNestedParallel
+    toy_test.go:80: parent before
+=== RUN   TestNestedParallel/p1
+=== PAUSE TestNestedParallel/p1
+=== RUN   TestNestedParallel/seq
+    toy_test.go:86: seq boom
+=== RUN   TestNestedParallel/p2
+=== PAUSE TestNestedParallel/p2
+=== NAME  TestNestedParallel
+    toy_test.go:91: parent after
+=== CONT  TestNestedParallel/p1
+=== CONT  TestNestedParallel/p2
+    toy_test.go:89: p2 boom
+=== NAME  TestNestedParallel/p1
+    toy_test.go:84: p1 boom
+--- FAIL: TestNestedParallel (0.00s)
+    --- FAIL: TestNestedParallel/seq (0.00s)
+    --- FAIL: TestNestedParallel/p2 (0.00s)
+    --- FAIL: TestNestedParallel/p1 (0.02s)
+FAIL

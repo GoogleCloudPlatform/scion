@@ -227,7 +227,7 @@ func (f *Fetcher) run(ctx context.Context, rawURL string, mode fetchMode, author
 		if !errors.As(err, &fe) {
 			fe = fail(ReasonConnect, "%v", innerError(err))
 		}
-		if ctx.Err() != nil && fe.Reason != ReasonDeniedAddress {
+		if expired(ctx) && fe.Reason != ReasonDeniedAddress {
 			fe = fail(ReasonTimeout, "%s", fe.Detail)
 		}
 		msg := "artifacts: remote image not fetched"
@@ -239,6 +239,17 @@ func (f *Fetcher) run(ctx context.Context, rawURL string, mode fetchMode, author
 		return nil, fe
 	}
 	return res, nil
+}
+
+// expired reports whether ctx is done or its deadline has passed. The
+// deadline check covers a failure that races the timer that cancels ctx,
+// which runs on another goroutine.
+func expired(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	d, ok := ctx.Deadline()
+	return ok && !time.Now().Before(d)
 }
 
 // fetch follows redirects under the per-hop rules. authorization, when set, is
@@ -445,7 +456,6 @@ func (f *Fetcher) get(ctx context.Context, u *url.URL, addr netip.Addr, mode fet
 			MinVersion: tls.VersionTLS12,
 		},
 		TLSHandshakeTimeout:    f.cfg.ConnectTimeout,
-		ResponseHeaderTimeout:  f.cfg.Timeout,
 		DisableKeepAlives:      true,
 		DisableCompression:     true,
 		MaxResponseHeaderBytes: 64 << 10,

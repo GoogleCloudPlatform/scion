@@ -1,0 +1,10 @@
+=== RUN   TestSlashName
+    toy_test.go:152: parent log
+=== RUN   TestSlashName/a/b
+    toy_test.go:153: slash boom
+=== NAME  TestSlashName
+    toy_test.go:154: parent after
+    toy_test.go:155: parent fail
+--- FAIL: TestSlashName (0.00s)
+    --- FAIL: TestSlashName/a/b (0.00s)
+FAIL

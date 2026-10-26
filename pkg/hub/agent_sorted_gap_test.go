@@ -345,7 +345,7 @@ func TestListAgentsSorted_TamperedCursorCannotWidenScope(t *testing.T) {
 			} {
 				rec := doRequestAsUser(t, f.srv, viewer, http.MethodGet, f.listPath(withCursor(q, bad)), nil)
 				assert.Equal(t, http.StatusBadRequest, rec.Code, "%s: %s", q, rec.Body.String())
-				assert.Equal(t, "invalid cursor", decodeErrorMessage(t, rec.Body.Bytes()))
+				assert.Equal(t, "invalid cursor: restart pagination from the first page", decodeErrorMessage(t, rec.Body.Bytes()))
 			}
 		}
 	}
@@ -388,7 +388,7 @@ func TestListAgentsSorted_NonUUIDCursorIDRejected(t *testing.T) {
 	for _, id := range ids {
 		rec := doRequestAsUser(t, sf.srv, sf.viewer, http.MethodGet, sf.listPath(withCursor(q, tamperGlobalCursor(t, cur, 5, id))), nil)
 		require.Equal(t, http.StatusBadRequest, rec.Code, "id %q: %s", id, rec.Body.String())
-		assert.Equal(t, "invalid cursor", decodeErrorMessage(t, rec.Body.Bytes()), "id %q", id)
+		assert.Equal(t, "invalid cursor: restart pagination from the first page", decodeErrorMessage(t, rec.Body.Bytes()), "id %q", id)
 		assert.Equal(t, ref.Body.String(), rec.Body.String(), "id %q: body must match the generic invalid-cursor body", id)
 	}
 }
@@ -424,7 +424,7 @@ func TestListProjectAgentsSorted_NonUUIDCursorIDRejected(t *testing.T) {
 		for _, id := range ids {
 			rec := call(f.listPath(withCursor(q, tamperGlobalCursor(t, cur, 5, id))))
 			require.Equal(t, http.StatusBadRequest, rec.Code, "%s id %q: %s", name, id, rec.Body.String())
-			assert.Equal(t, "invalid cursor", decodeErrorMessage(t, rec.Body.Bytes()), "%s id %q", name, id)
+			assert.Equal(t, "invalid cursor: restart pagination from the first page", decodeErrorMessage(t, rec.Body.Bytes()), "%s id %q", name, id)
 			assert.Equal(t, ref.Body.String(), rec.Body.String(), "%s id %q", name, id)
 		}
 	}
@@ -636,7 +636,7 @@ func TestListProjectAgentsSortedAgentJWT_CursorBindingPerField(t *testing.T) {
 		for _, replay := range tc.replays {
 			rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, f.listPath(withCursor(replay, cur)), nil, tok)
 			assert.Equal(t, http.StatusBadRequest, rec.Code, "%s: replay %q: %s", tc.name, replay, rec.Body.String())
-			assert.Equal(t, "invalid cursor", decodeErrorMessage(t, rec.Body.Bytes()), "%s: replay %q", tc.name, replay)
+			assert.Equal(t, "invalid cursor: restart pagination from the first page", decodeErrorMessage(t, rec.Body.Bytes()), "%s: replay %q", tc.name, replay)
 		}
 	}
 
@@ -660,7 +660,7 @@ func TestListProjectAgentsSortedAgentJWT_CursorBindingPerField(t *testing.T) {
 	otherPath := "/api/v1/projects/" + other.ID + "/agents?" + withCursor(q, cur)
 	rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, otherPath, nil, otherTok)
 	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-	assert.Equal(t, "invalid cursor", decodeErrorMessage(t, rec.Body.Bytes()))
+	assert.Equal(t, "invalid cursor: restart pagination from the first page", decodeErrorMessage(t, rec.Body.Bytes()))
 	// And the original token cannot reach the other project at all.
 	rec = doRequestWithAgentToken(t, f.srv, http.MethodGet, otherPath, nil, tok)
 	assert.NotEqual(t, http.StatusOK, rec.Code, rec.Body.String())

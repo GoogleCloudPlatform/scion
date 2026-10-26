@@ -41,9 +41,19 @@ func TestBuildPod_NFSWorktree_MountsAndEnv(t *testing.T) {
 
 	main := pod.Spec.Containers[0]
 	assert.Equal(t, "/repo-root/worktrees/agent-1", main.WorkingDir)
+	// The two base mounts plus the read-only admin narrowing: hooks,
+	// info, objects/info and worktrees read-only, with the agent's own
+	// worktrees/agent-1 re-mounted read-write. (This worktree shape is refused at
+	// Run today; buildPod still constructs it, with the narrowing, for the
+	// follow-up that lifts the refusal.)
 	assert.Equal(t, []corev1.VolumeMount{
 		{Name: "workspace", MountPath: "/repo-root/.git", SubPath: "projects/proj-123/workspace/.git"},
 		{Name: "workspace", MountPath: "/repo-root/worktrees/agent-1", SubPath: "projects/proj-123/workspace/worktrees/agent-1"},
+		{Name: "workspace", MountPath: "/repo-root/.git/hooks", SubPath: "projects/proj-123/workspace/.git/hooks", ReadOnly: true},
+		{Name: "workspace", MountPath: "/repo-root/.git/info", SubPath: "projects/proj-123/workspace/.git/info", ReadOnly: true},
+		{Name: "workspace", MountPath: "/repo-root/.git/objects/info", SubPath: "projects/proj-123/workspace/.git/objects/info", ReadOnly: true},
+		{Name: "workspace", MountPath: "/repo-root/.git/worktrees", SubPath: "projects/proj-123/workspace/.git/worktrees", ReadOnly: true},
+		{Name: "workspace", MountPath: "/repo-root/.git/worktrees/agent-1", SubPath: "projects/proj-123/workspace/.git/worktrees/agent-1"},
 	}, main.VolumeMounts)
 	v, ok := envValue(main.Env, "SCION_WORKSPACE_PATH")
 	assert.True(t, ok)

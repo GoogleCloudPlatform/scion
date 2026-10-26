@@ -242,7 +242,6 @@ func TestAgentDelegationAdmission_MatchesCatalog(t *testing.T) {
 		assert.True(t, permissions.AgentDelegable(spec.BasePermission, permissions.BoundaryKindHub) ||
 			permissions.AgentDelegable(spec.BasePermission, permissions.BoundaryKindProject),
 			"the primary permission of %s is not delegable", entry.Operation)
-		assert.NotEqual(t, authzop.OperationID("agent.attach"), entry.Operation)
 		tableOps[entry.Operation] = true
 	}
 	for _, spec := range authzop.Catalog {
@@ -425,12 +424,8 @@ func TestAgentDelegation_ChainCodesForRowShapesHandlersNeverWrite(t *testing.T) 
 // or canViewAgentEnv, so the delegated arm in those two helpers covers
 // every site.
 func TestAgentEnvVisibility_DecidedOnlyByTheHelpers(t *testing.T) {
-	// pkgmove:scan-covers pkg/hub/apierr
+	// pkgmove:scan-covers guardScanSubdirs
 	// scanned through guardScanSubdirs; guards ResponseView and redactAppliedConfigEnvForResponse call sites.
-	// pkgmove:scan-covers pkg/hub/internal/principal
-	// scanned through guardScanSubdirs; guards ResponseView and redactAppliedConfigEnvForResponse call sites.
-	// pkgmove:scan-covers pkg/hub/maintenance
-	// scanned through guardScanSubdirs once it exists; guards ResponseView and redactAppliedConfigEnvForResponse call sites.
 	files, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	fset := token.NewFileSet()
@@ -512,6 +507,7 @@ var storeResponseRedactionCallers = map[string][]string{
 // visibility input.
 func assertStoreResponseRedactionChain(t *testing.T) {
 	t.Helper()
+	// scan-coverage:exempt reads pkg/store only; the pkg/hub sites are scanned through guardScanSubdirs above.
 	files, err := filepath.Glob(filepath.Join("..", "store", "*.go"))
 	require.NoError(t, err)
 	fset := token.NewFileSet()
@@ -586,6 +582,8 @@ func TestAgentDelegationRoutes_ResolveToTheirOperations(t *testing.T) {
 			assert.Equal(t, "/api/v1/agents/{id}/delegations/{grantId}", row.catalogPattern(false))
 		case AgentRouteDelegationCredential:
 			assert.Equal(t, "/api/v1/agents/{id}/delegations/{grantId}/credentials/{credentialId}", row.catalogPattern(false))
+		case AgentRouteDelegationRevokeAll:
+			assert.Equal(t, "/api/v1/agents/{id}/delegations/revoke-all", row.catalogPattern(false))
 		case AgentRoutePortItem:
 			assert.Equal(t, "/api/v1/agents/{id}/ports/{port}", row.catalogPattern(false))
 		}

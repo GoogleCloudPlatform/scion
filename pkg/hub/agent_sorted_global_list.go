@@ -39,7 +39,7 @@ func (s *Server) listAgentsSorted(w http.ResponseWriter, r *http.Request, filter
 
 	if p.cursor != "" {
 		if _, err := store.DecodeAgentCursor(p.cursor, p.sort, p.dir, binding); err != nil {
-			BadRequest(w, "invalid cursor")
+			writeInvalidCursor(w)
 			return
 		}
 	}

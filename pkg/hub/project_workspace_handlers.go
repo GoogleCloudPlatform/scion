@@ -70,7 +70,9 @@ const maxPreviewFileSize = 50 * 1024 * 1024
 // responses. allow-same-origin must never be added: it would undo exactly
 // that isolation. The header has no effect when the response is loaded as a
 // subresource such as an <img>, so inline image previews are unaffected.
-const untrustedContentSandboxCSP = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads"
+// frame-ancestors 'none': these pages are never embedded in other pages,
+// with or without the web frontend in front of the hub.
+const untrustedContentSandboxCSP = "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads; frame-ancestors 'none'"
 
 // contentDisposition builds a Content-Disposition header value with
 // mime.FormatMediaType, as the skill and template handlers do, so non-ASCII
@@ -122,7 +124,7 @@ func (s *Server) workspaceWriteBlocked() bool {
 // errSharedDirWritesUnavailable is returned when a shared-dir write is
 // refused because the shared dir resolved to storage that is not durable on
 // this hub (Cloud Run Service with shared dirs on instance-local disk).
-const errSharedDirWritesUnavailable = "Shared directory writes are not available: shared directories are not on durable storage on this hub. Configure server.shared_dir_storage or server.workspace_storage with the nfs backend."
+const errSharedDirWritesUnavailable = "Shared directory writes are not available: shared directories are not on durable storage on this hub. Configure server.project_storage with a shared backend (nfs, cloudrun-volume or gke-shared-volume)."
 
 // writeGate is the Cloud Run durability gate for one write target. The zero
 // value allows writes.
@@ -1253,10 +1255,10 @@ type sharedDirResolution struct {
 	Source sharedDirLayoutSource
 }
 
-// onSharedBackend reports whether the shared dir is on the shared (nfs)
-// tree, <subpath_root>/<project UUID>/shared-dirs/<name>.
+// onSharedBackend reports whether the shared dir is on the shared tree
+// (nfs or a shared volume), <subpath_root>/<project UUID>/shared-dirs/<name>.
 func (r *sharedDirResolution) onSharedBackend() bool {
-	return r.Resolved.Backend == projectfs.BackendNFS
+	return r.Resolved.Backend.Shared()
 }
 
 // openSharedDirRoot opens the resolved shared dir through the layout
@@ -1268,84 +1270,49 @@ func (s *Server) openSharedDirRoot(resolution *sharedDirResolution, createIfMiss
 	return resolution.Resolved.Open(createIfMissing)
 }
 
-// sharedDirLayoutSource names the server block a shared-dir Layout came from.
+// sharedDirLayoutSource names where a shared-dir Layout came from.
 type sharedDirLayoutSource string
 
 const (
-	sharedDirLayoutFromSharedDirStorage sharedDirLayoutSource = "server.shared_dir_storage"
-	sharedDirLayoutFromWorkspaceStorage sharedDirLayoutSource = "server.workspace_storage"
-	sharedDirLayoutLocal                sharedDirLayoutSource = "local"
+	sharedDirLayoutFromProjectStorage sharedDirLayoutSource = "server.project_storage"
+	sharedDirLayoutLocal              sharedDirLayoutSource = "local"
 )
 
-// sharedDirLayout returns the Layout the hub resolves shared-dir Mounts on,
-// synthesized from its in-memory server config (design fs-cleanup M1 form
-// for phase 1; never from a per-request settings-file read, the DB or
-// project settings).
-//
-// T3 precedence, matching what brokers do today: server.shared_dir_storage
-// when its backend is nfs, else server.workspace_storage when its backend is
-// nfs, else local. P3 replaces this with server.project_storage.
-//
-// cloudrun-volume and gke-shared-volume workspaces leave shared dirs local,
-// as on the brokers (Kubernetes gives those per-dir RWX claims); the Cloud
-// Run write gate then refuses shared-dir writes there.
+// sharedDirLayout returns the Layout the hub resolves shared-dir Mounts on:
+// projectStorageLayout, labelled for logs.
 func (s *Server) sharedDirLayout() (projectfs.Layout, sharedDirLayoutSource, error) {
-	if err := s.config.SharedDirStorageError; err != nil {
-		return projectfs.Layout{}, sharedDirLayoutFromSharedDirStorage, err
+	full, err := s.projectStorageLayout()
+	if err != nil {
+		return projectfs.Layout{}, sharedDirLayoutFromProjectStorage, err
 	}
-	if sd := s.config.SharedDirStorageConfig; sd != nil && sd.Backend != "" && sd.Backend != config.WorkspaceStorageBackendLocal {
-		if err := sd.Validate(); err != nil {
-			return projectfs.Layout{}, sharedDirLayoutFromSharedDirStorage, fmt.Errorf("server.shared_dir_storage: %w", err)
-		}
-		layout, err := hubNFSLayout(sd.NFS)
-		if err != nil {
-			return projectfs.Layout{}, sharedDirLayoutFromSharedDirStorage, fmt.Errorf("server.shared_dir_storage: %w", err)
-		}
-		return layout, sharedDirLayoutFromSharedDirStorage, nil
+	layout := full.SharedDirLayout()
+	if layout.Backend.Shared() {
+		return layout, sharedDirLayoutFromProjectStorage, nil
 	}
-	if ws := s.config.WorkspaceStorageConfig; ws != nil && ws.Backend == config.WorkspaceStorageBackendNFS {
-		layout, err := hubNFSLayout(ws.NFS)
-		if err != nil {
-			return projectfs.Layout{}, sharedDirLayoutFromWorkspaceStorage, fmt.Errorf("server.workspace_storage: %w", err)
-		}
-		return layout, sharedDirLayoutFromWorkspaceStorage, nil
-	}
-	return projectfs.Layout{Backend: projectfs.BackendLocal}, sharedDirLayoutLocal, nil
+	return layout, sharedDirLayoutLocal, nil
 }
 
-// hubNFSLayout builds an nfs Layout for the hub, which serves files from its
-// own mount of the share and so needs an absolute mount_root.
-func hubNFSLayout(nfs *config.V1NFSConfig) (projectfs.Layout, error) {
-	layout, err := config.NFSLayout(nfs)
+// projectStorageLayout returns the hub's projectfs Layout, built from its
+// in-memory server.project_storage (ServerConfig.ProjectStorageConfig, as
+// resolved at startup; design fs-cleanup §P2) through
+// config.ProjectStorageLayout, the translation the brokers use too. It is
+// never built from a per-request settings-file read, the DB or project
+// settings. One backend places the workspace and the shared dirs: nfs, or
+// the cloudrun-volume / gke-shared-volume volume mounted at
+// <volumeMountBase>/<volume_name>, gives the UUID-keyed tree; local (and no
+// block) gives today's slug-keyed layout. The hub serves files from its own
+// mount of the share, so a shared Layout's host base must be absolute.
+func (s *Server) projectStorageLayout() (projectfs.Layout, error) {
+	layout, err := config.ProjectStorageLayout(s.config.ProjectStorageConfig, volumeMountBase)
 	if err != nil {
 		return projectfs.Layout{}, err
 	}
-	if !filepath.IsAbs(layout.HostBase) {
-		return projectfs.Layout{}, fmt.Errorf("nfs.mount_root must be an absolute path on the hub (host base %q)", layout.HostBase)
+	for _, l := range []projectfs.Layout{layout, layout.SharedDirLayout()} {
+		if l.Backend.Shared() && !filepath.IsAbs(l.HostBase) {
+			return projectfs.Layout{}, fmt.Errorf("%s: the share must be mounted at an absolute path on the hub (host base %q)", config.ProjectStorageKey, l.HostBase)
+		}
 	}
 	return layout, nil
-}
-
-// sharedDirLayoutWarnings reports a disagreement between the two nfs blocks
-// when both are configured, naming which block each Mount kind follows.
-func sharedDirLayoutWarnings(ws *config.V1WorkspaceStorageConfig, sd *config.V1SharedDirStorageConfig) []string {
-	if ws == nil || ws.Backend != config.WorkspaceStorageBackendNFS || sd == nil || sd.Backend != config.WorkspaceStorageBackendNFS {
-		return nil
-	}
-	wsLayout, wsErr := config.NFSLayout(ws.NFS)
-	sdLayout, sdErr := config.NFSLayout(sd.NFS)
-	if wsErr != nil || sdErr != nil {
-		return nil // reported where each block is validated
-	}
-	if wsLayout.HostBase == sdLayout.HostBase && wsLayout.SubPathRoot == sdLayout.SubPathRoot && wsLayout.Share == sdLayout.Share {
-		return nil
-	}
-	return []string{fmt.Sprintf(
-		"server.workspace_storage and server.shared_dir_storage are both nfs but disagree "+
-			"(workspace: host base %q, subpath_root %q, share %q; shared dirs: host base %q, subpath_root %q, share %q): "+
-			"the hub serves shared dirs from server.shared_dir_storage and workspaces from server.workspace_storage",
-		wsLayout.HostBase, wsLayout.SubPathRoot, wsLayout.Share.ID,
-		sdLayout.HostBase, sdLayout.SubPathRoot, sdLayout.Share.ID)}
 }
 
 // errSharedDirNotDeclared is returned for a shared dir the project does not
@@ -1356,12 +1323,10 @@ var errSharedDirNotDeclared = errors.New("shared directory is not declared on th
 // through the layout authority (pkg/projectfs) on the Layout from
 // sharedDirLayout.
 //
-// On a shared (nfs) Layout the shared dir is the one agents mount:
+// On a shared Layout the shared dir is the one agents mount, on every
+// runtime that can mount the shared tree:
 // <subpath_root>/<project UUID>/shared-dirs/<name>, for every project,
-// whether or not it has a co-located broker (design Q1, applied exactly).
-// Known gap until P3 (findings D9): a co-located Docker broker with only
-// server.workspace_storage nfs still keeps its agents' shared dirs on its
-// node's local disk.
+// whether or not it has a co-located broker.
 //
 // On the local Layout the path is today's slug-keyed layout: for a git
 // project with a co-located provider that has a LocalPath, the project's own
@@ -1386,7 +1351,7 @@ func (s *Server) resolveSharedDirMount(ctx context.Context, project *store.Proje
 		return nil, &sharedDirStorageResolveError{err: err}
 	}
 
-	if layout.Backend == projectfs.BackendNFS {
+	if layout.Backend.Shared() {
 		resolution, err := resolveNFSSharedDir(layout, source, project, mount)
 		if err != nil {
 			// Every error here is marked as a storage resolution failure:
@@ -1668,7 +1633,10 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 
 	token := s.resolveCloneToken(ctx, project)
 
-	pullResult, err := util.PullSharedWorkspace(workspacePath, token)
+	// Pull from the project's clone URL as the hub knows it, not from the
+	// remote configured in the workspace, which agents can change.
+	cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
+	pullResult, err := util.PullSharedWorkspace(workspacePath, cloneURL, token)
 	if err != nil {
 		slog.Warn("shared workspace pull failed",
 			"project_id", project.ID, "error", err.Error())

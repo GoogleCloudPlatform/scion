@@ -46,7 +46,7 @@ func withWorkspaceVolume(pod *corev1.Pod, kind string, nfsHome bool) *corev1.Pod
 		ws.EmptyDir = &corev1.EmptyDirVolumeSource{}
 	}
 	pod.Spec.Volumes = append(pod.Spec.Volumes, ws)
-	pod.Annotations = withHomeStorageAnnotation(pod.Annotations, nfsHome)
+	pod.Annotations = withScionAnnotation(pod.Annotations, k8sHomeStorageAnnotation, HomeStorageNFS, nfsHome)
 	return pod
 }
 

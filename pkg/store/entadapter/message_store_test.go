@@ -483,3 +483,48 @@ func TestMessageProjectProvenanceRejectsMalformedID(t *testing.T) {
 	msg.RecipientProjectID = &bad
 	assert.ErrorIs(t, s.CreateMessage(context.Background(), msg), store.ErrInvalidInput)
 }
+
+// TestMessageDelegationAttribution_RoundTrip: the authorizing user and the
+// grant of a message sent with an agent delegated credential
+// (.design/agent-delegation.md §14.5) are stored and read back; a message
+// without them reads back empty. Runs on both backends (enttest).
+func TestMessageDelegationAttribution_RoundTrip(t *testing.T) {
+	s := newTestMessageStore(t)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+
+	delegated := newTestMessage(projectID, "agent-b")
+	delegated.Sender, delegated.SenderID = "agent:agent-a", "agent-a"
+	delegated.AuthorizingUserID = uuid.NewString()
+	delegated.DelegationGrantID = uuid.NewString()
+	require.NoError(t, s.CreateMessage(ctx, delegated))
+	plain := newTestMessage(projectID, "agent-b")
+	require.NoError(t, s.CreateMessage(ctx, plain))
+
+	got, err := s.GetMessage(ctx, delegated.ID)
+	require.NoError(t, err)
+	assert.Equal(t, delegated.AuthorizingUserID, got.AuthorizingUserID)
+	assert.Equal(t, delegated.DelegationGrantID, got.DelegationGrantID)
+	assert.Equal(t, "agent:agent-a", got.Sender, "the sender stays the agent")
+
+	got, err = s.GetMessage(ctx, plain.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.AuthorizingUserID)
+	assert.Empty(t, got.DelegationGrantID)
+
+	list, err := s.ListMessages(ctx, store.MessageFilter{RecipientID: "agent-b"}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, list.Items, 2)
+	attributed := 0
+	for _, m := range list.Items {
+		if m.ID == delegated.ID {
+			attributed++
+			assert.Equal(t, delegated.AuthorizingUserID, m.AuthorizingUserID)
+			assert.Equal(t, delegated.DelegationGrantID, m.DelegationGrantID)
+		} else {
+			assert.Empty(t, m.AuthorizingUserID)
+			assert.Empty(t, m.DelegationGrantID)
+		}
+	}
+	assert.Equal(t, 1, attributed)
+}

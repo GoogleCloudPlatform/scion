@@ -58,7 +58,7 @@ func newNFSDeleteTestEnv(t *testing.T, name string) *nfsDeleteTestEnv {
 	}
 	require.NoError(t, s.CreateProject(context.Background(), project))
 	mountRoot := filepath.Join(home, "mnt")
-	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 		Backend: "nfs",
 		NFS: &config.V1NFSConfig{
 			MountRoot:   mountRoot,
@@ -202,7 +202,7 @@ func TestDeleteProject_NoEmbeddedBroker_NFS_HubRemovesExportTree(t *testing.T) {
 // A share that is not mounted on the hub is nothing to remove.
 func TestDeleteProject_NFS_ShareNotMountedOnHubIsSuccess(t *testing.T) {
 	e := newNFSDeleteTestEnv(t, "unmounted-nfs")
-	e.srv.config.WorkspaceStorageConfig.NFS.MountRoot = filepath.Join(e.home, "absent")
+	e.srv.config.ProjectStorageConfig.NFS.MountRoot = filepath.Join(e.home, "absent")
 	e.deleteProject(t)
 }
 
@@ -211,7 +211,7 @@ func TestDeleteProject_NFS_ShareNotMountedOnHubIsSuccess(t *testing.T) {
 // share ID of ".." must not reach a tree beside the mount root.
 func TestDeleteProject_NFS_HostBaseOutsideMountRootRefused(t *testing.T) {
 	e := newNFSDeleteTestEnv(t, "dotdot-share")
-	nfs := e.srv.config.WorkspaceStorageConfig.NFS
+	nfs := e.srv.config.ProjectStorageConfig.NFS
 	nfs.Shares[0].ID = ".."
 	victim := filepath.Join(filepath.Dir(nfs.MountRoot), "projects", e.project.ID)
 	require.NoError(t, os.MkdirAll(victim, 0o755))

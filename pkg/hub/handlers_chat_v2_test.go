@@ -153,7 +153,7 @@ func TestTypeChat_NotDispatchedToAgent(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestWave2_ReadState_SetAndGet(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
@@ -197,7 +197,7 @@ func TestWave2_ReadState_SetAndGet(t *testing.T) {
 }
 
 func TestWave2_UserPrefs_DefaultsAndOverride(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
@@ -240,7 +240,7 @@ func TestWave2_UserPrefs_DefaultsAndOverride(t *testing.T) {
 }
 
 func TestChatV2_DM_UpsertAndList(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
@@ -292,7 +292,7 @@ func TestChatV2_DM_UpsertAndList(t *testing.T) {
 }
 
 func TestChatV2_TouchTopicActivity(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
@@ -336,7 +336,7 @@ func TestChatV2_TouchTopicActivity(t *testing.T) {
 }
 
 func TestWave2_DeleteTopic_LastThreadGuard(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
@@ -384,7 +384,7 @@ func TestWave2_DeleteTopic_LastThreadGuard(t *testing.T) {
 }
 
 func TestWave2_TopicNameUniqueness(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
@@ -424,7 +424,7 @@ func TestWave2_TopicNameUniqueness(t *testing.T) {
 }
 
 func TestWave2_TouchDMActivity(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
@@ -467,7 +467,7 @@ func TestWave2_TouchDMActivity(t *testing.T) {
 }
 
 func TestWave2_GetReadStates_Batch(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
@@ -2844,19 +2844,64 @@ func TestDEF96_PromoteDM_HistoryVisibleOnFirstRead(t *testing.T) {
 	}
 }
 
-// TestPromoteDM_Handler_SetsConversationDefaultAgentID is review round 2
-// finding #3: round 1's TestPromoteDM_DualWrite_SetsConversationDefaultAgentID
-// calls the *store* with DefaultAgentID already filled in, so it proves the
-// SQL and nothing else — deleting handlers_chat_v2.go's
-// `DefaultAgentID: agentID` (the actual wiring, at the promote HTTP
-// handler) doesn't fail that test. This exercises the real promote
-// endpoint end to end: POST the promote request for a user<->agent DM,
-// then assert the promoted conversation's default_agent_id equals the
-// agent's ID, the same way a promoted thread's default is expected to show
-// up in `scion conversation show` (F1).
-func TestPromoteDM_Handler_SetsConversationDefaultAgentID(t *testing.T) {
+// promoteDMThroughHandler creates a project, an agent with the slug
+// promote-da-bot and a user<->agent DM with one message, promotes the DM
+// through the promote endpoint and returns the store, the agent ID, the
+// webchat store and the promote response.
+func promoteDMThroughHandler(t *testing.T) (store.Store, string, WebChatStore, promoteResponse) {
+	t.Helper()
+	f := setupPromoteDM(t, time.Time{}, false)
+	rec := f.promote(t)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("promote: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var promResp promoteResponse
+	if err := json.NewDecoder(rec.Body).Decode(&promResp); err != nil {
+		t.Fatalf("decode promote response: %v", err)
+	}
+	if promResp.ConversationID == "" {
+		t.Fatal("promoteResponse.ConversationID is empty")
+	}
+
+	return f.s, f.agentID, f.wcs, promResp
+}
+
+// promoteDMFixture is a project, an agent with the slug promote-da-bot and
+// a user<->agent DM with one message, ready to be promoted. lookupFault and
+// faultSwitch are set only when the fixture was built with the agent lookup
+// fault installed.
+type promoteDMFixture struct {
+	srv          *Server
+	s            store.Store
+	wcs          WebChatStore
+	projectID    string
+	agentID      string
+	dmKey        string
+	directConvID string
+	lookupFault  *promoteAgentLookupFaultStore
+	faultSwitch  *storeFaultSwitch
+}
+
+// promoteDMThreadName is the thread name every promoteDMFixture promote asks for.
+const promoteDMThreadName = "Promote DA Thread"
+
+// setupPromoteDM builds a promoteDMFixture whose agent has DeletedAt set to
+// deletedAt (zero for a live agent). With withLookupFault, the agent lookup
+// fault wrapper (promoteAgentLookupFaultStore) is installed on the server
+// right after it is built, disarmed (installStoreFault).
+func setupPromoteDM(t *testing.T, deletedAt time.Time, withLookupFault bool) *promoteDMFixture {
+	t.Helper()
 	srv, s := testServer(t)
 	ctx := context.Background()
+	agentID := tid("promote-da-agent")
+	var lookupFault *promoteAgentLookupFaultStore
+	var faultSwitch *storeFaultSwitch
+	if withLookupFault {
+		lookupFault, faultSwitch = installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *promoteAgentLookupFaultStore {
+			return &promoteAgentLookupFaultStore{Store: inner, fault: f, agentID: agentID}
+		})
+	}
 
 	proj := &store.Project{
 		ID: tid("promote-da-proj"), Name: "promote-da-proj", Slug: "promote-da-proj",
@@ -2866,7 +2911,6 @@ func TestPromoteDM_Handler_SetsConversationDefaultAgentID(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	agentID := tid("promote-da-agent")
 	agent := &store.Agent{
 		ID:        agentID,
 		ProjectID: proj.ID,
@@ -2875,6 +2919,7 @@ func TestPromoteDM_Handler_SetsConversationDefaultAgentID(t *testing.T) {
 		Phase:     "idle",
 		OwnerID:   DevUserID,
 		CreatedBy: DevUserID,
+		DeletedAt: deletedAt,
 	}
 	if err := s.CreateAgent(ctx, agent); err != nil {
 		t.Fatalf("CreateAgent: %v", err)
@@ -2932,19 +2977,61 @@ func TestPromoteDM_Handler_SetsConversationDefaultAgentID(t *testing.T) {
 		t.Fatalf("UpsertDM: %v", err)
 	}
 
-	promoteBody := map[string]string{"name": "Promote DA Thread"}
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+dmKey+"/promote", promoteBody)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("promote: expected 201, got %d: %s", rec.Code, rec.Body.String())
-	}
+	return &promoteDMFixture{srv: srv, s: s, wcs: wcs, projectID: proj.ID, agentID: agentID, dmKey: dmKey,
+		directConvID: directConv.ID, lookupFault: lookupFault, faultSwitch: faultSwitch}
+}
 
-	var promResp promoteResponse
-	if err := json.NewDecoder(rec.Body).Decode(&promResp); err != nil {
-		t.Fatalf("decode promote response: %v", err)
+// promote posts the promote request for the fixture's DM as the dev user.
+func (f *promoteDMFixture) promote(t *testing.T) *httptest.ResponseRecorder {
+	t.Helper()
+	return doRequest(t, f.srv, http.MethodPost, "/api/v1/chat/conversations/"+f.dmKey+"/promote",
+		map[string]string{"name": promoteDMThreadName})
+}
+
+// checkNotPromoted checks the fixture's DM was left as it was: no thread
+// with the requested name, the message still in the DM, and the direct
+// conversation still direct. It reads through the fixture's own store.
+func (f *promoteDMFixture) checkNotPromoted(t *testing.T, s store.Store) {
+	t.Helper()
+	ctx := context.Background()
+	topics, err := f.wcs.ListTopics(ctx, f.projectID)
+	if err != nil {
+		t.Fatalf("ListTopics: %v", err)
 	}
-	if promResp.ConversationID == "" {
-		t.Fatal("promoteResponse.ConversationID is empty")
+	for _, tp := range topics {
+		if tp.Name == promoteDMThreadName {
+			t.Errorf("a thread named %q was created", tp.Name)
+		}
 	}
+	n, err := f.wcs.CountMessages(ctx, f.dmKey)
+	if err != nil {
+		t.Fatalf("CountMessages: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("DM message count = %d, want 1 (the message stays in the DM)", n)
+	}
+	conv, err := s.GetConversationByExternalRef(ctx, "native", f.dmKey)
+	if err != nil {
+		t.Fatalf("GetConversationByExternalRef: %v", err)
+	}
+	if conv.ID != f.directConvID || conv.Kind != "direct" {
+		t.Errorf("direct conversation = %s (%s), want %s (direct)", conv.ID, conv.Kind, f.directConvID)
+	}
+}
+
+// TestPromoteDM_Handler_SetsConversationDefaultAgentID is review round 2
+// finding #3: round 1's TestPromoteDM_DualWrite_SetsConversationDefaultAgentID
+// calls the *store* with DefaultAgentID already filled in, so it proves the
+// SQL and nothing else — deleting handlers_chat_v2.go's
+// `DefaultAgentID: agentID` (the actual wiring, at the promote HTTP
+// handler) doesn't fail that test. This exercises the real promote
+// endpoint end to end: POST the promote request for a user<->agent DM,
+// then assert the promoted conversation's default_agent_id equals the
+// agent's ID, the same way a promoted thread's default is expected to show
+// up in `scion conversation show` (F1).
+func TestPromoteDM_Handler_SetsConversationDefaultAgentID(t *testing.T) {
+	s, agentID, _, promResp := promoteDMThroughHandler(t)
+	ctx := context.Background()
 
 	groupConv, err := s.GetConversation(ctx, promResp.ConversationID)
 	if err != nil {
@@ -2956,6 +3043,85 @@ func TestPromoteDM_Handler_SetsConversationDefaultAgentID(t *testing.T) {
 	if *groupConv.DefaultAgentID != agentID {
 		t.Errorf("default_agent_id = %q, want %q", *groupConv.DefaultAgentID, agentID)
 	}
+}
+
+// TestPromoteDM_Handler_StoresAgentSlugAsTopicDefault: promoting a DM
+// stores the agent slug as the thread's default agent, the form group
+// create stores (setGroupDefaultAgent). The agent ID as the owner value
+// (conversations.default_agent_id) is checked by
+// TestPromoteDM_Handler_SetsConversationDefaultAgentID; the topic's
+// DefaultAgentID field is write-only and GetTopic does not read it back.
+func TestPromoteDM_Handler_StoresAgentSlugAsTopicDefault(t *testing.T) {
+	_, _, wcs, promResp := promoteDMThroughHandler(t)
+
+	topic, err := wcs.GetTopic(context.Background(), promResp.ID)
+	if err != nil {
+		t.Fatalf("GetTopic: %v", err)
+	}
+	if topic == nil {
+		t.Fatal("promoted topic not found")
+	}
+	if topic.DefaultAgent != "promote-da-bot" {
+		t.Errorf("topic default_agent = %q, want the agent slug %q", topic.DefaultAgent, "promote-da-bot")
+	}
+	if promResp.DefaultAgent != "promote-da-bot" {
+		t.Errorf("response defaultAgent = %q, want %q", promResp.DefaultAgent, "promote-da-bot")
+	}
+}
+
+// TestPromoteDM_Handler_RefusesSoftDeletedAgent: promoting a DM whose agent
+// is soft-deleted is answered 404 "agent not found", as handleAddParticipant
+// answers a soft-deleted agent, and leaves the DM as it was.
+func TestPromoteDM_Handler_RefusesSoftDeletedAgent(t *testing.T) {
+	f := setupPromoteDM(t, time.Now().UTC(), false)
+	rec := f.promote(t)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("soft-deleted agent: promote status = %d, want 404: %s", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, `"not_found"`) || !strings.Contains(body, "agent not found") {
+		t.Errorf("soft-deleted agent: body = %s, want the not_found \"agent not found\" answer", body)
+	}
+	f.checkNotPromoted(t, f.s)
+}
+
+// promoteAgentLookupFaultStore is a switch-gated wrapper (installStoreFault).
+// While its switch is armed, it fails every GetAgent call for agentID after
+// the first one (the first is the project lookup from the DM key; the
+// second is the promote handler's own agent lookup), and counts them.
+type promoteAgentLookupFaultStore struct {
+	store.Store
+	fault   *storeFaultSwitch
+	agentID string
+	calls   int
+}
+
+var errPromoteAgentLookup = errors.New("test agent lookup fault")
+
+func (w *promoteAgentLookupFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if !w.fault.Active() || id != w.agentID {
+		return w.Store.GetAgent(ctx, id)
+	}
+	w.calls++
+	if w.calls > 1 {
+		return nil, errPromoteAgentLookup
+	}
+	return w.Store.GetAgent(ctx, id)
+}
+
+// TestPromoteDM_Handler_AgentLookupErrorRefused: when the promote handler's
+// agent lookup fails, the promote is refused with the lookup error (500)
+// and the DM is left as it was.
+func TestPromoteDM_Handler_AgentLookupErrorRefused(t *testing.T) {
+	f := setupPromoteDM(t, time.Time{}, true)
+	f.faultSwitch.Arm()
+	rec := f.promote(t)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("agent lookup error: promote status = %d, want 500: %s", rec.Code, rec.Body.String())
+	}
+	if f.lookupFault.calls != 2 {
+		t.Errorf("GetAgent calls for the agent = %d, want 2 (the project lookup, then the promote handler's lookup)", f.lookupFault.calls)
+	}
+	f.checkNotPromoted(t, f.s)
 }
 
 // TestDEF96_PromoteDM_Atomicity verifies AC-96-5: forcing a failure at the
@@ -4922,7 +5088,7 @@ func TestChatV2_Send_SenderUsesEmailNotDisplayName(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestAutoAdvanceSenderReadState(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer func() { _ = db.Close() }()
 
 	ctx := context.Background()
