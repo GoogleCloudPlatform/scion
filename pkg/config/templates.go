@@ -536,6 +536,13 @@ func projectTemplatesRoot(projectPath string) string {
 // isHubWorkspaceRootWithoutScion reports whether p is a hub-managed
 // workspace root (below the hub projects directory, not a .scion path)
 // that has no .scion entry: it then has no project configuration tier.
+//
+// "Below the hub projects directory" is isUnderHubProjectsDir
+// (hub_projects_dir_other.go and hub_projects_dir_windows.go): p lies below
+// the global directory's projects/ directory, where hub-managed workspaces
+// live. It is the only containment decision for the project layer of a hub
+// workspace root: settings, project templates and harness-configs all read
+// it through this function.
 func isHubWorkspaceRootWithoutScion(p string) bool {
 	if p == "" || filepath.Base(p) == DotScion {
 		return false
@@ -545,13 +552,6 @@ func isHubWorkspaceRootWithoutScion(p string) bool {
 	}
 	return isUnderHubProjectsDir(p)
 }
-
-// isUnderHubProjectsDir (hub_projects_dir_other.go and
-// hub_projects_dir_windows.go) reports whether p lies below the global
-// directory's projects/ directory, where hub-managed workspaces live. It is
-// the only containment decision for the project layer of a hub workspace
-// root: settings, project templates and harness-configs all read it through
-// isHubWorkspaceRootWithoutScion.
 
 // LegacyProjectTemplatesWarning returns a start warning when projectPath is
 // a workspace root (see projectTemplatesRoot) with templates under its own

@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -199,7 +200,7 @@ func TestLoadClientConfig_IncompletePair(t *testing.T) {
 			if !errors.Is(err, ErrIncompleteClientKeyPair) {
 				t.Fatalf("error = %v, want ErrIncompleteClientKeyPair", err)
 			}
-			if !strings.Contains(err.Error(), tc.wantPath) {
+			if !namesPath(err, tc.wantPath) {
 				t.Fatalf("error %q does not name %q", err, tc.wantPath)
 			}
 		})
@@ -234,7 +235,7 @@ func TestLoadClientConfig_BadFilesNamePathOnly(t *testing.T) {
 			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
 				t.Fatalf("error = %v, want %v", err, tc.wantIs)
 			}
-			if !strings.Contains(err.Error(), tc.wantPath) {
+			if !namesPath(err, tc.wantPath) {
 				t.Fatalf("error %q does not name %q", err, tc.wantPath)
 			}
 			if strings.Contains(err.Error(), garbage) {
@@ -345,4 +346,11 @@ func TestLoadClientConfig_PresentsOnlyAcceptableCert(t *testing.T) {
 	if len(refused.Certificate) != 0 {
 		t.Fatal("a certificate was presented although the acceptable CAs do not include its issuer")
 	}
+}
+
+// namesPath reports whether err names path, either as written or quoted
+// with %q (which doubles the backslashes of a Windows path).
+func namesPath(err error, path string) bool {
+	msg := err.Error()
+	return strings.Contains(msg, path) || strings.Contains(msg, strconv.Quote(path))
 }

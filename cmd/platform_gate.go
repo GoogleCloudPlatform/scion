@@ -16,6 +16,8 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -244,16 +246,16 @@ var flagValidationAnnotations = []string{
 // would turn "scion server start" into an unknown command, which does not
 // say why. On every other platform it does nothing.
 //
-// A gated command's own run hooks are cleared, it accepts any arguments
-// and unknown flags, and the required-flag and flag-group rules of the
-// flags it defines are dropped, so nothing of the command runs and no
-// usage error for it is reported. Root's PersistentPreRunE still handles
-// the global flags (a bad --format or a --tz/--utc conflict is still
-// reported), then returns the refusal (windowsRefusal) before any
-// invocation-target, project, settings or migration work. RunE refuses
-// too, for a command reached without root's hook. It is called with
-// runtime.GOOS right after applyModeRestrictions; tests pass goos
-// explicitly.
+// A gated command's own run hooks, persistent ones included, are cleared, it
+// accepts any arguments and unknown flags, and the required-flag and
+// flag-group rules of the flags it defines are dropped, so nothing of the
+// command runs and no usage error for it is reported. Root's
+// PersistentPreRunE still handles the global flags (a bad --format or a
+// --tz/--utc conflict is still reported), then returns the refusal
+// (windowsRefusal) before any invocation-target, project, settings or
+// migration work. RunE refuses too, for a command reached without root's
+// hook. It is called with runtime.GOOS right after applyModeRestrictions;
+// tests pass goos explicitly.
 func applyPlatformRestrictions(root *cobra.Command, goos string) {
 	if goos != "windows" {
 		return
@@ -269,6 +271,56 @@ func windowsRefusal(cmd *cobra.Command) error {
 		return nil
 	}
 	return &unsupportedOnWindowsError{path: path}
+}
+
+// completeGated answers a shell completion request (cobra's hidden
+// __complete and __completeNoDesc commands, which every completion script
+// runs) for a command the Windows gate refused. Cobra would otherwise call
+// the gated command's ValidArgsFunction and the completion functions
+// registered for its flags (RegisterFlagCompletionFunc), which can read
+// files, settings or the hub. For such a request it writes only the
+// completion directive ShellCompDirectiveNoFileComp to out (no
+// completions, and no file completion by the shell) and reports true; the
+// caller then exits without running cobra. Any other request, including
+// one for an allowed child of a gated parent (project use), reports false
+// and goes through cobra unchanged. args are the command-line arguments
+// after the program name. Off Windows no command is marked, so it always
+// reports false.
+//
+// The request is recognised the way cobra recognises it, not by the first
+// argument: cobra also accepts global flags before __complete (--debug, or
+// --project with its value). A hidden placeholder with the same names is
+// added for the lookup and removed again; the request is one only when
+// root.Find resolves args to a command of that name, and Find's remaining
+// arguments are then exactly the ones cobra's completion code receives.
+func completeGated(root *cobra.Command, args []string, out io.Writer) bool {
+	placeholder := &cobra.Command{
+		Use:                cobra.ShellCompRequestCmd,
+		Aliases:            []string{cobra.ShellCompNoDescRequestCmd},
+		Hidden:             true,
+		DisableFlagParsing: true,
+		Run:                func(*cobra.Command, []string) {},
+	}
+	root.AddCommand(placeholder)
+	defer root.RemoveCommand(placeholder)
+	found, rest, err := root.Find(args)
+	if err != nil || len(rest) == 0 {
+		return false
+	}
+	// By name, as cobra decides it: a command of that name already on root
+	// (cobra's own, or any other) is a completion request too, so the
+	// check fails closed rather than handing the request to cobra.
+	if name := found.Name(); name != cobra.ShellCompRequestCmd && name != cobra.ShellCompNoDescRequestCmd {
+		return false
+	}
+	// The last argument is the word being completed; cobra resolves the
+	// target command from the ones before it, the same way.
+	target, _, err := root.Find(rest[:len(rest)-1])
+	if err != nil || windowsRefusal(target) == nil {
+		return false
+	}
+	_, _ = fmt.Fprintf(out, ":%d\n", cobra.ShellCompDirectiveNoFileComp)
+	return true
 }
 
 // gateCommands walks the tree under parent and replaces the run function
@@ -293,6 +345,12 @@ func gateCommands(parent *cobra.Command, prefix string, gate func(path string) b
 		child.Run = nil
 		child.PreRun, child.PreRunE = nil, nil
 		child.PostRun, child.PostRunE = nil, nil
+		// Its persistent hooks too: cobra runs the nearest persistent
+		// pre-run hook only, so one on a gated command would replace
+		// root's, which returns the refusal. An allowed child of a gated
+		// parent (project use) then falls back to root's hook.
+		child.PersistentPreRun, child.PersistentPreRunE = nil, nil
+		child.PersistentPostRun, child.PersistentPostRunE = nil, nil
 		child.ValidArgsFunction = nil
 		child.Args = cobra.ArbitraryArgs
 		child.FParseErrWhitelist.UnknownFlags = true

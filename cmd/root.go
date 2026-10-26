@@ -315,6 +315,11 @@ func Execute() {
 
 	applyModeRestrictions(rootCmd, mode)
 	applyPlatformRestrictions(rootCmd, runtime.GOOS)
+	// Shell completion of a command the Windows gate refused: no
+	// completion function of the command runs (cmd/platform_gate.go).
+	if completeGated(rootCmd, cliArgs, os.Stdout) {
+		return
+	}
 
 	// Suppress ASCII banner in agent mode. This runs in Execute rather
 	// than init(), where the mode cannot yet be resolved safely.

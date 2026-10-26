@@ -111,6 +111,9 @@ func hubSkillsDiscoverBase(sourceURL string) (out string) {
 // the line hubSkillsSpanEnd, both included; each must occur once.
 func hubSkillsSpan(t *testing.T, name, src string) string {
 	t.Helper()
+	// Line endings are normalised first: the anchors end in "\n", and a
+	// CRLF checkout (Windows) gives both files "\r\n" endings.
+	src = strings.ReplaceAll(src, "\r\n", "\n")
 	if strings.Count(src, hubSkillsSpanStart) != 1 || strings.Count(src, hubSkillsSpanEnd) != 1 {
 		t.Fatalf("%s: span anchors found %d and %d times, want 1 each", name, strings.Count(src, hubSkillsSpanStart), strings.Count(src, hubSkillsSpanEnd))
 	}

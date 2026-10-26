@@ -51,6 +51,16 @@ jobs:
           - goos: darwin
             goarch: arm64
             output: scion-darwin-arm64
+          # Windows builds: scion.exe in a .zip (what Windows opens without
+          # extra tools). The docs name these assets exactly.
+          - goos: windows
+            goarch: amd64
+            output: scion-windows-amd64
+            archive: zip
+          - goos: windows
+            goarch: arm64
+            output: scion-windows-arm64
+            archive: zip
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
@@ -114,14 +124,20 @@ jobs:
           OUTPUT_NAME: ${{ matrix.output }}
         run: |
           mkdir -p dist
-          go build -ldflags "${LDFLAGS}" -o dist/scion ./cmd/scion
-          tar -czvf "${OUTPUT_NAME}.tar.gz" -C dist scion
+          BIN=scion
+          if [ "${GOOS}" = "windows" ]; then BIN=scion.exe; fi
+          go build -ldflags "${LDFLAGS}" -o "dist/${BIN}" ./cmd/scion
+          if [ "${GOOS}" = "windows" ]; then
+            (cd dist && zip -q "../${OUTPUT_NAME}.zip" "${BIN}")
+          else
+            tar -czvf "${OUTPUT_NAME}.tar.gz" -C dist "${BIN}"
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: ${{ matrix.output }}
-          path: ${{ matrix.output }}.tar.gz
+          path: ${{ matrix.output }}.${{ matrix.archive || 'tar.gz' }}
           if-no-files-found: error
 
   build-plugins:

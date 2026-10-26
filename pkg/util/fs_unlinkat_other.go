@@ -16,8 +16,9 @@
 
 package util
 
-// unlinkAt is unavailable on this platform: attempted is always false, so the
-// caller falls back to its other removal strategies.
+// unlinkAt is unavailable on this platform: it attempts nothing and returns
+// errUnlinkAtUnsupported, so removeSymlinkSafe fails closed instead of
+// falling back to path-based removal.
 func unlinkAt(_, _ string) (attempted bool, err error) {
-	return false, nil
+	return false, errUnlinkAtUnsupported
 }

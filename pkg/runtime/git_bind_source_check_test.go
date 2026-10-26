@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// These tests exercise the unix git-metadata bind checks (O_NOFOLLOW,
+// symlinks); on other platforms checkedBindSource is an ErrUnsupported stub.
+//go:build unix
+
 package runtime
 
 import (

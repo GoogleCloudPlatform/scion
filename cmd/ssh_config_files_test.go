@@ -410,6 +410,7 @@ func TestSSHCmdQuote_RefusesShellSpecialChars(t *testing.T) {
 	for _, word := range []string{"C:/a\u01c0b", "C:/a\u01c3b", "C:/a\u0300b", "C:/a\u0302b", "C:/a\u0303b", "C:/a\u030eb"} {
 		_, err := sshShellQuote(word)
 		require.Error(t, err, "%q", word)
+		assert.Contains(t, err.Error(), "cannot carry", "%q", word)
 	}
 	// Other combining marks stay accepted (decomposed account names).
 	assert.Equal(t, "C:/Jose\u0301/x", mustSSHShellQuote(t, "C:/Jose\u0301/x"))

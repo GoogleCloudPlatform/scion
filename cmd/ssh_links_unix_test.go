@@ -90,31 +90,12 @@ func TestWriteSSHHubPlan_HardLinkedConfigNoSideEffect(t *testing.T) {
 	require.NoError(t, os.WriteFile(p.userConfig(), []byte("Host old\n"), 0o600))
 	second := filepath.Join(home, "second-name")
 	require.NoError(t, os.Link(p.userConfig(), second))
-	snapshot := func() map[string]string {
-		out := map[string]string{}
-		require.NoError(t, filepath.WalkDir(home, func(path string, d os.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if d.Type().IsRegular() {
-				b, err := os.ReadFile(path)
-				if err != nil {
-					return err
-				}
-				out[path] = "file:" + string(b)
-			} else {
-				out[path] = d.Type().String()
-			}
-			return nil
-		}))
-		return out
-	}
-	before := snapshot()
+	before := treeSnapshotUnix(t, home)
 	res := &sshRegenResult{label: "hub", includeFile: p.includeFile("hub"), knownHostsFile: p.knownHostsFile("hub"),
 		includeContent: "# include\n", knownContent: "# known hosts\n"}
 	err := writeSSHHubPlan(p, res)
 	require.ErrorIs(t, err, privatefs.ErrHardLinked)
-	assert.Equal(t, before, snapshot(), "the refusal changed nothing in home")
+	assert.Equal(t, before, treeSnapshotUnix(t, home), "the refusal changed nothing in home")
 
 	require.NoError(t, os.Remove(second))
 	require.NoError(t, writeSSHHubPlan(p, res), "control: one name")

@@ -54,11 +54,6 @@ func seedPrivateGitConfig(baseConfigPath, agentDir, branch string) (string, erro
 	if agentDir == "" {
 		return "", fmt.Errorf("seed private git config: empty agent dir")
 	}
-	gitDir := filepath.Join(agentDir, "git")
-	if err := os.MkdirAll(gitDir, 0700); err != nil {
-		return "", fmt.Errorf("seed private git config: %w", err)
-	}
-
 	raw, err := readBaseGitConfig(baseConfigPath)
 	if err != nil {
 		return "", fmt.Errorf("seed private git config: %w", err)
@@ -101,6 +96,12 @@ func seedPrivateGitConfig(baseConfigPath, agentDir, branch string) (string, erro
 	// preferences go in the agent's writable global git config in the agent home.
 	redacted = append(redacted, privateConfigUpstreamSeed(branch)...)
 
+	// Create the git dir only once the base config has been read, so a
+	// refused read (for example ErrUnsupported off unix) creates nothing.
+	gitDir := filepath.Join(agentDir, "git")
+	if err := os.MkdirAll(gitDir, 0700); err != nil {
+		return "", fmt.Errorf("seed private git config: %w", err)
+	}
 	tmp, err := os.CreateTemp(gitDir, "config.*.tmp") // O_EXCL
 	if err != nil {
 		return "", fmt.Errorf("seed private git config: temp: %w", err)

@@ -27,7 +27,7 @@ import (
 	"testing"
 )
 
-const privilegeHint = "the Windows test job must run with SeCreateSymbolicLinkPrivilege or Developer Mode (security checklist §5); this is a job configuration failure, not a skip"
+const privilegeHint = "the Windows test job must run with SeCreateSymbolicLinkPrivilege or Developer Mode; symlink and junction tests never skip, so this is a job configuration failure, not a skip"
 
 // MustSymlink creates newname as a symbolic link to oldname, or fails the
 // test.

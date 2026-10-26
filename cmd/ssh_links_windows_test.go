@@ -117,7 +117,7 @@ func vscodeUpdateFor(t *testing.T, agent string) vscodeUpdate {
 // a directory for another path of the same call). Control: once the
 // foreign right is removed, the same call succeeds and its leaves are
 // private.
-func TestSSHDirCallers_LinkTargetFailingRuleIRefused(t *testing.T) {
+func TestSSHDirCallers_ForeignWritableLinkTargetRefused(t *testing.T) {
 	includeLine := func(t *testing.T, home string) error {
 		_, err := ensureSSHIncludeLine(sshPaths{home: home})
 		return err
@@ -163,7 +163,7 @@ func TestSSHDirCallers_LinkTargetFailingRuleIRefused(t *testing.T) {
 				homeBefore, targetBefore := treeSnapshot(t, home), treeSnapshot(t, target)
 
 				err := tc.call(t, home)
-				require.ErrorIs(t, err, privatefs.ErrNotPrivate, "the rule I failure is returned")
+				require.ErrorIs(t, err, privatefs.ErrNotPrivate, "the foreign-writable link target is refused")
 				assert.Contains(t, err.Error(), wintest.SIDUsers)
 				assert.Equal(t, homeBefore, treeSnapshot(t, home), "the refusal changed nothing in home")
 				assert.Equal(t, targetBefore, treeSnapshot(t, target), "the refusal changed nothing in the target")

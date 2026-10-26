@@ -28,6 +28,7 @@ const hostedUserGuide = {
 	items: [
 		{ label: 'Connecting to a Hub', slug: 'hosted/user/hosted-user' },
 		{ label: 'Working with Several Hubs', slug: 'hosted/user/multiple-hubs' },
+		{ label: 'Windows', slug: 'hosted/user/windows' },
 		{ label: 'User Access Tokens', slug: 'hosted/user/personal-access-tokens' },
 		{ label: 'Test Identities on Another Test Hub', slug: 'hosted/user/test-identity-target-hubs' },
 		{ label: 'CLI from a Coding Agent', slug: 'hosted/user/coding-agent-cli' },

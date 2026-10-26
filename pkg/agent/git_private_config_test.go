@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// These tests exercise the unix private git config seed (readBaseGitConfig
+// uses O_NOFOLLOW); on other platforms it is an ErrUnsupported stub.
+//go:build unix
+
 package agent
 
 import (

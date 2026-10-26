@@ -612,14 +612,6 @@ func encodeVSCodeSettings(m map[string]any) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func writeVSCodeSettings(path string, m map[string]any) error {
-	data, err := encodeVSCodeSettings(m)
-	if err != nil {
-		return err
-	}
-	return writeVSCodeSettingsData(path, data)
-}
-
 func writeVSCodeSettingsData(path string, data []byte) error {
 	if err := writeFileAtomic(path, data, sshFileMode); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)

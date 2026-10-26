@@ -54,6 +54,6 @@ func TestInitDevAuth_WindowsTokenFilePrivate(t *testing.T) {
 		t.Fatalf("token file = %q, %v; want %q", data, err, token)
 	}
 	if !wintest.ReadSD(t, sub).HasAllowACE(wintest.SIDUsers) {
-		t.Error("the token directory lost its inherited protection (row C2 keeps it Inherit)")
+		t.Error("the token directory lost its inherited protection: only the token file is private, the directory keeps what it inherits")
 	}
 }
