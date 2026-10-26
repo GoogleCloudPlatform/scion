@@ -120,6 +120,9 @@ func TestFederateResolve_SkillHashV2_On(t *testing.T) {
 		{"trusted", hashV2FedCase{trust: "trusted", claimV1: goldenLegacySkillV1, files: federatedLegacyFiles()}, true, goldenLegacySkillV2},
 		{"trusted, claimed v1 disagrees with files", hashV2FedCase{trust: "trusted", claimV1: goldenGitHubExecSkillV1, files: federatedLegacyFiles()}, false, ""},
 		{"trusted, no per-file hashes", hashV2FedCase{trust: "trusted", claimV1: goldenLegacySkillV1, claimV2: goldenLegacySkillV2, files: noHashes}, true, ""},
+		{"trusted, no content hash and no per-file hashes", hashV2FedCase{trust: "trusted", files: noHashes}, false, ""},
+		{"trusted, no content hash and no files", hashV2FedCase{trust: "trusted"}, false, ""},
+		{"trusted, no content hash but recomputable", hashV2FedCase{trust: "trusted", files: federatedLegacyFiles()}, false, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -167,4 +170,15 @@ func TestFederateResolve_SkillHashV2_Off(t *testing.T) {
 	})
 	require.NotNil(t, resolveErr, "off: a pin that differs from the claim still fails")
 	assert.Equal(t, "trust_violation", resolveErr.Code)
+
+	// A trusted registry that sends neither a content hash nor per-file
+	// hashes is accepted with the experiment off, as before.
+	noHashes := federatedLegacyFiles()
+	for i := range noHashes {
+		noHashes[i].Hash = ""
+	}
+	resolved, resolveErr = runHashV2Federation(t, hashV2FedCase{trust: "trusted", files: noHashes})
+	require.Nil(t, resolveErr, "off: an unverifiable trusted skill is accepted, as before")
+	assert.Empty(t, resolved.ContentHash)
+	assert.Empty(t, resolved.ContentHashV2)
 }

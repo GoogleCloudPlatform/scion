@@ -22,10 +22,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
 
@@ -248,6 +250,83 @@ func TestInstallSkill_ContentHashV2(t *testing.T) {
 			}
 			if _, statErr := os.Stat(installed); statErr != nil {
 				t.Errorf("skill not installed: %v", statErr)
+			}
+		})
+	}
+}
+
+// The cache-hit branch of the install step checks v2 too. A matching v2
+// installs from the cache without a download; a v2 that the cached copy
+// cannot satisfy (here a file listed without a per-file hash) falls
+// through to the download, which verifies the downloaded files and
+// installs them; a wrong v2 falls through and the download fails closed.
+func TestInstallSkill_ContentHashV2CacheHit(t *testing.T) {
+	content := []byte("# cached v2 skill\n")
+	var downloads atomic.Int64
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		downloads.Add(1)
+		_, _ = w.Write(content)
+	}))
+	t.Cleanup(srv.Close)
+	origTransport := http.DefaultTransport
+	http.DefaultTransport = srv.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = origTransport })
+
+	fileHash := transfer.HashBytes(content)
+	infos := []transfer.FileInfo{{Path: "SKILL.md", Hash: fileHash, Mode: "0644"}}
+	v1 := transfer.ComputeContentHashV1(infos)
+	v2 := transfer.ComputeContentHashV2(infos)
+	wrongV2 := transfer.ComputeContentHashV2([]transfer.FileInfo{{Path: "README.md", Hash: fileHash, Mode: "0644"}})
+
+	tests := []struct {
+		name          string
+		listedHash    string
+		hashV2        string
+		wantDownloads int64
+		wantErr       bool
+	}{
+		{"v2 match uses the cache", fileHash, v2, 0, false},
+		{"unverifiable cached copy falls through to download", "", v2, 1, false},
+		{"wrong v2 falls through and fails closed", fileHash, wrongV2, 1, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			downloads.Store(0)
+			cache, err := templatecache.New(t.TempDir(), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// No executable file, so the cache key is the bare v1 hash.
+			if _, err := cache.Put(v1, map[string][]byte{"SKILL.md": content}); err != nil {
+				t.Fatal(err)
+			}
+			ctx := ContextWithSkillCache(context.Background(), cache)
+			skillsDest := t.TempDir()
+			skill := ResolvedSkill{
+				Name: "cached-v2", URI: "skill://scion/core/cached-v2@1.0.0", Version: "1.0.0",
+				Hash: v1, HashV2: tt.hashV2,
+				Files: []ResolvedFile{{Path: "SKILL.md", URL: srv.URL + "/SKILL.md", Hash: tt.listedHash, Mode: "0644"}},
+			}
+			_, err = installSkillAt(ctx, skill, skillsDest)
+			if got := downloads.Load(); got != tt.wantDownloads {
+				t.Errorf("downloads = %d, want %d", got, tt.wantDownloads)
+			}
+			installed := filepath.Join(skillsDest, "cached-v2", "SKILL.md")
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "bundle hash v2 mismatch") {
+					t.Fatalf("want a v2 mismatch, got %v", err)
+				}
+				if _, statErr := os.Stat(installed); !os.IsNotExist(statErr) {
+					t.Errorf("a rejected skill must not be installed, stat err = %v", statErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("install: %v", err)
+			}
+			got, readErr := os.ReadFile(installed)
+			if readErr != nil || string(got) != string(content) {
+				t.Errorf("installed SKILL.md = %q, %v", got, readErr)
 			}
 		})
 	}

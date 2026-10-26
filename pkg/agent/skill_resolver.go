@@ -743,10 +743,11 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 				copyErr = verifyInstalledSkillHash(skillStagingDir, skill)
 			}
 			if copyErr == nil && skill.HashV2 != "" {
-				// verifyInstalledSkillHash checked every listed file
-				// against its per-file hash, so v2 over the listed hashes
-				// is v2 of the copied files. A file listed without a hash
-				// fails here and is downloaded instead.
+				// verifyInstalledSkillHash checked every listed file that
+				// has a per-file hash, so v2 over the listed hashes is v2
+				// of the copied files. A file listed without a hash puts
+				// an empty hash into the v2 preimage, so the check fails
+				// and the skill is downloaded and verified instead.
 				listed := make([]transfer.FileInfo, len(skill.Files))
 				for i, f := range skill.Files {
 					listed[i] = transfer.FileInfo{Path: f.Path, Hash: f.Hash}

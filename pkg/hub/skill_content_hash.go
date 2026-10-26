@@ -78,8 +78,9 @@ func (s *Server) withSkillContentHashV2(sv *store.SkillVersion) *store.SkillVers
 // constraint that matches no version's v1 hash is matched against the v2
 // hash of each published or deprecated version (v1 first, then v2). When
 // several versions share that v2 (the same files republished), the oldest
-// wins (created ascending, then ID), the order the store's v1 lookup returns
-// rows in on SQLite.
+// wins (created ascending, then ID). The store's v1 lookup has no explicit
+// order (First() with no ORDER BY, so the database decides); making it
+// match is ptone/scion#6248.
 func (s *Server) resolveSkillVersion(ctx context.Context, skillID, constraint string) (*store.SkillVersion, error) {
 	sv, err := s.store.ResolveSkillVersion(ctx, skillID, constraint)
 	if err == nil || !errors.Is(err, store.ErrNotFound) ||
@@ -137,7 +138,8 @@ func (s *Server) listAllSkillVersions(ctx context.Context, skillID string) ([]st
 // While it is on, the hub recomputes v1 and v2 from the file list (paths,
 // per-file hashes and modes; a missing mode is "0644", as the broker
 // installs it). A claimed v1, or a claimed v2, that disagrees fails
-// closed. A pinned registry additionally needs a file list it can
+// closed, at every trust level. A skill with no claimed contentHash whose
+// hashes cannot be recomputed fails too, since nothing would verify it. A pinned registry additionally needs a file list it can
 // recompute from, and its pin must equal the recomputed v1 or v2. The
 // recomputed v2 is then sent as contentHashV2. Because the broker checks
 // every file against its per-file hash and installs it with the listed
@@ -181,6 +183,12 @@ func (s *Server) checkFederatedSkillHashes(ctx context.Context, registry *store.
 		return nil
 	}
 
+	if !recomputed && resolved.ContentHash == "" {
+		// Nothing would verify this skill: the hub cannot recompute a hash
+		// and the broker has no bundle hash to check against.
+		return trustViolation(fmt.Sprintf("cannot verify %q from registry %q: it sent no content hash and did not list a hash for every file",
+			skillRef.URI, registryName))
+	}
 	if recomputed {
 		if resolved.ContentHash != v1 {
 			return trustViolation(fmt.Sprintf("content hash %s for %q from registry %q does not match its files (%s)",
