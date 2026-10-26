@@ -23,6 +23,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/internal/testutil/wintest"
 )
 
 func sampleEntry() *CacheEntry {
@@ -38,11 +40,9 @@ func TestCacheEntryCreatedExclusive0600(t *testing.T) {
 	fi, err := os.Lstat(res.Path())
 	require.NoError(t, err)
 	assert.True(t, fi.Mode().IsRegular())
-	assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
+	assertPrivateFile(t, res.Path())
 	for _, d := range []string{filepath.Dir(res.Path()), filepath.Dir(filepath.Dir(res.Path()))} {
-		di, err := os.Stat(d)
-		require.NoError(t, err)
-		assert.Equal(t, os.FileMode(0o700), di.Mode().Perm(), d)
+		assertPrivateDir(t, d)
 	}
 	assert.Equal(t, filepath.Join(home, ".scion", "hub-profiles", "t1", "run-r1", "owner.json"), res.Path())
 
@@ -64,7 +64,7 @@ func TestCacheRefusesSymlinks(t *testing.T) {
 	target := filepath.Join(home, "target.json")
 
 	// A dangling symlink at the alias path is refused (O_EXCL|O_NOFOLLOW).
-	require.NoError(t, os.Symlink(target, filepath.Join(dir, "owner.json")))
+	wintest.MustSymlink(t, target, filepath.Join(dir, "owner.json"))
 	_, err = ReserveEntry(home, "t1", "r1", "owner")
 	require.Error(t, err)
 	_, statErr := os.Lstat(target)
@@ -83,7 +83,7 @@ func TestCacheRefusesSymlinks(t *testing.T) {
 	require.NoError(t, os.MkdirAll(real, 0o700))
 	pdir := filepath.Join(home2, ".scion", "hub-profiles", "t1")
 	require.NoError(t, os.MkdirAll(pdir, 0o700))
-	require.NoError(t, os.Symlink(real, filepath.Join(pdir, "run-r1")))
+	wintest.MustSymlink(t, real, filepath.Join(pdir, "run-r1"))
 	_, err = ReserveEntry(home2, "t1", "r1", "owner")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "symlink")
@@ -96,23 +96,12 @@ func TestCacheRefusesSymlinks(t *testing.T) {
 	elsewhere := filepath.Join(home3, "elsewhere")
 	require.NoError(t, os.MkdirAll(filepath.Join(elsewhere, "run-r1"), 0o700))
 	require.NoError(t, os.MkdirAll(filepath.Join(home3, ".scion", "hub-profiles"), 0o700))
-	require.NoError(t, os.Symlink(elsewhere, filepath.Join(home3, ".scion", "hub-profiles", "t1")))
+	wintest.MustSymlink(t, elsewhere, filepath.Join(home3, ".scion", "hub-profiles", "t1"))
 	_, err = ReserveEntry(home3, "t1", "r1", "owner")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "symlink")
 	entries, _ = os.ReadDir(filepath.Join(elsewhere, "run-r1"))
 	assert.Empty(t, entries, "nothing was written through the symlinked profile dir")
-}
-
-func TestCacheReadRefusesOpenModes(t *testing.T) {
-	home := t.TempDir()
-	res, err := ReserveEntry(home, "t1", "r1", "owner")
-	require.NoError(t, err)
-	require.NoError(t, res.Fill(sampleEntry()))
-	require.NoError(t, os.Chmod(res.Path(), 0o644))
-	_, err = ReadEntry(home, "t1", "r1", "owner")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "must be 0600")
 }
 
 func TestCacheReplaceIsAtomicAndKeeps0600(t *testing.T) {
@@ -128,8 +117,7 @@ func TestCacheReplaceIsAtomicAndKeeps0600(t *testing.T) {
 	got, err := ReadEntry(home, "t1", "r1", "owner")
 	require.NoError(t, err)
 	assert.Equal(t, "FIXTURE-TOKEN-2", got.Token)
-	fi, _ := os.Lstat(res.Path())
-	assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
+	assertPrivateFile(t, res.Path())
 	entries, _ := os.ReadDir(filepath.Dir(res.Path()))
 	assert.Len(t, entries, 1, "no temporary file is left behind")
 

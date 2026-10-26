@@ -618,6 +618,28 @@ jobs:
           esac
           exit "$rc"
 
+      # Windows file-protection guard: pure bash plus
+      # `go list` (no compile). Exit 1 = findings, 2 = tool or list error.
+      - name: Check Windows File Protection (winsec-guard)
+        run: |
+          set +e
+          bash hack/winsec-guard.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=winsec-guard NOT checked::winsec-guard --self-test failed (exit $rc) — the guard itself is broken, so nothing was analysed."
+            exit "$rc"
+          fi
+          bash hack/winsec-guard.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=winsec-guard::A Windows-reachable file uses Chmod as protection, string containment, a zero no-follow flag or a nil privacy check; see the step log and the header of hack/winsec-guard.sh." ;;
+            *) echo "::error title=winsec-guard NOT checked::winsec-guard could not run (exit $rc) — NOTHING WAS ANALYSED." ;;
+          esac
+          exit "$rc"
+
       # Run Tests with a diagnostic hang watchdog (ptone/scion#3183). It is
       # diagnostic only: no retries, and on a normal pass or fail the step
       # exits with make test-fast-ci's own exit code. If the tests are still
@@ -816,6 +838,46 @@ jobs:
 
       - name: Build Binary
         run: make build
+
+      - name: Save Go cache
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
+
+  # The Windows CLI must keep compiling. This is its own ubuntu job rather
+  # than a step in Build & Test: in Build & Test the step measured 9m05s
+  # cold (GOOS=windows compiles pkg/hub and its dependencies with no cached
+  # objects, and only pushes to main save this workload's cache), which put
+  # that job at 28m of its 30m timeout. Non-test builds only (pkg/hub compiles as a dependency,
+  # never its test package), so no Web UI build is needed: web/dist/client
+  # holds a committed .gitkeep for the embed. winsec-guard runs in Build &
+  # Test. No needs/if and no path gating: it runs on every PR and push to
+  # main, so the check is always reported.
+  windows-cross-build:
+    name: Windows cross-build (guard)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        id: go
+        uses: ./.github/actions/setup-go-cache
+        with:
+          workload: windows-cross-build
+
+      - name: Cross-build for Windows (guard)
+        env:
+          GOTOOLCHAIN: local
+          GOGC: '50'
+        run: |
+          GOOS=windows GOARCH=amd64 go build -buildvcs=false -o /dev/null ./cmd/scion
+          GOOS=windows GOARCH=arm64 go build -buildvcs=false -o /dev/null ./cmd/scion
+          GOOS=windows GOARCH=amd64 go vet ./pkg/util/privatefs/... ./pkg/util/pathcanon/... ./pkg/util/filelock/... ./pkg/tunnelclient/...
 
       - name: Save Go cache
         uses: ./.github/actions/save-go-cache

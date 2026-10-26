@@ -109,9 +109,7 @@ func TestIssueAdminToCache_ThroughAdminDelegation(t *testing.T) {
 		assertAdminIssuerRequest(t, req, tc.delegation)
 		assert.Equal(t, "r1", req.Header.Get(HeaderRunLabel))
 
-		fi, err := os.Lstat(filepath.Join(h.home, ".scion", "hub-profiles", "t1", "run-r1", "a-"+tc.role+".json"))
-		require.NoError(t, err)
-		assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
+		assertPrivateFile(t, filepath.Join(h.home, ".scion", "hub-profiles", "t1", "run-r1", "a-"+tc.role+".json"))
 		got, err := ReadEntry(h.home, "t1", "r1", "a-"+tc.role)
 		require.NoError(t, err)
 		assert.Equal(t, e.Token, got.Token)

@@ -1,3 +1,5 @@
+//go:build unix
+
 /*
 Copyright 2026 The Scion Authors.
 */
@@ -321,3 +323,10 @@ func RefuseSymlinkOrNonRegularAt(dirFd int, name string) error {
 	}
 	return nil
 }
+
+// Close closes a directory descriptor returned by this package.
+func Close(fd int) error { return syscall.Close(fd) }
+
+// Fchown changes the owner of an open descriptor; it has the chown
+// callback shape WriteAtNoFollowWithChown takes.
+func Fchown(fd, uid, gid int) error { return syscall.Fchown(fd, uid, gid) }

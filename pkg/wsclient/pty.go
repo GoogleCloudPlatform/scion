@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/termresize"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"github.com/gorilla/websocket"
 	"golang.org/x/term"
@@ -872,14 +873,14 @@ func (c *PTYClient) restoreAfterRun(runErr error) {
 
 // handleResize handles terminal resize events.
 func (c *PTYClient) handleResize() {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGWINCH)
+	resized, stop := termresize.Notify(c.ctx, c.oldFd)
+	defer stop()
 
 	for {
 		select {
 		case <-c.ctx.Done():
 			return
-		case <-sigCh:
+		case <-resized:
 			cols, rows, err := term.GetSize(c.oldFd)
 			if err != nil {
 				continue

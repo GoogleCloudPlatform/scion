@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// These tests exercise unix-only, Windows-gated agent storage code.
+//go:build unix
+
 package agent
 
 import (
@@ -31,17 +34,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
-
-// mustDetectRepoRoot calls detectRepoRoot with no settings and fails the test
-// on an error.
-func mustDetectRepoRoot(t *testing.T, explicit bool, effectiveWorkspace, projectDir string) string {
-	t.Helper()
-	got, err := detectRepoRoot(explicit, effectiveWorkspace, projectDir, nil)
-	if err != nil {
-		t.Fatalf("detectRepoRoot(%v, %q, %q): %v", explicit, effectiveWorkspace, projectDir, err)
-	}
-	return got
-}
 
 // mkGitRepo creates dir and makes it a git repository with one commit.
 func mkGitRepo(t *testing.T, dir string) string {

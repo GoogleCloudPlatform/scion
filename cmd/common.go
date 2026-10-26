@@ -505,7 +505,7 @@ func CheckAgentsGitignore(projectPath string) error {
 		return nil
 	}
 
-	rel, err := filepath.Rel(root, projectDir)
+	rel, err := filepath.Rel(root, projectDir) //winsec:not-containment only RunAgent (start, create, resume) reaches it, and those are gated on Windows
 	if err != nil || strings.HasPrefix(rel, "..") {
 		return nil
 	}
