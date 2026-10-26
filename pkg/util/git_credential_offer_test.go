@@ -425,3 +425,25 @@ func TestNoCredentialHelpers_UnauthenticatedCloneAndPullSucceed(t *testing.T) {
 		t.Fatalf("unauthenticated pull: %v", err)
 	}
 }
+
+// git applies no URL-scoped setting to a URL it cannot normalize (a "/../"
+// segment above the root), so only the generic http.extraHeader applies
+// there. With NoCredentialHelpers it is not sent either, on clone and pull;
+// without it, it is.
+func TestNoCredentialHelpers_ResetsGenericExtraHeaderForUnnormalizedURL(t *testing.T) {
+	_, workspace, _ := sharedWorkspaceFixture(t)
+	cs := newCredentialTraceServer(t)
+	cs.useAmbientConfig(t, cs.ambientHeaderConfig())
+	url := cs.srv.URL + "/../org/repo.git"
+
+	_ = CloneSharedWorkspace(filepath.Join(t.TempDir(), "ws"), url, "", "")
+	if got := cs.seenHeaders(); !slices.Contains(got, "generic") {
+		t.Fatalf("a plain clone must send the generic ambient header (harness), got %q", got)
+	}
+	n := len(cs.seenHeaders())
+	_ = CloneSharedWorkspaceHardened(filepath.Join(t.TempDir(), "ws"), url, "", "", HostGitHardening{NoCredentialHelpers: true})
+	_, _ = PullSharedWorkspaceHardened(workspace, url, "", HostGitHardening{NoCredentialHelpers: true})
+	if extra := cs.seenHeaders()[n:]; len(extra) != 0 {
+		t.Errorf("NoCredentialHelpers sent ambient headers %q", extra)
+	}
+}

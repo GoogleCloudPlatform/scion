@@ -93,7 +93,12 @@ func (tr *hostCloneTrace) url() string { return tr.srv.URL + "/org/repo.git" }
 
 func (tr *hostCloneTrace) clone(t *testing.T, in ProvisionInput) {
 	t.Helper()
-	in.GitClone = &api.GitCloneConfig{URL: tr.url()}
+	tr.cloneURL(t, in, tr.url())
+}
+
+func (tr *hostCloneTrace) cloneURL(t *testing.T, in ProvisionInput, url string) {
+	t.Helper()
+	in.GitClone = &api.GitCloneConfig{URL: url}
 	in.Resolved = ResolvedWorkspace{HostPath: filepath.Join(t.TempDir(), "dest")}
 	require.Error(t, runGitClone(context.Background(), in), "the 401 endpoint cannot be cloned")
 }
@@ -153,4 +158,16 @@ func TestRunGitClone_NotHardenedUnchanged(t *testing.T) {
 	require.NotEmpty(t, auth)
 	assert.Equal(t, "ambient:ambient-secret", auth[0])
 	assert.NotEmpty(t, headers, "the host's extra headers still apply")
+}
+
+// For a URL git cannot normalize (a "/../" segment above the root) git
+// applies only the generic http.extraHeader; the hardened unbound clone
+// does not send it either.
+func TestRunGitClone_HardenedUnboundUnnormalizedURL(t *testing.T) {
+	tr := newHostCloneTrace(t)
+	tr.cloneURL(t, ProvisionInput{HostGitHardened: true, CloneTokenRemote: "github.com/org/repo"}, tr.srv.URL+"/../org/repo.git")
+	auth, headers, askpass := tr.seen()
+	assert.Empty(t, auth)
+	assert.Empty(t, headers)
+	assert.Empty(t, askpass)
 }

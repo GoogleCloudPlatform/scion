@@ -202,6 +202,7 @@ func hostGitBindingCases(tr *hostGitTrace) []struct {
 		bound                  bool
 	}{
 		{"label names another host", "github.com/org/repo", tr.url("org/repo"), false},
+		{"label git cannot normalize", "github.com/org/repo", tr.srv.URL + "/../org/repo.git", false},
 		{"same host, other owner/repo", tr.url("org/repo"), tr.url("other/repo"), false},
 		{"matching recorded remote", tr.url("org/repo"), "", true},
 		{"label equals the recorded remote", tr.url("org/repo"), tr.url("org/repo"), true},
