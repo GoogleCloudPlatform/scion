@@ -1519,3 +1519,132 @@ func TestMaterialAssociation_FactDefensiveBranches(t *testing.T) {
 		assert.Contains(t, detail, "project lookup failed")
 	})
 }
+
+// TestDeliverySelector_AdmissionMemoKeepsDeny: a denied admission walk is
+// memoized too. The first item stores the deny with its cause, and every
+// later item under the same permission in that selection is denied with the
+// same cause without walking the chain again.
+func TestDeliverySelector_AdmissionMemoKeepsDeny(t *testing.T) {
+	m := newLDFixture(t, "memo-deny", ldOptions{edge: withBoundedCeiling("agent.read")})
+	ctx := context.Background()
+	var metas []secret.SecretMeta
+	for _, scope := range []string{store.ScopeProject, store.ScopeHub, store.ScopeRuntimeBroker} {
+		metas = append(metas, m.secret(t, "MD_MEMO_DENY_"+strings.ToUpper(scope), "v", store.SecretTypeEnvironment, scope, m.scopeID(scope)))
+	}
+	var log []string
+	hdWithStore(t, m.authz, &ldOrderStore{Store: m.store, target: m.agent.ID, log: &log})
+	edgeReads := func(run func()) int {
+		log = log[:0]
+		run()
+		n := 0
+		for _, e := range log {
+			if e == "edges" {
+				n++
+			}
+		}
+		return n
+	}
+
+	sel := newDeliverySelector(m.authz, m.agent, PurposeRestart)
+	first := edgeReads(func() {
+		ok, err := sel.authorize(ctx, MaterialKindSecret, materialRecordSecret, metas[0].ID, metas[0].Name, store.ScopeProject, m.agent.ProjectID)
+		require.NoError(t, err)
+		assert.False(t, ok, "control: the chain does not allow secret.deliver")
+	})
+	require.Greater(t, first, 0, "the first item walked the chain")
+	require.NotNil(t, sel.ident)
+	require.NotNil(t, sel.ident.admission)
+	o, ok := sel.ident.admission.load("secret.deliver")
+	require.True(t, ok, "the deny is memoized")
+	assert.False(t, o.ok)
+	assert.Equal(t, DenyCauseCeilingEffectExceeded, o.cause)
+	assert.NotEmpty(t, o.reason)
+
+	rest := edgeReads(func() {
+		for _, sm := range metas[1:] {
+			ok, err := sel.authorize(ctx, MaterialKindSecret, materialRecordSecret, sm.ID, sm.Name, sm.Scope, m.scopeID(sm.Scope))
+			require.NoError(t, err)
+			assert.False(t, ok, "%s stays denied", sm.Name)
+		}
+	})
+	assert.Less(t, rest, 2*first, "the later items did not walk the chain again")
+
+	grant, ok := grantForDeliveryScope(store.ScopeHub)
+	require.True(t, ok)
+	res := materialDeliveryResource(MaterialKindSecret, materialRecordSecret, metas[1].ID, metas[1].Name, store.ScopeHub, m.hubID, m.agent.ID, grant, PurposeRestart)
+	d := decidePerm(m.authz, sel.ident, res, ActionDeliver, "secret.deliver", false)
+	assert.False(t, d.Allowed)
+	assert.Equal(t, DenyCauseCeilingEffectExceeded, d.DenyCause, "a memoized deny keeps its cause: %s", d.Reason)
+	assert.Equal(t, 3, sel.denied, "every item was refused")
+}
+
+// TestDispatchDelivery_TestAdminPlaceholderMasksLowerScope: for an agent
+// rooted at an admin-kind test identity whose owner is not the root, the
+// owner's user-scope secret is withheld, yet it still outranks an allowed
+// project secret of the same name, as on the Resolve path: neither is
+// delivered. The withheld secret is never fetched, no item is delivered
+// without a value, and a project secret no withheld item masks is delivered.
+func TestDispatchDelivery_TestAdminPlaceholderMasksLowerScope(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	ctx := context.Background()
+	issuer := taUser(t, s, "md-tam-iss", store.SystemRoleSuperAdmin)
+	root := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin).Identity.ID
+	projectID := tid("md-tam-project")
+	taProject(t, s, projectID, root)
+
+	const hubID = "md-tam-hub"
+	backend := secret.NewLocalBackend(s, hubID, "test-secret")
+	rec := &ldRecordingSecretBackend{SecretBackend: backend}
+	d := NewHTTPAgentDispatcherWithClient(s, &mockRuntimeBrokerClient{}, false, slog.Default())
+	d.SetHubID(hubID)
+	d.SetAuthzService(srv.authzService)
+	d.SetSecretBackend(rec)
+
+	id := tid("md-tam-agent")
+	agent := &store.Agent{
+		ID: id, Slug: "md-tam-" + id[:8], Name: "md-tam-" + id[:8], ProjectID: projectID,
+		Phase: string(state.PhaseRunning), OwnerID: issuer.ID, CreatedBy: root, Ancestry: []string{root},
+		AppliedConfig: &store.AgentAppliedConfig{},
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	hdEdge(t, s, store.DelegationPrincipalUser, root, id, projectID, nil)
+
+	set := func(name, value, scope, scopeID string) secret.SecretMeta {
+		_, meta, err := backend.Set(ctx, &secret.SetSecretInput{
+			Name: name, Value: value, SecretType: store.SecretTypeEnvironment, Target: name,
+			Scope: scope, ScopeID: scopeID, InjectionMode: store.InjectionModeAlways, CreatedBy: root,
+		})
+		require.NoError(t, err)
+		return *meta
+	}
+	set("MD_TAM_SHARED", "from-project", store.ScopeProject, projectID)
+	set("MD_TAM_PROJECT_ONLY", "project-only", store.ScopeProject, projectID)
+
+	values := func(got []ResolvedSecret) map[string]string {
+		out := map[string]string{}
+		for _, r := range got {
+			out[r.Name] = r.Value
+		}
+		return out
+	}
+	got, err := d.selectDeliverySecrets(ctx, newDeliverySelector(srv.authzService, agent, PurposeRestart), agent)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"MD_TAM_SHARED": "from-project", "MD_TAM_PROJECT_ONLY": "project-only"}, values(got),
+		"control: the root is a member of the project, so its project secrets are authorized and allowed")
+
+	withheld := set("MD_TAM_SHARED", "from-user", store.ScopeUser, issuer.ID)
+	rec.fetched = nil
+	got, err = d.selectDeliverySecrets(ctx, newDeliverySelector(srv.authzService, agent, PurposeRestart), agent)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"MD_TAM_PROJECT_ONLY": "project-only"}, values(got),
+		"the withheld user secret masks the project secret of the same name, and is itself dropped")
+	for _, r := range got {
+		assert.NotEmpty(t, r.Value, "%s delivered without a value", r.Name)
+	}
+	for _, meta := range rec.fetched {
+		assert.NotEqual(t, withheld.ID, meta.ID, "the withheld secret's value was fetched")
+	}
+	old, _, err := d.resolveSecrets(ctx, agent)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, old, got, "the same result as the Resolve path")
+}
