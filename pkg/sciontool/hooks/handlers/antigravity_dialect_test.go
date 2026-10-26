@@ -186,13 +186,9 @@ func TestAntigravityFixture_CallsPerInvocationNoDoubleCount(t *testing.T) {
 		t.Errorf("gen_ai.api.calls single data point value = %d, want 3", callPoints[0].Value)
 	}
 	wantAttrs := map[string]string{
-		// agent_id/project_id are metricAttrs()'s producer-side labels (kept
-		// for Cloud descriptor compatibility, design §3.2); they are
-		// distinct from the exporter-stamped canonical scion_agent_id/
-		// scion_project_id, which have their own contract constants and are
-		// out of hooks.Handle's scope entirely.
-		"agent_id":                     "agent-1",
-		"project_id":                   "project-1",
+		// No unprefixed agent_id/project_id (ptone/scion#3668): identity
+		// comes only from the exporter-stamped canonical scion_agent_id/
+		// scion_project_id, which are out of hooks.Handle's scope entirely.
 		telemetrycontract.HarnessLabel: "antigravity",
 		telemetrycontract.ModelLabel:   "gemini-3.1-pro-low",
 		telemetrycontract.StatusLabel:  telemetrycontract.StatusSuccess,

@@ -16,358 +16,172 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // newTestProjectDeletionServiceForNFSCleanup builds a ProjectDeletionService
-// with just enough set (a logger) to exercise cleanupNFSSharedDirTree
-// directly -- that method touches only svc.logger and the filesystem/global
-// settings, never svc.store or svc.authz.
-func newTestProjectDeletionServiceForNFSCleanup() *ProjectDeletionService {
-	return &ProjectDeletionService{logger: slog.Default()}
+// with just enough set (a logger and the shared-dir Layout) to exercise
+// cleanupNFSSharedDirTree directly -- that method touches only svc.logger,
+// svc.sharedDirLayout and the filesystem, never svc.store or svc.authz.
+func newTestProjectDeletionServiceForNFSCleanup(layout projectfs.Layout, layoutErr error) *ProjectDeletionService {
+	return &ProjectDeletionService{
+		logger:          slog.Default(),
+		sharedDirLayout: func() (projectfs.Layout, error) { return layout, layoutErr },
+	}
 }
 
-// sdsLocalWithNFSBlockYAML is a global settings file whose backend is local
-// and that selects nfs nowhere, but still has a complete nfs block.
-func sdsLocalWithNFSBlockYAML(mountRoot string) string {
-	return `schema_version: "1"
-server:
-  shared_dir_storage:
-    backend: local
-    nfs:
-      mount_root: ` + mountRoot + `
-      shares:
-        - id: scion-shared
-          pv_name: pv
-`
+// nfsCleanupLayout is the shared-dir Layout of an nfs storage block whose
+// share scion-shared is mounted under mountRoot.
+func nfsCleanupLayout(t *testing.T, mountRoot string) projectfs.Layout {
+	t.Helper()
+	layout, err := config.NFSLayout(&config.V1NFSConfig{
+		MountRoot: mountRoot,
+		Shares:    []config.V1NFSShare{{ID: "scion-shared", PVName: "pv"}},
+	})
+	require.NoError(t, err)
+	return layout
 }
 
-// TestCleanupNFSSharedDirTree_LocalBackendWithNFSBlock_RemovesTree: the
-// backend is local and nothing selects nfs, but the nfs block is complete.
-// An agent created while nfs was selected keeps that backend through its
-// broker-side record, which the hub cannot read, so its tree is still on
-// the export. Project delete must remove the project's tree.
-func TestCleanupNFSSharedDirTree_LocalBackendWithNFSBlock_RemovesTree(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	globalScionDir := filepath.Join(tmpHome, ".scion")
-	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
-
-	mountRoot := filepath.Join(tmpHome, "srv")
-	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(sdsLocalWithNFSBlockYAML(mountRoot)), 0644))
-
-	// The tree an agent recorded on nfs left on the export.
-	projectID := "pid-local-with-nfs-block"
-	leaf := filepath.Join(mountRoot, "scion-shared", "projects", projectID, "shared-dirs", "scratchpad")
-	require.NoError(t, os.MkdirAll(leaf, 0o2775))
-	require.NoError(t, os.WriteFile(filepath.Join(leaf, "agent.txt"), []byte("written by an agent on nfs"), 0o644))
-	// Another project's tree is untouched.
-	other := filepath.Join(mountRoot, "scion-shared", "projects", "pid-other", "shared-dirs", "scratchpad")
-	require.NoError(t, os.MkdirAll(other, 0o2775))
-
-	svc := newTestProjectDeletionServiceForNFSCleanup()
-	svc.cleanupNFSSharedDirTree(context.Background(), projectID)
-
-	_, err := os.Stat(filepath.Join(mountRoot, "scion-shared", "projects", projectID))
-	assert.True(t, os.IsNotExist(err), "a complete nfs block must make delete clean the project's tree even when the backend is local")
-	_, err = os.Stat(other)
-	assert.NoError(t, err, "other projects' trees must survive")
-}
-
-// With a local backend, a complete nfs block and no export on this host,
-// cleanup warns and returns; it never logs an error and never creates
-// anything.
-func TestCleanupNFSSharedDirTree_LocalBackendWithNFSBlock_MissingExport_WarnsAndSkips(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	globalScionDir := filepath.Join(tmpHome, ".scion")
-	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
-	mountRoot := filepath.Join(tmpHome, "not-mounted")
-	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(sdsLocalWithNFSBlockYAML(mountRoot)), 0644))
-
-	buf := captureSlog(t)
-	svc := newTestProjectDeletionServiceForNFSCleanup()
-	svc.cleanupNFSSharedDirTree(context.Background(), "pid-local-missing-export")
-
-	logged := buf.String()
-	assert.Contains(t, logged, "level=WARN")
-	assert.Contains(t, logged, "not reachable on this host")
-	assert.NotContains(t, logged, "level=ERROR")
-	_, err := os.Stat(mountRoot)
-	assert.True(t, os.IsNotExist(err), "cleanup must not create the export path")
-}
-
-// With a local backend and no nfs block, cleanup is a silent no-op.
-func TestCleanupNFSSharedDirTree_LocalBackendNoNFSBlock_NoOp(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	globalScionDir := filepath.Join(tmpHome, ".scion")
-	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"),
-		[]byte("schema_version: \"1\"\nserver:\n  shared_dir_storage:\n    backend: local\n"), 0644))
-
-	buf := captureSlog(t)
-	svc := newTestProjectDeletionServiceForNFSCleanup()
-	svc.cleanupNFSSharedDirTree(context.Background(), "pid-local-no-block")
-
-	assert.NotContains(t, buf.String(), "pid-local-no-block")
-}
-
-// TestCleanupNFSSharedDirTree_NFSBackend_RemovesTree is the positive
-// counterpart for the global backend: with backend: nfs configured, cleanup
-// removes the project's shared-dir tree.
-func TestCleanupNFSSharedDirTree_NFSBackend_RemovesTree(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	globalScionDir := filepath.Join(tmpHome, ".scion")
-	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
-
-	mountRoot := filepath.Join(tmpHome, "srv")
-	settingsYAML := `schema_version: "1"
-server:
-  shared_dir_storage:
-    backend: nfs
-    nfs:
-      mount_root: ` + mountRoot + `
-      shares:
-        - id: scion-shared
-          pv_name: pv
-`
-	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settingsYAML), 0644))
-
+// On a shared Layout, project delete removes the project's shared-dir tree
+// from the share (and nothing of any other project).
+func TestCleanupNFSSharedDirTree_SharedLayout_RemovesTree(t *testing.T) {
+	mountRoot := t.TempDir()
 	projectID := "pid-nfs-backend"
 	leaf := filepath.Join(mountRoot, "scion-shared", "projects", projectID, "shared-dirs", "scratchpad")
 	require.NoError(t, os.MkdirAll(leaf, 0o2775))
 	require.NoError(t, os.WriteFile(filepath.Join(leaf, "gone.txt"), []byte("must be removed"), 0o644))
+	other := filepath.Join(mountRoot, "scion-shared", "projects", "pid-other", "shared-dirs", "scratchpad")
+	require.NoError(t, os.MkdirAll(other, 0o2775))
 
-	svc := newTestProjectDeletionServiceForNFSCleanup()
+	svc := newTestProjectDeletionServiceForNFSCleanup(nfsCleanupLayout(t, mountRoot), nil)
 	svc.cleanupNFSSharedDirTree(context.Background(), projectID)
 
 	_, err := os.Stat(filepath.Join(mountRoot, "scion-shared", "projects", projectID))
-	assert.True(t, os.IsNotExist(err), "the project's NFS shared-dir tree must be removed when backend is nfs")
+	assert.True(t, os.IsNotExist(err), "the project's shared-dir tree must be removed on a shared Layout")
+	_, err = os.Stat(other)
+	assert.NoError(t, err, "other projects' trees must survive")
 }
 
-// TestCleanupNFSSharedDirTree_UnreadableSettingsMentioningKey_LogsErrorAndSkips:
-// a global settings file that fails to parse, but plausibly mentions
-// shared_dir_storage, must log exactly one ERROR record naming the project
-// and skip cleanup -- never silently do nothing, and never touch either the
-// conventional local project-configs layout or a pre-existing NFS export
-// tree it can no longer address.
-func TestCleanupNFSSharedDirTree_UnreadableSettingsMentioningKey_LogsErrorAndSkips(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	globalScionDir := filepath.Join(tmpHome, ".scion")
-	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
-
-	mountRoot := filepath.Join(tmpHome, "srv")
-	projectID := "pid-unreadable-mentions-key"
-	exportLeaf := filepath.Join(mountRoot, "scion-shared", "projects", projectID, "shared-dirs", "scratchpad")
-	require.NoError(t, os.MkdirAll(exportLeaf, 0o2775))
-	require.NoError(t, os.WriteFile(filepath.Join(exportLeaf, "keep.txt"), []byte("export sentinel"), 0o644))
-
-	localLeaf := config.SharedDirHostPath(tmpHome, "unreadable-mentions-key", projectID, "scratchpad")
-	require.NoError(t, os.MkdirAll(localLeaf, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(localLeaf, "keep.txt"), []byte("local sentinel"), 0o644))
-
-	// A v1-tagged file that mentions shared_dir_storage but fails to parse.
-	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"),
-		[]byte("schema_version: \"1\"\nserver:\n  shared_dir_storage:\n    backend: nfs\n    nfs: [unterminated\n"), 0644))
-
-	buf := captureSlog(t)
-	svc := newTestProjectDeletionServiceForNFSCleanup()
-	svc.cleanupNFSSharedDirTree(context.Background(), projectID)
-
-	logged := buf.String()
-	assert.Contains(t, logged, "level=ERROR", "an unreadable settings file mentioning shared_dir_storage must log at ERROR")
-	assert.Contains(t, logged, projectID, "the ERROR record must name the project")
-
-	exportContent, err := os.ReadFile(filepath.Join(exportLeaf, "keep.txt"))
-	require.NoError(t, err, "the export tree must survive: cleanup could not even resolve it")
-	assert.Equal(t, "export sentinel", string(exportContent))
-
-	localContent, err := os.ReadFile(filepath.Join(localLeaf, "keep.txt"))
-	require.NoError(t, err, "the local project-configs tree must never be touched by NFS cleanup")
-	assert.Equal(t, "local sentinel", string(localContent))
-}
-
-// TestCleanupNFSSharedDirTree_LegacyFormatMentioningKey_LogsErrorAndSkips:
-// the same fail-closed logging requirement, this time for a legacy-format
-// settings file (no schema_version) that still mentions shared_dir_storage.
-func TestCleanupNFSSharedDirTree_LegacyFormatMentioningKey_LogsErrorAndSkips(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	globalScionDir := filepath.Join(tmpHome, ".scion")
-	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
-
-	mountRoot := filepath.Join(tmpHome, "srv")
-	projectID := "pid-legacy-mentions-key"
-	exportLeaf := filepath.Join(mountRoot, "scion-shared", "projects", projectID, "shared-dirs", "scratchpad")
-	require.NoError(t, os.MkdirAll(exportLeaf, 0o2775))
-	require.NoError(t, os.WriteFile(filepath.Join(exportLeaf, "keep.txt"), []byte("export sentinel"), 0o644))
-
-	localLeaf := config.SharedDirHostPath(tmpHome, "legacy-mentions-key", projectID, "scratchpad")
-	require.NoError(t, os.MkdirAll(localLeaf, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(localLeaf, "keep.txt"), []byte("local sentinel"), 0o644))
-
-	// A legacy-format file (no schema_version) that still mentions the key.
-	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"),
-		[]byte("server:\n  shared_dir_storage:\n    backend: nfs\n"), 0644))
-
-	buf := captureSlog(t)
-	svc := newTestProjectDeletionServiceForNFSCleanup()
-	svc.cleanupNFSSharedDirTree(context.Background(), projectID)
-
-	logged := buf.String()
-	assert.Contains(t, logged, "level=ERROR", "a legacy-format settings file mentioning shared_dir_storage must log at ERROR")
-	assert.Contains(t, logged, projectID, "the ERROR record must name the project")
-
-	exportContent, err := os.ReadFile(filepath.Join(exportLeaf, "keep.txt"))
-	require.NoError(t, err, "the export tree must survive: cleanup could not even resolve it")
-	assert.Equal(t, "export sentinel", string(exportContent))
-
-	localContent, err := os.ReadFile(filepath.Join(localLeaf, "keep.txt"))
-	require.NoError(t, err, "the local project-configs tree must never be touched by NFS cleanup")
-	assert.Equal(t, "local sentinel", string(localContent))
-}
-
-// sdsOverrideSettingsYAML is a global settings file whose global backend is
-// local while the gke profile overrides it to nfs.
-func sdsOverrideSettingsYAML(mountRoot string) string {
-	return `schema_version: "1"
-runtimes:
-  k8s:
-    type: kubernetes
-profiles:
-  gke:
-    runtime: k8s
-    shared_dir_storage_backend: nfs
-server:
-  shared_dir_storage:
-    backend: local
-    nfs:
-      mount_root: ` + mountRoot + `
-      shares:
-        - id: scion-shared
-          pv_name: pv
-`
-}
-
-// When only a profile override selects nfs, cleanup removes the project's
-// tree from the export if the export is reachable on this host.
-func TestCleanupNFSSharedDirTree_ProfileOverrideOnly_RemovesTree(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	globalScionDir := filepath.Join(tmpHome, ".scion")
-	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
-	mountRoot := filepath.Join(tmpHome, "srv")
-	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(sdsOverrideSettingsYAML(mountRoot)), 0644))
-
-	projectID := "pid-override-only"
+// The legacy split (shared dirs on the shared_dir_storage export while
+// workspaces are not on nfs) cleans the export the shared dirs are on.
+func TestCleanupNFSSharedDirTree_LegacySplit_RemovesTreeFromSharedDirExport(t *testing.T) {
+	mountRoot := t.TempDir()
+	projectID := "pid-split"
 	leaf := filepath.Join(mountRoot, "scion-shared", "projects", projectID, "shared-dirs", "scratchpad")
 	require.NoError(t, os.MkdirAll(leaf, 0o2775))
-	require.NoError(t, os.WriteFile(filepath.Join(leaf, "gone.txt"), []byte("x"), 0o644))
 
-	svc := newTestProjectDeletionServiceForNFSCleanup()
+	ps, _, err := config.SynthesizeProjectStorage(nil, nil, &config.V1SharedDirStorageConfig{Backend: "nfs",
+		NFS: &config.V1NFSConfig{MountRoot: mountRoot, Shares: []config.V1NFSShare{{ID: "scion-shared", PVName: "pv"}}}}, nil)
+	require.NoError(t, err)
+	full, err := config.ProjectStorageLayout(ps, config.DefaultVolumeMountBase)
+	require.NoError(t, err)
+	require.NotNil(t, full.SharedDirs, "fixture must be the legacy split")
+
+	svc := newTestProjectDeletionServiceForNFSCleanup(full.SharedDirLayout(), nil)
 	svc.cleanupNFSSharedDirTree(context.Background(), projectID)
 
-	_, err := os.Stat(filepath.Join(mountRoot, "scion-shared", "projects", projectID))
-	assert.True(t, os.IsNotExist(err), "an nfs profile override must make delete clean the project's tree")
+	_, err = os.Stat(filepath.Join(mountRoot, "scion-shared", "projects", projectID))
+	assert.True(t, os.IsNotExist(err))
 }
 
-// When only a profile override selects nfs and the export is not mounted
-// on this host, cleanup warns and returns; it never logs an error and
-// never creates anything.
-func TestCleanupNFSSharedDirTree_ProfileOverrideOnly_MissingExport_WarnsAndSkips(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	globalScionDir := filepath.Join(tmpHome, ".scion")
-	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
-	mountRoot := filepath.Join(tmpHome, "not-mounted")
-	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(sdsOverrideSettingsYAML(mountRoot)), 0644))
+// On the local Layout no project has a tree on any share (one backend for
+// every agent), so cleanup is a silent no-op, even when an nfs export with
+// a tree for the project is mounted.
+func TestCleanupNFSSharedDirTree_LocalLayout_NoOp(t *testing.T) {
+	mountRoot := t.TempDir()
+	projectID := "pid-local"
+	leaf := filepath.Join(mountRoot, "scion-shared", "projects", projectID, "shared-dirs", "scratchpad")
+	require.NoError(t, os.MkdirAll(leaf, 0o2775))
 
 	buf := captureSlog(t)
-	svc := newTestProjectDeletionServiceForNFSCleanup()
+	svc := newTestProjectDeletionServiceForNFSCleanup(projectfs.Layout{Backend: projectfs.BackendLocal}, nil)
+	svc.cleanupNFSSharedDirTree(context.Background(), projectID)
+
+	assert.NotContains(t, buf.String(), projectID)
+	_, err := os.Stat(leaf)
+	assert.NoError(t, err, "nothing is removed on the local Layout")
+}
+
+// A missing share mount on a shared Layout logs an ERROR naming the
+// project and never creates the export path.
+func TestCleanupNFSSharedDirTree_MissingExport_LogsErrorAndSkips(t *testing.T) {
+	mountRoot := filepath.Join(t.TempDir(), "not-mounted")
+
+	buf := captureSlog(t)
+	svc := newTestProjectDeletionServiceForNFSCleanup(nfsCleanupLayout(t, mountRoot), nil)
 	svc.cleanupNFSSharedDirTree(context.Background(), "pid-missing-export")
 
 	logged := buf.String()
-	assert.Contains(t, logged, "level=WARN")
-	assert.Contains(t, logged, "not reachable on this host")
+	assert.Contains(t, logged, "level=ERROR")
 	assert.Contains(t, logged, "pid-missing-export")
-	assert.NotContains(t, logged, "level=ERROR")
 	_, err := os.Stat(mountRoot)
 	assert.True(t, os.IsNotExist(err), "cleanup must not create the export path")
 }
 
-// An nfs override held only in the DB settings overlay (the file has
-// none) also makes delete clean the project's tree.
-func TestCleanupNFSSharedDirTree_OverlayOverride_RemovesTree(t *testing.T) {
-	old := config.GetGlobalSettingsOverlay()
-	t.Cleanup(func() { config.SetGlobalSettingsOverlay(old) })
-
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	globalScionDir := filepath.Join(tmpHome, ".scion")
-	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
-	mountRoot := filepath.Join(tmpHome, "srv")
-	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
-server:
-  shared_dir_storage:
-    backend: local
-    nfs:
-      mount_root: `+mountRoot+`
-      shares:
-        - id: scion-shared
-          pv_name: pv
-`), 0644))
-
-	o := config.NewSettingsOverlay()
-	o.Update(map[string]config.V1RuntimeConfig{"k8s": {Type: "kubernetes"}},
-		map[string]config.V1ProfileConfig{"gke": {Runtime: "k8s", SharedDirStorageBackend: "nfs"}}, nil)
-	config.SetGlobalSettingsOverlay(o)
-
-	projectID := "pid-overlay-override"
-	leaf := filepath.Join(mountRoot, "scion-shared", "projects", projectID, "shared-dirs", "scratchpad")
-	require.NoError(t, os.MkdirAll(leaf, 0o2775))
-
-	svc := newTestProjectDeletionServiceForNFSCleanup()
-	svc.cleanupNFSSharedDirTree(context.Background(), projectID)
-
-	_, err := os.Stat(filepath.Join(mountRoot, "scion-shared", "projects", projectID))
-	assert.True(t, os.IsNotExist(err))
-}
-
-// When a profile override selects nfs but there is no nfs block, cleanup
-// logs an ERROR naming the project and skips.
-func TestCleanupNFSSharedDirTree_OverrideWithoutNFSBlock_LogsErrorAndSkips(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	globalScionDir := filepath.Join(tmpHome, ".scion")
-	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
-runtimes:
-  k8s:
-    type: kubernetes
-profiles:
-  gke:
-    runtime: k8s
-    shared_dir_storage_backend: nfs
-server:
-  shared_dir_storage:
-    backend: local
-`), 0644))
+// A symlinked project directory on the share is refused (DeleteProjectTree's
+// symlink refusal): nothing it points at is removed.
+func TestCleanupNFSSharedDirTree_SymlinkedProjectDirRefused(t *testing.T) {
+	mountRoot := t.TempDir()
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "shared-dirs", "scratchpad")
+	require.NoError(t, os.MkdirAll(victim, 0o755))
+	projects := filepath.Join(mountRoot, "scion-shared", "projects")
+	require.NoError(t, os.MkdirAll(projects, 0o755))
+	require.NoError(t, os.Symlink(outside, filepath.Join(projects, "pid-symlink")))
 
 	buf := captureSlog(t)
-	svc := newTestProjectDeletionServiceForNFSCleanup()
-	svc.cleanupNFSSharedDirTree(context.Background(), "pid-override-no-block")
+	svc := newTestProjectDeletionServiceForNFSCleanup(nfsCleanupLayout(t, mountRoot), nil)
+	svc.cleanupNFSSharedDirTree(context.Background(), "pid-symlink")
 
-	logged := buf.String()
-	assert.Contains(t, logged, "level=ERROR")
-	assert.Contains(t, logged, "pid-override-no-block")
+	assert.Contains(t, buf.String(), "level=ERROR")
+	_, err := os.Stat(victim)
+	assert.NoError(t, err, "a symlink target must never be removed")
+}
+
+// A Layout that cannot be built logs an ERROR naming the project and skips;
+// an invalid project ID is refused before the filesystem is touched; a
+// service without a Layout does nothing.
+func TestCleanupNFSSharedDirTree_FailClosedCases(t *testing.T) {
+	t.Run("layout error", func(t *testing.T) {
+		buf := captureSlog(t)
+		svc := newTestProjectDeletionServiceForNFSCleanup(projectfs.Layout{}, errors.New("bad storage block"))
+		svc.cleanupNFSSharedDirTree(context.Background(), "pid-layout-error")
+		assert.Contains(t, buf.String(), "level=ERROR")
+		assert.Contains(t, buf.String(), "pid-layout-error")
+	})
+	t.Run("invalid project ID", func(t *testing.T) {
+		mountRoot := t.TempDir()
+		buf := captureSlog(t)
+		svc := newTestProjectDeletionServiceForNFSCleanup(nfsCleanupLayout(t, mountRoot), nil)
+		svc.cleanupNFSSharedDirTree(context.Background(), "../victim")
+		assert.Contains(t, buf.String(), "level=ERROR")
+	})
+	t.Run("no layout", func(t *testing.T) {
+		buf := captureSlog(t)
+		(&ProjectDeletionService{logger: slog.Default()}).cleanupNFSSharedDirTree(context.Background(), "pid-no-layout")
+		assert.Empty(t, buf.String())
+	})
+}
+
+// An invalid project ID never reaches the filesystem: cleanup refuses
+// before resolving anything, and the share's other trees are untouched.
+func TestCleanupNFSSharedDirTree_InvalidProjectIDRefused(t *testing.T) {
+	mountRoot := t.TempDir()
+	other := filepath.Join(mountRoot, "scion-shared", "projects", "pid-other", "shared-dirs", "scratchpad")
+	require.NoError(t, os.MkdirAll(other, 0o2775))
+	svc := newTestProjectDeletionServiceForNFSCleanup(nfsCleanupLayout(t, mountRoot), nil)
+	for _, id := range []string{"../pid-other", "", "a/b", ".."} {
+		svc.cleanupNFSSharedDirTree(context.Background(), id)
+	}
+	_, err := os.Stat(other)
+	assert.NoError(t, err, "no other project's tree is touched")
 }

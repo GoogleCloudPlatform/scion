@@ -373,8 +373,10 @@ func TestOwnedFilesProof(t *testing.T) {
 	assert.Equal(t, agent.FilesUnknown, docker.ownedFilesProof(abandonProjectID, "worker", t.TempDir(), abandonProjectID))
 	require.NoError(t, os.MkdirAll(filepath.Join(root, config.DotScion, "agents", "worker"), 0o755))
 	assert.Equal(t, agent.FilesPresent, docker.ownedFilesProof(abandonProjectID, "worker", root, abandonProjectID))
-	require.NoError(t, os.WriteFile(filepath.Join(root, config.DotScion, "settings.yaml"),
-		[]byte("schema_version: \"1\"\nserver:\n  workspace_storage:\n    backend: nfs\n"), 0o644))
+	// Storage blocks are global-only (Layer-0, ptone/scion#5821): a project's
+	// own settings.yaml cannot place storage, so the nfs backend is set in the
+	// broker's global settings.
+	newTestGlobalSettings(t, "schema_version: \"1\"\nserver:\n  project_storage:\n    backend: nfs\n")
 	require.NoError(t, os.RemoveAll(filepath.Join(root, config.DotScion, "agents", "worker")))
 	assert.Equal(t, agent.FilesUnknown, docker.ownedFilesProof(abandonProjectID, "worker", root, abandonProjectID), "an nfs-backed project is never proven absent")
 }

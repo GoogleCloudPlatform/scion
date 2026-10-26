@@ -322,7 +322,7 @@ The hub exposes `/readyz` and `/healthz`, and `hub-cloudrun` wires up a
 probe.**
 
 - **`/readyz`** answers `{"status":"ready"}`/200 once `store.Ping` succeeds
-  and, because this module always sets `workspace_storage.backend: nfs`,
+  and, because this module always sets `project_storage.backend: nfs`,
   the NFS mount also checks healthy; otherwise it's 503 `not_ready` with a
   reason. This is what gates traffic to a fresh revision (the startup
   probe), and what "the hub is up" means operationally.

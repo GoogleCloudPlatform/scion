@@ -17,6 +17,7 @@ package cmd
 import (
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 )
@@ -38,10 +40,10 @@ import (
 // The second return value is a warning for the caller to log, set when the
 // backend is "nfs" but the block is unusable.
 func brokerNFSConfig(vs *config.VersionedSettings) (*config.V1NFSConfig, string) {
-	if vs == nil || vs.Server == nil || vs.Server.WorkspaceStorage == nil {
+	if vs == nil || vs.Server == nil || vs.Server.EffectiveWorkspaceStorage() == nil {
 		return nil, ""
 	}
-	ws := *vs.Server.WorkspaceStorage
+	ws := *vs.Server.EffectiveWorkspaceStorage()
 	if ws.Backend != "nfs" {
 		return nil, ""
 	}
@@ -70,9 +72,9 @@ func brokerWorkspaceStorageWarning(vs *config.VersionedSettings) string {
 	if vs == nil || vs.Server == nil {
 		return ""
 	}
-	if err := vs.Server.WorkspaceStorage.ValidateSelectedSubPathRoot(); err != nil {
+	if err := vs.Server.EffectiveWorkspaceStorage().ValidateSelectedSubPathRoot(); err != nil {
 		return fmt.Sprintf("server.%v; agent starts that use the %q workspace backend will fail until it is fixed",
-			err, vs.Server.WorkspaceStorage.Backend)
+			err, vs.Server.EffectiveWorkspaceStorage().Backend)
 	}
 	return ""
 }
@@ -80,10 +82,10 @@ func brokerWorkspaceStorageWarning(vs *config.VersionedSettings) string {
 // brokerWorkspaceStorageBackend returns the server.workspace_storage backend
 // name from the broker's global settings, or "" (local) when unset.
 func brokerWorkspaceStorageBackend(vs *config.VersionedSettings) string {
-	if vs == nil || vs.Server == nil || vs.Server.WorkspaceStorage == nil {
+	if vs == nil || vs.Server == nil || vs.Server.EffectiveWorkspaceStorage() == nil {
 		return ""
 	}
-	return vs.Server.WorkspaceStorage.Backend
+	return vs.Server.EffectiveWorkspaceStorage().Backend
 }
 
 // brokerRegistrationWorkspaceStorage returns the workspace storage
@@ -94,7 +96,61 @@ func brokerWorkspaceStorageBackend(vs *config.VersionedSettings) string {
 // the real health.
 func brokerRegistrationWorkspaceStorage(vs *config.VersionedSettings) *api.BrokerWorkspaceStorage {
 	nfs, _ := brokerNFSConfig(vs)
-	return runtimebroker.BuildWorkspaceStorageDescriptor(brokerWorkspaceStorageBackend(vs), nfs, nil)
+	desc := runtimebroker.BuildWorkspaceStorageDescriptor(brokerWorkspaceStorageBackend(vs), nfs, nil)
+	layout, _ := brokerStorageLayout(vs)
+	desc.Homes = runtimebroker.StorageHomes(layout)
+	desc.Volume = runtimebroker.StorageVolume(layout)
+	desc.SharedDirs = projectfs.SharedDirsPlacement(layout)
+	return desc
+}
+
+// brokerStorageLayout builds the broker's projectfs Layout from its global
+// settings: the same server.project_storage struct the hub builds its Layout
+// from (config.ResolveProjectStorage: the block as written, or synthesized
+// from the deprecated blocks), translated by config.ProjectStorageLayout.
+// The returned warnings are for the caller to log once at startup: the
+// synthesis warnings, or the reason the block is unusable (the broker then
+// reports the local Layout, which the hub refuses for shared-mode
+// dispatches on a shared hub; the broker does not refuse to start).
+func brokerStorageLayout(vs *config.VersionedSettings) (projectfs.Layout, []string) {
+	local := projectfs.Layout{Backend: projectfs.BackendLocal, Homes: projectfs.BackendLocal}
+	if vs == nil {
+		return local, nil
+	}
+	ps, warnings, err := config.ResolveProjectStorage(vs.Server)
+	if err != nil {
+		return local, []string{fmt.Sprintf("project storage settings are unusable, reporting the local layout: %v", err)}
+	}
+	layout, err := config.ProjectStorageLayout(ps, config.DefaultVolumeMountBase)
+	if err != nil {
+		return local, append(warnings, fmt.Sprintf("project storage settings are unusable, reporting the local layout: %v", err))
+	}
+	return layout, append(warnings, brokerSharedDirLayoutWarnings(layout, os.Stat)...)
+}
+
+// brokerSharedDirLayoutWarnings returns startup warnings for a shared-dir
+// Layout that would fail Kubernetes agent starts with shared dirs (every
+// project has the default scratchpad): a share without a claim (nfs
+// shares[0].pv_name, gke_shared_volume.pv_claim_name) or a gke-shared-volume
+// this broker has not mounted. Agent starts still refuse; this says so once,
+// at startup, instead of only per start.
+func brokerSharedDirLayoutWarnings(layout projectfs.Layout, stat func(string) (os.FileInfo, error)) []string {
+	sd := layout.SharedDirLayout()
+	var out []string
+	switch sd.Backend {
+	case projectfs.BackendNFS:
+		if sd.Share.PVName == "" {
+			out = append(out, "project storage: the nfs share has no pv_name; Kubernetes agent starts with shared dirs will fail until nfs.shares[0].pv_name is set")
+		}
+	case projectfs.BackendGKESharedVolume:
+		if sd.Share.PVName == "" {
+			out = append(out, "project storage: gke_shared_volume.pv_claim_name is not set; Kubernetes agent starts with shared dirs will fail until it is")
+		}
+		if _, err := stat(sd.HostBase); err != nil {
+			out = append(out, fmt.Sprintf("project storage: the shared volume is not mounted on this broker at %s; agent starts with shared dirs will fail until it is", sd.HostBase))
+		}
+	}
+	return out
 }
 
 // loadBrokerRegistrationWorkspaceStorage loads the global settings and
@@ -171,8 +227,8 @@ func defaultNFSDoctorProbe() nfsDoctorProbe {
 func checkDoctorNFSMounts(vs *config.VersionedSettings, probe nfsDoctorProbe) scionruntime.CheckResult {
 	const name = "nfs-mounts"
 	backend := "local"
-	if vs != nil && vs.Server != nil && vs.Server.WorkspaceStorage != nil && vs.Server.WorkspaceStorage.Backend != "" {
-		backend = vs.Server.WorkspaceStorage.Backend
+	if vs != nil && vs.Server != nil && vs.Server.EffectiveWorkspaceStorage() != nil && vs.Server.EffectiveWorkspaceStorage().Backend != "" {
+		backend = vs.Server.EffectiveWorkspaceStorage().Backend
 	}
 	if backend != "nfs" {
 		return scionruntime.CheckResult{

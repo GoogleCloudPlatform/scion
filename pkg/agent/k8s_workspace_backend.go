@@ -21,19 +21,23 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
-// k8sGKESharedVolumeBackend is the workspace_storage backend that the
-// Kubernetes runtime does not mount into agent pods yet (ptone/scion#1075).
+// k8sGKESharedVolumeBackend is the workspace backend (server.project_storage,
+// or the deprecated server.workspace_storage) that the Kubernetes runtime
+// does not mount into agent pods yet (ptone/scion#1075).
 const k8sGKESharedVolumeBackend = "gke-shared-volume"
 
 // k8sWorkspaceBackendDroppedMsg is the warning logged when a Kubernetes
-// agent starts with a workspace_storage backend the runtime does not mount.
-const k8sWorkspaceBackendDroppedMsg = "server.workspace_storage.backend is gke-shared-volume, " +
+// agent starts with a workspace backend the runtime does not mount. It names
+// both keys: the backend comes from the effective workspace storage, which
+// server.project_storage sets, or the deprecated server.workspace_storage.
+const k8sWorkspaceBackendDroppedMsg = "the workspace storage backend (server.project_storage.backend, " +
+	"or the deprecated server.workspace_storage.backend) is gke-shared-volume, " +
 	"but the kubernetes runtime does not mount it for agents: agent workspaces use an " +
 	"emptyDir volume and are lost when the pod is deleted; use backend nfs for persistent " +
 	"agent workspaces"
 
 // k8sWorkspaceBackendDropped reports whether an agent started on runtimeName
-// with workspace_storage backend gets an emptyDir workspace instead: true only
+// with workspace backend gets an emptyDir workspace instead: true only
 // for the Kubernetes runtime with backend gke-shared-volume. Agent start only
 // applies the nfs backend there, in every workspace mode.
 func k8sWorkspaceBackendDropped(runtimeName, backend string) bool {

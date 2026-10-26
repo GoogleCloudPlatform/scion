@@ -304,10 +304,10 @@ func nfsExportWorkspaceOnAnyRuntime(projectPath, projectID, agentName string) (r
 	if err != nil {
 		return "", "", fmt.Errorf("workspace_storage nfs: load settings: %w", err)
 	}
-	if settings == nil || settings.Server == nil || settings.Server.WorkspaceStorage == nil {
+	if settings == nil || settings.Server == nil || settings.Server.EffectiveWorkspaceStorage() == nil {
 		return "", "", nil
 	}
-	backend := nfsWorktreeBackend(settings.Server.WorkspaceStorage, store.SharingModeWorktreePerAgent)
+	backend := nfsWorktreeBackend(settings.Server.EffectiveWorkspaceStorage(), store.SharingModeWorktreePerAgent)
 	if backend.Name() != "nfs" {
 		return "", "", nil
 	}

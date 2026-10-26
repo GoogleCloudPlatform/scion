@@ -15,19 +15,26 @@
 // Package cspreport receives the policy reports browsers send for the web
 // pages and writes each one to the log as a csp_violation record.
 //
-// Two body shapes are accepted: the Reporting API (Content-Type
-// application/reports+json, a JSON array of reports) and the older
-// single-report form (Content-Type application/csp-report, an object with a
-// "csp-report" member). Reports are only logged: nothing is persisted in
-// application storage and nothing is sent back besides the status code.
+// Both report content types are accepted: application/reports+json and
+// application/csp-report. The body is read by its shape, whichever of the
+// two types it is sent with, since browsers do not agree on the pairing:
+// a JSON array of Reporting API reports, a single Reporting API report (an
+// object with "type" and "body", as Safari sends it), or the older
+// single-report form (an object with a "csp-report" member). Reports are
+// only logged: nothing is persisted in application storage and nothing is
+// sent back besides the status code.
 //
 // A record holds the directive, the sink of a Trusted Types report, the
-// blocked URI and source file (reduced, see reduceURL) and the line. The
-// report's sample, which can hold the start of page content such as a
-// chat message, is left out unless Handler.RawSamples is set.
+// blocked URI and source file (reduced, see reduceURL), the line and the
+// path of the page. The report's sample, which can hold the start of page
+// content such as a chat message, is left out unless Handler.RawSamples is
+// set. With Handler.Dedupe, repeats of the same violation are collapsed
+// into one record per interval, and a summary record (RepeatsLogMessage)
+// later counts them and shows the latest (see Dedupe and repeatAttrs).
 package cspreport
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -53,16 +60,21 @@ const (
 	maxFieldBytes = 512
 
 	// maxRecordsPerRequest bounds the records one request can write. A
-	// browser batches a few reports at a time.
+	// browser batches a few reports at a time. Repeats collapsed by Dedupe
+	// do not count.
 	maxRecordsPerRequest = 10
 
 	// LogMessage is the message of the record written for each report.
 	LogMessage = "csp_violation"
 
 	// DroppedLogMessage is the message of the one record written when a
-	// request holds more reports than maxRecordsPerRequest; its "dropped"
-	// attribute counts the reports that were not logged.
+	// request holds more reports to log than maxRecordsPerRequest; its
+	// "dropped" attribute counts the reports that were not logged.
 	DroppedLogMessage = "csp_violation_dropped"
+
+	// RepeatsLogMessage is the message of the summary record Dedupe writes
+	// for a violation whose repeats were collapsed (see repeatAttrs).
+	RepeatsLogMessage = "csp_violation_repeats"
 
 	contentTypeReports   = "application/reports+json"
 	contentTypeCSPReport = "application/csp-report"
@@ -85,11 +97,16 @@ type RecordLimiter func() (allowed bool, retryAfterSeconds int)
 // Handler is the report endpoint. Allow is asked once per request, before
 // the content type is checked and the body is read, so refused and
 // malformed requests count against it too. AllowRecord is asked once per
-// record. Log receives the records; a nil Log uses slog.Default(). A nil
-// Allow or AllowRecord lets everything through.
+// report record and dropped-count record written; a report collapsed by
+// Dedupe, and a Dedupe summary record, do not ask it. With a Dedupe,
+// AllowRecord is called under the Dedupe's lock, so it must not block or
+// call back into the handler. Log
+// receives the records; a nil Log uses slog.Default(). A nil Allow or
+// AllowRecord lets everything through, and a nil Dedupe logs every report.
 type Handler struct {
 	Allow       Limiter
 	AllowRecord RecordLimiter
+	Dedupe      *Dedupe
 	Log         *slog.Logger
 	// RawSamples adds each report's sample, cut to MaxSampleRunes, to its
 	// record as "sample". Off by default: a sample can hold the start of
@@ -100,23 +117,27 @@ type Handler struct {
 }
 
 // Violation is one parsed report. Sample is logged only with
-// Handler.RawSamples.
+// Handler.RawSamples. DocumentPath is the path of the page the report is
+// about (see documentPath).
 type Violation struct {
-	Directive  string
-	Sink       string
-	BlockedURI string
-	SourceFile string
-	Line       int
-	Sample     string
+	Directive    string
+	Sink         string
+	BlockedURI   string
+	SourceFile   string
+	Line         int
+	DocumentPath string
+	Sample       string
 }
 
-// ServeHTTP answers 204 when at least one record was written, 429 when the
-// request limiter refuses or the record limiter refuses the first record,
-// 413 when the body is over MaxBodyBytes, 415 for another content type and
-// 400 for a malformed body. Reports refused by either limiter are neither
-// logged nor counted. The dropped-count record covers only reports past
-// maxRecordsPerRequest, and is written only while the record limiter
-// allows it.
+// ServeHTTP answers 204 when every report was written, collapsed as a
+// repeat by Dedupe, or counted as dropped; 429 when the request limiter
+// refuses or the record limiter refuses a report before any record of the
+// request was written; 413 when the body is over MaxBodyBytes, 415 for
+// another content type and 400 for a malformed body. Reports refused by
+// either limiter are neither logged nor counted. The dropped-count record
+// covers only the reports to log past maxRecordsPerRequest (repeats are
+// collapsed first), and is written only while the record limiter allows
+// it. Dedupe summary records are written whatever the answer.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -144,13 +165,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unreadable report", http.StatusBadRequest)
 		return
 	}
-	var violations []Violation
-	dropped := 0
-	if mediaType == contentTypeReports {
-		violations, dropped, err = parseReports(body)
-	} else {
-		violations, err = parseCSPReport(body)
-	}
+	violations, err := parseBody(body)
 	if err != nil {
 		http.Error(w, "malformed report", http.StatusBadRequest)
 		return
@@ -159,19 +174,34 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if log == nil {
 		log = slog.Default()
 	}
-	for i, v := range violations {
-		if ok, retry := h.allowRecord(); !ok {
-			if i == 0 {
+	written, dropped := 0, 0
+reports:
+	for _, v := range violations {
+		verdict, summaries, retry := h.Dedupe.admit(v, written < maxRecordsPerRequest, h.allowRecord)
+		for i := range summaries {
+			// A summary belongs to earlier requests, not this one.
+			log.LogAttrs(context.Background(), slog.LevelInfo, RepeatsLogMessage, repeatAttrs(&summaries[i])...)
+		}
+		switch verdict {
+		case verdictRepeat:
+			continue
+		case verdictDropped:
+			dropped++
+			continue
+		case verdictRefused:
+			if written == 0 {
 				tooMany(w, retry)
 				return
 			}
-			break
+			break reports
 		}
+		written++
 		attrs := []slog.Attr{
 			slog.String("directive", v.Directive),
 			slog.String("blocked_uri", v.BlockedURI),
 			slog.String("source_file", v.SourceFile),
 			slog.Int("line", v.Line),
+			slog.String("document_path", v.DocumentPath),
 		}
 		if v.Sink != "" {
 			attrs = append(attrs, slog.String("sink", v.Sink))
@@ -187,6 +217,31 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// repeatAttrs are the attributes of a summary record (RepeatsLogMessage):
+// the latest repeat's "directive", "blocked_uri", "source_file", "line",
+// "document_path" and, when set, "sink", as in a report record; "repeats",
+// the number of repeats collapsed after the violation's record;
+// "first_logged", when that record was written; and "latest_seen", when
+// the latest repeat arrived. The latest repeat's sample is never logged.
+func repeatAttrs(r *repeatSummary) []slog.Attr {
+	v := r.Latest
+	attrs := []slog.Attr{
+		slog.String("directive", v.Directive),
+		slog.String("blocked_uri", v.BlockedURI),
+		slog.String("source_file", v.SourceFile),
+		slog.Int("line", v.Line),
+		slog.String("document_path", v.DocumentPath),
+	}
+	if v.Sink != "" {
+		attrs = append(attrs, slog.String("sink", v.Sink))
+	}
+	return append(attrs,
+		slog.Int("repeats", r.Count),
+		slog.Time("first_logged", r.First.UTC()),
+		slog.Time("latest_seen", r.LatestSeen.UTC()),
+	)
 }
 
 // allowRecord asks AllowRecord, allowing everything when it is nil.
@@ -206,10 +261,13 @@ func tooMany(w http.ResponseWriter, retry int) {
 	http.Error(w, "too many reports", http.StatusTooManyRequests)
 }
 
-// reportingAPIReport is one entry of an application/reports+json body.
+// reportingAPIReport is one Reporting API report: an entry of an array
+// body, or the whole body when a browser sends a single report.
 type reportingAPIReport struct {
 	Type string `json:"type"`
+	URL  string `json:"url"`
 	Body *struct {
+		DocumentURL        string `json:"documentURL"`
 		EffectiveDirective string `json:"effectiveDirective"`
 		BlockedURL         string `json:"blockedURL"`
 		SourceFile         string `json:"sourceFile"`
@@ -218,73 +276,118 @@ type reportingAPIReport struct {
 	} `json:"body"`
 }
 
-// legacyCSPReport is an application/csp-report body.
+// legacyCSPReport is the "csp-report" member of the older single-report
+// form.
 type legacyCSPReport struct {
-	Report *struct {
-		EffectiveDirective string `json:"effective-directive"`
-		ViolatedDirective  string `json:"violated-directive"`
-		BlockedURI         string `json:"blocked-uri"`
-		SourceFile         string `json:"source-file"`
-		LineNumber         int    `json:"line-number"`
-		ScriptSample       string `json:"script-sample"`
-	} `json:"csp-report"`
+	DocumentURI        string `json:"document-uri"`
+	EffectiveDirective string `json:"effective-directive"`
+	ViolatedDirective  string `json:"violated-directive"`
+	BlockedURI         string `json:"blocked-uri"`
+	SourceFile         string `json:"source-file"`
+	LineNumber         int    `json:"line-number"`
+	ScriptSample       string `json:"script-sample"`
+}
+
+// singleReport is an object body: either the older form (with a
+// "csp-report" member) or one Reporting API report.
+type singleReport struct {
+	reportingAPIReport
+	Legacy *legacyCSPReport `json:"csp-report"`
 }
 
 var errMalformed = errors.New("malformed report")
 
-// parseReports reads a Reporting API body. Entries of other report types
-// are skipped; a body with no policy report in it is malformed. Policy
-// reports past maxRecordsPerRequest are counted in dropped, not returned.
-func parseReports(body []byte) (out []Violation, dropped int, err error) {
-	var reports []reportingAPIReport
-	if err := json.Unmarshal(body, &reports); err != nil {
-		return nil, 0, errMalformed
-	}
-	for _, rep := range reports {
-		if rep.Type != reportTypeCSP || rep.Body == nil {
-			continue
+// parseBody reads a report body by its shape: a JSON array is a list of
+// Reporting API reports, and an object is either the older form or a
+// single Reporting API report. Entries of other report types are skipped;
+// a body with no policy report in it is malformed. Every policy report is
+// returned (MaxBodyBytes bounds how many); the handler applies
+// maxRecordsPerRequest after collapsing repeats.
+func parseBody(body []byte) ([]Violation, error) {
+	if firstByte(body) == '[' {
+		var reports []reportingAPIReport
+		if err := json.Unmarshal(body, &reports); err != nil {
+			return nil, errMalformed
 		}
-		if len(out) == maxRecordsPerRequest {
-			dropped++
-			continue
+		var out []Violation
+		for _, rep := range reports {
+			if v, ok := rep.violation(); ok {
+				out = append(out, v)
+			}
 		}
-		b := rep.Body
-		out = append(out, newViolation(b.EffectiveDirective, b.BlockedURL, b.SourceFile, b.LineNumber, b.Sample))
+		if len(out) == 0 {
+			return nil, errMalformed
+		}
+		return out, nil
 	}
-	if len(out) == 0 {
-		return nil, 0, errMalformed
-	}
-	return out, dropped, nil
-}
-
-// parseCSPReport reads an application/csp-report body.
-func parseCSPReport(body []byte) ([]Violation, error) {
-	var rep legacyCSPReport
-	if err := json.Unmarshal(body, &rep); err != nil || rep.Report == nil {
+	var rep singleReport
+	if err := json.Unmarshal(body, &rep); err != nil {
 		return nil, errMalformed
 	}
-	b := rep.Report
-	directive := b.EffectiveDirective
-	if directive == "" {
-		directive = b.ViolatedDirective
+	if b := rep.Legacy; b != nil {
+		directive := b.EffectiveDirective
+		if directive == "" {
+			directive = b.ViolatedDirective
+		}
+		return []Violation{newViolation(directive, b.BlockedURI, b.SourceFile, b.LineNumber, b.DocumentURI, b.ScriptSample)}, nil
 	}
-	return []Violation{newViolation(directive, b.BlockedURI, b.SourceFile, b.LineNumber, b.ScriptSample)}, nil
+	v, ok := rep.violation()
+	if !ok {
+		return nil, errMalformed
+	}
+	return []Violation{v}, nil
+}
+
+// firstByte returns the first byte of body that is not JSON white space,
+// or 0.
+func firstByte(body []byte) byte {
+	for _, c := range body {
+		switch c {
+		case ' ', '\t', '\r', '\n':
+		default:
+			return c
+		}
+	}
+	return 0
+}
+
+// violation returns the report as a Violation, or false when it is not a
+// policy report with a body. The page is the body's documentURL, or the
+// report's url when the body has none.
+func (rep reportingAPIReport) violation() (Violation, bool) {
+	if rep.Type != reportTypeCSP || rep.Body == nil {
+		return Violation{}, false
+	}
+	b := rep.Body
+	document := b.DocumentURL
+	if document == "" {
+		document = rep.URL
+	}
+	return newViolation(b.EffectiveDirective, b.BlockedURL, b.SourceFile, b.LineNumber, document, b.Sample), true
 }
 
 // newViolation bounds every field of a record. URLs are reduced by
-// reduceURL; the sink is taken from the sample of a Trusted Types report.
-func newViolation(directive, blockedURI, sourceFile string, line int, sample string) Violation {
+// reduceURL, and the page by documentPath; the sink is taken from the
+// sample of a Trusted Types report.
+func newViolation(directive, blockedURI, sourceFile string, line int, documentURL, sample string) Violation {
 	if line < 0 {
 		line = 0
 	}
 	return Violation{
-		Directive:  truncateBytes(directive, maxFieldBytes),
-		Sink:       sinkName(directive, sample),
-		BlockedURI: truncateBytes(reduceURL(blockedURI), maxFieldBytes),
-		SourceFile: truncateBytes(reduceURL(sourceFile), maxFieldBytes),
-		Line:       line,
-		Sample:     truncateRunes(sample, MaxSampleRunes),
+		Directive:    truncateBytes(directive, maxFieldBytes),
+		Sink:         sinkName(directive, sample),
+		BlockedURI:   truncateBytes(reduceURL(blockedURI), maxFieldBytes),
+		SourceFile:   truncateBytes(reduceURL(sourceFile), maxFieldBytes),
+		Line:         line,
+		DocumentPath: truncateBytes(documentPath(documentURL), maxFieldBytes),
+		Sample:       truncateRunes(sample, MaxSampleRunes),
 	}
+}
+
+// key is what Dedupe tells repeats apart by: the directive, the origin of
+// the blocked URI and the page path.
+func (v Violation) key() string {
+	return v.Directive + "\x00" + urlOrigin(v.BlockedURI) + "\x00" + v.DocumentPath
 }
 
 // trustedTypesSinks is the closed list of sink names a Trusted Types

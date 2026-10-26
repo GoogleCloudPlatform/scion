@@ -198,7 +198,7 @@ func decodeStrict(yamlText string) (*config.VersionedSettings, error) {
 // realistic fixture and proves every emitted key decodes into a field
 // config.VersionedSettings actually declares, then spot-checks the fields
 // that gate the most load-bearing behavior (schema_version, the profile ->
-// runtime resolution, the workspace_storage backend, and hub_id -- see
+// runtime resolution, the project_storage backend, and hub_id -- see
 // settings_v1.go's V1ServerHubConfig.HubID, which is what the hub uses to
 // namespace its Secret Manager reads, not the legacy hub_config.go field of
 // almost the same name).
@@ -223,14 +223,20 @@ func TestSettingsTemplateRendersAndDecodes(t *testing.T) {
 	if got, want := vs.Server.Hub.HubID, vars["hub_name"].(string); got != want {
 		t.Errorf("server.hub.hub_id = %q, want %q (this is the value the hub hashes into its Secret Manager scope prefix)", got, want)
 	}
-	if vs.Server.WorkspaceStorage == nil {
-		t.Fatal("server.workspace_storage is nil after decode")
+	if vs.Server.ProjectStorage == nil {
+		t.Fatal("server.project_storage is nil after decode")
 	}
-	if got, want := vs.Server.WorkspaceStorage.Backend, "nfs"; got != want {
-		t.Errorf("server.workspace_storage.backend = %q, want %q", got, want)
+	if got, want := vs.Server.ProjectStorage.Backend, "nfs"; got != want {
+		t.Errorf("server.project_storage.backend = %q, want %q", got, want)
 	}
-	if vs.Server.WorkspaceStorage.NFS == nil {
-		t.Fatal("server.workspace_storage.nfs is nil after decode")
+	if vs.Server.ProjectStorage.NFS == nil {
+		t.Fatal("server.project_storage.nfs is nil after decode")
+	}
+	if vs.Server.WorkspaceStorage != nil || vs.Server.SharedDirStorage != nil || vs.Server.HomeStorage != nil {
+		t.Error("the template must render only server.project_storage, never a deprecated storage block")
+	}
+	if _, warnings, err := config.ResolveProjectStorage(vs.Server); err != nil || len(warnings) != 0 {
+		t.Errorf("server.project_storage does not resolve cleanly: err=%v warnings=%q", err, warnings)
 	}
 
 	rt, rtType, err := vs.ResolveRuntime("")

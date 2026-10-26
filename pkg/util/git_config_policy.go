@@ -263,8 +263,7 @@ func allowVar(policy RepoConfigPolicy, v gitConfigVar, opts repoConfigAllowOptio
 		if hasSub {
 			switch name {
 			case "pushurl", "tagopt", "prune", "prunetags", "mirror",
-				"promisor", "partialclonefilter", "fetchrecursesubmodules",
-				"followremotehead":
+				"fetchrecursesubmodules", "followremotehead":
 				return true, ""
 			case "uploadpack", "receivepack", "proxy", "vcs":
 				return false, "a remote command or proxy override"
@@ -464,7 +463,7 @@ var (
 		"colormoved", "colormovedws", "context", "interhunkcontext",
 		"mnemonicprefix", "noprefix", "wordregex", "submodule", "relative",
 		"ignoresubmodules", "dirstat", "statgraphwidth", "wserrorhighlight",
-		"suppressblankempty", "colorwords", "tabsize", "orderfile")
+		"suppressblankempty", "colorwords", "tabsize")
 	diffDriverKeys = set("binary", "wordregex", "xfuncname")
 	mergeTopKeys   = set("conflictstyle", "ff", "renamelimit", "renames",
 		"stat", "log", "autostash", "verbosity", "directoryrenames",
@@ -497,6 +496,9 @@ func set(keys ...string) map[string]bool {
 // if git resolves any entry the parser did not, so a parser divergence fails
 // closed. It fails closed on anything it cannot locate, read or parse.
 func checkRepoConfigPolicy(ctx context.Context, dir string, env []string, policy RepoConfigPolicy, opts repoConfigAllowOptions) error {
+	if err := refuseRootCommonDirRedirect(dir); err != nil {
+		return err
+	}
 	parsed, err := parseRepoConfig(dir, env)
 	if err != nil {
 		return err
@@ -510,6 +512,35 @@ func checkRepoConfigPolicy(ctx context.Context, dir string, env []string, policy
 		}
 	}
 	return crossCheckAgainstGit(ctx, dir, env, parsed)
+}
+
+// refuseRootCommonDirRedirect refuses a host-side git command when the
+// repository's `.git` directory carries a root-level `commondir` or `gitdir`
+// file. A normal repository never has one there (a `commondir`/`gitdir` belongs
+// inside a worktree admin dir, `.git/worktrees/<name>/`); at the `.git` root it
+// makes git treat the repository itself as a linked worktree and resolve the
+// common dir — the place it reads config, hooks and refs from — through an
+// agent-writable path. The container-side read-only `.git` root closes this for
+// agents; this guard protects the user's host git for the layouts we do not mount
+// read-only (shared-plain and any pre-existing state). A linked worktree, whose
+// `.git` is a gitfile pointing at its admin dir, legitimately resolves a
+// commondir and is not the target here, so only a `.git` directory is checked.
+func refuseRootCommonDirRedirect(dir string) error {
+	gitPath := filepath.Join(dir, ".git")
+	fi, err := os.Lstat(gitPath)
+	if err != nil || !fi.IsDir() {
+		return nil
+	}
+	for _, name := range []string{"commondir", "gitdir"} {
+		if _, err := os.Lstat(filepath.Join(gitPath, name)); err == nil {
+			return &RepoConfigRefusedError{
+				Dir:    dir,
+				Key:    ".git/" + name,
+				Reason: "a root-level " + name + " would redirect the repository's common git directory",
+			}
+		}
+	}
+	return nil
 }
 
 // parseRepoConfig reads, as data, every repository config file git would read
