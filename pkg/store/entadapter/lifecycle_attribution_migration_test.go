@@ -199,11 +199,31 @@ func TestLifecycleAttributionMigration_Postgres(t *testing.T) {
 	cs := NewCompositeStore(client)
 	t.Cleanup(func() { _ = cs.Close() })
 	require.NoError(t, cs.MigrateWithSchemaLock(ctx))
+	// The twelve columns exist (explicit catalog check, implementation
+	// review r1 OP-4).
+	for _, col := range []string{"attribution_state", "attribution_stamp", "last_run", "last_generation", "attributed_run",
+		"attributed_generation", "quarantined_runs", "quarantine_mode", "reincarnation_mint_run", "untrusted_open_run",
+		"untrusted_open_run_generation", "untrusted_open_run_rev"} {
+		var n int
+		require.NoError(t, raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.columns
+			WHERE table_schema = current_schema() AND table_name = 'agent_lifecycle_cursors' AND column_name = $1`, col).Scan(&n))
+		assert.Equal(t, 1, n, "column %s added", col)
+	}
 	assert.Equal(t, before, oldCursorRows(t, raw))
 	c, err := cs.client.AgentLifecycleCursor.Get(ctx, uuid.MustParse(id))
 	require.NoError(t, err)
-	assert.Equal(t, store.LifecycleAttribution{}, entCursorToStore(c).Attribution)
+	sc := entCursorToStore(c)
+	assert.Equal(t, store.LifecycleAttribution{}, sc.Attribution)
 	assert.Nil(t, c.AttributionStamp)
+	// Old-row behaviour, as in the SQLite case: LEGACY normalises
+	// fail-closed and its valid named segment stays trusted (R4).
+	f := lifecycleevents.Facts{Op: store.AgentWriteStatus, HasBefore: true, BeforeLive: true, HasAfter: true,
+		BeforeRunID: "run-1", AfterRunID: "run-1", BeforeGeneration: 1, AfterGeneration: 1,
+		Cursor: lifecycleevents.CursorFacts{Exists: true, OpenRun: sc.OpenRun, Run: sc.RunState(), FingerprintMatches: true}}
+	pre := lifecycleevents.PrepareAttribution(&f, sc)
+	assert.True(t, pre.Normalized)
+	assert.Equal(t, "legacy", pre.StaleReason)
+	assert.False(t, pre.SegUntrusted)
 
 	require.NoError(t, cs.MigrateWithSchemaLock(ctx))
 	assert.Equal(t, before, oldCursorRows(t, raw))
