@@ -26,7 +26,7 @@ When you start an agent, Scion determines its workspace based on the following p
 You can tell Scion exactly which directory to use as the workspace. This is useful for:
 - Working on a specific subfolder.
 - Using a shared directory across multiple agents.
-- Working on a path outside the current repository without creating a worktree.
+- Working on a registered git worktree outside the repository root, or a directory outside a non-git project.
 
 ### Absolute vs. Relative Paths
 
@@ -43,7 +43,7 @@ scion start my-agent "run analysis" --workspace /home/user/my-service
 
 - **Behavior**: The specified directory is mounted directly to `/workspace`.
 - **Isolation**: **None**. Changes made by the agent are immediately visible on the host and to any other agents sharing this directory.
-- **Git**: No new worktree or branch is created, even if inside a repo.
+- **Git**: No new worktree or branch is created automatically. In a git project, a workspace in a subdirectory of the repository or outside the repository root must already be a registered git worktree of that repository; a plain subdirectory or an unregistered path outside the repository root is refused at start (see [Git that Scion runs on the host](#git-that-scion-runs-on-the-host)).
 
 #### Relative Paths (Contained Subdirectory Mounts)
 
@@ -56,7 +56,7 @@ scion start my-agent "fix web bugs" --workspace packages/web
 
 - **Behavior**: Scion resolves the subdirectory path against the project root, performs strict containment checks (preventing directory traversal and escaping via symlinks), and mounts only that subtree to `/workspace`.
 - **Isolation**: The agent has **full containment** — it cannot see or access any files or folders outside of that specific subdirectory.
-- **Support**: Supported for directory (non-git) projects — both linked and hub-managed.
+- **Support**: Supported for directory (non-git) projects — both linked and hub-managed. In a git repository, a subdirectory workspace must be a registered git worktree of that repository; plain subdirectories are refused at start.
 - **Git-Clone Projects Limitation**: Relative `--workspace` paths are **not supported** for per-agent git (clone-based) projects and will be rejected with an error. For those projects, use an absolute path or omit the `--workspace` flag.
 
 ---
@@ -383,9 +383,7 @@ writable; there the host-side git controls additionally refuse to run if a root-
 `gitdir` is present in the repository, so a redirect file cannot steer git that Scion runs on the
 host.
 
-A workspace in a subdirectory of a repository must be a registered git worktree of that repository;
-other subdirectory workspaces are refused at start, because the per-agent git metadata cannot be
-mounted for a plain subdirectory.
+A workspace in a subdirectory of a repository, or outside the repository root, must be a registered git worktree of that repository (for an outside-root worktree, only `/repo-root/.git` and `/workspace` are mounted into the container, not the full repository root). Plain subdirectory workspaces and unregistered workspaces outside the repository root are refused at start, because the per-agent git metadata cannot be mounted for them.
 
 On Docker and Podman, a project `.scion` that is mounted read-only — one in a registered outside-root
 checkout, one in a subdirectory of the workspace, or a nested `.scion` directory inside the agent's

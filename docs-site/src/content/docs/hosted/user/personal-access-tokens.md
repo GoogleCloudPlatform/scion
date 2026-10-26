@@ -298,13 +298,18 @@ The same per-request checks apply, with these limits:
   updating an integration; and changing the GitHub App configuration.
 - **Invitations and the allow list.** Inviting users (single or bulk), pre-registering a user
   (`POST /api/v1/users`, `scion hub users provision`) and managing invitation codes admit only a
-  hub token carrying `user:invite`. Reading the allow list and its domains
+  hub token carrying `user:invite`. On `POST /api/v1/users`, `user:read` on the token (together
+  with `user.read` on your user) controls whether an existing record's details are returned on a
+  repeat or conflict; without it, conflicts return `user_exists` and a repeat returns only
+  `{email, status}`. Pre-registering a user is audited as `user_provision` (recording the token as
+  the credential), and is refused for every caller on a Hub running with dev authentication (`403`,
+  `dev_auth_not_supported`). Reading the allow list and its domains
   needs `hub_allow_list:read`; adding, importing or removing allow-list entries needs
   `hub_allow_list:read` and `hub_allow_list:update`. Your user must also hold the matching hub
   permission. An invited user gets no role binding or group membership from the invitation.
   Removing an allow-list entry deletes the invited user together with that user's role bindings
-  and group memberships, and is refused with `409` while the invited user is a project's last
-  owner.
+  and group memberships, and is refused with `409` while agents or active agent delegations depend
+  on the user (`user_delete_blocked`) or while the user is a project's last owner (`last_owner`).
 - **Creating, registering and cloning projects.** Creating or registering a project admits only
   a hub token carrying `project:create`, and your user must hold `project.create`. You become the
   owner of the new project, so the token must also carry a selector for every permission of the

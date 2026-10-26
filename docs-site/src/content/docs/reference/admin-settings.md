@@ -146,7 +146,7 @@ A workstation save that touches both destinations is checked as a whole first. A
 
 Of the system routes, only `PUT /api/v1/system/identity` and `PATCH /api/v1/system/workstation-settings` require a Hub admin (the `hub.config.update` permission, held by the hub-admin and super-admin roles; the workstation's dev user holds it as super-admin); other signed-in callers get `403`.
 
-On every Hub, a key the API cannot store anywhere (an unknown or misspelled key, or a field with no settings home) is rejected with `422 unpersisted_keys_rejected`, unless its value is unchanged from what `GET` returns. A save never answers `200` for a key it dropped. An empty body is a `400`.
+On every Hub, a key the API cannot store anywhere (an unknown or misspelled key, or a field with no settings home) is rejected with `422 unpersisted_keys_rejected`, unless its value is unchanged from what `GET` returns. Settings-file-only keys that are never writable through the API (such as `server.hub.gcp_project_id`, which is also omitted from `GET /api/v1/admin/server-config` and `env_overrides` and has no UI field; see [Hub server settings](/scion/reference/server-config/#hub-serverhub)) are rejected with `422` in every mode (`unpersisted_keys_rejected` on a database-backed Hub, `unsaved_keys_rejected` in `settings.yaml` mode), even when sent as `""` or `null`. A save never answers `200` for a key it dropped. An empty body is a `400`.
 
 ## Seeded/Managed Lifecycle
 
@@ -362,4 +362,5 @@ The admin UI provides structured feedback on save:
 | **409** `legacy_server_yaml` | Shows the message: the server config still comes from a deprecated `server.yaml`; move it under `server:` in `settings.yaml`, remove `server.yaml`, then save again. Nothing was saved |
 | **422** `validation_error` | On a database-backed Hub, a duration-valued key, including one nested in a map, does not parse as a duration (for example `"5 minutes"`); `details.field` names the full key path. `""` or `null` clears the key. Also: `default_thinking_level` outside 1-100 (`0` included; `null` clears it), or `{"federation": null}` (`details.keys`). Nothing was saved |
 | **422** `layer0_rejected` | Safety-net notice on hosted Hubs (should not occur with layer-aware UI) |
+| **422** `startup_only_key_rejected` | On a database-backed Hub, `telemetry.cloud.cloud_logging` was sent with a value different from what `GET` returns (`keys: ["telemetry.cloud.cloud_logging"]`); nothing was saved |
 | **422** `unclassified_keys_rejected` / `unpersisted_keys_rejected` / `hub_owned_keys_rejected` / `unsaved_keys_rejected` | Shows the message and the offending keys; nothing was saved |

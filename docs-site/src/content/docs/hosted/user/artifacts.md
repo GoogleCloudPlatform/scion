@@ -164,6 +164,14 @@ On the current version of a Markdown artifact, choose **Review**. An editor open
 2. **Save review** publishes your marked-up copy as a version of kind *review*, with an optional note. It stays disabled until there is at least one mark, and while text outside your marks differs from the version you started from.
 3. If someone publishes a newer version while you review, your review is not saved. The editor restarts from the current version, and your text is shown read-only with **Copy** so you can redo your marks.
 
+:::note[Graphical review editor (experimental)]
+When the `web.artifact_review_editor` [experiment](/scion/reference/experiments/) is on (in addition to `hub.artifacts`), **Review** opens a graphical review editor with a **Graphical** and **Source** view toggle:
+- In **Graphical** view (**Track changes** is always on), you edit the rendered document directly: typing, deleting and replacing text are recorded inline as CriticMarkup suggestions, and **Comment** (`Ctrl+Alt+M` or `Cmd+Alt+M`) adds a note on the selection (`Enter` edits the selected comment).
+- Changes that cannot be recorded in the graphical view — formatting, headings, lists, tables, code blocks, paragraph breaks, multi-paragraph paste, or edits that would move an earlier comment — show a hint to switch to **Source** view.
+- **Source** view uses the CriticMarkup source editor and toolbar (**Comment**, **Suggest**, **Insert**, **Delete**). Suggestions you made in the graphical view become read-only in the graphical view after you switch to **Source**, though you can still edit them in **Source**. Undo history is kept per view and resets when you switch, and your last chosen view is remembered in the browser.
+- Every save goes through the same review publish and Hub checks whether or not `web.artifact_review_editor` is on.
+:::
+
 While a review is the current version, the artifact shows a *Review pending* badge (also in the Artifacts list), and a banner names the reviewer and counts the marks. On a review, the preview's **Marks · Clean · Accepted** switch shows the marks, the text with every mark rejected, or the text with every mark accepted.
 
 **Review** is shown to people who may publish versions of the artifact and to people given review access (see [Share an artifact](#share-an-artifact)). Use **Edit** for a plain edit instead of a review.
