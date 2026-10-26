@@ -448,13 +448,21 @@ func TestChainFromAgentCreate(t *testing.T) {
 // section 6.1; review r6 L4): a run mint is trusted as fresh because its
 // only production caller generates the run ID for its own dispatch. The
 // callers of SetAgentRunID are exactly HTTPAgentDispatcher.beginRun, and
-// beginRun passes the result of uuid.NewString(). The scan covers the
-// module outside pkg/store and pkg/ent; pkg/store/storetest (shared store
-// tests, not production) supplies run IDs of its own and is outside it.
+// beginRun passes the result of uuid.NewString(), assigned exactly once.
+// The scan covers the whole module except pkg/ent (generated code); the
+// one allowed exception is the shared store conformance helper
+// pkg/store/storetest/domains_usage_reservation_release.go (not
+// production), which supplies run IDs of its own (implementation review
+// r1 OP-3).
 func TestSetAgentRunIDHasOneFreshMintCaller(t *testing.T) {
-	assert.Equal(t,
-		[]string{"pkg/hub/httpdispatcher.go HTTPAgentDispatcher.beginRun"},
-		referencesOutsideStore(t, map[string]bool{"SetAgentRunID": true}))
+	const storetestException = "pkg/store/storetest/domains_usage_reservation_release.go "
+	var callers []string
+	for _, ref := range moduleReferences(t, map[string]bool{"SetAgentRunID": true}, filepath.Join("pkg", "ent")) {
+		if !strings.HasPrefix(ref, storetestException) {
+			callers = append(callers, ref)
+		}
+	}
+	assert.Equal(t, []string{"pkg/hub/httpdispatcher.go HTTPAgentDispatcher.beginRun"}, callers)
 
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "httpdispatcher.go", nil, parser.SkipObjectResolution)
@@ -466,11 +474,17 @@ func TestSetAgentRunIDHasOneFreshMintCaller(t *testing.T) {
 		}
 	}
 	require.NotNil(t, begin, "beginRun not found")
-	fresh := map[string]bool{} // identifiers assigned uuid.NewString()
+	fresh := map[string]bool{}  // identifiers assigned uuid.NewString()
+	assigns := map[string]int{} // assignments per identifier, any value
 	var mintArgs []ast.Expr
 	ast.Inspect(begin.Body, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.AssignStmt:
+			for _, lhs := range x.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok {
+					assigns[id.Name]++
+				}
+			}
 			for i, rhs := range x.Rhs {
 				if call, ok := rhs.(*ast.CallExpr); ok && isSelector(call.Fun, "uuid", "NewString") && i < len(x.Lhs) {
 					if id, ok := x.Lhs[i].(*ast.Ident); ok {
@@ -489,6 +503,7 @@ func TestSetAgentRunIDHasOneFreshMintCaller(t *testing.T) {
 	id, ok := mintArgs[0].(*ast.Ident)
 	require.True(t, ok, "the minted run ID is an identifier")
 	assert.True(t, fresh[id.Name], "beginRun's minted run ID %s must come from uuid.NewString()", id.Name)
+	assert.Equal(t, 1, assigns[id.Name], "beginRun's minted run ID %s must be assigned exactly once (no reassignment before the mint)", id.Name)
 }
 
 func isSelector(e ast.Expr, pkg, name string) bool {
