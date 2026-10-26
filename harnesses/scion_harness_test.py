@@ -24,67 +24,12 @@ import textwrap
 import threading
 import tomllib
 import unittest
-from contextlib import contextmanager
 from typing import Any
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import scion_harness as sh
-
-
-# Since Python 3.14 the C JSON decoder's nesting limit follows the stack
-# size: about 65000 levels with an 8 MiB stack, and no limit with an
-# unlimited one. Whether content is "too deep for Python" now depends on the
-# machine (ptone/scion#6254), so tests of that path simulate a decoder limit
-# instead of relying on the interpreter's. The limit is below every fixed
-# limit of older versions, so shallower content still decodes for real.
-SIMULATED_DECODER_DEPTH_LIMIT = 500
-
-
-def _first_too_deep_offset(text: str, limit: int) -> int | None:
-    """Offset of the first bracket nesting text deeper than limit (brackets
-    inside strings don't count), or None if it never does."""
-    depth = 0
-    in_string = escaped = False
-    for i, ch in enumerate(text):
-        if in_string:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_string = False
-        elif ch == '"':
-            in_string = True
-        elif ch in "[{":
-            depth += 1
-            if depth > limit:
-                return i
-        elif ch in "]}":
-            depth -= 1
-    return None
-
-
-@contextmanager
-def simulated_decoder_depth_limit(limit: int = SIMULATED_DECODER_DEPTH_LIMIT):
-    """Make json.loads stop at limit levels of nesting the way a decoder at
-    its limit does: errors earlier in the document are raised as usual, and
-    reaching the first bracket past the limit raises RecursionError."""
-    real_loads = json.loads
-
-    def loads(s, *args, **kwargs):
-        cut = _first_too_deep_offset(s, limit) if isinstance(s, str) else None
-        if cut is None:
-            return real_loads(s, *args, **kwargs)
-        try:
-            real_loads(s[:cut], *args, **kwargs)
-        except json.JSONDecodeError as exc:
-            if exc.pos < cut:
-                raise
-        raise RecursionError("maximum recursion depth exceeded while decoding a JSON document")
-
-    with mock.patch.object(json, "loads", loads):
-        yield
+from json_depth_testutil import SIMULATED_DECODER_DEPTH_LIMIT, simulated_decoder_depth_limit
 
 
 class TestVersionContract(unittest.TestCase):
@@ -1723,6 +1668,47 @@ class TestAtomicWriteText(unittest.TestCase):
 # ---------------------------------------------------------------------------
 # read_json_skipping_comment_lines
 # ---------------------------------------------------------------------------
+
+
+class TestSimulatedDecoderDepthLimit(unittest.TestCase):
+    """json_depth_testutil.simulated_decoder_depth_limit behaves like a real
+    decoder at its nesting limit (ptone/scion#6254)."""
+
+    def _loads(self, text, limit=2, **kwargs):
+        with simulated_decoder_depth_limit(limit):
+            return json.loads(text, **kwargs)
+
+    def test_within_limit_decodes_for_real(self):
+        n = SIMULATED_DECODER_DEPTH_LIMIT
+        self.assertEqual(self._loads("[" * n + "]" * n, limit=n), json.loads("[" * n + "]" * n))
+        self.assertEqual(self._loads('{"a": [1]}'), {"a": [1]})
+
+    def test_bracket_at_value_position_raises_recursion_error(self):
+        for text in ("[[[]]]", '{"a": {"b": {}}}', "[1, [[]]]", '["x", [ []]]', b"[[[]]]"):
+            with self.subTest(text=text), self.assertRaises(RecursionError):
+                self._loads(text)
+
+    def test_bracket_where_no_value_can_go_raises_decode_error(self):
+        for text, msg in (("[[1[]]]", "Expecting ',' delimiter"),
+                          ("[{{}}]", "Expecting property name enclosed in double quotes"),
+                          ('[{"a" []}]', "Expecting ':' delimiter")):
+            with self.subTest(text=text), self.assertRaises(json.JSONDecodeError) as cm:
+                self._loads(text)
+            self.assertEqual(cm.exception.msg, msg)
+
+    def test_errors_before_the_deep_part_are_raised_first(self):
+        with self.assertRaises(json.JSONDecodeError):
+            self._loads('{"a": 1,, "b": [[[]]]}')
+
+        def reject(_):
+            raise ValueError("hook")
+
+        with self.assertRaisesRegex(ValueError, "^hook$"):
+            self._loads('[NaN, [[]]]', parse_constant=reject)
+
+    def test_brackets_inside_strings_do_not_count(self):
+        text = '["[[[{{{", "\\\"[[[", ["x"]]'
+        self.assertEqual(self._loads(text), json.loads(text))
 
 
 class TestReadJsonSkippingComments(unittest.TestCase):
