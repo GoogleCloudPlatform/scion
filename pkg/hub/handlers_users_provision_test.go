@@ -328,7 +328,7 @@ func TestHandleProvisionUser(t *testing.T) {
 	t.Run("row04a_dev_auth_mode_refused", func(t *testing.T) {
 		// Dev auth is single-user local mode: on a hub running with dev
 		// auth, provisioning is refused for every caller, before any body
-		// check: the dev credential, the session the web dev auto-login
+		// check: the dev credential, the session a web dev sign-in link
 		// mints for the dev user, and any other admin's session.
 		srv, s := testServer(t)
 		require.True(t, srv.authConfig.DevAuthEnabled)

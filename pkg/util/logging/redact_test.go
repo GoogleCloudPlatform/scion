@@ -30,6 +30,7 @@ func TestRedactQuery(t *testing.T) {
 		"raw=1&version=1.0.0":              "raw=1&version=1.0.0",
 		"raw=1&version=1.0.0&exp=5&sig=AB": "raw=1&version=1.0.0&exp=5&sig=REDACTED",
 		"sig=AB&raw=1":                     "sig=REDACTED&raw=1",
+		"code=AB&next=%2F":                 "code=REDACTED&next=%2F",
 		"sig=AB&sig=CD":                    "sig=REDACTED&sig=REDACTED",
 		"%73ig=AB":                         "%73ig=REDACTED",
 		"SIG=AB":                           "SIG=REDACTED",

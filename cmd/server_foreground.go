@@ -2122,6 +2122,11 @@ func logWorkstationReadyBanner(cfg *config.GlobalConfig, globalDir string, webEn
 			displayHost = "127.0.0.1"
 		}
 		log.Printf("Web UI: http://%s:%d", displayHost, port)
+		if devAuthToken != "" {
+			// The web UI signs a browser in only from a single-use link,
+			// which is never written to this log.
+			log.Printf("To sign in to the web UI, run: scion server open")
+		}
 	}
 	if devAuthToken != "" {
 		log.Printf("Developer token: %s", devTokenStartupHint(cfg, globalDir))
@@ -3730,7 +3735,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 	webHost := webListenHost(cfg)
 
 	// Refuse to start when dev auth is enabled on a non-loopback interface.
-	// Dev auth auto-logs in every request as admin — exposing it on a public
+	// Dev auth signs browsers in as admin — exposing it on a public
 	// address would create an unauthenticated admin endpoint. Startup runs
 	// the same check earlier (webStartupPreflight); this one stays as
 	// defense in depth.
