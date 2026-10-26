@@ -19,11 +19,10 @@ import "github.com/GoogleCloudPlatform/scion/pkg/api"
 // CheckDispatchCloneURL is the clone-URL check a broker runs before it
 // dispatches an agent whose workspace is cloned from cloneURL, on any route
 // (the host-side worktree clone, the linked checkout or the in-container
-// clone): the same rule as every ProvisionShared call (checkProvisionCloneURL,
-// CheckHostCloneURL: https, ssh or git only). An empty URL (nothing is
-// cloned) passes. The only other exception is a local repository a running
-// test registered with AllowLocalCloneFixture, which exists only in a test
-// binary.
+// clone): CheckHostCloneURL's rule, https, ssh or git only. An empty URL
+// (nothing is cloned) passes. The only other exception is a local
+// repository a running test registered with AllowLocalCloneFixture, which is
+// honoured only in a test binary.
 func CheckDispatchCloneURL(cloneURL string) error {
 	return checkProvisionCloneURL(ProvisionInput{GitClone: &api.GitCloneConfig{URL: cloneURL}})
 }

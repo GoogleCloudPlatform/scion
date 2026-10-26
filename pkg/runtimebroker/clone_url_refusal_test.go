@@ -121,9 +121,6 @@ func TestCloneURLRefusal_Restart(t *testing.T) {
 // dispatch, where host-side provisioning is skipped). Nothing is cloned on
 // the host.
 func TestCloneURLRefusal_WorktreePerAgent(t *testing.T) {
-	if eligible, reason := runtime.WorktreeModeEligible(); !eligible {
-		t.Fatalf("precondition: worktree mode must be eligible on this host (git >= 2.48): %s", reason)
-	}
 	for _, tc := range []struct {
 		name     string
 		runtime  string
@@ -134,6 +131,12 @@ func TestCloneURLRefusal_WorktreePerAgent(t *testing.T) {
 		{"kubernetes dispatch", "kubernetes", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.hostPath && tc.runtime == "docker" {
+				// Only the host-side worktree case needs an eligible host.
+				if eligible, reason := runtime.WorktreeModeEligible(); !eligible {
+					t.Fatalf("precondition: worktree mode must be eligible on this host (git >= 2.48): %s", reason)
+				}
+			}
 			cfg := DefaultServerConfig()
 			cfg.StateDir = t.TempDir()
 			srv := newTestServerForStartContextRuntime(t, cfg, tc.runtime)

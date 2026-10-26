@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1885,7 +1886,10 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_CarriesWorkspaceDispatchMetadata
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
-	gitClone := &api.GitCloneConfig{URL: "https://github.com/example/repo.git"}
+	// A clone URL distinct from the project's recorded remote, so the token
+	// remote is shown to come from the record, not from the URL.
+	depth := 1
+	gitClone := &api.GitCloneConfig{URL: "https://mirror.example.invalid/example/repo.git", Branch: "main", Depth: &depth}
 	agent := &store.Agent{
 		ID:              tid("agent-ws"),
 		Name:            "test-agent",
@@ -1906,8 +1910,10 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_CarriesWorkspaceDispatchMetadata
 	// The dispatched GitClone is the stored one plus the project's recorded
 	// remote as its token remote (withTokenRemote); the stored config is
 	// not modified.
-	if ws.GitClone == nil || ws.GitClone.URL != gitClone.URL || ws.GitClone.TokenRemote != "https://github.com/example/repo.git" {
-		t.Errorf("expected StartExtras.Workspace.GitClone=%+v with TokenRemote %q, got %+v", gitClone, "https://github.com/example/repo.git", ws.GitClone)
+	want := *gitClone
+	want.TokenRemote = "https://github.com/example/repo.git"
+	if ws.GitClone == nil || !reflect.DeepEqual(*ws.GitClone, want) {
+		t.Errorf("expected StartExtras.Workspace.GitClone=%+v, got %+v", want, ws.GitClone)
 	}
 	if gitClone.TokenRemote != "" {
 		t.Errorf("the stored GitClone was modified: %+v", gitClone)
@@ -1959,7 +1965,8 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_RetryAfterHashMismatchCarriesWor
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 	dispatcher.SetHarnessConfigRepairer(func(ctx context.Context, ref HarnessConfigRepairRef) error { return nil })
 
-	gitClone := &api.GitCloneConfig{URL: "https://github.com/example/repo.git"}
+	depth := 1
+	gitClone := &api.GitCloneConfig{URL: "https://mirror.example.invalid/example/repo.git", Branch: "main", Depth: &depth}
 	agent := &store.Agent{
 		ID:              tid("agent-hm"),
 		Name:            "test-agent",
@@ -1981,8 +1988,10 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_RetryAfterHashMismatchCarriesWor
 		t.Fatalf("expected StartAgent to be called twice (fail then retry), got %d calls", mockClient.startCallCount)
 	}
 	ws := mockClient.lastStartExtras.Workspace
-	if ws.GitClone == nil || ws.GitClone.URL != gitClone.URL || ws.GitClone.TokenRemote != "https://github.com/example/repo.git" {
-		t.Errorf("expected the retry's StartExtras.Workspace.GitClone=%+v with TokenRemote %q, got %+v", gitClone, "https://github.com/example/repo.git", ws.GitClone)
+	want := *gitClone
+	want.TokenRemote = "https://github.com/example/repo.git"
+	if ws.GitClone == nil || !reflect.DeepEqual(*ws.GitClone, want) {
+		t.Errorf("expected the retry's StartExtras.Workspace.GitClone=%+v, got %+v", want, ws.GitClone)
 	}
 	if gitClone.TokenRemote != "" {
 		t.Errorf("the stored GitClone was modified: %+v", gitClone)

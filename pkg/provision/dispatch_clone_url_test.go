@@ -21,7 +21,6 @@ import (
 	"go/token"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -64,23 +63,21 @@ func TestCheckDispatchCloneURL(t *testing.T) {
 // checkProvisionCloneURL, whose registry lookup is false outside a test
 // binary (testing.Testing). A future production caller fails this test.
 func TestLocalCloneFixture_UnreachableFromProduction(t *testing.T) {
-	gitPath, err := exec.LookPath("git")
-	if err != nil {
-		t.Fatalf("git is required: %v", err)
-	}
-	out, err := exec.Command(gitPath, "rev-parse", "--show-toplevel").Output()
+	// Tests run in their package directory (pkg/provision), so the module
+	// root is two levels up; no git checkout is needed.
+	root, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatalf("locate the module root: %v", err)
 	}
-	root := strings.TrimSpace(string(out))
 	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
 		t.Fatalf("module root %s has no go.mod: %v", root, err)
 	}
 	// Go scoping decides what can reach the registry: the unexported
 	// localCloneFixtures / isLocalCloneFixture only from package provision
-	// itself, the exported AllowLocalCloneFixture from any package as
-	// provision.AllowLocalCloneFixture. (Other packages may declare unrelated
-	// names of their own, for example pkg/hub's local clone fixture seam.)
+	// itself, the exported AllowLocalCloneFixture from any package under any
+	// import name (or a dot-import). Other packages may declare unrelated
+	// unexported names of their own, for example pkg/hub's local clone
+	// fixture seam.
 	unexported := map[string]bool{"localCloneFixtures": true, "isLocalCloneFixture": true, "AllowLocalCloneFixture": true}
 	provisionDir := filepath.Join(root, "pkg", "provision")
 	definition := filepath.Join(provisionDir, "clone_fixture.go")
@@ -113,21 +110,19 @@ func TestLocalCloneFixture_UnreachableFromProduction(t *testing.T) {
 		rel := strings.TrimPrefix(path, root+"/")
 		inProvision := filepath.Dir(path) == provisionDir
 		ast.Inspect(file, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.SelectorExpr:
-				// provision.AllowLocalCloneFixture from another package.
-				if pkg, ok := x.X.(*ast.Ident); ok && pkg.Name == "provision" && x.Sel.Name == "AllowLocalCloneFixture" {
-					t.Errorf("non-test file %s calls provision.AllowLocalCloneFixture: the local clone fixture exemption must stay test-only", rel)
-				}
-			case *ast.Ident:
-				if !inProvision || !unexported[x.Name] {
-					return true
-				}
-				if path == definition {
-					found++
-					return true
-				}
+			x, ok := n.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			switch {
+			case path == definition && unexported[x.Name]:
+				found++
+			case inProvision && unexported[x.Name]:
 				t.Errorf("non-test file %s references %s: the local clone fixture exemption must stay test-only", rel, x.Name)
+			case !inProvision && x.Name == "AllowLocalCloneFixture":
+				// Any qualifier (an aliased import) or a dot-import: the
+				// exported name appears as an identifier either way.
+				t.Errorf("non-test file %s references AllowLocalCloneFixture: the local clone fixture exemption must stay test-only", rel)
 			}
 			return true
 		})
