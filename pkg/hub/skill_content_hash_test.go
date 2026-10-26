@@ -227,7 +227,7 @@ type legacySkillVersion struct {
 	Created            time.Time            `json:"created"`
 }
 
-func mustJSON(t *testing.T, v any) string {
+func skillHashJSON(t *testing.T, v any) string {
 	t.Helper()
 	b, err := json.Marshal(v)
 	require.NoError(t, err)
@@ -276,16 +276,16 @@ func TestSkillContentHashV2_ResolveAndVersionJSON(t *testing.T) {
 		URI: got.URI, Name: got.Name, ResolvedVersion: got.ResolvedVersion, ContentHash: got.ContentHash,
 		Files: got.Files, Deprecated: got.Deprecated, DeprecationMessage: got.DeprecationMessage, ReplacementURI: got.ReplacementURI,
 	}
-	assert.Equal(t, mustJSON(t, legacy), mustJSON(t, got))
+	assert.Equal(t, skillHashJSON(t, legacy), skillHashJSON(t, got))
 
 	stored, err := s.GetSkillVersion(context.Background(), sv.ID)
 	require.NoError(t, err)
 	off := srv.withSkillContentHashV2(stored)
-	assert.Equal(t, mustJSON(t, legacySkillVersion{
+	assert.Equal(t, skillHashJSON(t, legacySkillVersion{
 		ID: off.ID, SkillID: off.SkillID, Version: off.Version, Status: off.Status, ContentHash: off.ContentHash,
 		Files: off.Files, PublisherID: off.PublisherID, DeprecationMessage: off.DeprecationMessage,
 		ReplacementURI: off.ReplacementURI, DownloadCount: off.DownloadCount, Created: off.Created,
-	}), mustJSON(t, off))
+	}), skillHashJSON(t, off))
 
 	resp = resolve(goldenLegacySkillV1)
 	require.Len(t, resp.Resolved, 1, "a v1 hash resolves with the experiment off")
