@@ -70,9 +70,9 @@ The local backend is unchanged: its slug-keyed trees keep their deleters.
   state is the legacy directory is refused with
   `ErrLegacyAgentStateRetired`, before any side effect, and its old
   workspace stays intact until the agent is deleted.
-- Agent delete still finds and removes the legacy directory, and now also
-  removes the agent's state in the forced-external root without a Hub
-  project ID.
+- Agent delete still finds and removes the legacy directory. It removes
+  the agent's state in the forced-external root, with or without a Hub
+  project ID, through the external agents root (now covered by a test).
 
 ## Verification
 

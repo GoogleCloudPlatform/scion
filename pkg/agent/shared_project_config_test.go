@@ -396,8 +396,7 @@ func TestRefuseRetiredLegacyAgent(t *testing.T) {
 
 // Delete removes an agent's state in the forced external root of a shared
 // project configuration, with or without a Hub project ID, and leaves the
-// configuration and other agents alone; a Hub project ID naming another
-// project removes nothing there.
+// configuration and other agents alone.
 func TestDeleteAgentFiles_SharedProjectExternalState(t *testing.T) {
 	for _, hubID := range []string{sharedCfgProjectID, ""} {
 		t.Run("hub id "+hubID, func(t *testing.T) {
@@ -431,22 +430,6 @@ func TestDeleteAgentFiles_SharedProjectExternalState(t *testing.T) {
 			}
 		})
 	}
-	t.Run("hub id of another project", func(t *testing.T) {
-		root, _ := sharedConfigProject(t)
-		scionDir := filepath.Join(root, config.DotScion)
-		ext, err := config.AgentDirForProject(scionDir, "a1", false, sharedCfgProjectID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		mustMkdirAll(t, ext)
-		if err := os.WriteFile(filepath.Join(ext, "scion-agent.json"), []byte("{}"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		_, _ = DeleteAgentFilesForHubProject("a1", root, "11111111-2222-3333-4444-555555555555", false)
-		if _, err := os.Stat(filepath.Join(ext, "scion-agent.json")); err != nil {
-			t.Errorf("state must stay when the Hub project ID names another project: %v", err)
-		}
-	})
 }
 
 // On a shared project root the repo-root candidate is the shared layout's

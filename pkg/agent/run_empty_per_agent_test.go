@@ -332,7 +332,7 @@ func TestReprovision_EmptyPerAgent_ReusesWorkspaceInPlace(t *testing.T) {
 	if !os.SameFile(wsInfoBefore, wsInfoAfter) {
 		t.Fatal("workspace directory was recreated, want the same directory reused in place")
 	}
-	if !persistedEmptyPerAgent([]string{filepath.Join(projectScionDir, "agents")}, "worker") {
+	if !persistedEmptyPerAgent([]string{filepath.Join(projectScionDir, "agents")}, "", "worker") {
 		t.Fatal("reprovisioned scion-agent.json must still record empty-per-agent")
 	}
 

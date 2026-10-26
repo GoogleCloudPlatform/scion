@@ -104,7 +104,7 @@ func AgentFilesPresence(agentName, projectPath, hubProjectID string) FilesPresen
 			return p
 		}
 	}
-	if layout.repoRoot == "" || persistedEmptyPerAgent([]string{agentsDir}, agentName, externalAgentDir) {
+	if layout.repoRoot == "" || persistedEmptyPerAgent([]string{agentsDir}, externalAgentDir, agentName) {
 		return FilesAbsent
 	}
 	if _, _, found, err := provision.FindBranchForAgent(layout.repoRoot, projectDir, agentName); err != nil {
