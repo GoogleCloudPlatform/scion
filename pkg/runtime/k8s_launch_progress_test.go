@@ -593,8 +593,8 @@ func TestWaitForPodReady_DisruptedPodIsTyped(t *testing.T) {
 			}
 			if tc.goneFrom > 0 {
 				// A pod gone by the next poll keeps the Kubernetes NotFound
-				// error in the chain and its text: callers (the broker's
-				// restart handler) match on both.
+				// error in the chain and its text, as before: the broker's
+				// restart handler matches the text.
 				if !k8serrors.IsNotFound(err) || !strings.Contains(err.Error(), "not found") {
 					t.Errorf("error %q: IsNotFound=%v, want the wrapped NotFound error and its text", err, k8serrors.IsNotFound(err))
 				}
