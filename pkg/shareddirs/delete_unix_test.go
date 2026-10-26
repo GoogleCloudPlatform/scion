@@ -733,3 +733,67 @@ func TestDeleteProjectRoot_SymlinkedComponentsRefused(t *testing.T) {
 
 	require.Error(t, DeleteProjectRoot(hostBase, "projects", "../pid-1"), "an invalid project ID is refused")
 }
+
+// TestDeleteTree_RemovesOnlyTheLeaf: a multi-component path is removed with
+// everything under it; its parents and siblings stay; a symlink inside is
+// unlinked, never followed; a repeated call is nothing to do.
+func TestDeleteTree_RemovesOnlyTheLeaf(t *testing.T) {
+	hostBase := t.TempDir()
+	leaf := filepath.Join(hostBase, "projects", "pid-1", "agents", "dev")
+	require.NoError(t, os.MkdirAll(filepath.Join(leaf, "workspace", "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(leaf, "workspace", "sub", "f"), []byte("x"), 0o644))
+	victim := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(victim, "keep.txt"), []byte("victim"), 0o644))
+	require.NoError(t, os.Symlink(victim, filepath.Join(leaf, "out")))
+	sibling := filepath.Join(hostBase, "projects", "pid-1", "agents", "other")
+	require.NoError(t, os.MkdirAll(sibling, 0o755))
+
+	existed, err := DeleteTree(hostBase, "projects/pid-1/agents/dev")
+	require.NoError(t, err)
+	assert.True(t, existed)
+	assert.NoDirExists(t, leaf)
+	assert.DirExists(t, sibling)
+	assert.FileExists(t, filepath.Join(victim, "keep.txt"))
+
+	existed, err = DeleteTree(hostBase, "projects/pid-1/agents/dev")
+	require.NoError(t, err)
+	assert.False(t, existed, "a missing leaf is nothing to do")
+	existed, err = DeleteTree(hostBase, "absent/pid-1")
+	require.NoError(t, err)
+	assert.False(t, existed, "a missing parent is nothing to do")
+}
+
+// TestDeleteTree_SymlinkAtAnyComponentRefused: a symlink at the leaf or at
+// any parent component is refused and its target left untouched.
+func TestDeleteTree_SymlinkAtAnyComponentRefused(t *testing.T) {
+	for _, linkAt := range []string{"projects", "projects/pid-1", "projects/pid-1/agents", "projects/pid-1/agents/dev"} {
+		t.Run(linkAt, func(t *testing.T) {
+			hostBase := t.TempDir()
+			victim := t.TempDir()
+			require.NoError(t, os.MkdirAll(filepath.Join(victim, "pid-1", "agents", "dev", "agents", "dev"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(victim, "keep.txt"), []byte("v"), 0o644))
+			link := filepath.Join(hostBase, linkAt)
+			require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o755))
+			require.NoError(t, os.Symlink(victim, link))
+
+			_, err := DeleteTree(hostBase, "projects/pid-1/agents/dev")
+			require.Error(t, err)
+			assert.FileExists(t, filepath.Join(victim, "keep.txt"))
+			assert.DirExists(t, filepath.Join(victim, "pid-1", "agents", "dev"))
+		})
+	}
+}
+
+// TestDeleteTree_InvalidInputs: an unclean or absolute path and a missing
+// host base are errors, and nothing is removed.
+func TestDeleteTree_InvalidInputs(t *testing.T) {
+	hostBase := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(hostBase, "keep"), 0o755))
+	for _, rel := range []string{"", ".", "..", "../keep", "a/../keep", "/keep", "a//b", "a/./b"} {
+		_, err := DeleteTree(hostBase, rel)
+		assert.Error(t, err, "path %q", rel)
+	}
+	assert.DirExists(t, filepath.Join(hostBase, "keep"))
+	_, err := DeleteTree(filepath.Join(hostBase, "absent"), "keep")
+	assert.Error(t, err, "a missing host base is an error")
+}

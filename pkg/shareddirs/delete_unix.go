@@ -247,6 +247,86 @@ func DeleteSharedDir(hostBase, subPathRoot, projectID, name string) error {
 	return nil
 }
 
+// ErrTreeRefused marks a DeleteTree error raised before anything was
+// removed: an invalid path, an unusable host base, or a component that is a
+// symlink or not a directory. Retrying cannot help with such an error;
+// other errors (a removal that failed part-way, for example because a
+// process was still writing) may clear on a retry.
+var ErrTreeRefused = errors.New("tree deletion refused")
+
+// DeleteTree removes <hostBase>/<relPath> and everything under it, via
+// the same symlink-safe, fd-based openat/unlinkat walk as
+// DeleteProjectTree. relPath is a relative path of one or more components,
+// none of them empty, "." or "..". Every component of relPath must be a
+// plain directory: a symlink (or any other non-directory) at any of them is
+// refused, never followed. Entries under the leaf are removed regardless of
+// type, and a symlink there is unlinked, never followed.
+//
+// existed reports whether the leaf directory was there to remove. An
+// absent component is nothing to do (existed false, no error), so repeated
+// or concurrent calls converge. An unusable hostBase is an error: a missing
+// mount must never look like a successful delete.
+func DeleteTree(hostBase, relPath string) (existed bool, err error) {
+	comps, err := splitRelPath(relPath)
+	if err != nil {
+		return false, fmt.Errorf("%w: %w", ErrTreeRefused, err)
+	}
+	baseFd, err := unix.Open(hostBase, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return false, fmt.Errorf("%w: host base %q does not exist", ErrTreeRefused, hostBase)
+		}
+		return false, fmt.Errorf("%w: open host base %q: %w", ErrTreeRefused, hostBase, err)
+	}
+	defer func() { _ = unix.Close(baseFd) }()
+
+	parentFd := baseFd
+	if len(comps) > 1 {
+		fd, ok, err := openExistingDirPathNoFollow(baseFd, strings.Join(comps[:len(comps)-1], "/"))
+		if err != nil {
+			return false, fmt.Errorf("%w: %q: %w", ErrTreeRefused, relPath, err)
+		}
+		if !ok {
+			return false, nil
+		}
+		parentFd = fd
+		defer func() { _ = unix.Close(fd) }()
+	}
+	leaf := comps[len(comps)-1]
+	leafFd, ok, err := openExistingDirNoFollow(parentFd, leaf)
+	if err != nil {
+		return false, fmt.Errorf("%w: %q: %w", ErrTreeRefused, relPath, err)
+	}
+	if !ok {
+		return false, nil
+	}
+	walkErr := removeTreeContents(leafFd, 0)
+	_ = unix.Close(leafFd)
+	if walkErr != nil {
+		return true, fmt.Errorf("remove contents of %q: %w", relPath, walkErr)
+	}
+	if err := unix.Unlinkat(parentFd, leaf, unix.AT_REMOVEDIR); err != nil && !errors.Is(err, unix.ENOENT) {
+		return true, fmt.Errorf("remove %q: %w", relPath, err)
+	}
+	return true, nil
+}
+
+// splitRelPath splits a relative path into its components, refusing an
+// absolute path and an empty, "." or ".." component.
+func splitRelPath(relPath string) ([]string, error) {
+	slashed := filepath.ToSlash(relPath)
+	if slashed == "" || strings.HasPrefix(slashed, "/") || filepath.IsAbs(relPath) {
+		return nil, fmt.Errorf("path %q is not a relative path", relPath)
+	}
+	comps := strings.Split(slashed, "/")
+	for _, c := range comps {
+		if c == "" || c == "." || c == ".." {
+			return nil, fmt.Errorf("path %q is not a clean relative path", relPath)
+		}
+	}
+	return comps, nil
+}
+
 // openExistingDirNoFollow opens the existing directory component `comp`
 // under parentFd, refusing to follow it if it's a symlink (O_NOFOLLOW) or
 // use it if it's not a directory (O_DIRECTORY) — but, unlike
