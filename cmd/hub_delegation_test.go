@@ -236,6 +236,14 @@ func TestBuildCreateAgentDelegationRequest_Refusals(t *testing.T) {
 	d, err := parseDelegationExpires("12h")
 	require.NoError(t, err)
 	assert.Equal(t, 12*time.Hour, d)
+	// A day count is accepted up to the largest that fits in a time.Duration.
+	d, err = parseDelegationExpires("106751d")
+	require.NoError(t, err)
+	assert.Equal(t, time.Duration(106751)*24*time.Hour, d)
+	for _, s := range []string{"106752d", "100000000d"} {
+		_, err = parseDelegationExpires(s)
+		require.Error(t, err, s)
+	}
 }
 
 // TestHubDelegationRevokeAll_ConfirmationAndOutput: revoke-all needs exactly

@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -167,12 +168,16 @@ var hubDelegationConfirm = func(prompt string) bool {
 	return hubsync.ConfirmAction(prompt, false, autoConfirm || nonInteractive)
 }
 
+// maxDelegationExpiresDays is the largest whole number of days that fits in a
+// time.Duration (106751); a larger day count would overflow.
+const maxDelegationExpiresDays = int(math.MaxInt64 / int64(24*time.Hour))
+
 // parseDelegationExpires parses a grant lifetime: a Go duration, or a whole
 // number of days with a "d" suffix.
 func parseDelegationExpires(s string) (time.Duration, error) {
 	if days, ok := strings.CutSuffix(s, "d"); ok {
 		n, err := strconv.Atoi(days)
-		if err != nil || n <= 0 {
+		if err != nil || n <= 0 || n > maxDelegationExpiresDays {
 			return 0, fmt.Errorf("invalid --expires %q: use a duration such as 12h or a number of days such as 7d", s)
 		}
 		return time.Duration(n) * 24 * time.Hour, nil
