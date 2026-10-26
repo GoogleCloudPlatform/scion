@@ -370,7 +370,9 @@ func TestLifecycleAttribution_T22QuietMint(t *testing.T) {
 }
 
 // TestLifecycleAttribution_T23BuildFailureCommits: the soft finish commits
-// without a bump (the build-failure path); the restore normalises to
+// without a bump (withoutObservation: a no-op observer for that write,
+// simulating the commit-without-bump state of the build-failure path, not
+// that executed path); the restore normalises to
 // held/UNATTRIBUTED; nothing names B1. T23b: then a fresh mint, a failed
 // start and a revert to B1: B1 was pushed at the normalisation, so the
 // revert is held (rule 4).
@@ -475,7 +477,9 @@ func TestLifecycleAttribution_T26QuarantineOverflow(t *testing.T) {
 
 // TestLifecycleAttribution_T27HardDelete: a held live row's hard delete
 // names R1/1. R6-2: a write with no POST still fires the trigger for
-// closure selection (a build-failed revert, then DeleteAgent).
+// closure selection (a revert committed without a bump via
+// withoutObservation, simulating the commit-without-bump state, then
+// DeleteAgent).
 func TestLifecycleAttribution_T27HardDelete(t *testing.T) {
 	f, a := heldAfterSoftFinish(t)
 	f.hardDelete(a.ID)
