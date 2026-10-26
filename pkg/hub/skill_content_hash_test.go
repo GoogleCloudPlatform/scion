@@ -376,10 +376,12 @@ func TestPreResolveAgentSkills_ContentHashUsesStatusFilter(t *testing.T) {
 	}
 	for i := range entries {
 		e := &entries[i]
-		// Distinct paths give each version its own v1 and v2 hash.
+		// A distinct file content hash gives each version its own v1 and v2
+		// hash (v1 covers file contents only, so a distinct path is not
+		// enough).
 		e.files = []store.TemplateFile{
 			{Path: "SKILL.md", Size: 10, Hash: skillHashFileA, Mode: "0644"},
-			{Path: e.status + ".sh", Size: 20, Hash: skillHashFileB, Mode: "0755"},
+			{Path: "scripts/run.sh", Size: 20, Hash: fmt.Sprintf("sha256:%064x", i+1), Mode: "0755"},
 		}
 		e.version = fmt.Sprintf("1.%d.0", i)
 		require.NoError(t, s.CreateSkillVersion(ctx, &store.SkillVersion{
