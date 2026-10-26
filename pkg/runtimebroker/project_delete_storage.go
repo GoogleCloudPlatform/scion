@@ -66,11 +66,11 @@ func (s *Server) claimReleasers() []sharedDirClaimReleaser {
 }
 
 // releaseProjectSharedDirClaims deletes, at project delete, the per-dir
-// shared-dir claims of projectID in the namespaces this broker's
-// Kubernetes runtimes place agents in (ptone/scion#5835). The hub asks for
-// the cleanup only after its deletion service has committed the delete,
-// which refuses while agents remain unless forced; a claim still mounted
-// by a terminating pod is kept by Kubernetes until the pod is gone. Only
+// shared-dir claims of projectID in the default namespaces of this
+// broker's Kubernetes runtimes (ptone/scion#5835). The hub asks for the
+// cleanup only after its deletion service has committed the delete, which
+// refuses while agents remain unless forced; whatever the delete, a claim
+// an existing pod still references is kept and audited as in use. Only
 // claims carrying the project-id label, a shared-dir label and the
 // scion-shared-<...>-<dir> name are deleted
 // (scionrt.KubernetesRuntime.ReleaseProjectSharedDirClaims); the layout's
@@ -107,6 +107,12 @@ func (s *Server) releaseProjectSharedDirClaims(reqCtx context.Context, slug, pro
 		for name, ferr := range res.Failed {
 			projectfs.Audit(ctx, log, projectfs.DeleterBroker, projectID, "", projectfs.Deletion{
 				Tree: projectfs.TreeClaim, Path: res.Namespace + "/" + name, Outcome: projectfs.OutcomeFailed, Err: ferr,
+			})
+		}
+		for _, name := range res.InUse {
+			projectfs.Audit(ctx, log, projectfs.DeleterBroker, projectID, "", projectfs.Deletion{
+				Tree: projectfs.TreeClaim, Path: res.Namespace + "/" + name, Outcome: projectfs.OutcomeKept,
+				Reason: "in use: an existing pod references the claim",
 			})
 		}
 		for _, name := range res.Unlabelled {

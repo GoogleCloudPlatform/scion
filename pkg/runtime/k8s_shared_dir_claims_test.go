@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -154,4 +155,68 @@ func TestReleaseProjectSharedDirClaims_Failures(t *testing.T) {
 
 	_, err = r2.ReleaseProjectSharedDirClaims(context.Background(), "", "web", nil)
 	assert.Error(t, err)
+}
+
+func podUsing(ns, name string, claims ...string) *corev1.Pod {
+	p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
+	for _, c := range claims {
+		p.Spec.Volumes = append(p.Spec.Volumes, corev1.Volume{Name: c,
+			VolumeSource: corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: c}}})
+	}
+	return p
+}
+
+// A claim an existing pod references (in any phase) is kept and listed as
+// in use, never released; a claim no pod references is released.
+func TestReleaseProjectSharedDirClaims_InUseKept(t *testing.T) {
+	r, cs := claimRuntime(t,
+		claim("agents", "scion-shared-web-a", claimLabels("a", "web", claimTestProjectID)),
+		claim("agents", "scion-shared-web-b", claimLabels("b", "web", claimTestProjectID)),
+		podUsing("agents", "agent-pod", "scion-shared-web-a"),
+		podUsing("elsewhere", "other-ns-pod", "scion-shared-web-b"), // another namespace: no effect
+	)
+	res, err := r.ReleaseProjectSharedDirClaims(context.Background(), claimTestProjectID, "web", nil)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"scion-shared-web-a"}, res.InUse)
+	assert.Equal(t, []string{"scion-shared-web-b"}, res.Deleted)
+	assert.Equal(t, []string{"scion-shared-web-a"}, claimNames(t, cs, "agents"))
+
+	r2, cs2 := claimRuntime(t, claim("agents", "scion-shared-web-a", claimLabels("a", "web", claimTestProjectID)))
+	cs2.PrependReactor("list", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, errors.New("forbidden")
+	})
+	_, err = r2.ReleaseProjectSharedDirClaims(context.Background(), claimTestProjectID, "web", nil)
+	assert.Error(t, err, "without the pod list nothing is released")
+	assert.Equal(t, []string{"scion-shared-web-a"}, claimNames(t, cs2, "agents"))
+}
+
+// Every claim deletion carries the claim's UID as a precondition, so a
+// claim re-created meanwhile under the same name is not deleted.
+func TestReleaseProjectSharedDirClaims_UIDPrecondition(t *testing.T) {
+	c := claim("agents", "scion-shared-web-a", claimLabels("a", "web", claimTestProjectID))
+	r, cs := claimRuntime(t, c)
+	var got *metav1.Preconditions
+	cs.PrependReactor("delete", "persistentvolumeclaims", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+		got = a.(k8stesting.DeleteAction).GetDeleteOptions().Preconditions
+		return false, nil, nil
+	})
+	_, err := r.ReleaseProjectSharedDirClaims(context.Background(), claimTestProjectID, "web", nil)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.NotNil(t, got.UID)
+	assert.Equal(t, c.UID, *got.UID)
+}
+
+// A claim of the same name labelled for another project is never reused
+// for this project's shared dir.
+func TestEnsureProjectRWXClaim_RefusesAnotherProjectsClaim(t *testing.T) {
+	r, _ := claimRuntime(t, claim("agents", "scion-shared-web-a", claimLabels("a", "web", "another-project")))
+	err := r.ensureProjectRWXClaim(context.Background(), "agents", "web", claimTestProjectID, "a", "", resource.MustParse("1Gi"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "belongs to another project")
+
+	r2, _ := claimRuntime(t, claim("agents", "scion-shared-web-a", claimLabels("a", "web", claimTestProjectID)))
+	assert.NoError(t, r2.ensureProjectRWXClaim(context.Background(), "agents", "web", claimTestProjectID, "a", "", resource.MustParse("1Gi")), "its own claim is reused")
+	r3, _ := claimRuntime(t, claim("agents", "scion-shared-web-a", claimLabels("a", "web", "")))
+	assert.NoError(t, r3.ensureProjectRWXClaim(context.Background(), "agents", "web", claimTestProjectID, "a", "", resource.MustParse("1Gi")), "a claim without the label is reused as before")
 }

@@ -537,3 +537,18 @@ func TestDeleteAgentFiles_SharedProjectExternalState(t *testing.T) {
 		})
 	}
 }
+
+// The refusal is an agent-state conflict, so brokers answer it with 409 and
+// its message, never an opaque 500.
+func TestErrLegacyAgentStateRetiredIsStateConflict(t *testing.T) {
+	err := fmt.Errorf("start: %w", ErrLegacyAgentStateRetired)
+	if !config.IsAgentStateConflict(err) {
+		t.Fatal("ErrLegacyAgentStateRetired must be an agent-state conflict")
+	}
+	if !errors.Is(err, ErrLegacyAgentStateRetired) {
+		t.Fatal("errors.Is must match the refusal")
+	}
+	if !strings.Contains(err.Error(), "delete this agent") {
+		t.Errorf("the message must say what to do: %q", err.Error())
+	}
+}

@@ -15,7 +15,6 @@
 package agent
 
 import (
-	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -129,8 +128,17 @@ func legacyAgentWorkspaceRoot(projectDir, agentName, agentDir string, sharedOrEx
 // project root, whose record is gone. Nothing may start from it, and the new
 // agent must not reuse its state. Deleting the new agent removes the
 // directory (ptone/scion#5835); creating it again then provisions it in the
-// external root.
-var ErrLegacyAgentStateRetired = errors.New("an earlier agent of this name, provisioned before its project's configuration moved to the shared project root, left its state on this broker and no agent owns it any more; delete this agent to remove that state, then create it again")
+// external root. It is an agent-state conflict (config.IsAgentStateConflict),
+// so brokers answer it with 409 and its message.
+var ErrLegacyAgentStateRetired error = legacyAgentStateRetiredError{}
+
+type legacyAgentStateRetiredError struct{}
+
+func (legacyAgentStateRetiredError) Error() string {
+	return "an earlier agent of this name, provisioned before its project's configuration moved to the shared project root, left its state on this broker and no agent owns it any more; delete this agent to remove that state, then create it again"
+}
+
+func (legacyAgentStateRetiredError) Unwrap() error { return config.ErrAgentStateConflict }
 
 // refuseRetiredLegacyAgent returns ErrLegacyAgentStateRetired for a create
 // (opts.FreshProvision) of an agent of a shared project configuration that

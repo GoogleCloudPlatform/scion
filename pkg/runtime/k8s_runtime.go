@@ -1991,6 +1991,15 @@ func (r *KubernetesRuntime) ensureProjectRWXClaim(
 	// Check if PVC already exists (project-scoped, may have been created by another agent)
 	existing, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
 	if err == nil {
+		// A claim of the same name labelled for another project (two
+		// projects with the same slug in one namespace) is never reused:
+		// it holds the other project's files, and deleting that project
+		// releases it.
+		if projectID != "" {
+			if other := existing.Labels[projectkeys.LabelProjectID]; other != "" && other != projectID {
+				return fmt.Errorf("shared dir %q: PVC %q in namespace %q belongs to another project (project ID %s); refusing to reuse it", dirName, pvcName, namespace, other)
+			}
+		}
 		runtimeLog().Info("Project RWX PVC already exists, reusing", "pvc", pvcName, "dir", dirName)
 		warnOnStorageClassMismatch(existing, storageClass)
 		return nil

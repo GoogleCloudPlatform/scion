@@ -47,6 +47,10 @@ type SharedDirClaimRelease struct {
 	// that carry no project-id label. They are never deleted (a name is not
 	// an identity); they are listed for an operator to check.
 	Unlabelled []string
+	// InUse are the project's claims kept because an existing pod in the
+	// namespace references them (a pod of a forced delete's agent still
+	// running, or another project's pod bound to the claim).
+	InUse []string
 }
 
 // ReleaseProjectSharedDirClaims deletes, in this runtime's namespace, the
@@ -59,10 +63,11 @@ type SharedDirClaimRelease struct {
 //   - a scion.shared-dir label naming a valid shared dir;
 //   - a name of the form scion-shared-<...>-<that dir>.
 //
-// Never deleted: a claim without the project-id label (claims of the
+// Never deleted: a claim an existing pod in the namespace references
+// (returned in InUse), a claim without the project-id label (claims of the
 // project's name projectName without it are returned in Unlabelled), a
 // claim named in keep (the layout's shared claim), and anything matched by
-// name only. Each deletion is preconditioned on the claim's UID, so a claim
+// name only. A failure to list the namespace's pods releases nothing. Each deletion is preconditioned on the claim's UID, so a claim
 // re-created meanwhile is not deleted. It is best-effort: a claim that
 // cannot be deleted is reported in Failed and the others are still
 // deleted; a failure to list the claims is the returned error.
@@ -86,6 +91,10 @@ func (r *KubernetesRuntime) ReleaseProjectSharedDirClaims(ctx context.Context, p
 	if err != nil {
 		return out, fmt.Errorf("list shared-dir claims in namespace %q: %w", ns, err)
 	}
+	inUse, err := r.claimsReferencedByPods(ctx, ns)
+	if err != nil {
+		return out, err
+	}
 	for i := range list.Items {
 		pvc := &list.Items[i]
 		dir := pvc.Labels[sharedDirClaimLabel]
@@ -94,6 +103,8 @@ func (r *KubernetesRuntime) ReleaseProjectSharedDirClaims(ctx context.Context, p
 		}
 		id, hasID := pvc.Labels[projectkeys.LabelProjectID]
 		switch {
+		case hasID && id == projectID && inUse[pvc.Name]:
+			out.InUse = append(out.InUse, pvc.Name)
 		case hasID && id == projectID:
 			uid := pvc.UID
 			err := claims.Delete(ctx, pvc.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}})
@@ -112,7 +123,28 @@ func (r *KubernetesRuntime) ReleaseProjectSharedDirClaims(ctx context.Context, p
 	}
 	sort.Strings(out.Deleted)
 	sort.Strings(out.Unlabelled)
+	sort.Strings(out.InUse)
 	return out, nil
+}
+
+// claimsReferencedByPods returns the claims that an existing pod in ns
+// references in a volume, whatever the pod's phase: a claim a pod still
+// mounts is never released (pvc-protection would only defer its deletion
+// until the pod ends, and then destroy the data).
+func (r *KubernetesRuntime) claimsReferencedByPods(ctx context.Context, ns string) (map[string]bool, error) {
+	pods, err := r.Client.Clientset.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list pods in namespace %q: %w", ns, err)
+	}
+	used := map[string]bool{}
+	for i := range pods.Items {
+		for _, v := range pods.Items[i].Spec.Volumes {
+			if v.PersistentVolumeClaim != nil && v.PersistentVolumeClaim.ClaimName != "" {
+				used[v.PersistentVolumeClaim.ClaimName] = true
+			}
+		}
+	}
+	return used, nil
 }
 
 // sharedDirClaimShape reports whether name is scion-shared-<...>-<dir> for

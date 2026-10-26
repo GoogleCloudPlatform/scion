@@ -74,13 +74,15 @@ func auditLines(log string) []string {
 // deleter. The project directory's removal is audited too.
 func TestDeleteProject_ReleasesSharedDirClaimsWithAudit(t *testing.T) {
 	srv, home, _ := newNFSDeleteTestServer(t)
-	srv.config.StorageLayout = projectfs.Layout{Backend: projectfs.BackendNFS, HostBase: "/mnt/nfs/share1", Share: projectfs.Share{ID: "share1", PVName: "hub-nfs"}}
+	sd := projectfs.Layout{Backend: projectfs.BackendNFS, HostBase: "/mnt/nfs/sd", Share: projectfs.Share{ID: "sd", PVName: "sd-nfs"}}
+	srv.config.StorageLayout = projectfs.Layout{Backend: projectfs.BackendNFS, HostBase: "/mnt/nfs/share1", Share: projectfs.Share{ID: "share1", PVName: "hub-nfs"}, SharedDirs: &sd}
 	makeHubProject(t, home, "proj-a", scopeProjA, "dev")
 	r1 := &fakeClaimReleaser{res: scionrt.SharedDirClaimRelease{
 		Namespace:  "agents",
 		Deleted:    []string{"scion-shared-proj-a-scratchpad"},
 		Failed:     map[string]error{"scion-shared-proj-a-data": errors.New("forbidden")},
 		Unlabelled: []string{"scion-shared-proj-a-cache"},
+		InUse:      []string{"scion-shared-proj-a-live"},
 	}}
 	r2 := &fakeClaimReleaser{err: errors.New("cluster unreachable"), res: scionrt.SharedDirClaimRelease{Namespace: "other"}}
 	withClaimReleasers(t, r1, r2)
@@ -96,8 +98,8 @@ func TestDeleteProject_ReleasesSharedDirClaimsWithAudit(t *testing.T) {
 			t.Fatalf("release call: %+v", r)
 		}
 	}
-	if len(r1.gotKeep) == 0 || r1.gotKeep[0] != "hub-nfs" {
-		t.Errorf("the layout's shared claim must be kept: %v", r1.gotKeep)
+	if len(r1.gotKeep) != 2 || r1.gotKeep[0] != "hub-nfs" || r1.gotKeep[1] != "sd-nfs" {
+		t.Errorf("both layout claims (workspace and shared-dir share) must be kept: %v", r1.gotKeep)
 	}
 
 	lines := auditLines(logs.String())
@@ -105,6 +107,7 @@ func TestDeleteProject_ReleasesSharedDirClaimsWithAudit(t *testing.T) {
 		"path=agents/scion-shared-proj-a-scratchpad": "outcome=deleted",
 		"path=agents/scion-shared-proj-a-data":       "outcome=failed",
 		"path=agents/scion-shared-proj-a-cache":      "outcome=kept",
+		"path=agents/scion-shared-proj-a-live":       "outcome=kept",
 		"path=other/*":                               "outcome=failed",
 	}
 	for path, outcome := range want {
