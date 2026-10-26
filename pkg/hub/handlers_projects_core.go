@@ -3660,6 +3660,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 		Actor:     userIdentity,
 		Force:     r.URL.Query().Get("force") == "true",
 	}
+	effectInputs.forced = req.Force
 	result, decision := s.deletionService.Delete(ctx, req)
 	if decision != nil {
 		writeError(w, decision.HTTPStatus, decision.DenialCode, decision.Reason, decision.Details)
@@ -3687,6 +3688,8 @@ type deletionEffectInputs struct {
 	harnesses []store.HarnessConfig
 	providers []store.ProjectProvider
 	project   *store.Project // may be nil if not found
+	// forced is set for a forced delete (ProjectDeleteRequest.Force).
+	forced bool
 }
 
 // preEnumerateDeletionEffects gathers read-only data needed for post-deletion
@@ -3775,7 +3778,14 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 	// background: its tree on the shared project storage (from the hub's
 	// own mount, whatever provider rows exist), the legacy slug-keyed trees
 	// whose markers name it, and its object-storage prefix.
-	s.startProjectStorageCleanup(project)
+	// A forced delete that found agent records may leave agents running on
+	// their brokers: their project tree is not removed now but after a
+	// grace (forcedDeleteGrace), by the maintenance pass.
+	var deferUntil time.Time
+	if inputs.forced && len(inputs.agents) > 0 {
+		deferUntil = time.Now().Add(s.forcedDeleteGrace())
+	}
+	s.startProjectStorageCleanup(project, deferUntil)
 
 	// Effect 7: Clean up external project config directory.
 	if project.Slug != "" && project.ID != "" {

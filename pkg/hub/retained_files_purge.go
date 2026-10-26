@@ -116,7 +116,7 @@ func (s *Server) purgeExpiredAgents(ctx context.Context, cutoff time.Time) (int,
 				// remove the agent's storage the hub owns (its agents/<slug>
 				// directory on the shared project storage and its
 				// object-storage prefix), audited (ptone/scion#5835).
-				s.startAgentStorageCleanup(a)
+				s.startAgentStorageCleanup(a, false)
 			}
 		}
 		if len(page) < retainedPurgePageSize {

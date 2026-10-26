@@ -18,13 +18,17 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -146,7 +150,7 @@ func TestProjectStorageCleanup_RootAndObjectPrefix(t *testing.T) {
 	tree := e.seedTree(t, e.subRoot, project.ID)
 	sibling := e.seedTree(t, e.subRoot, tid("psc-sibling"))
 
-	e.srv.startProjectStorageCleanup(project)
+	e.srv.startProjectStorageCleanup(project, time.Time{})
 	e.srv.storageCleanupWG.Wait()
 
 	assertAbsent(t, tree, "the project root is removed")
@@ -177,7 +181,7 @@ func TestProjectStorageCleanup_VolumeBackends(t *testing.T) {
 			project := &store.Project{ID: tid("psc-vol-" + backend), Slug: "psc-vol"}
 			tree := e.seedTree(t, filepath.Join(volumeMountBase, "vol", "projects"), project.ID)
 
-			e.srv.startProjectStorageCleanup(project)
+			e.srv.startProjectStorageCleanup(project, time.Time{})
 			e.srv.storageCleanupWG.Wait()
 
 			assertAbsent(t, tree, "the project root is removed on "+backend)
@@ -197,7 +201,7 @@ func TestProjectStorageCleanup_LegacySplit(t *testing.T) {
 	project := &store.Project{ID: tid("psc-split"), Slug: "psc-split"}
 	tree := e.seedTree(t, filepath.Join(mountRoot, "scion-shared", "projects"), project.ID)
 
-	e.srv.startProjectStorageCleanup(project)
+	e.srv.startProjectStorageCleanup(project, time.Time{})
 	e.srv.storageCleanupWG.Wait()
 
 	assertAbsent(t, tree, "the shared-dir export's project root is removed")
@@ -214,7 +218,7 @@ func TestProjectStorageCleanup_LocalBackend(t *testing.T) {
 	require.NoError(t, os.MkdirAll(local, 0o755))
 	nfsTree := e.seedTree(t, e.subRoot, project.ID)
 
-	e.srv.startProjectStorageCleanup(project)
+	e.srv.startProjectStorageCleanup(project, time.Time{})
 	e.srv.storageCleanupWG.Wait()
 	assert.DirExists(t, local)
 	assert.DirExists(t, nfsTree)
@@ -222,7 +226,7 @@ func TestProjectStorageCleanup_LocalBackend(t *testing.T) {
 
 	e.srv.SetStorage(nil)
 	before := len(e.auditLines())
-	e.srv.startProjectStorageCleanup(project)
+	e.srv.startProjectStorageCleanup(project, time.Time{})
 	e.srv.storageCleanupWG.Wait()
 	assert.Len(t, e.auditLines(), before, "nothing to do, nothing audited")
 }
@@ -237,7 +241,7 @@ func TestProjectStorageCleanup_FailuresAudited(t *testing.T) {
 		e.srv.config.ProjectStorageConfig.NFS.MountRoot = absent
 		project := &store.Project{ID: tid("psc-unmounted"), Slug: "psc-unmounted"}
 
-		e.srv.startProjectStorageCleanup(project)
+		e.srv.startProjectStorageCleanup(project, time.Time{})
 		e.srv.storageCleanupWG.Wait()
 
 		l := e.auditLine(t, "project-root")
@@ -253,7 +257,7 @@ func TestProjectStorageCleanup_FailuresAudited(t *testing.T) {
 		require.NoError(t, os.Symlink(victim, filepath.Join(e.subRoot, project.ID)))
 		seen := setHubAttemptHook(t, nil)
 
-		e.srv.startProjectStorageCleanup(project)
+		e.srv.startProjectStorageCleanup(project, time.Time{})
 		e.srv.storageCleanupWG.Wait()
 
 		assert.Equal(t, []int{1}, *seen, "a refusal is not retried")
@@ -265,7 +269,7 @@ func TestProjectStorageCleanup_FailuresAudited(t *testing.T) {
 		e.srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{Backend: "nfs"}
 		project := &store.Project{ID: tid("psc-layout"), Slug: "psc-layout"}
 
-		e.srv.startProjectStorageCleanup(project)
+		e.srv.startProjectStorageCleanup(project, time.Time{})
 		e.srv.storageCleanupWG.Wait()
 
 		assert.Contains(t, e.auditLine(t, "project-root"), "outcome=failed")
@@ -279,7 +283,7 @@ func TestProjectStorageCleanup_ProjectExistsKeepsEverything(t *testing.T) {
 	require.NoError(t, e.s.CreateProject(context.Background(), project))
 	tree := e.seedTree(t, e.subRoot, project.ID)
 
-	e.srv.startProjectStorageCleanup(project)
+	e.srv.startProjectStorageCleanup(project, time.Time{})
 	e.srv.storageCleanupWG.Wait()
 
 	assert.DirExists(t, filepath.Join(tree, "workspace", ".git"))
@@ -300,8 +304,8 @@ func TestProjectStorageCleanup_LegacyHubProjectsTree(t *testing.T) {
 	require.NoError(t, os.MkdirAll(unmarked, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(unmarked, "README.md"), []byte("x"), 0o644))
 
-	e.srv.startProjectStorageCleanup(project)
-	e.srv.startProjectStorageCleanup(other)
+	e.srv.startProjectStorageCleanup(project, time.Time{})
+	e.srv.startProjectStorageCleanup(other, time.Time{})
 	e.srv.storageCleanupWG.Wait()
 
 	assertAbsent(t, marked, "the marked legacy tree is removed")
@@ -310,52 +314,63 @@ func TestProjectStorageCleanup_LegacyHubProjectsTree(t *testing.T) {
 	assert.Contains(t, e.auditLine(t, "legacy-hub-projects", "project_id="+other.ID), "outcome=kept")
 }
 
-// An agent's storage cleanup removes agents/<slug> and exactly its object
-// prefix, audited with the hub as the deleter.
+// An agent's storage cleanup removes its own home and secrets, and then
+// agents/<slug> once nothing else is in it (the broker already removed the
+// agent's workspace), and exactly its object prefix, audited with the hub
+// as the deleter.
 func TestAgentStorageCleanup_AgentRootAndPrefix(t *testing.T) {
 	e := newStorageCleanupEnv(t)
 	projectID := tid("asc-project")
 	tree := e.seedTree(t, e.subRoot, projectID)
-	require.NoError(t, os.MkdirAll(filepath.Join(tree, "agents", "other", "workspace"), 0o755))
 	a := &store.Agent{ID: tid("asc-agent"), Slug: "dev", ProjectID: projectID}
+	agentDir := filepath.Join(tree, "agents", "dev")
+	require.NoError(t, os.RemoveAll(filepath.Join(agentDir, "workspace"))) // the broker's removal happened
+	for _, d := range []string{"home-" + a.ID, "secrets-" + a.ID} {
+		require.NoError(t, os.MkdirAll(filepath.Join(agentDir, d, "x"), 0o755))
+	}
+	require.NoError(t, os.MkdirAll(filepath.Join(tree, "agents", "other", "workspace"), 0o755))
 
-	e.srv.startAgentStorageCleanup(a)
+	e.srv.startAgentStorageCleanup(a, true)
 	e.srv.storageCleanupWG.Wait()
 
-	assertAbsent(t, filepath.Join(tree, "agents", "dev"), "the agent root is removed")
+	assertAbsent(t, agentDir, "the emptied agent root is removed")
 	assert.DirExists(t, filepath.Join(tree, "agents", "other", "workspace"))
 	assert.DirExists(t, filepath.Join(tree, "workspace", ".git"))
 	assert.Equal(t, []string{"hubs/hub-1/workspaces/" + projectID + "/" + a.ID + "/"}, e.objects.got())
-	l := e.auditLine(t, "agent-root")
-	for _, s := range []string{"deleter=hub", "outcome=deleted", "agent=dev"} {
-		assert.Contains(t, l, s)
+	for _, tree := range []string{"agent-home", "agent-secrets", "agent-root"} {
+		l := e.auditLine(t, tree)
+		for _, s := range []string{"deleter=hub", "outcome=deleted", "agent=dev"} {
+			assert.Contains(t, l, s, tree)
+		}
 	}
 }
 
-// While another agent record of the project with the same slug (live, or
-// soft-deleted with retained files) may still use agents/<slug>, only this
-// agent's ID-keyed home and secrets go.
-func TestAgentStorageCleanup_SlugInUseRemovesOnlyOwnLeaves(t *testing.T) {
+// The hub never removes the agent's own workspace (or anything it does not
+// own): while the workspace is still there (the broker's removal has not
+// happened), agents/<slug> is kept, audited as pending broker removal, and
+// only the agent's own home and secrets go. Another agent's home with the
+// same slug stays too.
+func TestAgentStorageCleanup_WorkspacePendingKeepsAgentRoot(t *testing.T) {
 	e := newStorageCleanupEnv(t)
-	ctx := context.Background()
-	project := &store.Project{ID: tid("asc-shared-slug"), Slug: "asc-shared-slug", Name: "asc-shared-slug"}
-	require.NoError(t, e.s.CreateProject(ctx, project))
-	other := &store.Agent{ID: tid("asc-other"), Slug: "dev", Name: "dev", ProjectID: project.ID}
-	require.NoError(t, e.s.CreateAgent(ctx, other))
-	a := &store.Agent{ID: tid("asc-self"), Slug: "dev", ProjectID: project.ID}
-	agentDir := filepath.Join(e.seedTree(t, e.subRoot, project.ID), "agents", "dev")
-	for _, d := range []string{"home-" + a.ID, "secrets-" + a.ID, "home-" + other.ID} {
+	projectID := tid("asc-pending")
+	agentDir := filepath.Join(e.seedTree(t, e.subRoot, projectID), "agents", "dev")
+	a := &store.Agent{ID: tid("asc-self"), Slug: "dev", ProjectID: projectID}
+	other := tid("asc-other")
+	for _, d := range []string{"home-" + a.ID, "secrets-" + a.ID, "home-" + other} {
 		require.NoError(t, os.MkdirAll(filepath.Join(agentDir, d), 0o755))
 	}
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "workspace", "unpushed.txt"), []byte("work"), 0o644))
 
-	e.srv.startAgentStorageCleanup(a)
+	e.srv.startAgentStorageCleanup(a, false)
 	e.srv.storageCleanupWG.Wait()
 
 	assertAbsent(t, filepath.Join(agentDir, "home-"+a.ID), "own home removed")
 	assertAbsent(t, filepath.Join(agentDir, "secrets-"+a.ID), "own secrets removed")
-	assert.DirExists(t, filepath.Join(agentDir, "home-"+other.ID))
-	assert.DirExists(t, filepath.Join(agentDir, "workspace"))
-	assert.Contains(t, e.auditLine(t, "agent-home"), "outcome=deleted")
+	assert.DirExists(t, filepath.Join(agentDir, "home-"+other))
+	assert.FileExists(t, filepath.Join(agentDir, "workspace", "unpushed.txt"))
+	l := e.auditLine(t, "agent-root")
+	assert.Contains(t, l, "outcome=kept")
+	assert.Contains(t, l, "workspace pending broker removal")
 }
 
 // The agent's storage goes on a hard delete that deletes its files only;
@@ -374,4 +389,268 @@ func TestAgentStorageOnDelete(t *testing.T) {
 	for _, tc := range cases {
 		assert.Equal(t, tc.want, agentStorageOnDelete(tc.req), "%+v", tc.req)
 	}
+}
+
+// storageCleanupCall is one observed startAgentStorageCleanup call.
+type storageCleanupCall struct {
+	agentID           string
+	teardownConfirmed bool
+}
+
+// observeAgentStorageCleanup records the agent storage cleanups started
+// during a test.
+func observeAgentStorageCleanup(t *testing.T) func() []storageCleanupCall {
+	t.Helper()
+	var mu sync.Mutex
+	var calls []storageCleanupCall
+	agentStorageCleanupObserver = func(a *store.Agent, confirmed bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, storageCleanupCall{a.ID, confirmed})
+	}
+	t.Cleanup(func() { agentStorageCleanupObserver = nil })
+	return func() []storageCleanupCall {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]storageCleanupCall(nil), calls...)
+	}
+}
+
+// The delete engine starts the agent storage cleanup on a hard delete that
+// deletes the agent's files (teardown confirmed when the broker answered),
+// and on a forced delete after a broker failure (teardown not confirmed),
+// never on a soft delete or a delete that keeps the files.
+func TestAgentStorageCleanup_EngineWiring(t *testing.T) {
+	cases := []struct {
+		name          string
+		retention     time.Duration
+		query         string
+		brokerFails   bool
+		wantCall      bool
+		wantConfirmed bool
+	}{
+		{"hard delete", 0, "", false, true, true},
+		{"soft delete", time.Hour, "", false, false, false},
+		{"hard delete keeping files", 0, "?deleteFiles=false", false, false, false},
+		{"forced delete after a broker failure", time.Hour, "?force=true", true, true, false},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := observeAgentStorageCleanup(t)
+			srv, s, _, disp := engineTestServer(t)
+			srv.config.SoftDeleteRetention = tc.retention
+			if tc.brokerFails {
+				disp.setFn(func(context.Context, *store.Agent) error { return errors.New("broker unreachable") })
+			}
+			agent := setupBrokerAgentInPhase(t, s, "wire-"+string(rune('a'+i)), state.PhaseStopped)
+
+			rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID+tc.query, nil)
+			require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+			srv.storageCleanupWG.Wait()
+
+			got := calls()
+			if !tc.wantCall {
+				assert.Empty(t, got)
+				return
+			}
+			require.Len(t, got, 1)
+			assert.Equal(t, agent.ID, got[0].agentID)
+			assert.Equal(t, tc.wantConfirmed, got[0].teardownConfirmed)
+		})
+	}
+}
+
+// The retained-files purge starts the agent storage cleanup once it has
+// purged the record.
+func TestAgentStorageCleanup_PurgeWiring(t *testing.T) {
+	calls := observeAgentStorageCleanup(t)
+	srv, s, disp, a := retainedPurgeFixture(t, "wire", 2*time.Hour)
+	disp.setFn(func(context.Context, *store.Agent) error { return nil })
+
+	srv.purgeHandler()(context.Background())
+	srv.storageCleanupWG.Wait()
+
+	require.True(t, agentGone(t, s, a.ID))
+	got := calls()
+	require.Len(t, got, 1)
+	assert.Equal(t, a.ID, got[0].agentID)
+}
+
+// forcedDeleteProject creates project p with one agent record when
+// withAgent, then deletes it with force=true and waits for the storage
+// cleanup.
+func (e *storageCleanupEnv) forcedDeleteProject(t *testing.T, p *store.Project, withAgent bool) {
+	t.Helper()
+	ctx := context.Background()
+	require.NoError(t, e.s.CreateProject(ctx, p))
+	if withAgent {
+		require.NoError(t, e.s.CreateAgent(ctx, &store.Agent{ID: tid(p.Slug + "-agent"), Slug: "dev", Name: "dev", ProjectID: p.ID}))
+	}
+	rec := doRequest(t, e.srv, http.MethodDelete, "/api/v1/projects/"+p.ID+"?force=true", nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	e.srv.storageCleanupWG.Wait()
+}
+
+// AC-F1: a forced delete that finds agent records deletes nothing of the
+// project tree: it writes the tombstone with now + grace (at least 24 h)
+// and audits the deferral; the object-storage prefix stays.
+func TestForcedProjectDelete_WithAgentsDefers(t *testing.T) {
+	e := newStorageCleanupEnv(t)
+	p := &store.Project{ID: tid("fpd-agents"), Slug: "fpd-agents", Name: "fpd-agents"}
+	tree := e.seedTree(t, e.subRoot, p.ID)
+	before := time.Now()
+
+	e.forcedDeleteProject(t, p, true)
+
+	assert.FileExists(t, filepath.Join(tree, "workspace", "README.md"), "nothing is deleted")
+	data, err := os.ReadFile(filepath.Join(tree, "provision", projectfs.DeleteAfterFile))
+	require.NoError(t, err)
+	after, err := time.Parse(time.RFC3339, strings.TrimSpace(string(data)))
+	require.NoError(t, err)
+	assert.False(t, after.Before(before.Add(24*time.Hour).Add(-time.Second)), "grace of at least 24h: %s", after)
+	assert.True(t, after.Before(time.Now().Add(24*time.Hour).Add(time.Minute)))
+	assert.Empty(t, e.objects.got(), "the object prefix is deleted with the tree, later")
+	l := e.auditLine(t, "project-root")
+	assert.Contains(t, l, "outcome=kept")
+	assert.Contains(t, l, "deferred until")
+}
+
+// The grace is the soft-delete retention when it is longer than 24 h.
+func TestForcedDeleteGrace(t *testing.T) {
+	e := newStorageCleanupEnv(t)
+	e.srv.config.SoftDeleteRetention = time.Hour
+	assert.Equal(t, 24*time.Hour, e.srv.forcedDeleteGrace())
+	e.srv.config.SoftDeleteRetention = 72 * time.Hour
+	assert.Equal(t, 72*time.Hour, e.srv.forcedDeleteGrace())
+}
+
+// AC-F2: a forced delete with no agent records deletes the tree and the
+// prefix at once, as a normal delete.
+func TestForcedProjectDelete_NoAgentsDeletesNow(t *testing.T) {
+	e := newStorageCleanupEnv(t)
+	p := &store.Project{ID: tid("fpd-none"), Slug: "fpd-none", Name: "fpd-none"}
+	tree := e.seedTree(t, e.subRoot, p.ID)
+
+	e.forcedDeleteProject(t, p, false)
+
+	assertAbsent(t, tree, "the tree is removed at once")
+	assert.Equal(t, []string{"hubs/hub-1/workspaces/" + p.ID + "/"}, e.objects.got())
+}
+
+// AC-F3: the maintenance pass removes a tombstoned tree and its prefix
+// after its time, and not before.
+func TestDeferredProjectDeletion_SweepAfterTime(t *testing.T) {
+	e := newStorageCleanupEnv(t)
+	layout, err := e.srv.projectStorageLayout()
+	require.NoError(t, err)
+	due := tid("dpd-due")
+	notYet := tid("dpd-not-yet")
+	dueTree := e.seedTree(t, e.subRoot, due)
+	notYetTree := e.seedTree(t, e.subRoot, notYet)
+	_, err = layout.MarkDeleteAfter(due, time.Now().Add(-time.Minute))
+	require.NoError(t, err)
+	_, err = layout.MarkDeleteAfter(notYet, time.Now().Add(time.Hour))
+	require.NoError(t, err)
+
+	e.srv.sweepDeferredProjectDeletions(context.Background())
+
+	assertAbsent(t, dueTree, "a due tree is removed")
+	assert.FileExists(t, filepath.Join(notYetTree, "provision", projectfs.DeleteAfterFile), "a tree not yet due stays")
+	assert.Equal(t, []string{"hubs/hub-1/workspaces/" + due + "/"}, e.objects.got())
+	l := e.auditLine(t, "project-root", "project_id="+due)
+	assert.Contains(t, l, "outcome=deleted")
+	assert.Contains(t, l, deferredDeletionReason)
+}
+
+// AC-F4: a tombstoned tree whose project exists again is kept and its
+// tombstone removed.
+func TestDeferredProjectDeletion_RecreatedProjectKeepsTree(t *testing.T) {
+	e := newStorageCleanupEnv(t)
+	layout, err := e.srv.projectStorageLayout()
+	require.NoError(t, err)
+	p := &store.Project{ID: tid("dpd-again"), Slug: "dpd-again", Name: "dpd-again"}
+	require.NoError(t, e.s.CreateProject(context.Background(), p))
+	tree := e.seedTree(t, e.subRoot, p.ID)
+	_, err = layout.MarkDeleteAfter(p.ID, time.Now().Add(-time.Minute))
+	require.NoError(t, err)
+
+	e.srv.sweepDeferredProjectDeletions(context.Background())
+
+	assert.FileExists(t, filepath.Join(tree, "workspace", "README.md"))
+	assertAbsent(t, filepath.Join(tree, "provision", projectfs.DeleteAfterFile), "the tombstone is removed")
+	assert.Empty(t, e.objects.got())
+	assert.Contains(t, e.auditLine(t, "project-root"), "deferred deletion cancelled")
+}
+
+// AC-F6: with the share not mounted the pass deletes nothing and writes one
+// ERROR audit line per pass.
+func TestDeferredProjectDeletion_ShareNotMounted(t *testing.T) {
+	e := newStorageCleanupEnv(t)
+	require.NoError(t, os.RemoveAll(e.subRoot)) // the mount point stays, its tree is gone
+
+	e.srv.sweepDeferredProjectDeletions(context.Background())
+
+	lines := e.auditLines()
+	require.Len(t, lines, 1)
+	assert.Contains(t, lines[0], "level=ERROR")
+	assert.Contains(t, lines[0], "outcome=failed")
+	assert.Empty(t, e.objects.got())
+}
+
+// A non-forced removal that still fails part-way after its retry writes
+// the tombstone with the current time, so the maintenance pass retries it.
+func TestProjectStorageCleanup_FailedRemovalRetriedByPass(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	e := newStorageCleanupEnv(t)
+	prev := projectStorageCleanupRetryDelay
+	projectStorageCleanupRetryDelay = time.Millisecond
+	t.Cleanup(func() { projectStorageCleanupRetryDelay = prev })
+	project := &store.Project{ID: tid("psc-retry-later"), Slug: "psc-retry-later"}
+	tree := e.seedTree(t, e.subRoot, project.ID)
+	ws := filepath.Join(tree, "workspace")
+	require.NoError(t, os.Chmod(ws, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(ws, 0o755) })
+
+	e.srv.startProjectStorageCleanup(project, time.Time{})
+	e.srv.storageCleanupWG.Wait()
+	assert.FileExists(t, filepath.Join(tree, "provision", projectfs.DeleteAfterFile))
+
+	require.NoError(t, os.Chmod(ws, 0o755))
+	e.srv.sweepDeferredProjectDeletions(context.Background())
+	assertAbsent(t, tree, "the pass removes it")
+}
+
+// R1: the hub's health reports a shared backend whose mount point has no
+// project tree (the share is not mounted) before any delete needs it, as a
+// non-critical (degraded) check; a mounted tree is healthy; the local
+// backend has no such check; a hung probe times out.
+func TestHealth_ProjectStorageTree(t *testing.T) {
+	e := newStorageCleanupEnv(t)
+	checks := map[string]string{}
+	e.srv.checkProjectStorageTree(checks)
+	assert.Equal(t, "healthy", checks[projectStorageTreeCheck])
+
+	require.NoError(t, os.RemoveAll(e.subRoot))
+	checks = map[string]string{}
+	e.srv.checkProjectStorageTree(checks)
+	assert.Contains(t, checks[projectStorageTreeCheck], "the share may not be mounted")
+	assert.False(t, criticalHealthChecks[projectStorageTreeCheck], "degraded, never unhealthy")
+	assert.Equal(t, HealthStatusDegraded, deriveHealthStatus(map[string]string{"database": "healthy", projectStorageTreeCheck: checks[projectStorageTreeCheck]}))
+
+	prevProbe, prevTimeout := projectStorageTreeProbe, workspaceHealthTimeout
+	block := make(chan struct{})
+	projectStorageTreeProbe = func(projectfs.Layout) error { <-block; return nil }
+	workspaceHealthTimeout = 10 * time.Millisecond
+	t.Cleanup(func() { close(block); projectStorageTreeProbe, workspaceHealthTimeout = prevProbe, prevTimeout })
+	checks = map[string]string{}
+	e.srv.checkProjectStorageTree(checks)
+	assert.Contains(t, checks[projectStorageTreeCheck], "timed out")
+
+	e.srv.config.ProjectStorageConfig = nil
+	checks = map[string]string{}
+	e.srv.checkProjectStorageTree(checks)
+	_, has := checks[projectStorageTreeCheck]
+	assert.False(t, has, "no check on the local backend")
 }

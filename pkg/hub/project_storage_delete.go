@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -31,10 +32,11 @@ import (
 // and in its object storage: a project's tree <subpath root>/<project ID>
 // (from its own mount of the share, whatever provider rows exist; brokers
 // leave it alone), the legacy slug-keyed trees whose identity markers name
-// the project, the project's object-storage prefix, an agent's
-// agents/<slug> directory and its object-storage prefix. Every deletion is
-// audited (projectfs.Audit, deleter "hub"); none ever fails or rolls back
-// the delete that committed before it.
+// the project, the project's object-storage prefix, and, of an agent, its
+// home and secrets below agents/<slug>, that directory once it is empty,
+// and its object-storage prefix. Every deletion is audited
+// (projectfs.Audit, deleter "hub"); none ever fails or rolls back the
+// delete that committed before it.
 
 // projectStorageCleanupRetryDelay is how long a removal that failed part-way
 // waits before its one retry (agent pods may still be terminating and
@@ -50,6 +52,25 @@ var (
 // project's storage cleanup. Tests only.
 var projectStorageCleanupAttemptHook func(attempt int)
 
+// forcedDeleteMinGrace is the shortest grace a forced project delete with
+// agent records gives the project's tree before the maintenance pass
+// removes it.
+const forcedDeleteMinGrace = 24 * time.Hour
+
+// forcedDeleteGrace is the grace of a forced project delete: the
+// soft-delete retention when it is longer than forcedDeleteMinGrace,
+// otherwise forcedDeleteMinGrace.
+func (s *Server) forcedDeleteGrace() time.Duration {
+	if retention, _ := s.softDeleteSettings(); retention > forcedDeleteMinGrace {
+		return retention
+	}
+	return forcedDeleteMinGrace
+}
+
+// deferredDeletionReason is the reason on the audit line of a tree the
+// maintenance pass removed after its tombstone's time.
+const deferredDeletionReason = "deleted after the deferred-deletion time"
+
 // startProjectStorageCleanup starts, in the background, the removal of the
 // deleted project's storage:
 //
@@ -64,111 +85,228 @@ var projectStorageCleanupAttemptHook func(attempt int)
 //   - its object-storage prefix [hubs/<hub>/]workspaces/<project ID>/, when
 //     the hub has object storage.
 //
+// A non-zero deferUntil (a forced delete that found agent records, whose
+// agents may still be running) removes nothing on a shared backend: it
+// writes the deletion tombstone with that time into every project root
+// (projectfs.Layout.MarkDeleteAfter), and the maintenance pass
+// (sweepDeferredProjectDeletions) removes the tree, the legacy trees and
+// the object prefix once the time has passed.
+//
 // Project IDs can be reused (registering from the same checkout brings the
 // same ID back), so immediately before each attempt the project must still
 // be absent from the store; any other answer keeps everything. A removal
 // of the project root that failed part-way is retried once after
-// projectStorageCleanupRetryDelay; a refusal is not. It runs with its own
-// context and timeout, never the request's, and logs every outcome as an
-// audit line.
-func (s *Server) startProjectStorageCleanup(project *store.Project) {
+// projectStorageCleanupRetryDelay, and when it fails again the tombstone is
+// written with the current time so that the maintenance pass retries it; a
+// refusal (for example the share not mounted) is not retried. It runs with
+// its own context and timeout, never the request's, and logs every outcome
+// as an audit line.
+func (s *Server) startProjectStorageCleanup(project *store.Project, deferUntil time.Time) {
 	if project == nil || project.ID == "" {
 		return
 	}
 	projectID, slug := project.ID, project.Slug
-	log := s.projectsLogger()
 	layout, layoutErr := s.projectStorageLayout()
-	stor := s.GetStorage()
-	hubID := s.HubID()
-	globalDir, _ := config.GetGlobalDir()
-	retryDelay, timeout, hook := projectStorageCleanupRetryDelay, projectStorageCleanupTimeout, projectStorageCleanupAttemptHook
-
 	shared := layoutErr == nil && (layout.Backend.Shared() || layout.SharedDirLayout().Backend.Shared())
-	if layoutErr == nil && !shared && stor == nil {
+	if layoutErr == nil && !shared && s.GetStorage() == nil {
 		return // local backend, no object storage: nothing of the hub's to remove
 	}
-	// stillDeleted checks the store; attempt 0 is the object-storage step.
-	stillDeleted := func(ctx context.Context, attempt int) bool {
-		if hook != nil && attempt > 0 {
-			hook(attempt)
-		}
-		_, err := s.store.GetProject(ctx, projectID)
-		if errors.Is(err, store.ErrNotFound) {
-			return true
-		}
-		if err != nil {
-			log.Info("project storage cleanup: could not confirm the project is still deleted; keeping its storage",
-				"project_id", projectID, "attempt", attempt, "error", err)
-		} else {
-			log.Info("project storage kept: the project exists again", "project_id", projectID, "attempt", attempt)
-		}
-		return false
-	}
+	log := s.projectsLogger()
+	timeout := projectStorageCleanupTimeout
 
 	s.storageCleanupWG.Add(1)
 	go func() {
 		defer s.storageCleanupWG.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		audit := func(ds []projectfs.Deletion) {
-			projectfs.AuditAll(ctx, log, projectfs.DeleterHub, projectID, "", ds)
+		if layoutErr != nil {
+			projectfs.Audit(ctx, log, projectfs.DeleterHub, projectID, "", projectfs.Deletion{
+				Tree: projectfs.TreeProjectRoot, Outcome: projectfs.OutcomeFailed,
+				Err: layoutErr, Reason: "the hub's project storage layout is unavailable"})
+			return
 		}
-
-		switch {
-		case layoutErr != nil:
-			audit([]projectfs.Deletion{{Tree: projectfs.TreeProjectRoot, Outcome: projectfs.OutcomeFailed,
-				Err: layoutErr, Reason: "the hub's project storage layout is unavailable"}})
-		case shared:
-			for attempt := 1; attempt <= 2; attempt++ {
-				if !stillDeleted(ctx, attempt) {
-					return
-				}
-				ds, err := layout.DeleteProject(projectID)
-				if err != nil {
-					audit([]projectfs.Deletion{{Tree: projectfs.TreeProjectRoot, Outcome: projectfs.OutcomeFailed, Err: err}})
-					break
-				}
-				retry := false
-				for _, d := range ds {
-					retry = retry || projectfs.Retryable(d)
-				}
-				if !retry || attempt == 2 {
-					audit(ds)
-					break
-				}
-				log.Warn("project storage cleanup: removing the project root failed; retrying once",
-					"project_id", projectID, "retry_in", retryDelay)
-				t := time.NewTimer(retryDelay)
-				select {
-				case <-ctx.Done():
-					t.Stop()
-					audit(ds)
-					return
-				case <-t.C:
-				}
-			}
-			if layout.Backend.Shared() && slug != "" && ctx.Err() == nil {
-				ds, err := migrate.DeleteLegacyProjectTrees(layout, globalDir, slug, projectID)
-				if err != nil {
-					ds = append(ds, projectfs.Deletion{Tree: projectfs.TreeLegacyHubProjects, Outcome: projectfs.OutcomeFailed, Err: err})
-				}
-				audit(ds)
-			}
-		}
-
-		if stor != nil && ctx.Err() == nil && stillDeleted(ctx, 0) {
-			prefix, err := projectfs.ProjectObjectPrefix(hubID, projectID)
-			if err != nil {
-				audit([]projectfs.Deletion{{Tree: projectfs.TreeObjectPrefix, Outcome: projectfs.OutcomeFailed, Err: err}})
+		if shared && !deferUntil.IsZero() {
+			if !s.projectStillDeleted(ctx, projectID, 1) {
 				return
 			}
-			audit([]projectfs.Deletion{projectfs.DeleteObjectPrefix(ctx, stor, prefix)})
+			ds, err := layout.MarkDeleteAfter(projectID, deferUntil)
+			if err != nil {
+				ds = append(ds, projectfs.Deletion{Tree: projectfs.TreeProjectRoot, Outcome: projectfs.OutcomeFailed, Err: err})
+			}
+			projectfs.AuditAll(ctx, log, projectfs.DeleterHub, projectID, "", ds)
+			return
 		}
+		s.deleteProjectStorage(ctx, layout, projectID, slug, "", true)
 	}()
+}
+
+// projectStillDeleted reports whether projectID is absent from the store
+// (a project that exists again keeps its storage). attempt numbers the
+// check for projectStorageCleanupAttemptHook; 0 does not call it.
+func (s *Server) projectStillDeleted(ctx context.Context, projectID string, attempt int) bool {
+	if hook := projectStorageCleanupAttemptHook; hook != nil && attempt > 0 {
+		hook(attempt)
+	}
+	log := s.projectsLogger()
+	_, err := s.store.GetProject(ctx, projectID)
+	if errors.Is(err, store.ErrNotFound) {
+		return true
+	}
+	if err != nil {
+		log.Info("project storage cleanup: could not confirm the project is still deleted; keeping its storage",
+			"project_id", projectID, "attempt", attempt, "error", err)
+	} else {
+		log.Info("project storage kept: the project exists again", "project_id", projectID, "attempt", attempt)
+	}
+	return false
+}
+
+// deleteProjectStorage removes projectID's project root on every shared
+// Layout of layout (retried once, as startProjectStorageCleanup says), then
+// the legacy slug trees (when slug is known) and the object-storage
+// prefix, auditing each with reason. retryLater writes the tombstone with
+// the current time when the root removal still fails part-way after its
+// retry, so the maintenance pass tries again.
+func (s *Server) deleteProjectStorage(ctx context.Context, layout projectfs.Layout, projectID, slug, reason string, retryLater bool) {
+	log := s.projectsLogger()
+	audit := func(ds []projectfs.Deletion) {
+		for i := range ds {
+			if reason != "" && ds[i].Outcome == projectfs.OutcomeDeleted && ds[i].Reason == "" {
+				ds[i].Reason = reason
+			}
+		}
+		projectfs.AuditAll(ctx, log, projectfs.DeleterHub, projectID, "", ds)
+	}
+	shared := layout.Backend.Shared() || layout.SharedDirLayout().Backend.Shared()
+	if shared {
+		for attempt := 1; attempt <= 2; attempt++ {
+			if !s.projectStillDeleted(ctx, projectID, attempt) {
+				return
+			}
+			ds, err := layout.DeleteProject(projectID)
+			if err != nil {
+				audit([]projectfs.Deletion{{Tree: projectfs.TreeProjectRoot, Outcome: projectfs.OutcomeFailed, Err: err}})
+				break
+			}
+			retry := false
+			for _, d := range ds {
+				retry = retry || projectfs.Retryable(d)
+			}
+			if !retry {
+				audit(ds)
+				break
+			}
+			if attempt == 2 {
+				audit(ds)
+				if retryLater {
+					marks, err := layout.MarkDeleteAfter(projectID, time.Now())
+					if err == nil {
+						for i := range marks {
+							if marks[i].Outcome == projectfs.OutcomeKept {
+								marks[i].Reason = "removal failed; the maintenance pass retries it"
+							}
+						}
+						audit(marks)
+					}
+				}
+				break
+			}
+			log.Warn("project storage cleanup: removing the project root failed; retrying once",
+				"project_id", projectID, "retry_in", projectStorageCleanupRetryDelay)
+			t := time.NewTimer(projectStorageCleanupRetryDelay)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				audit(ds)
+				return
+			case <-t.C:
+			}
+		}
+		if layout.Backend.Shared() && slug != "" && ctx.Err() == nil {
+			globalDir, _ := config.GetGlobalDir()
+			ds, err := migrate.DeleteLegacyProjectTrees(layout, globalDir, slug, projectID)
+			if err != nil {
+				ds = append(ds, projectfs.Deletion{Tree: projectfs.TreeLegacyHubProjects, Outcome: projectfs.OutcomeFailed, Err: err})
+			}
+			audit(ds)
+		}
+	}
+
+	if stor := s.GetStorage(); stor != nil && ctx.Err() == nil && s.projectStillDeleted(ctx, projectID, 0) {
+		prefix, err := projectfs.ProjectObjectPrefix(s.HubID(), projectID)
+		if err != nil {
+			audit([]projectfs.Deletion{{Tree: projectfs.TreeObjectPrefix, Outcome: projectfs.OutcomeFailed, Err: err}})
+			return
+		}
+		audit([]projectfs.Deletion{projectfs.DeleteObjectPrefix(ctx, stor, prefix)})
+	}
+}
+
+// sweepDeferredProjectDeletions is the maintenance pass of deferred
+// project deletions: it lists the project roots that carry a deletion
+// tombstone (projectfs.Layout.DeferredDeletions) and, for each:
+//
+//   - when its project exists again, clears the tombstone and keeps the
+//     tree;
+//   - when the tombstone's time has passed, removes the project's storage
+//     as a project delete does (deleteProjectStorage, the slug read from
+//     the tree's project configuration), audited as deleted after the
+//     deferred-deletion time;
+//   - otherwise leaves it for a later pass.
+//
+// A listing that fails (the share not mounted) is one ERROR audit line per
+// pass and nothing else. It runs on the purge tick; every hub replica may
+// run it, and it is idempotent.
+func (s *Server) sweepDeferredProjectDeletions(ctx context.Context) {
+	layout, err := s.projectStorageLayout()
+	if err != nil || !(layout.Backend.Shared() || layout.SharedDirLayout().Backend.Shared()) {
+		return
+	}
+	log := s.projectsLogger()
+	due, err := layout.DeferredDeletions()
+	if err != nil {
+		projectfs.Audit(ctx, log, projectfs.DeleterHub, "", "", projectfs.Deletion{
+			Tree: projectfs.TreeProjectRoot, Path: layout.HostBase, Outcome: projectfs.OutcomeFailed,
+			Err: err, Reason: "deferred project deletions could not be listed"})
+	}
+	now := time.Now()
+	seen := map[string]bool{}
+	for _, d := range due {
+		if seen[d.ProjectID] || ctx.Err() != nil {
+			continue
+		}
+		seen[d.ProjectID] = true
+		_, gerr := s.store.GetProject(ctx, d.ProjectID)
+		switch {
+		case gerr == nil:
+			if cerr := layout.ClearDeleteAfter(d.ProjectID); cerr != nil {
+				log.Warn("deferred project deletion: could not clear the tombstone of a project that exists again",
+					"project_id", d.ProjectID, "error", cerr)
+				continue
+			}
+			projectfs.Audit(ctx, log, projectfs.DeleterHub, d.ProjectID, "", projectfs.Deletion{
+				Tree: projectfs.TreeProjectRoot, Path: d.Path, Outcome: projectfs.OutcomeKept,
+				Reason: "the project exists again: deferred deletion cancelled"})
+			continue
+		case !errors.Is(gerr, store.ErrNotFound):
+			log.Info("deferred project deletion: could not confirm the project is still deleted; keeping its tree",
+				"project_id", d.ProjectID, "error", gerr)
+			continue
+		}
+		if !d.After.IsZero() && now.Before(d.After) {
+			continue
+		}
+		slug, _ := config.ReadProjectSlug(filepath.Join(d.Path, config.DotScion))
+		s.deleteProjectStorage(ctx, layout, d.ProjectID, slug, deferredDeletionReason, false)
+	}
 }
 
 // agentStorageCleanupTimeout bounds one background agent storage cleanup.
 var agentStorageCleanupTimeout = 15 * time.Minute
+
+// agentStorageCleanupObserver, when set, is called at the start of every
+// startAgentStorageCleanup. Tests only.
+var agentStorageCleanupObserver func(a *store.Agent, teardownConfirmed bool)
 
 // agentStorageOnDelete reports whether a finished agent delete removes the
 // agent's storage on the share and in object storage: a hard delete that
@@ -178,15 +316,23 @@ func agentStorageOnDelete(req store.DeletionRequestInfo) bool {
 	return !req.Soft && req.DeleteFiles
 }
 
+// agentRootOtherFilesReason is the reason of an agent directory kept after
+// a confirmed broker teardown: it still has entries the hub does not own.
+const agentRootOtherFilesReason = "the agent directory still has entries the hub does not own (other agent files remain)"
+
 // startAgentStorageCleanup starts, in the background, the removal of the
 // deleted agent's storage the hub owns:
 //
-//   - its directory agents/<slug> on every shared Layout of the hub
-//     (projectfs.Layout.DeleteAgent): its own workspace in the per-agent
-//     modes, its homes and its secrets. The directory is keyed by slug, so
-//     while another agent record of the project (deleted or not) has the
-//     same slug only this agent's ID-keyed leaves home-<agent ID> and
-//     secrets-<agent ID> are removed (DeleteAgentLeaves);
+//   - on every shared Layout of the hub, its home-<agent ID> and
+//     secrets-<agent ID> below agents/<slug>, and then agents/<slug>
+//     itself only when it is empty (projectfs.Layout.DeleteAgent). The
+//     agent's own workspace or worktree is never removed here: the broker
+//     removes it under the provisioning lock with its git bookkeeping.
+//     A directory that is not empty is kept, audited as workspace pending
+//     broker removal when the broker teardown was not confirmed
+//     (teardownConfirmed false: a forced delete after a broker failure, an
+//     unreachable broker, no broker), and as other agent files remaining
+//     otherwise;
 //   - its object-storage prefix [hubs/<hub>/]workspaces/<project ID>/<agent
 //     ID>/, when the hub has object storage.
 //
@@ -194,15 +340,22 @@ func agentStorageOnDelete(req store.DeletionRequestInfo) bool {
 // committed: on a hard delete that deletes the agent's files
 // (agentStorageOnDelete), or when the retained-files purge removed the
 // record. Every outcome is an audit line; nothing is returned.
-func (s *Server) startAgentStorageCleanup(agent *store.Agent) {
+func (s *Server) startAgentStorageCleanup(agent *store.Agent, teardownConfirmed bool) {
 	if agent == nil || agent.ID == "" || agent.ProjectID == "" || agent.Slug == "" {
 		return
+	}
+	if obs := agentStorageCleanupObserver; obs != nil {
+		obs(agent, teardownConfirmed)
 	}
 	a := *agent
 	log := s.agentLifecycleLog
 	layout, layoutErr := s.projectStorageLayout()
 	stor := s.GetStorage()
 	hubID := s.HubID()
+	shared := layoutErr == nil && (layout.Backend.Shared() || layout.SharedDirLayout().Backend.Shared())
+	if layoutErr == nil && !shared && stor == nil {
+		return
+	}
 
 	s.storageCleanupWG.Add(1)
 	go func() {
@@ -217,20 +370,15 @@ func (s *Server) startAgentStorageCleanup(agent *store.Agent) {
 		case layoutErr != nil:
 			audit([]projectfs.Deletion{{Tree: projectfs.TreeAgentRoot, Outcome: projectfs.OutcomeFailed,
 				Err: layoutErr, Reason: "the hub's project storage layout is unavailable"}})
-		case layout.Backend.Shared() || layout.SharedDirLayout().Backend.Shared():
-			shared, err := s.agentSlugInUse(ctx, &a)
-			var ds []projectfs.Deletion
-			switch {
-			case err != nil:
-				ds = []projectfs.Deletion{{Tree: projectfs.TreeAgentRoot, Outcome: projectfs.OutcomeKept,
-					Reason: "could not check whether another agent of the project has the same name: " + err.Error()}}
-			case shared:
-				ds, err = layout.DeleteAgentLeaves(a.ProjectID, a.Slug, a.ID)
-			default:
-				ds, err = layout.DeleteAgent(a.ProjectID, a.Slug)
-			}
+		case shared:
+			ds, err := layout.DeleteAgent(a.ProjectID, a.Slug, a.ID)
 			if err != nil {
 				ds = append(ds, projectfs.Deletion{Tree: projectfs.TreeAgentRoot, Outcome: projectfs.OutcomeFailed, Err: err})
+			}
+			for i := range ds {
+				if ds[i].Tree == projectfs.TreeAgentRoot && ds[i].Outcome == projectfs.OutcomeKept && teardownConfirmed {
+					ds[i].Reason = agentRootOtherFilesReason
+				}
 			}
 			audit(ds)
 		}
@@ -244,28 +392,4 @@ func (s *Server) startAgentStorageCleanup(agent *store.Agent) {
 			audit([]projectfs.Deletion{projectfs.DeleteObjectPrefix(ctx, stor, prefix)})
 		}
 	}()
-}
-
-// agentSlugInUse reports whether another agent record of a's project, live
-// or soft-deleted, has a's slug, so that agents/<slug> may still hold its
-// files. A listing that cannot be read to the end counts as in use.
-func (s *Server) agentSlugInUse(ctx context.Context, a *store.Agent) (bool, error) {
-	cursor := ""
-	for page := 0; page < 100; page++ {
-		res, err := s.store.ListAgents(ctx, store.AgentFilter{ProjectID: a.ProjectID, IncludeDeleted: true},
-			store.ListOptions{Limit: 500, Cursor: cursor, SkipTotalCount: true})
-		if err != nil {
-			return true, err
-		}
-		for _, other := range res.Items {
-			if other.ID != a.ID && other.Slug == a.Slug {
-				return true, nil
-			}
-		}
-		if res.NextCursor == "" {
-			return false, nil
-		}
-		cursor = res.NextCursor
-	}
-	return true, nil
 }

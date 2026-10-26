@@ -5393,6 +5393,10 @@ func (s *Server) purgeHandler() func(ctx context.Context) {
 			}
 		}
 
+		// Remove the project trees whose deferred deletion is due (forced
+		// project deletes, and removals that failed and are retried).
+		s.sweepDeferredProjectDeletions(ctx)
+
 		// Purge scheduled events that are no longer pending (failed
 		// included) and completed more than scheduledEventRetention ago, on
 		// every tick, whatever the soft-delete retention (ptone/scion#4517).
