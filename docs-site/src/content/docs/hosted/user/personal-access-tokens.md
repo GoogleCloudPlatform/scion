@@ -301,9 +301,7 @@ The same per-request checks apply, with these limits:
   hub token carrying `user:invite`. On `POST /api/v1/users`, `user:read` on the token (together
   with `user.read` on your user) controls whether an existing record's details are returned on a
   repeat or conflict; without it, conflicts return `user_exists` and a repeat returns only
-  `{email, status}`. Pre-registering a user is audited as `user_provision` (recording the token as
-  the credential), and is refused for every caller on a Hub running with dev authentication (`403`,
-  `dev_auth_not_supported`). Reading the allow list and its domains
+  `{email, status}`. Creating a pre-registered user is audited as `user_provision` (recording the token as the credential; a repeat or conflict is not audited), and pre-registering is refused for every caller on a Hub running with dev authentication (`403`, `dev_auth_not_supported`). Reading the allow list and its domains
   needs `hub_allow_list:read`; adding, importing or removing allow-list entries needs
   `hub_allow_list:read` and `hub_allow_list:update`. Your user must also hold the matching hub
   permission. An invited user gets no role binding or group membership from the invitation.

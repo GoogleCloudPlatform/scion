@@ -297,7 +297,7 @@ Settings for forwarding telemetry to a cloud OTLP backend.
 | `endpoint` | string | — | Cloud OTLP endpoint URL. |
 | `protocol` | string | `grpc` | Transport protocol: `grpc` or `http`. |
 | `provider` | string | — | Cloud provider name (for example `gcp`). |
-| `cloud_logging` | bool | `false` | Forward structured logs to Google Cloud Logging (`SCION_CLOUD_LOGGING`). Preserved through settings conversion into the resolved agent telemetry config (`telemetry.cloud.cloud_logging`). On a database-backed Hub server it is read only at startup and cannot be changed through `PUT /api/v1/admin/server-config` (`422 startup_only_key_rejected`). |
+| `cloud_logging` | bool | `false` | Send the Scion server's (Hub's) own logs directly to Google Cloud Logging. Read once at server startup; `SCION_CLOUD_LOGGING`, when set (even to `false`), takes precedence over the file. Agents do not use it: the value is carried into the agent's resolved telemetry config (`telemetry.cloud.cloud_logging`) but is not passed to the agent as an environment variable. On a database-backed Hub it cannot be changed through `PUT /api/v1/admin/server-config` (`422 startup_only_key_rejected`). |
 | `headers` | map | — | Additional headers for OTLP export (e.g., `Authorization`). |
 | `tls.enabled` | bool | `true` | Enable TLS for the connection. |
 | `tls.insecure_skip_verify` | bool | `false` | Skip TLS certificate verification (development only). |
@@ -369,7 +369,7 @@ Settings can be overridden using environment variables with the `SCION_` prefix.
 | `cli.autohelp` | `SCION_CLI_AUTOHELP` |
 | `telemetry.enabled` | `SCION_TELEMETRY_ENABLED` |
 | `telemetry.cloud.enabled` | `SCION_TELEMETRY_CLOUD_ENABLED` |
-| `telemetry.cloud.cloud_logging` | `SCION_CLOUD_LOGGING` |
+| `telemetry.cloud.cloud_logging` (server process only) | `SCION_CLOUD_LOGGING` |
 | `telemetry.cloud.endpoint` | `SCION_OTEL_ENDPOINT` |
 | `telemetry.cloud.protocol` | `SCION_OTEL_PROTOCOL` |
 | `telemetry.cloud.tls.enabled` (inverted) | `SCION_OTEL_INSECURE` |
