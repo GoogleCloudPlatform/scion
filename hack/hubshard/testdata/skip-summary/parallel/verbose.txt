@@ -1,0 +1,21 @@
+=== RUN   TestParA
+=== PAUSE TestParA
+=== RUN   TestParB
+=== PAUSE TestParB
+=== RUN   TestParC
+=== PAUSE TestParC
+=== CONT  TestParA
+=== CONT  TestParC
+    toy_test.go:132: c log
+--- PASS: TestParC (0.00s)
+=== CONT  TestParB
+    toy_test.go:125: b log
+=== NAME  TestParA
+    toy_test.go:118: a log
+=== NAME  TestParB
+    toy_test.go:127: b skips
+--- SKIP: TestParB (0.01s)
+=== NAME  TestParA
+    toy_test.go:120: a fails
+--- FAIL: TestParA (0.03s)
+FAIL

@@ -296,8 +296,9 @@ The same per-request checks apply, with these limits:
   sign-in, and every token is refused for them: writing integration secrets or integration
   settings that configure credentials, authentication, endpoints or host paths; installing or
   updating an integration; and changing the GitHub App configuration.
-- **Invitations and the allow list.** Inviting users (single or bulk) and managing invitation
-  codes admit only a hub token carrying `user:invite`. Reading the allow list and its domains
+- **Invitations and the allow list.** Inviting users (single or bulk), pre-registering a user
+  (`POST /api/v1/users`, `scion hub users provision`) and managing invitation codes admit only a
+  hub token carrying `user:invite`. Reading the allow list and its domains
   needs `hub_allow_list:read`; adding, importing or removing allow-list entries needs
   `hub_allow_list:read` and `hub_allow_list:update`. Your user must also hold the matching hub
   permission. An invited user gets no role binding or group membership from the invitation.

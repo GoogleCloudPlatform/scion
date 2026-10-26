@@ -838,7 +838,7 @@ func migrateLegacyAgentState(legacyDir, externalDir string) {
 	}
 	moveFile("prompt.md")
 	moveFile("scion-agent.json")
-	moveFile(sharedDirStorageRecordFile)
+	moveFile(legacySharedDirStorageRecordFile)
 	// Remove the legacy dir if empty (best effort; non-empty leftovers like a
 	// stale workspace/ shell are left in place to avoid surprising deletes).
 	_ = os.Remove(legacyDir)
@@ -1222,17 +1222,6 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 		return nil, fmt.Errorf("%w: agent %q container is still running; stop it first", ErrReprovisionRefused, opts.Name)
 	}
 
-	// An explicit shared-dir backend change is checked before anything is
-	// provisioned, and recorded only after provisioning succeeds.
-	var sdChange *pendingSharedDirBackendChange
-	if len(opts.SharedDirBackendChanges) > 0 || opts.AllowEmptySharedDir {
-		c, err := prepareSharedDirBackendChange(ctx, projectDir, agentDir, opts)
-		if err != nil {
-			return nil, err
-		}
-		sdChange = c
-	}
-
 	ctx, inlineCfg := buildProvisionContext(ctx, opts)
 	ctx = api.ContextWithReprovision(ctx)
 
@@ -1257,17 +1246,8 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 	// Staging does not deliver the task: prompt.md is only read by Start as
 	// a fallback when its request has no task, and a start that carries
 	// the same task overwrites the file with it and delivers it once.
-	// This runs before the shared dir backend change is recorded, so a
-	// failed write leaves that change unrecorded ("recorded only after
-	// provisioning succeeds").
 	if err := writeReprovisionPrompt(agentDir, opts.Task); err != nil {
 		return cfg, err
-	}
-
-	if sdChange != nil {
-		if err := sdChange.record(opts, cfg); err != nil {
-			return cfg, err
-		}
 	}
 
 	return withProvisionedImage(ctx, opts, agentDir, cfg)
@@ -2281,7 +2261,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			worktreeBranch = api.Slugify(agentName)
 		}
 
-		if err := util.CreateWorktree(agentWorkspace, worktreeBranch); err != nil {
+		// Pin the git-lfs endpoint from the broker-recorded origin (the hub
+		// project's repository), not the live, agent-writable remote.origin.url.
+		// On the linked-checkout route GitClone is cleared, so the recorded origin
+		// arrives via the context; fall back to GitClone for the clone/hub-native
+		// paths.
+		recordedOrigin := api.RecordedOriginFromContext(ctx)
+		if recordedOrigin == "" && gitClone != nil {
+			recordedOrigin = gitClone.URL
+		}
+		if err := util.CreateWorktreeWithOrigin(agentWorkspace, worktreeBranch, recordedOrigin); err != nil {
 			return "", "", nil, fmt.Errorf("failed to create git worktree: %w", err)
 		}
 		util.Debugf("provision: worktree created in %s", time.Since(worktreeStart))
@@ -4456,7 +4445,15 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 					targetBranch = api.Slugify(agentName)
 				}
 				removeWorkspaceWorktreeEntry(agentWorkspace)
-				if err := util.CreateWorktree(agentWorkspace, targetBranch); err != nil {
+				// Pin the git-lfs endpoint from the broker-recorded origin
+				// (context on the linked route; GitClone fallback otherwise).
+				recordedOrigin := api.RecordedOriginFromContext(ctx)
+				if recordedOrigin == "" {
+					if gc := api.GitCloneFromContext(ctx); gc != nil {
+						recordedOrigin = gc.URL
+					}
+				}
+				if err := util.CreateWorktreeWithOrigin(agentWorkspace, targetBranch, recordedOrigin); err != nil {
 					slog.Warn("GetAgent: could not recreate the missing worktree; continuing without a workspace",
 						"agent", agentName, "path", agentWorkspace, "branch", targetBranch, "error", err)
 					agentWorkspace = ""

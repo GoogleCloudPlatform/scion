@@ -837,6 +837,13 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context, startsBefore
 			ExitReason:      ag.ExitReason,
 			RuntimeTarget:   agentTargets[heartbeatAgentKey(ag)],
 			RunID:           ag.RunID,
+			// The resolved agent config, for a create the Hub kept after
+			// an unknown dispatch outcome (ptone/scion#4987).
+			Template:            ag.Template,
+			HarnessConfig:       ag.HarnessConfig,
+			HarnessConfigSource: ag.HarnessConfigSource,
+			Image:               ag.Image,
+			Runtime:             ag.Runtime,
 		}
 		// The other entries go with the first reported entry of the key.
 		if more := otherEntries[heartbeatAgentKey(ag)]; len(more) > 0 {

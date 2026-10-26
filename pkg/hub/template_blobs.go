@@ -22,8 +22,6 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -340,8 +338,8 @@ func (r *templateBlobResolver) resolve(ctx context.Context, e *store.TemplateFil
 			}
 			sawMismatch = mismatch
 		}
-		if r.opts.dir != "" {
-			found, err := r.fromDir(ctx, e, blobPath)
+		if r.opts.collected != nil {
+			found, err := r.fromCollected(ctx, e, blobPath)
 			if err != nil {
 				return "", err
 			}
@@ -471,20 +469,22 @@ func (r *templateBlobResolver) moveStaged(ctx context.Context, staged, blobPath,
 	return true, nil
 }
 
-// fromDir writes e's blob from the commit's local directory (import,
-// reimport and bootstrap), when the file is there with the expected hash.
-func (r *templateBlobResolver) fromDir(ctx context.Context, e *store.TemplateFile, blobPath string) (bool, error) {
-	fp := filepath.Join(r.opts.dir, filepath.FromSlash(e.Path))
-	fi, err := os.Stat(fp)
-	if err != nil || !fi.Mode().IsRegular() || fi.Size() > maxUploadFileSize {
+// fromCollected writes e's blob from the commit's collected directory
+// (import, reimport and bootstrap), when collection recorded e.Path with e's
+// hash. The bytes are read through the collected directory's root and
+// verified against the collected entry (a regular file of the collected size
+// and hash); a failed verification fails the commit. An entry that was not
+// collected, or was collected with another hash, is not found here.
+func (r *templateBlobResolver) fromCollected(ctx context.Context, e *store.TemplateFile, blobPath string) (bool, error) {
+	fi, ok := r.opts.collected.entry(e.Path)
+	if !ok || fi.Hash != e.Hash || fi.Size > maxUploadFileSize {
 		return false, nil
 	}
-	data, err := os.ReadFile(fp)
+	data, err := transfer.ReadCollectedFile(r.opts.collected.root, fi)
 	if err != nil {
-		return false, nil
-	}
-	if transfer.HashBytes(data) != e.Hash {
-		return false, nil
+		// The entry is no longer the regular file of the collected size and
+		// hash: the commit fails rather than look elsewhere.
+		return false, fmt.Errorf("read %s: %w", e.Path, err)
 	}
 	if err := uploadTemplateBlob(ctx, r.stor, blobPath, e.Hash, data); err != nil {
 		return false, fmt.Errorf("write blob %s: %w", e.Path, err)

@@ -57,7 +57,13 @@ const resourceImportConcurrency = 6
 // naming, the create-or-sync loop — is shared here.
 
 // resourceDir pairs a derived resource name with its on-disk directory.
-type resourceDir struct{ name, path, sourceURL string }
+type resourceDir struct {
+	name, path, sourceURL string
+	// nameFromConfig is set when name was read from the directory's
+	// config.yaml before collection; the import then requires the collected
+	// config.yaml to carry the same name.
+	nameFromConfig bool
+}
 
 // skippedDir pairs a child directory name with the reason it was skipped during
 // discovery (e.g. it lacks the kind's marker file, so it is not a resource).
@@ -434,12 +440,14 @@ func discoverResourceDirs(root, sourceURL string, kind resourceImportKind) ([]re
 				name = derived
 			}
 		}
+		nameFromConfig := false
 		if kind.marker == "config.yaml" {
 			if hcDir, err := config.LoadHarnessConfigDir(root); err == nil && hcDir.Config.Name != "" {
 				name = hcDir.Config.Name
+				nameFromConfig = true
 			}
 		}
-		return []resourceDir{{name, root, sourceURL}}, nil, nil
+		return []resourceDir{{name: name, path: root, sourceURL: sourceURL, nameFromConfig: nameFromConfig}}, nil, nil
 	}
 
 	entries, err := os.ReadDir(root)
@@ -461,16 +469,18 @@ func discoverResourceDirs(root, sourceURL string, kind resourceImportKind) ([]re
 		dir := filepath.Join(root, entry.Name())
 		if kind.isResourceDir(dir) {
 			childName := entry.Name()
+			nameFromConfig := false
 			if kind.marker == "config.yaml" {
 				if hcDir, err := config.LoadHarnessConfigDir(dir); err == nil && hcDir.Config.Name != "" {
 					childName = hcDir.Config.Name
+					nameFromConfig = true
 				}
 			}
 			childSourceURL := sourceURL
 			if sourceURL != "" {
 				childSourceURL = strings.TrimRight(sourceURL, "/") + "/" + entry.Name()
 			}
-			dirs = append(dirs, resourceDir{childName, dir, childSourceURL})
+			dirs = append(dirs, resourceDir{name: childName, path: dir, sourceURL: childSourceURL, nameFromConfig: nameFromConfig})
 		} else {
 			skipped = append(skipped, skippedDir{entry.Name(), "no " + kind.marker})
 		}
@@ -540,6 +550,9 @@ func (s *Server) importResourceDirs(ctx context.Context, dirs []resourceDir, ski
 
 			rstore, err := kind.newStore(rd.path)
 			if err == nil {
+				if rd.nameFromConfig {
+					rstore.requireConfigName()
+				}
 				_, err = rstore.Bootstrap(ctx, rd.name, rd.path, scope, scopeID, rd.sourceURL, true)
 			}
 			done := int(completed.Add(1))

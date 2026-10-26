@@ -90,3 +90,57 @@ func TestSharedDirConfigDelete_NFSBackend_SymlinkedSharedDirsRefused(t *testing.
 	require.NoError(t, readErr, "the symlink itself must still be exactly what it was")
 	assert.Equal(t, outside.dir, target)
 }
+
+// TestSharedDirConfigDelete_NFSBackend_SymlinkedLeafRefused: a leaf that is
+// itself a symlink planted on the shared tree is not followed by the
+// declaration DELETE's confined deleter: the target outside the export is
+// never touched (the declaration is still removed).
+func TestSharedDirConfigDelete_NFSBackend_SymlinkedLeafRefused(t *testing.T) {
+	hostBase := setNFSSharedDirStorageGlobalSettings(t)
+	srv, _ := testServer(t)
+	useNFSSharedDirStorage(srv, hostBase)
+	outside := newOutsideTree(t)
+	project := createTestGitProject(t, srv, "Config Delete Symlink Leaf", "github.com/test/config-delete-symlink-leaf")
+	addSharedDirToProject(t, srv, project.ID, "artifacts")
+
+	sharedDirs := filepath.Join(hostBase, "projects", project.ID, "shared-dirs")
+	require.NoError(t, os.MkdirAll(sharedDirs, 0o2775))
+	leaf := filepath.Join(sharedDirs, "artifacts")
+	require.NoError(t, os.Symlink(outside.dir, leaf))
+
+	before := outside.snapshot(t)
+	rec := doRequest(t, srv, http.MethodDelete,
+		fmt.Sprintf("/api/v1/projects/%s/shared-dirs/artifacts", project.ID), nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+	outside.assertIntact(t, before)
+}
+
+// TestSharedDirConfigDelete_RequiredScratchpadRefused: while the hub's
+// project default scratchpad is on, the scratchpad is a Required Mount and
+// its declaration cannot be removed (409); nothing is deleted.
+func TestSharedDirConfigDelete_RequiredScratchpadRefused(t *testing.T) {
+	hostBase := setNFSSharedDirStorageGlobalSettings(t)
+	srv, _ := testServer(t)
+	useNFSSharedDirStorage(srv, hostBase)
+	project := createTestGitProject(t, srv, "Required Scratchpad", "github.com/test/required-scratchpad")
+	declareSharedDir(t, srv, project.ID, "scratchpad")
+	require.True(t, srv.defaultScratchpadEnabled(), "sanity: the compiled default is on")
+	leaf := filepath.Join(hostBase, "projects", project.ID, "shared-dirs", "scratchpad")
+	require.NoError(t, os.MkdirAll(leaf, 0o2775))
+	require.NoError(t, os.WriteFile(filepath.Join(leaf, "keep.txt"), []byte("keep"), 0o644))
+
+	rec := doRequest(t, srv, http.MethodDelete,
+		fmt.Sprintf("/api/v1/projects/%s/shared-dirs/scratchpad", project.ID), nil)
+	assert.Equal(t, http.StatusConflict, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "required")
+	_, err := os.Stat(filepath.Join(leaf, "keep.txt"))
+	assert.NoError(t, err, "a refused removal deletes nothing")
+
+	off := false
+	srv.config.DefaultScratchpad = &off
+	if srv.GetOperationalSettings() == nil {
+		rec = doRequest(t, srv, http.MethodDelete,
+			fmt.Sprintf("/api/v1/projects/%s/shared-dirs/scratchpad", project.ID), nil)
+		assert.Equal(t, http.StatusNoContent, rec.Code, "with the default off the scratchpad is an ordinary shared dir")
+	}
+}
