@@ -90,10 +90,6 @@ var controlCheckExclusions = map[liveInventoryKey]string{
 // does and does not prove.
 var suffixCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "artifact.version.upload", Method: "PUT", Pattern: "/api/v1/artifacts/{id}/versions/{seq}/files/{path}"}:       "the file path is every segment after files/, so the bogus suffix becomes part of the file path, and the fixture's version 1 is ready, so handlePutFile (pkg/artifacts/versions.go) answers 409 conflict (not pending) before it looks the file up",
-	{OperationID: "user.read", Method: "GET", Pattern: "/api/v1/users/{id}"}:                                                     "handleUserByID (handlers_users_core.go) only special-cases the \"revoke-sessions\" suffix; any other suffix, including this check's bogus one, falls through to the same GET handling as the bare ID",
-	{OperationID: "user.update", Method: "PATCH", Pattern: "/api/v1/users/{id}"}:                                                 "same as user.read above: handleUserByID ignores an unrecognized suffix rather than 404ing on it",
-	{OperationID: "user.self.update", Method: "PATCH", Pattern: "/api/v1/users/{id}"}:                                            "same as user.read above: handleUserByID ignores an unrecognized suffix rather than 404ing on it",
-	{OperationID: "user.admin.delete", Method: "DELETE", Pattern: "/api/v1/users/{id}"}:                                          "same as user.read above: handleUserByID ignores an unrecognized suffix rather than 404ing on it",
 	{OperationID: "secret.read", Method: "GET", Pattern: "/api/v1/secrets/{key}"}:                                                "handleSecretByKey (handlers_env_secrets.go) extracts the key with extractID, which truncates at the first '/' after the prefix and discards the suffix, so the request proceeds on the bare key; with no secret backend configured in testServer, getSecret then panics on a nil backend, recovered as a 500 — not a 404/405, but unrelated to the suffix, which the truncation already removed",
 	{OperationID: "secret.write", Method: "PUT", Pattern: "/api/v1/secrets/{key}"}:                                               "extractID truncates the suffix the same way as secret.read above, but setSecret checks the request body's value field before ever touching the secret backend; this test's generic empty PUT body always fails that check with 400 \"value is required\", the same 400 the bare path gets",
 	{OperationID: "secret.write", Method: "DELETE", Pattern: "/api/v1/secrets/{key}"}:                                            "extractID truncates the suffix the same way as secret.read above; deleteSecret then panics on a nil secret backend the same way getSecret does, recovered as a 500",
@@ -109,6 +105,7 @@ var suffixCheckExclusions = map[liveInventoryKey]string{
 	{OperationID: "secret.read", Method: "GET", Pattern: "/api/v1/secrets"}:                                                      "the by-key route \"/api/v1/secrets/\" registers as a prefix, so a suffix on this bare collection route falls through to handleSecretByKey with the suffix as the key; getSecret then panics on a nil secret backend, recovered as a 500",
 	{OperationID: "hub.lifecyclehooks.read", Method: "GET", Pattern: "/api/v1/admin/lifecycle-hooks"}:                            "the by-ID route \"/api/v1/admin/lifecycle-hooks/\" registers as a prefix, so a suffix on this bare collection route falls through to handleAdminLifecycleHookByID with the suffix as the ID; getLifecycleHook then 400s failing to parse it as a UUID",
 	{OperationID: "hub.githubapp.read", Method: "GET", Pattern: "/api/v1/github-app/installations"}:                              "the by-ID route \"/api/v1/github-app/installations/\" registers as a prefix, so a suffix on this bare collection route falls through to handleGitHubAppInstallationByIDRead with the suffix as the ID; parseInstallationIDFromPath then 400s \"invalid installation ID\" failing to parse it as an integer",
+	{OperationID: "chat.star.list", Method: "GET", Pattern: "/api/v1/chat/stars"}:                                                "the by-ID route \"/api/v1/chat/stars/\" registers as a prefix, so a suffix on this bare collection route falls through to handleChatStarRoutes with the suffix as the message ID; parseStarMessageID then 400s (the design's answer for a malformed message ID)",
 	{OperationID: "agent.stopall", Method: "POST", Pattern: "/api/v1/agents/stop-all"}:                                           "handleAgentByID checks id == \"stop-all\" before it looks at anything after that segment, so a suffix is silently ignored and stop-all runs exactly as it would on the bare path",
 	{OperationID: "quota.read", Method: "GET", Pattern: "/api/v1/admin/usage/{limit}"}:                                           "handleAdminUsageByLimit (handlers_quota.go) extracts limitID with extractID, which truncates at the first '/' and discards everything after it, so the suffix never reaches the lookup",
 	{OperationID: "quota.read", Method: "GET", Pattern: "/api/v1/admin/limits/{id}/entitlements"}:                                "handleAdminLimitByID (handlers_quota.go) dispatches to the entitlement list only when the second segment is exactly \"entitlements\"; with a further suffix the remainder is not \"entitlements\", so the request falls through to the limit definition GET on the real ID (200)",
@@ -263,10 +260,10 @@ const bogusSegment = "live-inventory-bogus-suffix"
 //     bare path, so the positive check cannot tell a too-long pattern from
 //     a correct one. Such a handler also FAILS the suffix check (it
 //     answers something other than 404/405), which is why it is listed in
-//     suffixCheckExclusions with the specific reason: e.g. handleUserByID
-//     falls through for any unrecognized suffix; extractID-based handlers
-//     truncate at the first '/' and discard the rest rather than folding
-//     it into the ID. This is a real, named limitation, not an oversight.
+//     suffixCheckExclusions with the specific reason: e.g.
+//     extractID-based handlers truncate at the first '/' and discard the
+//     rest rather than folding it into the ID. This is a real, named
+//     limitation, not an oversight.
 //   - Full path correctness when the positive check's non-404/405 status
 //     comes from a pre-dispatch condition unrelated to routing — most
 //     commonly a 5xx or 503 for a backend this test server does not

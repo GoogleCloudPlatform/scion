@@ -89,7 +89,7 @@ func MakeWritableRecursive(path string) error {
 		totalFiles++
 		if info.Mode().Perm()&0200 == 0 {
 			chmodCount++
-			return os.Chmod(path, info.Mode().Perm()|0200)
+			return os.Chmod(path, info.Mode().Perm()|0200) //winsec:not-protection makes the entry writable or removable before deletion
 		}
 		return nil
 	})
@@ -137,7 +137,7 @@ func RemoveAllSafe(root string) error {
 			if os.IsPermission(err) {
 				// Make the parent directory writable and retry.
 				parent := filepath.Dir(path)
-				if chErr := os.Chmod(parent, 0700); chErr == nil {
+				if chErr := os.Chmod(parent, 0700); chErr == nil { //winsec:not-protection makes the entry writable or removable before deletion
 					// Re-stat to determine the entry type.
 					info, stErr := os.Lstat(path)
 					if stErr != nil {
@@ -149,7 +149,7 @@ func RemoveAllSafe(root string) error {
 						return nil
 					}
 					if info.IsDir() {
-						_ = os.Chmod(path, 0700)
+						_ = os.Chmod(path, 0700) //winsec:not-protection makes the entry writable or removable before deletion
 						dirs = append(dirs, path)
 						return nil
 					}
@@ -172,7 +172,7 @@ func RemoveAllSafe(root string) error {
 			// Ensure the directory is writable so we can list/delete contents.
 			info, infoErr := d.Info()
 			if infoErr == nil && info.Mode().Perm()&0700 != 0700 {
-				_ = os.Chmod(path, 0700)
+				_ = os.Chmod(path, 0700) //winsec:not-protection makes the entry writable or removable before deletion
 			}
 			dirs = append(dirs, path)
 			return nil
@@ -190,7 +190,7 @@ func RemoveAllSafe(root string) error {
 	for _, f := range files {
 		if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
 			if os.IsPermission(err) {
-				_ = os.Chmod(filepath.Dir(f), 0700)
+				_ = os.Chmod(filepath.Dir(f), 0700) //winsec:not-protection makes the entry writable or removable before deletion
 				err = os.Remove(f)
 			}
 			if err != nil && !os.IsNotExist(err) && firstErr == nil {
@@ -205,7 +205,7 @@ func RemoveAllSafe(root string) error {
 	for i := len(dirs) - 1; i >= 0; i-- {
 		if err := os.Remove(dirs[i]); err != nil && !os.IsNotExist(err) {
 			if os.IsPermission(err) {
-				_ = os.Chmod(dirs[i], 0700)
+				_ = os.Chmod(dirs[i], 0700) //winsec:not-protection makes the entry writable or removable before deletion
 				err = os.Remove(dirs[i])
 			}
 			if err != nil && !os.IsNotExist(err) && firstErr == nil {
@@ -270,7 +270,7 @@ func removeSymlinkSafe(path string) {
 	// Strategy 3: direct os.Remove (may trigger autofs on macOS).
 	Debugf("removeSymlinkSafe: falling back to os.Remove for %s", name)
 	if rmErr := os.Remove(path); rmErr != nil && os.IsPermission(rmErr) {
-		_ = os.Chmod(dir, 0700)
+		_ = os.Chmod(dir, 0700) //winsec:not-protection makes the entry writable or removable before deletion
 		_ = os.Remove(path)
 	}
 	elapsed := time.Since(start)

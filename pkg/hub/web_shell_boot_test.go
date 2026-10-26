@@ -128,7 +128,7 @@ func TestSPAShell_HeadFlushedBeforePrefetch(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"id": agentID, "name": "flush-agent"})
 	}), func(ctx context.Context) error { return nil })
 
-	srv := httptest.NewServer(ws.Handler())
+	srv := httptest.NewServer(devSignedIn(t, ws))
 	defer srv.Close()
 	// Runs before srv.Close (defers run last-in first-out), so a failing
 	// test never leaves the handler blocked and Close waiting on it.
@@ -143,7 +143,8 @@ func TestSPAShell_HeadFlushedBeforePrefetch(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
-	assert.Equal(t, webContentSecurityPolicy, resp.Header.Get("Content-Security-Policy"))
+	policy := resp.Header.Get("Content-Security-Policy")
+	assert.Equal(t, webContentSecurityPolicy(policyNonce(t, policy)), policy)
 	assert.Equal(t, "nosniff", resp.Header.Get("X-Content-Type-Options"))
 	assert.Equal(t, "text/html; charset=utf-8", resp.Header.Get("Content-Type"))
 

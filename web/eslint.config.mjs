@@ -30,8 +30,8 @@ const tsconfigRootDir = import.meta.dirname;
 // window.location (href, assign, replace) directly drops the base path the
 // UI needs when served under a proxy prefix. Any write is flagged, not only
 // a literal absolute path, since the target is often built elsewhere.
-// Used in two config blocks below: a later block's no-restricted-syntax
-// replaces an earlier one's, so the components block repeats these.
+// Used in several config blocks below: a later block's no-restricted-syntax
+// replaces an earlier one's, so each later block repeats these.
 const locationWriteRestrictions = [
   {
     selector: [
@@ -148,6 +148,8 @@ export default defineConfig([
     [
       'e2e/agent-store-count/*.ts',
       'e2e/artifacts-access/*.ts',
+      'e2e/artifacts-agent-owned/*.ts',
+      'e2e/artifacts-review/*.ts',
       'e2e/chat/*.ts',
       'e2e/chat-file-preview/*.ts',
       'e2e/chat-mobile/*.ts',
@@ -160,6 +162,7 @@ export default defineConfig([
       'e2e/test-hub-banner/*.ts',
       'e2e/broker-area/*.ts',
       'e2e/test-identity-session/*.ts',
+      'e2e/page-policy/*.ts',
       'e2e/iap-driver/*.ts',
       'e2e/iap-journey/*.ts',
       'e2e/harness-selftest/*.ts',
@@ -180,6 +183,11 @@ export default defineConfig([
   project(['e2e/terminal-owner/*.ts'], './e2e/terminal-owner/tsconfig.json'),
   project(['e2e/port-proxy/*.ts'], './e2e/port-proxy/tsconfig.json'),
   project(['e2e-perf/budgets/*.ts'], './e2e-perf/budgets/tsconfig.json'),
+  // The review editor is its own TS project (see its tsconfig.json).
+  project(
+    ['src/components/artifact-review/**/*.ts'],
+    './src/components/artifact-review/tsconfig.json'
+  ),
 
   // Test files: a looser type-aware rule set than sources. Tests reach
   // into private members and use `as any` fakes, so the no-unsafe-* rules
@@ -288,6 +296,79 @@ export default defineConfig([
           property: 'fetch',
           message: 'Use apiFetch() from client/api.js instead of a direct fetch().',
         })),
+      ],
+    },
+  },
+
+  // The review editor renders artifact text in the page (ptone/scion#5913):
+  // it builds DOM only through ProseMirror's renderers and text bindings,
+  // so no string reaches the DOM as HTML from these files. The navigation
+  // rules of the blocks above (location writes, history writes, imports of
+  // client/main) are repeated, because a later no-restricted-syntax or
+  // no-restricted-imports entry replaces an earlier one for the same files.
+  {
+    files: ['src/components/artifact-review/**/*.ts'],
+    ignores: ['src/components/artifact-review/**/*.test.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: 'lit/directives/unsafe-html.js',
+              message: 'The review editor must not turn strings into HTML.',
+            },
+            {
+              name: 'lit-html/directives/unsafe-html.js',
+              message: 'The review editor must not turn strings into HTML.',
+            },
+          ],
+          patterns: [
+            {
+              group: ['**/client/main', '**/client/main.js', '**/client/main.ts'],
+              message:
+                'Import navigation helpers from client/navigation.js; importing client/main boots the app.',
+            },
+          ],
+        },
+      ],
+      'no-restricted-syntax': [
+        'error',
+        ...locationWriteRestrictions,
+        {
+          selector:
+            'MemberExpression[property.name=/^(innerHTML|outerHTML|insertAdjacentHTML|srcdoc|setHTMLUnsafe|createContextualFragment|parseFromString)$/], MemberExpression[property.value=/^(innerHTML|outerHTML|insertAdjacentHTML|srcdoc|setHTMLUnsafe|createContextualFragment|parseFromString)$/]',
+          message: 'The review editor must not turn strings into HTML (see eslint.config.mjs).',
+        },
+        {
+          selector:
+            "NewExpression[callee.name='DOMParser'], CallExpression[callee.object.name='document'][callee.property.name=/^(write|writeln)$/], CallExpression[callee.object.name='document'][callee.property.value=/^(write|writeln)$/], Identifier[name='unsafeHTML']",
+          message: 'The review editor must not turn strings into HTML (see eslint.config.mjs).',
+        },
+        {
+          // Lit property bindings (.innerHTML=${…}), a srcdoc attribute
+          // binding (any case), setAttribute / setAttributeNS with 'srcdoc',
+          // an 'on…' name or a name not written out as a literal (or called
+          // as el['setAttribute']), object
+          // keys (Object.assign(el, { innerHTML })), and
+          // write() on a document reached through another object
+          // (window.document.write).
+          selector:
+            "TemplateElement[value.raw=/\\.(innerHTML|outerHTML|srcdoc)\\s*=/], TemplateElement[value.raw=/\\bsrcdoc\\s*=\\s*[\"']?$/i], CallExpression[callee.property.name='setAttribute'][arguments.0.value=/^(srcdoc|on)/i], CallExpression[callee.property.name='setAttribute'][arguments.0.type!='Literal'], CallExpression[callee.property.name='setAttributeNS'][arguments.1.value=/^(srcdoc|on)/i], CallExpression[callee.property.name='setAttributeNS'][arguments.1.type!='Literal'], Property[key.name=/^(innerHTML|outerHTML|srcdoc)$/], Property[key.value=/^(innerHTML|outerHTML|srcdoc)$/], CallExpression[callee.object.property.name='document'][callee.property.name=/^(write|writeln)$/], CallExpression[callee.property.value=/^setAttribute(NS)?$/], CallExpression[callee.object.property.name='document'][callee.property.value=/^(write|writeln)$/], CallExpression[callee.object.property.value='document'][callee.property.name=/^(write|writeln)$/], CallExpression[callee.object.property.value='document'][callee.property.value=/^(write|writeln)$/]",
+          message: 'The review editor must not turn strings into HTML (see eslint.config.mjs).',
+        },
+        {
+          selector:
+            'MemberExpression[property.name=/^(push|replace)State$/], MemberExpression[property.value=/^(push|replace)State$/], MemberExpression[property.type="TemplateLiteral"][property.quasis.0.value.cooked=/^(push|replace)State$/], ObjectPattern > Property[key.name=/^(push|replace)State$/], ObjectPattern > Property[key.value=/^(push|replace)State$/]',
+          message:
+            'Use navigateTo(), pushUrl() or replaceSearch() from client/navigation.js instead of raw history.pushState/replaceState.',
+        },
+        {
+          selector:
+            'ImportExpression[source.value=/\\/client\\/main(\\.(js|ts))?$/], ImportExpression[source.type="TemplateLiteral"][source.quasis.length=1][source.quasis.0.value.cooked=/\\/client\\/main(\\.(js|ts))?$/]',
+          message:
+            'Import navigation helpers from client/navigation.js; importing client/main boots the app.',
+        },
       ],
     },
   },

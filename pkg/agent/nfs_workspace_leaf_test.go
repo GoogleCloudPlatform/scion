@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// These tests exercise unix-only, Windows-gated agent storage code.
+//go:build unix
+
 package agent
 
 import (
@@ -656,23 +659,26 @@ func TestStartNFSWorkspace_PreCreatesClaimSharedDirs(t *testing.T) {
 	assert.Equal(t, uint32(0o2775), statMode(t, sdPath).Mode&0o7777)
 }
 
-// Shared dirs with their own NFS storage are not on the workspace claim, so
-// nothing is created for them under the workspace's project directory.
-func TestStartNFSWorkspace_SharedDirStorageNFSNotOnClaim(t *testing.T) {
+// A workspace_storage nfs block and a shared_dir_storage nfs block that
+// name different trees cannot be placed by one storage block (design OQ1):
+// the start fails closed, naming both, before the pod is created and
+// before anything is created on either export.
+func TestStartNFSWorkspace_SharedDirStorageOnOtherTreeFailsClosed(t *testing.T) {
 	mountRoot := filepath.Join(t.TempDir(), "nfs")
 	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
 	sdMountRoot := filepath.Join(t.TempDir(), "sd-nfs")
 	require.NoError(t, os.MkdirAll(filepath.Join(sdMountRoot, "sd-share"), 0o755))
 
-	_, ranCount, cfg, err := startNFSWorkspaceAgentWith(t, "kubernetes", mountRoot,
+	_, ranCount, _, err := startNFSWorkspaceAgentWith(t, "kubernetes", mountRoot,
 		sprintfServerYAML(sharedDirStorageNFSGlobalYAML, sdMountRoot, "sd-share", "sd-pv"),
 		[]api.SharedDir{{Name: "scratchpad"}})
-	require.NoError(t, err)
-	require.Equal(t, 1, ranCount)
-	require.NotNil(t, cfg.SharedDirStorage)
-	assert.True(t, cfg.NFSWorkspacePreCreated)
-	_, statErr := os.Stat(filepath.Join(mountRoot, "share-1", "projects", testNFSWorkspaceProjectID, "shared-dirs"))
-	assert.True(t, os.IsNotExist(statErr), "no shared-dirs directory may be created on the workspace claim")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "name different trees")
+	assert.Equal(t, 0, ranCount, "the pod must not be created")
+	_, statErr := os.Stat(filepath.Join(mountRoot, "share-1", "projects"))
+	assert.True(t, os.IsNotExist(statErr), "nothing may be created on the workspace export")
+	_, statErr = os.Stat(filepath.Join(sdMountRoot, "sd-share", "projects"))
+	assert.True(t, os.IsNotExist(statErr), "nothing may be created on the shared-dir export")
 }
 
 // A directory the broker is not allowed to create does not stop Start: the

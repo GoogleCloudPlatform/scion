@@ -407,6 +407,47 @@ type sseEvent struct {
 	Data    map[string]any `json:"data"`
 }
 
+// devSessionCookie signs in to the hub's web server as a browser would: it
+// mints a single-use code at /auth/dev-launch with the dev token, opens the
+// sign-in link without following its redirect, and returns the session
+// cookie the link set.
+func (h *hubProc) devSessionCookie() *http.Cookie {
+	h.t.Helper()
+	req, err := http.NewRequest(http.MethodPost, h.base+"/auth/dev-launch", nil)
+	if err != nil {
+		h.t.Fatalf("dev-launch request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+h.token)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		h.t.Fatalf("dev-launch: %v", err)
+	}
+	var launch struct {
+		SignInPath string `json:"signInPath"`
+	}
+	err = json.NewDecoder(resp.Body).Decode(&launch)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || err != nil || !strings.HasPrefix(launch.SignInPath, "/") {
+		h.t.Fatalf("dev-launch: status %d, decode error %v", resp.StatusCode, err)
+	}
+	noRedirect := &http.Client{
+		Timeout:       60 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	resp, err = noRedirect.Get(h.base + launch.SignInPath)
+	if err != nil {
+		h.t.Fatalf("dev sign-in: %v", err)
+	}
+	_ = resp.Body.Close()
+	for _, c := range resp.Cookies() {
+		if c.Name == "scion_sess" && c.Value != "" {
+			return c
+		}
+	}
+	h.t.Fatalf("dev sign-in: status %d, no session cookie", resp.StatusCode)
+	return nil
+}
+
 // sseStream subscribes to the given subjects on /events.
 type sseStream struct {
 	events chan sseEvent
@@ -425,7 +466,9 @@ func (h *hubProc) subscribe(subjects ...string) *sseStream {
 		cancel()
 		h.t.Fatalf("sse request: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+h.token)
+	// /events is a web route: it takes a web session, which a dev-auth
+	// server creates only from a sign-in link (devSessionCookie).
+	req.AddCookie(h.devSessionCookie())
 	req.Header.Set("Accept", "text/event-stream")
 	resp, err := (&http.Client{}).Do(req)
 	if err != nil {

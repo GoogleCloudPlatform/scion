@@ -1,6 +1,6 @@
 # Administrative User Provisioning API
 
-**Status:** H.1 design approved ([ptone/scion#2133](https://github.com/ptone/scion/issues/2133), merged as GoogleCloudPlatform/scion#2064). H.2 ([ptone/scion#2134](https://github.com/ptone/scion/issues/2134)) is in implementation; its start gates are satisfied (§16.1): the D.2 shared admission mechanics it uses have merged (Phase 2, hub-token admission, is further gated on D.2 G5), and the sign-in item [GoogleCloudPlatform/scion#2071](https://github.com/GoogleCloudPlatform/scion/pull/2071) ("require provider-verified email and unify sign-in policy across auth paths") has landed. OD-1 (stored initial role) was **decided by ptone on 2026-09-28**: no stored role (§6, §19). OD-2 to OD-10 were **decided by ptone on 2026-10-04: option (a) for each** (§19, §20.2). H.2 PR-1 binds the A/D concepts to the merged code (§16.2, "Phase 0 binding").
+**Status:** H.1 design approved ([ptone/scion#2133](https://github.com/ptone/scion/issues/2133), merged as GoogleCloudPlatform/scion#2064). H.2 ([ptone/scion#2134](https://github.com/ptone/scion/issues/2134)) is implemented: Phases 0-1 (GoogleCloudPlatform/scion#2735), Phase 3 (GoogleCloudPlatform/scion#2778), and Phase 2, hub-token admission, delivered with the user administration token admission of [ptone/scion#2124](https://github.com/ptone/scion/issues/2124) after the invitation routes (§16.2). OD-1 (stored initial role) was **decided by ptone on 2026-09-28**: no stored role (§6, §19). OD-2 to OD-10 were **decided by ptone on 2026-10-04: option (a) for each** (§19, §20.2). H.2 PR-1 binds the A/D concepts to the merged code (§16.2, "Phase 0 binding").
 **Tracker:** H, [ptone/scion#2116](https://github.com/ptone/scion/issues/2116) (ptone approved continuing it on 2026-09-28 as a separate followup; it is not a core prerequisite and does not gate core UAT delivery)
 **Date:** 2026-09-28
 **Anchored at:** `origin/main` @ `acc5a4b`
@@ -1043,6 +1043,30 @@ confirm that the `user.read` detail-authority decision (§5.4; PR-1 evaluates it
 `hubScopedResource("user", "hub")` with no target evidence) resolves to the same hub target as the
 `user.invite` decision, or switch it to `hubCollectionEvidence("user.read")`. Then re-add
 `DenialCredentialInsufficient` to the catalog entry for rows 6-7.
+
+**Phase 2 shipped** (H.2 PR-3, with [ptone/scion#2124](https://github.com/ptone/scion/issues/2124)).
+`POST /api/v1/users` admits a hub user access token under the rule of the invitation routes:
+
+- The catalog entry is `AdmitOn(BearerTargetHubCollection, BearerBoundaryHub)` and lists
+  `CredentialScopedUAT`. The decision keeps `hubCollectionEvidence("user.invite")` on
+  `Resource{Type: "user"}`, the hub-level create rule of §7.3 item 3.
+- A token whose ceiling lacks `user.invite`, or whose boundary is not the hub, gets `403 forbidden`
+  with `details.reason: credential_insufficient` (rows 6-7), before the body is read. The catalog
+  entry lists `DenialCredentialInsufficient`.
+- Live authority is the holder's current grants intersected with the ceiling, checked on every
+  request (row 8).
+- Invitation-effect governance: the record carries no role, role binding or group membership, and
+  any non-null `role` is refused with 422 for a token as for a session. The invitation routes' effect
+  test covers provisioning.
+- The `user.read` detail check stays on `hubScopedResource("user", "hub")`, which resolves to the hub
+  scope of the `user.invite` decision. `hubCollectionEvidence("user.read")` would resolve to an
+  unknown target, because `user.read` has no collection target class. A token needs `user:read` for
+  the detailed view.
+- OD-10 (a): the record persists when the token is revoked or expires, when the holder is
+  suspended, and when the holder loses `user.invite`. The `user_provision` mutation audit records the
+  token's ID, kind and boundary.
+- On a hub running with dev auth every caller is refused (row 4a), tokens included. Credential kinds
+  other than a session or a user access token get the session-only refusal.
 
 **Phase 3 — web UI.** The display-name field and submit routing in `admin-users.ts`, plus web tests.
 Delivery: H.2 PR-2. It does not depend on Phase 2: the web form uses a session.

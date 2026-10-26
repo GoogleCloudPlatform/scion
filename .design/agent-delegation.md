@@ -347,7 +347,7 @@ the claim transaction.
 | --- | --- | --- | --- |
 | `agent.delegation.revoke` | `DELETE /api/v1/agents/{agentId}/delegations/{grantId}` | session; the bound agent's own agent JWT | the issuer; the bound agent (relinquish its own grant); the agent's current owner; hub admins (any grant); project admins of P, for project(P)-bounded grants only |
 | `agent.delegation.credential.revoke` | `DELETE /api/v1/agents/{agentId}/delegations/{grantId}/credentials/{credentialId}` | as above | as above |
-| `agent.delegation.revoke_all` | `POST /api/v1/users/me/delegations/revoke-all` (the caller's own grants); `POST /api/v1/agents/{agentId}/delegations/revoke-all` | session | the issuer, for their own grants; per agent, the same rule per grant. Grants the caller may not revoke are skipped and reported, not revoked |
+| `agent.delegation.revokeall` (permission `agent.delegation.revoke_all`; operation IDs take no underscore) | `POST /api/v1/users/me/delegations/revoke-all` (the caller's own grants); `POST /api/v1/agents/{agentId}/delegations/revoke-all` | session | the issuer, for their own grants; per agent, the same rule per grant. Grants the caller may not revoke are skipped and reported, not revoked |
 | `agent.delegation.list` | `GET /api/v1/agents/{agentId}/delegations`; `GET /api/v1/users/me/delegations` | session; the bound agent's own agent JWT (its own grants, metadata only) | as revoke, per grant. Grants outside the caller's authority are left out, not counted |
 | `agent.delegation.read` | `GET /api/v1/agents/{agentId}/delegations/{grantId}` | as list | as list, per grant. A grant outside the caller's authority returns 404 `grant_not_found` |
 
@@ -1008,7 +1008,9 @@ does not change that schema.
 
 A message sent with a delegated credential is stored with `Sender = "agent:<A>"` (A's slug),
 `SenderID = A` and `SenderProjectID` = A's project, like every other agent-sender row (from G.3-a),
-plus two new nullable columns (G.3-b), `AuthorizingUserID` and `DelegationGrantID`. Recipients, the web UI
+plus two new nullable columns (G.3-b), `AuthorizingUserID` and `DelegationGrantID` (stored as
+`authorizing_user_id` and `delegation_grant_id`, returned as `authorizingUserId` and
+`delegationGrantId`, empty on every other message). Recipients, the web UI
 and the CLI render it as "from agent A, authorized by <issuer> via delegation <grantId>". A
 recipient never sees it as sent by the issuer.
 
@@ -1037,8 +1039,9 @@ sciontool delegation helper can use it.
 ### 16.1 Transactional revocation through B.3 hooks
 
 G registers one `AgentTxHook` in each of the four registries (§3.4). Each hook revokes the agent's
-active grants and their credentials, with `revoke_reason` and a mutation audit, on the
-transaction-scoped store. A hook error rolls back the lifecycle operation.
+unrevoked grants (expired ones included) and their unrevoked credentials, with `revoke_reason` and a
+mutation audit, on the transaction-scoped store. A hook error rolls back the lifecycle operation.
+The revoke route (§7) and every lifecycle revocation share one per-grant revocation body.
 
 | Registry | Revoke reason | Why it must be transactional |
 | --- | --- | --- |
@@ -1076,7 +1079,14 @@ These cascades are best-effort, because use-time checks are authoritative:
   does. Revoke-all is the way to end grants.
 - **Project delete** (`ProjectDeletionService`): it runs no agent lifecycle hooks. G adds an
   explicit step that revokes grants and credentials of the project's agents to the project deletion
-  cascade.
+  cascade. The step runs inside the cascade transaction, like every other cascade step, so a
+  revocation failure fails the project delete.
+- **Revoke reasons of these paths:** `agent_suspended` (agent suspend and auto-suspend),
+  `issuer_suspended` (`updateUser` setting the status to suspended), `issuer_deleted` (after
+  `deleteUser` or the test identity purge commits) and `project_deleted`. The best-effort paths run
+  in a transaction of their own after the change has committed; a failure is logged and never fails
+  the change. Each revoked grant gets one `agent_delegation_grant_revoke` mutation record, as in §7,
+  attributed to the principal whose action caused it (the hub when there is none).
 - **Purge of soft-deleted agents:** no hooks. Grants were already revoked at soft delete.
 - **Failed-create cleanup** (`compensateAgentCreate`, `agent_create_tx.go`): no hooks. If a grant
   was issued for an agent whose create is later rolled back, the agent row is removed, so exchange
@@ -1339,7 +1349,7 @@ New catalog specs in a G-owned `pkg/hub/authzop/catalog_agent_delegation.go`:
 | `agent.delegation.create` | `session_jwt` | `SessionOnly(ReasonCredentialManagement)` | issue credential | governance and atomic audit |
 | `agent.delegation.exchange` | `agent_jwt` | `NonUser()` with a `Pin` naming G's UAT and session refusal test | mint credential | the bearer matrix skips non-user operations, so G pins its own test |
 | `agent.delegation.revoke`, `.credential.revoke`, `.list`, `.read` | `session_jwt`, `agent_jwt` | `SessionOnly(ReasonCredentialManagement)` | revoke authority (revokes); read (list, read) | the handler takes the bound-agent branch first and then requires a session, so a UAT gets 403 with `details.reason = CREDENTIAL_MANAGEMENT` and `details.credential = session_required` |
-| `agent.delegation.revoke_all` | `session_jwt` | `SessionOnly(ReasonCredentialManagement)` | revoke authority | |
+| `agent.delegation.revokeall` (permission `agent.delegation.revoke_all`; operation IDs take no underscore) | `session_jwt` | `SessionOnly(ReasonCredentialManagement)` | revoke authority | |
 
 No G operation lists `scoped_uat`. Operations admitted for delegated use (§13) add
 `PrincipalAgentDelegated` and `CredentialDelegatedAgent` as they are admitted.

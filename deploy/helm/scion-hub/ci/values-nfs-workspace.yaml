@@ -14,7 +14,7 @@
 
 
 # THE NFS WORKSPACE PERMUTATION: the minimal install plus workspaceStorage.nfs,
-# so CI renders server.workspace_storage and the hub pod's inline nfs volume.
+# so CI renders server.project_storage and the hub pod's inline nfs volume.
 # Every address and path is a placeholder: a documentation-range IP
 # (RFC 5737), an example export and an example claim name. Nothing here is
 # ever mounted.

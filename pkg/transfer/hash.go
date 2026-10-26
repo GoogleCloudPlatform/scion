@@ -49,7 +49,7 @@ var gitBlobHashPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 //
 // It is used to tell apart the two hash formats that flow through skill
 // resolution: "sha256:<hex64>" digests produced by this package, and bare git
-// blob object IDs supplied verbatim by GitHub's Contents API.
+// blob object IDs supplied verbatim by GitHub's git trees API.
 func IsGitBlobHash(s string) bool {
 	return gitBlobHashPattern.MatchString(s)
 }
@@ -57,8 +57,8 @@ func IsGitBlobHash(s string) bool {
 // GitBlobHashBytes computes the git blob object ID of data, i.e.
 // SHA-1("blob <len>\x00" + data), returned as bare lowercase hex.
 //
-// This is the value GitHub's Contents API reports in the "sha" field of a
-// file entry. Computing it locally lets a caller verify content fetched from
+// This is the value GitHub's git trees and Contents APIs report in the
+// "sha" field of a file entry. Computing it locally lets a caller verify content fetched from
 // GitHub against metadata GitHub already published, without the metadata
 // producer having to download the content itself.
 //
@@ -97,9 +97,10 @@ func GitBlobHashFile(path string) (string, error) {
 }
 
 // HashFile computes the SHA-256 hash of a file.
-// Returns the hash in format "sha256:<hex>".
+// Returns the hash in format "sha256:<hex>". The file is opened
+// non-blocking on Unix, so a FIFO at path does not block the open.
 func HashFile(path string) (string, error) {
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, readOnlyFlags, 0)
 	if err != nil {
 		return "", err
 	}
@@ -126,12 +127,17 @@ func HashBytes(data []byte) string {
 // not part of the preimage, so a rename-only or chmod-only change keeps the
 // same value (ptone/scion#5658).
 //
-// It remains the skill bundle hash: published skill versions are immutable
-// and pinned by this value (registry pins, content-addressed version lookup,
-// broker install verification), so it cannot change without a pin
-// migration. For templates and harness-configs the hub records it while
-// the hub.content_hash_v2 experiment is off, and ComputeContentHashV2 while
-// it is on. The hub never uses it to accept a client's expected hash
+// It remains the recorded skill bundle hash (the contentHash of every skill
+// response): published skill versions are immutable and pinned by this
+// value (registry pins, content-addressed version lookup), and brokers
+// before ptone/scion#5935 verify an installed bundle by recomputing it.
+// Skill hash v2 (ComputeContentHashV2 over the same files) is derived
+// alongside it while the hub.skill_content_hash_v2 experiment is on and is
+// accepted as well as v1 for pins and lookups (ptone/scion#5935).
+//
+// For templates and harness-configs the hub records it while the
+// hub.content_hash_v2 experiment is off, and ComputeContentHashV2 while it
+// is on. The hub never uses it to accept a client's expected hash
 // against a v2 row: the commit compare-and-swap compares the stored value
 // strictly (accepting a v1 value that matches the v1 hash of the stored
 // files would accept a stale commit over a rename-only or chmod-only
@@ -153,7 +159,7 @@ func ComputeContentHashV1(files []FileInfo) string {
 }
 
 // ComputeContentHashV2 is the content hash of templates and harness-configs
-// (ptone/scion#5658): SHA-256 over one line per file, in path order,
+// (ptone/scion#5658), and skill content hash v2 (ptone/scion#5935): SHA-256 over one line per file, in path order,
 //
 //	<path> NUL <normalised mode> NUL <file hash> LF
 //

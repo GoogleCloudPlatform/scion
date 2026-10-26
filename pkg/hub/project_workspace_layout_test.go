@@ -69,7 +69,7 @@ func newWorkspaceLayoutFixture(t *testing.T) workspaceLayoutFixture {
 }
 
 func (f workspaceLayoutFixture) useNFS() {
-	f.srv.config.WorkspaceStorageConfig = nfsConfig(f.mountRoot)
+	f.srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(f.mountRoot))
 }
 
 func workspaceFilesURL(projectID string) string {
@@ -154,7 +154,7 @@ func TestProjectWorkspaceFiles_VolumeBackends_UUIDTree(t *testing.T) {
 			base := t.TempDir()
 			setVolumeMountBase(t, base)
 			require.NoError(t, os.MkdirAll(filepath.Join(base, "ws"), 0o755))
-			f.srv.config.WorkspaceStorageConfig = tc.cfg
+			f.srv.config.ProjectStorageConfig = projectStorageFromWorkspace(tc.cfg)
 			project, _ := createTestHubManagedProject(t, f.srv, "Volume "+tc.name)
 
 			res, err := f.srv.projectWorkspaceResolved(project)
@@ -182,7 +182,7 @@ func TestProjectWorkspaceFiles_VolumeBackendWithoutName_FailsClosed(t *testing.T
 	f := newWorkspaceLayoutFixture(t)
 	project, workspacePath := createTestHubManagedProject(t, f.srv, "Unnamed Volume")
 	require.NoError(t, os.RemoveAll(workspacePath))
-	f.srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{Backend: "cloudrun-volume"}
+	f.srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{Backend: "cloudrun-volume"}
 
 	for _, method := range []string{http.MethodGet, http.MethodPost} {
 		var code int
@@ -349,7 +349,7 @@ func TestProjectSlugFile_LocalBackendUnaffected(t *testing.T) {
 // rolled back with 503 rather than seeding instance-local disk.
 func TestCreateProject_SharedBackendUnmounted_RollsBack(t *testing.T) {
 	f := newWorkspaceLayoutFixture(t)
-	f.srv.config.WorkspaceStorageConfig = nfsConfig(filepath.Join(f.home, "not-mounted"))
+	f.srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(filepath.Join(f.home, "not-mounted")))
 
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{Name: "Unmounted Share"})
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
@@ -693,7 +693,7 @@ func TestCreateAgent_UnusableSharedStorage_503NoRowNoDispatch(t *testing.T) {
 	require.NoError(t, f.s.CreateRuntimeBroker(ctx, broker))
 	project := &store.Project{ID: tid("project-unusable"), Slug: "unusable", Name: "Unusable"}
 	require.NoError(t, f.s.CreateProject(ctx, project))
-	f.srv.config.WorkspaceStorageConfig = unusableWorkspaceStorage()
+	f.srv.config.ProjectStorageConfig = projectStorageFromWorkspace(unusableWorkspaceStorage())
 
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents", map[string]interface{}{
 		"name": "unusable-agent", "projectId": project.ID, "runtimeBrokerId": broker.ID,
@@ -719,7 +719,7 @@ func TestCreateAgent_EmbeddedBroker_WorkspaceLeafFailure_503(t *testing.T) {
 	f.srv.SetEmbeddedBrokerID(broker.ID)
 	project := &store.Project{ID: tid("project-leaf-fail"), Slug: "leaf-fail", Name: "Leaf Fail"}
 	require.NoError(t, f.s.CreateProject(ctx, project))
-	f.srv.config.WorkspaceStorageConfig = nfsConfig(filepath.Join(f.home, "not-mounted"))
+	f.srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(filepath.Join(f.home, "not-mounted")))
 
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents", map[string]interface{}{
 		"name": "leaf-fail-agent", "projectId": project.ID, "runtimeBrokerId": broker.ID,
@@ -738,7 +738,7 @@ func TestReincarnateAgent_UnusableSharedStorage_503(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
-	srv.config.WorkspaceStorageConfig = unusableWorkspaceStorage()
+	srv.config.ProjectStorageConfig = projectStorageFromWorkspace(unusableWorkspaceStorage())
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 		a.AppliedConfig.Workspace = ""
 	})
@@ -753,13 +753,13 @@ func TestReincarnateAgent_UnusableSharedStorage_503(t *testing.T) {
 func TestCreateProject_UnusableSharedStorage_ReleasesProjectQuota(t *testing.T) {
 	f := newWorkspaceLayoutFixture(t)
 	setUserProjectQuotaCeiling(t, f.s, 1)
-	f.srv.config.WorkspaceStorageConfig = unusableWorkspaceStorage()
+	f.srv.config.ProjectStorageConfig = projectStorageFromWorkspace(unusableWorkspaceStorage())
 	for i := 0; i < 2; i++ {
 		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{Name: fmt.Sprintf("Unusable Quota %d", i)})
 		require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
 		assert.Zero(t, countProjectQuotaReservations(t, f.s, DevUserID), "rollback must release the reservation")
 	}
-	f.srv.config.WorkspaceStorageConfig = nil
+	f.srv.config.ProjectStorageConfig = nil
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{Name: "Usable Quota"})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 }
@@ -788,7 +788,7 @@ func TestSafetyGate_WorkspaceAbsent_NothingCreated(t *testing.T) {
 func TestProjectWorkspaceFiles_ShareRootMissing_503(t *testing.T) {
 	f := newWorkspaceLayoutFixture(t)
 	project, _ := createTestHubManagedProject(t, f.srv, "Share Missing")
-	f.srv.config.WorkspaceStorageConfig = nfsConfig(filepath.Join(f.home, "not-mounted"))
+	f.srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(filepath.Join(f.home, "not-mounted")))
 	rec := doRequest(t, f.srv, http.MethodGet, workspaceFilesURL(project.ID), nil)
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), f.home)

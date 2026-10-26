@@ -87,7 +87,9 @@ func TestResolvedExperiments_WebLayerOnlyFromOneSnapshot(t *testing.T) {
 	srv, _ := serverWithExperimentsDoc(t, `{"overrides":{"hub.test_gate":false}}`)
 
 	got := srv.resolvedExperiments()
-	want := map[string]bool{"hub.test_gate": false, "web.only_thing": true}
+	// testRegistry also holds the production federation.project_visitors
+	// (both layers, default off), so it is in the web-facing map.
+	want := map[string]bool{"hub.test_gate": false, "web.only_thing": true, experiments.FederationProjectVisitors: false}
 	if len(got) != len(want) {
 		t.Fatalf("resolvedExperiments() = %v, want %v", got, want)
 	}
@@ -100,6 +102,30 @@ func TestResolvedExperiments_WebLayerOnlyFromOneSnapshot(t *testing.T) {
 	// for the web-facing /api/v1/experiments response (1a-ii).
 	if _, present := got["hub.server_only"]; present {
 		t.Error("resolvedExperiments() must exclude server-only experiments")
+	}
+}
+
+// TestResolvedExperiments_IncludesProjectVisitors: the browser reads
+// GET /api/v1/experiments to gate the project Visitors tab and the admin
+// visitor access switch, so federation.project_visitors must be in the
+// resolved map with the production registry, with its effective value.
+func TestResolvedExperiments_IncludesProjectVisitors(t *testing.T) {
+	srv := &Server{}
+	got := srv.resolvedExperiments()
+	if v, ok := got[experiments.FederationProjectVisitors]; !ok || v {
+		t.Errorf("resolvedExperiments()[%q] = %v (present=%v), want false and present", experiments.FederationProjectVisitors, v, ok)
+	}
+
+	fakeStore := newFakeHubSettingStore()
+	fakeStore.seed("experiments", json.RawMessage(`{"overrides":{"federation.project_visitors":true}}`))
+	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	on := &Server{}
+	on.SetOperationalSettings(ops)
+	if v, ok := on.resolvedExperiments()[experiments.FederationProjectVisitors]; !ok || !v {
+		t.Errorf("with the override on: resolvedExperiments()[%q] = %v (present=%v), want true", experiments.FederationProjectVisitors, v, ok)
 	}
 }
 

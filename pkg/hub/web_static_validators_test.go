@@ -359,9 +359,9 @@ func writeValidatorDisk(t *testing.T) string {
 }
 
 // validatorServers returns, for embedded and disk mode, a plain server and
-// a dev-auth server over the validator build. The dev-auth server lets
-// root-level and deep-link requests reach the SPA catch-all (and so
-// tryServeStaticFile) rather than the login gate.
+// a dev-auth server over the validator build. Signed in (devSignedIn), the
+// dev-auth server lets root-level and deep-link requests reach the SPA
+// catch-all (and so tryServeStaticFile) rather than the login gate.
 func validatorServers(t *testing.T) map[string][2]*WebServer {
 	t.Helper()
 	embedded := newValidatorWebServer(t)
@@ -425,9 +425,10 @@ func TestStaticAsset_SiblingNameForms(t *testing.T) {
 	for mode, servers := range validatorServers(t) {
 		t.Run(mode, func(t *testing.T) {
 			ws, wsAuth := servers[0], servers[1]
+			signedIn := devSignedIn(t, wsAuth)
 			srv := func(root bool) http.Handler {
 				if root {
-					return wsAuth.Handler()
+					return signedIn
 				}
 				return ws.Handler()
 			}
@@ -464,7 +465,7 @@ func TestStaticAsset_SiblingNameForms(t *testing.T) {
 func TestSPADeepLinks_EncodedSegmentsGetShell(t *testing.T) {
 	for mode, servers := range validatorServers(t) {
 		t.Run(mode, func(t *testing.T) {
-			wsAuth := servers[1]
+			signedIn := devSignedIn(t, servers[1])
 			for _, target := range []string{
 				"/projects/x/agents/y",
 				"/projects/a%20b/agents/y",
@@ -473,7 +474,7 @@ func TestSPADeepLinks_EncodedSegmentsGetShell(t *testing.T) {
 			} {
 				req := httptest.NewRequest(http.MethodGet, target, nil)
 				rec := httptest.NewRecorder()
-				wsAuth.Handler().ServeHTTP(rec, req)
+				signedIn.ServeHTTP(rec, req)
 				assert.Equal(t, http.StatusOK, rec.Code, target)
 				assert.Contains(t, rec.Header().Get("Content-Type"), "text/html", target)
 				assert.Contains(t, rec.Body.String(), "scion-app", target)

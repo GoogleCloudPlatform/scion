@@ -3,12 +3,12 @@
 These files are **templates, not active workflows**. GitHub only runs
 workflows under `.github/workflows/`, so the copies here never run. Putting
 them there is a separate, reviewed step that needs ptone's go-ahead: the PoC
-is P6, and the `ci.yml` change is P7.
+is P6, and the routing in `.github/workflows` is P7 (see "Routing in
+`.github/workflows`" below).
 
 | File | What it is |
 | :--- | :--- |
 | [`cr-runner-poc.yml`](cr-runner-poc.yml) | PoC workflow (push to a throwaway `cr-ci-poc-*` branch, or `workflow_dispatch`): runs `golangci-lint` on a cr-ci runner without the `-c=1` throttle, sampling memory and `/scratch` use |
-| [`ci-lint-routing.snippet.yml`](ci-lint-routing.snippet.yml) | The lines of `ci.yml`'s `lint` job that change: the routing `runs-on` expression and the lint step's env |
 | [`templates_test.go`](templates_test.go) | Static checks (stdlib only) on these templates and on `scripts/github-app-manifest.json` |
 
 ## Running the PoC: a push-triggered throwaway branch
@@ -64,26 +64,24 @@ mediator serves only jobs whose labels are all `RUNNER_LABEL`; anything else
 (`[self-hosted, scion-cr-8c32g]`) is logged as `labels_unservable` and never
 gets a runner ([architecture](../docs/architecture.md#flow), "Labels").
 
-## Applying the snippet to `ci.yml` (P7)
+## Routing in `.github/workflows`
 
-P7 is a separate pull request outside `cr-ci/`, and it needs ptone's word. It
-changes only the `lint` job of `.github/workflows/ci.yml`:
-
-1. Replace `runs-on: ubuntu-latest` with the expression above.
-2. Add the snippet's first step, "Check cr-ci cache parity (cr-ci runner
-   only)", as the job's first step. It runs only when
-   `runner.environment == 'self-hosted'`.
-3. In the **golangci-lint** step, replace the `env:` block with the one in
-   the snippet. The throttles stay on GitHub-hosted runners and are lifted
-   only when `runner.environment == 'self-hosted'`.
-4. In the same step, change `--concurrency=2` to `--concurrency="$LINT_CONCURRENCY"`.
-5. Update the step's comment block to say that the throttles apply to the
-   16 GB runner only.
-
-The change is inert until `SCION_LARGE_RUNNER` is set on a repository
+The routing lives in the workflows themselves, not in a template: the
+primary-runner work (PR-wf1, phase A; PR-wf2, phase B) gives each routed job
+the expression above as its `runs-on`. PR-wf1 also adds
+`hack/check-runner-routing.sh` (its own job in `ci.yml`, `runner-routing-check`),
+which keeps every routed `runs-on` byte-identical to it and keeps jobs that must
+not run on cr-ci off it, and a cache-parity check in
+`.github/actions/setup-go-cache` for routed jobs (cr-ci runners only). Until
+those PRs land, nothing in `.github/workflows` routes to cr-ci. Nothing is routed until `SCION_LARGE_RUNNER` is set on
+a repository
 ([github-setup.md, step 8](../docs/github-setup.md#8-route-jobs-the-actions-variable-scion_large_runner-g10)).
-The P7 PR therefore needs no coordination with the rollout, and upstream gets
-it through the normal sync.
+The design (which jobs, which phase, capacity) is in the exchange bucket,
+`cr-ci/primary/design.md`.
+
+The earlier `ci-lint-routing.snippet.yml` template (P7, lint only) is gone: it
+also lifted the lint step's memory throttles on the cr-ci runner, and the lint
+job no longer has those since #4061 (`hack/golangci-lint-split.sh`).
 
 **Only host-process jobs may be routed.** Cloud Run cannot run Docker, so
 jobs with `services:` (the Postgres jobs) or Docker steps must stay on
@@ -118,9 +116,10 @@ exchange bucket, `p6/`). Five runs of the same lint:
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | golangci-lint wall time | 1036 s | 978 s | 843 s | **772 s** | **796 s** |
 
-- **Shipped on the cr-ci runner** (snippet note 2, and the PoC template's
-  defaults): `--concurrency=8`, `GOGC=100`, `GOMEMLIMIT=24GiB`, no `-c=1`, build
-  cache on disk. GitHub-hosted runners keep 2 / 25 / 8GiB and `-c=1`.
+- **Used by the PoC template** (its defaults): `--concurrency=8`, `GOGC=100`,
+  `GOMEMLIMIT=24GiB`, no `-c=1`, build cache on disk. (The live lint job no
+  longer has these knobs: since #4061 it runs `hack/golangci-lint-split.sh`
+  with the patched golangci-lint.)
 - **Memory:** 25.5 GB peak sampled, 6.6 GB still available; GOMEMLIMIT is what
   bounds pkg/hub's compile. No guard trip. GOGC above 100 or `off` was not tested.
 - **Disk:** `/scratch` peaked at 15.8-16.5 GB. An on-disk build cache needs at
@@ -245,21 +244,19 @@ mediator log and the execution log
 
 `go test ./workflows/` (from `cr-ci/`) checks, without a YAML library:
 
-- The snippet's `runs-on` line is exactly the routing expression, and so is
-  every copy of it in `docs/architecture.md`, `docs/github-setup.md` and this
-  README.
+- Every copy of the routing expression in `docs/architecture.md`,
+  `docs/github-setup.md` and this README is exactly the canonical expression
+  (the live workflows are checked by `hack/check-runner-routing.sh`, added by PR-wf1).
 - The expression keeps the fork guard and the `ubuntu-latest` fallback.
 - The PoC triggers on `push` to `cr-ci-poc-*` branches and on
   `workflow_dispatch`, and runs on the label alone. Its default label (input
   and push fallback) equals `RUNNER_LABEL`'s default in `config.example.env`.
   It contains no `-c=1` throttle, samples memory and `/scratch` during the lint,
   and reports `df -h /scratch`.
-- Both templates start with the self-hosted-only, verify-only cache parity
+- The PoC template starts with the self-hosted-only, verify-only cache parity
   step (`HOME`, the work folder and cache links, `go env` paths,
   `GITHUB_WORKSPACE`, zstd). It creates no links and writes no `GITHUB_ENV`.
 - The PoC judges warmth by the contents of `$(go env GOCACHE)`.
-- The snippet sets `GOMEMLIMIT`, `GOFLAGS` and `LINT_CONCURRENCY` per runner
-  type.
 - Every `uses:` is pinned to a full commit SHA. No tabs.
 - `scripts/github-app-manifest.json` requests exactly Actions read,
   Administration write and Metadata read, and the `workflow_job` event. The

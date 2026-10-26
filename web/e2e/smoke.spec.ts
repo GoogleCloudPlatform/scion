@@ -16,7 +16,7 @@
  * Smoke E2E spec — proves the full E2E loop works:
  *
  * 1. Hub is running (started by global-setup)
- * 2. Admin can log in (session from dev-auth auto-login)
+ * 2. Admin can log in (session from a dev sign-in link)
  * 3. Navigate to /admin/groups
  * 4. Seeded group is visible
  * 5. Page passes axe accessibility scan

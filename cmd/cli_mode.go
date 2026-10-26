@@ -186,6 +186,12 @@ var agentAllowed = map[string]bool{
 	"conversation.group.rename": true,
 	"conversation.group.add":    true,
 	"conversation.group.remove": true,
+
+	// Project-scoped secret reads as the calling agent (ptone/scion#5013).
+	// secret.set stays out: agents write secrets with sciontool secret set.
+	"secret":      true,
+	"secret.get":  true,
+	"secret.list": true,
 }
 
 // resolveMode determines the active CLI mode from environment and settings.

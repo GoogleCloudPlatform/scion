@@ -1,0 +1,13 @@
+# Fixture for hack/check-runner-routing.sh --selftest; not a workflow GitHub runs.
+name: fixture
+
+on:
+  pull_request:
+
+jobs:
+  routed:
+    name: routed job
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER && 40 || 70 }}
+    steps:
+      - run: echo ok

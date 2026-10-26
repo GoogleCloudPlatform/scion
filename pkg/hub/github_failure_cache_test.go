@@ -37,7 +37,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// statusGitHub is a fake GitHub API whose commits and contents endpoints
+// statusGitHub is a fake GitHub API whose commits and git trees endpoints
 // answer with the configured status (200 serves a valid response).
 type statusGitHub struct {
 	*httptest.Server
@@ -53,7 +53,7 @@ func newStatusGitHub(t *testing.T, owner, repo, skillPath, commitSHA string) *st
 	f.commitStatus.Store(http.StatusOK)
 	f.contentsStatus.Store(http.StatusOK)
 	commitsPrefix := "/repos/" + owner + "/" + repo + "/commits/"
-	contentsPrefix := "/repos/" + owner + "/" + repo + "/contents/"
+	treesPrefix := "/repos/" + owner + "/" + repo + "/git/trees/"
 	f.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasPrefix(r.URL.Path, commitsPrefix):
@@ -63,14 +63,16 @@ func newStatusGitHub(t *testing.T, owner, repo, skillPath, commitSHA string) *st
 				return
 			}
 			_, _ = w.Write([]byte(commitSHA))
-		case strings.HasPrefix(r.URL.Path, contentsPrefix):
+		case strings.HasPrefix(r.URL.Path, treesPrefix):
+			assert.True(t, strings.HasPrefix(strings.TrimPrefix(r.URL.Path, treesPrefix), commitSHA+":"+skillPath),
+				"the tree must be listed at the resolved commit: %s", r.URL.Path)
 			f.contentsCalls.Add(1)
 			if st := int(f.contentsStatus.Load()); st != http.StatusOK {
 				http.Error(w, `{"message":"Not Found"}`, st)
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[{"name":"SKILL.md","path":"` + skillPath + `/SKILL.md","sha":"x","size":1,"type":"file"}]`))
+			_, _ = w.Write([]byte(ghTreeTestSingleFile))
 		default:
 			t.Errorf("unexpected GitHub API request: %s", r.URL.Path)
 			http.NotFound(w, r)
@@ -361,7 +363,7 @@ func TestResolveGitHubSkill_StaleEntryWinsOverRememberedFailure(t *testing.T) {
 	ctx := context.Background()
 	require.NoError(t, srv.ghResolutionStore.Put(ctx, cacheKey, GitHubCacheEntry{
 		CommitSHA:   staleSHA,
-		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "x", Size: 1}},
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "x", Size: 1, Mode: "0644"}},
 		BundleHash:  "sha256:stale",
 		TokenScope:  "public",
 		ExpiresAt:   time.Now().Add(-time.Minute),

@@ -43,6 +43,11 @@ func ConvertV1TelemetryToAPI(v1 *V1TelemetryConfig) *api.TelemetryConfig {
 			Headers:      v1.Cloud.Headers,
 			Provider:     v1.Cloud.Provider,
 			GCPProjectID: v1.Cloud.GCPProjectID,
+			// Carried like Enabled (nil stays unset) so the agent's
+			// resolved telemetry config holds it (ptone/scion#5562).
+			// TelemetryConfigToEnv does not emit it: nothing in the
+			// agent reads SCION_CLOUD_LOGGING yet.
+			CloudLogging: v1.Cloud.CloudLogging,
 		}
 		if v1.Cloud.TLS != nil {
 			result.Cloud.TLS = &api.TelemetryTLS{
@@ -164,6 +169,9 @@ func TelemetryConfigToEnv(cfg *api.TelemetryConfig) map[string]string {
 		if cfg.Cloud.GCPProjectID != nil && *cfg.Cloud.GCPProjectID != "" {
 			env["SCION_GCP_PROJECT_ID"] = *cfg.Cloud.GCPProjectID
 		}
+		// telemetry.cloud.cloud_logging is carried in the config but not
+		// emitted: SCION_CLOUD_LOGGING is read only by the hub's own logger,
+		// and nothing in the agent reads it (ptone/scion#5562).
 	}
 
 	// Hub config

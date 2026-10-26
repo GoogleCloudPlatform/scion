@@ -1238,9 +1238,15 @@ func (s *Server) markCreateCleanupRefused(ctx context.Context, agentID string, r
 const createCleanupRefusedPrefix = "Create failed and its cleanup was refused: "
 
 // createCleanupRefusedMessage is the kept row's message after a refused
-// create-failure cleanup.
+// create-failure cleanup. It names force delete only when a force delete
+// would remove the run the broker holds (reportedRunDeletable,
+// ptone/scion#5016).
 func createCleanupRefusedMessage(refused *DeleteRunMismatchError) string {
-	return createCleanupRefusedPrefix + deleteRunMismatchMessage(refused) + ". Delete the agent to retry."
+	msg := createCleanupRefusedPrefix + deleteRunMismatchMessage(refused) + ". Delete the agent to retry"
+	if reportedRunDeletable(refused) {
+		msg += "; force delete removes run " + refused.CurrentRunID + " that the broker holds, then the agent"
+	}
+	return msg + "."
 }
 
 // isCreateCleanupRefusedRow reports whether a is a row markCreateCleanupRefused
@@ -3810,6 +3816,8 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		s.handleAgentDelegationItem(w, r, id, route.Suffix.Param)
 	case AgentRouteDelegationCredential:
 		s.handleAgentDelegationCredential(w, r, id, route.Suffix.Param, route.Suffix.SecondParam)
+	case AgentRouteDelegationRevokeAll:
+		s.handleAgentDelegationsRevokeAll(w, r, id)
 
 	case AgentRouteActionStatus:
 		s.handleAgentAction(w, r, id, api.AgentActionStatus)

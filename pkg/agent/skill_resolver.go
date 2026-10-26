@@ -107,6 +107,13 @@ const (
 	// SkillErrCodeInvalidURI is the code for a skill reference that does
 	// not parse as a URI the resolver accepts.
 	SkillErrCodeInvalidURI = "invalid_uri"
+
+	// SkillErrCodeUnsupportedContent is the code for a gh:// skill whose
+	// repository tree cannot be installed as a skill: it holds a git
+	// submodule, more than MaxGitHubSkillFiles files or an unsafe path, or
+	// GitHub truncated its listing (see IsGitHubSkillTreeError). The hub
+	// and the local resolver both use it (ptone/scion#5781).
+	SkillErrCodeUnsupportedContent = "unsupported_skill_content"
 )
 
 // SkillResolutionError is returned by ProvisionAgent when a required skill
@@ -211,7 +218,8 @@ type ResolvedSkill struct {
 	URI                string
 	As                 string
 	Version            string
-	Hash               string // Bundle content hash (sha256:...)
+	Hash               string // Bundle content hash v1 (sha256:...)
+	HashV2             string // Bundle content hash v2 (ptone/scion#5935); verified when set (see verifySkillBundleHashes)
 	Scope              string // Injection scope (hub, user, project, template, platform, "")
 	Files              []ResolvedFile
 	Deprecated         bool   `json:"-"`
@@ -734,6 +742,18 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 			if copyErr == nil {
 				copyErr = verifyInstalledSkillHash(skillStagingDir, skill)
 			}
+			if copyErr == nil && skill.HashV2 != "" {
+				// verifyInstalledSkillHash checked every listed file that
+				// has a per-file hash, so v2 over the listed hashes is v2
+				// of the copied files. A file listed without a hash puts
+				// an empty hash into the v2 preimage, so the check fails
+				// and the skill is downloaded and verified instead.
+				listed := make([]transfer.FileInfo, len(skill.Files))
+				for i, f := range skill.Files {
+					listed[i] = transfer.FileInfo{Path: f.Path, Hash: f.Hash}
+				}
+				copyErr = verifySkillBundleHashV2(skill, listed)
+			}
 			if copyErr == nil {
 				// The entry key already covers the executable bits, but
 				// set each file's mode again so the install does not depend
@@ -806,7 +826,7 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 		// Both writers create the file 0644 (under the umask); give it
 		// the recorded mode, so an executable skill script stays
 		// executable (ptone/scion#5657).
-		if err := os.Chmod(destPath, transfer.NormalizeMode(f.Mode)); err != nil {
+		if err := os.Chmod(destPath, transfer.NormalizeMode(f.Mode)); err != nil { //winsec:not-protection sets a skill file's recorded mode bits; skills are installed only by agent provisioning and start
 			return nil, wrapSkillFileError("failed to set mode of", f.Path, err)
 		}
 
@@ -827,22 +847,15 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 		})
 	}
 
-	// S2: Verify bundle hash. Skill hashes are transfer.ComputeContentHashV1
-	// (they are pinned; see the hub's computeSkillContentHash).
-	if skill.Hash != "" {
-		var transferFiles []transfer.FileInfo
-		for _, fe := range fileEntries {
-			transferFiles = append(transferFiles, transfer.FileInfo{
-				Path: fe.Path,
-				Hash: fe.Hash,
-			})
-		}
-		bundleHash := transfer.ComputeContentHashV1(transferFiles)
-		if bundleHash != skill.Hash {
-			msg := fmt.Sprintf("bundle hash mismatch for skill %q: expected %s, got %s",
-				skill.URI, skill.Hash, bundleHash)
-			return nil, newSkillInstallError(msg, errors.New(msg))
-		}
+	// S2: Verify the bundle hashes: v1 (transfer.ComputeContentHashV1,
+	// what the hub's contentHash carries) and, when the hub sent one, v2
+	// (ptone/scion#5935), each over the hashes of the downloaded files.
+	installed := make([]transfer.FileInfo, len(fileEntries))
+	for i, fe := range fileEntries {
+		installed[i] = transfer.FileInfo{Path: fe.Path, Hash: fe.Hash}
+	}
+	if err := verifySkillBundleHashes(skill, installed); err != nil {
+		return nil, err
 	}
 
 	if err := commitStagedSkill(skillStagingDir, finalDest, dest); err != nil {
@@ -855,6 +868,47 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 	}
 
 	return buildSkillEntry(skill, dest, skillsDest)
+}
+
+// verifySkillBundleHashes checks the bundle hashes of skill against files,
+// the path and hash of each installed file: v1 when skill.Hash is set and
+// v2 when skill.HashV2 is set (ptone/scion#5935); any mismatch fails
+// closed. The v2 preimage takes each file's mode from the resolve metadata
+// (skill.Files), normalised with transfer.NormalizedModeString as on the
+// hub, so a missing mode counts as "0644" on both sides; it is the mode the
+// file is installed with, never one read back from disk.
+func verifySkillBundleHashes(skill ResolvedSkill, files []transfer.FileInfo) error {
+	if skill.Hash != "" {
+		if got := transfer.ComputeContentHashV1(files); got != skill.Hash {
+			msg := fmt.Sprintf("bundle hash mismatch for skill %q: expected %s, got %s",
+				skill.URI, skill.Hash, got)
+			return newSkillInstallError(msg, errors.New(msg))
+		}
+	}
+	if skill.HashV2 != "" {
+		return verifySkillBundleHashV2(skill, files)
+	}
+	return nil
+}
+
+// verifySkillBundleHashV2 checks skill.HashV2 against files; see
+// verifySkillBundleHashes.
+func verifySkillBundleHashV2(skill ResolvedSkill, files []transfer.FileInfo) error {
+	modes := make(map[string]string, len(skill.Files))
+	for _, f := range skill.Files {
+		modes[f.Path] = f.Mode
+	}
+	withModes := make([]transfer.FileInfo, len(files))
+	for i, f := range files {
+		f.Mode = transfer.NormalizedModeString(modes[f.Path])
+		withModes[i] = f
+	}
+	if got := transfer.ComputeContentHashV2(withModes); got != skill.HashV2 {
+		msg := fmt.Sprintf("bundle hash v2 mismatch for skill %q: expected %s, got %s",
+			skill.URI, skill.HashV2, got)
+		return newSkillInstallError(msg, errors.New(msg))
+	}
+	return nil
 }
 
 // commitStagedSkill moves the verified skill at staged to finalDest,
@@ -941,9 +995,10 @@ func skillFileModes(skill ResolvedSkill) map[string]os.FileMode {
 //
 // Templates and harness-configs key their cache entries with
 // templatecache.EntryKey, the v2 content hash of their files
-// (ptone/scion#5658). Skills keep this scheme until the skill hash moves
-// to v2 with a pin migration; the derivation is unchanged from
-// ptone/scion#5657, so its entries stay valid.
+// (ptone/scion#5658). Skills keep this v1-based scheme even when the hub
+// sends a v2 hash (ptone/scion#5935), so existing entries stay valid; a
+// cache hit is still checked against v2 (see installOneSkill). The
+// derivation is unchanged from ptone/scion#5657.
 func skillCacheKey(skill ResolvedSkill) string {
 	var exec []string
 	for p, m := range skillFileModes(skill) {
@@ -977,7 +1032,7 @@ func applySkillFileModes(dir string, skill ResolvedSkill) error {
 	}
 	defer func() { _ = root.Close() }()
 	for _, f := range skill.Files {
-		if err := root.Chmod(filepath.FromSlash(f.Path), transfer.NormalizeMode(f.Mode)); err != nil {
+		if err := root.Chmod(filepath.FromSlash(f.Path), transfer.NormalizeMode(f.Mode)); err != nil { //winsec:not-protection sets a skill file's recorded mode bits; skills are installed only by agent provisioning and start
 			return fmt.Errorf("failed to set mode of %s: %w", f.Path, err)
 		}
 	}
@@ -1033,7 +1088,7 @@ func verifyInstalledSkillHash(dir string, skill ResolvedSkill) error {
 //     local GitHubSkillResolver, which downloads content during resolution.
 //   - a bare git blob object ID (40 hex chars) — produced by the Hub's gh://
 //     resolution cache, which copies the "sha" field straight out of GitHub's
-//     Contents API and so never sees the file bytes.
+//     git trees API and so never sees the file bytes.
 //
 // An empty expected hash means the resolver published no per-file digest; the
 // file is still hashed as sha256 so the resolution record has a usable value,

@@ -25,12 +25,10 @@ import (
 	"maps"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -40,9 +38,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/termresize"
 	"github.com/google/uuid"
 	"golang.org/x/term"
 	corev1 "k8s.io/api/core/v1"
@@ -511,6 +511,16 @@ func filterDescriptiveLabels(agentName string, labels map[string]string) map[str
 }
 
 func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName string, err error) {
+	// Refuse, at the single production entry point for every start / restart /
+	// wake / reincarnate, the Kubernetes shapes where agents in a project would
+	// share one repository (its .git) on the NFS export. Run is the only
+	// caller of buildPod, so this gate cannot be bypassed, and keeping it here
+	// rather than in buildPod leaves buildPod a pure pod constructor (the
+	// read-only .git narrowing it builds for that shape stays testable and ready
+	// for the follow-up that lifts this refusal).
+	if msg, refuse := k8sSharedRepoShapeRefusal(config); refuse {
+		return "", errors.New(msg)
+	}
 	fmt.Printf("Starting agent '%s' on Kubernetes...\n", config.Name)
 	namespace := r.runNamespace(config.Labels)
 
@@ -1891,49 +1901,6 @@ func (r *KubernetesRuntime) runNamespace(labels map[string]string) string {
 	return r.DefaultNamespace
 }
 
-// sharedDirsHaveOwnClaims reports whether the local shared dirs of config
-// get a claim of their own (createSharedDirPVCs creates or reuses one per
-// dir). They do not when the workspace is on nfs with a bound claim: they
-// are then served by subPath from the workspace claim.
-func sharedDirsHaveOwnClaims(config RunConfig) bool {
-	return config.WorkspaceBackendName != "nfs" || config.NFSPVClaimName == ""
-}
-
-// SharedDirUsesClaim implements SharedDirClaimChecker with the same rules
-// as createSharedDirPVCs: a dir served from the shared_dir_storage nfs
-// export has no claim of its own, and neither has any dir when
-// sharedDirsHaveOwnClaims is false.
-func (r *KubernetesRuntime) SharedDirUsesClaim(config RunConfig, dirName string) bool {
-	if config.SharedDirStorage.Serves(dirName) {
-		return false
-	}
-	return sharedDirsHaveOwnClaims(config)
-}
-
-// SharedDirClaimExists implements SharedDirClaimChecker: it looks up, by
-// name, the shared-dir PVC that createSharedDirPVCs would create or reuse
-// for dirName, in the namespace Run would use for config. Any error other
-// than NotFound is returned.
-func (r *KubernetesRuntime) SharedDirClaimExists(ctx context.Context, config RunConfig, dirName string) (bool, error) {
-	projectName := projectkeys.ProjectNameFromLabels(config.Labels)
-	if projectName == "" {
-		return false, fmt.Errorf("cannot look up the shared dir PVC: missing scion.project label")
-	}
-	if r.Client == nil || r.Client.Clientset == nil {
-		return false, fmt.Errorf("cannot look up the shared dir PVC: no Kubernetes client")
-	}
-	namespace := r.runNamespace(config.Labels)
-	pvcName := sharedDirPVCName(projectName, dirName)
-	_, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
-	if err == nil {
-		return true, nil
-	}
-	if k8serrors.IsNotFound(err) {
-		return false, nil
-	}
-	return false, fmt.Errorf("looking up shared dir PVC %s/%s: %w", namespace, pvcName, err)
-}
-
 // defaultSharedDirSize is the default PVC size when not specified in settings.
 const defaultSharedDirSize = "10Gi"
 
@@ -1941,40 +1908,19 @@ const defaultSharedDirSize = "10Gi"
 // PVCs are project-scoped and persist across agent restarts. If a PVC already
 // exists (from a previous agent in the same project), it is reused.
 //
-// When backend=nfs, shared dirs are served via NFS subPath from the workspace
-// PVC and do NOT require separate PVCs — this method is a no-op for NFS.
+// On a shared backend (RunConfig.SharedDirStorage) every shared dir is
+// served by subPath from the share's claim and needs no PVC of its own: this
+// method is then a no-op. Per-dir claims exist only on the local backend.
 func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace string, config RunConfig) error {
 	if len(config.SharedDirs) == 0 {
 		return nil
 	}
-
-	// server.shared_dir_storage backend=nfs: shared dirs use subPaths on the
-	// dedicated shared NFS PVC, no separate PVCs needed (design
-	// deploy-config-explore §3.2.4). Takes precedence over the
-	// workspace_storage:nfs branch below. With per-dir backends only the
-	// dirs the realization serves are skipped; the rest are handled below.
-	sharedDirs := config.SharedDirs
-	if config.SharedDirStorage != nil && config.SharedDirStorage.Backend == "nfs" {
-		sharedDirs = make([]api.SharedDir, 0, len(config.SharedDirs))
-		for _, sd := range config.SharedDirs {
-			if !config.SharedDirStorage.Serves(sd.Name) {
-				sharedDirs = append(sharedDirs, sd)
-			}
-		}
-		if len(sharedDirs) == 0 {
-			runtimeLog().Info("shared_dir_storage nfs: shared dirs served via NFS subPath, skipping PVC creation",
-				"shared_dir_count", len(config.SharedDirs))
-			return nil
-		}
-	}
-
-	// NFS backend: shared dirs use subPaths on the workspace NFS PVC,
-	// no separate PVCs needed (design §5.3).
-	if !sharedDirsHaveOwnClaims(config) {
-		runtimeLog().Info("NFS backend: shared dirs served via NFS subPath, skipping PVC creation",
-			"shared_dir_count", len(sharedDirs))
+	if config.SharedDirStorage.Shared() {
+		runtimeLog().Info("shared dirs served by subPath from the shared-dir storage claim, skipping PVC creation",
+			"backend", config.SharedDirStorage.Backend, "shared_dir_count", len(config.SharedDirs))
 		return nil
 	}
+	sharedDirs := config.SharedDirs
 
 	projectID := projectkeys.ProjectIDFromLabels(config.Labels)
 
@@ -2579,6 +2525,15 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			{Name: "workspace", MountPath: "/repo-root/.git", SubPath: gitSubPath},
 			{Name: "workspace", MountPath: agentWorkingDir, SubPath: worktreeSubPath},
 		}
+		// Read-only narrowing of the shared .git admin surface for the agent
+		// container: hooks/info/objects-info/worktrees read-only, the agent's
+		// own worktrees/<name>/ read-write. This shape is gated by the refusal in
+		// Run today; the narrowing is kept here so the follow-up
+		// that lifts the refusal (adding the per-agent private .git/config on the
+		// export) needs no mount changes. The init container stays writable (it
+		// provisions: clone + worktree add) and is hardened by pkg/provision's
+		// SafeGitCommand/HostGitArgs instead.
+		agentVolumeMounts = append(agentVolumeMounts, k8sGitAdminReadOnlyMounts(gitSubPath, config.NFSWorktreeName)...)
 	}
 	// Keep the in-project agents root of a shared /workspace mount out of
 	// the agent's view (k8sWorkspaceAgentsExcluded). The worktree and
@@ -2699,16 +2654,15 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		// passed here either.
 		initCommand := nfsProvisionCommand(initGitClone, K8sContainerUID, fsGroupGID)
 
-		// F-111: shared dirs served from the workspace PVC by subPath
-		// (nfsSharedDirs below) are siblings of the workspace under the
-		// project root, but each is its OWN volume mount at the container
-		// level — the workspace mount alone doesn't give this init container
-		// filesystem access to them. Mirror the same volumes/targets the main
-		// container gets (by index, so the names match what the loop below
-		// creates) so `sciontool provision` can mkdir+chown them too. Out of
-		// scope here: dirs served by server.shared_dir_storage's own NFS
-		// mechanism (SharedDirStorage.Serves below) — a separate subsystem,
-		// not implicated in F-111.
+		// F-111: shared dirs served from the workspace PVC by subPath are
+		// siblings of the workspace under the project root, but each is its
+		// OWN volume mount at the container level — the workspace mount
+		// alone doesn't give this init container filesystem access to them.
+		// Mirror the same volumes/targets the main container gets (by index,
+		// so the names match what the loop below creates) so `sciontool
+		// provision` can mkdir+chown them too. Out of scope here: shared
+		// dirs on another claim (the legacy split shared-dir export), which
+		// the broker pre-creates itself (nfsSharedDirInitMounts).
 		initVolumeMounts := []corev1.VolumeMount{initWorkspaceMount}
 		// #2670: the sentinel and the provisioning lock live in the
 		// project's provisioning state directory, mounted next to the
@@ -2880,9 +2834,12 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// Process shared directories — mount shared-dir volumes.
 	// Build a set of shared dir targets so we can skip them in the regular volume loop.
 	//
-	// NFS backend (N2-5): shared dirs are served from the SAME workspace NFS PVC
-	// via subPath (e.g., "projects/<pid>/shared-dirs/<name>"), avoiding per-dir PVCs.
-	// The workspace volume is already defined; we add additional subPath mounts.
+	// Shared backend (RunConfig.SharedDirStorage: nfs, gke-shared-volume or
+	// cloudrun-volume): every shared dir is mounted by its resolved subPath
+	// ("<subpath root>/<pid>/shared-dirs/<name>") from the share's claim,
+	// the same tree the hub serves. K8s requires a separate Volume entry
+	// per unique (claimName, subPath) pair, so each dir gets its own volume
+	// name even when the claim is the workspace's.
 	//
 	// Local backend: each shared dir gets its own PVC (existing behavior, unchanged).
 	k8sContainerWorkspace := config.ContainerWorkspace
@@ -2890,68 +2847,24 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		k8sContainerWorkspace = "/workspace"
 	}
 	sharedDirTargets := make(map[string]bool, len(config.SharedDirs))
-	// server.shared_dir_storage backend=nfs takes precedence over the
-	// existing workspace_storage:nfs shared-dir branch when both are set
-	// (design deploy-config-explore §3.2.4). It applies per shared dir:
-	// with per-dir backends the realization serves only the dirs on nfs.
-	nfsSharedDirs := config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
 	for i, sd := range config.SharedDirs {
 		target := fmt.Sprintf("/scion-volumes/%s", sd.Name)
 		if sd.InWorkspace {
 			target = fmt.Sprintf("%s/.scion-volumes/%s", k8sContainerWorkspace, sd.Name)
 		}
 		sharedDirTargets[target] = true
+		volName := fmt.Sprintf("shared-dir-%d", i)
 
-		if config.SharedDirStorage.Serves(sd.Name) {
-			// shared_dir_storage nfs: mount the dedicated shared PVC by
-			// subPath. Fail closed (design G5) rather than falling back to
-			// an unclaimed/EmptyDir volume when the claim name is missing.
-			if config.SharedDirStorage.PVClaimName == "" {
-				return nil, fmt.Errorf(
-					"shared dir %q: server.shared_dir_storage.nfs.shares[0].pv_name is empty; cannot mount shared dir", sd.Name)
-			}
-			sdSubPath, ok := config.SharedDirStorage.SubPaths[sd.Name]
-			if !ok || sdSubPath == "" {
-				return nil, fmt.Errorf("shared dir %q: no resolved subPath in server.shared_dir_storage", sd.Name)
-			}
-			volName := fmt.Sprintf("shared-dir-%d", i)
-
-			pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
-				Name: volName,
-				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: config.SharedDirStorage.PVClaimName,
-						ReadOnly:  sd.ReadOnly,
-					},
-				},
-			})
-			pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
-				Name:      volName,
-				MountPath: target,
-				SubPath:   sdSubPath,
-				ReadOnly:  sd.ReadOnly,
-			})
-		} else if nfsSharedDirs {
-			// NFS backend: mount from the workspace PVC with a shared-dir subPath.
-			// SubPath root mirrors the nfsBackend.Resolve layout:
-			//   <SubPathRoot>/<projectID>/shared-dirs/<name>
-			// F-111 review (BLOCKING): nfsSharedDirSubPath validates sd.Name and
-			// the resulting path itself now — reject here too, independent of
-			// pkg/agent/shared_dir_storage.go's own gate.
-			sdSubPath, err := nfsSharedDirSubPath(config.NFSSubPath, sd.Name)
+		if config.SharedDirStorage.Shared() {
+			claim, sdSubPath, err := sharedDirClaimSubPath(config.SharedDirStorage, sd.Name)
 			if err != nil {
 				return nil, err
 			}
-			volName := fmt.Sprintf("shared-dir-%d", i)
-
-			// The volume source is the SAME NFS PVC as the workspace — but K8s
-			// requires a separate Volume entry per unique (claimName, subPath)
-			// pair in the pod spec, so we add the volume under a distinct name.
 			pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
 				Name: volName,
 				VolumeSource: corev1.VolumeSource{
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: config.NFSPVClaimName,
+						ClaimName: claim,
 						ReadOnly:  sd.ReadOnly,
 					},
 				},
@@ -2962,27 +2875,26 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 				SubPath:   sdSubPath,
 				ReadOnly:  sd.ReadOnly,
 			})
-		} else {
-			// Local backend: each shared dir gets its own PVC (existing behavior).
-			projectName := projectkeys.ProjectNameFromLabels(config.Labels)
-			pvcName := sharedDirPVCName(projectName, sd.Name)
-			volName := fmt.Sprintf("shared-dir-%d", i)
-
-			pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
-				Name: volName,
-				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: pvcName,
-						ReadOnly:  sd.ReadOnly,
-					},
-				},
-			})
-			pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
-				Name:      volName,
-				MountPath: target,
-				ReadOnly:  sd.ReadOnly,
-			})
+			continue
 		}
+
+		// Local backend: each shared dir gets its own PVC (existing behavior).
+		projectName := projectkeys.ProjectNameFromLabels(config.Labels)
+		pvcName := sharedDirPVCName(projectName, sd.Name)
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+			Name: volName,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: pvcName,
+					ReadOnly:  sd.ReadOnly,
+				},
+			},
+		})
+		pod.Spec.Containers[0].VolumeMounts = append(pod.Spec.Containers[0].VolumeMounts, corev1.VolumeMount{
+			Name:      volName,
+			MountPath: target,
+			ReadOnly:  sd.ReadOnly,
+		})
 	}
 
 	// Process Volumes
@@ -4225,12 +4137,12 @@ func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 	}
 
 	// Monitor for resize signals (SIGWINCH)
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGWINCH)
+	resized, stopResize := termresize.Notify(attachCtx, fd)
+	defer stopResize()
 	go func() {
 		for {
 			select {
-			case <-sigChan:
+			case <-resized:
 				if w, h, err := term.GetSize(fd); err == nil {
 					sizeQueue.resizeChan <- remotecommand.TerminalSize{Width: uint16(w), Height: uint16(h)}
 				}
@@ -4239,7 +4151,6 @@ func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 			}
 		}
 	}()
-	defer signal.Stop(sigChan)
 
 	// Trigger a "resize dance" to force TUI redraw. Some TUIs only redraw
 	// when they receive a SIGWINCH where the dimensions actually change.
@@ -4633,56 +4544,47 @@ func (r *KubernetesRuntime) GetWorkspacePath(ctx context.Context, id string) (st
 	return "", fmt.Errorf("no workspace path found for pod %s", id)
 }
 
-// nfsSharedDirSubPath computes the NFS subPath for a shared directory given the
-// workspace subPath. The workspace subPath is like "projects/<pid>/workspace";
-// shared dirs are siblings: "projects/<pid>/shared-dirs/<name>".
+// sharedDirClaimSubPath returns the claim and subPath shared dir name is
+// mounted from on a shared backend, failing closed (design G5) when the
+// share has no claim or the dir has no resolved subPath, rather than
+// falling back to a per-dir claim or an EmptyDir.
 //
-// This mirrors the nfsBackend.Resolve layout (design §5.3).
-//
-// F-111 review (tf-lead/tf-review-nfsfix, BLOCKING): sharedDirName is data —
-// it can come from a cloned repo's in-repo settings.yaml — and
-// filepath.Join silently collapses ".." segments before Kubernetes' own
-// subPath escape check ever sees the resulting string. A name like
-// "../../<other-project>/workspace" would resolve to another project's real
-// workspace directory; since F-111 gave the provisioning init container CHOWN/
-// FOWNER/DAC_OVERRIDE, that's not just a data leak, it's a cross-project
-// ownership hijack (chown -R -h on someone else's tree). This is defense in
-// depth alongside pkg/agent/shared_dir_storage.go's own validation gate
-// (resolveSharedDirs, fails closed when workspace_storage.backend is nfs):
-// this function refuses to build a bad subPath at all, independently, in
-// case anything else ever reaches buildPod with unvalidated SharedDirs.
-//
-// Two independent checks, not one: api.ValidateSharedDirs rejects anything
-// that isn't a valid slug (lowercase alphanumeric + internal hyphens only —
-// which cannot produce a path separator or ".." by construction), and the
-// joined-path-prefix check below is a second, structurally different gate
-// that doesn't depend on the slug regex ever staying correct.
-//
-// The layout is pkg/projectfs': the project ID and subpath root are read
-// back from workspaceSubPath ("<subpath root>/<pid>/workspace") and the
-// shared dir is resolved by Layout.Resolve, which validates the name (the
-// slug check) and confines the leaf to <subpath root>/<pid>/shared-dirs/
-// (shareddirs.ConfineLeaf). The prefix check below stays as the second,
-// structurally different gate.
-func nfsSharedDirSubPath(workspaceSubPath, sharedDirName string) (string, error) {
+// The subPath was resolved by pkg/projectfs on the broker (Layout.Resolve
+// validates the name and confines the leaf to <subpath root>/<pid>/
+// shared-dirs/). This is a second, structurally different gate, so that a
+// pod spec is never built from an unchecked subPath: sharedDirName is data
+// (it can come from a cloned repo's in-repo settings.yaml), and the
+// provisioning init container that mounts these subPaths has CHOWN/FOWNER/
+// DAC_OVERRIDE (F-111), so an escaping subPath would be a cross-project
+// ownership hijack, not just a leak. The name must pass
+// api.ValidateSharedDirs (a slug: no separator, no ".." by construction)
+// and the subPath must be a clean relative path ending in
+// shared-dirs/<name>.
+func sharedDirClaimSubPath(r *SharedDirRealization, sharedDirName string) (claim, subPath string, err error) {
 	if err := api.ValidateSharedDirs([]api.SharedDir{{Name: sharedDirName}}); err != nil {
-		return "", fmt.Errorf("shared dir name %q: %w", sharedDirName, err)
+		return "", "", fmt.Errorf("shared dir name %q: %w", sharedDirName, err)
 	}
-	if filepath.Base(workspaceSubPath) != "workspace" || !filepath.IsLocal(workspaceSubPath) {
-		return "", fmt.Errorf("shared dir %q: unexpected NFS workspace subPath %q", sharedDirName, workspaceSubPath)
+	if r.PVClaimName == "" {
+		return "", "", fmt.Errorf("shared dir %q: the %s shared-dir storage has no claim "+
+			"(server.project_storage nfs.shares[0].pv_name, or gke_shared_volume.pv_claim_name); cannot mount shared dir",
+			sharedDirName, r.Backend)
 	}
-	parent := filepath.Dir(workspaceSubPath) // "<subpath root>/<pid>"
-	layout := projectfs.Layout{Backend: projectfs.BackendNFS, SubPathRoot: filepath.Dir(parent)}
-	res, err := layout.Resolve(projectfs.Project{ID: filepath.Base(parent)}, "",
-		projectfs.SharedDirMount(api.SharedDir{Name: sharedDirName}, ""))
-	if err != nil {
-		return "", fmt.Errorf("shared dir %q: %w", sharedDirName, err)
+	subPath = r.SubPaths[sharedDirName]
+	if subPath == "" {
+		return "", "", fmt.Errorf("shared dir %q: no resolved subPath in the shared-dir storage", sharedDirName)
 	}
-	wantDir := filepath.Join(parent, "shared-dirs")
-	if !strings.HasPrefix(res.RelPath, wantDir+string(filepath.Separator)) {
-		return "", fmt.Errorf("shared dir name %q: resolved subPath %q escapes %s", sharedDirName, res.RelPath, wantDir)
+	if !filepath.IsLocal(subPath) || filepath.Clean(subPath) != subPath ||
+		filepath.Base(subPath) != sharedDirName || filepath.Base(filepath.Dir(subPath)) != "shared-dirs" {
+		return "", "", fmt.Errorf("shared dir %q: resolved subPath %q is not <project>/shared-dirs/%s", sharedDirName, subPath, sharedDirName)
 	}
-	return res.RelPath, nil
+	// The project component is a valid project ID and the realization's
+	// own project (pkg/agent always sets it; an empty one fails closed): a
+	// subPath can never name another project's tree.
+	project := filepath.Base(filepath.Dir(filepath.Dir(subPath)))
+	if r.ProjectID == "" || !shareddirs.ValidProjectID(project) || project != r.ProjectID {
+		return "", "", fmt.Errorf("shared dir %q: resolved subPath %q is not under this project's tree", sharedDirName, subPath)
+	}
+	return r.PVClaimName, subPath, nil
 }
 
 // nfsSharedDirMount pairs a shared dir's own name (config.SharedDirs[i].Name,
@@ -4699,17 +4601,19 @@ type nfsSharedDirMount struct {
 }
 
 // nfsSharedDirInitMounts returns the workspace-provision init container's
-// additional VolumeMounts for shared dirs served from the workspace NFS PVC
-// by subPath (F-111, design §9) — mirrors buildPod's own nfsSharedDirs branch
-// below exactly (same volume names, by index, same subPath/target
-// computation), so the volumes these mounts reference are guaranteed to
-// exist in pod.Spec.Volumes once that branch runs later in the same buildPod
-// call. Returns nil for any other shared-dir mechanism
-// (server.shared_dir_storage's own NFS backend, or the local per-dir-PVC
-// backend) — those are separate subsystems, not implicated in F-111.
+// additional VolumeMounts for shared dirs served from the workspace NFS
+// claim by subPath (F-111, design §9): the shared-dir storage is on the
+// same claim as the workspace. It mirrors buildPod's shared-dir loop
+// exactly (same volume names, by index, same subPath/target), so the
+// volumes these mounts reference are guaranteed to exist in
+// pod.Spec.Volumes once that loop runs later in the same buildPod call.
+// Returns nil when the shared dirs are on another claim (the legacy split
+// shared-dir export) or on the local backend: the init container does not
+// mount those.
 func nfsSharedDirInitMounts(config RunConfig) ([]nfsSharedDirMount, error) {
-	nfsSharedDirs := config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != ""
-	if !nfsSharedDirs || len(config.SharedDirs) == 0 {
+	onWorkspaceClaim := config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "" &&
+		config.SharedDirStorage.Shared() && config.SharedDirStorage.PVClaimName == config.NFSPVClaimName
+	if !onWorkspaceClaim || len(config.SharedDirs) == 0 {
 		return nil, nil
 	}
 
@@ -4720,16 +4624,11 @@ func nfsSharedDirInitMounts(config RunConfig) ([]nfsSharedDirMount, error) {
 
 	var mounts []nfsSharedDirMount
 	for i, sd := range config.SharedDirs {
-		// A dir served by server.shared_dir_storage nfs is not on the
-		// workspace claim. The index stays the pod volume index.
-		if config.SharedDirStorage.Serves(sd.Name) {
-			continue
-		}
 		target := fmt.Sprintf("/scion-volumes/%s", sd.Name)
 		if sd.InWorkspace {
 			target = fmt.Sprintf("%s/.scion-volumes/%s", k8sContainerWorkspace, sd.Name)
 		}
-		subPath, err := nfsSharedDirSubPath(config.NFSSubPath, sd.Name)
+		_, subPath, err := sharedDirClaimSubPath(config.SharedDirStorage, sd.Name)
 		if err != nil {
 			return nil, err
 		}
@@ -4751,6 +4650,115 @@ func nfsSharedDirInitMounts(config RunConfig) ([]nfsSharedDirMount, error) {
 // runtimes use.
 func NFSWorktreeContainerPath(name string) string {
 	return "/repo-root/worktrees/" + name
+}
+
+// k8sSharedRepoShapeRefusal reports whether this Kubernetes pod would share one
+// repository's .git across the project's agents on the NFS export, and the
+// neutral end-state message to return if so. The shared-.git shapes are:
+//   - worktree-per-agent (NFSWorktreeName set): every agent mounts the shared
+//     .git at /repo-root/.git;
+//   - shared-workspace (the project's shared checkout, with its .git, mounted at
+//     /workspace for every agent), which includes pre-#3998 agents that stay on
+//     the shared checkout (nfsKeepSharedCheckout).
+//
+// Clone-per-agent (NFSAgentDirName set) and empty-per-agent (NFSAgentDirEmpty)
+// each get their own agent directory and do not share a .git; the local/emptyDir
+// backends do not either. Everything else on the NFS backend is a shared checkout.
+//
+// The shape is derived from the per-agent workspace fields re-sent on every
+// start — NFSWorktreeName, NFSAgentDirName, NFSAgentDirEmpty and the
+// SCION_WORKSPACE_GIT env hint; the ephemeral GitCloneForInit can only add a
+// refusal, never lift one. So the refusal fires on EVERY start of a shared-repo
+// agent, including a bare restart; and an NFS agent whose shape is unset/unknown is
+// refused fail-closed rather than brought up on a writable shared checkout.
+func k8sSharedRepoShapeRefusal(config RunConfig) (string, bool) {
+	if config.WorkspaceBackendName != "nfs" || config.NFSPVClaimName == "" {
+		return "", false
+	}
+	// worktree-per-agent: every agent mounts the shared .git.
+	if config.NFSWorktreeName != "" {
+		return k8sSharedRepoShapeRefusalText, true
+	}
+	// clone-per-agent and empty-per-agent get their own agent directory and do not
+	// share a repository.
+	if config.NFSAgentDirName != "" || config.NFSAgentDirEmpty {
+		return "", false
+	}
+	// Otherwise this NFS agent uses the project's shared checkout (shared-workspace).
+	// A git-backed shared checkout is the shared-repository shape and is refused on
+	// every start (create, restart, or an unset shape). A non-git shared workspace
+	// has no shared .git and is allowed — but only when the signals positively say
+	// non-git; if git-ness cannot be determined, refuse (fail closed).
+	if config.GitCloneForInit != nil {
+		return k8sSharedRepoShapeRefusalText, true
+	}
+	if v, present := runConfigEnvValue(config, "SCION_WORKSPACE_GIT"); present {
+		if b, ok := util.ParseBool(v); ok && !b {
+			return "", false // positively non-git
+		}
+	}
+	return k8sSharedRepoShapeRefusalText, true
+}
+
+// runConfigEnvValue returns the value of the given key in config.Env ("KEY=VALUE"
+// entries), and whether it was present.
+func runConfigEnvValue(config RunConfig, key string) (string, bool) {
+	for _, kv := range config.Env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// k8sSharedRepoShapeRefusalText is the exact neutral end-state message returned
+// when a Kubernetes start is refused for the shared-repository shape.
+const k8sSharedRepoShapeRefusalText = "Kubernetes does not support git projects that share one repository across agents " +
+	"(worktree-per-agent or shared-workspace on NFS). Re-create the agent as clone-per-agent, " +
+	"or run it on a local or Docker broker. Work not pushed from the existing agent remains in " +
+	"the project's shared checkout on the workspace storage."
+
+// k8sGitAdminReadOnlyMounts returns the read-only subPath volumeMounts that
+// narrow the shared .git admin surface for a worktree-per-agent agent container.
+// The shared .git subPath itself is mounted read-write
+// elsewhere (objects and refs must be writable for commit); these layer
+// read-only over hooks/, info/, objects/info/ and worktrees/, with the agent's
+// own worktrees/<name>/ re-mounted read-write on top so it can still write its
+// own HEAD/index/logs. gitSubPath is the export-relative path of the shared
+// .git; ownWorktreeName is this agent's worktree admin dir name.
+//
+// Note: this does NOT make .git/config read-only — the per-agent private config
+// on Kubernetes needs the seeded copy on the export and is a tracked follow-up;
+// until it lands the shared config stays read-write (documented residual).
+func k8sGitAdminReadOnlyMounts(gitSubPath, ownWorktreeName string) []corev1.VolumeMount {
+	const base = "/repo-root/.git"
+	ro := func(rel string) corev1.VolumeMount {
+		return corev1.VolumeMount{
+			Name:      "workspace",
+			MountPath: path.Join(base, rel),
+			SubPath:   path.Join(gitSubPath, rel),
+			ReadOnly:  true,
+		}
+	}
+	mounts := []corev1.VolumeMount{
+		ro("hooks"),
+		ro("info"),
+		ro(path.Join("objects", "info")),
+		ro("worktrees"),
+	}
+	if ownWorktreeName != "" {
+		// The agent's own worktree admin dir is read-write on top of the
+		// read-only worktrees/ dir (its gitdir/config.worktree are not singled
+		// out read-only here — unlike the bind-mount runtimes; the shared-repo
+		// shape is refused at start and the shared-config follow-up adds the
+		// per-worktree file pins).
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      "workspace",
+			MountPath: path.Join(base, "worktrees", ownWorktreeName),
+			SubPath:   path.Join(gitSubPath, "worktrees", ownWorktreeName),
+		})
+	}
+	return mounts
 }
 
 // nfsWorktreeSubPaths returns the subPaths of the shared checkout's .git and
@@ -4859,14 +4867,15 @@ func nfsProvisionEnv(gc *api.GitCloneConfig) []corev1.EnvVar {
 	return envs
 }
 
-// sharedDirSupplementalGroups returns the nfs shared-dir leaf groups
+// sharedDirSupplementalGroups returns the shared-dir leaf groups
 // (RunConfig.SharedDirStorage.SupplementalGroups, already guarded by
 // pkg/agent) to add as pod supplementalGroups, so the agent can write files
 // other agent kinds create in the leaf's group (ptone/scion#3155). A gid
 // equal to fsGroup is skipped, since Kubernetes already adds fsGroup. Nil
-// when the agent mounts no nfs shared dir, leaving the pod spec unchanged.
+// when the agent mounts no shared dir from a shared backend, leaving the
+// pod spec unchanged.
 func sharedDirSupplementalGroups(config RunConfig, fsGroup int64) []int64 {
-	if config.SharedDirStorage == nil || config.SharedDirStorage.Backend != "nfs" || len(config.SharedDirs) == 0 {
+	if !config.SharedDirStorage.Shared() || len(config.SharedDirs) == 0 {
 		return nil
 	}
 	var out []int64
@@ -4995,16 +5004,28 @@ func k8sProjectConfigVolumeMount(config RunConfig) (corev1.VolumeMount, bool, er
 	if _, err := os.Stat(config.Workspace); err != nil {
 		return corev1.VolumeMount{}, false, fmt.Errorf("cannot check the shared workspace for project configuration to mount read-only: %w", err)
 	}
-	_, target, ok, err := workspaceProjectConfigMount(config.Workspace, "/workspace", true)
-	if err != nil || !ok {
+	if _, _, ok, err := workspaceProjectConfigMount(config.Workspace, "/workspace", true); err != nil || !ok {
 		return corev1.VolumeMount{}, false, err
 	}
-	rel := strings.TrimPrefix(target, "/workspace/")
+	// The entry is realized through the layout authority as a pod mount of
+	// the workspace claim, by the workspace's subPath (design §P1a rule 3:
+	// the workspace's .scion entry, never the project root).
+	entry, err := projectfs.ProjectConfigEntry(projectfs.Resolved{
+		Backend: projectfs.BackendNFS, Kind: projectfs.KindWorkspace,
+		HostPath: config.Workspace, SubPath: config.NFSSubPath, Target: "/workspace",
+	})
+	if err != nil {
+		return corev1.VolumeMount{}, false, err
+	}
+	realized, err := projectfs.Layout{Backend: projectfs.BackendNFS, Share: projectfs.Share{PVName: config.NFSPVClaimName}}.Realize(entry, projectfs.RuntimePod)
+	if err != nil {
+		return corev1.VolumeMount{}, false, err
+	}
 	return corev1.VolumeMount{
 		Name:      "workspace",
-		MountPath: target,
-		SubPath:   path.Join(config.NFSSubPath, rel),
-		ReadOnly:  true,
+		MountPath: realized.Target,
+		SubPath:   realized.SubPath,
+		ReadOnly:  realized.ReadOnly,
 	}, true, nil
 }
 

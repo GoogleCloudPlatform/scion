@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/providers/env"
@@ -92,7 +93,8 @@ type HubServerConfig struct {
 	// Defaults to sha256(hostname)[:12] if not set.
 	HubID string `json:"hubId" yaml:"hubId" koanf:"hubId"`
 
-	// HubName is a human-readable display name for this hub in HA deployments.
+	// HubName names this hub in HA deployments: a lowercase DNS label
+	// (HubNamePattern) used in log labels, telemetry and secret labels.
 	// All nodes in a cluster should share the same hub_name.
 	// Defaults to os.Hostname() if not set.
 	HubName string `json:"hubName,omitempty" yaml:"hubName,omitempty" koanf:"hubName"`
@@ -177,6 +179,11 @@ type HubServerConfig struct {
 	// authorization store-call and decision-audit counts, DB pool waits).
 	// Off by default; observe only; read at startup.
 	PerfTrace bool `json:"perfTrace" yaml:"perfTrace" koanf:"perfTrace"`
+
+	// CSPReportRawSamples adds each browser policy report's sample to its
+	// csp_violation log record. Off by default (a sample can hold page
+	// content); for diagnosis; read at startup.
+	CSPReportRawSamples bool `json:"cspReportRawSamples" yaml:"cspReportRawSamples" koanf:"cspReportRawSamples"`
 
 	// MembershipSweepReportOnly puts the membership-standing sweep in
 	// report-only mode: it logs and audits the agents it would hold and
@@ -277,12 +284,16 @@ func PersistentHubID() string {
 	// First boot (or file missing/empty): compute, persist, and return.
 	id := DefaultHubID()
 
-	// Ensure the directory exists.
-	if err := os.MkdirAll(globalDir, 0700); err != nil {
+	// Ensure the directory exists: missing components are created private
+	// (mode 0700; on Windows an owner-only ACL). An existing directory is
+	// left as it is.
+	tree, err := privatefs.OpenTree(globalDir, privatefs.TreeOptions{CreateAnchor: true})
+	if err != nil {
 		slog.Warn("hub_id: cannot create config directory; hub_id will not be persisted",
 			"dir", globalDir, "error", err)
 		return id
 	}
+	_ = tree.Close()
 
 	if stored, err := persistHubIDOnce(filePath, id); err != nil {
 		slog.Warn("hub_id: failed to persist hub_id; future hostname changes may re-namespace secrets",
@@ -327,31 +338,33 @@ func persistHubIDOnce(path, id string) (string, error) {
 		}
 		return id, nil
 	}
-	tmp, err := createTempFile(dir, "."+filepath.Base(path)+".tmp-*")
+	// The temporary file is created private (mode 0600; on Windows an
+	// owner-only ACL set at creation) and linked into place while it is
+	// still open; the link shares its protection. The temporary name is
+	// then deleted through the handle, never by name.
+	tree, err := privatefs.OpenTree(dir, privatefs.TreeOptions{})
 	if err != nil {
 		return "", err
 	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
+	defer func() { _ = tree.Close() }()
+	tmp, _, err := tree.CreateTemp("", "."+filepath.Base(path)+".tmp-*", privatefs.Private)
+	if err != nil {
 		return "", err
 	}
-	if err := tmp.Chmod(0600); err != nil {
+	defer func() {
+		_ = tree.RemoveOpen(tmp)
 		_ = tmp.Close()
+	}()
+	if _, err := tmp.Write(data); err != nil {
 		return "", err
 	}
 	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
 		return "", err
 	}
-	if err := tmp.Close(); err != nil {
-		return "", err
-	}
-	err = linkFile(tmpName, path)
+	err = linkFile(tmp.Name(), path)
 	if err != nil && !errors.Is(err, fs.ErrExist) {
 		// No hard links here: create the file exclusively instead.
-		err = createFileExclusive(path, data, 0600)
+		err = createFileExclusive(tree, path, data, 0600)
 	}
 	if errors.Is(err, fs.ErrExist) {
 		// Written meanwhile by a writer outside the lock (a hand edit):
@@ -381,21 +394,25 @@ func readStoredHubID(path string) (string, error) {
 // system without hard links.
 var linkFile = os.Link
 
-// createFileExclusive writes data to a new file at path, failing with an
-// error wrapping fs.ErrExist if path already exists.
-func createFileExclusive(path string, data []byte, mode os.FileMode) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+// createFileExclusive writes data to a new file at path, in tree (anchored
+// at path's directory), failing with an error wrapping fs.ErrExist if path
+// already exists. The file gets the protection of mode (privatefs.ForMode):
+// for 0600, mode 0600 even under a umask stricter than 077, and on Windows
+// an owner-only ACL set at creation. A partial
+// file is deleted through its own handle.
+func createFileExclusive(tree *privatefs.Tree, path string, data []byte, mode os.FileMode) error {
+	f, err := tree.Create(filepath.Base(path), true, privatefs.ForMode(mode))
 	if err != nil {
 		return err
 	}
 	if _, err := f.Write(data); err != nil {
+		_ = tree.RemoveOpen(f)
 		_ = f.Close()
-		_ = os.Remove(path)
 		return err
 	}
 	if err := f.Sync(); err != nil {
+		_ = tree.RemoveOpen(f)
 		_ = f.Close()
-		_ = os.Remove(path)
 		return err
 	}
 	return f.Close()
@@ -1219,6 +1236,20 @@ type GlobalConfig struct {
 	// project workspaces. Nil or Backend=="" / "local" preserves the legacy
 	// node-local behavior. Populated from server.workspace_storage in settings.yaml.
 	WorkspaceStorage *V1WorkspaceStorageConfig `json:"-" yaml:"-" koanf:"-"`
+
+	// ProjectStorage is server.project_storage as written (file, then
+	// SCION_SERVER_PROJECT_STORAGE_* env). SharedDirStorage and HomeStorage
+	// are server.shared_dir_storage and server.home_storage from the file
+	// only. ResolveProjectStorage turns the four blocks into the one block
+	// the hub uses.
+	ProjectStorage   *V1ProjectStorageConfig   `json:"-" yaml:"-" koanf:"-"`
+	SharedDirStorage *V1SharedDirStorageConfig `json:"-" yaml:"-" koanf:"-"`
+	HomeStorage      *V1HomeStorageConfig      `json:"-" yaml:"-" koanf:"-"`
+	// EffectiveProjectStorage is the block ResolveGlobalProjectStorage
+	// returned at hub startup; nil means the local backend.
+	EffectiveProjectStorage *V1ProjectStorageConfig `json:"-" yaml:"-" koanf:"-"`
+	// EffectiveProjectStorageWarnings are that resolution's warnings.
+	EffectiveProjectStorageWarnings []string `json:"-" yaml:"-" koanf:"-"`
 
 	// NativeChat controls the built-in chat feature. Nil (absent) means
 	// enabled. Populated from server.native_chat in settings.yaml.
@@ -2339,6 +2370,7 @@ type globalConfigEnvOverlay struct {
 	DefaultGCPIdentityServiceAccountID *string `koanf:"default_gcp_identity_service_account_id"`
 	Server                             struct {
 		WorkspaceStorage *V1WorkspaceStorageConfig `koanf:"workspace_storage"`
+		ProjectStorage   *V1ProjectStorageConfig   `koanf:"project_storage"`
 		NativeChat       *V1NativeChatConfig       `koanf:"native_chat"`
 	} `koanf:"server"`
 }
@@ -2362,12 +2394,14 @@ func applyEnvToOutsideKoanfFields(gc *GlobalConfig) error {
 	var ov globalConfigEnvOverlay
 	ov.Telemetry = gc.TelemetryConfig
 	ov.Server.WorkspaceStorage = gc.WorkspaceStorage
+	ov.Server.ProjectStorage = gc.ProjectStorage
 	ov.Server.NativeChat = gc.NativeChat
 	if err := k.Unmarshal("", &ov); err != nil {
 		return fmt.Errorf("SCION_SERVER_* environment: %w", err)
 	}
 	gc.TelemetryConfig = ov.Telemetry
 	gc.WorkspaceStorage = ov.Server.WorkspaceStorage
+	gc.ProjectStorage = ov.Server.ProjectStorage
 	gc.NativeChat = ov.Server.NativeChat
 	if v := ov.ProjectDefaults.DefaultScratchpad; v != nil {
 		gc.DefaultScratchpad = v
@@ -2466,7 +2500,7 @@ func LoadServerMode() string {
 	}
 
 	var raw map[string]interface{}
-	if err := yamlv3.Unmarshal(data, &raw); err != nil {
+	if err := unmarshalSettingsYAML(data, &raw); err != nil {
 		return ""
 	}
 
@@ -2561,7 +2595,7 @@ func readSettingsFileRaw(dir string) (map[string]interface{}, bool) {
 		return nil, false
 	}
 	var raw map[string]interface{}
-	if err := yamlv3.Unmarshal(data, &raw); err != nil {
+	if err := unmarshalSettingsYAML(data, &raw); err != nil {
 		return nil, false
 	}
 	return raw, true

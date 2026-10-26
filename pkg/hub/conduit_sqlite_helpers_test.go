@@ -943,6 +943,26 @@ func (f *relayFixture) agentSessions(t *testing.T) []registry.SessionRecord {
 	return out
 }
 
+// conduitSessionState describes a conduit session for a failure message:
+// its id, open or ended, its error, and whether it is draining or received
+// a GoAway (ptone/scion#5255, ptone/scion#4893, ptone/scion#5045).
+func conduitSessionState(ls conduit.LocalSession) string {
+	state := "open"
+	select {
+	case <-ls.Done():
+		state = "ended"
+	default:
+	}
+	goAway := false
+	select {
+	case <-ls.GoAwayReceived():
+		goAway = true
+	default:
+	}
+	info := ls.Info()
+	return fmt.Sprintf("%s %s, err %v, draining %v, GoAway received %v", info.SessionID, state, ls.Err(), info.Draining, goAway)
+}
+
 var errInjectedStoreFault = errors.New("injected store fault")
 
 // proxyApp is the agent's in-container HTTP server, recording what it

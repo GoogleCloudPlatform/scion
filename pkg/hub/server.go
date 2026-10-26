@@ -49,6 +49,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/cspreport"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -64,6 +65,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/ssemetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -85,6 +87,15 @@ const (
 type ServerConfig struct {
 	// Port is the HTTP port to listen on.
 	Port int
+	// StartupServerSettings is the server settings block as start-up
+	// resolved it, after the workstation defaults and the command-line flags
+	// (config.ConvertGlobalToV1ServerConfig of the final config). The
+	// server-config GET compares environment values with it, for the keys
+	// start-up overrides (startupOverriddenServerKeys), to report whether an
+	// environment value is in effect. It is never returned by any API. Nil
+	// when the caller does not set it; env_values then keeps the loader's
+	// precedence for those keys.
+	StartupServerSettings *config.V1ServerConfig
 	// NodeImageRegistry is this hub process's SCION_IMAGE_REGISTRY
 	// (config.ImageRegistryFromEnv, read once at startup): the node env
 	// layer of hub-scope image_registry reads (setup status, image pull,
@@ -269,6 +280,11 @@ type ServerConfig struct {
 	// returned in X-Scion-Perf-* headers to admin requests that opt in. Off by
 	// default; observe only. See perftrace.go.
 	PerfTrace bool
+	// CSPReportRawSamples (server.hub.csp_report_raw_samples) adds each
+	// browser policy report's sample to its csp_violation log record. Off
+	// by default: a sample can hold the start of page content, such as a
+	// chat message. For a short diagnosis only; startup only.
+	CSPReportRawSamples bool
 	// MembershipSweepReportOnly (server.hub.membership_sweep_report_only)
 	// puts the membership-standing sweep in report-only mode: it logs and
 	// audits each agent it would hold (mutation type
@@ -497,25 +513,20 @@ type ServerConfig struct {
 	// in non-dev/non-workstation modes.
 	Mode string
 
-	// WorkspaceStorageConfig selects the workspace storage backend for
-	// hub-managed project workspaces; the hub builds its workspace Layout
-	// from it (workspaceLayout). With Backend "nfs", "cloudrun-volume" or
-	// "gke-shared-volume" the hub serves the same projects/<uuid>/workspace
-	// tree agents mount. Nil or Backend=="" / "local" keeps the local,
-	// slug-keyed layout (~/.scion/projects/<slug>).
-	WorkspaceStorageConfig *config.V1WorkspaceStorageConfig
-
-	// SharedDirStorageConfig is the hub's server.shared_dir_storage, read
-	// once at startup from the global settings file through the same
-	// env-free loader the brokers use (config.LoadHubSharedDirStorage);
-	// never re-read per request, never from the DB or project settings.
-	// With WorkspaceStorageConfig it decides where the hub's shared-dir
-	// browser resolves shared dirs (sharedDirLayout).
-	SharedDirStorageConfig *config.V1SharedDirStorageConfig
-	// SharedDirStorageError is set when the settings file plausibly
-	// configures server.shared_dir_storage but could not be loaded; shared-dir
-	// resolution then fails closed rather than using the local layout.
-	SharedDirStorageError error
+	// ProjectStorageConfig is the hub's one storage block,
+	// server.project_storage, as resolved at startup
+	// (config.ResolveGlobalProjectStorage: written, or synthesized from the
+	// deprecated workspace_storage/shared_dir_storage/home_storage blocks).
+	// The hub builds its projectfs Layout from it (projectStorageLayout);
+	// never from a per-request settings-file read, the DB or project
+	// settings. Its workspace view (WorkspaceStorage) selects where
+	// hub-managed project workspaces live. Nil or backend "" / "local"
+	// preserves the node-local behavior.
+	ProjectStorageConfig *config.V1ProjectStorageConfig
+	// ProjectStorageWarnings are the warnings of that resolution (non-empty
+	// when the block was synthesized from the deprecated blocks); the hub
+	// reports them as a degraded health check until the block is written.
+	ProjectStorageWarnings []string
 
 	// NativeChatEnabled controls whether the built-in chat feature is active:
 	// the /api/v1/chat/* routes are registered and the web UI is told to show
@@ -1418,11 +1429,6 @@ type RemoteCreateAgentRequest struct {
 	// catalog rather than reused (`scion reincarnate`, design §3.4). See
 	// runtimebroker.CreateAgentRequest.Reprovision, the wire twin this maps to.
 	Reprovision bool `json:"reprovision,omitempty"`
-	// SharedDirBackendChanges and AllowEmptySharedDir mirror
-	// runtimebroker.CreateAgentRequest's fields of the same names. Set only
-	// on a reprovision for `scion reincarnate --shared-dir-backend`.
-	SharedDirBackendChanges map[string]string `json:"sharedDirBackendChanges,omitempty"`
-	AllowEmptySharedDir     bool              `json:"allowEmptySharedDir,omitempty"`
 	// ExpectExistingNFSWorkspace mirrors
 	// runtimebroker.CreateAgentRequest.ExpectExistingNFSWorkspace: on a
 	// ProvisionOnly request for an agent moved from another broker, the
@@ -1653,12 +1659,6 @@ type RemoteAgentResponse struct {
 	// instead, which must not be reported as reincarnate success.
 	Reprovisioned bool `json:"reprovisioned,omitempty"`
 
-	// SharedDirBackendsChanged mirrors
-	// runtimebroker.CreateAgentResponse.SharedDirBackendsChanged.
-	// dispatchProvision fails a reprovision that asked for a shared dir
-	// backend change when the broker does not confirm it.
-	SharedDirBackendsChanged bool `json:"sharedDirBackendsChanged,omitempty"`
-
 	// LaunchPending, LaunchID and LaunchInstanceID mirror
 	// runtimebroker.CreateAgentResponse's async launch echo. LaunchPending
 	// with a LaunchID equal to the request's means the broker accepted the
@@ -1771,22 +1771,25 @@ type Server struct {
 	// ApplySnapshot returns to it when the configured hub_name is unset.
 	// See startupHubNameOrDefault. In file mode a name removed from
 	// settings.yaml therefore stays in use until restart (ptone/scion#3070).
-	startupHubName     string
-	store              store.Store
-	httpServer         *http.Server
-	mux                *http.ServeMux
-	mu                 sync.RWMutex
-	startTime          time.Time
-	dispatcher         AgentDispatcher      // Optional dispatcher for co-located runtime broker
-	storage            storage.Storage      // Optional storage backend for templates
-	secretBackend      secret.SecretBackend // Optional secret backend
-	agentTokenService  *AgentTokenService   // Agent JWT token service
-	userTokenService   *UserTokenService    // User JWT token service
-	downloadSigningKey []byte               // HMAC key for skill file capability URLs (#1792)
-	artifactViewKey    []byte               // HMAC key for artifact view capabilities (pkg/artifacts RouteView)
-	// attachmentDeliveryKey signs attachment delivery capabilities
-	// (ptone/scion#4596, attachment_delivery.go).
-	attachmentDeliveryKey []byte
+	startupHubName    string
+	store             store.Store
+	httpServer        *http.Server
+	mux               *http.ServeMux
+	mu                sync.RWMutex
+	startTime         time.Time
+	dispatcher        AgentDispatcher      // Optional dispatcher for co-located runtime broker
+	storage           storage.Storage      // Optional storage backend for templates
+	secretBackend     secret.SecretBackend // Optional secret backend
+	agentTokenService *AgentTokenService   // Agent JWT token service
+	userTokenService  *UserTokenService    // User JWT token service
+	// downloadKeys sign skill file capability URLs (#1792); artifactViewKeys
+	// sign artifact view capabilities (pkg/artifacts RouteView);
+	// attachmentDeliveryKeys sign attachment delivery capabilities
+	// (ptone/scion#4596). Each is a signing-ring purpose in keyring mode and
+	// one fixed legacy key otherwise (capability_keys.go).
+	downloadKeys           capabilityKeys
+	artifactViewKeys       capabilityKeys
+	attachmentDeliveryKeys capabilityKeys
 
 	// chatSpacesBatch sets the GET /chat/spaces rollup batch sizes; the
 	// zero value uses the defaults (handlers_chat_v2.go).
@@ -2439,6 +2442,13 @@ type Server struct {
 	// geExchangeRateLimiter's is started below.
 	externalBearerRateLimiter *externalBearerRateLimiter
 
+	// cspReports is the browser policy report endpoint (csp_reports.go),
+	// and cspReportLimiter its rate limit, kept here so Start can run its
+	// cleanup goroutine. Both are set by New; nil on a Server built
+	// without it.
+	cspReports       *cspreport.Handler
+	cspReportLimiter *cspReportLimiter
+
 	// experiments is the compiled feature-flag registry (pkg/experiments).
 	// Nil in production and in most tests; always read through the
 	// nil-safe experimentRegistry() accessor, never directly.
@@ -2515,9 +2525,6 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	}
 	if err := validateVisitorRoutes(startupRouteMetadata()); err != nil {
 		return nil, err
-	}
-	for _, warning := range sharedDirLayoutWarnings(cfg.WorkspaceStorageConfig, cfg.SharedDirStorageConfig) {
-		slog.Warn(warning)
 	}
 	// The test-identity expiry and feature checks run in the auth
 	// middleware's per-request user-row block, which needs a user store.
@@ -3062,6 +3069,12 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		s, srv.authzService,
 		logging.Subsystem("hub.project-deletion"),
 	)
+	// Project delete removes the project's shared-dir tree from the hub's
+	// in-memory shared-dir Layout (server.project_storage).
+	srv.deletionService.sharedDirLayout = func() (projectfs.Layout, error) {
+		layout, _, err := srv.sharedDirLayout()
+		return layout, err
+	}
 
 	// RS4: Initialize user access token service with authorization, audit, and
 	// transactional support via the bounded domain service pattern.
@@ -3321,6 +3334,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// A restored agent whose root user is no longer admitted to its project
 	// comes back held (ptone/scion#3433).
 	srv.registerMembershipRestoreHook()
+	// Agent delete, restore and the reincarnation claim revoke the agent's
+	// delegation grants in their own transaction
+	// (.design/agent-delegation.md §16.1).
+	srv.registerAgentDelegationLifecycleHooks()
 
 	// Wire the proxy user provisioner (wraps provisionUser with 60s cache)
 	if cfg.ProxyAuth != nil {
@@ -3440,6 +3457,12 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// one.
 	srv.externalBearerRateLimiter = newExternalBearerRateLimiter(cfg.TrustedProxies)
 	srv.authConfig.ExternalBearerLimiter = srv.externalBearerRateLimiter
+
+	srv.cspReportLimiter = newCSPReportLimiter(cfg.TrustedProxies)
+	srv.cspReports = newCSPReportHandler(srv.cspReportLimiter, cfg.CSPReportRawSamples)
+	if cfg.CSPReportRawSamples {
+		slog.Warn("Browser policy report samples are logged (server.hub.csp_report_raw_samples); samples can hold page content")
+	}
 
 	// Initialize GE Google credential exchange service, sharing the validator
 	// and resolver above so both mechanisms produce identical decisions
@@ -4965,6 +4988,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	}
 
 	dispatcher := NewHTTPAgentDispatcherWithClient(s.store, client, s.config.Debug, logging.Subsystem("hub.dispatcher"))
+	dispatcher.SetStorageLayout(s.projectStorageLayout)
 
 	// Configure token generator if available
 	if s.agentTokenService != nil {
@@ -5334,6 +5358,9 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	// suspendAgent's HTTP-path behavior.
 	s.releaseBrokerQuota(ctx, agent)
 	releaseClaim()
+	// As for suspendAgent: the agent's delegation grants end with the
+	// suspension, best effort (.design/agent-delegation.md §16.3).
+	s.revokeAgentDelegationGrantsBestEffort(ctx, store.AgentDelegationGrantFilter{AgentID: agent.ID}, revokeReasonAgentSuspended)
 	s.events.PublishAgentStatus(ctx, agent)
 	return true
 }
@@ -6685,6 +6712,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	if s.externalBearerRateLimiter != nil {
 		s.externalBearerRateLimiter.StartCleanup(ctx)
 	}
+	if s.cspReportLimiter != nil {
+		s.cspReportLimiter.StartCleanup(ctx)
+	}
 
 	// Start OIDC key cleanup loop to remove expired rotated keys from JWKS.
 	if s.oidcKeyManager != nil {
@@ -6693,6 +6723,10 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 
 	// Start the scheduled chat message sweeper (exits when ctx is cancelled).
 	s.startScheduledSendSweeper(ctx)
+
+	// Starred messages need a chat store with the star capability; report
+	// a misconfiguration at startup (requests answer 503 meanwhile).
+	s.validateMessageStarStore()
 
 	// Start the migration of personal chat thread groups into project
 	// thread groups (ptone/scion#4424). It exits when ctx is cancelled.
@@ -7239,6 +7273,7 @@ func (s *Server) registerRoutes() {
 	// Agent delegation grants the caller issued (.design/agent-delegation.md
 	// §7); session only, and available while hub.agent_delegation is off.
 	s.mux.HandleFunc("/api/v1/users/me/delegations", s.guarded("/api/v1/users/me/delegations", s.handleUserMeDelegations))
+	s.mux.HandleFunc("/api/v1/users/me/delegations/revoke-all", s.guarded("/api/v1/users/me/delegations/revoke-all", s.handleUserMeDelegationsRevokeAll))
 
 	// User-scoped terminal workspace persistence (/users/me/terminal-workspace)
 	s.mux.HandleFunc("/api/v1/users/me/terminal-workspace", s.guarded("/api/v1/users/me/terminal-workspace", s.handleUserMeTerminalWorkspace))
@@ -7375,6 +7410,9 @@ func (s *Server) registerRoutes() {
 		s.mux.HandleFunc("/api/v1/chat/user-prefs", s.guarded("/api/v1/chat/user-prefs", s.chatRoute(s.handleChatUserPrefs)))
 		s.mux.HandleFunc("/api/v1/chat/presence", s.guarded("/api/v1/chat/presence", s.chatRoute(s.handleChatPresence)))
 		s.mux.HandleFunc("/api/v1/chat/search", s.guarded("/api/v1/chat/search", s.chatRoute(s.handleChatSearch)))
+		// Starred messages (web.chat_starred_messages; 404 while off).
+		s.mux.HandleFunc("/api/v1/chat/stars", s.guarded("/api/v1/chat/stars", s.chatRoute(s.handleChatStars)))
+		s.mux.HandleFunc("/api/v1/chat/stars/", s.guarded("/api/v1/chat/stars/", s.chatRoute(s.handleChatStarRoutes)))
 		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.chatAttachmentRoute(s.handleChatAttachments)))
 		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.chatAttachmentRoute(s.handleChatAttachmentByID)))
 	}
@@ -7398,6 +7436,9 @@ func (s *Server) registerRoutes() {
 	// Test-identity gate status for the web test-hub banner, readable
 	// without authentication (ptone/scion#4240).
 	s.mux.HandleFunc("GET /api/v1/test-infra/status", s.guarded("GET /api/v1/test-infra/status", s.handleTestInfraStatus))
+
+	// Policy reports from browsers showing the web pages; no sign-in (browsers send reports on their own).
+	s.mux.HandleFunc("POST /api/v1/csp-reports", s.guarded("POST /api/v1/csp-reports", s.handleCSPReport))
 
 	// Resolved experiments map for signed-in callers (ptone/scion#2217).
 	s.mux.HandleFunc("/api/v1/experiments", s.guarded("/api/v1/experiments", s.handleExperiments))

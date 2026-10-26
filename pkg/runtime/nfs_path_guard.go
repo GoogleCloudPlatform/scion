@@ -18,8 +18,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // ValidateNotExportRoot ensures that hostPath is a proper subdirectory of
@@ -47,50 +45,4 @@ func ValidateNotExportRoot(hostPath, hostBase string) error {
 	}
 
 	return nil
-}
-
-// NFSSharedDirsToVolumeMounts converts shared directory declarations into
-// VolumeMount entries using NFS-resolved paths from a ResolvedWorkspace.
-// This is the NFS counterpart of config.SharedDirsToVolumeMounts — the
-// container-side targets are unchanged (/scion-volumes/<name> or in-workspace),
-// but the host-side source paths come from the NFS backend's Resolve output
-// instead of the local filesystem helpers.
-//
-// The containerWorkspace parameter specifies the container-side workspace path
-// (e.g., /workspace). The resolved workspace must have been produced by
-// nfsBackend.Resolve with the shared dir names included in ResolveInput.
-func NFSSharedDirsToVolumeMounts(resolved ResolvedWorkspace, dirs []api.SharedDir, containerWorkspace string) ([]api.VolumeMount, error) {
-	if len(dirs) == 0 {
-		return nil, nil
-	}
-
-	if containerWorkspace == "" {
-		containerWorkspace = "/workspace"
-	}
-
-	var mounts []api.VolumeMount
-	for _, d := range dirs {
-		sd, ok := resolved.SharedDirs[d.Name]
-		if !ok {
-			return nil, fmt.Errorf("shared dir %q not found in NFS resolution", d.Name)
-		}
-
-		// Isolation guard: shared dir paths must be under the host base, not the root.
-		if err := ValidateNotExportRoot(sd.HostPath, resolved.HostBase); err != nil {
-			return nil, fmt.Errorf("shared dir %q: %w", d.Name, err)
-		}
-
-		target := fmt.Sprintf("/scion-volumes/%s", d.Name)
-		if d.InWorkspace {
-			target = fmt.Sprintf("%s/.scion-volumes/%s", containerWorkspace, d.Name)
-		}
-
-		mounts = append(mounts, api.VolumeMount{
-			Source:   sd.HostPath,
-			Target:   target,
-			ReadOnly: d.ReadOnly,
-		})
-	}
-
-	return mounts, nil
 }

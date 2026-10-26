@@ -165,7 +165,7 @@ func webListenHost(cfg *config.GlobalConfig) string {
 func devAuthBindError(webHost string) error {
 	return fmt.Errorf(
 		"dev auth cannot be enabled when the server is bound to a non-loopback address (%s). "+
-			"Dev auth auto-logs in all requests as admin and must only be used on localhost. "+
+			"Dev auth signs browsers in as admin and must only be used on localhost. "+
 			"Either bind to 127.0.0.1/::1/localhost (--host 127.0.0.1) or disable dev auth", webHost)
 }
 

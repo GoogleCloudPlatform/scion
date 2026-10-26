@@ -48,11 +48,6 @@ profiles:
     shared_dir_storage_class: standard-rwx
     shared_dir_size: 40Gi
     safe_to_evict: true
-    shared_dir_storage_backend: nfs
-    shared_dir_storage_backends:
-      cache: local
-    home_storage_backend: local
-    home_storage_leaf: pod
     kubernetes_service_account_mappings:
       agent@proj.iam.gserviceaccount.com: ksa-agent
     kubernetes_block_service_account: zero-priv

@@ -15,7 +15,6 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -336,32 +335,8 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 	}
 
 	// Upload files
-	for _, uploadInfo := range pubResp.UploadURLs {
-		// Find the matching local file
-		var match *publishFile
-		for i := range files {
-			if files[i].path == uploadInfo.Path {
-				match = &files[i]
-				break
-			}
-		}
-		if match == nil {
-			continue
-		}
-
-		// Read through os.Root (links that leave the skill directory are
-		// refused) and verified against the collected size and hash, so the
-		// uploaded bytes are the ones in the manifest. A mismatch fails
-		// before any byte of the file is sent.
-		data, err := transfer.ReadCollectedFile(skillRoot, match.collected())
-		if err != nil {
-			return err
-		}
-		err = skillSvc.UploadFile(ctx, uploadInfo.URL, uploadInfo.Method, uploadInfo.Headers, bytes.NewReader(data))
-		if err != nil {
-			return fmt.Errorf("failed to upload %s: %w", uploadInfo.Path, err)
-		}
-		fmt.Printf("  Uploaded %s\n", uploadInfo.Path)
+	if err := uploadSkillFiles(ctx, skillSvc, skillRoot, files, pubResp.UploadURLs, os.Stdout); err != nil {
+		return err
 	}
 
 	// Build manifest with the hashes recorded at collection
@@ -385,6 +360,22 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Published %s v%s (hash: %s)\n", filepath.Base(filepath.Clean(skillDir)), sv.Version, sv.ContentHash)
 	return nil
+}
+
+// uploadSkillFiles uploads the collected skill files that have an upload
+// URL, printing "  Uploaded <path>" to out for each. Each file is read
+// through root (links that leave the skill directory are refused) and
+// verified against the collected size and hash, so the uploaded bytes are
+// the ones in the manifest. A mismatch fails before any byte of that file
+// is sent, and stops the upload.
+func uploadSkillFiles(ctx context.Context, up signedURLUploader, root *os.Root, files []publishFile, urls []hubclient.UploadURLInfo, out io.Writer) error {
+	byPath := make(map[string]transfer.FileInfo, len(files))
+	for _, f := range files {
+		byPath[f.path] = f.collected()
+	}
+	return uploadCollectedFiles(ctx, up, root, byPath, urls, nil, func(path string) {
+		_, _ = fmt.Fprintf(out, "  Uploaded %s\n", path)
+	})
 }
 
 type publishFile struct {
@@ -721,6 +712,9 @@ func runSkillsResolve(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Name: %s\n", result.Name)
 	fmt.Printf("Resolved Version: %s\n", result.ResolvedVersion)
 	fmt.Printf("Content Hash: %s\n", result.ContentHash)
+	if result.ContentHashV2 != "" {
+		fmt.Printf("Content Hash v2: %s\n", result.ContentHashV2)
+	}
 	if len(result.Files) > 0 {
 		fmt.Println("Files:")
 		for _, f := range result.Files {
