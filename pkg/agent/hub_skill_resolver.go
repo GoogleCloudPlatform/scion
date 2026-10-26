@@ -89,6 +89,7 @@ func hubResolveResponseToResult(refs []api.SkillReference, resp *hubclient.Resol
 			As:                 ref.As,
 			Version:            rs.ResolvedVersion,
 			Hash:               rs.ContentHash,
+			HashV2:             rs.ContentHashV2,
 			Scope:              ref.Scope,
 			Files:              files,
 			Deprecated:         rs.Deprecated,

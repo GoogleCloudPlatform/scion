@@ -712,6 +712,9 @@ func runSkillsResolve(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Name: %s\n", result.Name)
 	fmt.Printf("Resolved Version: %s\n", result.ResolvedVersion)
 	fmt.Printf("Content Hash: %s\n", result.ContentHash)
+	if result.ContentHashV2 != "" {
+		fmt.Printf("Content Hash v2: %s\n", result.ContentHashV2)
+	}
 	if len(result.Files) > 0 {
 		fmt.Println("Files:")
 		for _, f := range result.Files {
