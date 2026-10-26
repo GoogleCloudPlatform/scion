@@ -36,9 +36,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
-	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -3748,29 +3748,34 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 		s.quotaService.Release(ctx, "max_projects_per_user", projectID)
 	}
 
-	// Effect 3: Notify provider brokers to clean up local project
-	// directories and the project's NFS workspace tree, if any. Each
-	// provider is filtered by brokerUsesSlugProjectDir.
+	// Effect 3: Notify provider brokers to clean up their local project
+	// directories and project-configs entries and to release the project's
+	// per-dir shared-dir claims. Each provider is filtered by
+	// brokerUsesSlugProjectDir.
 	s.cleanupBrokerProjectDirectoriesFromInputs(ctx, project, inputs.providers)
 
 	// Effect 5: Filesystem cleanup (hub-managed projects). On the local
-	// workspace backend the hub-managed workspace is ~/.scion/projects/<slug>;
-	// on a shared backend the project tree (workspace and project
-	// configuration under ProjectRoot) is removed by the ID-keyed tree
-	// cleanup below.
-	if (project.GitRemote == "" || project.IsSharedWorkspace()) && project.Slug != "" {
-		projectPath := s.removeHubManagedProjectDir(projectID, project.Slug)
-		s.removeEmbeddedBrokerProjectDir(project.Slug, projectPath)
-	} else if project.Slug != "" && s.embeddedBrokerUsesSlugProjectDir(project, inputs.providers) {
-		// A git project the embedded broker served without a linked path
-		// lives at ~/.scion/projects/<slug> on it (ptone/scion#2569).
-		s.removeEmbeddedBrokerProjectDir(project.Slug, "")
+	// workspace backend the hub-managed workspace is ~/.scion/projects/<slug>
+	// (and the embedded broker's directory is that same one), removed here
+	// as before. On a shared backend the hub's and the embedded broker's
+	// ~/.scion/projects/<slug> is a legacy slug-keyed tree, removed by the
+	// storage cleanup below only when its identity markers name this
+	// project, never on its name alone.
+	if !s.workspaceBackendShared() {
+		if (project.GitRemote == "" || project.IsSharedWorkspace()) && project.Slug != "" {
+			projectPath := s.removeHubManagedProjectDir(projectID, project.Slug)
+			s.removeEmbeddedBrokerProjectDir(project.Slug, projectPath)
+		} else if project.Slug != "" && s.embeddedBrokerUsesSlugProjectDir(project, inputs.providers) {
+			// A git project the embedded broker served without a linked path
+			// lives at ~/.scion/projects/<slug> on it (ptone/scion#2569).
+			s.removeEmbeddedBrokerProjectDir(project.Slug, "")
+		}
 	}
-	// Remove the project's ID-keyed NFS workspace tree from the hub's own
-	// mount of the export, in the background. This covers the embedded
-	// broker (skipped by Effect 3), linked-path providers and brokers
-	// without a provider row.
-	s.startHubNFSProjectTreeCleanup(projectID)
+	// Remove the project's storage the hub is the one deleter of, in the
+	// background: its tree on the shared project storage (from the hub's
+	// own mount, whatever provider rows exist), the legacy slug-keyed trees
+	// whose markers name it, and its object-storage prefix.
+	s.startProjectStorageCleanup(project)
 
 	// Effect 7: Clean up external project config directory.
 	if project.Slug != "" && project.ID != "" {
@@ -3780,10 +3785,22 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 		}
 		if configPath, err := marker.ExternalProjectPath(); err == nil {
 			projectConfigDir := filepath.Dir(configPath)
-			if err := config.RemoveProjectConfig(projectConfigDir); err != nil && !os.IsNotExist(err) {
+			_, statErr := os.Lstat(projectConfigDir)
+			err := config.RemoveProjectConfig(projectConfigDir)
+			if err != nil && !os.IsNotExist(err) {
 				s.projectsLogger().Warn("failed to remove project config directory",
 					"project_id", projectID, "error_class", fsErrorClass(err))
+			} else {
+				err = nil
 			}
+			d := projectfs.Deletion{Tree: projectfs.TreeProjectConfig, Path: projectConfigDir, Outcome: projectfs.OutcomeDeleted}
+			switch {
+			case err != nil:
+				d.Outcome, d.Err = projectfs.OutcomeFailed, err
+			case os.IsNotExist(statErr):
+				d.Outcome = projectfs.OutcomeAbsent
+			}
+			projectfs.Audit(ctx, s.projectsLogger(), projectfs.DeleterHub, projectID, "", d)
 		}
 	}
 
@@ -3795,7 +3812,7 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 // deleted project on the local workspace backend, ~/.scion/projects/<slug>,
 // only when it is a direct child of that projects root. On a shared backend
 // it removes nothing (the project tree is keyed by project ID and removed by
-// startHubNFSProjectTreeCleanup). When the slug fails the slug rule or the
+// startProjectStorageCleanup). When the slug fails the slug rule or the
 // path cannot be resolved, nothing is removed and a warning is logged.
 //
 // It returns the local path it was asked to remove, or "" when nothing was
@@ -4000,8 +4017,8 @@ func (s *Server) cleanupBrokerProjectDirectoriesFromInputs(ctx context.Context, 
 
 // brokerUsesSlugProjectDir reports whether provider's broker keeps project
 // in its conventional ~/.scion/projects/<slug> directory, so that the
-// broker's project cleanup (which removes that directory and the project's
-// NFS workspace tree) applies to it. That holds for hub-managed projects (no
+// broker's project cleanup (which removes that directory and releases the
+// project's shared-dir claims) applies to it. That holds for hub-managed projects (no
 // git remote, or a shared-workspace git project) on every provider, and for
 // any other git project on a provider with no registered local path: the
 // hub then dispatches by slug (projectDispatchInfo.projectSlug in
@@ -4023,74 +4040,6 @@ func (s *Server) embeddedBrokerUsesSlugProjectDir(project *store.Project, provid
 		}
 	}
 	return false
-}
-
-// hubNFSProjectCleanupRetryDelay is how long a failed NFS project tree
-// removal waits before its one retry (agent pods may still be terminating),
-// and hubNFSProjectCleanupTimeout bounds the whole background cleanup.
-// Variables so tests can shorten them.
-var (
-	hubNFSProjectCleanupRetryDelay = 30 * time.Second
-	hubNFSProjectCleanupTimeout    = 15 * time.Minute
-)
-
-// hubNFSCleanupAttemptHook, when set, is called with the attempt number (1
-// or 2) just before each attempt's still-deleted check. Tests only.
-var hubNFSCleanupAttemptHook func(attempt int)
-
-// startHubNFSProjectTreeCleanup starts, in the background, the removal of
-// the deleted project's tree <MountRoot>/<shareID>/<SubPathRoot>/<projectID>
-// on the NFS workspace export when this hub's workspace storage is nfs
-// (ptone/scion#2569). The tree is keyed by project ID, so removing it is safe
-// whatever provider rows exist; brokers remove it from their own mounts too,
-// and whichever runs second finds nothing to do. A share not mounted on the
-// hub counts as nothing to remove. The removal is guarded by
-// runtime.CleanupNFSProjectRetry, which retries a failed removal once. It
-// runs with its own context and timeout, not the request's.
-//
-// Project IDs can be reused (registering from the same checkout brings the
-// same ID back), so immediately before each attempt the project must still
-// be absent from the store (GetProject returns store.ErrNotFound; any other
-// result keeps the tree, logged at Info). A final failure is logged for an
-// operator, never returned.
-func (s *Server) startHubNFSProjectTreeCleanup(projectID string) {
-	wsCfg := s.config.ProjectStorageConfig.WorkspaceStorage()
-	if wsCfg == nil || wsCfg.Backend != "nfs" || wsCfg.NFS == nil || len(wsCfg.NFS.Shares) == 0 {
-		return
-	}
-	nfs := wsCfg.NFS
-	log := s.projectsLogger()
-	retryDelay, timeout, hook := hubNFSProjectCleanupRetryDelay, hubNFSProjectCleanupTimeout, hubNFSCleanupAttemptHook
-	stillDeleted := func(ctx context.Context, attempt int) bool {
-		if hook != nil {
-			hook(attempt)
-		}
-		_, err := s.store.GetProject(ctx, projectID)
-		if errors.Is(err, store.ErrNotFound) {
-			return true
-		}
-		if err != nil {
-			log.Info("NFS workspace tree cleanup: could not confirm the project is still deleted; keeping the tree",
-				"project_id", projectID, "attempt", attempt, "error", err)
-		}
-		return false
-	}
-	s.nfsCleanupWG.Add(1)
-	go func() {
-		defer s.nfsCleanupWG.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		defer cancel()
-		err := runtime.CleanupNFSProjectRetry(ctx, nfs, projectID, retryDelay, stillDeleted)
-		switch {
-		case errors.Is(err, runtime.ErrNFSCleanupSkipped):
-			log.Info("NFS workspace tree kept: the project exists again", "project_id", projectID)
-		case err != nil:
-			log.Error("project's NFS workspace tree was not removed after project delete; an operator must remove it",
-				"project_id", projectID, "error", err)
-		default:
-			log.Info("removed project's NFS workspace tree (if present)", "project_id", projectID)
-		}
-	}()
 }
 
 // NOTE: deleteProjectAgents was replaced by dispatchAgentDeletions in RS3 R1,

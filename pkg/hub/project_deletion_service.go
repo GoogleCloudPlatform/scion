@@ -24,8 +24,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
-	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -53,9 +51,6 @@ type ProjectDeletionService struct {
 	authz   *AuthzService
 	logger  *slog.Logger
 	nowFunc func() time.Time
-	// sharedDirLayout returns the hub's shared-dir Layout
-	// (Server.sharedDirLayout). Nil skips shared-dir cleanup on delete.
-	sharedDirLayout func() (projectfs.Layout, error)
 }
 
 // NewProjectDeletionService creates a new ProjectDeletionService.
@@ -378,64 +373,13 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 		}
 	}
 
-	// Best-effort NFS shared-dir cleanup (ptone/scion#1802, Phase 2 item 3).
-	// This runs AFTER the transaction has committed: the DB row is the
-	// source of truth for "the project is deleted", and a filesystem
-	// cleanup failure must never roll that back or fail the request — it is
-	// logged and left for operator follow-up, exactly like the pre-existing
-	// (out of scope here) local-backend and workspace-dir leftover trees
-	// this same issue documents. NFS backend only: local-backend and
-	// workspace-dir cleanup remain out of scope, tracked on #1802 itself.
-	svc.cleanupNFSSharedDirTree(ctx, project.ID)
-
+	// The project's storage (its tree on the shared project storage, the
+	// legacy slug-keyed trees naming it, and its object-storage prefix) is
+	// removed by the caller after this commit, best-effort and audited
+	// (Server.startProjectStorageCleanup, ptone/scion#5835): the DB row is
+	// the source of truth for "the project is deleted", and a storage
+	// failure never rolls it back.
 	return result, nil
-}
-
-// cleanupNFSSharedDirTree removes projectID's shared-dir tree
-// (<subpath_root>/<projectID>/shared-dirs, and the project directory when
-// it is then empty) from the share when the hub's shared-dir Layout is on
-// a shared backend (ptone/scion#1802). The Layout is the hub's in-memory
-// one (Server.sharedDirLayout, from server.project_storage resolved at
-// startup), never a settings-file read, so a project's own settings can
-// never influence it. There is one backend for every agent (no per-agent
-// record), so a local Layout has no tree on any share and cleanup is a
-// no-op. Removing a missing tree is a no-op. The removal is
-// shareddirs.DeleteProjectTree's symlink-refusing, fd-based walk; a
-// failure is logged at ERROR and never blocks or rolls back the DB
-// deletion (deletion is best-effort here).
-func (svc *ProjectDeletionService) cleanupNFSSharedDirTree(ctx context.Context, projectID string) {
-	if svc.sharedDirLayout == nil {
-		return
-	}
-	layout, err := svc.sharedDirLayout()
-	if err != nil {
-		svc.logger.ErrorContext(ctx, "shared-dir storage layout unavailable; skipping shared-dir cleanup on project delete",
-			"project_id", projectID, "error", err)
-		return
-	}
-	if !layout.Backend.Shared() {
-		return
-	}
-	if !shareddirs.ValidProjectID(projectID) {
-		// Should be unreachable (hub project IDs are UUIDs it generates
-		// itself); checked before the filesystem is touched at all.
-		svc.logger.ErrorContext(ctx, "refusing shared-dir cleanup on project delete: project ID fails validation",
-			"project_id", projectID)
-		return
-	}
-	// ProjectRoot validates the project ID again (hub project IDs are UUIDs it
-	// generates itself, so a failure should be unreachable) before the
-	// filesystem is touched at all.
-	root, err := layout.ProjectRoot(projectID)
-	if err != nil {
-		svc.logger.ErrorContext(ctx, "refusing shared-dir cleanup on project delete",
-			"project_id", projectID, "error", err)
-		return
-	}
-	if err := shareddirs.DeleteProjectTree(root.HostBase, root.SubPathRoot, projectID); err != nil {
-		svc.logger.ErrorContext(ctx, "failed to remove project's shared-dir tree on delete",
-			"project_id", projectID, "backend", string(layout.Backend), "host_base", root.HostBase, "error", err)
-	}
 }
 
 // ---------------------------------------------------------------------------

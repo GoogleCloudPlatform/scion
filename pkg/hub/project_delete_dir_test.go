@@ -124,7 +124,7 @@ func TestDeleteProject_StoredSlugNotDirectChild_RemovesNoDirectory(t *testing.T)
 			logs := captureProjectsLog(t, srv)
 			rec = doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+id, nil)
 			require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
-			srv.nfsCleanupWG.Wait()
+			srv.storageCleanupWG.Wait()
 
 			logged := logs.String()
 			if !tc.shared {
@@ -201,7 +201,7 @@ func TestDeleteProject_RemovesExactlyOwnDirectory(t *testing.T) {
 
 			rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+id, nil)
 			require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
-			srv.nfsCleanupWG.Wait()
+			srv.storageCleanupWG.Wait()
 
 			_, err := os.Stat(own)
 			if tc.shared {

@@ -695,6 +695,15 @@ func (e *deletionEngine) run() deletionOutcome {
 		return out
 	}
 
+	// A hard delete that deletes the agent's files also removes the
+	// agent's storage the hub owns (its agents/<slug> directory on the
+	// shared project storage and its object-storage prefix), in the
+	// background and audited (ptone/scion#5835). A soft delete keeps it
+	// until the retained-files purge.
+	if agentStorageOnDelete(e.plan.req) {
+		e.tailStep("remove agent storage", func() { s.startAgentStorageCleanup(agent) })
+	}
+
 	// Persist and deliver only after the row change succeeded. Each tail
 	// step recovers on its own: the delete has committed.
 	if nd := s.notificationDispatcher; nd != nil && len(pending) > 0 {
