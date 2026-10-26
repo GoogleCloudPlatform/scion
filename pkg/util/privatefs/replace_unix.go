@@ -35,8 +35,10 @@ import (
 //
 // This is the POSIX sequence scion's ssh-config writer used before this
 // package, with one tightening (the one-name rule): an
-// existing regular target with more than one name (Nlink != 1, read on the
-// opened file) is refused with ErrHardLinked, never replaced.
+// existing regular target with more than one name (Nlink > 1, read on the
+// opened file) is refused with ErrHardLinked, never replaced. A target that
+// is replaced or removed while it is being checked (Nlink == 0) is opened
+// again a few times, then refused with ErrReplacedConcurrently.
 func ReplaceFollowing(path string, data []byte, newMode fs.FileMode, tempPrefix string) error {
 	target, mode, err := replaceTarget(path, newMode)
 	if err != nil {
@@ -87,8 +89,24 @@ func CheckReplaceTarget(path string) error {
 // replaceTarget resolves path (following a symlinked leaf) and returns the
 // file to replace and the mode the new file gets: the existing file's mode,
 // or newMode for a new file. An existing regular target with more than one
-// name is refused.
-func replaceTarget(path string, newMode fs.FileMode) (string, fs.FileMode, error) {
+// name is refused. A target that has no name by the time its link count is
+// read was replaced or removed after it was opened: path is resolved and
+// opened again (retryReplaced), and ErrReplacedConcurrently is returned if
+// it keeps changing.
+func replaceTarget(path string, newMode fs.FileMode) (target string, mode fs.FileMode, err error) {
+	err = retryReplaced(path, func() error {
+		target, mode, err = replaceTargetOnce(path, newMode)
+		return err
+	})
+	if err != nil {
+		return "", 0, err
+	}
+	return target, mode, nil
+}
+
+// replaceTargetOnce is one attempt of replaceTarget. It fails with
+// errNoNames when the opened target has no name left.
+func replaceTargetOnce(path string, newMode fs.FileMode) (string, fs.FileMode, error) {
 	target := path
 	if fi, err := os.Lstat(path); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
 		resolved, err := filepath.EvalSymlinks(path)
@@ -99,6 +117,7 @@ func replaceTarget(path string, newMode fs.FileMode) (string, fs.FileMode, error
 	}
 	mode := newMode
 	if f, err := os.OpenFile(target, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0); err == nil {
+		afterLinkCheckOpen(target)
 		fi, serr := f.Stat()
 		if serr == nil {
 			serr = checkSingleLinkInfo(target, fi)
@@ -117,6 +136,9 @@ func replaceTarget(path string, newMode fs.FileMode) (string, fs.FileMode, error
 // checkSingleLinkInfo refuses a regular file with more than one name
 // (the one-name rule). Other file types are left to the caller (a directory has
 // several links by nature). A link count that cannot be read is refused.
+// A count of zero means the file was unlinked after it was opened (a stale
+// handle, not a hard link). It is refused with errNoNames, so the caller
+// can open the path again (retryReplaced).
 func checkSingleLinkInfo(name string, fi fs.FileInfo) error {
 	if !fi.Mode().IsRegular() {
 		return nil
@@ -124,6 +146,9 @@ func checkSingleLinkInfo(name string, fi fs.FileInfo) error {
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {
 		return fmt.Errorf("refusing %s: cannot read its link count: %w", name, ErrHardLinked)
+	}
+	if st.Nlink == 0 {
+		return fmt.Errorf("refusing %s: %w", name, errNoNames)
 	}
 	if st.Nlink != 1 {
 		return fmt.Errorf("refusing %s: it has %d names: %w", name, st.Nlink, ErrHardLinked)
