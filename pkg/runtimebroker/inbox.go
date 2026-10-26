@@ -385,11 +385,12 @@ const inboxScriptPath = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:
 // created by the shell's noclobber redirection (O_EXCL in dash, bash and
 // busybox ash), not by mkdir(1): some mkdir implementations report success
 // when they lose the race to a directory created concurrently (uutils
-// coreutils 0.8 does), which let two writers move. An existing claim of
-// any type, including a directory claim from an older broker, holds the
-// message. Until the move succeeds, the exit trap removes the claim with
-// the temporary directory, so a failed write leaves no claim. A message
-// directory that already exists counts as delivered.
+// coreutils 0.8 to 0.10 do; 0.11.0 fixed it, but hosts and images may
+// still ship an affected version), which let two writers move. An existing
+// claim of any type, including a directory claim from an older broker,
+// holds the message. Until the move succeeds, the exit trap removes the
+// claim with the temporary directory, so a failed write leaves no claim. A
+// message directory that already exists counts as delivered.
 const inboxWriteScript = inboxScriptPath + `set -eu
 umask 077
 home="${HOME:?}"
