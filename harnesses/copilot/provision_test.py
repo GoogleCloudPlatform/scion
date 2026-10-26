@@ -27,6 +27,7 @@ import re
 import tempfile
 import unittest
 from contextlib import contextmanager, redirect_stderr
+from unittest import mock
 
 PROVISION_PATH = os.path.join(os.path.dirname(__file__), "provision.py")
 SPEC = importlib.util.spec_from_file_location("copilot_provision", PROVISION_PATH)
@@ -36,6 +37,60 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(provision)
 
 scion_harness = provision.scion_harness
+
+# Since Python 3.14 the C JSON decoder's nesting limit follows the stack
+# size: about 65000 levels with an 8 MiB stack, and no limit with an
+# unlimited one. Whether content is "too deep for Python" now depends on the
+# machine (ptone/scion#6254), so tests of that path simulate a decoder limit
+# instead of relying on the interpreter's. The limit is below every fixed
+# limit of older versions, so shallower content still decodes for real.
+SIMULATED_DECODER_DEPTH_LIMIT = 500
+
+
+def _first_too_deep_offset(text: str, limit: int) -> int | None:
+    """Offset of the first bracket nesting text deeper than limit (brackets
+    inside strings don't count), or None if it never does."""
+    depth = 0
+    in_string = escaped = False
+    for i, ch in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "[{":
+            depth += 1
+            if depth > limit:
+                return i
+        elif ch in "]}":
+            depth -= 1
+    return None
+
+
+@contextmanager
+def simulated_decoder_depth_limit(limit: int = SIMULATED_DECODER_DEPTH_LIMIT):
+    """Make json.loads stop at limit levels of nesting the way a decoder at
+    its limit does: errors earlier in the document are raised as usual, and
+    reaching the first bracket past the limit raises RecursionError."""
+    real_loads = json.loads
+
+    def loads(s, *args, **kwargs):
+        cut = _first_too_deep_offset(s, limit) if isinstance(s, str) else None
+        if cut is None:
+            return real_loads(s, *args, **kwargs)
+        try:
+            real_loads(s[:cut], *args, **kwargs)
+        except json.JSONDecodeError as exc:
+            if exc.pos < cut:
+                raise
+        raise RecursionError("maximum recursion depth exceeded while decoding a JSON document")
+
+    with mock.patch.object(json, "loads", loads):
+        yield
 
 
 @contextmanager
@@ -380,12 +435,13 @@ class CopilotConfigFileAuthTest(BaseTelemetryTest):
     def test_staged_too_deep_config_is_accepted(self) -> None:
         # Copilot and the host read nesting deeper than Python's decoder
         # does; the file is copied as is, and _ensure_settings keeps it.
+        n = SIMULATED_DECODER_DEPTH_LIMIT
         raw = ('{"placeholder_sign_in": {"login": "example-user"}, "n": '
-               + "[" * 100000 + "]" * 100000 + "}").encode()
-        self.assertFalse(provision._validate_staged_config(raw.decode(), "/staged/COPILOT_CONFIG"))
+               + "[" * n + "]" * n + "}").encode()
         secret = self._stage_config_secret(raw)
         stderr = io.StringIO()
-        with redirect_stderr(stderr):
+        with simulated_decoder_depth_limit(), redirect_stderr(stderr):
+            self.assertFalse(provision._validate_staged_config(raw.decode(), "/staged/COPILOT_CONFIG"))
             resolved = self._provision_staged()
         # ctx.info writes the note to stderr; it names the file, no content.
         note = (f"copilot provision: COPILOT_CONFIG secret file {secret} is nested "
@@ -490,29 +546,15 @@ class CopilotConfigFileAuthTest(BaseTelemetryTest):
         self._assert_replaced()
 
     def test_too_deep_sign_in_file_is_untouched(self) -> None:
-        # Find the first depth Python's decoder rejects; Go's limit is
-        # 10000 levels, so the host may still read sign-in from it.
-        def doc(n: int) -> str:
-            return '{"copilot_hmac_key": "placeholder-hmac", "theme": ' + "[" * n + "]" * n + "}"
-
-        def too_deep(n: int) -> bool:
-            try:
-                json.loads(doc(n))
-            except RecursionError:
-                return True
-            return False
-
-        lo, hi = 1, 9998  # 9998 arrays + the object = 9999 levels, within Go's limit
-        self.assertTrue(too_deep(hi), "Python's decoder accepts 9999 levels; test needs updating")
-        while lo < hi:
-            mid = (lo + hi) // 2
-            if too_deep(mid):
-                hi = mid
-            else:
-                lo = mid + 1
-        raw = doc(lo).encode()
+        # The shallowest depth the decoder rejects (the object plus n arrays);
+        # Go's limit is 10000 levels, so the host may still read sign-in
+        # from it.
+        n = SIMULATED_DECODER_DEPTH_LIMIT
+        raw = ('{"copilot_hmac_key": "placeholder-hmac", "theme": '
+               + "[" * n + "]" * n + "}").encode()
         self._write_raw(raw)
-        self._provision_must_succeed()
+        with simulated_decoder_depth_limit():
+            self._provision_must_succeed()
         self.assertEqual(self._read_raw(), raw)
 
     def _assert_deep_sign_in_untouched(self, defect: bytes) -> None:
@@ -521,13 +563,13 @@ class CopilotConfigFileAuthTest(BaseTelemetryTest):
         # the defect; the host-rule parse then reaches the deep part.
         raw = (b'{"copilot_hmac_key": "placeholder-hmac", "model": ' + defect
                + b', "theme": ' + b"[" * 9998 + b"]" * 9998 + b"}")
-        with self.assertRaises(ValueError):
-            provision._load_config_strictly(raw)
-        with self.assertRaises(RecursionError,
-                               msg="Python's decoder accepts 9999 levels; test needs updating"):
-            provision._config_holds_sign_in_or_too_deep(raw)
         self._write_raw(raw)
-        self._provision_must_succeed()
+        with simulated_decoder_depth_limit():
+            with self.assertRaises(ValueError):
+                provision._load_config_strictly(raw)
+            with self.assertRaises(RecursionError):
+                provision._config_holds_sign_in_or_too_deep(raw)
+            self._provision_must_succeed()
         self.assertEqual(self._read_raw(), raw)
 
     def test_too_deep_sign_in_file_after_long_int_is_untouched(self) -> None:
@@ -717,8 +759,10 @@ class ConfigFileMayHoldCredentialTest(unittest.TestCase):
     def test_deep_nesting_is_not_sign_in(self) -> None:
         # Too deep for Python's decoder, so unparseable here. Go's limit is
         # 10000 levels; which shallower depths still differ from the host
-        # depends on the decoder (with the C decoder, only 9998-9999).
-        self.assertFalse(self._check('{"placeholder_key": ' + "[" * 100000 + "]" * 100000 + "}"))
+        # depends on the decoder and, since Python 3.14, on the stack size.
+        n = SIMULATED_DECODER_DEPTH_LIMIT
+        with simulated_decoder_depth_limit():
+            self.assertFalse(self._check('{"placeholder_key": ' + "[" * n + "]" * n + "}"))
 
     def test_unreadable_fails_open(self) -> None:
         # No host counterpart: the host applies the rule only to content it read.

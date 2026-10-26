@@ -24,11 +24,67 @@ import textwrap
 import threading
 import tomllib
 import unittest
+from contextlib import contextmanager
 from typing import Any
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import scion_harness as sh
+
+
+# Since Python 3.14 the C JSON decoder's nesting limit follows the stack
+# size: about 65000 levels with an 8 MiB stack, and no limit with an
+# unlimited one. Whether content is "too deep for Python" now depends on the
+# machine (ptone/scion#6254), so tests of that path simulate a decoder limit
+# instead of relying on the interpreter's. The limit is below every fixed
+# limit of older versions, so shallower content still decodes for real.
+SIMULATED_DECODER_DEPTH_LIMIT = 500
+
+
+def _first_too_deep_offset(text: str, limit: int) -> int | None:
+    """Offset of the first bracket nesting text deeper than limit (brackets
+    inside strings don't count), or None if it never does."""
+    depth = 0
+    in_string = escaped = False
+    for i, ch in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "[{":
+            depth += 1
+            if depth > limit:
+                return i
+        elif ch in "]}":
+            depth -= 1
+    return None
+
+
+@contextmanager
+def simulated_decoder_depth_limit(limit: int = SIMULATED_DECODER_DEPTH_LIMIT):
+    """Make json.loads stop at limit levels of nesting the way a decoder at
+    its limit does: errors earlier in the document are raised as usual, and
+    reaching the first bracket past the limit raises RecursionError."""
+    real_loads = json.loads
+
+    def loads(s, *args, **kwargs):
+        cut = _first_too_deep_offset(s, limit) if isinstance(s, str) else None
+        if cut is None:
+            return real_loads(s, *args, **kwargs)
+        try:
+            real_loads(s[:cut], *args, **kwargs)
+        except json.JSONDecodeError as exc:
+            if exc.pos < cut:
+                raise
+        raise RecursionError("maximum recursion depth exceeded while decoding a JSON document")
+
+    with mock.patch.object(json, "loads", loads):
+        yield
 
 
 class TestVersionContract(unittest.TestCase):
@@ -1718,9 +1774,18 @@ class TestReadJsonSkippingComments(unittest.TestCase):
         self._assert_provision_error(raw, "not valid JSON")
 
     def test_too_deep_raises_provision_error(self):
-        raw = ('{"key": "' + self.MARKER + '", "n": ' + "[" * 100000
-               + "]" * 100000 + "}").encode()
-        self._assert_provision_error(raw, "nested too deeply")
+        n = SIMULATED_DECODER_DEPTH_LIMIT
+        raw = ('{"key": "' + self.MARKER + '", "n": ' + "[" * n
+               + "]" * n + "}").encode()
+        with simulated_decoder_depth_limit():
+            self._assert_provision_error(raw, "nested too deeply")
+
+    def test_depth_within_limit_parses(self):
+        # Guards the simulation: one level shallower is decoded for real.
+        n = SIMULATED_DECODER_DEPTH_LIMIT - 1
+        path = self._write_raw(('{"n": ' + "[" * n + "]" * n + "}").encode())
+        with simulated_decoder_depth_limit():
+            self.assertIn("n", sh.read_json_skipping_comment_lines(path))
 
     def test_missing_file_raises_os_error(self):
         with self.assertRaises(FileNotFoundError):
