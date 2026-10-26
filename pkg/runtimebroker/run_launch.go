@@ -889,6 +889,12 @@ func classifyStartError(ctx context.Context, err error, templateSlug, lastStep s
 				step = lf.Step
 			}
 			if reason := launchReasonEnum(lf.Reason); reason != "" {
+				if lf.Code == api.LaunchCodePodDisrupted {
+					// The fixed text stays the prefix (the CLI matches it to
+					// print the code label once); the suffix says whether
+					// the cluster preempted or evicted the pod.
+					text += ": it was " + scionrt.PodDisruptionKind(reason)
+				}
 				text += " (" + reason + ")"
 			}
 			return lf.Code, step, text
