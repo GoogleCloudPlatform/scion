@@ -3167,6 +3167,17 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 	// GITHUB_TOKEN from the environment, so it is never in a git argv or .git/config.
 	cloneURLNoCredential := normalizeCloneURL(cloneURL)
 
+	// The git token is offered to this clone only when its URL names the
+	// project's recorded remote (api.EnvGitTokenRemote, which the broker relays
+	// from the hub's project record): https, the same host and owner/repo
+	// (provision.CloneTokenAllowed). A clone URL from a label naming any other
+	// host or repository, or no recorded remote at all, gets no credential
+	// helper, on the fetch or in the agent's .gitconfig.
+	offerToken := provision.CloneTokenAllowed(os.Getenv(api.EnvGitTokenRemote), cloneURLNoCredential)
+	if !offerToken {
+		log.Info("WARNING: the clone URL does not name the project's recorded git remote; cloning without a git credential")
+	}
+
 	// Determine the agent feature branch name early so we can try cloning it.
 	agentBranch := os.Getenv("SCION_AGENT_BRANCH")
 
@@ -3210,8 +3221,13 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 	fetchBranch := func(branchToFetch string) (string, bool) {
 		// -c credential.<scheme>://<host>.helper=<run-time env-expansion helper>:
 		// the helper is scoped to the clone URL's host, and the token is read from
-		// GITHUB_TOKEN by the helper, never passed on the fetch argv.
-		fetchArgs := []string{"-c", scopedCredentialConfigArg(cloneURL), "-C", workspacePath, "fetch"}
+		// GITHUB_TOKEN by the helper, never passed on the fetch argv. Installed
+		// only when offerToken.
+		var fetchArgs []string
+		if offerToken {
+			fetchArgs = append(fetchArgs, "-c", scopedCredentialConfigArg(cloneURL))
+		}
+		fetchArgs = append(fetchArgs, "-C", workspacePath, "fetch")
 		if depth > 0 {
 			fetchArgs = append(fetchArgs, "--depth", depthStr)
 		}
@@ -3308,16 +3324,21 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 	// root (HOME=/root) but the harness runs as the scion user.
 	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
 
-	var credentialHelper string
-	if hub.IsGitHubAppEnabled() {
-		credentialHelper = "!sciontool credential-helper"
-	} else {
-		credentialHelper = provision.GitTokenCredentialHelper
-	}
-	credCmd := exec.Command("git", "config", "--file", gitconfigPath, "credential.helper", credentialHelper)
-	setupGitCmd(credCmd)
-	if err := procreap.RunManaged(credCmd); err != nil {
-		return fmt.Errorf("failed to configure git credential helper: %w", err)
+	// Only when offerToken: a clone URL that does not name the project's
+	// recorded remote gets no helper, so later fetches and pushes to that
+	// origin are never offered the token.
+	if offerToken {
+		var credentialHelper string
+		if hub.IsGitHubAppEnabled() {
+			credentialHelper = "!sciontool credential-helper"
+		} else {
+			credentialHelper = provision.GitTokenCredentialHelper
+		}
+		credCmd := exec.Command("git", "config", "--file", gitconfigPath, "credential.helper", credentialHelper)
+		setupGitCmd(credCmd)
+		if err := procreap.RunManaged(credCmd); err != nil {
+			return fmt.Errorf("failed to configure git credential helper: %w", err)
+		}
 	}
 
 	// Resolve the agent feature branch name.

@@ -126,6 +126,20 @@ func remoteHelperForm(raw string) bool {
 	return i > 0 && strings.HasPrefix(raw[i:], "::")
 }
 
+// CloneTokenAllowed reports whether the project's git token may be offered
+// to a clone of cloneURL, given the project's recorded remote tokenRemote
+// (api.GitCloneConfig.TokenRemote, from the hub's project record). It applies
+// the same rule as the hub's own clone (cloneTokenHost): cloneURL must be
+// https without user info, query or fragment, and name tokenRemote's host and
+// owner/repo. An empty tokenRemote allows nothing (fail closed). Every
+// sciontool clone that can offer the token decides through this one
+// function, so a further constraint on which remotes may get a token is
+// added here.
+func CloneTokenAllowed(tokenRemote, cloneURL string) bool {
+	_, ok := cloneTokenHost(tokenRemote, cloneURL)
+	return ok
+}
+
 // cloneTokenHost returns the host a project's git token may be offered to
 // when cloning cloneURL: the URL's host, when cloneURL is https without user
 // info and its normalized host and owner/repo path equal the project's

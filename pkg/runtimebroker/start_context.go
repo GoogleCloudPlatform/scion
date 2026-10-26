@@ -611,6 +611,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// The git token remote is set only from the hub's GitClone (below), never
+	// from the request's env, so an env entry cannot bind the git token to
+	// another remote.
+	delete(env, api.EnvGitTokenRemote)
+
 	// 3. Hub auth token. Precedence (highest first):
 	//   1. in.AgentToken — the explicit hub-provided dedicated field (create path).
 	//   2. an existing env["SCION_AUTH_TOKEN"] already populated from in.ResolvedEnv
@@ -1166,6 +1171,13 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		if gc.Depth != nil {
 			env["SCION_GIT_DEPTH"] = strconv.Itoa(*gc.Depth)
 			classifyBrokerEnv("SCION_GIT_DEPTH", api.EnvKindPlain)
+		}
+		// The project's recorded remote, as the hub sent it: sciontool init
+		// offers the git token to the clone only when the clone URL names it.
+		// Relayed unchanged; without it the clone gets no token.
+		if gc.TokenRemote != "" {
+			env[api.EnvGitTokenRemote] = gc.TokenRemote
+			classifyBrokerEnv(api.EnvGitTokenRemote, api.EnvKindPlain)
 		}
 		if in.Config.Branch != "" {
 			env["SCION_AGENT_BRANCH"] = in.Config.Branch

@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -30,8 +31,24 @@ func workspaceSpecFor(agent *store.Agent, info projectDispatchInfo) WorkspaceDis
 		SharedWorkspaceClone: info.sharedWorkspaceClone,
 	}
 	if agent != nil && agent.AppliedConfig != nil {
-		spec.GitClone = agent.AppliedConfig.GitClone
+		spec.GitClone = withTokenRemote(agent.AppliedConfig.GitClone, info.gitRemote)
 		spec.Branch = agent.AppliedConfig.Branch
 	}
 	return spec
+}
+
+// withTokenRemote returns a copy of gc whose TokenRemote is the project's
+// recorded git remote, or nil when gc is nil. The value always comes from the
+// project record resolved for this dispatch: whatever TokenRemote the stored
+// config carries is replaced, so an agent created before the project's
+// remote changed, or a config that arrived with its own value, never binds
+// the token to anything but the current record. An empty gitRemote clears
+// it, and the clone then gets no token.
+func withTokenRemote(gc *api.GitCloneConfig, gitRemote string) *api.GitCloneConfig {
+	if gc == nil {
+		return nil
+	}
+	out := *gc
+	out.TokenRemote = gitRemote
+	return &out
 }

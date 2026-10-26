@@ -2609,7 +2609,8 @@ func TestBuildCreateRequest_GoldenPayload(t *testing.T) {
     "gitClone": {
       "url": "https://github.com/example/repo.git",
       "branch": "main",
-      "depth": 1
+      "depth": 1,
+      "tokenRemote": "https://github.com/example/repo.git"
     }
   },
   "resolvedEnv": {

@@ -962,7 +962,23 @@ type GitCloneConfig struct {
 	URL    string `json:"url"`              // HTTPS clone URL (without credentials)
 	Branch string `json:"branch,omitempty"` // Branch to clone (default: main)
 	Depth  *int   `json:"depth,omitempty"`  // Clone depth (nil/omitted = shallow depth 1, 0 = full clone, >0 = that depth)
+
+	// TokenRemote is the project's recorded git remote (the hub's
+	// project.GitRemote, host/owner/repo), set by the hub on every dispatch
+	// from the project record, never from the clone URL or a label. The
+	// project's git token is offered to the clone only when URL is https and
+	// names this remote's host and owner/repo (provision.CloneTokenAllowed);
+	// when it is empty no token is offered. Brokers and runtimes relay it
+	// unchanged: to the agent container and to the Kubernetes provisioning
+	// init container as EnvGitTokenRemote.
+	TokenRemote string `json:"tokenRemote,omitempty"`
 }
+
+// EnvGitTokenRemote is the container environment variable that carries
+// GitCloneConfig.TokenRemote to sciontool (init's in-container clone and the
+// provision init container's clone). Without it no git token is offered to
+// the clone.
+const EnvGitTokenRemote = "SCION_GIT_TOKEN_REMOTE"
 
 type gitCloneContextKey struct{}
 

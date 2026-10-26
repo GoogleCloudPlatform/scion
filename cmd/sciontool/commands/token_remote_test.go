@@ -1,0 +1,341 @@
+/*
+Copyright 2026 The Scion Authors.
+*/
+package commands
+
+import (
+	"context"
+	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
+)
+
+// tokenRemoteTestToken is the git token the tests offer. A server that sees
+// it as the basic-auth password records that the token was sent to it.
+const tokenRemoteTestToken = "token-remote-test-credential"
+
+// tokenGitServer is an https git server (dumb http) for one bare repository.
+// It records every request and whether the token was ever sent to it.
+type tokenGitServer struct {
+	url      string // https://127.0.0.1:<port>/org/repo.git
+	remote   string // the recorded-remote form: 127.0.0.1:<port>/org/repo
+	host     string // 127.0.0.1:<port>
+	requests atomic.Int64
+	sawToken atomic.Bool
+}
+
+// newTokenGitServer serves bare over https. With requireAuth, a request
+// without the token as its basic-auth password gets 401 (a private
+// repository); without it every request is served (a public repository), so
+// a clone succeeds with or without a credential.
+func newTokenGitServer(t *testing.T, bare string, requireAuth bool) *tokenGitServer {
+	t.Helper()
+	g := &tokenGitServer{}
+	files := http.StripPrefix("/org/", http.FileServer(http.Dir(filepath.Dir(bare))))
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		g.requests.Add(1)
+		_, pass, ok := r.BasicAuth()
+		if ok && pass == tokenRemoteTestToken {
+			g.sawToken.Store(true)
+		}
+		if requireAuth && (!ok || pass != tokenRemoteTestToken) {
+			w.Header().Set("WWW-Authenticate", `Basic realm="test"`)
+			http.Error(w, "authentication required", http.StatusUnauthorized)
+			return
+		}
+		files.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.host = u.Host
+	g.url = srv.URL + "/org/" + filepath.Base(bare)
+	g.remote = g.host + "/org/" + strings.TrimSuffix(filepath.Base(bare), ".git")
+	// Every httptest TLS server shares one certificate; trust it.
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_SSL_CAINFO", caFile)
+	return g
+}
+
+// tokenRemoteBareRepo creates root/repo.git with one commit on main, served
+// over dumb http (update-server-info), and isolates git from the user's and
+// the system's config. git must be installed: the test fails without it.
+func tokenRemoteBareRepo(t *testing.T, root string) string {
+	t.Helper()
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("git is required: %v", err)
+	}
+	globalCfg := filepath.Join(root, "global.gitconfig")
+	if err := os.WriteFile(globalCfg, []byte("[user]\n\temail=a@b.c\n\tname=A\n[init]\n\tdefaultBranch=main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", globalCfg)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	t.Setenv("GIT_CONFIG_COUNT", "")
+	run := func(dir string, args ...string) {
+		t.Helper()
+		c := exec.Command(gitPath, args...)
+		c.Dir = dir
+		if out, e := c.CombinedOutput(); e != nil {
+			t.Fatalf("git %v: %v\n%s", args, e, out)
+		}
+	}
+	bare := filepath.Join(root, "repo.git")
+	run(root, "init", "-q", "--bare", bare)
+	seed := filepath.Join(root, "seed")
+	run(root, "init", "-q", "-b", "main", seed)
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(seed, "add", ".")
+	run(seed, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "init")
+	run(seed, "push", "-q", bare, "main")
+	run(bare, "update-server-info")
+	return bare
+}
+
+// --- in-container clone (sciontool init) ---
+
+// initCloneWithTokenRemote runs gitCloneWorkspace for cloneURL with the
+// token in GITHUB_TOKEN and tokenRemote in api.EnvGitTokenRemote ("" leaves
+// it unset), and returns the agent home it used and the clone error.
+func initCloneWithTokenRemote(t *testing.T, cloneURL, tokenRemote string) (agentHome string, err error) {
+	t.Helper()
+	agentHome = t.TempDir()
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if mkErr := os.MkdirAll(workspace, 0o755); mkErr != nil {
+		t.Fatal(mkErr)
+	}
+	t.Setenv("HOME", agentHome)
+	t.Setenv("SCION_GIT_CLONE_URL", cloneURL)
+	t.Setenv("SCION_WORKSPACE_PATH", workspace)
+	t.Setenv("SCION_GIT_BRANCH", "main")
+	t.Setenv("SCION_GIT_DEPTH", "0")
+	t.Setenv("SCION_AGENT_BRANCH", "")
+	t.Setenv("SCION_AGENT_NAME", "test-agent")
+	t.Setenv("SCION_GITHUB_APP_ENABLED", "")
+	t.Setenv("GITHUB_TOKEN", tokenRemoteTestToken)
+	t.Setenv(api.EnvGitTokenRemote, tokenRemote)
+	if tokenRemote == "" {
+		os.Unsetenv(api.EnvGitTokenRemote)
+	}
+	return agentHome, gitCloneWorkspace(os.Getuid(), os.Getgid(), agentHome, false)
+}
+
+// agentHelperConfigured reports whether the agent's .gitconfig configures any
+// credential helper (unscoped or host-scoped).
+func agentHelperConfigured(t *testing.T, agentHome string) bool {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(agentHome, ".gitconfig"))
+	if os.IsNotExist(err) {
+		return false
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Contains(string(data), "helper")
+}
+
+// The in-container clone offers the git token only to a clone URL that
+// names the project's recorded remote (https, same host and owner/repo). A
+// clone-url label naming another host, another repository on the recorded
+// host, or no recorded remote at all gets no credential: a private
+// repository there is never sent the token.
+func TestGitCloneWorkspace_TokenBoundToRecordedRemote(t *testing.T) {
+	root := t.TempDir()
+	bare := tokenRemoteBareRepo(t, root)
+
+	t.Run("matching remote gets the token", func(t *testing.T) {
+		own := newTokenGitServer(t, bare, true)
+		home, err := initCloneWithTokenRemote(t, own.url, own.remote)
+		if err != nil {
+			t.Fatalf("clone of the recorded remote: %v", err)
+		}
+		if !own.sawToken.Load() {
+			t.Error("the recorded remote's clone must be offered the token")
+		}
+		if !agentHelperConfigured(t, home) {
+			t.Error("the recorded remote's clone configures the agent credential helper")
+		}
+	})
+
+	for _, tc := range []struct {
+		name   string
+		remote func(other *tokenGitServer) string
+	}{
+		{"label naming another host", func(*tokenGitServer) string { return "github.com/org/repo" }},
+		{"same host, other owner/repo", func(h *tokenGitServer) string { return h.host + "/other/repo" }},
+		{"no token remote", func(*tokenGitServer) string { return "" }},
+	} {
+		t.Run(tc.name+" gets no token", func(t *testing.T) {
+			other := newTokenGitServer(t, bare, true)
+			_, err := initCloneWithTokenRemote(t, other.url, tc.remote(other))
+			if err == nil {
+				t.Fatal("a private repository cloned without a credential must fail")
+			}
+			if strings.Contains(err.Error(), tokenRemoteTestToken) {
+				t.Errorf("the clone error carries the token: %v", err)
+			}
+			if other.requests.Load() == 0 {
+				t.Fatal("fixture check: git never reached the server")
+			}
+			if other.sawToken.Load() {
+				t.Error("the token was sent to a clone URL that does not name the recorded remote")
+			}
+		})
+	}
+}
+
+// A clone URL that does not name the recorded remote leaves no credential
+// helper in the agent's .gitconfig even when the clone itself succeeds (a
+// public repository on the label's host), so later fetches and pushes to
+// that origin are not offered the token either.
+func TestGitCloneWorkspace_NoAgentHelperForUnboundRemote(t *testing.T) {
+	root := t.TempDir()
+	bare := tokenRemoteBareRepo(t, root)
+	public := newTokenGitServer(t, bare, false)
+
+	home, err := initCloneWithTokenRemote(t, public.url, "github.com/org/repo")
+	if err != nil {
+		t.Fatalf("clone of a public repository: %v", err)
+	}
+	if agentHelperConfigured(t, home) {
+		t.Error("an unbound clone URL must not get a credential helper in the agent's .gitconfig")
+	}
+
+	home, err = initCloneWithTokenRemote(t, public.url, "")
+	if err != nil {
+		t.Fatalf("clone of a public repository: %v", err)
+	}
+	if agentHelperConfigured(t, home) {
+		t.Error("without a token remote the agent's .gitconfig gets no credential helper")
+	}
+
+	home, err = initCloneWithTokenRemote(t, public.url, public.remote)
+	if err != nil {
+		t.Fatalf("clone of a public repository: %v", err)
+	}
+	if !agentHelperConfigured(t, home) {
+		t.Error("fixture check: the matching remote configures the agent credential helper")
+	}
+}
+
+// --- provision init container (sciontool provision) ---
+
+// provisionCloneWithTokenRemote runs runProvision (the real
+// provision.ProvisionShared) for a shared-plain clone of cloneURL with the
+// token in GITHUB_TOKEN and tokenRemote in api.EnvGitTokenRemote ("" leaves
+// it unset).
+func provisionCloneWithTokenRemote(t *testing.T, cloneURL, tokenRemote string) error {
+	t.Helper()
+	wsDir := filepath.Join(t.TempDir(), "workspace")
+	if err := os.MkdirAll(wsDir, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	oldWorkspace, oldMode, oldUID, oldGID, oldDepth := provisionWorkspace, provisionMode, provisionUID, provisionGID, provisionDepth
+	t.Cleanup(func() {
+		provisionWorkspace, provisionMode, provisionUID, provisionGID, provisionDepth = oldWorkspace, oldMode, oldUID, oldGID, oldDepth
+	})
+	provisionWorkspace = wsDir
+	provisionMode = "shared-plain"
+	provisionUID = os.Getuid()
+	provisionGID = os.Getgid()
+	provisionDepth = 0
+	t.Setenv("SCION_CLONE_URL", cloneURL)
+	t.Setenv("SCION_CLONE_BRANCH", "main")
+	t.Setenv("SCION_WORKSPACE_MODE", "")
+	t.Setenv("SCION_PROVISION_STATE_DIR", "")
+	t.Setenv("SCION_PROJECT_ID", "test-proj")
+	t.Setenv("SCION_SHARED_DIR_PATHS", "")
+	t.Setenv(provision.ChownBestEffortEnv, "1")
+	t.Setenv(provision.GitTokenEnv, tokenRemoteTestToken)
+	t.Setenv(api.EnvGitTokenRemote, tokenRemote)
+	if tokenRemote == "" {
+		os.Unsetenv(api.EnvGitTokenRemote)
+	}
+	return runProvision(context.Background())
+}
+
+// The provisioning init container's clone (through provision.ProvisionShared)
+// offers the git token only to a clone URL that names the project's recorded
+// remote, the same rule as the in-container clone.
+func TestRunProvision_TokenBoundToRecordedRemote(t *testing.T) {
+	root := t.TempDir()
+	bare := tokenRemoteBareRepo(t, root)
+
+	t.Run("matching remote gets the token", func(t *testing.T) {
+		own := newTokenGitServer(t, bare, true)
+		if err := provisionCloneWithTokenRemote(t, own.url, own.remote); err != nil {
+			t.Fatalf("clone of the recorded remote: %v", err)
+		}
+		if !own.sawToken.Load() {
+			t.Error("the recorded remote's clone must be offered the token")
+		}
+	})
+
+	for _, tc := range []struct {
+		name   string
+		remote func(other *tokenGitServer) string
+	}{
+		{"label naming another host", func(*tokenGitServer) string { return "github.com/org/repo" }},
+		{"same host, other owner/repo", func(h *tokenGitServer) string { return h.host + "/other/repo" }},
+		{"no token remote", func(*tokenGitServer) string { return "" }},
+	} {
+		t.Run(tc.name+" gets no token", func(t *testing.T) {
+			other := newTokenGitServer(t, bare, true)
+			err := provisionCloneWithTokenRemote(t, other.url, tc.remote(other))
+			if err == nil {
+				t.Fatal("a private repository cloned without a credential must fail")
+			}
+			if strings.Contains(err.Error(), tokenRemoteTestToken) {
+				t.Errorf("the clone error carries the token: %v", err)
+			}
+			if other.requests.Load() == 0 {
+				t.Fatal("fixture check: git never reached the server")
+			}
+			if other.sawToken.Load() {
+				t.Error("the token was sent to a clone URL that does not name the recorded remote")
+			}
+		})
+	}
+}
+
+// provisionCloneToken returns the token only for a clone whose URL names the
+// recorded remote; no remote, no clone or no token yields none.
+func TestProvisionCloneToken(t *testing.T) {
+	gc := func(u string) *api.GitCloneConfig { return &api.GitCloneConfig{URL: u} }
+	for _, tc := range []struct {
+		name, remote, token string
+		gc                  *api.GitCloneConfig
+		want                string
+	}{
+		{"matching remote", "github.com/org/repo", "tok", gc("https://github.com/org/repo.git"), "tok"},
+		{"label naming another host", "github.com/org/repo", "tok", gc("https://mirror.example/org/repo.git"), ""},
+		{"same host, other repo", "github.com/org/repo", "tok", gc("https://github.com/org/other.git"), ""},
+		{"no token remote", "", "tok", gc("https://github.com/org/repo.git"), ""},
+		{"no clone", "github.com/org/repo", "tok", nil, ""},
+		{"no token", "github.com/org/repo", "", gc("https://github.com/org/repo.git"), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := provisionCloneToken(tc.gc, tc.token, tc.remote); got != tc.want {
+				t.Errorf("provisionCloneToken = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

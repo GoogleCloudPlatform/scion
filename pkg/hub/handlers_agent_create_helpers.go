@@ -402,7 +402,9 @@ func projectCloneSource(project *store.Project) (cloneURL, branch string) {
 // sharedWorkspaceCloneConfig returns the clone settings for the workspace of
 // a shared-plain git project, or nil for any other project. They describe
 // the same full clone of the default branch the hub makes for the project's
-// own workspace (cloneSharedWorkspaceProject).
+// own workspace (cloneSharedWorkspaceProject), with TokenRemote set to the
+// project's recorded git remote so the git token is offered only to a clone
+// of that remote.
 //
 // They are sent to the broker separately from AppliedConfig.GitClone, which
 // stays nil for these projects: GitClone would make the broker clone into a
@@ -419,7 +421,7 @@ func sharedWorkspaceCloneConfig(project *store.Project) *api.GitCloneConfig {
 		return nil
 	}
 	fullClone := 0
-	return &api.GitCloneConfig{URL: cloneURL, Branch: branch, Depth: &fullClone}
+	return &api.GitCloneConfig{URL: cloneURL, Branch: branch, Depth: &fullClone, TokenRemote: project.GitRemote}
 }
 
 // deriveAgentConfig is create's whole config-resolution pipeline, run after

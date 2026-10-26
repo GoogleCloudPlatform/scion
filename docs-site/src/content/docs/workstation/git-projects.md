@@ -42,6 +42,8 @@ Scion provides two ways to authenticate with GitHub for your projects:
 
 :::caution
 Do not put a token in the repository URL. The Hub stores a project's git remote without credentials, and refuses a `scion.dev/clone-url` label that contains a username, password, token, query string, or fragment (`400`). If an existing project relied on a token embedded in its clone URL, move that token to a `GITHUB_TOKEN` project secret or use the GitHub App.
+
+An agent's clone uses the git token only for the project's own git remote. When a `scion.dev/clone-url` label names another host or repository (a mirror, for example), the agent clones it without the token, so the mirror must allow anonymous HTTPS clones.
 :::
 
 ### Option A: GitHub App Integration

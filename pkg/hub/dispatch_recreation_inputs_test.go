@@ -138,7 +138,10 @@ func TestDispatchAgentRestart_CarriesStartInputs(t *testing.T) {
 	extras := f.client.lastRestartExtras
 	assert.Equal(t, "/home/user/projects/rec/.scion", extras.ProjectPath)
 	assert.Empty(t, extras.ProjectSlug, "a provider path is sent instead of the slug")
-	assert.Same(t, f.gitClone, extras.Workspace.GitClone)
+	require.NotNil(t, extras.Workspace.GitClone)
+	assert.Equal(t, f.gitClone.URL, extras.Workspace.GitClone.URL)
+	assert.Equal(t, "https://github.com/example/repo.git", extras.Workspace.GitClone.TokenRemote,
+		"the token remote is the project's recorded remote")
 	assert.Equal(t, "feature-branch", extras.Workspace.Branch)
 	assert.Equal(t, store.WorkspaceModeWorktreePerAgent, extras.Workspace.WorkspaceMode)
 	assert.Equal(t, "web-dev", extras.TemplateName)
