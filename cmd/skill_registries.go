@@ -250,8 +250,16 @@ func runRegistriesRemove(cmd *cobra.Command, args []string) error {
 var registriesPinCmd = &cobra.Command{
 	Use:   "pin <name-or-id> <skill-uri>",
 	Short: "Pin a skill hash for a registry",
-	Args:  cobra.ExactArgs(2),
-	RunE:  runRegistriesPin,
+	Long: `Pin the content hash a skill from a pinned-trust registry must have.
+
+The hash is either form of a skill's content hash: the "Content Hash"
+(file contents only) or, from a hub with the hub.skill_content_hash_v2
+experiment on, the "Content Hash v2" (file contents, paths and executable
+bits), both shown by 'scion skills resolve'. A v2 pin also rejects a skill
+whose files were renamed or had their executable bit changed. A hub with
+that experiment off matches the content hash only.`,
+	Args: cobra.ExactArgs(2),
+	RunE: runRegistriesPin,
 }
 
 func runRegistriesPin(cmd *cobra.Command, args []string) error {
@@ -315,5 +323,5 @@ func init() {
 	registriesUpdateCmd.Flags().String("resolve-path", "", "Custom resolve endpoint path")
 
 	// Flags for pin command
-	registriesPinCmd.Flags().String("hash", "", "Content hash to pin (required, e.g., sha256:...)")
+	registriesPinCmd.Flags().String("hash", "", "Content hash or content hash v2 to pin (required, e.g., sha256:...)")
 }
