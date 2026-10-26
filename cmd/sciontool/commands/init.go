@@ -3629,7 +3629,10 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 		configureCmd = func(cmd *exec.Cmd) {}
 	}
 
-	runGitConfig := func(args ...string) {
+	// gitConfig runs `git config --file gitconfigPath args...`. With absentOK, a
+	// run that exits 5 (`--unset-all` of a key that is not set) is not a
+	// failure.
+	gitConfig := func(absentOK bool, args ...string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		gitPath, rerr := rootexec.Resolve("git")
@@ -3643,12 +3646,17 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 		cmd := exec.CommandContext(ctx, gitPath, append([]string{"config", "--file", gitconfigPath}, args...)...)
 		configureCmd(cmd)
 		if out, cerr := procreap.CombinedOutputManaged(cmd); cerr != nil {
+			var exitErr *exec.ExitError
+			if absentOK && errors.As(cerr, &exitErr) && exitErr.ExitCode() == 5 {
+				return
+			}
 			log.Error("Failed to run git config %v: %s %v", args, string(out), cerr)
 			if gitConfigFailureHook != nil {
 				gitConfigFailureHook(args, cerr)
 			}
 		}
 	}
+	runGitConfig := func(args ...string) { gitConfig(false, args...) }
 
 	// Configure credential helper using sciontool's credential-helper command,
 	// which handles both GITHUB_TOKEN env var and GitHub App token refresh.
@@ -3660,8 +3668,20 @@ func configureSharedWorkspaceGit(agentHome string, uid, gid int, requirePrivileg
 		// Simple credential helper using GITHUB_TOKEN env var
 		credentialHelper = provision.GitTokenCredentialHelper
 	}
-	// This is idempotent and works even if provisioning already set it.
-	runGitConfig("credential.helper", credentialHelper)
+	// The helper is scoped to the host of the project's recorded git remote
+	// (api.EnvGitTokenRemote, which the broker relays from the hub's project
+	// record): credential.https://<host>.helper. It is never scoped to the
+	// clone-url label or the shared workspace's own origin, which agents can
+	// write. An unscoped credential.helper (written by an earlier version) is
+	// removed first; without a recorded remote no helper is configured.
+	// Replacing all values keeps this idempotent when provisioning already
+	// wrote the same key.
+	gitConfig(true, "--unset-all", "credential.helper")
+	if scope, ok := provision.TokenRemoteCredentialScope(os.Getenv(api.EnvGitTokenRemote)); ok {
+		runGitConfig("--replace-all", "credential."+scope+".helper", credentialHelper)
+	} else {
+		log.Warn("No recorded git remote for the shared workspace; no git credential helper configured")
+	}
 
 	// Configure git identity for the agent
 	agentName := os.Getenv("SCION_AGENT_NAME")

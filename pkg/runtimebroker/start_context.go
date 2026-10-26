@@ -1078,6 +1078,13 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		if gc := in.Config.SharedWorkspaceClone; gc != nil && gc.URL != "" && in.Config.GitClone == nil {
 			gcCopy := *gc
 			opts.SharedWorkspaceClone = &gcCopy
+			// The project's recorded remote, as the hub sent it: the agent's
+			// git credential helper is scoped to its host (sciontool init,
+			// configureSharedWorkspaceGit), never to the clone URL's.
+			if gc.TokenRemote != "" {
+				env[api.EnvGitTokenRemote] = gc.TokenRemote
+				classifyBrokerEnv(api.EnvGitTokenRemote, api.EnvKindPlain)
+			}
 		}
 	}
 

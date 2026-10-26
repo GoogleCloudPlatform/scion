@@ -127,8 +127,9 @@ var execAuditSymbolAllowlist = map[string]map[string]bool{
 	// agent's gitconfig); no exec.Cmd is reachable through it.
 	// CloneTokenAllowed (pkg/provision/host_git.go) only parses the clone URL
 	// (url.Parse) and compares normalized remotes (cloneTokenHost,
-	// util.NormalizeGitRemote): no exec.Cmd and no I/O.
-	"pkg/provision": {"GitTokenCredentialHelper": true, "CloneTokenAllowed": true},
+	// util.NormalizeGitRemote); TokenRemoteCredentialScope (same file) only
+	// normalizes and checks a remote string: no exec.Cmd and no I/O.
+	"pkg/provision": {"GitTokenCredentialHelper": true, "CloneTokenAllowed": true, "TokenRemoteCredentialScope": true},
 }
 
 // execAuditTrustedDir is excluded from scanning outright rather than via

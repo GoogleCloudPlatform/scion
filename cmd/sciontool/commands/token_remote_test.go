@@ -339,3 +339,130 @@ func TestProvisionCloneToken(t *testing.T) {
 		})
 	}
 }
+
+// --- shared workspace (sciontool init, configureSharedWorkspaceGit) ---
+
+// The shared workspace's credential helper is scoped to the host of the
+// project's recorded remote (api.EnvGitTokenRemote), never left unscoped: an
+// unscoped helper an earlier version wrote is removed, and without a
+// recorded remote no helper is configured at all.
+func TestConfigureSharedWorkspaceGit_HelperScopedToTokenRemote(t *testing.T) {
+	var failures []string
+	old := gitConfigFailureHook
+	gitConfigFailureHook = func(args []string, err error) { failures = append(failures, strings.Join(args, " ")) }
+	t.Cleanup(func() { gitConfigFailureHook = old })
+
+	for _, tc := range []struct {
+		name, remote, wantKey string
+	}{
+		{"recorded remote", "github.com/org/shared", "credential.https://github.com.helper"},
+		{"recorded remote with a port", "ghe.example.com:8443/team/app", "credential.https://ghe.example.com:8443.helper"},
+		{"no recorded remote", "", ""},
+		{"remote without a repository", "github.com", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			failures = nil
+			agentHome := t.TempDir()
+			gitconfigPath := filepath.Join(agentHome, ".gitconfig")
+			// An unscoped helper, as an earlier version left it.
+			if err := os.WriteFile(gitconfigPath, []byte("[credential]\n\thelper = !old-helper\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(api.EnvGitTokenRemote, tc.remote)
+			if err := configureSharedWorkspaceGit(agentHome, 0, 0, false); err != nil {
+				t.Fatalf("configureSharedWorkspaceGit: %v", err)
+			}
+			if got := gitConfigGet(t, gitconfigPath, "credential.helper"); got != "" {
+				t.Errorf("an unscoped credential.helper is still configured: %q", got)
+			}
+			data, err := os.ReadFile(gitconfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantKey == "" {
+				if strings.Contains(string(data), "helper") {
+					t.Errorf("no credential helper may be configured, got:\n%s", data)
+				}
+			} else if got := gitConfigGet(t, gitconfigPath, tc.wantKey); got == "" {
+				t.Errorf("%s not configured, got:\n%s", tc.wantKey, data)
+			}
+			if len(failures) != 0 {
+				t.Errorf("git config failures: %v", failures)
+			}
+		})
+	}
+}
+
+// End to end: with the agent's .gitconfig from configureSharedWorkspaceGit,
+// git offers the token to the recorded remote's host only. A shared
+// workspace whose origin is a clone-url label naming another host is never
+// sent the token.
+func TestConfigureSharedWorkspaceGit_TokenOnlyToRecordedRemoteHost(t *testing.T) {
+	root := t.TempDir()
+	bare := tokenRemoteBareRepo(t, root)
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("git is required: %v", err)
+	}
+
+	fetch := func(t *testing.T, tokenRemote, originURL string) error {
+		t.Helper()
+		agentHome := t.TempDir()
+		t.Setenv(api.EnvGitTokenRemote, tokenRemote)
+		if err := configureSharedWorkspaceGit(agentHome, 0, 0, false); err != nil {
+			t.Fatalf("configureSharedWorkspaceGit: %v", err)
+		}
+		ws := filepath.Join(t.TempDir(), "ws")
+		run := func(args ...string) error {
+			c := exec.Command(gitPath, args...)
+			c.Env = append(os.Environ(),
+				"GIT_CONFIG_GLOBAL="+filepath.Join(agentHome, ".gitconfig"),
+				"GIT_TERMINAL_PROMPT=0",
+				"GITHUB_TOKEN="+tokenRemoteTestToken)
+			out, err := c.CombinedOutput()
+			if err != nil && strings.Contains(string(out), tokenRemoteTestToken) {
+				t.Errorf("git output carries the token: %s", out)
+			}
+			return err
+		}
+		if err := run("init", "-q", ws); err != nil {
+			t.Fatalf("git init: %v", err)
+		}
+		if err := run("-C", ws, "remote", "add", "origin", originURL); err != nil {
+			t.Fatalf("git remote add: %v", err)
+		}
+		return run("-C", ws, "fetch", "-q", "origin", "main")
+	}
+
+	t.Run("recorded remote's host gets the token", func(t *testing.T) {
+		record := newTokenGitServer(t, bare, true)
+		if err := fetch(t, record.remote, record.url); err != nil {
+			t.Fatalf("fetch from the recorded remote: %v", err)
+		}
+		if !record.sawToken.Load() {
+			t.Error("the recorded remote's host must be offered the token")
+		}
+	})
+
+	for _, tc := range []struct {
+		name   string
+		remote func(record *tokenGitServer) string
+	}{
+		{"origin on a label naming another host", func(r *tokenGitServer) string { return r.remote }},
+		{"no recorded remote", func(*tokenGitServer) string { return "" }},
+	} {
+		t.Run(tc.name+" gets no token", func(t *testing.T) {
+			record := newTokenGitServer(t, bare, true)
+			other := newTokenGitServer(t, bare, true)
+			if err := fetch(t, tc.remote(record), other.url); err == nil {
+				t.Fatal("a private repository fetched without a credential must fail")
+			}
+			if other.requests.Load() == 0 {
+				t.Fatal("fixture check: git never reached the server")
+			}
+			if other.sawToken.Load() {
+				t.Error("the token was sent to a host other than the recorded remote's")
+			}
+		})
+	}
+}

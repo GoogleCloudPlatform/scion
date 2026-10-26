@@ -1059,6 +1059,24 @@ func IsSharedWorkspaceFromContext(ctx context.Context) bool {
 	return v
 }
 
+type gitTokenRemoteContextKey struct{}
+
+// ContextWithGitTokenRemote attaches the project's recorded git remote of a
+// shared-plain workspace (StartOptions.SharedWorkspaceClone.TokenRemote, as
+// the hub sent it). Provisioning scopes the agent's git credential helper to
+// this remote's host (provision.TokenRemoteCredentialScope), never to the
+// clone-url label or the workspace's own git config.
+func ContextWithGitTokenRemote(ctx context.Context, remote string) context.Context {
+	return context.WithValue(ctx, gitTokenRemoteContextKey{}, remote)
+}
+
+// GitTokenRemoteFromContext returns the remote ContextWithGitTokenRemote
+// attached, or "" when there is none.
+func GitTokenRemoteFromContext(ctx context.Context) string {
+	s, _ := ctx.Value(gitTokenRemoteContextKey{}).(string)
+	return s
+}
+
 type hubProjectIDContextKey struct{}
 
 // ContextWithHubProjectID attaches the Hub-supplied project ID of a broker

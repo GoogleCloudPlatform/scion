@@ -3361,12 +3361,13 @@ func TestConfigureSharedWorkspaceGit_WithoutRunScionAvailable(t *testing.T) {
 		t.Skip("/run/scion exists in this environment; this test wants to prove it is not needed, not that it is absent")
 	}
 	agentHome := t.TempDir()
+	t.Setenv(api.EnvGitTokenRemote, "github.com/org/shared")
 	if err := configureSharedWorkspaceGit(agentHome, 0, 0, false); err != nil {
 		t.Fatalf("configureSharedWorkspaceGit: %v", err)
 	}
 	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
-	if got := gitConfigGet(t, gitconfigPath, "credential.helper"); got == "" {
-		t.Error("credential.helper is empty; expected it to be configured without /run/scion available")
+	if got := gitConfigGet(t, gitconfigPath, "credential.https://github.com.helper"); got == "" {
+		t.Error("credential helper is empty; expected it to be configured without /run/scion available")
 	}
 }
 
@@ -3577,6 +3578,7 @@ func TestConfigureSharedWorkspaceGit_UsablePairWritesConfig(t *testing.T) {
 	if uid <= 0 || gid <= 0 {
 		t.Skipf("test process uid/gid %d/%d is not a usable pair", uid, gid)
 	}
+	t.Setenv(api.EnvGitTokenRemote, "github.com/org/shared")
 	for _, enforced := range []bool{false, true} {
 		t.Run(fmt.Sprintf("enforced=%v", enforced), func(t *testing.T) {
 			agentHome := t.TempDir()
@@ -3587,8 +3589,8 @@ func TestConfigureSharedWorkspaceGit_UsablePairWritesConfig(t *testing.T) {
 			if got := gitConfigGet(t, gitconfig, "user.email"); got != "agent@scion.dev" {
 				t.Errorf("user.email = %q, want agent@scion.dev", got)
 			}
-			if got := gitConfigGet(t, gitconfig, "credential.helper"); got == "" {
-				t.Error("credential.helper not written")
+			if got := gitConfigGet(t, gitconfig, "credential.https://github.com.helper"); got == "" {
+				t.Error("credential helper not written")
 			}
 		})
 	}

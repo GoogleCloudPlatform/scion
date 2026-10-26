@@ -154,3 +154,34 @@ func TestTokenRemote_SharedWorkspaceCloneKeepsTokenRemote(t *testing.T) {
 	require.NotNil(t, sc.Opts.SharedWorkspaceClone)
 	assert.Equal(t, relayTokenRemote, sc.Opts.SharedWorkspaceClone.TokenRemote)
 }
+
+// A shared-plain project's agent gets the hub's token remote in its env, so
+// sciontool init scopes the shared workspace's credential helper to the
+// recorded remote's host; without one it gets none.
+func TestTokenRemote_SharedWorkspaceEnv(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+	build := func(tokenRemote string) map[string]string {
+		t.Helper()
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name:        "agent-1",
+			ProjectPath: "/some/path",
+			Config: &CreateAgentConfig{
+				Workspace:       t.TempDir(),
+				SharedWorkspace: true,
+				Env:             []string{api.EnvGitTokenRemote + "=mirror.example/org/shared"},
+				SharedWorkspaceClone: &api.GitCloneConfig{
+					URL:         "https://mirror.example/org/shared.git",
+					TokenRemote: tokenRemote,
+				},
+			},
+			HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
+			Operation:   opCreate,
+		})
+		require.NoError(t, err)
+		return sc.Opts.Env
+	}
+	assert.Equal(t, relayTokenRemote, build(relayTokenRemote)[api.EnvGitTokenRemote])
+	assert.NotContains(t, build(""), api.EnvGitTokenRemote, "no token remote without the hub's; the request env entry is dropped")
+}

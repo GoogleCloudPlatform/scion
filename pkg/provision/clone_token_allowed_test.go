@@ -54,3 +54,34 @@ func TestCloneTokenAllowed(t *testing.T) {
 		})
 	}
 }
+
+// TokenRemoteCredentialScope scopes a credential helper to the recorded
+// remote's https host, and refuses a remote it cannot scope safely.
+func TestTokenRemoteCredentialScope(t *testing.T) {
+	for _, tc := range []struct {
+		remote, want string
+		ok           bool
+	}{
+		{"github.com/org/repo", "https://github.com", true},
+		{"GitHub.com/Org/Repo", "https://github.com", true},
+		{"https://github.com/org/repo.git", "https://github.com", true},
+		{"git@github.com:org/repo.git", "https://github.com", true},
+		{"ghe.example.com:8443/team/app", "https://ghe.example.com:8443", true},
+		{"", "", false},
+		{"github.com", "", false},
+		{"github.com/", "", false},
+		{`git"x.example/org/repo`, "", false},
+		{"a;b.example/org/repo", "", false},
+		{"a]b.example/org/repo", "", false},
+		{"[::1]:8443/org/repo", "https://[::1]:8443", true},
+		{"[::1]x/org/repo", "", false},
+		{"[1.2.3.4]/org/repo", "", false},
+		{"-x.example/org/repo", "", false},
+		{"host with space/org/repo", "", false},
+	} {
+		got, ok := TokenRemoteCredentialScope(tc.remote)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("TokenRemoteCredentialScope(%q) = %q, %v; want %q, %v", tc.remote, got, ok, tc.want, tc.ok)
+		}
+	}
+}

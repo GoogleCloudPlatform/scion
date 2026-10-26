@@ -16,6 +16,7 @@ package provision
 
 import (
 	"errors"
+	"net"
 	"net/url"
 	"strings"
 
@@ -138,6 +139,50 @@ func remoteHelperForm(raw string) bool {
 func CloneTokenAllowed(tokenRemote, cloneURL string) bool {
 	_, ok := cloneTokenHost(tokenRemote, cloneURL)
 	return ok
+}
+
+// TokenRemoteCredentialScope returns the URL a git credential helper for the
+// project's git token is scoped to (credential.<scope>.helper):
+// "https://<host>" for the host of the recorded remote tokenRemote
+// (util.NormalizeGitRemote form, host/owner/repo, or an https URL). It
+// reports false, and no helper may be configured, when tokenRemote is empty,
+// has no owner/repo path, or its host is not a plain DNS name, IPv4 address
+// or bracketed IPv6 address with an optional port (anything that could break
+// out of the config subsection). The scope always comes from the project
+// record, never from a clone URL, a label or a repository's own git config.
+func TokenRemoteCredentialScope(tokenRemote string) (string, bool) {
+	remote := util.NormalizeGitRemote(tokenRemote)
+	host, path, ok := strings.Cut(remote, "/")
+	if !ok || host == "" || path == "" {
+		return "", false
+	}
+	host = strings.ToLower(host)
+	for _, c := range host {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '.' || c == '-' || c == ':' || c == '[' || c == ']') {
+			return "", false
+		}
+	}
+	if strings.HasPrefix(host, "-") || strings.HasPrefix(host, ".") {
+		return "", false
+	}
+	// Brackets only around an IPv6 literal, optionally followed by a port.
+	if strings.ContainsAny(host, "[]") {
+		end := strings.Index(host, "]")
+		if !strings.HasPrefix(host, "[") || end < 0 || strings.ContainsAny(host[end+1:], "[]") {
+			return "", false
+		}
+		if ip := net.ParseIP(host[1:end]); ip == nil || ip.To4() != nil {
+			return "", false
+		}
+		if rest := host[end+1:]; rest != "" && !strings.HasPrefix(rest, ":") {
+			return "", false
+		}
+	}
+	u, err := url.Parse("https://" + host + "/")
+	if err != nil || u.Host != host {
+		return "", false
+	}
+	return "https://" + host, true
 }
 
 // cloneTokenHost returns the host a project's git token may be offered to
