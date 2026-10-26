@@ -157,12 +157,14 @@ scion secret list
 scion secret get ANTHROPIC_API_KEY
 ```
 
+`scion secret get --value KEY` prints the secret's value instead, which only works inside an agent container (see [Agent Runtime Secret Retrieval](#agent-runtime-secret-retrieval) below).
+
 :::tip[Graceful Raw vs. Base64 Fallback]
 To prevent silent integration failures (such as when the web UI sends raw plaintext but the underlying REST endpoint accepts base64), all four of Scion's secret-write API handlers (Hub, User, Project, and Broker scopes) feature a **graceful fallback mechanism**.
 
 When writing a secret, the Hub checks if the payload is a valid base64-encoded string. If it is, the Hub decodes it back to raw bytes before encrypting. If it is not valid base64 (or if decoding fails), the Hub gracefully falls back to treating the payload as raw plaintext. This ensures that both base64-encoded binary payloads (e.g. key files) and raw plaintext API keys are accepted reliably.
 
-To prevent accidental base64-decoding when setting plaintext secrets that happen to look like valid base64 (e.g., specific API keys), the CLI commands `scion hub secret set` and `scion secret set` explicitly send `encoding: raw` to bypass server-side base64 validation and ensure the secret is stored exactly as typed.
+To prevent accidental base64-decoding when setting plaintext secrets that happen to look like valid base64 (e.g., specific API keys), `scion hub secret set` explicitly sends `encoding: raw` for plaintext values to bypass server-side base64 validation and ensure the secret is stored exactly as typed. `scion secret set` instead base64-encodes every value on the client (file contents from `@file` included), so the Hub decodes it back to exactly the bytes given.
 :::
 
 **Interactive Secrets-Gather:**
@@ -226,31 +228,29 @@ Once set, every agent that starts will have the credential file mounted at `~/.s
 
 While environment and file-based injection deliver secrets at agent startup, Scion also supports **dynamic runtime secret retrieval** from inside the agent container. This enables harnesses or scripts to request project-scoped secrets programmatically as-needed, reducing initial environment exposure.
 
-This runtime retrieval is accessible either via the `sciontool` helper utility or directly through the Hub API.
+This runtime retrieval is accessible either via the `scion` CLI or directly through the Hub API.
 
-#### Using `sciontool`
-From inside an agent container, use the `sciontool secret` command suite:
+#### Using the `scion` CLI inside an agent
+From inside an agent container, read secrets with `scion secret`. The calls are made as the agent, with its own hub identity:
 
-*   **List Available Secrets**: Lists metadata (keys, types, and injection targets) for all secrets in the agent's project. Sensitive values are omitted.
+*   **List Available Secrets**: Lists metadata (keys, types, versions and update times) for all secrets in the agent's project. Values are omitted.
     ```bash
-    sciontool secret list
-    ```
-    *Output:*
-    ```text
-    KEY              TYPE         TARGET
-    ---              ----         ------
-    MY_API_KEY       environment  MY_API_KEY
-    CLAUDE_AUTH      file         ~/.claude/.credentials.json
+    scion secret list
     ```
 
-*   **Retrieve a Secret Value**: Decodes and outputs the raw bytes of a specific secret to stdout (ideal for piping or scripting).
+*   **Retrieve a Secret Value**: Decodes and writes the raw bytes of a specific secret to stdout, with no added newline (ideal for piping or scripting).
     ```bash
-    sciontool secret get MY_API_KEY
+    scion secret get --value MY_API_KEY
     ```
     *Example script usage:*
     ```bash
-    export API_KEY=$(sciontool secret get MY_API_KEY)
+    export API_KEY=$(scion secret get --value MY_API_KEY)
     ```
+    Without `--value`, `scion secret get MY_API_KEY` prints the secret's metadata.
+
+`sciontool secret get` has moved to `scion secret get --value`, and `sciontool secret list` to `scion secret list`; the old commands now print a message naming the `scion` command and exit `1`.
+
+#### Writing secrets with `sciontool`
 
 *   **Set a Secret**: You can write/update secrets from inside the container to persist credentials discovered or generated at runtime. Secrets can be scoped to either the **project** (visible to all agents in the project) or the **user** (personal secrets visible only to your own agents):
     ```bash
