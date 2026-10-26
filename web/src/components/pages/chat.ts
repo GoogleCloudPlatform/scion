@@ -107,7 +107,8 @@ import {
 import { openTerminal, terminalHref, agentGraphHref } from '../../client/open-terminal.js';
 import { hasOpenModalDescendant, isOpenModalElement } from '../shared/open-modal.js';
 import { deepActiveElement } from '../shared/deep-active-element.js';
-import { PaletteTypeahead } from '../shared/palette/palette-typeahead.js';
+import { PaletteTypeahead, primaryPointerIsTouch } from '../shared/palette/palette-typeahead.js';
+import type { ScionQuickPalette } from '../shared/palette/quick-palette.js';
 import '../shared/chat/chat-thread.js';
 import type { PeerAgentResolvedDetail } from '../shared/chat/chat-thread.js';
 import { ChatPanelHistory, type ChatPanel } from './chat-panel-history.js';
@@ -164,6 +165,10 @@ const MEMBERS_WIDTH_KEY = 'scion.chat.membersWidth';
 const loadChatSearch = () => import('../shared/chat/chat-search.js');
 // Lazy-load the quick switcher component on first Cmd+K press
 const loadQuickPalette = () => import('../shared/palette/quick-palette.js');
+/** Longest wait for an idle moment before the quick switcher preloads on a touch device. */
+const PALETTE_PRELOAD_IDLE_TIMEOUT_MS = 5000;
+/** When the quick switcher preloads on a touch device without requestIdleCallback. */
+const PALETTE_PRELOAD_FALLBACK_DELAY_MS = 2500;
 
 /**
  * How long a successfully-loaded People or Threads group stays fresh across
@@ -457,6 +462,15 @@ function dmListSignature(dms: readonly ChatDMListEntry[]): string {
       ].join('\u0000')
     )
     .join('\u0001');
+}
+
+/**
+ * Whether a `pointerType` is a finger or a pen: a press that should hold the
+ * on-screen keyboard. A pen counts because stylus phones are among those that
+ * report hover support.
+ */
+function isTapPointer(type: string | undefined): boolean {
+  return type === 'touch' || type === 'pen';
 }
 
 @customElement('scion-page-chat')
@@ -784,7 +798,29 @@ export class ScionPageChat extends LitElement {
    * {@link PaletteTypeahead}). Started in `_openPalette`, before the
    * first open's lazy import, or when a press queues a reopen.
    */
-  private readonly _paletteTypeahead = new PaletteTypeahead();
+  private readonly _paletteTypeahead = new PaletteTypeahead({
+    holdsKeyboard: () => this._paletteOpenByTouch || primaryPointerIsTouch(),
+  });
+  /**
+   * True only while a quick-switcher button tapped with a finger or a pen sends its
+   * open request (see `_handlePaletteFooterClick`), so the type-ahead holds
+   * the on-screen keyboard for that tap even on a phone that does not match
+   * the touch-primary query: several Android phones report hover support or
+   * a fine pointer. Without the hidden field taking focus inside the tap,
+   * the query input takes focus only after the palette shows, too late for
+   * the browser to open the keyboard.
+   */
+  private _paletteOpenByTouch = false;
+  /** Imports the quick switcher module (a field, so a test can make it fail). */
+  private _loadQuickPalette: () => Promise<unknown> = loadQuickPalette;
+  /** Cancels the idle-time preload of the quick switcher, while one is scheduled. */
+  private _cancelPalettePreload: (() => void) | null = null;
+  /**
+   * The `pointerType` of the latest `pointerdown` on a quick-switcher button,
+   * cleared by its click or a `pointercancel`. Read only for a click that
+   * carries no `pointerType` of its own.
+   */
+  private _paletteFooterPointerType = '';
   /**
    * Bumped synchronously at the start of every `_openPalette` call (fresh or
    * dequeued). `_retargetPaletteInvokerToNewComposer` captures this value
@@ -1821,6 +1857,7 @@ export class ScionPageChat extends LitElement {
     // Created wide on top of entries made in the mobile layout: drop back to
     // the first of them (see ChatPanelHistory.toBase).
     if (!this.isMobileLayout && this._isOnChatRoute()) this._panelHistory.toBase();
+    this._schedulePalettePreload();
     this.restoreMembersWidth();
     // Restore persisted layout density preference.
     try {
@@ -1879,6 +1916,8 @@ export class ScionPageChat extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    this._cancelPalettePreload?.();
+    this._cancelPalettePreload = null;
     chatUnread.setSource(null);
     ++this._unreadDMRequestId;
     ++this._userNavSeq;
@@ -5015,6 +5054,37 @@ export class ScionPageChat extends LitElement {
   }
 
   /**
+   * On a touch-primary device, imports and mounts the quick switcher (closed)
+   * once the page is idle, so a tap can open it and focus its query input
+   * inside the tap (see `_openPalette`). Elsewhere it still loads on its
+   * first open, so a desktop first load does not fetch it.
+   */
+  private _schedulePalettePreload(): void {
+    if (this.v2SwitcherLoaded || this._cancelPalettePreload || !primaryPointerIsTouch()) return;
+    const run = (): void => {
+      this._cancelPalettePreload = null;
+      if (!this.isConnected || this.v2SwitcherLoaded) return;
+      this._loadQuickPalette().then(
+        () => {
+          if (this.isConnected) this.v2SwitcherLoaded = true;
+        },
+        // The first open imports it again, and fails loudly if it still can't.
+        (err: unknown) => console.debug('[chat] quick switcher preload failed', err)
+      );
+    };
+    const idle = (window as { requestIdleCallback?: typeof requestIdleCallback })
+      .requestIdleCallback;
+    if (typeof idle === 'function') {
+      const handle = idle(run, { timeout: PALETTE_PRELOAD_IDLE_TIMEOUT_MS });
+      this._cancelPalettePreload = () => window.cancelIdleCallback(handle);
+    } else {
+      // Safari has no requestIdleCallback.
+      const timer = setTimeout(run, PALETTE_PRELOAD_FALLBACK_DELAY_MS);
+      this._cancelPalettePreload = () => clearTimeout(timer);
+    }
+  }
+
+  /**
    * A queued reopen is an open request too: keys typed until it runs become
    * its query. Cancelling the queue stops the capture.
    */
@@ -5039,8 +5109,9 @@ export class ScionPageChat extends LitElement {
       // focus to a hidden field that holds the on-screen keyboard.
       if (!options.skipInvokerCapture) this._capturePaletteInvokerFocus();
       this._paletteTypeahead.start();
+      const mountedAtStart = this.v2SwitcherLoaded;
       if (!this.v2SwitcherLoaded) {
-        await loadQuickPalette();
+        await this._loadQuickPalette();
         this.v2SwitcherLoaded = true;
         // Let <scion-quick-palette> mount and render with open=false first.
         // Shoelace's dialog reacts to `open` transitioning false -> true to
@@ -5055,6 +5126,14 @@ export class ScionPageChat extends LitElement {
         return;
       }
       this.v2PaletteOpen = true;
+      // A tap with the palette already mounted (this call has not awaited
+      // anything): open it and focus its query input now, inside the tap,
+      // which is the only focus a home-screen web app on iOS opens the
+      // on-screen keyboard for. A first tap before the palette loaded keeps
+      // the hidden field that the type-ahead focused above.
+      if (this._paletteOpenByTouch && mountedAtStart) {
+        (this._switcherEl as ScionQuickPalette | undefined)?.openAndFocusNow();
+      }
       this._startPaletteVisibilityWatchdog();
       this._loadPaletteGroupsOnOpen();
     } catch (err) {
@@ -6328,6 +6407,8 @@ export class ScionPageChat extends LitElement {
           aria-haspopup="dialog"
           aria-keyshortcuts=${isTouch ? nothing : keyShortcuts}
           title=${isTouch ? nothing : `Quick switcher (${shortcutLabel})`}
+          @pointerdown=${this._handlePaletteFooterPointerDown}
+          @pointercancel=${this._handlePaletteFooterPointerCancel}
           @click=${this._handlePaletteFooterClick}
         >
           <sl-icon name="compass" aria-hidden="true"></sl-icon>
@@ -6349,10 +6430,34 @@ export class ScionPageChat extends LitElement {
    */
   private _handlePaletteFooterClick(e: Event): void {
     const btn = e.currentTarget as HTMLElement;
+    // A click is a PointerEvent with its own pointerType in current engines
+    // ('' for one raised by Enter or Space). Only a click that is not one
+    // falls back to the latest pointerdown, and only if it came from a
+    // pointer (detail 0 marks a keyboard click).
+    const clickType = (e as Partial<PointerEvent>).pointerType;
+    const byTouch =
+      clickType !== undefined
+        ? isTapPointer(clickType)
+        : (e as MouseEvent).detail > 0 && isTapPointer(this._paletteFooterPointerType);
+    this._paletteFooterPointerType = '';
     btn.focus({ preventScroll: true });
-    btn.dispatchEvent(
-      new CustomEvent(CHAT_PALETTE_OPEN_REQUEST_EVENT, { bubbles: true, composed: true })
-    );
+    this._paletteOpenByTouch = byTouch;
+    try {
+      btn.dispatchEvent(
+        new CustomEvent(CHAT_PALETTE_OPEN_REQUEST_EVENT, { bubbles: true, composed: true })
+      );
+    } finally {
+      this._paletteOpenByTouch = false;
+    }
+  }
+
+  private _handlePaletteFooterPointerDown(e: PointerEvent): void {
+    this._paletteFooterPointerType = e.pointerType;
+  }
+
+  /** A cancelled press (the page scrolled, the finger slid away) never clicks. */
+  private _handlePaletteFooterPointerCancel(): void {
+    this._paletteFooterPointerType = '';
   }
 
   /** The left rail: the space rail once loaded, else a spinner or a load error. */
