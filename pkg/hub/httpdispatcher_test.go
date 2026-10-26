@@ -1903,8 +1903,14 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_CarriesWorkspaceDispatchMetadata
 	}
 
 	ws := mockClient.lastStartExtras.Workspace
-	if ws.GitClone != gitClone {
-		t.Errorf("expected StartExtras.Workspace.GitClone=%+v, got %+v", gitClone, ws.GitClone)
+	// The dispatched GitClone is the stored one plus the project's recorded
+	// remote as its token remote (withTokenRemote); the stored config is
+	// not modified.
+	if ws.GitClone == nil || ws.GitClone.URL != gitClone.URL || ws.GitClone.TokenRemote != "https://github.com/example/repo.git" {
+		t.Errorf("expected StartExtras.Workspace.GitClone=%+v with TokenRemote %q, got %+v", gitClone, "https://github.com/example/repo.git", ws.GitClone)
+	}
+	if gitClone.TokenRemote != "" {
+		t.Errorf("the stored GitClone was modified: %+v", gitClone)
 	}
 	if ws.Branch != "feature-branch" {
 		t.Errorf("expected StartExtras.Workspace.Branch=%q, got %q", "feature-branch", ws.Branch)
@@ -1975,8 +1981,11 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_RetryAfterHashMismatchCarriesWor
 		t.Fatalf("expected StartAgent to be called twice (fail then retry), got %d calls", mockClient.startCallCount)
 	}
 	ws := mockClient.lastStartExtras.Workspace
-	if ws.GitClone != gitClone {
-		t.Errorf("expected the retry's StartExtras.Workspace.GitClone=%+v, got %+v", gitClone, ws.GitClone)
+	if ws.GitClone == nil || ws.GitClone.URL != gitClone.URL || ws.GitClone.TokenRemote != "https://github.com/example/repo.git" {
+		t.Errorf("expected the retry's StartExtras.Workspace.GitClone=%+v with TokenRemote %q, got %+v", gitClone, "https://github.com/example/repo.git", ws.GitClone)
+	}
+	if gitClone.TokenRemote != "" {
+		t.Errorf("the stored GitClone was modified: %+v", gitClone)
 	}
 	if ws.Branch != "feature-branch" {
 		t.Errorf("expected the retry's StartExtras.Workspace.Branch=%q, got %q", "feature-branch", ws.Branch)

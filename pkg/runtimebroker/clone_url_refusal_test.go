@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -112,37 +113,89 @@ func TestCloneURLRefusal_Restart(t *testing.T) {
 	assert.Zero(t, mgr.startCalls, "the agent must not be started")
 }
 
-// The worktree-per-agent dispatches that fall back to the in-container clone
-// before provisioning runs (no project path for a host-side worktree, or a
-// Kubernetes dispatch, where host-side provisioning is skipped) refuse the
-// URL instead of falling back.
-func TestCloneURLRefusal_WorktreeFallback(t *testing.T) {
+// A worktree-per-agent dispatch refuses a clone URL provisioning refuses
+// before ANY route that uses it: the broker's own host-side worktree clone
+// (an eligible docker dispatch with a project path, whose host clone of a
+// local repository would otherwise succeed), and the dispatches that would
+// fall back to the in-container clone (no project path; a Kubernetes
+// dispatch, where host-side provisioning is skipped). Nothing is cloned on
+// the host.
+func TestCloneURLRefusal_WorktreePerAgent(t *testing.T) {
+	if eligible, reason := runtime.WorktreeModeEligible(); !eligible {
+		t.Fatalf("precondition: worktree mode must be eligible on this host (git >= 2.48): %s", reason)
+	}
 	for _, tc := range []struct {
-		name        string
-		runtime     string
-		projectPath string
+		name     string
+		runtime  string
+		hostPath bool
 	}{
-		{"no project path", "docker", ""},
-		{"kubernetes dispatch", "kubernetes", "/some/path"},
+		{"eligible host-side worktree", "docker", true},
+		{"no project path", "docker", false},
+		{"kubernetes dispatch", "kubernetes", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := DefaultServerConfig()
 			cfg.StateDir = t.TempDir()
 			srv := newTestServerForStartContextRuntime(t, cfg, tc.runtime)
+			projectPath := ""
+			if tc.hostPath {
+				projectPath = filepath.Join(t.TempDir(), "proj")
+				require.NoError(t, os.MkdirAll(projectPath, 0o755))
+			}
+			// A real local repository that is NOT a registered test fixture:
+			// provisioning refuses its path as a clone URL.
+			repo := unregisteredLocalRepo(t)
 			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
 				Name: "agent-1", AgentID: "agent-1", ProjectID: "p1", ProjectSlug: "proj",
-				ProjectPath:   tc.projectPath,
+				ProjectPath:   projectPath,
 				WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
-				Config:        &CreateAgentConfig{GitClone: &api.GitCloneConfig{URL: "file:///srv/refused.example/repo", Branch: "main"}},
+				Config:        &CreateAgentConfig{GitClone: &api.GitCloneConfig{URL: repo, Branch: "main"}},
 				HTTPRequest:   httptest.NewRequest("POST", "/api/v1/agents", nil),
 				Operation:     opCreate,
 			})
-			require.Nil(t, sc, "no start context may be built for a refused URL")
+			require.Nil(t, sc, "no start context may be built for a refused URL (the host-side worktree clone must not run)")
 			var sce *startContextError
 			require.ErrorAs(t, err, &sce)
-			assertCloneURLRefusal(t, sce.Status, sce.Message, "clone-per-agent")
+			assert.Equal(t, http.StatusUnprocessableEntity, sce.Status)
+			assert.Contains(t, sce.Message, "worktree-per-agent: "+provision.ErrHostCloneURLRefused.Error())
+			assert.NotContains(t, sce.Message, repo, "the refusal names no URL")
+			if tc.hostPath && tc.runtime == "docker" {
+				resolved, rerr := runtime.NewLocalBackend().Resolve(runtime.ResolveInput{
+					ProjectDir: projectPath, ProjectID: "p1", AgentID: "agent-1",
+					Mode: store.SharingModeWorktreePerAgent,
+				})
+				require.NoError(t, rerr)
+				_, statErr := os.Stat(filepath.Join(resolved.HostPath, ".git"))
+				assert.True(t, os.IsNotExist(statErr), "the shared base must not have been cloned on the host (stat error: %v)", statErr)
+			}
 		})
 	}
+}
+
+// unregisteredLocalRepo creates a local git repository with one commit on
+// main, NOT registered with provision.AllowLocalCloneFixture, and returns its
+// path. git must be installed: the test fails without it.
+func unregisteredLocalRepo(t *testing.T) string {
+	t.Helper()
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("git is required: %v", err)
+	}
+	dir := filepath.Join(t.TempDir(), "local-repo")
+	run := func(args ...string) {
+		t.Helper()
+		c := exec.Command(gitPath, args...)
+		c.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_SYSTEM="+os.DevNull,
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com")
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q", "-b", "main", dir)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("x\n"), 0o644))
+	run("-C", dir, "add", ".")
+	run("-C", dir, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "init")
+	return dir
 }
 
 // A shared-plain project's workspace clone settings (the Kubernetes

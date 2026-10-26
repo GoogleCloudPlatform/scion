@@ -16,7 +16,6 @@ package runtimebroker
 
 import (
 	"context"
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1133,17 +1132,14 @@ func TestBuildStartContext_WorktreePerAgentCreate_ProvisioningFailureCleansUpPar
 
 	sc, err := srv.buildStartContext(context.Background(), in)
 	// The worktree provisioning failure falls back to clone-per-agent (a
-	// fresh agent has no existing worktree to protect) — it is not the same
-	// failure mode as the existing-worktree case above. The clone-per-agent
-	// step then refuses this test's local fixture URL (the in-container clone
-	// takes only https, ssh or git URLs), so the dispatch ends with that
-	// step's refusal, which proves the fallback was taken.
-	if sc != nil {
-		t.Fatal("a start context was built for a local clone URL, want the clone-per-agent refusal")
+	// fresh agent has no existing worktree to protect), so the overall
+	// request still succeeds — it is not the same failure mode as the
+	// existing-worktree case above.
+	if err != nil {
+		t.Fatalf("buildStartContext should fall back to clone-per-agent, not fail outright: %v", err)
 	}
-	var sce *startContextError
-	if !errors.As(err, &sce) || !strings.HasPrefix(sce.Message, "clone-per-agent: ") {
-		t.Fatalf("buildStartContext error = %v, want the clone-per-agent step's refusal (the fallback)", err)
+	if sc.Opts.GitClone == nil {
+		t.Error("expected fallback to in-container clone mode (GitClone set) when worktree provisioning fails on a fresh create")
 	}
 
 	// This call's own partial worktree must have been cleaned up.

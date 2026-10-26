@@ -218,14 +218,7 @@ func TestBuildStartContext_WorktreeProvisionFollowsDispatchRuntime(t *testing.T)
 	for _, tc := range dispatchRuntimeCases {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, dotScion := newDispatchRuntimeServer(t, tc, "")
-			// A container-runtime agent's worktree is cloned on the host from
-			// a local fixture; a kubernetes agent's URL only reaches the
-			// in-container clone, which refuses a local path, so it gets an
-			// https URL.
-			cloneURL := initBareRepoWithCommit(t)
-			if !tc.wantContainerRouting {
-				cloneURL = "https://git.example.invalid/org/repo.git"
-			}
+			bare := initBareRepoWithCommit(t)
 			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
 				Name:          "agent-a",
 				AgentID:       "agent-a",
@@ -235,7 +228,7 @@ func TestBuildStartContext_WorktreeProvisionFollowsDispatchRuntime(t *testing.T)
 				WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 				Config: &CreateAgentConfig{
 					Profile:  tc.profile(),
-					GitClone: &api.GitCloneConfig{URL: cloneURL, Branch: "main"},
+					GitClone: &api.GitCloneConfig{URL: bare, Branch: "main"},
 				},
 				HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
 				Operation:   opCreate,
@@ -255,7 +248,7 @@ func TestBuildStartContext_WorktreeProvisionFollowsDispatchRuntime(t *testing.T)
 			if sc.Opts.Workspace != "" {
 				t.Errorf("expected no host worktree for a kubernetes agent, got Workspace=%q", sc.Opts.Workspace)
 			}
-			if got := sc.Opts.Env["SCION_GIT_CLONE_URL"]; got != cloneURL {
+			if got := sc.Opts.Env["SCION_GIT_CLONE_URL"]; got != bare {
 				t.Errorf("expected the in-container clone fallback, got SCION_GIT_CLONE_URL=%q", got)
 			}
 		})
