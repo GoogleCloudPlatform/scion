@@ -478,6 +478,72 @@ func TestSkillStore_ResolveVersion_ContentHashOldestWins(t *testing.T) {
 	}
 }
 
+// TestSkillStore_ResolveVersion_ContentHashUsesStatusFilter: a "sha256:"
+// constraint considers the same statuses as the semver forms, published and
+// deprecated. It runs on whichever backend enttest selects (SQLite by default,
+// Postgres with -tags integration).
+func TestSkillStore_ResolveVersion_ContentHashUsesStatusFilter(t *testing.T) {
+	cs := newTestCompositeStore(t)
+	ctx := context.Background()
+
+	skillID := uuid.New().String()
+	require.NoError(t, cs.CreateSkill(ctx, &store.Skill{
+		ID:     skillID,
+		Name:   "hash-status",
+		Slug:   "hash-status",
+		Scope:  "global",
+		Status: "active",
+	}))
+
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	create := func(version string, status entskillversion.Status, hash string, created time.Time) uuid.UUID {
+		t.Helper()
+		e, err := cs.client.SkillVersion.Create().
+			SetSkillID(skillID).
+			SetVersion(version).
+			SetStatus(status).
+			SetContentHash(hash).
+			SetCreated(created).
+			Save(ctx)
+		require.NoError(t, err)
+		return e.ID
+	}
+
+	t.Run("each status with its own hash", func(t *testing.T) {
+		for i, tc := range []struct {
+			status   entskillversion.Status
+			resolves bool
+		}{
+			{entskillversion.StatusPublished, true},
+			{entskillversion.StatusDeprecated, true},
+			{entskillversion.StatusDraft, false},
+			{entskillversion.StatusArchived, false},
+		} {
+			hash := "sha256:status-" + string(tc.status)
+			id := create(fmt.Sprintf("1.%d.0", i), tc.status, hash, base)
+
+			sv, err := cs.ResolveSkillVersion(ctx, skillID, hash)
+			if tc.resolves {
+				require.NoError(t, err, tc.status)
+				assert.Equal(t, id.String(), sv.ID, tc.status)
+			} else {
+				assert.ErrorIs(t, err, store.ErrNotFound, tc.status)
+			}
+		}
+	})
+
+	t.Run("older draft and archived versions sharing a hash are skipped", func(t *testing.T) {
+		const hash = "sha256:shared-status"
+		create("2.0.0", entskillversion.StatusDraft, hash, base)
+		create("2.1.0", entskillversion.StatusArchived, hash, base.Add(time.Minute))
+		published := create("2.2.0", entskillversion.StatusPublished, hash, base.Add(time.Hour))
+
+		sv, err := cs.ResolveSkillVersion(ctx, skillID, hash)
+		require.NoError(t, err)
+		assert.Equal(t, published.String(), sv.ID)
+	})
+}
+
 func TestSkillStore_ResolveVersion_ExcludesDrafts(t *testing.T) {
 	cs := newTestCompositeStore(t)
 	ctx := context.Background()
