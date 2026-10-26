@@ -905,6 +905,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		// repo locally.
 		workspace := effectiveDispatchWorkspace(agent.AppliedConfig.Workspace, projectInfo.projectPath)
 		wsSpec := workspaceSpecFor(agent, projectInfo)
+		if err := checkDispatchCloneURLs(wsSpec); err != nil {
+			return nil, fmt.Errorf("%s: %w", callerName, err)
+		}
 		var remoteGCPIdentity *RemoteGCPIdentityConfig
 		if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil {
 			remoteGCPIdentity = &RemoteGCPIdentityConfig{
@@ -3379,6 +3382,9 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 		classifyEnv(&envClassifications, "SCION_WORKSPACE_MODE", api.EnvKindPlain)
 	}
 	wsSpec := workspaceSpecFor(agent, projectInfo)
+	if err := checkDispatchCloneURLs(wsSpec); err != nil {
+		return startEnvResult{}, fmt.Errorf("%s: %w", caller, err)
+	}
 	switch resolvedMode {
 	case store.SharingModeClonePerAgent, store.SharingModeWorktreePerAgent:
 		resolvedEnv["SCION_WORKSPACE_GIT"] = "true"

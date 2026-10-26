@@ -1076,6 +1076,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		// cloned per agent. Ignored when GitClone is set: that request asks
 		// for a per-agent clone instead.
 		if gc := in.Config.SharedWorkspaceClone; gc != nil && gc.URL != "" && in.Config.GitClone == nil {
+			// A clone URL that provisioning refuses fails the dispatch, as on
+			// every other path that clones the project's URL.
+			if sce := refusedCloneURL(in.AgentID, "shared-workspace", gc.URL); sce != nil {
+				span.SetStatus(codes.Error, sce.Message)
+				return nil, sce
+			}
 			gcCopy := *gc
 			opts.SharedWorkspaceClone = &gcCopy
 			// The project's recorded remote, as the hub sent it: the agent's
@@ -1168,6 +1174,14 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// --- Git clone mode ---
 	if !worktreeProvisioned && !linkedCheckout && in.Config != nil && in.Config.GitClone != nil {
 		gc := in.Config.GitClone
+		// Every route to the in-container clone (clone-per-agent, and the
+		// worktree-per-agent fallback) passes here: a clone URL that
+		// provisioning refuses fails the dispatch, before any clone setting
+		// reaches the agent or a provisioning init container.
+		if sce := refusedCloneURL(in.AgentID, "clone-per-agent", gc.URL); sce != nil {
+			span.SetStatus(codes.Error, sce.Message)
+			return nil, sce
+		}
 		env["SCION_GIT_CLONE_URL"] = gc.URL
 		// Clone URL may embed credentials — the original #127 bug.
 		classifyBrokerEnv("SCION_GIT_CLONE_URL", api.EnvKindSecretInjected)
@@ -2168,6 +2182,22 @@ func resolveWorktreeProvision(in worktreeProvisionInput) worktreeProvisionResult
 		},
 		WorktreePath: worktreePath,
 		ProjectRoot:  resolved.HostPath,
+	}
+}
+
+// refusedCloneURL returns the dispatch failure for a project clone URL that
+// provisioning refuses (provision.CheckHostCloneURL), or nil for an accepted
+// or empty URL: HTTP 422 with the refusal's fixed text after mode, naming no
+// URL, the same shape as the worktree-per-agent refusal. The dispatch does
+// not fall back to another workspace mode.
+func refusedCloneURL(agentID, mode, cloneURL string) *startContextError {
+	if cloneURL == "" || provision.CheckHostCloneURL(cloneURL) == nil {
+		return nil
+	}
+	slog.Warn(mode+": the project's clone URL is not accepted; failing the dispatch", "agent_id", agentID)
+	return &startContextError{
+		Status:  http.StatusUnprocessableEntity,
+		Message: fmt.Errorf("%s: %w", mode, provision.ErrHostCloneURLRefused).Error(),
 	}
 }
 

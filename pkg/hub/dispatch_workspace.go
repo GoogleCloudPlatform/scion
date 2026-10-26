@@ -15,7 +15,10 @@
 package hub
 
 import (
+	"fmt"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -51,4 +54,20 @@ func withTokenRemote(gc *api.GitCloneConfig, gitRemote string) *api.GitCloneConf
 	out := *gc
 	out.TokenRemote = gitRemote
 	return &out
+}
+
+// checkDispatchCloneURLs returns an error wrapping
+// provision.ErrHostCloneURLRefused when spec's per-agent clone URL or shared
+// workspace clone URL is one provisioning refuses (provision.CheckHostCloneURL),
+// so such an agent is not dispatched at all. The broker refuses the same
+// URLs on every path; this fails the dispatch before any broker request.
+// The error names no URL.
+func checkDispatchCloneURLs(spec WorkspaceDispatchSpec) error {
+	if gc := spec.GitClone; gc != nil && gc.URL != "" && provision.CheckHostCloneURL(gc.URL) != nil {
+		return fmt.Errorf("clone-per-agent: %w", provision.ErrHostCloneURLRefused)
+	}
+	if gc := spec.SharedWorkspaceClone; gc != nil && gc.URL != "" && provision.CheckHostCloneURL(gc.URL) != nil {
+		return fmt.Errorf("shared-workspace: %w", provision.ErrHostCloneURLRefused)
+	}
+	return nil
 }
