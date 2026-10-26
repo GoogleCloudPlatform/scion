@@ -363,12 +363,15 @@ func localGateIsTestingTestingCall(e ast.Expr) bool {
 	return ok && pkg.Name == "testing"
 }
 
-// Production code cannot reach the fixture exception: in the package's
-// non-test files only clone_fixture.go touches the registry, its only check
-// passes testing.Testing(), the exception is consulted only by the local
-// clone, and nothing calls testing.Init.
+// Production code cannot reach the fixture exception: in the non-test files
+// of pkg/hub (and of every area moved out of it) only clone_fixture.go
+// touches the registry, its only check passes testing.Testing(), the
+// exception is consulted only by the local clone and the workspace pull, and
+// nothing calls testing.Init.
 func TestLocalCloneFixture_UnreachableFromProductionCode(t *testing.T) {
-	entries, err := os.ReadDir(".")
+	// pkgmove:scan-covers guardScanSubdirs
+	// scanned through guardScanSubdirs: pkg/hub and every area moved out of it.
+	entries, err := readGuardScanDirs(".")
 	require.NoError(t, err)
 	fset := token.NewFileSet()
 	registryUses := map[string]int{}
