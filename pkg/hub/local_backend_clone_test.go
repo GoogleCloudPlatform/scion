@@ -107,6 +107,8 @@ func localGateAssertHardenedClone(t *testing.T, argv []string, cloneURL, dest, e
 	assert.Equal(t, "protocol.file.allow=never", lastFile,
 		"the last protocol.file.allow ahead of clone must be never: %q", argv)
 	assert.Contains(t, argv[:clone], "protocol.allow=never", "argv: %q", argv)
+	assert.Equal(t, 1, strings.Count(strings.Join(argv[:clone], "\n")+"\n", "protocol.file.allow=user\n"),
+		"the base host pins appear once: %q", argv)
 	assert.Contains(t, argv[:clone], "http.followRedirects=false", "argv: %q", argv)
 	n := len(argv)
 	require.GreaterOrEqual(t, n, 3)
@@ -361,12 +363,15 @@ func localGateIsTestingTestingCall(e ast.Expr) bool {
 	return ok && pkg.Name == "testing"
 }
 
-// Production code cannot reach the fixture exception: in the package's
-// non-test files only clone_fixture.go touches the registry, its only check
-// passes testing.Testing(), the exception is consulted only by the local
-// clone, and nothing calls testing.Init.
+// Production code cannot reach the fixture exception: in the non-test files
+// of pkg/hub (and of every area moved out of it) only clone_fixture.go
+// touches the registry, its only check passes testing.Testing(), the
+// exception is consulted only by the local clone and the workspace pull, and
+// nothing calls testing.Init.
 func TestLocalCloneFixture_UnreachableFromProductionCode(t *testing.T) {
-	entries, err := os.ReadDir(".")
+	// pkgmove:scan-covers guardScanSubdirs
+	// scanned through guardScanSubdirs: pkg/hub and every area moved out of it.
+	entries, err := readGuardScanDirs(".")
 	require.NoError(t, err)
 	fset := token.NewFileSet()
 	registryUses := map[string]int{}
@@ -415,6 +420,6 @@ func TestLocalCloneFixture_UnreachableFromProductionCode(t *testing.T) {
 		assert.Equal(t, "clone_fixture.go", file, "only clone_fixture.go may touch the fixture registry")
 	}
 	assert.Equal(t, 1, registeredCalls, "one registry check, in localCloneFixtureAllowed")
-	assert.Equal(t, map[string]int{"handlers_projects_core.go": 1}, allowedCalls,
-		"the exception is consulted only by the local-backend clone")
+	assert.Equal(t, map[string]int{"handlers_projects_core.go": 1, "project_workspace_handlers.go": 1}, allowedCalls,
+		"the exception is consulted only by the local-backend clone and the workspace pull")
 }

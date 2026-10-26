@@ -125,8 +125,8 @@ func TestCloneSharedWorkspaceHardened_ArgsAndEnvOnEveryClone(t *testing.T) {
 	argvLog, envLog := sharedCloneFakeGit(t, true)
 	dest := filepath.Join(t.TempDir(), "workspace")
 	const url = "https://git.example.invalid/org/repo.git"
-	err := CloneSharedWorkspaceHardened(dest, url, "x", "",
-		[]string{"-c", "protocol.file.allow=never"}, []string{"GIT_ALLOW_PROTOCOL=https:ssh:git"})
+	err := CloneSharedWorkspaceHardened(dest, url, "x", "", HostGitHardening{
+		Config: []string{"protocol.file.allow=never"}, Env: []string{"GIT_ALLOW_PROTOCOL=https:ssh:git"}})
 	if err != nil {
 		t.Fatalf("CloneSharedWorkspaceHardened: %v", err)
 	}
@@ -164,8 +164,8 @@ func TestCloneSharedWorkspaceHardened_RealGitRefusesLocalSource(t *testing.T) {
 	}
 	source := setupGitRepo(t)
 	dest := filepath.Join(t.TempDir(), "workspace")
-	err := CloneSharedWorkspaceHardened(dest, source, "", "",
-		[]string{"-c", "protocol.file.allow=never"}, []string{"GIT_ALLOW_PROTOCOL=https:ssh:git"})
+	err := CloneSharedWorkspaceHardened(dest, source, "", "", HostGitHardening{
+		Config: []string{"protocol.file.allow=never"}, Env: []string{"GIT_ALLOW_PROTOCOL=https:ssh:git"}})
 	if err == nil {
 		t.Fatal("a hardened clone of a local path must fail")
 	}

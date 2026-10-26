@@ -512,6 +512,37 @@ func ScopedCredentialHelperEnv(base []string, cloneURL, token string) (env []str
 	), true
 }
 
+// NoCredentialHelperEnv returns base, for a git command that talks to
+// cloneURL, with:
+//   - the configured credential helper list reset to empty, so no helper of
+//     the host user's (a credential store, also one scoped to a URL) is
+//     asked;
+//   - the configured extra HTTP headers reset to empty, twice: git picks
+//     http.<url>.extraHeader settings by the most specific matching URL and
+//     skips a less specific reset, so one reset is keyed on cloneURL itself,
+//     which no other setting for this request can be more specific than;
+//     and git applies no URL-scoped setting at all to a URL it cannot
+//     normalize (for example one with a "/../" segment), so the generic
+//     http.extraHeader is reset too;
+//   - askpass disabled: an empty GIT_ASKPASS stops git's askpass lookup, and
+//     with GIT_TERMINAL_PROMPT=0 git then fails instead of prompting.
+//
+// It does not change other git authentication sources, for example
+// ~/.netrc, TLS client certificates (http.sslCert) or Kerberos/Negotiate.
+func NoCredentialHelperEnv(base []string, cloneURL string) []string {
+	start := existingConfigCount(base)
+	return append(base,
+		"GIT_ASKPASS=",
+		"GIT_CONFIG_COUNT="+strconv.Itoa(start+3),
+		fmt.Sprintf("GIT_CONFIG_KEY_%d=credential.helper", start),
+		fmt.Sprintf("GIT_CONFIG_VALUE_%d=", start),
+		fmt.Sprintf("GIT_CONFIG_KEY_%d=http.extraHeader", start+1),
+		fmt.Sprintf("GIT_CONFIG_VALUE_%d=", start+1),
+		fmt.Sprintf("GIT_CONFIG_KEY_%d=http.%s.extraHeader", start+2, cloneURL),
+		fmt.Sprintf("GIT_CONFIG_VALUE_%d=", start+2),
+	)
+}
+
 // scopedGitCredentialEnv is the environment variable the scoped credential helper
 // reads at run time. It is set only in the environment of the single git command
 // that needs it, and scrubbed by HostGitEnv from every host git call. Its value is
