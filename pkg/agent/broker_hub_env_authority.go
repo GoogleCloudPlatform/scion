@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"sort"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
@@ -81,11 +82,23 @@ func warnDroppedBrokerEnv(agentID string, hubEnv map[string]string, dropped []dr
 		if hubSet && hubValue == d.Value {
 			continue
 		}
+		// The key name only, never the value: a dropped value can be a URL or
+		// another setting that must not be echoed into logs or warnings.
 		slog.Warn("agent start: ignoring broker-local env value; only the hub supplies this key for hub-dispatched agents",
-			"agent_id", agentID, "key", d.Key, "value", d.Value, "layer", d.Layer, "hub_supplied", hubSet && hubValue != "")
+			"agent_id", agentID, "key", d.Key, "layer", d.Layer, "hub_supplied", hubSet && hubValue != "")
 		warnings = append(warnings, fmt.Sprintf(
-			"Warning: ignoring %s=%q from the broker %s layer for agent %s: only the hub supplies %s for hub-dispatched agents (set it as a hub environment variable instead)",
-			d.Key, d.Value, d.Layer, agentID, d.Key))
+			"Warning: ignoring %s from the broker %s layer for agent %s: only the hub supplies %s for hub-dispatched agents (%s)",
+			d.Key, d.Layer, agentID, d.Key, hubOnlyKeyGuidance(d.Key)))
 	}
 	return warnings
+}
+
+// hubOnlyKeyGuidance names the supported hub-side setting for a hub-only key.
+func hubOnlyKeyGuidance(key string) string {
+	switch key {
+	case api.EnvGitTokenRemote, "SCION_GIT_CLONE_URL":
+		return "it comes from the project's git settings on the hub"
+	default:
+		return "set it as a hub environment variable instead"
+	}
 }

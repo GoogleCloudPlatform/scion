@@ -466,3 +466,116 @@ func TestConfigureSharedWorkspaceGit_TokenOnlyToRecordedRemoteHost(t *testing.T)
 		})
 	}
 }
+
+// The clone-per-agent agent .gitconfig helper is scoped to the recorded
+// remote's host, like the shared workspace's: a clone of the recorded remote
+// gets credential.https://<host>.helper and no unscoped helper (one an
+// earlier version left is removed); a clone URL naming another host, or no
+// recorded remote, gets no helper at all and the unscoped one is removed too.
+// End to end, git with that .gitconfig offers the token to the recorded
+// remote's host only.
+func TestGitCloneWorkspace_AgentHelperScopedToTokenRemote(t *testing.T) {
+	root := t.TempDir()
+	bare := tokenRemoteBareRepo(t, root)
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("git is required: %v", err)
+	}
+	seedUnscoped := func(t *testing.T) string {
+		t.Helper()
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[credential]\n\thelper = !old-helper\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return home
+	}
+	clone := func(t *testing.T, home, cloneURL, tokenRemote string) error {
+		t.Helper()
+		workspace := filepath.Join(t.TempDir(), "workspace")
+		if err := os.MkdirAll(workspace, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("HOME", home)
+		t.Setenv("SCION_GIT_CLONE_URL", cloneURL)
+		t.Setenv("SCION_WORKSPACE_PATH", workspace)
+		t.Setenv("SCION_GIT_BRANCH", "main")
+		t.Setenv("SCION_GIT_DEPTH", "0")
+		t.Setenv("SCION_AGENT_BRANCH", "")
+		t.Setenv("SCION_AGENT_NAME", "test-agent")
+		t.Setenv("SCION_GITHUB_APP_ENABLED", "")
+		t.Setenv("GITHUB_TOKEN", tokenRemoteTestToken)
+		t.Setenv(api.EnvGitTokenRemote, tokenRemote)
+		return gitCloneWorkspace(os.Getuid(), os.Getgid(), home, false)
+	}
+	fetchWith := func(t *testing.T, home, originURL string) error {
+		t.Helper()
+		ws := filepath.Join(t.TempDir(), "ws")
+		run := func(args ...string) error {
+			c := exec.Command(gitPath, args...)
+			c.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+filepath.Join(home, ".gitconfig"), "GIT_TERMINAL_PROMPT=0", "GITHUB_TOKEN="+tokenRemoteTestToken)
+			return c.Run()
+		}
+		if err := run("init", "-q", ws); err != nil {
+			t.Fatal(err)
+		}
+		if err := run("-C", ws, "remote", "add", "origin", originURL); err != nil {
+			t.Fatal(err)
+		}
+		return run("-C", ws, "fetch", "-q", "origin", "main")
+	}
+
+	t.Run("recorded remote", func(t *testing.T) {
+		own := newTokenGitServer(t, bare, true)
+		home := seedUnscoped(t)
+		if err := clone(t, home, own.url, own.remote); err != nil {
+			t.Fatalf("clone: %v", err)
+		}
+		gitconfig := filepath.Join(home, ".gitconfig")
+		if got := gitConfigGet(t, gitconfig, "credential.helper"); got != "" {
+			t.Errorf("an unscoped credential.helper is still configured: %q", got)
+		}
+		if got := gitConfigGet(t, gitconfig, "credential.https://"+own.host+".helper"); got == "" {
+			t.Error("the helper scoped to the recorded remote's host is not configured")
+		}
+		// End to end with only that .gitconfig (no -c on the command line):
+		// the recorded remote's host gets the token, another host does not.
+		own.sawToken.Store(false)
+		if err := fetchWith(t, home, own.url); err != nil {
+			t.Errorf("fetch from the recorded remote with the agent .gitconfig: %v", err)
+		}
+		if !own.sawToken.Load() {
+			t.Error("the agent helper did not offer the token to the recorded remote's host")
+		}
+		other := newTokenGitServer(t, bare, true)
+		_ = fetchWith(t, home, other.url)
+		if other.requests.Load() == 0 {
+			t.Fatal("fixture check: git never reached the other server")
+		}
+		if other.sawToken.Load() {
+			t.Error("the agent helper offered the token to another host")
+		}
+	})
+
+	for _, tc := range []struct {
+		name   string
+		remote func(s *tokenGitServer) string
+	}{
+		{"label naming another host", func(*tokenGitServer) string { return "github.com/org/repo" }},
+		{"no recorded remote", func(*tokenGitServer) string { return "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			public := newTokenGitServer(t, bare, false)
+			home := seedUnscoped(t)
+			if err := clone(t, home, public.url, tc.remote(public)); err != nil {
+				t.Fatalf("clone of a public repository: %v", err)
+			}
+			data, err := os.ReadFile(filepath.Join(home, ".gitconfig"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), "helper") {
+				t.Errorf("no credential helper may remain, got:\n%s", data)
+			}
+		})
+	}
+}

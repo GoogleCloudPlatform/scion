@@ -15,6 +15,9 @@
 package agent
 
 import (
+	"bytes"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -79,5 +82,50 @@ func TestCloneURL_BrokerModeOnlyFromBroker(t *testing.T) {
 	_, _ = resolveAuthEnvOverlay(&opts, settings, "", "claude-cfg")
 	if v, ok := opts.Env["SCION_GIT_CLONE_URL"]; ok {
 		t.Errorf("harness-config clone URL merged into opts.Env: %q", v)
+	}
+}
+
+// A dropped hub-only value is never echoed: the log line and the warning
+// name the key and the layer only. The git keys point to the project's git
+// settings on the hub, not to a hub environment variable.
+func TestWarnDroppedBrokerEnv_NeverLogsValue(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	const cloneURL = "https://mirror.example/org/repo.git"
+	const tokenRemote = "mirror.example/org/repo"
+	warnings := warnDroppedBrokerEnv("agent-1", nil, []droppedBrokerEnv{
+		{Key: "SCION_GIT_CLONE_URL", Value: cloneURL, Layer: envLayerConfig},
+		{Key: api.EnvGitTokenRemote, Value: tokenRemote, Layer: envLayerHarnessConfigEntry},
+		{Key: "TZ", Value: "Europe/Paris", Layer: envLayerConfig},
+	})
+	if len(warnings) != 3 {
+		t.Fatalf("want 3 warnings, got %v", warnings)
+	}
+	logged := buf.String()
+	for _, v := range []string{cloneURL, tokenRemote, "mirror.example", "Europe/Paris"} {
+		if strings.Contains(logged, v) {
+			t.Errorf("the log echoes a dropped value %q:\n%s", v, logged)
+		}
+		for _, w := range warnings {
+			if strings.Contains(w, v) {
+				t.Errorf("warning %q echoes a dropped value %q", w, v)
+			}
+		}
+	}
+	for _, key := range []string{"SCION_GIT_CLONE_URL", api.EnvGitTokenRemote, "TZ"} {
+		if !strings.Contains(logged, key) {
+			t.Errorf("the log does not name the dropped key %s:\n%s", key, logged)
+		}
+	}
+	for i, w := range warnings[:2] {
+		if !strings.Contains(w, "the project's git settings on the hub") || strings.Contains(w, "hub environment variable") {
+			t.Errorf("warning %d guidance = %q, want the project's git settings", i, w)
+		}
+	}
+	if !strings.Contains(warnings[2], "hub environment variable") {
+		t.Errorf("TZ guidance = %q, want a hub environment variable", warnings[2])
 	}
 }

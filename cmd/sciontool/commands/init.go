@@ -3324,17 +3324,30 @@ func gitCloneWorkspace(uid, gid int, agentHome string, requirePrivilegeDrop bool
 	// root (HOME=/root) but the harness runs as the scion user.
 	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
 
-	// Only when offerToken: a clone URL that does not name the project's
-	// recorded remote gets no helper, so later fetches and pushes to that
-	// origin are never offered the token.
-	if offerToken {
+	// The helper is scoped to the host of the project's recorded git remote
+	// (credential.https://<host>.helper, provision.TokenRemoteCredentialScope),
+	// the same binding as the shared workspace's helper, and written only when
+	// offerToken: a clone URL that does not name the recorded remote, or no
+	// recorded remote, gets no helper, so later fetches and pushes to that
+	// origin are never offered the token. An unscoped credential.helper (an
+	// earlier version wrote one) is removed first in every case.
+	unsetCmd := exec.Command("git", "config", "--file", gitconfigPath, "--unset-all", "credential.helper")
+	setupGitCmd(unsetCmd)
+	if err := procreap.RunManaged(unsetCmd); err != nil {
+		var exitErr *exec.ExitError
+		// Exit status 5: the key is not set (or the file does not exist).
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 5 {
+			return fmt.Errorf("failed to remove an unscoped git credential helper: %w", err)
+		}
+	}
+	if scope, scoped := provision.TokenRemoteCredentialScope(os.Getenv(api.EnvGitTokenRemote)); offerToken && scoped {
 		var credentialHelper string
 		if hub.IsGitHubAppEnabled() {
 			credentialHelper = "!sciontool credential-helper"
 		} else {
 			credentialHelper = provision.GitTokenCredentialHelper
 		}
-		credCmd := exec.Command("git", "config", "--file", gitconfigPath, "credential.helper", credentialHelper)
+		credCmd := exec.Command("git", "config", "--file", gitconfigPath, "--replace-all", "credential."+scope+".helper", credentialHelper)
 		setupGitCmd(credCmd)
 		if err := procreap.RunManaged(credCmd); err != nil {
 			return fmt.Errorf("failed to configure git credential helper: %w", err)

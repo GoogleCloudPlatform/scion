@@ -616,8 +616,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// another remote. Likewise the in-container clone URL is set only from
 	// GitClone, after the clone URL check (refusedCloneURL), so an env entry
 	// cannot start a clone that check never saw.
-	delete(env, api.EnvGitTokenRemote)
-	delete(env, "SCION_GIT_CLONE_URL")
+	// Their classifications go too: a value set below is classified again
+	// there, and one that is not set leaves no stale entry.
+	for _, key := range []string{api.EnvGitTokenRemote, "SCION_GIT_CLONE_URL"} {
+		delete(env, key)
+		delete(envCls, key)
+	}
 
 	// 3. Hub auth token. Precedence (highest first):
 	//   1. in.AgentToken — the explicit hub-provided dedicated field (create path).

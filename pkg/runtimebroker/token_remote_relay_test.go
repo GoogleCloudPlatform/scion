@@ -185,3 +185,44 @@ func TestTokenRemote_SharedWorkspaceEnv(t *testing.T) {
 	assert.Equal(t, relayTokenRemote, build(relayTokenRemote)[api.EnvGitTokenRemote])
 	assert.NotContains(t, build(""), api.EnvGitTokenRemote, "no token remote without the hub's; the request env entry is dropped")
 }
+
+// The classifications of the clone URL and token remote keys follow the
+// keys: a classification that arrived with a dropped request env entry does
+// not survive the drop; when the broker sets the key from GitClone, it is
+// classified by the broker; a nil classification map (an older hub) stays nil.
+func TestTokenRemote_NoStaleEnvClassification(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+	build := func(gc *api.GitCloneConfig, cls map[string]api.EnvKind) *startContext {
+		t.Helper()
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name:        "agent-1",
+			ProjectPath: "/some/path",
+			ResolvedEnv: map[string]string{api.EnvGitTokenRemote: "mirror.example/org/repo", "SCION_GIT_CLONE_URL": "https://mirror.example/org/repo.git"},
+			Config: &CreateAgentConfig{
+				Env:      []string{api.EnvGitTokenRemote + "=mirror.example/org/repo", "SCION_GIT_CLONE_URL=https://mirror.example/org/repo.git"},
+				GitClone: gc,
+			},
+			EnvClassifications: cls,
+			HTTPRequest:        httptest.NewRequest("POST", "/api/v1/agents", nil),
+			Operation:          opCreate,
+		})
+		require.NoError(t, err)
+		return sc
+	}
+	hubCls := func() map[string]api.EnvKind {
+		return map[string]api.EnvKind{api.EnvGitTokenRemote: api.EnvKindPlain, "SCION_GIT_CLONE_URL": api.EnvKindPlain}
+	}
+
+	sc := build(nil, hubCls())
+	assert.NotContains(t, sc.EnvClassifications, api.EnvGitTokenRemote, "no stale classification for a dropped key")
+	assert.NotContains(t, sc.EnvClassifications, "SCION_GIT_CLONE_URL", "no stale classification for a dropped key")
+
+	sc = build(&api.GitCloneConfig{URL: "https://github.com/example/repo.git", TokenRemote: relayTokenRemote}, hubCls())
+	assert.Equal(t, api.EnvKindPlain, sc.EnvClassifications[api.EnvGitTokenRemote])
+	assert.Equal(t, api.EnvKindSecretInjected, sc.EnvClassifications["SCION_GIT_CLONE_URL"], "the broker's own classification")
+
+	sc = build(nil, nil)
+	assert.Nil(t, sc.EnvClassifications, "an older hub's nil classifications stay nil")
+}
