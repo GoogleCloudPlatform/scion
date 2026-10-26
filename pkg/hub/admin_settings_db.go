@@ -1049,6 +1049,21 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	if s.rejectTestAdminSettingsWrite(w, r, settingsBodyKeys(rawBody), nil) {
 		return
 	}
+	// telemetry.cloud.cloud_logging is read only at startup, before the
+	// settings database is opened: a changed value is refused, an unchanged
+	// echo of GET is dropped (ptone/scion#5664), in DB and workstation mode
+	// alike.
+	cl, err := s.checkCloudLoggingDBWrite(r.Context(), ops, rawBody)
+	if err != nil {
+		slog.Error("PUT server-config: failed to build GET view for the cloud_logging check", "error", err)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+		return
+	}
+	if cl.refused {
+		writeCloudLoggingDBWriteRefused(w)
+		return
+	}
+	rawBody = cl.body
 	var req ServerConfigUpdateDBRequest
 	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
@@ -2221,6 +2236,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			}
 			if hub.HubClass != "" {
 				keys = append(keys, config.HubClassKey)
+			}
+			if hub.GCPProjectID != "" {
+				keys = append(keys, config.HubGCPProjectIDKey)
 			}
 			if hub.TestIdentities != nil {
 				keys = append(keys, config.TestIdentitiesKey)
