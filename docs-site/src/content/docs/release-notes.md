@@ -4,11 +4,11 @@ title: Release Notes
 
 Scion release notes are published weekly.
 
-## Latest: Week of October 12 -- 18, 2026
+## Latest: Week of October 19 -- 25, 2026
 
-The CLI's local-only mode is gone. Every agent command now goes through a Hub, picked from a per-user list of named Hubs and a current context set with `scion use`. Async agent launch became the `hub.async_agent_launch` experiment, with per-step progress, typed failures and launches that survive Runtime Broker restarts. User access tokens now need matching selectors for chat, quota, agent and user-scope operations, and can now administer invitations, membership and schedules, create global skills and manage skill registries. `scion ssh` and `scion vscode` open shells and editors on agents, and the terminal workspace left its experiment.
+Scion now mounts repository git metadata into agents read-only with a private, credential-stripped `.git/config`, mounts project `.scion` directories read-only in shared layouts, and requires a clone-per-agent workspace sharing mode for git projects on Kubernetes. Project storage consolidated into a single `server.project_storage` block and layout authority that backs the Files tab and chat attachments, while WebDAV, project-level `scion sync`, the Hub project copy and GCS workspace sync were retired. Agent-bound delegation added in-memory credential exchange over `~/.scion/delegation.sock`, lifecycle revocation, revoke-all endpoints and visible delegation attribution on messages, alongside `project.chat_post` for project thread posts and expanded User Access Token scopes for users, groups, roles, access boundaries and project creation. Across the web client, CLI and Runtime Brokers, API responses and static assets are compressed, the Agent Edit page replaced Configure, a single model channel feeds the harness `--model` argument, and `scion reincarnate --force` can move agents by recreating their workspace on another Runtime Broker.
 
-[Read the full release notes for this week ->](/scion/release-notes/2026-10-12/)
+[Read the full release notes for this week ->](/scion/release-notes/2026-10-19/)
 
 ## Templates describe the job, not the environment
 
@@ -90,6 +90,7 @@ Upgrade note: on the first start after upgrading, the Hub has no record yet, so 
 
 ## Previous Weeks
 
+- [Week of October 12 -- 18, 2026](/scion/release-notes/2026-10-12/)
 - [Week of October 5 -- 11, 2026](/scion/release-notes/2026-10-05/)
 - [Week of September 28 -- October 4, 2026](/scion/release-notes/2026-09-28/)
 - [Week of September 21 -- 27, 2026](/scion/release-notes/2026-09-21/)
