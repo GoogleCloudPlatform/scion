@@ -309,7 +309,10 @@ func (f *settle3bFixture) setLaunchRunIDForTest(t *testing.T, run string) {
 // recordBrokerRunCredential issues a token for s3bRunB (as the dispatch
 // that started it did) and puts the row back on Rm, so the heartbeat
 // adoption's credential rule (e) accepts s3bRunB. The launch stays active
-// and bound to Rm.
+// and bound to Rm. The row goes back to Rm by a revert, not by minting Rm
+// again: SetAgentRunID takes a newly generated run only (its store
+// contract), and the lifecycle run attribution holds a re-mint of an older
+// run as unproven (WP1 attribution design v2.8, rule 2F).
 func (f *settle3bFixture) recordBrokerRunCredential(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
@@ -319,8 +322,9 @@ func (f *settle3bFixture) recordBrokerRunCredential(t *testing.T) {
 	require.NoError(t, err)
 	_, err = f.store.SetAgentRunID(ctx, f.agent.ID, s3bRunB, cred)
 	require.NoError(t, err)
-	_, err = f.store.SetAgentRunID(ctx, f.agent.ID, s3bRunM, nil)
+	reverted, err := f.store.RevertAgentRunID(ctx, f.agent.ID, s3bRunB, s3bRunM)
 	require.NoError(t, err)
+	require.True(t, reverted)
 	got := mustGetAgent(t, f.store, f.agent.ID)
 	require.Equal(t, s3bRunM, got.LaunchRunID)
 	require.Equal(t, store.LaunchStateActive, got.LaunchState)
