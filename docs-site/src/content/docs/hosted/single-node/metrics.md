@@ -44,6 +44,8 @@ telemetry:
     # Required when exporting to Google Cloud. The metrics dashboard queries
     # Cloud Monitoring for this project, so without it the export has no
     # destination and the dashboard stays empty with no error shown.
+    # Read at startup. See "Which GCP project the Hub uses" in the server
+    # configuration reference for the dashboard's fallbacks.
     gcp_project_id: "my-gcp-project"
     endpoint: "monitoring.googleapis.com:443"
     protocol: grpc
@@ -224,7 +226,7 @@ In addition to the resource attributes above, every exported metric **point** ca
 - `scion_project_id`
 - `scion_agent_slug` — a display-friendly form of `scion_agent_id`, 1:1 with it, and read straight off the series (no Hub database lookup, so it survives agent deletion)
 
-These are the labels the Hub dashboard filters and groups on (`metric.labels.scion_project_id` for the project view, `metric.labels.scion_agent_id` for agent grouping). A producer that sets one of these three keys itself is rejected. They are distinct from the pre-existing, non-canonical point labels `agent_id` and `project_id` that some hook metrics also carry for historical, descriptor-compatibility reasons; the dashboard does not read those.
+These are the labels the Hub dashboard filters and groups on (`metric.labels.scion_project_id` for the project view, `metric.labels.scion_agent_id` for agent grouping). A producer that sets one of these three keys itself is rejected. They are distinct from the pre-existing, non-canonical point labels `agent_id` and `project_id` that some hook metrics (tool calls and durations) still carry for historical, descriptor-compatibility reasons; the dashboard does not read those. The usage metrics `gen_ai.api.calls` and `scion.usage.tokens` do not carry them: `gen_ai.api.calls` dropped them so both usage metrics share one label set. Filter calls and tokens on `scion_agent_id` and `scion_project_id`; a query or alert on `gen_ai.api.calls` that filters on the unprefixed `agent_id` or `project_id` matches only series written before that change.
 
 ### Native Event Name Normalization
 
@@ -346,7 +348,7 @@ For every significant lifecycle event (session start/end, tool use, model call),
 
 The Scion Hub maintains internal operational metrics for infrastructure monitoring. These are available via the `/api/v1/admin/metrics` endpoint (requires `hub-admin` role) and can be exported to standard monitoring tools.
 
-When Hub metrics export is on ([`server.hub.observability.metrics_enabled`](/scion/reference/server-config/#observability-export-serverhubobservability), or, when that switch is unset, `server.hub.gcp_project_id`), the Hub also exports its database pool, dispatch, notification, launch reaper and events stream metrics to Cloud Monitoring. To chart them per Hub instance, import the ready-made [Hub Monitoring Dashboard](/scion/hosted/single-node/hub-monitoring-dashboard/).
+When Hub metrics export is on ([`server.hub.observability.metrics_enabled`](/scion/reference/server-config/#observability-export-serverhubobservability), or, when that switch is unset, `server.hub.gcp_project_id`, set in `settings.yaml` or with `SCION_SERVER_HUB_GCPPROJECTID` and read at startup), the Hub also exports its database pool, dispatch, notification, launch reaper and events stream metrics to Cloud Monitoring. To chart them per Hub instance, import the ready-made [Hub Monitoring Dashboard](/scion/hosted/single-node/hub-monitoring-dashboard/).
 
 ### GCP Token Metrics
 
