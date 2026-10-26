@@ -167,12 +167,12 @@ func TestCredentialTrace_AskpassAnswersWithoutHelper(t *testing.T) {
 	}
 }
 
-// With NoCredentials a clone offers neither the token nor the host user's
+// With NoCredentialHelpers a clone offers neither the token nor the host user's
 // credentials.
 func TestCloneSharedWorkspaceHardened_NoCredentials(t *testing.T) {
 	cs := newCredentialTraceServer(t)
 	err := CloneSharedWorkspaceHardened(filepath.Join(t.TempDir(), "ws"), cs.repoURL(), "", "project-token",
-		HostGitHardening{NoCredentials: true})
+		HostGitHardening{NoCredentialHelpers: true})
 	if err == nil {
 		t.Fatal("the 401 endpoint cannot be cloned")
 	}
@@ -182,7 +182,7 @@ func TestCloneSharedWorkspaceHardened_NoCredentials(t *testing.T) {
 	}
 }
 
-// Without NoCredentials a hardened clone offers the token, and only the
+// Without NoCredentialHelpers a hardened clone offers the token, and only the
 // token (the scoped helper resets the host user's helpers).
 func TestCloneSharedWorkspaceHardened_OffersTokenOnly(t *testing.T) {
 	cs := newCredentialTraceServer(t)
@@ -193,19 +193,19 @@ func TestCloneSharedWorkspaceHardened_OffersTokenOnly(t *testing.T) {
 	assertOnlyTokenOffered(t, cs, "project-token")
 }
 
-// With NoCredentials a pull's fetch offers neither the token nor the host
+// With NoCredentialHelpers a pull's fetch offers neither the token nor the host
 // user's credentials.
 func TestPullSharedWorkspaceHardened_NoCredentials(t *testing.T) {
 	_, workspace, _ := sharedWorkspaceFixture(t)
 	cs := newCredentialTraceServer(t)
 	if _, err := PullSharedWorkspaceHardened(workspace, cs.repoURL(), "project-token",
-		HostGitHardening{NoCredentials: true}); err == nil {
+		HostGitHardening{NoCredentialHelpers: true}); err == nil {
 		t.Fatal("the 401 endpoint cannot be pulled")
 	}
 	assertNoCredentialOffered(t, cs)
 }
 
-// Without NoCredentials a hardened pull offers the token only.
+// Without NoCredentialHelpers a hardened pull offers the token only.
 func TestPullSharedWorkspaceHardened_OffersTokenOnly(t *testing.T) {
 	_, workspace, _ := sharedWorkspaceFixture(t)
 	cs := newCredentialTraceServer(t)

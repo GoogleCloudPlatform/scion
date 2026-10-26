@@ -190,8 +190,8 @@ func hostGitBindingCases(tr *hostGitTrace) []struct {
 }
 
 // The local-backend clone offers the project's token only to the project's
-// recorded remote over https; any other https host gets no credential at
-// all, neither the token nor the host user's credential store.
+// recorded remote over https; any other https host gets neither the token
+// nor a credential from the host user's credential helper or askpass.
 func TestHostGitAccess_LocalCloneTokenBoundToRecordedRemote(t *testing.T) {
 	tr := newHostGitTrace(t)
 	for i, tc := range hostGitBindingCases(tr) {
@@ -257,8 +257,8 @@ func hostGitPull(t *testing.T, srv *Server, projectID string) (int, string) {
 }
 
 // The workspace pull offers the project's token only to the project's
-// recorded remote over https; any other https host gets no credential at
-// all.
+// recorded remote over https; any other https host gets neither the token
+// nor a credential from the host user's credential helper or askpass.
 func TestHostGitAccess_PullTokenBoundToRecordedRemote(t *testing.T) {
 	tr := newHostGitTrace(t)
 	for i, tc := range hostGitBindingCases(tr) {
@@ -466,4 +466,21 @@ func TestHostGitAccess_BoundPullAuthenticates(t *testing.T) {
 	code, body := hostGitPull(t, srv, p.ID)
 	require.Equal(t, http.StatusOK, code, body)
 	assert.Contains(t, body, `"updated":true`)
+}
+
+// The trace endpoint's ambient credential store answers a pull of the
+// project's recorded remote when the project has no token (bound URLs keep
+// the host's own git authentication), so the pull's no-credential
+// assertions above are not vacuous.
+func TestHostGitAccess_PullTraceIsLive(t *testing.T) {
+	tr := newHostGitTrace(t)
+	srv, st, _ := hostGitTokenServer(t)
+	p := hostGitProvisionedProject(t, srv, st, "host-git-pull-live", tr.url("org/repo"), "")
+	m := tr.mark()
+
+	code, body := hostGitPull(t, srv, p.ID)
+	require.NotEqual(t, http.StatusOK, code, body)
+	got := tr.seen()[m.auth:]
+	require.NotEmpty(t, got, "the host's credential store must answer a bound pull with no project token")
+	assert.Equal(t, "ambient:ambient-secret", got[0])
 }

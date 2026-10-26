@@ -1616,7 +1616,9 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 	localFixture := localCloneFixtureAllowed(cloneURL)
 	if !localFixture {
 		if err := provision.CheckHostCloneURL(cloneURL); err != nil {
-			writeSharedCloneSourceRefused(w, err)
+			if !writeSharedCloneSourceRefused(w, err) {
+				InternalError(w)
+			}
 			return
 		}
 	}

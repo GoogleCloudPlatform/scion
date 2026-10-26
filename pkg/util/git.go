@@ -1676,9 +1676,9 @@ type HostGitHardening struct {
 	Config []string
 	// Env is appended to the command environment.
 	Env []string
-	// NoCredentials makes git offer no credential at all (NoCredentialEnv);
-	// the token is not used.
-	NoCredentials bool
+	// NoCredentialHelpers runs git with no credential helper and no askpass
+	// (NoCredentialHelperEnv); the token is not used.
+	NoCredentialHelpers bool
 }
 
 // configArgs returns h.Config as -c arguments.
@@ -1701,8 +1701,8 @@ func cloneSharedWorkspace(workspacePath, cloneURL, branch, token string, h HostG
 	baseEnv := append(HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1")
 	baseEnv = append(baseEnv, h.Env...)
 	env := baseEnv
-	if h.NoCredentials {
-		env = NoCredentialEnv(baseEnv)
+	if h.NoCredentialHelpers {
+		env = NoCredentialHelperEnv(baseEnv)
 	} else if token != "" {
 		if scoped, ok := ScopedCredentialHelperEnv(baseEnv, cloneURL, token); ok {
 			env = scoped
@@ -1837,8 +1837,8 @@ func pullSharedWorkspace(workspacePath, cloneURL, token string, h HostGitHardeni
 	// config at all and skips the LFS smudge, so no host-side checkout can
 	// leak the token to an agent-chosen endpoint.
 	fetchEnv := append(append([]string{}, baseEnv...), h.Env...)
-	if h.NoCredentials {
-		fetchEnv = NoCredentialEnv(fetchEnv)
+	if h.NoCredentialHelpers {
+		fetchEnv = NoCredentialHelperEnv(fetchEnv)
 	} else if token != "" {
 		// Only an http(s) clone URL can carry a host-scoped credential helper.
 		// For an ssh/scp or local-path URL the token is ignored (git uses its

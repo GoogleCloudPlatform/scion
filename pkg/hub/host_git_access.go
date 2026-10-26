@@ -31,15 +31,16 @@ import (
 // GIT_ALLOW_PROTOCOL). The project's token is offered only when cloneURL
 // resolves to the project's recorded git remote over https
 // (provision.CloneTokenBound); it is not even resolved otherwise. For any
-// other URL git offers no credential at all, neither the token nor the hub
-// host user's own (util.HostGitHardening.NoCredentials).
+// other URL git runs without the token, with the hub host user's credential
+// helpers reset and askpass disabled (util.HostGitHardening.NoCredentialHelpers;
+// see util.NoCredentialHelperEnv for what it does not cover).
 func (s *Server) hostGitAccess(ctx context.Context, project *store.Project, cloneURL string) (string, util.HostGitHardening) {
 	h := util.HostGitHardening{
 		Config: append(provision.HostCloneGitConfig(), "protocol.http.allow=never"),
 		Env:    []string{"GIT_ALLOW_PROTOCOL=" + provision.HostCloneProtocols},
 	}
 	if !provision.CloneTokenBound(project.GitRemote, cloneURL) {
-		h.NoCredentials = true
+		h.NoCredentialHelpers = true
 		return "", h
 	}
 	return s.resolveCloneToken(ctx, project), h
