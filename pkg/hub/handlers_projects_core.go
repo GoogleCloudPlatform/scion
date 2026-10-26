@@ -1499,7 +1499,8 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 	// remote, and the clone runs on the hub host: as on a shared backend it
 	// is checked before any filesystem work, refused (never rewritten)
 	// unless it is an https, ssh or git URL, and cloned with the hardened
-	// transport settings.
+	// transport settings and the token bound to the project's remote
+	// (hostGitAccess).
 	cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
 	localFixture := localCloneFixtureAllowed(cloneURL)
 	if !localFixture {
@@ -1518,16 +1519,14 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 		defaultBranch = "main"
 	}
 
-	// Resolve a token for authentication.
-	token := s.resolveCloneToken(ctx, project)
-
-	// Perform the clone
+	// Perform the clone. The project's token goes only to its own recorded
+	// remote (hostGitAccess).
 	var cloneErr error
 	if localFixture {
-		cloneErr = util.CloneSharedWorkspace(workspacePath, cloneURL, defaultBranch, token)
+		cloneErr = util.CloneSharedWorkspace(workspacePath, cloneURL, defaultBranch, "")
 	} else {
-		cloneErr = util.CloneSharedWorkspaceHardened(workspacePath, cloneURL, defaultBranch, token,
-			provision.HostCloneGitArgs(), []string{"GIT_ALLOW_PROTOCOL=" + provision.HostCloneProtocols})
+		token, hardening := s.hostGitAccess(ctx, project, cloneURL)
+		cloneErr = util.CloneSharedWorkspaceHardened(workspacePath, cloneURL, defaultBranch, token, hardening)
 	}
 	if cloneErr != nil {
 		// Clean up the workspace directory on failure — return to pre-creation state

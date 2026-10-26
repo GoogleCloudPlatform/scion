@@ -512,6 +512,25 @@ func ScopedCredentialHelperEnv(base []string, cloneURL, token string) (env []str
 	), true
 }
 
+// NoCredentialEnv returns base with git set up to offer no credential to
+// any host: the configured credential helper list is reset to empty (so no
+// helper of the host user's, such as a credential store, answers), no
+// configured http.extraHeader is sent, and askpass is disabled (an empty
+// GIT_ASKPASS stops git's askpass lookup; with GIT_TERMINAL_PROMPT=0 git
+// then fails instead of prompting). For a host-side clone or fetch of a URL
+// that must not receive the host's or a project's credentials.
+func NoCredentialEnv(base []string) []string {
+	start := existingConfigCount(base)
+	return append(base,
+		"GIT_ASKPASS=",
+		"GIT_CONFIG_COUNT="+strconv.Itoa(start+2),
+		fmt.Sprintf("GIT_CONFIG_KEY_%d=credential.helper", start),
+		fmt.Sprintf("GIT_CONFIG_VALUE_%d=", start),
+		fmt.Sprintf("GIT_CONFIG_KEY_%d=http.extraHeader", start+1),
+		fmt.Sprintf("GIT_CONFIG_VALUE_%d=", start+1),
+	)
+}
+
 // scopedGitCredentialEnv is the environment variable the scoped credential helper
 // reads at run time. It is set only in the environment of the single git command
 // that needs it, and scrubbed by HostGitEnv from every host git call. Its value is

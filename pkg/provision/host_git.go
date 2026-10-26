@@ -28,21 +28,31 @@ import (
 const HostCloneProtocols = "https:ssh:git"
 
 // HostCloneGitArgs returns the -c settings a hardened host-side clone
-// carries ahead of the subcommand: hostGitArgs, then a transport allow-list
-// that denies every protocol except https, ssh and git. The later
-// protocol.file.allow=never overrides hostGitArgs' protocol.file.allow=user,
-// so a local path or file:// URL is refused even on the command line.
-// http.followRedirects=false: the clone never follows an HTTP redirect to
-// another URL.
+// carries ahead of the subcommand: hostGitArgs, then HostCloneGitConfig.
 func HostCloneGitArgs() []string {
-	return append(hostGitArgs(),
-		"-c", "http.followRedirects=false",
-		"-c", "protocol.allow=never",
-		"-c", "protocol.file.allow=never",
-		"-c", "protocol.https.allow=always",
-		"-c", "protocol.ssh.allow=always",
-		"-c", "protocol.git.allow=always",
-	)
+	args := hostGitArgs()
+	for _, kv := range HostCloneGitConfig() {
+		args = append(args, "-c", kv)
+	}
+	return args
+}
+
+// HostCloneGitConfig returns the key=value settings a hardened host-side
+// clone or fetch adds after the base host pins (util.HostGitArgs): a
+// transport allow-list that denies every protocol except https, ssh and
+// git. protocol.file.allow=never overrides the base
+// protocol.file.allow=user, so a local path or file:// URL is refused even
+// on the command line. http.followRedirects=false: git never follows an
+// HTTP redirect to another URL.
+func HostCloneGitConfig() []string {
+	return []string{
+		"http.followRedirects=false",
+		"protocol.allow=never",
+		"protocol.file.allow=never",
+		"protocol.https.allow=always",
+		"protocol.ssh.allow=always",
+		"protocol.git.allow=always",
+	}
 }
 
 // hostGitArgs returns the base -c settings every host-side git invocation in a
@@ -124,6 +134,15 @@ func remoteHelperForm(raw string) bool {
 		i++
 	}
 	return i > 0 && strings.HasPrefix(raw[i:], "::")
+}
+
+// CloneTokenBound reports whether a project's git token may be offered to
+// a host-side clone or fetch of cloneURL: cloneURL is https without user
+// info and resolves to the host and owner/repo of the project's recorded
+// git remote (cloneTokenHost). Any other URL gets no token.
+func CloneTokenBound(projectRemote, cloneURL string) bool {
+	_, ok := cloneTokenHost(projectRemote, cloneURL)
+	return ok
 }
 
 // cloneTokenHost returns the host a project's git token may be offered to
