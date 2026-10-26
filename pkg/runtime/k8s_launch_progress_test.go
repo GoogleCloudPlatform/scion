@@ -534,21 +534,21 @@ func TestWaitForPodReady_DisruptedPodIsTyped(t *testing.T) {
 			text: `pod "p" was deleted while starting — if you did not stop it, start the agent again`},
 		{name: "evicted and failed", status: corev1.PodStatus{Phase: corev1.PodFailed, Reason: "Evicted", Message: secret},
 			step: api.LaunchStepScheduling, reason: "Evicted",
-			text: `pod "p" was evicted while starting (Evicted) — start the agent again`},
+			text: `pod "p" was evicted while starting (Evicted) — start the agent again: pod terminated with status: Failed`},
 		{name: "terminated by kubelet", status: corev1.PodStatus{Phase: corev1.PodFailed,
 			Conditions: []corev1.PodCondition{disruption("TerminationByKubelet")},
 			ContainerStatuses: []corev1.ContainerStatus{{Name: agentContainerName, State: corev1.ContainerState{
 				Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "Error", Message: "killed"}}}}},
 			step: api.LaunchStepScheduling, reason: "TerminationByKubelet",
-			text: `pod "p" was evicted while starting (TerminationByKubelet) — start the agent again`},
+			text: `pod "p" was evicted while starting (TerminationByKubelet) — start the agent again: pod failed to start: Error - killed`},
 		{name: "preempted, then gone",
 			status:   pending(condScheduled(corev1.ConditionTrue, ""), disruption(corev1.PodReasonPreemptionByScheduler)),
 			goneFrom: 2, step: api.LaunchStepContainerCreate, reason: "PreemptionByScheduler",
-			text: `pod "p" was preempted while starting (PreemptionByScheduler) — start the agent again`},
+			text: `pod "p" was preempted while starting (PreemptionByScheduler) — start the agent again: pods "p" not found`},
 		{name: "evicted, then gone",
 			status:   pending(condScheduled(corev1.ConditionTrue, ""), disruption("EvictionByEvictionAPI")),
 			goneFrom: 2, step: api.LaunchStepContainerCreate, reason: "EvictionByEvictionAPI",
-			text: `pod "p" was evicted while starting (EvictionByEvictionAPI) — start the agent again`},
+			text: `pod "p" was evicted while starting (EvictionByEvictionAPI) — start the agent again: pods "p" not found`},
 		{name: "gone", status: pending(condScheduled(corev1.ConditionTrue, "")), goneFrom: 2,
 			step: api.LaunchStepContainerCreate, text: `pods "p" not found`},
 		{name: "gone on poll 1", status: pending(), goneFrom: 1,
@@ -591,6 +591,14 @@ func TestWaitForPodReady_DisruptedPodIsTyped(t *testing.T) {
 			if strings.Contains(err.Error(), "secret-team") || strings.Contains(lf.Reason, "secret-team") {
 				t.Errorf("error or Reason carries the Kubernetes message: %v / %q", err, lf.Reason)
 			}
+			if tc.goneFrom > 0 {
+				// A pod gone by the next poll keeps the Kubernetes NotFound
+				// error in the chain and its text: callers (the broker's
+				// restart handler) match on both.
+				if !k8serrors.IsNotFound(err) || !strings.Contains(err.Error(), "not found") {
+					t.Errorf("error %q: IsNotFound=%v, want the wrapped NotFound error and its text", err, k8serrors.IsNotFound(err))
+				}
+			}
 		})
 	}
 
@@ -627,8 +635,8 @@ func TestWaitForPodReady_DisruptedPodIsTyped(t *testing.T) {
 			return true, nil, k8serrors.NewNotFound(corev1.Resource("pods"), "p")
 		})
 		err := rt.waitForPodReady(context.Background(), "default", "p", launchHooks{})
-		if err == nil || err.Error() != `pods "p" not found` {
-			t.Fatalf("err = %v, want the not-found text", err)
+		if err == nil || err.Error() != `pods "p" not found` || !k8serrors.IsNotFound(err) {
+			t.Fatalf("err = %v, want the Kubernetes NotFound error", err)
 		}
 		var lf *LaunchFailure
 		if !errors.As(err, &lf) || lf.Code != api.LaunchCodePodDisrupted || lf.Reason != "" {
@@ -665,8 +673,8 @@ func TestWaitForPodReady_DisruptedPodIsTyped(t *testing.T) {
 
 // TestPodDisruptionKind checks that the preempted/evicted word the start
 // error and the launch report use agrees with k8sDisruptionExitReason, the
-// agent status classifier, for every disruption signal; an empty reason
-// (a pod deleted without one) has no kind.
+// agent status classifier, for every disruption signal that carries a
+// reason; an empty reason (a pod deleted without one) has no kind.
 func TestPodDisruptionKind(t *testing.T) {
 	target := func(reason string) corev1.PodStatus {
 		return corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue, Reason: reason}}}
@@ -674,23 +682,29 @@ func TestPodDisruptionKind(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		status corev1.PodStatus
-		want   string
+		// exit is k8sDisruptionExitReason's result, kind PodDisruptionKind's.
+		exit, kind string
 	}{
-		{"scheduler preemption", target(corev1.PodReasonPreemptionByScheduler), "preempted"},
-		{"eviction API", target("EvictionByEvictionAPI"), "evicted"},
-		{"terminated by kubelet", target("TerminationByKubelet"), "evicted"},
-		{"other disruption reason", target("DeletionByTaintManager"), "evicted"},
-		{"kubelet eviction", corev1.PodStatus{Phase: corev1.PodFailed, Reason: "Evicted"}, "evicted"},
-		{"no signal", corev1.PodStatus{Phase: corev1.PodPending}, ""},
-		{"cleared condition", corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.DisruptionTarget, Status: corev1.ConditionFalse, Reason: corev1.PodReasonPreemptionByScheduler}}}, ""},
+		{"scheduler preemption", target(corev1.PodReasonPreemptionByScheduler), "preempted", "preempted"},
+		{"eviction API", target("EvictionByEvictionAPI"), "evicted", "evicted"},
+		{"terminated by kubelet", target("TerminationByKubelet"), "evicted", "evicted"},
+		{"other disruption reason", target("DeletionByTaintManager"), "evicted", "evicted"},
+		{"kubelet eviction", corev1.PodStatus{Phase: corev1.PodFailed, Reason: "Evicted"}, "evicted", "evicted"},
+		{"no signal", corev1.PodStatus{Phase: corev1.PodPending}, "", ""},
+		{"cleared condition", corev1.PodStatus{Conditions: []corev1.PodCondition{{Type: corev1.DisruptionTarget, Status: corev1.ConditionFalse, Reason: corev1.PodReasonPreemptionByScheduler}}}, "", ""},
+		// The one divergence: a true DisruptionTarget with no reason (which
+		// Kubernetes does not write) counts as evicted for the agent status,
+		// but podDisruptionReason finds no reason, so the start error keeps
+		// its plain text.
+		{"disruption without a reason", target(""), "evicted", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pod := &corev1.Pod{Status: tc.status}
-			if got := k8sDisruptionExitReason(pod); got != tc.want {
-				t.Errorf("k8sDisruptionExitReason = %q, want %q", got, tc.want)
+			if got := k8sDisruptionExitReason(pod); got != tc.exit {
+				t.Errorf("k8sDisruptionExitReason = %q, want %q", got, tc.exit)
 			}
-			if got := PodDisruptionKind(podDisruptionReason(pod)); got != tc.want {
-				t.Errorf("PodDisruptionKind(%q) = %q, want %q", podDisruptionReason(pod), got, tc.want)
+			if got := PodDisruptionKind(podDisruptionReason(pod)); got != tc.kind {
+				t.Errorf("PodDisruptionKind(%q) = %q, want %q", podDisruptionReason(pod), got, tc.kind)
 			}
 		})
 	}

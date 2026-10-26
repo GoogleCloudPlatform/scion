@@ -3188,10 +3188,15 @@ func podDisruptionReason(pod *corev1.Pod) string {
 // for a pod the cluster preempted or evicted (reason, from
 // podDisruptionReason) while the start waited for it to become ready. The
 // text says which of the two happened and gives the Kubernetes reason, never
-// the pod's or the condition's message.
-func podDisruptionStartError(podName, step, reason string) error {
-	return newLaunchFailure(api.LaunchCodePodDisrupted, step, reason,
-		fmt.Errorf("pod %q was %s while starting (%s) — start the agent again", podName, PodDisruptionKind(reason), reason))
+// the pod's or the condition's message. A non-nil cause (the Kubernetes
+// NotFound error, or the terminal-phase error) is wrapped after the text, so
+// its text and its error chain are kept for callers that match on them.
+func podDisruptionStartError(podName, step, reason string, cause error) error {
+	text := fmt.Sprintf("pod %q was %s while starting (%s) — start the agent again", podName, PodDisruptionKind(reason), reason)
+	if cause == nil {
+		return newLaunchFailure(api.LaunchCodePodDisrupted, step, reason, errors.New(text))
+	}
+	return newLaunchFailure(api.LaunchCodePodDisrupted, step, reason, fmt.Errorf("%s: %w", text, cause))
 }
 
 // podDisruptedError returns a pod_disrupted *LaunchFailure in step when the
@@ -3204,7 +3209,7 @@ func podDisruptedError(pod *corev1.Pod, podName, step string) error {
 		return nil
 	}
 	if reason := podDisruptionReason(pod); reason != "" {
-		return podDisruptionStartError(podName, step, reason)
+		return podDisruptionStartError(podName, step, reason, nil)
 	}
 	return newLaunchFailure(api.LaunchCodePodDisrupted, step, "",
 		fmt.Errorf("pod %q was deleted while starting — if you did not stop it, start the agent again", podName))
@@ -3375,7 +3380,7 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 					// The pod was removed (preempted, evicted or deleted)
 					// before it became ready.
 					if lastDisruption != "" {
-						return podDisruptionStartError(podName, failStep(lastStep), lastDisruption)
+						return podDisruptionStartError(podName, failStep(lastStep), lastDisruption, err)
 					}
 					return newLaunchFailure(api.LaunchCodePodDisrupted, failStep(lastStep), "", err)
 				}
@@ -3390,7 +3395,7 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 
 			// A pod being deleted never becomes usable: fail now rather than
 			// wait for it to disappear. A pod already in a terminal phase
-			// keeps its error text below.
+			// is reported below.
 			if pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed {
 				if err := podDisruptedError(pod, podName, failStep(lastStep)); err != nil {
 					runtimeLog().Error("Pod disrupted while starting", "pod", podName, "reason", podDisruptionReason(pod), "phase", "wait-schedule")
@@ -3505,7 +3510,7 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 					err = fmt.Errorf("pod failed to start: %s - %s", containerStatus.State.Terminated.Reason, containerStatus.State.Terminated.Message)
 				}
 				if lastDisruption != "" {
-					return podDisruptionStartError(podName, failStep(lastStep), lastDisruption)
+					return podDisruptionStartError(podName, failStep(lastStep), lastDisruption, err)
 				}
 				return err
 			}
