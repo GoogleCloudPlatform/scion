@@ -4,7 +4,7 @@
 #   1. Verify that /scratch is a mounted, writable volume (the Cloud Run
 #      ephemeral-disk). The container root filesystem is in memory on Cloud
 #      Run, so running without /scratch would silently eat RAM. Fail loudly.
-#   2. Link ~/work, ~/.cache and ~/go into /scratch and export ubuntu-latest's cache
+#   2. Link ~/work, ~/.cache, ~/go and ~/.npm into /scratch and export ubuntu-latest's cache
 #      paths, so actions/cache entries restore identically on both runner types while
 #      the bytes land on the ephemeral disk (see section 3).
 #   3. Exchange the one-time RUNNER_CLAIM_TOKEN with the mediator for the JIT
@@ -41,7 +41,7 @@
 #
 # Exit codes:
 #   2  configuration error: missing or invalid env (HOME included), /scratch missing or
-#      not writable, a HOME link (~/work, ~/.cache, ~/go) that is not the expected symlink
+#      not writable, a HOME link (~/work, ~/.cache, ~/go, ~/.npm) that is not the expected symlink
 #   3  claim failed: 401, 410, other non-retryable response (mediator or
 #      metadata server), or retries exhausted; run.sh not started
 #   128+n  SIGTERM (143) or SIGINT (130) received before run.sh started; run.sh not started
@@ -258,6 +258,8 @@ rm -f -- "$probe"
 #   ~/work   -> /scratch/_work   (the mediator's JIT work_folder is /home/runner/work)
 #   ~/.cache -> /scratch/.cache  (GOCACHE, GOLANGCI_LINT_CACHE, any XDG cache)
 #   ~/go     -> /scratch/go      (GOPATH, GOMODCACHE)
+#   ~/.npm   -> /scratch/.npm    (npm's cache; actions/setup-node's npm cache step also
+#                                 requires the directory to exist, as on ubuntu-latest)
 # The links are the parents of the cached paths, so tar never replaces a link.
 # XDG_CACHE_HOME stays unset, as on ubuntu-latest; tools then default to ~/.cache.
 # The runner sets its own RUNNER_WORKSPACE and RUNNER_TEMP for job steps; the
@@ -295,6 +297,7 @@ if ((cache_in_ram)); then
 fi
 ensure_link "$HOME/.cache" "$scratch/.cache"
 ensure_link "$HOME/go" "$scratch/go"
+ensure_link "$HOME/.npm" "$scratch/.npm"
 unset XDG_CACHE_HOME
 
 export RUNNER_WORKSPACE="$HOME/work"
@@ -308,7 +311,7 @@ export GOLANGCI_LINT_CACHE="$HOME/.cache/golangci-lint"
 # The runner's _diag (its own logs) is NOT on /scratch (see Dockerfile): a job that
 # fills /scratch must not take the runner, and the job's log, down with it.
 mkdir -p -- "$RUNNER_TEMP" "$GOCACHE" "$GOMODCACHE" "$GOLANGCI_LINT_CACHE"
-log "work folder, temp and caches on $scratch ($scratch_fstype) via $HOME/{work,.cache,go}"
+log "work folder, temp and caches on $scratch ($scratch_fstype) via $HOME/{work,.cache,go,.npm}"
 
 # Check the runner before spending the single-use token.
 if [[ ! -x $runner_dir/run.sh ]]; then

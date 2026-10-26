@@ -886,14 +886,15 @@ func TestEntrypointIDTokenTrailingNewline(t *testing.T) {
 	}
 }
 
-// checkHomeLinks asserts the cache-parity layout: ~/work, ~/.cache and ~/go are
-// symlinks whose literal targets mirror HOME under the scratch dir.
+// checkHomeLinks asserts the cache-parity layout: ~/work, ~/.cache, ~/go and
+// ~/.npm are symlinks whose literal targets mirror HOME under the scratch dir.
 func (h *harness) checkHomeLinks() {
 	h.t.Helper()
 	for link, target := range map[string]string{
 		"work":   h.scratch + "/_work",
 		".cache": h.scratch + "/.cache",
 		"go":     h.scratch + "/go",
+		".npm":   h.scratch + "/.npm",
 	} {
 		got, err := os.Readlink(filepath.Join(h.home, link))
 		if err != nil || got != target {
@@ -906,7 +907,7 @@ func TestEntrypointHomeLinksKeptWhenCorrect(t *testing.T) {
 	var h *harness
 	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
 	h = newHarness(t, cs.URL)
-	for link, target := range map[string]string{"work": "/_work", ".cache": "/.cache", "go": "/go"} {
+	for link, target := range map[string]string{"work": "/_work", ".cache": "/.cache", "go": "/go", ".npm": "/.npm"} {
 		if err := os.Symlink(h.scratch+target, filepath.Join(h.home, link)); err != nil {
 			t.Fatal(err)
 		}
