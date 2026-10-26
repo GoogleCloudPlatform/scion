@@ -371,8 +371,6 @@ func foldProfile(st *convState, vs *VersionedSettings, name string, prof V1Profi
 	} else if rt.SafeToEvict != nil {
 		set("safe_to_evict", *rt.SafeToEvict, rp+"safe_to_evict")
 	}
-	str("home_storage_backend", prof.HomeStorageBackend, rt.HomeStorageBackend)
-	str("home_storage_leaf", prof.HomeStorageLeaf, rt.HomeStorageLeaf)
 	str("kubernetes_block_service_account", prof.KubernetesBlockServiceAccount, rt.KubernetesBlockServiceAccount)
 	// Service-account mappings are a per-key lookup, the profile first,
 	// with no single value that shadows the map.
@@ -386,23 +384,9 @@ func foldProfile(st *convState, vs *VersionedSettings, name string, prof V1Profi
 			set("kubernetes_service_account_mappings."+gsa, ksa, pp+"kubernetes_service_account_mappings."+gsa)
 		}
 	}
-	// Rule 2a, the shadowing fold of the shared-dir backend pair: today's
-	// order is profile per-dir, profile single, runtime per-dir, runtime
-	// single, so the runtime entry's per-dir map applies only when the
-	// profile sets no single value.
-	str("shared_dir_storage_backend", prof.SharedDirStorageBackend, rt.SharedDirStorageBackend)
-	if prof.SharedDirStorageBackend == "" {
-		for dir, b := range rt.SharedDirStorageBackends {
-			if b != "" {
-				set("shared_dir_storage_backends."+dir, b, rp+"shared_dir_storage_backends."+dir)
-			}
-		}
-	}
-	for dir, b := range prof.SharedDirStorageBackends {
-		if b != "" {
-			set("shared_dir_storage_backends."+dir, b, pp+"shared_dir_storage_backends."+dir)
-		}
-	}
+	// The per-profile and per-runtime storage overrides are removed
+	// (design OQ2-A): each one set is reported and none is converted.
+	reportRemovedStorageOverrides(st, name, rtKey, prof, rt)
 
 	// A docker target has no Kubernetes settings: a legacy docker runtime
 	// ignores them, so they are not converted, and each one set is
@@ -457,7 +441,7 @@ func foldProfile(st *convState, vs *VersionedSettings, name string, prof V1Profi
 func isKubernetesOnlyTargetField(field string) bool {
 	switch field {
 	case "gke", "priority_class_name", "shared_dir_storage_class", "shared_dir_size", "safe_to_evict",
-		"home_storage_backend", "home_storage_leaf", "kubernetes_block_service_account":
+		"kubernetes_block_service_account":
 		return true
 	}
 	return strings.HasPrefix(field, "kubernetes_service_account_mappings.")
@@ -476,8 +460,7 @@ func reportDockerKubernetesFields(st *convState, name, rtKey string, prof V1Prof
 		set bool
 	}{
 		{"shared_dir_storage_class", prof.SharedDirStorageClass != ""}, {"shared_dir_size", prof.SharedDirSize != ""},
-		{"safe_to_evict", prof.SafeToEvict != nil}, {"home_storage_backend", prof.HomeStorageBackend != ""},
-		{"home_storage_leaf", prof.HomeStorageLeaf != ""},
+		{"safe_to_evict", prof.SafeToEvict != nil},
 		{"kubernetes_service_account_mappings", len(prof.KubernetesServiceAccountMappings) > 0},
 		{"kubernetes_block_service_account", prof.KubernetesBlockServiceAccount != ""},
 	} {
@@ -492,10 +475,46 @@ func reportDockerKubernetesFields(st *convState, name, rtKey string, prof V1Prof
 		{"context", rt.Context != ""}, {"namespace", rt.Namespace != ""}, {"gke", rt.GKE},
 		{"priority_class_name", rt.PriorityClassName != ""},
 		{"shared_dir_storage_class", rt.SharedDirStorageClass != ""}, {"shared_dir_size", rt.SharedDirSize != ""},
-		{"safe_to_evict", rt.SafeToEvict != nil}, {"home_storage_backend", rt.HomeStorageBackend != ""},
-		{"home_storage_leaf", rt.HomeStorageLeaf != ""},
+		{"safe_to_evict", rt.SafeToEvict != nil},
 		{"kubernetes_service_account_mappings", len(rt.KubernetesServiceAccountMappings) > 0},
 		{"kubernetes_block_service_account", rt.KubernetesBlockServiceAccount != ""},
+	} {
+		if f.set {
+			report(rp + f.key)
+		}
+	}
+}
+
+// reportRemovedStorageOverrides reports each removed storage override
+// (shared_dir_storage_backend, shared_dir_storage_backends,
+// home_storage_backend, home_storage_leaf) that profile name or its runtime
+// entry sets, as not converted. The message names the replacement,
+// server.project_storage and volumes: (RemovedStorageOverrideErrors).
+func reportRemovedStorageOverrides(st *convState, name, rtKey string, prof V1ProfileConfig, rt V1RuntimeConfig) {
+	report := func(path string) {
+		st.add(ConversionLegacyFieldRemoved, ConversionSeverityNotice, path,
+			fmt.Sprintf("%s is no longer supported and is not converted: %s", path, removedOverrideRemedyFn), name)
+	}
+	type key struct {
+		key string
+		set bool
+	}
+	pp, rp := "profiles."+name+".", "runtimes."+rtKey+"."
+	for _, f := range []key{
+		{"shared_dir_storage_backend", prof.SharedDirStorageBackend != ""},
+		{"shared_dir_storage_backends", len(prof.SharedDirStorageBackends) > 0},
+		{"home_storage_backend", prof.HomeStorageBackend != ""},
+		{"home_storage_leaf", prof.HomeStorageLeaf != ""},
+	} {
+		if f.set {
+			report(pp + f.key)
+		}
+	}
+	for _, f := range []key{
+		{"shared_dir_storage_backend", rt.SharedDirStorageBackend != ""},
+		{"shared_dir_storage_backends", len(rt.SharedDirStorageBackends) > 0},
+		{"home_storage_backend", rt.HomeStorageBackend != ""},
+		{"home_storage_leaf", rt.HomeStorageLeaf != ""},
 	} {
 		if f.set {
 			report(rp + f.key)
@@ -882,13 +901,6 @@ func setInstanceField(t *V1RuntimeTargetConfig, d *V1InstanceAgentDefaults, fiel
 		t.KubernetesServiceAccountMappings[rest] = v.(string)
 		return
 	}
-	if rest, ok := strings.CutPrefix(field, "shared_dir_storage_backends."); ok {
-		if t.SharedDirStorageBackends == nil {
-			t.SharedDirStorageBackends = map[string]string{}
-		}
-		t.SharedDirStorageBackends[rest] = v.(string)
-		return
-	}
 	if rest, ok := strings.CutPrefix(field, "harness_overrides."); ok {
 		hc, sub := splitHarnessOverrideField(rest)
 		if d.HarnessOverrides == nil {
@@ -930,12 +942,6 @@ func setInstanceField(t *V1RuntimeTargetConfig, d *V1InstanceAgentDefaults, fiel
 	case "safe_to_evict":
 		b := v.(bool)
 		t.SafeToEvict = &b
-	case "shared_dir_storage_backend":
-		t.SharedDirStorageBackend = v.(string)
-	case "home_storage_backend":
-		t.HomeStorageBackend = v.(string)
-	case "home_storage_leaf":
-		t.HomeStorageLeaf = v.(string)
 	case "kubernetes_block_service_account":
 		t.KubernetesBlockServiceAccount = v.(string)
 	case "default_harness_config":

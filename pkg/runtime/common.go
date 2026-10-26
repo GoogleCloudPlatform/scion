@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"net/url"
 	"os"
@@ -32,6 +31,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -290,6 +290,16 @@ func buildTmuxStartCmd(agentWindowCmd string, end tmuxSessionEnd) string {
 	}
 }
 
+// errWorktreeAdminUnresolved is returned when the broker-recorded worktree admin
+// directory for a workspace cannot be resolved from the common git dir's trusted
+// back-links: the start is refused rather than binding git metadata or the
+// enclosing repository. This is distinct from errOutsideRootNotRegistered (a
+// workspace outside the repo root that is not a registered worktree at all); this
+// sentinel covers a workspace routed through a worktree layout — including a plain
+// in-repo subdirectory that is not a registered worktree — for which no per-agent
+// private .git surface can be built.
+var errWorktreeAdminUnresolved = errors.New("cannot resolve the broker-recorded worktree admin directory for the workspace; refusing to mount git metadata")
+
 // buildCommonRunArgs constructs the common arguments for 'run' command across different runtimes.
 func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	args := []string{"run", "-d", "-i"}
@@ -469,11 +479,18 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		config.RepoRoot = resolvedRepoRoot
 	}
 
-	fullRepoRootMounted := false
 	// sharedWorkspaceAgentsMask is the container path of the in-project
 	// agents root of a shared workspace mount, shadowed with a tmpfs below
 	// (sharedWorkspaceAgentsMaskTarget); empty when no mask applies.
 	sharedWorkspaceAgentsMask := ""
+	// nestedMasks collects the no-create agents-dir masks requested by the
+	// nested and fallback own-.scion paths (requireExistingAgentsMask). They are
+	// emitted as tmpfs mounts AFTER the bind mounts, below, so a mask lands over
+	// its read-only .scion bind rather than before it.
+	var nestedMasks []string
+	addMask := func(maskTarget string) {
+		nestedMasks = append(nestedMasks, maskTarget)
+	}
 	if config.GitClone != nil {
 		// Git clone mode: mount the host-side workspace directory so the
 		// cloned repo is visible on the host for debugging and persistence.
@@ -484,29 +501,13 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	} else if config.RepoRoot != "" && config.Workspace != "" {
 		relWorkspace, err := filepath.Rel(config.RepoRoot, config.Workspace)
 		if err == nil && !strings.HasPrefix(relWorkspace, "..") && relWorkspace != "." {
-			// Worktree case: workspace is a subdirectory of repo root.
-			// Mount .git separately and workspace at its relative path.
-			registerMount(filepath.Join(config.RepoRoot, ".git"), "/repo-root/.git", false, true)
-			if config.RuntimeName == "docker" {
-				// Mount narrowing (Docker + hub-native only): narrow the
-				// container's write access to the shared base repo's admin
-				// surface — see narrowGitAdminMounts. This broader surface
-				// (hooks/info/config/config.worktree) stays hub-native-only:
-				// a linked project's own host-trusted hooks/config may have a
-				// legitimate need to stay writable that a hub-native base
-				// does not, and that question is unresolved for the local
-				// path.
-				if isHubManagedWorktreeBase(config.RepoRoot) {
-					narrowGitAdminMounts(registerMount, config.RepoRoot, config.Workspace)
-				}
-				// Mount narrowing (Part B, Docker, hub-native AND local): narrow the
-				// sharer registry and every worktree's admin back-link — see
-				// narrowSharerRegistryMounts. Unlike the broader surface
-				// above, neither of these two paths is ever legitimately
-				// written by anything other than the broker itself on any
-				// base type, so this narrower surface applies regardless of
-				// isHubManagedWorktreeBase.
-				narrowSharerRegistryMounts(registerMount, config.RepoRoot, config.Workspace)
+			// Worktree case: workspace is a subdirectory of repo root. Mount
+			// .git with the read-only / private narrowing (every runtime
+			// and base, incl. linked checkouts), then the workspace at its
+			// relative path. registerWorktreeGitMounts refuses the start if the
+			// per-agent private .git/config cannot be bound safely.
+			if err := registerWorktreeGitMounts(registerMount, config); err != nil {
+				return nil, err
 			}
 			containerWorkspace := filepath.Join("/repo-root", relWorkspace)
 			registerMount(config.Workspace, containerWorkspace, false, true)
@@ -531,6 +532,13 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 					if isDir(filepath.Join(src, "agents")) {
 						sharedWorkspaceAgentsMask = path.Join(tgt, "agents")
 					}
+				}
+				// A project kept in a SUBDIRECTORY of this non-own workspace (its
+				// .scion is <ws>/<sub>/.scion) would otherwise stay writable under the
+				// read-write workspace bind: mount the nested .scion read-only and mask
+				// its agents/ (same helper as the shared/config-only nested cases).
+				if err := applyNestedProjectConfig(config, containerWorkspace, registerMount, addMask); err != nil {
+					return nil, err
 				}
 			}
 		} else if relWorkspace == "." {
@@ -566,6 +574,22 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// only an existing agents dir.
 			registerMount(config.Workspace, "/workspace", false, true)
 			addArg("--workdir", "/workspace")
+			// Narrow the shared checkout's .git admin surface and bind a
+			// per-agent private .git/config (#5865). The .git root itself stays
+			// read-write (the main worktree's HEAD/index live there); a root
+			// commondir/gitdir redirect is refused host-side
+			// (refuseRootCommonDirRedirect) and config.worktree is bound read-only;
+			// a root-level `shallow` remains a documented residual. Refuses on Apple
+			// (cannot bind single files).
+			if err := registerSharedPlainGitMounts(registerMount, config); err != nil {
+				return nil, err
+			}
+			// Mount the project's .scion read-only and mask its agents dir (the
+			// shared-workspace project-config protection). A git-backed shared workspace
+			// was already refused above on Apple; a non-git shared workspace reaches here
+			// on every runtime. On docker/podman the broker creates the (git-excluded)
+			// agents dir first so the read-only mount leaves a mount point for the mask;
+			// Apple masks only an existing agents dir.
 			src, tgt, ok, err := workspaceProjectConfigMount(config.Workspace, "/workspace", config.RuntimeName != appleContainerRuntimeName)
 			if err != nil {
 				return nil, err
@@ -579,14 +603,72 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			if target, ok := sharedWorkspaceAgentsMaskTarget(config, "/workspace", true); ok {
 				sharedWorkspaceAgentsMask = target
 			}
+			// A project kept in a SUBDIRECTORY of this shared workspace (its .scion
+			// is <ws>/<sub>/.scion, not <ws>/.scion) would otherwise stay writable
+			// under the read-write /workspace bind: mount the nested .scion
+			// read-only and mask its agents/.
+			if err := applyNestedProjectConfig(config, "/workspace", registerMount, addMask); err != nil {
+				return nil, err
+			}
 		} else {
-			// Fallback if workspace is outside repo root or relative path is not straightforward.
-			// Still mount RepoRoot so that .git worktree pointers can potentially be resolved if
-			// we are clever, but for now just mount both.
-			registerMount(config.RepoRoot, "/repo-root", false, true)
+			// Fallback: workspace is outside the repo root. Only a
+			// registered worktree of RepoRoot may use this path, and then only
+			// <main>/.git (narrowed) plus the workspace are mounted — never the
+			// whole main checkout read-write. Anything else is refused.
+			registered, regErr := util.IsRegisteredWorktree(config.RepoRoot, config.Workspace)
+			if regErr != nil || !registered {
+				return nil, fmt.Errorf("agent %q: workspace %q against repository root %q: %w", config.Name, config.Workspace, config.RepoRoot, errOutsideRootNotRegistered)
+			}
+			gitDir := filepath.Join(config.RepoRoot, ".git")
+			// Derive the read-write own-worktree overlay target from the common
+			// dir's trusted back-links, not the agent-writable gitfile; refuse if
+			// it cannot be resolved.
+			name, ok := trustedWorktreeAdminName(gitDir, config.Workspace)
+			if !ok {
+				return nil, fmt.Errorf("agent %q: cannot resolve the broker-recorded worktree admin directory for workspace %q against %q; refusing to mount git metadata: %w", config.Name, config.Workspace, gitDir, errWorktreeAdminUnresolved)
+			}
+			// The .git root is read-only (no root-level commondir/other honoured
+			// file can be created); objects/refs/logs/own-worktree are read-write.
+			// docker/podman additionally bind the per-agent private config; Apple
+			// reads the repository config directly (documented).
+			if err := registerReadOnlyBaseGitMounts(registerMount, gitDir, "/repo-root/.git", name); err != nil {
+				return nil, err
+			}
+			if config.RuntimeName == appleContainerRuntimeName {
+				if err := refuseAppleRepoConfigWithSecrets(config.Name, gitDir); err != nil {
+					return nil, err
+				}
+			} else {
+				if err := registerPrivateGitConfig(registerMount, config, "/repo-root/.git"); err != nil {
+					return nil, err
+				}
+			}
 			registerMount(config.Workspace, "/workspace", false, true)
 			addArg("--workdir", "/workspace")
-			fullRepoRootMounted = true
+			// A non-own registered worktree may hold a project's .scion the broker
+			// reads; the workspace itself is bound read-write at /workspace, so its
+			// project config must be protected exactly as in the other not-own
+			// layouts: bind <ws>/.scion read-only and mask its agents/ when it
+			// exists (never created here — the worktree is the user's checkout), and
+			// mount a nested <ws>/<sub>/.scion read-only with its agents/ masked.
+			// This stays below /workspace; the fallback still mounts only
+			// /repo-root/.git and /workspace, never /repo-root, so nothing above the
+			// project root is exposed and the negative /repo-root test holds.
+			if !config.AgentOwnWorkspace {
+				src, tgt, ok, err := workspaceProjectConfigMount(config.Workspace, "/workspace", config.RuntimeName != appleContainerRuntimeName)
+				if err != nil {
+					return nil, err
+				}
+				if ok {
+					registerMount(src, tgt, true, true)
+					if err := requireExistingAgentsMask(config, src, tgt, addMask); err != nil {
+						return nil, err
+					}
+				}
+				if err := applyNestedProjectConfig(config, "/workspace", registerMount, addMask); err != nil {
+					return nil, err
+				}
+			}
 		}
 	} else if config.Workspace != "" {
 		registerMount(config.Workspace, "/workspace", false, true)
@@ -614,6 +696,12 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 					sharedWorkspaceAgentsMask = path.Join(tgt, "agents")
 				}
 			}
+		}
+		// A project whose .scion is in a SUBDIRECTORY of this workspace (for
+		// example a settings workspace_path pointing at an enclosing directory)
+		// gets the nested .scion read-only and its agents/ masked too.
+		if err := applyNestedProjectConfig(config, "/workspace", registerMount, addMask); err != nil {
+			return nil, err
 		}
 	}
 
@@ -778,70 +866,39 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		addArg("-v", volumeMap[tgt])
 	}
 
-	// Shadow the .scion directory with a tmpfs when the full repo root is
-	// mounted into the container. This prevents agents from accessing other
-	// agents' home directories and secrets via the host filesystem.
-	// The Apple runtime drops --mount arguments, so it gets the equivalent
-	// --tmpfs flag, and only when the directory exists, so the runtime
-	// never creates that mount point in the host checkout.
-	if fullRepoRootMounted {
-		if config.RuntimeName == appleContainerRuntimeName {
-			scionPath := filepath.Join(config.RepoRoot, workspaceProjectConfigDir)
-			if isDir(scionPath) {
-				addArg("--tmpfs", "/repo-root/"+workspaceProjectConfigDir)
-			} else if info, err := os.Lstat(scionPath); err == nil && !info.IsDir() {
-				// A marker file or link cannot be masked or bound
-				// read-only on Apple.
-				return nil, errProjectConfigMarkerNoBind
-			}
-		} else {
-			addArg("--mount", "type=tmpfs,destination=/repo-root/.scion")
-		}
-		// A project kept in a subdirectory of the repository has its
-		// .scion (and agents root) below the repo root: shadow it too, or
-		// bind its marker file read-only.
-		if rel, ok := nestedProjectConfigRel(config.RepoRoot, config.ProjectConfigPath); ok {
-			hostPath := filepath.Join(config.RepoRoot, rel)
-			target := "/repo-root/" + filepath.ToSlash(rel)
-			info, err := os.Lstat(hostPath)
-			switch {
-			case errors.Is(err, fs.ErrNotExist):
-			case err != nil:
-				return nil, fmt.Errorf("cannot check the project's .scion to mask it: %w", err)
-			case info.Mode()&os.ModeSymlink != 0:
-				return nil, errProjectConfigSymlink
-			case info.IsDir():
-				if config.RuntimeName == appleContainerRuntimeName {
-					addArg("--tmpfs", target)
-				} else {
-					addArg("--mount", "type=tmpfs,destination="+target)
-				}
-			default:
-				if config.RuntimeName == appleContainerRuntimeName {
-					return nil, errProjectConfigMarkerNoBind
-				}
-				addArg("-v", hostPath+":"+target+":ro")
-			}
-		}
-	}
+	// (The whole repo root is never mounted read-write any more: the
+	// outside-repo-root fallback now mounts only <main>/.git plus the workspace
+	// for a registered worktree, and refuses otherwise, so there is
+	// no /repo-root/.scion on the host to shadow.)
 	// Shadow the in-project agents root of a shared workspace mount with a
 	// tmpfs, so it is empty in the container. The Apple runtime drops
 	// --mount arguments (stripUnsupportedAppleFlags), so it gets the
 	// equivalent --tmpfs flag. Kubernetes keeps the path out of its pods
 	// itself (k8sWorkspaceAgentsExcluded).
 	if sharedWorkspaceAgentsMask != "" {
-		// Create <workspace>/.scion/agents on the host first, owned by the
-		// broker, so the runtime mounts the tmpfs over an existing directory
-		// rather than creating the mount point through the bind and leaving a
-		// root-owned directory in the user's checkout. The tmpfs then hides
-		// whatever is there.
-		if config.Workspace != "" {
-			_ = os.MkdirAll(filepath.Join(config.Workspace, filepath.FromSlash(sharedWorkspaceAgentsDir)), 0o755)
-		}
 		if config.RuntimeName == appleContainerRuntimeName {
 			addArg("--tmpfs", sharedWorkspaceAgentsMask)
 		} else {
 			addArg("--mount", "type=tmpfs,destination="+sharedWorkspaceAgentsMask)
+		}
+	}
+
+	// No-create agents masks requested by the nested and fallback own-.scion
+	// paths (requireExistingAgentsMask), emitted AFTER the bind mounts so each
+	// tmpfs lands over its read-only .scion bind. The helper adds a mask only
+	// for an agents dir that already exists on the broker (the start is
+	// otherwise refused on Docker/Podman), so nothing is created here. Deduped
+	// against the shared-workspace mask and each other.
+	emittedMask := map[string]bool{sharedWorkspaceAgentsMask: true}
+	for _, mask := range nestedMasks {
+		if mask == "" || emittedMask[mask] {
+			continue
+		}
+		emittedMask[mask] = true
+		if config.RuntimeName == appleContainerRuntimeName {
+			addArg("--tmpfs", mask)
+		} else {
+			addArg("--mount", "type=tmpfs,destination="+mask)
 		}
 	}
 
@@ -1043,9 +1100,7 @@ func isHubManagedWorktreeBase(repoRoot string) bool {
 // freshly-cloned base without a config.worktree (the common case —
 // extensions.worktreeConfig is opt-in) does not cause Docker to create an
 // empty file/dir on the host for a nonexistent bind-mount source.
-func narrowGitAdminMounts(registerMount func(string, string, bool, bool), repoRoot, workspace string) {
-	gitDir := filepath.Join(repoRoot, ".git")
-
+func narrowGitAdminMounts(registerMount func(string, string, bool, bool), gitDir, containerGitDir string) error {
 	// .git/hooks and .git/info are present after a default `git init`, but
 	// an empty/custom init.templateDir (or `git init --template=`) can
 	// produce a base without one or both. Skipping the mount in that case
@@ -1054,31 +1109,313 @@ func narrowGitAdminMounts(registerMount func(string, string, bool, bool), repoRo
 	// first (an empty read-only directory is harmless) so the mount always
 	// applies.
 	for _, dir := range []string{"hooks", "info"} {
-		src := filepath.Join(gitDir, dir)
-		if err := os.MkdirAll(src, 0755); err != nil {
-			// If the directory cannot even be created, mounting it read-only
-			// isn't possible either; leave this one subpath uncovered rather
-			// than fail agent startup over it.
+		// Create-first through the component-checked path (fail closed on a symlink
+		// or non-directory) so the read-only mount always applies and a container
+		// cannot create its own writable hooks/ or info/ in the rw .git root.
+		if err := bindChecked(registerMount, gitDir, containerGitDir, true, bindDirCreate, dir); err != nil {
+			return err
+		}
+	}
+
+	// .git/config is bound read-only (a per-agent redacted copy; see
+	// registerPrivateGitConfig), so repository config is read-only to the agent.
+
+	// The common .git/config.worktree is bound read-only too (create-first): git
+	// consults it when extensions.worktreeConfig is set. The agent's own
+	// worktrees/<name>/config.worktree is handled in narrowWorktreesDir.
+	if err := bindChecked(registerMount, gitDir, containerGitDir, true, bindFileCreate, "config.worktree"); err != nil {
+		return err
+	}
+
+	// .git/modules/<sub>/{config,hooks,info}: a superproject's submodule admin
+	// dirs are also honored by host-side git and by the agent's own in-container
+	// git for that submodule. Narrow each that exists at start (dirs are
+	// create-first like hooks/info above; config is a file bound only if present).
+	return narrowModuleAdminDirs(registerMount, gitDir, containerGitDir)
+}
+
+// bindSourceMode selects how checkedBindSource treats the leaf of a git-metadata
+// bind source.
+type bindSourceMode int
+
+const (
+	bindDirRequire  bindSourceMode = iota // leaf must be an existing real directory; missing -> absent
+	bindDirCreate                         // create the directory (and missing parents) if absent; -> present
+	bindFileRequire                       // leaf must be an existing regular file; missing -> absent
+	bindFileCreate                        // create the regular file (no-follow) if absent; -> present
+)
+
+// bindSourceRaceHook, when non-nil, is invoked by checkedBindSource in the window
+// after every component has been verified and immediately before the leaf is
+// created. It is nil in production (the guarded call then costs nothing); it exists
+// only so a test can deterministically stand in for a concurrent swap of an
+// already-verified component — replacing a verified real directory with a symlink
+// in exactly the create window the post-create re-walk is there to close.
+var bindSourceRaceHook func(leaf string)
+
+// reverifyChain re-walks gitRoot/comps with os.Lstat after a component has been
+// created, confirming that no component became a symlink and that the leaf still
+// has the expected type. The forward walk verifies each component one at a time,
+// but a component verified as a real directory can be swapped for a symlink before
+// the leaf is created (O_NOFOLLOW guards only the final path component, never an
+// intermediate one), which would land the created leaf outside the repository. This
+// re-walk runs after the create and fails closed on any such swap, so the caller
+// can refuse the start and remove what it created.
+func reverifyChain(gitRoot string, comps []string, leafWantDir bool) error {
+	cur := gitRoot
+	last := len(comps) - 1
+	for i, c := range comps {
+		cur = filepath.Join(cur, c)
+		fi, err := os.Lstat(cur)
+		if err != nil {
+			return fmt.Errorf("re-check git metadata bind source %s: %w", cur, err)
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("git metadata bind source %s became a symlink", cur)
+		}
+		if i < last {
+			if !fi.IsDir() {
+				return fmt.Errorf("git metadata bind source parent %s is not a directory", cur)
+			}
 			continue
 		}
-		registerMount(src, filepath.Join("/repo-root/.git", dir), true, true)
+		if leafWantDir {
+			if !fi.IsDir() {
+				return fmt.Errorf("git metadata bind source %s is not a directory", cur)
+			}
+		} else if !fi.Mode().IsRegular() {
+			return fmt.Errorf("git metadata bind source %s is not a regular file", cur)
+		}
+	}
+	return nil
+}
+
+// checkedBindSource is the single fail-closed inspection every git-metadata bind
+// SOURCE passes through before it is bound into an agent. Starting at the
+// broker-trusted gitRoot, it walks each component in comps with os.Lstat: a
+// component that is a symlink, or a non-directory intermediate component, refuses
+// the start — so a planted symlink, at the leaf or at any intermediate component,
+// can never redirect a bind to, or create a file or directory at, a path outside
+// the repository. A symlink is never followed and nothing is ever created through
+// one. The leaf is handled by mode:
+//   - bindDirRequire:  the leaf must be an existing real directory; a missing leaf
+//     or a missing intermediate component reports absent (present=false).
+//   - bindDirCreate:   a missing component is created one level at a time (its
+//     parent already verified a real directory); an existing non-dir/symlink refuses.
+//   - bindFileRequire: the leaf must be an existing regular file; missing reports absent.
+//   - bindFileCreate:  a missing leaf is created as a regular file with
+//     O_NOFOLLOW|O_EXCL in the verified parent (so a dangling symlink at the leaf is
+//     refused rather than created through); an existing non-regular/symlink refuses.
+//
+// For the *Create modes, after the leaf is created it re-walks the whole component
+// chain (reverifyChain): O_NOFOLLOW guards only the leaf, so a component verified as
+// a real directory and then swapped for a symlink before the create would land the
+// new entry outside the repository. The post-create re-walk fails closed on any such
+// swap, removing what was created and refusing the start.
+//
+// It returns the validated absolute source path and whether it is present to bind.
+func checkedBindSource(gitRoot string, mode bindSourceMode, comps ...string) (src string, present bool, err error) {
+	if len(comps) == 0 {
+		return "", false, fmt.Errorf("checkedBindSource: empty source under %s", gitRoot)
+	}
+	cur := gitRoot
+	last := len(comps) - 1
+	// Walk the intermediate components (all but the leaf): each must be an existing
+	// real directory. A symlink or non-directory refuses; a missing intermediate is
+	// created one level at a time for the *Create modes (its parent already verified
+	// a real directory) or reports absent for the *Require modes.
+	for i, c := range comps {
+		if c == "" || c == "." || c == ".." {
+			return "", false, fmt.Errorf("checkedBindSource: unsafe component %q under %s", c, gitRoot)
+		}
+		cur = filepath.Join(cur, c)
+		if i == last {
+			break
+		}
+		fi, statErr := os.Lstat(cur)
+		switch {
+		case statErr == nil:
+			if fi.Mode()&os.ModeSymlink != 0 {
+				return "", false, fmt.Errorf("git metadata bind source %s is a symlink", cur)
+			}
+			if !fi.IsDir() {
+				return "", false, fmt.Errorf("git metadata bind source parent %s is not a directory", cur)
+			}
+		case os.IsNotExist(statErr):
+			if mode == bindDirRequire || mode == bindFileRequire {
+				return "", false, nil
+			}
+			if mkErr := os.Mkdir(cur, 0755); mkErr != nil {
+				return "", false, fmt.Errorf("create git metadata directory %s: %w", cur, mkErr)
+			}
+		default:
+			return "", false, fmt.Errorf("stat git metadata bind source %s: %w", cur, statErr)
+		}
 	}
 
-	// .git/config always exists after `git init`/`git clone` — it is not
-	// template-populated — so no analogous fail-open gap applies here.
-	if configSrc := filepath.Join(gitDir, "config"); fileExists(configSrc) {
-		registerMount(configSrc, "/repo-root/.git/config", true, true)
+	// The leaf. cur is now gitRoot/comps.
+	switch mode {
+	case bindDirRequire, bindDirCreate:
+		fi, statErr := os.Lstat(cur)
+		switch {
+		case statErr == nil:
+			if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+				return "", false, fmt.Errorf("git metadata bind source %s is not a directory", cur)
+			}
+			return cur, true, nil
+		case os.IsNotExist(statErr):
+			if mode == bindDirRequire {
+				return "", false, nil
+			}
+			if bindSourceRaceHook != nil {
+				bindSourceRaceHook(cur)
+			}
+			if mkErr := os.Mkdir(cur, 0755); mkErr != nil {
+				return "", false, fmt.Errorf("create git metadata directory %s: %w", cur, mkErr)
+			}
+			// Close the create-window TOCTOU: if a verified component was swapped for
+			// a symlink before the Mkdir, the directory landed outside the repository.
+			// Re-walk and, on any swap, remove it and refuse.
+			if rErr := reverifyChain(gitRoot, comps, true); rErr != nil {
+				_ = os.Remove(cur)
+				return "", false, rErr
+			}
+			return cur, true, nil
+		default:
+			return "", false, fmt.Errorf("stat git metadata bind source %s: %w", cur, statErr)
+		}
+	case bindFileRequire:
+		fi, statErr := os.Lstat(cur)
+		switch {
+		case statErr == nil:
+			if fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
+				return "", false, fmt.Errorf("git metadata bind source %s is not a regular file", cur)
+			}
+			return cur, true, nil
+		case os.IsNotExist(statErr):
+			return "", false, nil
+		default:
+			return "", false, fmt.Errorf("stat git metadata bind source %s: %w", cur, statErr)
+		}
+	case bindFileCreate:
+		// Create the leaf as a regular file with O_EXCL|O_NOFOLLOW so that any
+		// existing path at cur — including a symlink (even a dangling one) — is
+		// refused rather than followed or created through. O_EXCL|O_NOFOLLOW is the
+		// load-bearing guard here: it is what keeps a symlinked leaf from being
+		// written through at the broker's uid.
+		if bindSourceRaceHook != nil {
+			bindSourceRaceHook(cur)
+		}
+		f, oErr := os.OpenFile(cur, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, 0644)
+		if oErr == nil {
+			_ = f.Close()
+			// Close the create-window TOCTOU: O_NOFOLLOW guards only the leaf, not an
+			// intermediate component. If a verified component was swapped for a symlink
+			// before the open, the file landed outside the repository. Re-walk and, on
+			// any swap, remove it and refuse.
+			if rErr := reverifyChain(gitRoot, comps, false); rErr != nil {
+				_ = os.Remove(cur)
+				return "", false, rErr
+			}
+			return cur, true, nil
+		}
+		if !errors.Is(oErr, os.ErrExist) {
+			return "", false, fmt.Errorf("create git metadata file %s: %w", cur, oErr)
+		}
+		// It already exists: bind only a real regular file (not a symlink/dir/other).
+		fi, lErr := os.Lstat(cur)
+		if lErr != nil {
+			return "", false, fmt.Errorf("stat git metadata bind source %s: %w", cur, lErr)
+		}
+		if fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
+			return "", false, fmt.Errorf("git metadata bind source %s is not a regular file", cur)
+		}
+		return cur, true, nil
+	default:
+		return "", false, fmt.Errorf("checkedBindSource: unknown mode %d", mode)
 	}
+}
 
-	// extensions.worktreeConfig, when enabled on the base, lets a worktree
-	// carry its own config.worktree that git also honors — narrow it too.
-	// This one keeps skip-if-missing: it is opt-in (needs the extension
-	// enabled in the now-read-only base config) and harmless if absent,
-	// unlike hooks/info which git always consults.
-	worktreeName := resolveWorktreeAdminName(workspace)
-	if configWorktree := filepath.Join(gitDir, "worktrees", worktreeName, "config.worktree"); fileExists(configWorktree) {
-		registerMount(configWorktree, filepath.Join("/repo-root/.git/worktrees", worktreeName, "config.worktree"), true, true)
+// bindChecked validates (and for the *Create modes creates) the git-metadata bind
+// source gitRoot/comps via checkedBindSource and, when present, registers it over
+// containerRoot/comps with the given read-only flag. Every git-metadata bind
+// source goes through here (or through ensureOverlayDir, which also calls
+// checkedBindSource), so none resolves via os.Stat/fileExists/MkdirAll/OpenFile
+// unchecked.
+func bindChecked(registerMount func(string, string, bool, bool), gitRoot, containerRoot string, readOnly bool, mode bindSourceMode, comps ...string) error {
+	src, present, err := checkedBindSource(gitRoot, mode, comps...)
+	if err != nil {
+		return err
 	}
+	if present {
+		registerMount(src, filepath.Join(append([]string{containerRoot}, comps...)...), readOnly, true)
+	}
+	return nil
+}
+
+// ensureOverlayDir inspects a single read-write overlay source directly under a
+// trusted parent (objects/, refs/, logs/, lfs/, rr-cache/ under the .git root)
+// through the same checkedBindSource fail-closed path. createIfMissing selects
+// bindDirCreate vs bindDirRequire; a symlink or non-directory refuses.
+func ensureOverlayDir(src string, createIfMissing bool) (present bool, err error) {
+	mode := bindDirRequire
+	if createIfMissing {
+		mode = bindDirCreate
+	}
+	_, present, err = checkedBindSource(filepath.Dir(src), mode, filepath.Base(src))
+	return present, err
+}
+
+// bindReadWriteOverlayDir binds src read-write over dst through ensureOverlayDir.
+func bindReadWriteOverlayDir(registerMount func(string, string, bool, bool), src, dst string, createIfMissing bool) error {
+	present, err := ensureOverlayDir(src, createIfMissing)
+	if err != nil {
+		return err
+	}
+	if present {
+		registerMount(src, dst, false, true)
+	}
+	return nil
+}
+
+// narrowModuleAdminDirs binds read-only every .git/modules/<sub>/{hooks,info}
+// directory and <sub>/config file that exists at start, under containerGitDir.
+// Submodule admin dirs are honored by host-side git and by the agent's own
+// in-container git for that submodule, so they get the same treatment as the
+// top-level hooks/info/config. Submodules created in-container after start are
+// out of scope (not present at mount time).
+func narrowModuleAdminDirs(registerMount func(string, string, bool, bool), gitDir, containerGitDir string) error {
+	modulesDir := filepath.Join(gitDir, "modules")
+	return filepath.WalkDir(modulesDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		// A submodule admin dir is one that directly contains a HEAD file. This is a
+		// discovery predicate, not a bind source; each bound source below is
+		// resolved through checkedBindSource (component-checked, symlink refused).
+		if !fileExists(filepath.Join(path, "HEAD")) {
+			return nil
+		}
+		rel, relErr := filepath.Rel(gitDir, path)
+		if relErr != nil {
+			return nil
+		}
+		relComps := strings.Split(filepath.ToSlash(rel), "/")
+		leaf := func(name string) []string {
+			c := make([]string, 0, len(relComps)+1)
+			c = append(c, relComps...)
+			return append(c, name)
+		}
+		for _, dir := range []string{"hooks", "info"} {
+			if e := bindChecked(registerMount, gitDir, containerGitDir, true, bindDirRequire, leaf(dir)...); e != nil {
+				return e
+			}
+		}
+		return bindChecked(registerMount, gitDir, containerGitDir, true, bindFileRequire, leaf("config")...)
+	})
 }
 
 // narrowSharerRegistryMounts layers read-only bind mounts over two further
@@ -1109,20 +1446,359 @@ func narrowGitAdminMounts(registerMount func(string, string, bool, bool), repoRo
 // container ever starts, so — like config.worktree above — it keeps
 // skip-if-missing: there is no create-first fail-open gap to close, only a
 // path that legitimately might not exist for a base with no worktrees yet.
-func narrowSharerRegistryMounts(registerMount func(string, string, bool, bool), repoRoot, workspace string) {
-	gitDir := filepath.Join(repoRoot, ".git")
+func narrowSharerRegistryMounts(registerMount func(string, string, bool, bool), gitDir, containerGitDir string) error {
+	// Create-first through the component-checked path (fail closed on a symlink or
+	// non-directory) so the read-only mount always applies and a container cannot
+	// create its own writable scion-sharers/ in the rw .git root.
+	// The per-worktree admin back-link (worktrees/<name>/gitdir) is pinned
+	// read-only in narrowWorktreesDir, using the broker-trusted admin name.
+	return bindChecked(registerMount, gitDir, containerGitDir, true, bindDirCreate, sharerRegistryDirName)
+}
 
-	sharersDir := filepath.Join(gitDir, sharerRegistryDirName)
-	if err := os.MkdirAll(sharersDir, 0755); err == nil {
-		registerMount(sharersDir, filepath.Join("/repo-root/.git", sharerRegistryDirName), true, true)
-	}
-	// If the directory cannot even be created, mounting it read-only isn't
-	// possible either; leave it uncovered rather than fail agent startup.
+// narrowObjectsInfo binds .git/objects/info read-only under containerGitDir.
+// The object store itself must stay writable (in-container commit writes loose
+// objects), but objects/info holds `alternates`/`http-alternates`, which host
+// git honors to read objects from another repository path — a cross-repo read
+// primitive. It is a directory, so this works as a bind on every runtime,
+// including Apple. Created first (like hooks/info) so the mount always applies.
+func narrowObjectsInfo(registerMount func(string, string, bool, bool), gitDir, containerGitDir string) error {
+	// Create-first through the component-checked path: the intermediate objects/ and
+	// the leaf objects/info are each Lstat-checked (symlink/non-dir refused).
+	return bindChecked(registerMount, gitDir, containerGitDir, true, bindDirCreate, "objects", "info")
+}
 
-	worktreeName := resolveWorktreeAdminName(workspace)
-	if backLink := filepath.Join(gitDir, "worktrees", worktreeName, "gitdir"); fileExists(backLink) {
-		registerMount(backLink, filepath.Join("/repo-root/.git/worktrees", worktreeName, "gitdir"), true, true)
+// narrowWorktreesDir binds .git/worktrees read-only, then re-mounts the agent's
+// own worktrees/<name>/ read-write on top. Sibling worktree admin dirs
+// (HEAD, index, commondir, gitdir, config.worktree) are then not writable from
+// this container, closing sibling HEAD modification and commondir/gitdir
+// redirection — and a sibling's config.worktree, which that sibling's
+// in-container git honors (#5733 covers only host-side git). The agent's own
+// worktrees/<name>/ stays writable for its HEAD/index/logs; its gitdir, commondir
+// and config.worktree are pinned read-only here (file binds, below). The whole
+// worktrees/ dir is a directory bind, so the sibling protection works on every
+// runtime.
+// worktreeName must be the broker-trusted admin name (trustedWorktreeAdminName),
+// or "" for a layout with no own per-agent worktree (shared-plain).
+func narrowWorktreesDir(registerMount func(string, string, bool, bool), gitDir, containerGitDir, worktreeName string) error {
+	// The whole worktrees/ dir is read-only so a container cannot write any
+	// sibling's admin files (HEAD, index, commondir, gitdir, config.worktree).
+	wtSrc, present, err := checkedBindSource(gitDir, bindDirRequire, "worktrees")
+	if err != nil {
+		return err
 	}
+	if !present {
+		return nil
+	}
+	registerMount(wtSrc, filepath.Join(containerGitDir, "worktrees"), true, true)
+	if worktreeName == "" {
+		return nil
+	}
+	ownSrc, ownPresent, err := checkedBindSource(gitDir, bindDirRequire, "worktrees", worktreeName)
+	if err != nil {
+		return err
+	}
+	if !ownPresent {
+		return nil
+	}
+	// The agent's own worktree admin dir is read-write for HEAD/index/logs/ORIG_HEAD.
+	registerMount(ownSrc, filepath.Join(containerGitDir, "worktrees", worktreeName), false, true)
+	// …but its back-link (gitdir), its commondir pointer, and its config.worktree
+	// stay read-only (create-first through the component-checked path), so the agent
+	// cannot redirect its own gitdir/commondir or write worktree-scoped config.
+	// These sit inside the read-write own-admin overlay, so a failed create would
+	// fail open; refuse the start.
+	for _, f := range []string{"gitdir", "commondir", "config.worktree"} {
+		if e := bindChecked(registerMount, gitDir, containerGitDir, true, bindFileCreate, "worktrees", worktreeName, f); e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
+// registerPrivateGitConfig binds the per-agent private .git/config copy
+// (config.PrivateGitConfigSource) READ-ONLY as a single file over
+// containerGitDir/config. The repository config is therefore read-only to the
+// agent on every runtime: the agent reads a redacted, per-agent copy, and any
+// write (git config --local, remote add) fails because the mount point cannot be
+// renamed over. The copy is pre-seeded with the agent's own branch upstream and
+// push.autoSetupRemote so a bare `git push` finds the upstream already set and
+// exits 0 without a config write; `git push -u` also exits 0 but cannot persist
+// the upstream and prints an error. Personal preferences go in the per-agent
+// writable global git config in the agent home.
+//
+// Immediately before the bind the source is re-checked: it must be a regular
+// file, not a symlink, with link count 1, owned by this (broker) process.
+// A missing or unsafe source returns an error so the caller refuses the start —
+// the config must never fall back to the shared, host-writable base file. The
+// broker never reads this file back.
+func registerPrivateGitConfig(registerMount func(string, string, bool, bool), config RunConfig, containerGitDir string) error {
+	src := config.PrivateGitConfigSource
+	if src == "" {
+		return fmt.Errorf("agent %q: a private .git/config source is required for this git layout but was not seeded", config.Name)
+	}
+	if err := checkPrivateGitConfigSource(src); err != nil {
+		return fmt.Errorf("agent %q: refusing to bind the private .git/config: %w", config.Name, err)
+	}
+	registerMount(src, filepath.Join(containerGitDir, "config"), true, true)
+	return nil
+}
+
+// checkPrivateGitConfigSource verifies a seeded private-config path is safe to
+// bind: a regular file (not a symlink or special file), link count 1 (not a hard
+// link that also names another file), owned by this process. It uses Lstat so a
+// symlink is rejected rather than followed.
+func checkPrivateGitConfigSource(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", path, err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s is a symlink", path)
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", path)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("%s: cannot read ownership/link count", path)
+	}
+	if st.Nlink != 1 {
+		return fmt.Errorf("%s has link count %d (want 1)", path, st.Nlink)
+	}
+	if int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("%s is owned by uid %d, not the broker (uid %d)", path, st.Uid, os.Getuid())
+	}
+	return nil
+}
+
+// registerWorktreeGitMounts registers the .git mounts for an in-repo worktree
+// layout (workspace is a subdirectory of the repo root). On every runtime the
+// base .git is bound read-only (registerReadOnlyBaseGitMounts), with read-write
+// overlays only for the paths an in-container git must write, so no root-level
+// file git honours can be created. On docker/podman a per-agent redacted private
+// config is then bound read-only over .git/config; Apple cannot bind a single
+// file, so there the agent reads the repository config directly (documented).
+func registerWorktreeGitMounts(registerMount func(string, string, bool, bool), config RunConfig) error {
+	gitDir := filepath.Join(config.RepoRoot, ".git")
+	const containerGit = "/repo-root/.git"
+	// The read-write own-worktree overlay must target the admin dir the broker's
+	// `git worktree add` created, identified from the common dir's trusted
+	// back-links — never the agent-writable <workspace>/.git gitfile. If it
+	// cannot be resolved, refuse and mount nothing.
+	name, ok := trustedWorktreeAdminName(gitDir, config.Workspace)
+	if !ok {
+		return fmt.Errorf("agent %q: cannot resolve the broker-recorded worktree admin directory for workspace %q against %q; refusing to mount git metadata: %w", config.Name, config.Workspace, gitDir, errWorktreeAdminUnresolved)
+	}
+	// The .git root is read-only on every runtime (so no root-level commondir or
+	// other honoured file can be created); objects/refs/logs/own-worktree are
+	// overlaid read-write. On docker/podman a per-agent redacted private config is
+	// then bound read-only over .git/config; Apple cannot bind a single file, so
+	// there the agent reads the repository config directly (documented).
+	if err := registerReadOnlyBaseGitMounts(registerMount, gitDir, containerGit, name); err != nil {
+		return err
+	}
+	if config.RuntimeName == appleContainerRuntimeName {
+		return refuseAppleRepoConfigWithSecrets(config.Name, gitDir)
+	}
+	return registerPrivateGitConfig(registerMount, config, containerGit)
+}
+
+// refuseAppleRepoConfigWithSecrets refuses the start when, on the Apple runtime,
+// the repository's .git/config holds credential-bearing settings. Apple cannot
+// bind a single file, so the agent reads the repository config directly (no
+// redacted per-agent copy); a read-only mount keeps the agent from changing the
+// config but still lets it read the values. The check runs
+// util.RedactGitConfigSecrets on the config and refuses if anything would be
+// stripped, naming only the sections (never the values). docker/podman are
+// unaffected: they bind a redacted private copy.
+func refuseAppleRepoConfigWithSecrets(agentName, gitDir string) error {
+	raw, err := readSmallConfigFile(filepath.Join(gitDir, "config"))
+	if err != nil {
+		return fmt.Errorf("agent %q: cannot read the repository git config to vet it for the Apple runtime: %w", agentName, err)
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	_, stripped, err := util.RedactGitConfigSecrets(raw)
+	if err != nil {
+		return fmt.Errorf("agent %q: cannot parse the repository git config to vet it for the Apple runtime: %w", agentName, err)
+	}
+	if len(stripped) == 0 {
+		return nil
+	}
+	return fmt.Errorf("agent %q: the repository's .git/config holds credentials in section(s) %s; remove them, or use a runtime that supports a private git config", agentName, strings.Join(credentialSections(stripped), ", "))
+}
+
+// credentialSections returns the sorted, unique top-level sections of the given
+// config keys (the part before the first "."), so a refusal can name the
+// sections without ever quoting a credential value.
+func credentialSections(keys []string) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	for _, k := range keys {
+		sec := k
+		if i := strings.IndexByte(k, '.'); i >= 0 {
+			sec = k[:i]
+		}
+		if _, ok := seen[sec]; !ok {
+			seen[sec] = struct{}{}
+			out = append(out, sec)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// readSmallConfigFile reads a .git/config, refusing a symlink or non-regular file
+// (O_NOFOLLOW) and capping the size. A missing file returns nil with no error.
+func readSmallConfigFile(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer func() { _ = f.Close() }() // read-only; a close error cannot affect the bytes already read
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	const maxConfig = 1 << 20
+	// Read one byte past the cap and refuse a file larger than it, so the whole
+	// config is covered by the credential check: every byte that is checked is the
+	// whole file, with no unread remainder.
+	raw, err := io.ReadAll(io.LimitReader(f, maxConfig+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxConfig {
+		return nil, fmt.Errorf("%s exceeds %d bytes", path, maxConfig)
+	}
+	return raw, nil
+}
+
+// registerRwBaseGitNarrowing narrows a read-write .git base
+// (docker/podman/k8s-style single-file binds supported). It layers the
+// read-only admin surface and the per-agent read-only private config over an
+// already read-write containerGitDir, and returns an error (refusing the start)
+// if the private config cannot be bound. worktreeName is the broker-trusted
+// admin name, or "" for a layout with no own per-agent worktree (shared-plain).
+func registerRwBaseGitNarrowing(registerMount func(string, string, bool, bool), config RunConfig, gitDir, containerGitDir, worktreeName string) error {
+	if err := narrowGitAdminMounts(registerMount, gitDir, containerGitDir); err != nil {
+		return err
+	}
+	if err := narrowSharerRegistryMounts(registerMount, gitDir, containerGitDir); err != nil {
+		return err
+	}
+	if err := narrowObjectsInfo(registerMount, gitDir, containerGitDir); err != nil {
+		return err
+	}
+	if err := narrowWorktreesDir(registerMount, gitDir, containerGitDir, worktreeName); err != nil {
+		return err
+	}
+	return registerPrivateGitConfig(registerMount, config, containerGitDir)
+}
+
+// registerReadOnlyBaseGitMounts implements the read-only-.git-root layout used by
+// the worktree and outside-root fallback layouts on every runtime. The whole .git
+// is bound read-only as a directory, so no new root-level entry (commondir,
+// gitdir, or any other file git would honour) can be created. Only the specific
+// paths an in-container git must write are re-opened read-write on top:
+//   - objects/, refs/, logs/ (commit/fetch/push write loose objects, refs, reflogs);
+//   - lfs/ (the in-container git-lfs object store) and rr-cache/ (rerere) — these
+//     are directories, so writes land in their own subtrees, not the root;
+//   - the agent's own worktrees/<name>/ (its HEAD/index/logs).
+//
+// objects/info/ is pinned read-only again on top of the read-write objects/
+// overlay (alternates), as are the agent's own worktrees/<name>/{gitdir,commondir,
+// config.worktree}. hooks/, info/, the root config and every other root entry
+// stay read-only by inheritance from the read-only base. Overlay source dirs are
+// created host-side first, failing closed (a symlink or non-directory source
+// refuses the start).
+//
+// Operations that write a lock or state file directly in the .git root fail
+// cleanly rather than silently, and are documented limitations of this layout
+// (the same ones the Apple layout has): deleting a branch or fetch --prune
+// (packed-refs.lock), git gc / git pack-refs, and a shallow fetch (shallow.lock)
+// all need a writable .git root; objects under modules/<name>/ (submodules) are
+// read-only too. Commit, branch creation, fetch, pull and push work normally.
+// worktreeName must be the broker-trusted admin name (trustedWorktreeAdminName),
+// or "" when the layout has no own per-agent worktree.
+func registerReadOnlyBaseGitMounts(registerMount func(string, string, bool, bool), gitDir, containerGitDir, worktreeName string) error {
+	registerMount(gitDir, containerGitDir, true, true) // read-only base
+	// objects/refs/logs are always present and needed; lfs is created so the
+	// in-container git-lfs store works (harmless when absent). Each is a writable
+	// overlay (created host-side, fail-closed).
+	for _, dir := range []string{"objects", "refs", "logs", "lfs"} {
+		if err := bindReadWriteOverlayDir(registerMount, filepath.Join(gitDir, dir), filepath.Join(containerGitDir, dir), true); err != nil {
+			return err
+		}
+	}
+	// rr-cache is overlaid read-write only if it already exists (createIfMissing
+	// false): creating it host-side would turn on rerere in the user's own checkout
+	// (git enables rerere automatically when .git/rr-cache exists and rerere.enabled
+	// is unset). It passes the same ensureOverlayDir refusal, so a symlink or a
+	// non-directory there is refused.
+	if err := bindReadWriteOverlayDir(registerMount, filepath.Join(gitDir, "rr-cache"), filepath.Join(containerGitDir, "rr-cache"), false); err != nil {
+		return err
+	}
+	// objects/info read-only again (alternates), on top of the rw objects/.
+	if err := narrowObjectsInfo(registerMount, gitDir, containerGitDir); err != nil {
+		return err
+	}
+	// The agent's own worktree admin dir must be writable (HEAD/index/logs), but
+	// its gitdir, commondir and config.worktree stay read-only. The rw overlay and
+	// each file go through the same checkedBindSource refusal, component by component;
+	// a missing own dir means no own worktree (skip the admin binds), a symlink or
+	// non-directory is refused.
+	if worktreeName == "" {
+		return nil
+	}
+	ownSrc, present, err := checkedBindSource(gitDir, bindDirRequire, "worktrees", worktreeName)
+	if err != nil {
+		return err
+	}
+	if !present {
+		return nil
+	}
+	registerMount(ownSrc, filepath.Join(containerGitDir, "worktrees", worktreeName), false, true)
+	for _, f := range []string{"gitdir", "commondir", "config.worktree"} {
+		if e := bindChecked(registerMount, gitDir, containerGitDir, true, bindFileCreate, "worktrees", worktreeName, f); e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
+// registerSharedPlainGitMounts narrows the .git admin surface of a shared-plain
+// workspace (the workspace IS the repo root, already bound read-write at
+// /workspace). The .git root stays read-write — the main worktree's HEAD/index
+// live there and the agent legitimately writes them — so only the admin surface
+// (hooks/info/objects-info/sibling-worktrees, modules) is pinned read-only and a
+// per-agent private .git/config is bound over the shared one. A root commondir/gitdir
+// redirect is refused host-side (refuseRootCommonDirRedirect) and config.worktree is
+// bound read-only (create-first); a root-level `shallow` an agent creates is a
+// documented residual (no host-side control for it). The Apple runtime is refused: it cannot bind
+// single files to make .git/config private, and a read-only .git would break the
+// main worktree's HEAD/index writes.
+func registerSharedPlainGitMounts(registerMount func(string, string, bool, bool), config RunConfig) error {
+	gitDir := filepath.Join(config.Workspace, ".git")
+	fi, err := os.Stat(gitDir)
+	if err != nil || !fi.IsDir() {
+		// A non-git (old-style) shared workspace, or .git is a file: nothing to
+		// narrow here.
+		return nil
+	}
+	if config.RuntimeName == appleContainerRuntimeName {
+		return fmt.Errorf("agent %q: %w", config.Name, errAppleSharedWorkspaceUnsupported)
+	}
+	// Shared-plain has no per-agent worktree admin dir (agents share the main
+	// checkout), so no own-worktree read-write overlay — pass "".
+	return registerRwBaseGitNarrowing(registerMount, config, gitDir, "/workspace/.git", "")
 }
 
 // sharerRegistryDirName is the marker directory pkg/provision's sharer
@@ -1149,30 +1825,113 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-// resolveWorktreeAdminName returns the name git used for this worktree's
-// admin directory under <repoRoot>/.git/worktrees/. It defaults to
-// filepath.Base(workspace), but `git worktree add` appends a numeric suffix
-// to disambiguate a name collision, so the actual name is read from the
-// worktree's own gitfile (a file at <workspace>/.git containing "gitdir:
-// <repoRoot>/.git/worktrees/<name>") when available. Falling back to the
-// basename on any read/parse failure only risks missing the optional
-// config.worktree mount (harmless — see narrowGitAdminMounts).
-func resolveWorktreeAdminName(workspace string) string {
-	fallback := filepath.Base(workspace)
-	data, err := os.ReadFile(filepath.Join(workspace, ".git"))
+// trustedWorktreeAdminName returns the name of the .git/worktrees/<name> admin
+// directory that belongs to the agent's workspace, derived ONLY from
+// broker-trusted data in the common git dir, never from the agent-writable
+// <workspace>/.git gitfile. It enumerates the common dir's worktrees/<name>
+// entries and returns the single one whose own gitdir back-reference resolves to
+// <workspace>/.git. A name must be a single path element (not "." or ".."). If
+// there is no unique match it returns ok=false, and the caller must refuse to
+// bind any read-write worktree overlay (fail closed).
+//
+// This is the control for the read-write own-worktree overlay: the agent must
+// not be able to choose, via its own gitfile, which admin dir it gets mounted
+// read-write (which could reach a sibling's admin dir, the whole worktrees/
+// directory, or — once cleaned — the .git root itself).
+func trustedWorktreeAdminName(gitDir, workspace string) (string, bool) {
+	wantGit := filepath.Join(workspace, ".git")
+	// The workspace .git gitfile is agent-writable. A worktree's .git is always a
+	// regular file (the gitfile); refuse if it is a symlink (or a directory, or
+	// missing), so the agent cannot repoint it at a sibling's gitfile and have the
+	// match resolve through it. Fail closed.
+	if fi, err := os.Lstat(wantGit); err != nil || !fi.Mode().IsRegular() {
+		return "", false
+	}
+	// Canonicalise by resolving the directory only and naming ".git" lexically, so
+	// a symlink the agent controls at the final component is never followed.
+	want := canonicalGitfilePath(wantGit)
+	worktreesDir := filepath.Join(gitDir, "worktrees")
+	entries, err := os.ReadDir(worktreesDir)
 	if err != nil {
-		return fallback
+		return "", false
 	}
-	line := strings.TrimSpace(string(data))
-	const prefix = "gitdir:"
-	if !strings.HasPrefix(line, prefix) {
-		return fallback
+	match := ""
+	for _, e := range entries {
+		name := e.Name()
+		// A single, non-traversing path element only.
+		if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\") {
+			continue
+		}
+		adminDir := filepath.Join(worktreesDir, name)
+		if !e.IsDir() {
+			continue
+		}
+		gitdirFile := filepath.Join(adminDir, "gitdir")
+		ptr, ok := readSmallRegularFile(gitdirFile)
+		if !ok {
+			continue
+		}
+		ptr = strings.TrimSpace(ptr)
+		if ptr == "" {
+			continue
+		}
+		// git worktree add --relative-paths writes a path relative to the admin
+		// dir; an absolute path is also valid. Resolve both the same way.
+		resolved := ptr
+		if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(adminDir, resolved)
+		}
+		if canonicalGitfilePath(resolved) != want {
+			continue
+		}
+		if match != "" {
+			// Two admin dirs claim this workspace — ambiguous; fail closed.
+			return "", false
+		}
+		match = name
 	}
-	adminDir := strings.TrimSpace(strings.TrimPrefix(line, prefix))
-	if adminDir == "" {
-		return fallback
+	if match == "" {
+		return "", false
 	}
-	return filepath.Base(adminDir)
+	return match, true
+}
+
+// canonicalGitfilePath returns a comparable absolute path for a worktree .git
+// gitfile. It resolves symlinks in the parent directory (broker-controlled path)
+// but names the final component lexically, so a symlink at the gitfile itself —
+// which the agent can write at <workspace>/.git — is never followed. If the
+// parent cannot be resolved (it may not exist yet) it falls back to the
+// absolute, cleaned form.
+func canonicalGitfilePath(path string) string {
+	abs := path
+	if a, err := filepath.Abs(path); err == nil {
+		abs = a
+	}
+	abs = filepath.Clean(abs)
+	dir, base := filepath.Split(abs)
+	if r, err := filepath.EvalSymlinks(filepath.Clean(dir)); err == nil {
+		return filepath.Join(r, base)
+	}
+	return abs
+}
+
+// readSmallRegularFile reads a small file, refusing symlinks and non-regular
+// files (a FIFO/device/symlink in a shared worktrees dir must not be
+// followed or block). It returns ok=false on any such refusal or error.
+func readSmallRegularFile(path string) (string, bool) {
+	fi, err := os.Lstat(path)
+	if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
+		return "", false
+	}
+	const max = 4096
+	if fi.Size() > max {
+		return "", false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	return string(data), true
 }
 
 // resolveContainerID maps an agent identifier (slug, name, or partial
@@ -2068,10 +2827,10 @@ const (
 	MetadataInterceptionOff      = "off"
 )
 
-// sharedDirGroups returns the guarded nfs shared-dir leaf groups for config,
-// or nil when the agent mounts no nfs shared dir.
+// sharedDirGroups returns the guarded shared-dir leaf groups for config,
+// or nil when the agent mounts no shared dir from a shared backend.
 func sharedDirGroups(config RunConfig) []int64 {
-	if config.SharedDirStorage == nil || config.SharedDirStorage.Backend != "nfs" || len(config.SharedDirs) == 0 {
+	if !config.SharedDirStorage.Shared() || len(config.SharedDirs) == 0 {
 		return nil
 	}
 	var out []int64

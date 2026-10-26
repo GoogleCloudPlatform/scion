@@ -23,6 +23,8 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // The DB-backed server-config PUT must never answer 200 "saved" for a key it
@@ -156,14 +158,17 @@ func (s *Server) rejectUnpersistedKeys(ctx context.Context, w http.ResponseWrite
 // the ServerConfigUpdateRequest decode would drop, unless that key is a
 // no-op echo of the file-mode GET view. It runs before settings.yaml is
 // read for the merge, so a rejected request writes nothing. done is true
-// if the response has been written.
-func rejectUnknownFileConfigKeys(w http.ResponseWriter, rawBody []byte) (done bool) {
+// if the response has been written. startup is passed to the GET view
+// (buildServerConfigFileResponse).
+func rejectUnknownFileConfigKeys(w http.ResponseWriter, rawBody []byte, startup *config.V1ServerConfig) (done bool) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(rawBody, &top); err != nil {
 		return false
 	}
 	candidates := unknownSettingsKeys(top, reflect.TypeOf(ServerConfigUpdateRequest{}), reflect.TypeOf(ServerConfigResponse{}))
-	rejected, err := rejectedSettingsKeys(candidates, serverConfigFileView)
+	rejected, err := rejectedSettingsKeys(candidates, func() (map[string]any, error) {
+		return serverConfigFileView(startup)
+	})
 	if err != nil {
 		slog.Error("PUT server-config: failed to build GET view for echo check", "error", err)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
@@ -230,8 +235,8 @@ func writeUnpersistedKeysRejected(w http.ResponseWriter, rejected []string) {
 
 // serverConfigFileView returns the file-mode GET /api/v1/admin/server-config
 // body as a generic JSON value, the reference for echo detection.
-func serverConfigFileView() (map[string]any, error) {
-	resp, err := buildServerConfigFileResponse()
+func serverConfigFileView(startup *config.V1ServerConfig) (map[string]any, error) {
+	resp, err := buildServerConfigFileResponse(startup)
 	if err != nil {
 		return nil, err
 	}

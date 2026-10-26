@@ -667,7 +667,7 @@ func TestAllowVar(t *testing.T) {
 		}
 	}
 	// user.signingKey is top-level user.*; the v() helper treats it as such.
-	deny := []string{"core.sshCommand", "core.editor", "credential.helper", "url.x.insteadOf", "http.proxy", "http.sslVerify", "gpg.program", "gpg.ssh.program", "gpg.ssh.allowedSignersFile", "alias.st", "remote.origin.uploadpack", "diff.external", "diff.x.textconv", "merge.x.driver", "lfs.url", "lfs.storage", "lfs.standalonetransferagent", "lfs.extension.foo.clean", "totally.unknown.key"}
+	deny := []string{"core.sshCommand", "core.editor", "credential.helper", "url.x.insteadOf", "http.proxy", "http.sslVerify", "gpg.program", "gpg.ssh.program", "gpg.ssh.allowedSignersFile", "alias.st", "remote.origin.uploadpack", "diff.external", "diff.x.textconv", "merge.x.driver", "lfs.url", "lfs.storage", "lfs.standalonetransferagent", "lfs.extension.foo.clean", "totally.unknown.key", "diff.orderfile", "remote.origin.promisor", "remote.origin.partialclonefilter"}
 	for _, mode := range []RepoConfigPolicy{RepoPolicyManaged, RepoPolicyLinked} {
 		for _, k := range deny {
 			if ok, _ := allowVar(mode, v(k, "x"), repoConfigAllowOptions{}); ok {
@@ -1551,6 +1551,7 @@ func TestLfsConfigNamesEndpoint(t *testing.T) {
 		"[remote \"origin\"]\n\tlfsurl = https://x":           true,
 		"[lfs \"https://x:443/lfs\"]\n\taccess = negotiate\n": true,
 		"[lfs]\n\tconcurrenttransfers = 4\n":                  false, // inert, not an endpoint
+		"[lfs\n\tbroken":                                      true,  // present but unparseable -> fail closed
 	}
 	for body, want := range cases {
 		repo := filepath.Join(t.TempDir(), "repo")
@@ -1562,7 +1563,7 @@ func TestLfsConfigNamesEndpoint(t *testing.T) {
 		} else {
 			hostRunGit(t, repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "--allow-empty", "-m", "empty")
 		}
-		if got := lfsConfigNamesEndpoint(repo); got != want {
+		if got := lfsConfigNamesEndpoint(repo, "HEAD"); got != want {
 			t.Errorf("lfsConfigNamesEndpoint(%q) = %v, want %v", body, got, want)
 		}
 	}
@@ -1656,4 +1657,187 @@ func addTestCredentialHelper(t *testing.T, serverURL string) {
 		t.Fatal(err)
 	}
 	_ = f.Close()
+}
+
+// lfsOptionForLinkedCheckout reads the .lfsconfig of the ref being checked
+// out, not the root's HEAD. A branch that adds an endpoint is skipped even when
+// HEAD has none; a branch with none (and an http origin) is pinned.
+func TestLfsOptionForLinkedCheckout_ReadsBranchRef(t *testing.T) {
+	hostGitTestEnv(t)
+	repo := filepath.Join(t.TempDir(), "repo")
+	hostRunGit(t, filepath.Dir(repo), "init", "-q", "-b", "main", repo)
+	hostRunGit(t, repo, "remote", "add", "origin", "https://host.example/o/r.git")
+	// main (HEAD): no .lfsconfig endpoint.
+	writeFile(t, filepath.Join(repo, "f.txt"), "x\n")
+	hostRunGit(t, repo, "add", ".")
+	hostRunGit(t, repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "main")
+	// feat: adds a .lfsconfig naming an endpoint.
+	hostRunGit(t, repo, "checkout", "-q", "-b", "feat")
+	writeFile(t, filepath.Join(repo, ".lfsconfig"), "[lfs]\n\turl = https://lfs.example/lfs\n")
+	hostRunGit(t, repo, "add", ".")
+	hostRunGit(t, repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "feat lfs")
+	hostRunGit(t, repo, "checkout", "-q", "main")
+
+	if opt := lfsOptionForLinkedCheckout(repo, "feat", ""); !opt.skipSmudge {
+		t.Errorf("branch feat names an endpoint: want skipSmudge, got %+v", opt)
+	}
+	if opt := lfsOptionForLinkedCheckout(repo, "main", ""); opt.skipSmudge || opt.url == "" {
+		t.Errorf("branch main has no endpoint (http origin): want pinned url, got %+v", opt)
+	}
+	// A new branch (does not exist yet) reads HEAD, which is main → pinned.
+	if opt := lfsOptionForLinkedCheckout(repo, "brand-new", ""); opt.skipSmudge || opt.url == "" {
+		t.Errorf("new branch reads HEAD (no endpoint): want pinned url, got %+v", opt)
+	}
+}
+
+// The git-lfs endpoint is pinned from the broker-recorded origin, not the
+// live remote.origin.url. When the live origin no longer matches the recorded
+// one (an agent repointed it), the smudge is skipped rather than pinned.
+func TestLfsOptionForLinkedCheckout_RecordedOrigin(t *testing.T) {
+	hostGitTestEnv(t)
+	repo := filepath.Join(t.TempDir(), "repo")
+	hostRunGit(t, filepath.Dir(repo), "init", "-q", "-b", "main", repo)
+	writeFile(t, filepath.Join(repo, "f.txt"), "x\n")
+	hostRunGit(t, repo, "add", ".")
+	hostRunGit(t, repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "main")
+
+	const recorded = "https://host.example/o/r.git"
+
+	// Live origin matches the recorded origin (http): pin the recorded endpoint.
+	hostRunGit(t, repo, "remote", "add", "origin", recorded)
+	opt := lfsOptionForLinkedCheckout(repo, "main", recorded)
+	if opt.skipSmudge || opt.url == "" {
+		t.Fatalf("live origin matches recorded (http): want pinned url, got %+v", opt)
+	}
+	if want, _ := DeriveLFSEndpoint(recorded); opt.url != want {
+		t.Errorf("pinned url = %q, want endpoint derived from the recorded origin %q", opt.url, want)
+	}
+
+	// The live origin is repointed elsewhere: it no longer matches the recorded
+	// one, so skip rather than pin (never contact that host).
+	hostRunGit(t, repo, "remote", "set-url", "origin", "https://other.example/x.git")
+	if opt := lfsOptionForLinkedCheckout(repo, "main", recorded); !opt.skipSmudge {
+		t.Errorf("live origin repointed away from recorded: want skipSmudge, got %+v", opt)
+	}
+
+	// An ssh recorded origin cannot derive an http(s) endpoint: skip.
+	hostRunGit(t, repo, "remote", "set-url", "origin", "git@host.example:o/r.git")
+	if opt := lfsOptionForLinkedCheckout(repo, "main", "git@host.example:o/r.git"); !opt.skipSmudge {
+		t.Errorf("ssh recorded origin: want skipSmudge, got %+v", opt)
+	}
+}
+
+// A committed .lfsconfig whose blob is unreadable (present in the tree but the
+// object is missing) must be treated as naming an endpoint — skip the smudge,
+// not pin — just like an unparseable one. `git show` reports the same error for
+// an absent and an unreadable path, so the code distinguishes them with ls-tree.
+func TestLfsOptionForLinkedCheckout_UnreadableLfsConfigSkips(t *testing.T) {
+	hostGitTestEnv(t)
+	repo := filepath.Join(t.TempDir(), "repo")
+	hostRunGit(t, filepath.Dir(repo), "init", "-q", "-b", "main", repo)
+	hostRunGit(t, repo, "remote", "add", "origin", "https://host.example/o/r.git")
+	writeFile(t, filepath.Join(repo, ".lfsconfig"), "[lfs]\n\turl = https://lfs.example/lfs\n")
+	hostRunGit(t, repo, "add", ".")
+	hostRunGit(t, repo, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "lfs")
+
+	// Control: with the blob readable, the endpoint is seen and the smudge skips.
+	if opt := lfsOptionForLinkedCheckout(repo, "main", ""); !opt.skipSmudge {
+		t.Fatalf("readable .lfsconfig names an endpoint: want skipSmudge, got %+v", opt)
+	}
+
+	// Remove the blob object so `git show main:.lfsconfig` fails while ls-tree
+	// still reports the entry.
+	sha := strings.TrimSpace(string(mustOutput(t, repo, "rev-parse", "main:.lfsconfig")))
+	if len(sha) < 3 {
+		t.Fatalf("unexpected blob sha %q", sha)
+	}
+	obj := filepath.Join(repo, ".git", "objects", sha[:2], sha[2:])
+	if err := os.Remove(obj); err != nil {
+		t.Fatalf("remove blob object: %v", err)
+	}
+	// Confirm the blob is now unreadable but the tree entry remains.
+	if _, err := mustOutputErr(repo, "show", "main:.lfsconfig"); err == nil {
+		t.Skip("git still served the removed blob (packed elsewhere); cannot exercise the unreadable path")
+	}
+	if opt := lfsOptionForLinkedCheckout(repo, "main", ""); !opt.skipSmudge {
+		t.Errorf("unreadable .lfsconfig must skip the smudge (fail closed), got %+v", opt)
+	}
+}
+
+func mustOutput(t *testing.T, dir string, args ...string) []byte {
+	t.Helper()
+	out, err := mustOutputErr(dir, args...)
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+	return out
+}
+
+func mustOutputErr(dir string, args ...string) ([]byte, error) {
+	c := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	return c.CombinedOutput()
+}
+
+// The host-side guard refuses a root-level .git/commondir or gitdir in a linked
+// checkout (a .git directory): such a file would redirect the repository's common
+// git dir — where host git reads config, hooks and refs — through an
+// agent-writable path. A .git gitfile (a linked worktree) is not the target.
+func TestRefuseRootCommonDirRedirect(t *testing.T) {
+	dir := t.TempDir()
+	gitDir := filepath.Join(dir, ".git")
+	if err := os.MkdirAll(gitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A normal .git directory (no root commondir/gitdir) passes.
+	if err := refuseRootCommonDirRedirect(dir); err != nil {
+		t.Fatalf("a .git with no root commondir/gitdir must pass, got: %v", err)
+	}
+	// A root-level commondir or gitdir is refused.
+	for _, name := range []string{"commondir", "gitdir"} {
+		p := filepath.Join(gitDir, name)
+		if err := os.WriteFile(p, []byte("../elsewhere\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		err := refuseRootCommonDirRedirect(dir)
+		var refused *RepoConfigRefusedError
+		if !errors.As(err, &refused) {
+			t.Errorf("a root .git/%s must be refused with RepoConfigRefusedError, got: %v", name, err)
+		}
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A .git gitfile (a linked worktree, which legitimately resolves a commondir
+	// inside its admin dir) is not the target of this guard.
+	if err := os.RemoveAll(gitDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gitDir, []byte("gitdir: /somewhere/worktrees/x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := refuseRootCommonDirRedirect(dir); err != nil {
+		t.Errorf("a .git gitfile (linked worktree) must not be refused, got: %v", err)
+	}
+}
+
+// Host-side git refuses, through HostGitCommand's policy check, to run in a
+// repository whose .git directory carries a root-level commondir or gitdir (a
+// redirect of the common git dir). The command is refused before any git runs.
+func TestHostGitCommand_RefusesRootCommonDirRedirect(t *testing.T) {
+	for _, name := range []string{"commondir", "gitdir"} {
+		t.Run(name, func(t *testing.T) {
+			repo, _ := newHostGitRepo(t)
+			if err := os.WriteFile(filepath.Join(repo, ".git", name), []byte("../elsewhere\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := HostGitCommand(context.Background(), repo, HostGitOptions{Policy: RepoPolicyLinked}, "status")
+			var refused *RepoConfigRefusedError
+			if !errors.As(err, &refused) {
+				t.Fatalf("error = %v, want *RepoConfigRefusedError for a root .git/%s", err, name)
+			}
+			if !strings.Contains(refused.Key, name) {
+				t.Errorf("refused key = %q, want it to name .git/%s", refused.Key, name)
+			}
+		})
+	}
 }

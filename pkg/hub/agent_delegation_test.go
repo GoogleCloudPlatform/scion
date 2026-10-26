@@ -681,6 +681,12 @@ func TestAgentDelegation_RouteGateDeniesEverythingElse(t *testing.T) {
 		{http.MethodPost, "/api/v1/agents/" + f.agentA.ID + "/delegations"},
 		{http.MethodPost, "/api/v1/agents/" + f.agentA.ID + "/delegations/" + grant.ID + "/exchange"},
 		{http.MethodGet, "/api/v1/agents/" + f.agentB.ID + "/no-such-route"},
+		// A durable effect (§17.2 flow 21): agent creation, in both forms.
+		{http.MethodPost, "/api/v1/agents"},
+		{http.MethodPost, "/api/v1/projects/" + f.proj.ID + "/agents"},
+		// Grant management, revoke-all included.
+		{http.MethodPost, "/api/v1/users/me/delegations/revoke-all"},
+		{http.MethodPost, "/api/v1/agents/" + f.agentA.ID + "/delegations/revoke-all"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
@@ -690,6 +696,9 @@ func TestAgentDelegation_RouteGateDeniesEverythingElse(t *testing.T) {
 		})
 	}
 	assert.Len(t, adtAudits(t, f.store, mutationAgentDelegationCredentialIssue), rowsBefore, "no denied request issued a credential")
+	g, err := f.store.GetAgentDelegationGrant(context.Background(), grant.ID)
+	require.NoError(t, err)
+	assert.Nil(t, g.RevokedAt, "no denied request revoked the grant")
 }
 
 func TestAgentDelegation_RevocationChainAndExperimentGate(t *testing.T) {

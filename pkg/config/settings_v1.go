@@ -318,261 +318,9 @@ func (vs *VersionedSettings) ResolveProfileSetting(profileName, key string,
 	return ResolveProfileValue(vs, profileName, key, fromProfile, fromRuntime)
 }
 
-// SharedDirStorageGlobalSource is the source key ResolveSharedDirStorage
-// returns when no profile or runtime entry overrides the backend.
-const SharedDirStorageGlobalSource = "server.shared_dir_storage.backend"
-
-// ResolveSharedDirStorage returns the shared-dir storage config that
-// applies to agents using profileName: the backend comes from the
-// profile's shared_dir_storage_backend, else its runtime entry's, else
-// server.shared_dir_storage.backend. The nfs block always comes from
-// server.shared_dir_storage.nfs. source names the key the backend came
-// from. The result is nil when nothing is configured (the local layout).
-// The returned config is a copy when an override applies; the global
-// block is never modified.
-//
-// Call this only on settings from LoadGlobalSettings or
-// LoadGlobalSettingsWithOverlay: like server.shared_dir_storage itself,
-// the overrides must not be settable from a project's own settings.
-//
-// A dispatch-time NFS mount check should choose the backend through this
-// method too, so it agrees with the start path.
-//
-// On a flat instance view (ForFlatInstance) the instance's
-// runtime_target.shared_dir_storage_backend takes the place of the profile
-// and runtime entry, and no profile is consulted.
-func (vs *VersionedSettings) ResolveSharedDirStorage(profileName string) (cfg *V1SharedDirStorageConfig, source string) {
-	if vs == nil {
-		return nil, ""
-	}
-	var global *V1SharedDirStorageConfig
-	if vs.Server != nil {
-		global = vs.Server.SharedDirStorage
-	}
-	var backend string
-	if vs.flat != nil {
-		// Flat instance: the instance's runtime_target takes the profile
-		// and runtime-entry rung; unset falls through to the global block.
-		if b := vs.flat.Target.SharedDirStorageBackend; b != "" {
-			backend, source = b, vs.flat.path("runtime_target.shared_dir_storage_backend")
-		}
-	} else {
-		backend, source = vs.ResolveProfileSetting(profileName, "shared_dir_storage_backend",
-			func(p V1ProfileConfig) string { return p.SharedDirStorageBackend },
-			func(r V1RuntimeConfig) string { return r.SharedDirStorageBackend })
-	}
-	if backend == "" {
-		if global == nil {
-			return nil, ""
-		}
-		return global, SharedDirStorageGlobalSource
-	}
-	out := &V1SharedDirStorageConfig{Backend: backend}
-	if global != nil {
-		out.NFS = global.NFS
-	}
-	return out, source
-}
-
-// ResolveSharedDirStorageBackend returns the backend ("local" or "nfs")
-// that applies to the shared dir dirName for agents using profileName,
-// the settings key it came from, and whether that key is a per-dir
-// shared_dir_storage_backends entry. The nearest level wins: the
-// profile's shared_dir_storage_backends entry for dirName, else the
-// profile's shared_dir_storage_backend, else the same two keys on the
-// profile's runtime entry, else server.shared_dir_storage.backend. A
-// profile's single value therefore wins over a runtime entry's per-dir
-// entry; to keep one dir on another backend, name it in the profile's
-// own shared_dir_storage_backends. If profileName is empty,
-// vs.ActiveProfile is used. backend is "" and source is "" when nothing
-// is configured (the local layout). The value is returned as written;
-// callers validate it.
-//
-// For a dir no per-dir entry names, the result matches the backend of
-// ResolveSharedDirStorage. Call this only on global settings, as for
-// ResolveSharedDirStorage. On a flat instance view the order is the
-// instance's runtime_target.shared_dir_storage_backends entry, its
-// shared_dir_storage_backend, then server.shared_dir_storage.backend.
-func (vs *VersionedSettings) ResolveSharedDirStorageBackend(profileName, dirName string) (backend, source string, perDir bool) {
-	if vs == nil {
-		return "", "", false
-	}
-	if vs.flat != nil {
-		// Flat instance: the instance's per-dir entry, else its single
-		// value, else the global backend. No profile is consulted.
-		t := vs.flat.Target
-		if v := t.SharedDirStorageBackends[dirName]; v != "" {
-			return v, vs.flat.path("runtime_target.shared_dir_storage_backends." + dirName), true
-		}
-		if v := t.SharedDirStorageBackend; v != "" {
-			return v, vs.flat.path("runtime_target.shared_dir_storage_backend"), false
-		}
-		return vs.globalSharedDirStorageBackend()
-	}
-	if profileName == "" {
-		profileName = vs.ActiveProfile
-	}
-	if profile, ok := vs.Profiles[profileName]; ok {
-		if v := profile.SharedDirStorageBackends[dirName]; v != "" {
-			return v, "profiles." + profileName + ".shared_dir_storage_backends." + dirName, true
-		}
-		if v := profile.SharedDirStorageBackend; v != "" {
-			return v, "profiles." + profileName + ".shared_dir_storage_backend", false
-		}
-		if rt, ok := vs.Runtimes[profile.Runtime]; ok {
-			if v := rt.SharedDirStorageBackends[dirName]; v != "" {
-				return v, "runtimes." + profile.Runtime + ".shared_dir_storage_backends." + dirName, true
-			}
-			if v := rt.SharedDirStorageBackend; v != "" {
-				return v, "runtimes." + profile.Runtime + ".shared_dir_storage_backend", false
-			}
-		}
-	}
-	return vs.globalSharedDirStorageBackend()
-}
-
-// globalSharedDirStorageBackend is the server.shared_dir_storage.backend
-// rung of ResolveSharedDirStorageBackend.
-func (vs *VersionedSettings) globalSharedDirStorageBackend() (backend, source string, perDir bool) {
-	if vs.Server != nil && vs.Server.SharedDirStorage != nil {
-		return vs.Server.SharedDirStorage.Backend, SharedDirStorageGlobalSource, false
-	}
-	return "", "", false
-}
-
-// SharedDirStorageNFSAnywhere reports whether the global backend or any
-// runtime, profile or flat Runtime Broker instance override selects nfs
-// (server.broker.instances[].runtime_target), and returns the nfs-backed
-// config to use for project-wide operations such as cleanup. It is nil
-// when no setting selects nfs. Like ResolveSharedDirStorage, call it only
-// on global settings.
-func (vs *VersionedSettings) SharedDirStorageNFSAnywhere() (cfg *V1SharedDirStorageConfig, onlyOverrides bool) {
-	if vs == nil {
-		return nil, false
-	}
-	var global *V1SharedDirStorageConfig
-	if vs.Server != nil {
-		global = vs.Server.SharedDirStorage
-	}
-	if global != nil && global.Backend == "nfs" {
-		return global, false
-	}
-	found := false
-	for _, rt := range vs.Runtimes {
-		if rt.SharedDirStorageBackend == "nfs" || mapSelectsNFS(rt.SharedDirStorageBackends) {
-			found = true
-		}
-	}
-	for _, p := range vs.Profiles {
-		if p.SharedDirStorageBackend == "nfs" || mapSelectsNFS(p.SharedDirStorageBackends) {
-			found = true
-		}
-	}
-	if vs.Server != nil && vs.Server.Broker != nil {
-		for _, inst := range vs.Server.Broker.Instances {
-			if t := inst.RuntimeTarget; t != nil && (t.SharedDirStorageBackend == "nfs" || mapSelectsNFS(t.SharedDirStorageBackends)) {
-				found = true
-			}
-		}
-	}
-	if !found {
-		return nil, false
-	}
-	out := &V1SharedDirStorageConfig{Backend: "nfs"}
-	if global != nil {
-		out.NFS = global.NFS
-	}
-	return out, true
-}
-
 // SharedDirNamePattern is the shared dir name rule of api.ValidateSharedDirs
 // as a regular expression, for the settings schemas.
 const SharedDirNamePattern = `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
-
-// ValidateSharedDirStorageBackendValues checks the parts of
-// shared_dir_storage_backend and shared_dir_storage_backends that do not
-// depend on server.shared_dir_storage: each single value is empty, "local"
-// or "nfs", and each per-dir entry is keyed by a valid shared dir name and
-// is "local" or "nfs". ValidateSharedDirStorageBackends checks these and
-// the nfs block. Results are sorted by path.
-func ValidateSharedDirStorageBackendValues(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig) []ValidationError {
-	return validateSharedDirStorageBackends(runtimes, profiles, nil, false)
-}
-
-// mapSelectsNFS reports whether any entry of a shared_dir_storage_backends
-// map selects nfs.
-func mapSelectsNFS(m map[string]string) bool {
-	for _, v := range m {
-		if v == "nfs" {
-			return true
-		}
-	}
-	return false
-}
-
-// ValidateSharedDirStorageBackends checks shared_dir_storage_backend and
-// shared_dir_storage_backends on every runtime and profile entry: a single
-// value must be empty, "local" or "nfs"; a per-dir entry must be keyed by a
-// valid shared dir name and be "local" or "nfs". "nfs" needs a complete
-// server.shared_dir_storage.nfs block (global may be nil). A per-dir entry
-// for a dir that a project does not have is valid: settings are global,
-// shared dirs are per project, and agent start ignores such an entry. This
-// checks configuration only; it never looks at the filesystem. Each
-// error's Path names the settings key. Results are sorted by path.
-func ValidateSharedDirStorageBackends(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig, global *V1SharedDirStorageConfig) []ValidationError {
-	return validateSharedDirStorageBackends(runtimes, profiles, global, true)
-}
-
-// validateSharedDirStorageBackends implements
-// ValidateSharedDirStorageBackends, and ValidateSharedDirStorageBackendValues
-// when checkNFSBlock is false.
-func validateSharedDirStorageBackends(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig, global *V1SharedDirStorageConfig, checkNFSBlock bool) []ValidationError {
-	var errs []ValidationError
-	var check func(path, backend string)
-	checkDirs := func(prefix string, dirs map[string]string) {
-		for name, backend := range dirs {
-			path := prefix + ".shared_dir_storage_backends." + name
-			if err := api.ValidateSharedDirs([]api.SharedDir{{Name: name}}); err != nil {
-				errs = append(errs, ValidationError{Path: path, Message: fmt.Sprintf("invalid shared dir name %q (must be lowercase alphanumeric with hyphens, e.g. \"build-cache\")", name)})
-				continue
-			}
-			if backend == "" {
-				errs = append(errs, ValidationError{Path: path, Message: "must be \"local\" or \"nfs\" (got \"\")"})
-				continue
-			}
-			check(path, backend)
-		}
-	}
-	check = func(path, backend string) {
-		switch backend {
-		case "", "local":
-			return
-		case "nfs":
-			if !checkNFSBlock {
-				return
-			}
-			cfg := &V1SharedDirStorageConfig{Backend: "nfs"}
-			if global != nil {
-				cfg.NFS = global.NFS
-			}
-			if err := cfg.Validate(); err != nil {
-				errs = append(errs, ValidationError{Path: path, Message: "selects \"nfs\", which needs a complete server.shared_dir_storage.nfs block (" + err.Error() + ")"})
-			}
-		default:
-			errs = append(errs, ValidationError{Path: path, Message: fmt.Sprintf("must be \"local\" or \"nfs\" (got %q)", backend)})
-		}
-	}
-	for name, rt := range runtimes {
-		check("runtimes."+name+".shared_dir_storage_backend", rt.SharedDirStorageBackend)
-		checkDirs("runtimes."+name, rt.SharedDirStorageBackends)
-	}
-	for name, p := range profiles {
-		check("profiles."+name+".shared_dir_storage_backend", p.SharedDirStorageBackend)
-		checkDirs("profiles."+name, p.SharedDirStorageBackends)
-	}
-	sort.Slice(errs, func(i, j int) bool { return errs[i].Path < errs[j].Path })
-	return errs
-}
 
 // ValidateSharedDirSize checks that a shared_dir_size value parses as a
 // positive Kubernetes resource quantity (for example 10Gi or 1Ti). Empty is
@@ -1578,15 +1326,21 @@ type V1ServerConfig struct {
 	// Mode selects the server operating mode: "workstation" (default) or "hosted".
 	// When set to "hosted", the server behaves as if --hosted were passed.
 	// The legacy value "production" is also accepted for backward compatibility.
-	Mode             string                    `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
-	Env              string                    `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
-	Hub              *V1ServerHubConfig        `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`
-	Relay            *V1ServerRelayConfig      `json:"relay,omitempty" yaml:"relay,omitempty" koanf:"relay"`
-	Broker           *V1BrokerConfig           `json:"broker,omitempty" yaml:"broker,omitempty" koanf:"broker"`
-	Database         *V1DatabaseConfig         `json:"database,omitempty" yaml:"database,omitempty" koanf:"database"`
-	Auth             *V1AuthConfig             `json:"auth,omitempty" yaml:"auth,omitempty" koanf:"auth"`
-	OAuth            *V1OAuthConfig            `json:"oauth,omitempty" yaml:"oauth,omitempty" koanf:"oauth"`
-	Storage          *V1StorageConfig          `json:"storage,omitempty" yaml:"storage,omitempty" koanf:"storage"`
+	Mode     string               `json:"mode,omitempty" yaml:"mode,omitempty" koanf:"mode"`
+	Env      string               `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
+	Hub      *V1ServerHubConfig   `json:"hub,omitempty" yaml:"hub,omitempty" koanf:"hub"`
+	Relay    *V1ServerRelayConfig `json:"relay,omitempty" yaml:"relay,omitempty" koanf:"relay"`
+	Broker   *V1BrokerConfig      `json:"broker,omitempty" yaml:"broker,omitempty" koanf:"broker"`
+	Database *V1DatabaseConfig    `json:"database,omitempty" yaml:"database,omitempty" koanf:"database"`
+	Auth     *V1AuthConfig        `json:"auth,omitempty" yaml:"auth,omitempty" koanf:"auth"`
+	OAuth    *V1OAuthConfig       `json:"oauth,omitempty" yaml:"oauth,omitempty" koanf:"oauth"`
+	Storage  *V1StorageConfig     `json:"storage,omitempty" yaml:"storage,omitempty" koanf:"storage"`
+	// ProjectStorage is the one storage block (design fs-cleanup §P2):
+	// it replaces WorkspaceStorage, SharedDirStorage and HomeStorage,
+	// which are synthesized into it while they remain
+	// (ResolveProjectStorage). See V1ProjectStorageConfig.
+	ProjectStorage *V1ProjectStorageConfig `json:"project_storage,omitempty" yaml:"project_storage,omitempty" koanf:"project_storage"`
+	// WorkspaceStorage is deprecated: see ProjectStorage.
 	WorkspaceStorage *V1WorkspaceStorageConfig `json:"workspace_storage,omitempty" yaml:"workspace_storage,omitempty" koanf:"workspace_storage"`
 	// SharedDirStorage selects the storage backend for project shared
 	// directories, independent of WorkspaceStorage (design
@@ -1836,6 +1590,13 @@ type V1ServerHubConfig struct {
 	// HubServerConfig.TestIdentities). It is file/env only: the
 	// server-config API refuses it in every mode.
 	TestIdentities *V1TestIdentitiesConfig `json:"test_identities,omitempty" yaml:"test_identities,omitempty" koanf:"test_identities"`
+	// GCPProjectID is server.hub.gcp_project_id (see
+	// HubServerConfig.GCPProjectID): the hub's own GCP project, used for
+	// service-account minting, the Policy Troubleshooter quota project and
+	// the hub's metrics and trace export. Read once at startup. It is
+	// file/env only: the server-config API refuses it in every mode and GET
+	// leaves it out (HubGCPProjectIDKey).
+	GCPProjectID string `json:"gcp_project_id,omitempty" yaml:"gcp_project_id,omitempty" koanf:"gcp_project_id"`
 	// AgentEndpoint optionally overrides the Hub URL injected into agents as
 	// SCION_HUB_ENDPOINT, without changing PublicURL's other uses (invite
 	// links, chat-bridge links, the OIDC issuer default, the cloudrun_invoker
@@ -2146,17 +1907,15 @@ type V1RuntimeTargetConfig struct {
 	// and an explicit false or true is kept as written. The agent's own
 	// kubernetes.safeToEvict wins over it. Kubernetes only.
 	SafeToEvict *bool `json:"safe_to_evict,omitempty" yaml:"safe_to_evict,omitempty" koanf:"safe_to_evict"`
-	// SharedDirStorageBackend and SharedDirStorageBackends ("local" or
-	// "nfs", the second per shared dir name) choose the shared-dir storage
-	// backend of the instance's new agents, between the agent's recorded
-	// backend and server.shared_dir_storage.backend. Docker and Kubernetes.
+	// SharedDirStorageBackend, SharedDirStorageBackends, HomeStorageBackend
+	// and HomeStorageLeaf are removed per-instance storage overrides
+	// (design: no per-runtime storage overrides): server.project_storage places every agent's storage.
+	// They still parse so that validation can reject them by name
+	// (RemovedStorageOverrideErrors); nothing reads them.
 	SharedDirStorageBackend  string            `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
 	SharedDirStorageBackends map[string]string `json:"shared_dir_storage_backends,omitempty" yaml:"shared_dir_storage_backends,omitempty" koanf:"shared_dir_storage_backends"`
-	// HomeStorageBackend ("local" or "nfs") and HomeStorageLeaf ("pod" or
-	// "broker") choose the home storage of the instance's new agents, above
-	// server.home_storage. Kubernetes only.
-	HomeStorageBackend string `json:"home_storage_backend,omitempty" yaml:"home_storage_backend,omitempty" koanf:"home_storage_backend"`
-	HomeStorageLeaf    string `json:"home_storage_leaf,omitempty" yaml:"home_storage_leaf,omitempty" koanf:"home_storage_leaf"`
+	HomeStorageBackend       string            `json:"home_storage_backend,omitempty" yaml:"home_storage_backend,omitempty" koanf:"home_storage_backend"`
+	HomeStorageLeaf          string            `json:"home_storage_leaf,omitempty" yaml:"home_storage_leaf,omitempty" koanf:"home_storage_leaf"`
 }
 
 // KubernetesRuntimeConfig returns the runtime entry form of a Kubernetes
@@ -2435,18 +2194,25 @@ const (
 // misconfigured: no shares defined, or a uid or gid outside
 // [0, fsutil.MaxOwnerID]. Call after ApplyNFSDefaults.
 func (ws *V1WorkspaceStorageConfig) ValidateNFS() error {
+	return ws.validateNFS("workspace_storage", NFSUIDKey, NFSGIDKey)
+}
+
+// validateNFS implements ValidateNFS with the block's key (key) and the
+// full uid and gid keys named in error messages, so server.project_storage
+// reports its own keys.
+func (ws *V1WorkspaceStorageConfig) validateNFS(key, uidKey, gidKey string) error {
 	if ws == nil || ws.Backend != WorkspaceStorageBackendNFS {
 		return nil
 	}
 	if ws.NFS == nil || len(ws.NFS.Shares) == 0 {
-		return fmt.Errorf("workspace_storage.backend is \"nfs\" but no NFS shares are defined; " +
-			"add at least one entry under workspace_storage.nfs.shares")
+		return fmt.Errorf("%s.backend is \"nfs\" but no NFS shares are defined; "+
+			"add at least one entry under %s.nfs.shares", key, key)
 	}
 	// An unset (0) uid/gid has become the default 1000 in ApplyNFSDefaults.
-	if err := fsutil.ValidateOwnerID(NFSUIDKey, ws.NFS.UID); err != nil {
+	if err := fsutil.ValidateOwnerID(uidKey, ws.NFS.UID); err != nil {
 		return err
 	}
-	if err := fsutil.ValidateOwnerID(NFSGIDKey, ws.NFS.GID); err != nil {
+	if err := fsutil.ValidateOwnerID(gidKey, ws.NFS.GID); err != nil {
 		return err
 	}
 	return nil
@@ -2495,6 +2261,12 @@ func (ws *V1WorkspaceStorageConfig) ApplyWorkspaceStorageDefaults() {
 // (ApplyNFSDefaults and ValidateNFS included): a backend like "NFS" was
 // previously treated as local by the hub and the runtimes.
 func (ws *V1WorkspaceStorageConfig) ValidateWorkspaceStorage() error {
+	return ws.validateWorkspaceStorage("workspace_storage", NFSUIDKey, NFSGIDKey)
+}
+
+// validateWorkspaceStorage implements ValidateWorkspaceStorage, naming key
+// (the block's settings key) and uidKey/gidKey in its errors.
+func (ws *V1WorkspaceStorageConfig) validateWorkspaceStorage(key, uidKey, gidKey string) error {
 	if ws == nil {
 		return nil
 	}
@@ -2503,26 +2275,26 @@ func (ws *V1WorkspaceStorageConfig) ValidateWorkspaceStorage() error {
 	case "", WorkspaceStorageBackendLocal:
 		return nil
 	case WorkspaceStorageBackendNFS:
-		if err := ws.ValidateNFS(); err != nil {
+		if err := ws.validateNFS(key, uidKey, gidKey); err != nil {
 			return err
 		}
 	case WorkspaceStorageBackendCloudRunVolume:
 		if ws.CloudRunVolume == nil || ws.CloudRunVolume.VolumeName == "" {
-			return fmt.Errorf("workspace_storage.backend is %q but workspace_storage.cloudrun_volume.volume_name is not set; "+
-				"set it to the name of the volume declared in the Cloud Run service", ws.Backend)
+			return fmt.Errorf("%s.backend is %q but %s.cloudrun_volume.volume_name is not set; "+
+				"set it to the name of the volume declared in the Cloud Run service", key, ws.Backend, key)
 		}
 	case WorkspaceStorageBackendGKESharedVolume:
 		if ws.GKESharedVolume == nil || ws.GKESharedVolume.VolumeName == "" {
-			return fmt.Errorf("workspace_storage.backend is %q but workspace_storage.gke_shared_volume.volume_name is not set; "+
-				"set it to the pod volume that mounts the shared PVC at /mnt/<volume_name>", ws.Backend)
+			return fmt.Errorf("%s.backend is %q but %s.gke_shared_volume.volume_name is not set; "+
+				"set it to the pod volume that mounts the shared PVC at /mnt/<volume_name>", key, ws.Backend, key)
 		}
 	default:
-		return fmt.Errorf("workspace_storage.backend %q is not supported; use one of %q, %q, %q or %q",
-			ws.Backend, WorkspaceStorageBackendLocal, WorkspaceStorageBackendNFS,
+		return fmt.Errorf("%s.backend %q is not supported; use one of %q, %q, %q or %q",
+			key, ws.Backend, WorkspaceStorageBackendLocal, WorkspaceStorageBackendNFS,
 			WorkspaceStorageBackendCloudRunVolume, WorkspaceStorageBackendGKESharedVolume)
 	}
 
-	return ws.ValidateSelectedSubPathRoot()
+	return ws.validateSelectedSubPathRoot(key)
 }
 
 // ValidateSelectedSubPathRoot checks, with ValidateSubPathRoot, the
@@ -2533,6 +2305,10 @@ func (ws *V1WorkspaceStorageConfig) ValidateWorkspaceStorage() error {
 // runs at startup: the runtime workspace backends reject an invalid
 // subpath_root on every agent start, so the broker warns about it early.
 func (ws *V1WorkspaceStorageConfig) ValidateSelectedSubPathRoot() error {
+	return ws.validateSelectedSubPathRoot("workspace_storage")
+}
+
+func (ws *V1WorkspaceStorageConfig) validateSelectedSubPathRoot(key string) error {
 	if ws == nil {
 		return nil
 	}
@@ -2548,7 +2324,7 @@ func (ws *V1WorkspaceStorageConfig) ValidateSelectedSubPathRoot() error {
 		return nil
 	}
 	if err := ValidateSubPathRoot(SubPathRootOrDefault(subPathRoot)); err != nil {
-		return fmt.Errorf("workspace_storage.%s.subpath_root %w", block, err)
+		return fmt.Errorf("%s.%s.subpath_root %w", key, block, err)
 	}
 	return nil
 }
@@ -3042,26 +2818,15 @@ type V1RuntimeConfig struct {
 	NodeSelector     map[string]string   `json:"node_selector,omitempty" yaml:"node_selector,omitempty" koanf:"node_selector"`
 	Tolerations      []api.K8sToleration `json:"tolerations,omitempty" yaml:"tolerations,omitempty" koanf:"tolerations"`
 	RuntimeClassName string              `json:"runtime_class_name,omitempty" yaml:"runtime_class_name,omitempty" koanf:"runtime_class_name"`
-	// SharedDirStorageBackend overrides server.shared_dir_storage.backend
-	// ("local" or "nfs") for agents whose profile uses this runtime entry.
-	// A profile's own value wins over it. The nfs details always come from
-	// server.shared_dir_storage.nfs. Read from global settings only; see
-	// ResolveSharedDirStorage.
-	SharedDirStorageBackend string `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
-	// SharedDirStorageBackends sets the backend ("local" or "nfs") for
-	// named shared dirs, keyed by shared dir name, for agents whose
-	// profile uses this runtime entry. A dir it does not name uses
-	// SharedDirStorageBackend. The profile's own settings win over this
-	// entry. See ResolveSharedDirStorageBackend.
+	// SharedDirStorageBackend, SharedDirStorageBackends, HomeStorageBackend
+	// and HomeStorageLeaf are removed per-runtime storage overrides
+	// (design: no per-runtime storage overrides): server.project_storage places every agent's storage.
+	// They still parse so that validation can reject them by name
+	// (RemovedStorageOverrideErrors); nothing reads them.
+	SharedDirStorageBackend  string            `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
 	SharedDirStorageBackends map[string]string `json:"shared_dir_storage_backends,omitempty" yaml:"shared_dir_storage_backends,omitempty" koanf:"shared_dir_storage_backends"`
-	// HomeStorageBackend overrides server.home_storage.backend ("local" or
-	// "nfs") for agents whose profile uses this runtime entry. A profile's
-	// own value wins over it. Read from global settings only; see
-	// ResolveHomeStorage.
-	HomeStorageBackend string `json:"home_storage_backend,omitempty" yaml:"home_storage_backend,omitempty" koanf:"home_storage_backend"`
-	// HomeStorageLeaf overrides server.home_storage.leaf ("pod" or
-	// "broker") for agents whose profile uses this runtime entry.
-	HomeStorageLeaf string `json:"home_storage_leaf,omitempty" yaml:"home_storage_leaf,omitempty" koanf:"home_storage_leaf"`
+	HomeStorageBackend       string            `json:"home_storage_backend,omitempty" yaml:"home_storage_backend,omitempty" koanf:"home_storage_backend"`
+	HomeStorageLeaf          string            `json:"home_storage_leaf,omitempty" yaml:"home_storage_leaf,omitempty" koanf:"home_storage_leaf"`
 	// CloudRun holds Cloud Run-specific settings when Type is "cloudrun".
 	CloudRun *CloudRunConfig `json:"cloudrun,omitempty" yaml:"cloudrun,omitempty" koanf:"cloudrun"`
 	// CloudRunInstances holds Cloud Run Instances-specific settings when Type is "cloudrun-instances".
@@ -3617,26 +3382,15 @@ type V1ProfileConfig struct {
 	// wins over it. Empty keeps the default shallow clone. See
 	// ResolveCloneDepthWithSource.
 	CloneDepth api.CloneDepth `json:"clone_depth,omitempty" yaml:"clone_depth,omitempty" koanf:"clone_depth"`
-	// SharedDirStorageBackend overrides server.shared_dir_storage.backend
-	// ("local" or "nfs") for agents using this profile. It wins over the
-	// same key on the profile's runtime entry. The nfs details always come
-	// from server.shared_dir_storage.nfs. Read from global settings only;
-	// see ResolveSharedDirStorage.
-	SharedDirStorageBackend string `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
-	// SharedDirStorageBackends sets the backend ("local" or "nfs") for
-	// named shared dirs, keyed by shared dir name, for agents using this
-	// profile. A dir it does not name uses SharedDirStorageBackend. Both
-	// win over the profile's runtime entry. See
-	// ResolveSharedDirStorageBackend.
+	// SharedDirStorageBackend, SharedDirStorageBackends, HomeStorageBackend
+	// and HomeStorageLeaf are removed per-profile storage overrides
+	// (design: no per-runtime storage overrides): server.project_storage places every agent's storage.
+	// They still parse so that validation can reject them by name
+	// (RemovedStorageOverrideErrors); nothing reads them.
+	SharedDirStorageBackend  string            `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
 	SharedDirStorageBackends map[string]string `json:"shared_dir_storage_backends,omitempty" yaml:"shared_dir_storage_backends,omitempty" koanf:"shared_dir_storage_backends"`
-	// HomeStorageBackend overrides server.home_storage.backend ("local" or
-	// "nfs") for agents using this profile. It wins over the same key on
-	// the profile's runtime entry. Read from global settings only; see
-	// ResolveHomeStorage.
-	HomeStorageBackend string `json:"home_storage_backend,omitempty" yaml:"home_storage_backend,omitempty" koanf:"home_storage_backend"`
-	// HomeStorageLeaf overrides server.home_storage.leaf ("pod" or
-	// "broker") for agents using this profile.
-	HomeStorageLeaf string `json:"home_storage_leaf,omitempty" yaml:"home_storage_leaf,omitempty" koanf:"home_storage_leaf"`
+	HomeStorageBackend       string            `json:"home_storage_backend,omitempty" yaml:"home_storage_backend,omitempty" koanf:"home_storage_backend"`
+	HomeStorageLeaf          string            `json:"home_storage_leaf,omitempty" yaml:"home_storage_leaf,omitempty" koanf:"home_storage_leaf"`
 	// KubernetesServiceAccountMappings overrides, per GSA email, the
 	// runtime-level mapping of the same name for agents created under this
 	// profile. See V1RuntimeConfig.KubernetesServiceAccountMappings and
@@ -3771,6 +3525,10 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 	// A hub-managed workspace root without a .scion entry has no project
 	// settings: its own settings file is workspace content.
 	noProjectLayer := isHubWorkspaceRootWithoutScion(projectPath)
+	// The storage blocks are Layer-0: a project's settings never supply
+	// them. They are taken from the layers loaded so far (defaults and the
+	// global file) and put back after the project layers.
+	storageSnapshot := snapshotLayer0StorageKeys(k)
 	if projectPath != "" && projectPath != globalDir && !noProjectLayer {
 		migratedHub, err := fileLayer("project", projectPath)
 		if err != nil {
@@ -3796,6 +3554,10 @@ func loadVersionedLayers(projectPath string, opts versionedLoadOptions) (*versio
 		if migratedHub {
 			logHubProjectIDPrecedenceChange(k, effectiveProjectPath, globalHubProjectID)
 		}
+	}
+
+	if err := restoreLayer0StorageKeys(k, storageSnapshot, res.sources); err != nil {
+		return nil, err
 	}
 
 	// The hub project ID of the settings files, before the environment
@@ -4363,6 +4125,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.HubClass != "" {
 			gc.Hub.HubClass = v1.Hub.HubClass
 		}
+		if v1.Hub.GCPProjectID != "" {
+			gc.Hub.GCPProjectID = v1.Hub.GCPProjectID
+		}
 		if v1.Hub.TestIdentities != nil {
 			ti := &TestIdentitiesConfig{AdminWebSessions: v1.Hub.TestIdentities.AdminWebSessions}
 			for _, e := range v1.Hub.TestIdentities.WorkloadIssuers {
@@ -4723,6 +4488,18 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		gc.WorkspaceStorage = v1.WorkspaceStorage
 	}
 
+	// Project storage and the blocks it replaces (ResolveGlobalProjectStorage
+	// synthesizes the one block after the env overlay).
+	if v1.ProjectStorage != nil {
+		gc.ProjectStorage = v1.ProjectStorage
+	}
+	if v1.SharedDirStorage != nil {
+		gc.SharedDirStorage = v1.SharedDirStorage
+	}
+	if v1.HomeStorage != nil {
+		gc.HomeStorage = v1.HomeStorage
+	}
+
 	// Native chat — thread into GlobalConfig so the hub can gate chat routes.
 	if v1.NativeChat != nil {
 		gc.NativeChat = v1.NativeChat
@@ -4813,6 +4590,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		AgentEndpoint:          gc.Hub.AgentEndpoint,
 		MonitoringDashboardURL: gc.Hub.MonitoringDashboardURL,
 		HubClass:               gc.Hub.HubClass,
+		GCPProjectID:           gc.Hub.GCPProjectID,
 		ReadTimeout:            gc.Hub.ReadTimeout.String(),
 		WriteTimeout:           gc.Hub.WriteTimeout.String(),
 		AdminEmails:            gc.Hub.AdminEmails,
@@ -5081,22 +4859,32 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 
 	// Federation
 	if gc.Federation.Enabled || len(gc.Federation.TrustedIssuers) > 0 {
-		v1.Federation = &V1FederationConfig{
-			Enabled:    &gc.Federation.Enabled,
-			Algorithms: gc.Federation.Algorithms,
-		}
-		if gc.Federation.Cache.RefreshInterval > 0 {
-			v1.Federation.RefreshInterval = gc.Federation.Cache.RefreshInterval.String()
-		}
-		if gc.Federation.Cache.DebounceInterval > 0 {
-			v1.Federation.DebounceInterval = gc.Federation.Cache.DebounceInterval.String()
-		}
-		for _, ti := range gc.Federation.TrustedIssuers {
-			v1.Federation.TrustedIssuers = append(v1.Federation.TrustedIssuers, V1TrustedIssuerConfig(ti))
-		}
+		v1.Federation = ConvertFederationToV1(&gc.Federation)
 	}
 
 	return v1
+}
+
+// ConvertFederationToV1 converts a federation configuration to the admin
+// API wire format, whatever its content. ConvertGlobalToV1ServerConfig
+// emits federation only when it is enabled or has trusted issuers; a
+// caller that knows a federation section is stored (the database-mode
+// server-config GET) uses this to report it in full.
+func ConvertFederationToV1(fc *FederationConfig) *V1FederationConfig {
+	out := &V1FederationConfig{
+		Enabled:    &fc.Enabled,
+		Algorithms: fc.Algorithms,
+	}
+	if fc.Cache.RefreshInterval > 0 {
+		out.RefreshInterval = fc.Cache.RefreshInterval.String()
+	}
+	if fc.Cache.DebounceInterval > 0 {
+		out.DebounceInterval = fc.Cache.DebounceInterval.String()
+	}
+	for _, ti := range fc.TrustedIssuers {
+		out.TrustedIssuers = append(out.TrustedIssuers, V1TrustedIssuerConfig(ti))
+	}
+	return out
 }
 
 // AdaptLegacySettings converts a legacy Settings struct to VersionedSettings.

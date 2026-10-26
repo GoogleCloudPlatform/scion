@@ -676,7 +676,7 @@ the mechanism was sound and only the justification was invented:
     a thing this chart produces BY DEFAULT: with workspaceStorage.nfs disabled
     there is no shared volume and no workspace_storage section, nothing two
     pods can both write. With it enabled, every replica mounts the same NFS
-    export and the hub renders server.workspace_storage, so two pods - the two
+    export and the hub renders server.project_storage, so two pods - the two
     replicas of a RollingUpdate included - CAN write the same share. That is the
     case the next bullet anticipated, and the answer there still holds:
     concurrency on the share is the hub's to coordinate (Postgres advisory
@@ -2948,7 +2948,7 @@ source for it is the divergence this check exists to prevent. */}}
 
 {{- /* HA preflight block 1, part 3: hub blob storage. GCS, and not the
 Filestore share - workspace storage is a different subsystem under
-server.workspace_storage and does not satisfy this. */}}
+server.project_storage and does not satisfy this. */}}
 {{- if eq (lower (toString $emittedDriver)) "postgres" }}
 {{- if ne (lower (toString (dig "server" "storage" "provider" "" $doc))) "gcs" }}
 {{- fail (printf "rendered settings.yaml must set server.storage.provider: gcs under Postgres, got %s. Local blob storage is not HA-safe and the hub refuses to start. This is the hub's own blob store; the Filestore workspace share does not satisfy it." (include "scion-hub.diagValue" (dig "server" "storage" "provider" "" $doc))) }}
@@ -3481,7 +3481,8 @@ hack/verify.sh enforces it under the name migration-rename-hazard, across every
 values permutation rather than only the default one.
 */}}
 {{- /*
-server.workspace_storage, from scion-hub.nfsWorkspace - the same define the
+server.project_storage (the one storage block: workspace, shared dirs and homes;
+homes stay local), from scion-hub.nfsWorkspace - the same define the
 Deployment's volume and mount come from, so the two cannot disagree about the
 mount path. Absent when workspaceStorage.nfs is disabled, which leaves every
 other render byte-identical. Snake_case and field names as the Cloud Run
@@ -3489,7 +3490,7 @@ module's settings template writes them.
 */}}
 {{- $nfsWs := include "scion-hub.nfsWorkspace" . | fromYaml }}
 {{- if $nfsWs }}
-{{- $server = set $server "workspace_storage" (dict
+{{- $server = set $server "project_storage" (dict
     "backend" "nfs"
     "nfs" (dict
       "mount_root" $nfsWs.mountRoot
@@ -4278,7 +4279,7 @@ WORKSPACE STORAGE - NFS. Appended at end of file, like the phases above.
 workspaceStorage.nfs, validated and normalised, as YAML - or the empty string
 when it is disabled. THE ONE SOURCE for both of its consumers:
 
-  - scion-hub.settings renders server.workspace_storage from it, and
+  - scion-hub.settings renders server.project_storage from it, and
   - deployment.yaml renders the hub pod's inline nfs volume and the hub
     container's mount from it.
 
@@ -4298,7 +4299,7 @@ V1NFSConfig and V1SharedDirStorageConfig).
 
 Field names match the Cloud Run module's settings template
 (deploy/terraform/modules/hub-cloudrun/templates/settings.yaml.tftpl,
-workspace_storage:), so the two deployments describe the share the same way.
+project_storage:), so the two deployments describe the share the same way.
 
 uid and gid are not values. They are rendered from the hub's effective
 hub.securityContext.runAsUser and runAsGroup - the same values
@@ -4314,7 +4315,8 @@ THE GUARDS, and why each one is here rather than left to the hub:
     chart's output saying why. A missing shareId makes the mount path the mount
     root itself, which still passes readiness while the hub and agents disagree
     about the tree. A missing pvName leaves agent pods with no claim to mount.
-  - config.extra.server.workspace_storage is refused while this is enabled.
+  - config.extra.server.project_storage (and the deprecated workspace_storage,
+    shared_dir_storage and home_storage) is refused while this is enabled.
     It would replace or change the settings half without touching the mount -
     exactly the drift this define exists to prevent. (The generic config.extra
     collision rule would catch an overlapping leaf too; this one names the
@@ -4342,7 +4344,7 @@ it, so the guards run even when the settings Secret is not rendered.
 {{- if $shareId }}{{- $inert = append $inert "workspaceStorage.nfs.shareId" }}{{- end }}
 {{- if $pvName }}{{- $inert = append $inert "workspaceStorage.nfs.pvName" }}{{- end }}
 {{- if $inert }}
-{{- fail (printf "%s set while workspaceStorage.nfs.enabled is false. The chart renders neither server.workspace_storage nor the hub's NFS mount in that case, so the value would reach nothing. Set workspaceStorage.nfs.enabled: true, or remove it." (join " and " $inert)) }}
+{{- fail (printf "%s set while workspaceStorage.nfs.enabled is false. The chart renders neither server.project_storage nor the hub's NFS mount in that case, so the value would reach nothing. Set workspaceStorage.nfs.enabled: true, or remove it." (join " and " $inert)) }}
 {{- end }}
 {{- else }}
 {{- $missing := list }}
@@ -4351,7 +4353,7 @@ it, so the guards run even when the settings Secret is not rendered.
 {{- if not $shareId }}{{- $missing = append $missing "workspaceStorage.nfs.shareId" }}{{- end }}
 {{- if not $pvName }}{{- $missing = append $missing "workspaceStorage.nfs.pvName" }}{{- end }}
 {{- if $missing }}
-{{- fail (printf "workspaceStorage.nfs.enabled is true, which requires %s. The chart renders the hub's NFS volume and server.workspace_storage from these, and the hub's /readyz fails unless the share is mounted at <mountRoot>/<shareId>." (join ", " $missing)) }}
+{{- fail (printf "workspaceStorage.nfs.enabled is true, which requires %s. The chart renders the hub's NFS volume and server.project_storage from these, and the hub's /readyz fails unless the share is mounted at <mountRoot>/<shareId>." (join ", " $missing)) }}
 {{- end }}
 {{- $mountRoot := trim (toString ($nfs.mountRoot | default "")) }}
 {{- $subpathRoot := trim (toString ($nfs.subpathRoot | default "")) }}
@@ -4375,8 +4377,12 @@ it, so the guards run even when the settings Secret is not rendered.
 {{- end }}
 {{- $extra := .Values.config.extra | default (dict) }}
 {{- $extraServer := $extra.server }}
-{{- if and (kindIs "map" $extraServer) (hasKey $extraServer "workspace_storage") }}
-{{- fail "workspaceStorage.nfs is enabled and config.extra also sets server.workspace_storage. The chart renders server.workspace_storage and the hub's NFS mount from workspaceStorage.nfs together, because the hub's /readyz fails unless the share is mounted at mount_root/shares[0].id; a settings block from config.extra could change one without the other. Use workspaceStorage.nfs alone." }}
+{{- if kindIs "map" $extraServer }}
+{{- range $key := list "project_storage" "workspace_storage" "shared_dir_storage" "home_storage" }}
+{{- if hasKey $extraServer $key }}
+{{- fail (printf "workspaceStorage.nfs is enabled and config.extra also sets server.%s. The chart renders server.project_storage and the hub's NFS mount from workspaceStorage.nfs together, because the hub's /readyz fails unless the share is mounted at mount_root/shares[0].id, and the hub accepts exactly one storage block; a settings block from config.extra could change one without the other. Use workspaceStorage.nfs alone." $key) }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- $out := dict
     "server" $server

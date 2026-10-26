@@ -36,7 +36,9 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
 
 // Reservation scope tests (max_agents_per_broker): an agent's active
@@ -754,19 +756,13 @@ func (p lockingPassthroughStore) TryAdvisoryLockObject(ctx context.Context, clas
 	return p.Store.(store.AdvisoryLocker).TryAdvisoryLockObject(ctx, class, obj)
 }
 
-// releaseFailingStore fails every ReleaseReservation, as a best-effort
-// release that only logs.
-type releaseFailingStore struct{ lockingPassthroughStore }
-
-func (releaseFailingStore) ReleaseReservation(context.Context, string, string) error {
-	return errors.New("release failed")
-}
-
-// A move whose source release fails is refused with the scope conflict and
-// leaves the slot on the source; nothing is reserved on the target.
-func TestMoveBrokerQuota_FailedSourceReleaseFailsTheMove(t *testing.T) {
+// A move whose transaction fails after it released the source row (a
+// failure injected through the store's transfer hook right before the
+// insert on the target) fails the move and rolls the release back: the
+// agent keeps exactly its source row, unchanged, and nothing is on the
+// target.
+func TestMoveBrokerQuota_FailedTransferKeepsSource(t *testing.T) {
 	srv, s := testServer(t)
-	srv.quotaService.store = releaseFailingStore{lockingPassthroughStore{srv.quotaService.store}}
 	brokerA, projectA := newQuotaTestBrokerAndProject(t, s, "move-a")
 	brokerB, _ := newQuotaTestBrokerAndProject(t, s, "move-b")
 	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
@@ -774,11 +770,26 @@ func TestMoveBrokerQuota_FailedSourceReleaseFailsTheMove(t *testing.T) {
 	agent := newQuotaTestAgent(t, s, brokerA, projectA, "move-x", state.PhaseStopped)
 	row := seedBrokerRow(t, s, def.ID, brokerA.ID, agent.ID, time.Time{})
 
+	injected := errors.New("injected transfer failure")
+	var steps []string
+	t.Cleanup(entadapter.SetTransferBrokerReservationTestHook(func(_ context.Context, _ *ent.Tx, step string, req store.BrokerReservationTransfer) error {
+		if req.AgentID != agent.ID {
+			return nil
+		}
+		steps = append(steps, step)
+		if step == "before_insert" {
+			return injected
+		}
+		return nil
+	}))
+
 	err = srv.moveBrokerQuota(context.Background(), agent, &reincarnationMove{SourceBrokerID: brokerA.ID, TargetBrokerID: brokerB.ID})
-	requireScopeConflict(t, err, agent.ID, brokerA.ID, brokerB.ID)
+	require.ErrorIs(t, err, injected, "the injected transfer failure fails the move")
+	assert.Equal(t, []string{"locked", "released", "before_insert"}, steps, "the source row was released inside the transaction")
 	got := activeReservation(t, s, def.ID, agent.ID)
 	require.NotNil(t, got)
-	assert.Equal(t, row.ID, got.ID, "the slot stays on the source")
+	assert.Equal(t, row.ID, got.ID, "the slot stays on the source, unchanged")
+	assert.Equal(t, brokerA.ID, got.ScopeID)
 	assert.Zero(t, brokerReservationCount(t, s, brokerB.ID), "nothing on the target")
 }
 
