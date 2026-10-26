@@ -50,13 +50,15 @@ type hostGitTrace struct {
 	srv  *httptest.Server
 	mu   sync.Mutex
 	auth []string
+	// headers records every X-Ambient request header value.
+	headers []string
 	// askpassLog records every run of the GIT_ASKPASS program the trace
 	// sets up (it answers "askpass-secret").
 	askpassLog string
 }
 
 // hostGitMark is a position in a trace's records.
-type hostGitMark struct{ auth, askpass int }
+type hostGitMark struct{ auth, askpass, headers int }
 
 func newHostGitTrace(t *testing.T) *hostGitTrace {
 	t.Helper()
@@ -73,6 +75,11 @@ func newHostGitTrace(t *testing.T) *hostGitTrace {
 			tr.auth = append(tr.auth, decoded)
 			tr.mu.Unlock()
 		}
+		if v := r.Header.Values("X-Ambient"); len(v) > 0 {
+			tr.mu.Lock()
+			tr.headers = append(tr.headers, v...)
+			tr.mu.Unlock()
+		}
 		w.Header().Set("WWW-Authenticate", `Basic realm="git"`)
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
@@ -84,7 +91,12 @@ func newHostGitTrace(t *testing.T) *hostGitTrace {
 	creds := filepath.Join(dir, "credentials")
 	require.NoError(t, os.WriteFile(creds, []byte(strings.Replace(tr.srv.URL, "https://", "https://ambient:ambient-secret@", 1)+"\n"), 0o600))
 	cfg := filepath.Join(dir, "gitconfig")
-	require.NoError(t, os.WriteFile(cfg, []byte("[http]\n\tsslCAInfo = "+ca+"\n[credential]\n\thelper = store --file="+creds+"\n"), 0o600))
+	body := "[http]\n\tsslCAInfo = " + ca + "\n\textraHeader = X-Ambient: generic\n" +
+		"[http \"" + tr.srv.URL + "/\"]\n\textraHeader = X-Ambient: host\n" +
+		"[http \"" + tr.url("org/repo") + "\"]\n\textraHeader = X-Ambient: full\n" +
+		"[http \"" + tr.url("other/repo") + "\"]\n\textraHeader = X-Ambient: full\n" +
+		"[credential]\n\thelper = store --file=" + creds + "\n"
+	require.NoError(t, os.WriteFile(cfg, []byte(body), 0o600))
 	t.Setenv("GIT_CONFIG_GLOBAL", cfg)
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	tr.askpassLog = filepath.Join(dir, "askpass.log")
@@ -108,8 +120,14 @@ func (tr *hostGitTrace) askpassRuns() []string {
 	return strings.Fields(string(b))
 }
 
+func (tr *hostGitTrace) seenHeaders() []string {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	return append([]string(nil), tr.headers...)
+}
+
 func (tr *hostGitTrace) mark() hostGitMark {
-	return hostGitMark{auth: len(tr.seen()), askpass: len(tr.askpassRuns())}
+	return hostGitMark{auth: len(tr.seen()), askpass: len(tr.askpassRuns()), headers: len(tr.seenHeaders())}
 }
 
 // assertNoCredential asserts that since m git offered no credential (not
@@ -118,6 +136,7 @@ func (tr *hostGitTrace) assertNoCredential(t *testing.T, m hostGitMark) {
 	t.Helper()
 	assert.Empty(t, tr.seen()[m.auth:], "git must offer no credential (neither the project's token nor the host's)")
 	assert.Empty(t, tr.askpassRuns()[m.askpass:], "git must not run GIT_ASKPASS")
+	assert.Empty(t, tr.seenHeaders()[m.headers:], "git must send none of the host's extra headers (generic, host or URL scoped)")
 }
 
 // assertTokenOnly asserts that since m git offered the project's token and
@@ -191,7 +210,8 @@ func hostGitBindingCases(tr *hostGitTrace) []struct {
 
 // The local-backend clone offers the project's token only to the project's
 // recorded remote over https; any other https host gets neither the token
-// nor a credential from the host user's credential helper or askpass.
+// nor a credential from the host user's credential helper or askpass, nor
+// the host's extra headers.
 func TestHostGitAccess_LocalCloneTokenBoundToRecordedRemote(t *testing.T) {
 	tr := newHostGitTrace(t)
 	for i, tc := range hostGitBindingCases(tr) {
@@ -258,7 +278,8 @@ func hostGitPull(t *testing.T, srv *Server, projectID string) (int, string) {
 
 // The workspace pull offers the project's token only to the project's
 // recorded remote over https; any other https host gets neither the token
-// nor a credential from the host user's credential helper or askpass.
+// nor a credential from the host user's credential helper or askpass, nor
+// the host's extra headers.
 func TestHostGitAccess_PullTokenBoundToRecordedRemote(t *testing.T) {
 	tr := newHostGitTrace(t)
 	for i, tc := range hostGitBindingCases(tr) {
@@ -396,6 +417,13 @@ func TestHostGitAccess_PullFetchHardened(t *testing.T) {
 // (oauth2:<token>). The host user's git config trusts its certificate.
 func hostGitAuthedRepo(t *testing.T, source string) string {
 	t.Helper()
+	return hostGitDumbRepo(t, source, true)
+}
+
+// hostGitDumbRepo is hostGitAuthedRepo, without the token check when
+// requireToken is false.
+func hostGitDumbRepo(t *testing.T, source string, requireToken bool) string {
+	t.Helper()
 	root := t.TempDir()
 	bare := filepath.Join(root, "org", "repo.git")
 	for _, args := range [][]string{
@@ -409,7 +437,7 @@ func hostGitAuthedRepo(t *testing.T, source string) string {
 	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("oauth2:"+hostGitTestToken))
 	files := http.FileServer(http.Dir(root))
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != want {
+		if requireToken && r.Header.Get("Authorization") != want {
 			w.Header().Set("WWW-Authenticate", `Basic realm="git"`)
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -468,10 +496,10 @@ func TestHostGitAccess_BoundPullAuthenticates(t *testing.T) {
 	assert.Contains(t, body, `"updated":true`)
 }
 
-// The trace endpoint's ambient credential store answers a pull of the
-// project's recorded remote when the project has no token (bound URLs keep
-// the host's own git authentication), so the pull's no-credential
-// assertions above are not vacuous.
+// The trace endpoint's ambient credential store and extra headers answer a
+// pull of the project's recorded remote when the project has no token
+// (bound URLs keep the host's own git authentication), so the pull's
+// no-credential assertions above are not vacuous.
 func TestHostGitAccess_PullTraceIsLive(t *testing.T) {
 	tr := newHostGitTrace(t)
 	srv, st, _ := hostGitTokenServer(t)
@@ -483,4 +511,19 @@ func TestHostGitAccess_PullTraceIsLive(t *testing.T) {
 	got := tr.seen()[m.auth:]
 	require.NotEmpty(t, got, "the host's credential store must answer a bound pull with no project token")
 	assert.Equal(t, "ambient:ambient-secret", got[0])
+	assert.Subset(t, tr.seenHeaders()[m.headers:], []string{"generic", "host", "full"})
+}
+
+// An unbound https clone and pull of a repository that needs no credential
+// still succeed under the unbound-path settings.
+func TestHostGitAccess_UnboundUnauthenticatedCloneAndPullSucceed(t *testing.T) {
+	srv, st, setToken := hostGitTokenServer(t)
+	url := hostGitDumbRepo(t, hostGitSourceRepo(t), false)
+	p := hostGitProject(t, st, "host-git-open-clone", "github.com/org/repo", url)
+	p.Labels[store.LabelDefaultBranch] = "main"
+	setToken(p.ID)
+	require.NoError(t, srv.cloneSharedWorkspaceProject(context.Background(), p))
+
+	code, body := hostGitPull(t, srv, p.ID)
+	require.Equal(t, http.StatusOK, code, body)
 }

@@ -512,22 +512,28 @@ func ScopedCredentialHelperEnv(base []string, cloneURL, token string) (env []str
 	), true
 }
 
-// NoCredentialHelperEnv returns base with the configured credential helper
-// list reset to empty (so no helper of the host user's, such as a
-// credential store, is asked), the generic http.extraHeader reset to empty,
-// and askpass disabled (an empty GIT_ASKPASS stops git's askpass lookup;
-// with GIT_TERMINAL_PROMPT=0 git then fails instead of prompting). It does
-// not change other git authentication sources (for example ~/.netrc, TLS
-// client certificates or Negotiate), nor URL-scoped http.<url>.extraHeader
-// settings.
-func NoCredentialHelperEnv(base []string) []string {
+// NoCredentialHelperEnv returns base, for a git command that talks to
+// cloneURL, with:
+//   - the configured credential helper list reset to empty, so no helper of
+//     the host user's (a credential store, also one scoped to a URL) is
+//     asked;
+//   - the configured extra HTTP headers reset to empty. git picks
+//     http.<url>.extraHeader settings by the most specific matching URL and
+//     skips a less specific reset, so the reset is keyed on cloneURL itself,
+//     which no other setting for this request can be more specific than;
+//   - askpass disabled: an empty GIT_ASKPASS stops git's askpass lookup, and
+//     with GIT_TERMINAL_PROMPT=0 git then fails instead of prompting.
+//
+// It does not change other git authentication sources, for example
+// ~/.netrc, TLS client certificates (http.sslCert) or Kerberos/Negotiate.
+func NoCredentialHelperEnv(base []string, cloneURL string) []string {
 	start := existingConfigCount(base)
 	return append(base,
 		"GIT_ASKPASS=",
 		"GIT_CONFIG_COUNT="+strconv.Itoa(start+2),
 		fmt.Sprintf("GIT_CONFIG_KEY_%d=credential.helper", start),
 		fmt.Sprintf("GIT_CONFIG_VALUE_%d=", start),
-		fmt.Sprintf("GIT_CONFIG_KEY_%d=http.extraHeader", start+1),
+		fmt.Sprintf("GIT_CONFIG_KEY_%d=http.%s.extraHeader", start+1, cloneURL),
 		fmt.Sprintf("GIT_CONFIG_VALUE_%d=", start+1),
 	)
 }

@@ -32,8 +32,9 @@ import (
 // resolves to the project's recorded git remote over https
 // (provision.CloneTokenBound); it is not even resolved otherwise. For any
 // other URL git runs without the token, with the hub host user's credential
-// helpers reset and askpass disabled (util.HostGitHardening.NoCredentialHelpers;
-// see util.NoCredentialHelperEnv for what it does not cover).
+// helpers and extra HTTP headers reset and askpass disabled
+// (util.HostGitHardening.NoCredentialHelpers; see util.NoCredentialHelperEnv
+// for what it does not cover).
 func (s *Server) hostGitAccess(ctx context.Context, project *store.Project, cloneURL string) (string, util.HostGitHardening) {
 	h := util.HostGitHardening{
 		Config: append(provision.HostCloneGitConfig(), "protocol.http.allow=never"),

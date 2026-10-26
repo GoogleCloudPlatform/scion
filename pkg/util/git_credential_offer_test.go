@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -34,6 +35,8 @@ type credentialTraceServer struct {
 	srv  *httptest.Server
 	mu   sync.Mutex
 	auth []string
+	// headers records every X-Ambient request header value.
+	headers []string
 	// askpassLog records every run of the GIT_ASKPASS program the server
 	// sets up (it answers "askpass-secret").
 	askpassLog string
@@ -70,6 +73,11 @@ func newCredentialTraceServer(t *testing.T) *credentialTraceServer {
 			}
 			cs.mu.Lock()
 			cs.auth = append(cs.auth, decoded)
+			cs.mu.Unlock()
+		}
+		if v := r.Header.Values("X-Ambient"); len(v) > 0 {
+			cs.mu.Lock()
+			cs.headers = append(cs.headers, v...)
 			cs.mu.Unlock()
 		}
 		w.Header().Set("WWW-Authenticate", `Basic realm="git"`)
@@ -240,8 +248,8 @@ func TestPullSharedWorkspaceHardened_ConfigOverridesNetworkArgs(t *testing.T) {
 
 // newAuthedDumbHTTPRepo serves a bare copy of source over https as a dumb
 // HTTP git repository at <url>/org/repo.git, answering 401 (Basic) unless a
-// request carries oauth2:<token>. The host user's git config trusts its
-// certificate. It returns the repository URL.
+// request carries oauth2:<token> (no check when token is empty). The host
+// user's git config trusts its certificate. It returns the repository URL.
 func newAuthedDumbHTTPRepo(t *testing.T, source, token string) string {
 	t.Helper()
 	root := t.TempDir()
@@ -258,7 +266,7 @@ func newAuthedDumbHTTPRepo(t *testing.T, source, token string) string {
 	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("oauth2:"+token))
 	files := http.FileServer(http.Dir(root))
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != want {
+		if token != "" && r.Header.Get("Authorization") != want {
 			w.Header().Set("WWW-Authenticate", `Basic realm="git"`)
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -302,5 +310,118 @@ func TestHardenedCloneAndPull_AuthenticateWithToken(t *testing.T) {
 	// Without the token the same repository refuses the clone.
 	if err := CloneSharedWorkspaceHardened(filepath.Join(t.TempDir(), "ws"), url, "", "", h); err == nil {
 		t.Fatal("the repository must require the token")
+	}
+}
+
+func (s *credentialTraceServer) seenHeaders() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.headers...)
+}
+
+// useAmbientConfig replaces the host user's git config with one that
+// trusts the server and holds extra, given after the [http] section.
+func (s *credentialTraceServer) useAmbientConfig(t *testing.T, extra string) {
+	t.Helper()
+	dir := t.TempDir()
+	ca := filepath.Join(dir, "ca.pem")
+	if err := os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: s.srv.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(dir, "gitconfig")
+	if err := os.WriteFile(cfg, []byte("[http]\n\tsslCAInfo = "+ca+"\n"+extra), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", cfg)
+}
+
+// ambientHeaderConfig sets an X-Ambient extra header at every URL scope a
+// request to the server's org/repo matches: generic, the host, and the full
+// repository URL.
+func (s *credentialTraceServer) ambientHeaderConfig() string {
+	return "\textraHeader = X-Ambient: generic\n" +
+		"[http \"" + s.srv.URL + "/\"]\n\textraHeader = X-Ambient: host\n" +
+		"[http \"" + s.repoURL() + "\"]\n\textraHeader = X-Ambient: full\n"
+}
+
+// With NoCredentialHelpers no configured extra header is sent, whether it
+// is generic or scoped to the host or to the full URL, on clone and pull.
+// Without it all three are sent (the harness is live).
+func TestNoCredentialHelpers_ResetsExtraHeadersAtEveryURLScope(t *testing.T) {
+	_, workspace, _ := sharedWorkspaceFixture(t)
+	cs := newCredentialTraceServer(t)
+	cs.useAmbientConfig(t, cs.ambientHeaderConfig())
+
+	_ = CloneSharedWorkspace(filepath.Join(t.TempDir(), "ws"), cs.repoURL(), "", "")
+	got := cs.seenHeaders()
+	for _, want := range []string{"generic", "host", "full"} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("a plain clone must send the %s ambient header (harness), got %q", want, got)
+		}
+	}
+
+	n := len(cs.seenHeaders())
+	_ = CloneSharedWorkspaceHardened(filepath.Join(t.TempDir(), "ws"), cs.repoURL(), "", "", HostGitHardening{NoCredentialHelpers: true})
+	if extra := cs.seenHeaders()[n:]; len(extra) != 0 {
+		t.Errorf("clone with NoCredentialHelpers sent ambient headers %q", extra)
+	}
+	n = len(cs.seenHeaders())
+	_, _ = PullSharedWorkspaceHardened(workspace, cs.repoURL(), "", HostGitHardening{NoCredentialHelpers: true})
+	if extra := cs.seenHeaders()[n:]; len(extra) != 0 {
+		t.Errorf("pull with NoCredentialHelpers sent ambient headers %q", extra)
+	}
+}
+
+// With NoCredentialHelpers a credential helper scoped to the host or to the
+// full URL is not asked either, on clone and pull; without it, it answers.
+func TestNoCredentialHelpers_ResetsURLScopedHelpers(t *testing.T) {
+	for _, scope := range []string{"host", "full URL"} {
+		t.Run(scope, func(t *testing.T) {
+			_, workspace, _ := sharedWorkspaceFixture(t)
+			cs := newCredentialTraceServer(t)
+			store := filepath.Join(t.TempDir(), "credentials")
+			if err := os.WriteFile(store, []byte(strings.Replace(cs.srv.URL, "https://", "https://scoped:scoped-secret@", 1)+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			url := cs.srv.URL
+			if scope == "full URL" {
+				url = cs.repoURL()
+			}
+			cs.useAmbientConfig(t, "[credential \""+url+"\"]\n\thelper = store --file="+store+"\n")
+
+			_ = CloneSharedWorkspace(filepath.Join(t.TempDir(), "ws"), cs.repoURL(), "", "")
+			if got := cs.seen(); len(got) == 0 || got[0] != "scoped:scoped-secret" {
+				t.Fatalf("a plain clone must use the scoped helper (harness), got %q", got)
+			}
+			m := len(cs.seen())
+			_ = CloneSharedWorkspaceHardened(filepath.Join(t.TempDir(), "ws"), cs.repoURL(), "", "", HostGitHardening{NoCredentialHelpers: true})
+			_, _ = PullSharedWorkspaceHardened(workspace, cs.repoURL(), "", HostGitHardening{NoCredentialHelpers: true})
+			if extra := cs.seen()[m:]; len(extra) != 0 {
+				t.Errorf("NoCredentialHelpers offered %q", extra)
+			}
+			if runs := cs.askpassRuns(); runs != "" {
+				t.Errorf("git ran GIT_ASKPASS:\n%s", runs)
+			}
+		})
+	}
+}
+
+// With NoCredentialHelpers an https clone and pull of a repository that
+// needs no credential still succeed (the CA from the host user's git config
+// still applies).
+func TestNoCredentialHelpers_UnauthenticatedCloneAndPullSucceed(t *testing.T) {
+	source := setupGitRepo(t)
+	url := newAuthedDumbHTTPRepo(t, source, "")
+	h := HostGitHardening{
+		Config:              []string{"protocol.allow=never", "protocol.file.allow=never", "protocol.https.allow=always", "protocol.http.allow=never"},
+		Env:                 []string{"GIT_ALLOW_PROTOCOL=https:ssh:git"},
+		NoCredentialHelpers: true,
+	}
+	dest := filepath.Join(t.TempDir(), "ws")
+	if err := CloneSharedWorkspaceHardened(dest, url, "", "", h); err != nil {
+		t.Fatalf("unauthenticated clone: %v", err)
+	}
+	if _, err := PullSharedWorkspaceHardened(dest, url, "", h); err != nil {
+		t.Fatalf("unauthenticated pull: %v", err)
 	}
 }
