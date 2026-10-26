@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -283,6 +284,56 @@ func TestHealthSummaryBrokers_VersionMismatchKeptWhenCapped(t *testing.T) {
 	assert.Equal(t, HealthStatusHealthy, resp.Status)
 }
 
+// A layout-mismatched row (GoogleCloudPlatform/scion#4177) and a
+// version-mismatched row are both kept when the broker list is capped; the
+// healthy row is the one dropped. Store order is newest first, so both
+// mismatched brokers are created before the healthy one and would fall past
+// the cap without the keep-when-capped key.
+func TestHealthSummaryBrokers_LayoutAndVersionMismatchKeptWhenCapped(t *testing.T) {
+	prev := healthSummaryBrokerLimit
+	healthSummaryBrokerLimit = 2
+	t.Cleanup(func() { healthSummaryBrokerLimit = prev })
+
+	ctx := context.Background()
+	srv, s := testServer(t)
+	srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig("/mnt/nfs"))
+	nfsOK := func() *api.BrokerWorkspaceStorage {
+		return &api.BrokerWorkspaceStorage{Backend: "nfs", Homes: "local",
+			NFS: &api.BrokerNFSWorkspaceStorage{Server: "10.0.0.2", Export: "/scion", SubPathRoot: "projects", Healthy: true}}
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: tid("cap-layout"), Name: "cap-layout", Slug: "cap-layout", Endpoint: "http://localhost:9811",
+		Status: store.BrokerStatusOnline, Version: "v1.3.0",
+		WorkspaceStorage: &api.BrokerWorkspaceStorage{Backend: "local", Homes: "local"},
+	}))
+	time.Sleep(2 * time.Millisecond)
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: tid("cap-version"), Name: "cap-version", Slug: "cap-version", Endpoint: "http://localhost:9812",
+		Status: store.BrokerStatusOnline, Version: "v1.2.0", WorkspaceStorage: nfsOK(),
+	}))
+	time.Sleep(2 * time.Millisecond)
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: tid("cap-ok"), Name: "cap-ok", Slug: "cap-ok", Endpoint: "http://localhost:9813",
+		Status: store.BrokerStatusOnline, Version: "v1.3.0", WorkspaceStorage: nfsOK(),
+	}))
+
+	list, _, err := srv.healthSummaryBrokers(ctx, nil, "v1.3.0")
+	require.NoError(t, err)
+	assert.True(t, list.Truncated)
+	assert.Equal(t, 3, list.Total)
+	ids := map[string]HealthSummaryBroker{}
+	for _, r := range list.Items {
+		ids[r.ID] = r
+	}
+	require.Len(t, ids, 2)
+	require.Contains(t, ids, tid("cap-layout"), "the layout-mismatched row is kept")
+	require.Contains(t, ids, tid("cap-version"), "the version-mismatched row is kept")
+	assert.NotContains(t, ids, tid("cap-ok"), "the healthy row is the one dropped")
+	assert.NotEmpty(t, ids[tid("cap-layout")].WorkspaceStorage.LayoutMismatch)
+	assert.Equal(t, "mismatch", ids[tid("cap-version")].VersionStatus)
+	assert.Empty(t, ids[tid("cap-version")].WorkspaceStorage.LayoutMismatch)
+}
+
 func TestHealthSummaryBrokerKeepWhenCapped(t *testing.T) {
 	online := store.BrokerStatusOnline
 	assert.True(t, healthSummaryBrokerKeepWhenCapped(HealthSummaryBroker{Status: online, VersionStatus: "mismatch"}))
@@ -292,6 +343,9 @@ func TestHealthSummaryBrokerKeepWhenCapped(t *testing.T) {
 		"problem rows are still kept")
 	assert.False(t, healthSummaryBrokerHasProblem(HealthSummaryBroker{Status: online, VersionStatus: "mismatch"}),
 		"a mismatch is not a problem row")
+	assert.True(t, healthSummaryBrokerKeepWhenCapped(HealthSummaryBroker{Status: online, VersionStatus: "match",
+		WorkspaceStorage: &HealthBrokerStorage{Backend: "local", LayoutMismatch: []string{"backend"}}}),
+		"a layout-mismatched row (a problem row) is kept")
 }
 
 // Order: the version item is the last item of its broker, before the next
