@@ -6775,7 +6775,9 @@ func replaceSettingsFileByName(lock *SettingsLock, path string, data []byte) err
 // backupSettingsFile makes backupPath a backup of the settings file at path
 // without moving path: a symlink is copied as a new symlink with the same
 // target (as renaming it would have kept it), and a regular file is hard
-// linked, or copied with its mode where hard links are not supported.
+// linked, or copied where hard links are not supported: with its mode on
+// unix, privately on Windows when the original is private (see
+// copySettingsBackup).
 func backupSettingsFile(path, backupPath string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -6791,25 +6793,7 @@ func backupSettingsFile(path, backupPath string) error {
 	if err := os.Link(path, backupPath); err == nil {
 		return nil
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	f, err := os.OpenFile(backupPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		_ = os.Remove(backupPath)
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(backupPath)
-		return err
-	}
-	return f.Close()
+	return copySettingsBackup(path, backupPath, info)
 }
 
 // loadServerConfigOnly loads a GlobalConfig from a single server.yaml file

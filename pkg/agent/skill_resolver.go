@@ -813,7 +813,7 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 		// Both writers create the file 0644 (under the umask); give it
 		// the recorded mode, so an executable skill script stays
 		// executable (ptone/scion#5657).
-		if err := os.Chmod(destPath, transfer.NormalizeMode(f.Mode)); err != nil {
+		if err := os.Chmod(destPath, transfer.NormalizeMode(f.Mode)); err != nil { //winsec:not-protection sets a skill file's recorded mode bits; skills are installed only by agent provisioning and start
 			return nil, wrapSkillFileError("failed to set mode of", f.Path, err)
 		}
 
@@ -984,7 +984,7 @@ func applySkillFileModes(dir string, skill ResolvedSkill) error {
 	}
 	defer func() { _ = root.Close() }()
 	for _, f := range skill.Files {
-		if err := root.Chmod(filepath.FromSlash(f.Path), transfer.NormalizeMode(f.Mode)); err != nil {
+		if err := root.Chmod(filepath.FromSlash(f.Path), transfer.NormalizeMode(f.Mode)); err != nil { //winsec:not-protection sets a skill file's recorded mode bits; skills are installed only by agent provisioning and start
 			return fmt.Errorf("failed to set mode of %s: %w", f.Path, err)
 		}
 	}

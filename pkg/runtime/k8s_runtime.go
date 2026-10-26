@@ -25,12 +25,10 @@ import (
 	"maps"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -44,6 +42,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/termresize"
 	"github.com/google/uuid"
 	"golang.org/x/term"
 	corev1 "k8s.io/api/core/v1"
@@ -4138,12 +4137,12 @@ func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 	}
 
 	// Monitor for resize signals (SIGWINCH)
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGWINCH)
+	resized, stopResize := termresize.Notify(attachCtx, fd)
+	defer stopResize()
 	go func() {
 		for {
 			select {
-			case <-sigChan:
+			case <-resized:
 				if w, h, err := term.GetSize(fd); err == nil {
 					sizeQueue.resizeChan <- remotecommand.TerminalSize{Width: uint16(w), Height: uint16(h)}
 				}
@@ -4152,7 +4151,6 @@ func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 			}
 		}
 	}()
-	defer signal.Stop(sigChan)
 
 	// Trigger a "resize dance" to force TUI redraw. Some TUIs only redraw
 	// when they receive a SIGWINCH where the dimensions actually change.

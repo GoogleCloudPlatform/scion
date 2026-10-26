@@ -15,18 +15,16 @@
 package hubprofile
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
 // The per-run identity cache keeps the test identities issued through a
@@ -34,13 +32,16 @@ import (
 //
 //	~/.scion/hub-profiles/<profile>/run-<label>/<alias>.json
 //
-// Directories are 0700 and files 0600. A new entry is created with
-// O_CREAT|O_EXCL|O_NOFOLLOW, so an existing file or a symlink (even a
-// dangling one) is refused. A refreshed token replaces the entry by
-// writing a new exclusive temporary file in the same directory and
-// renaming it over the entry. Reads refuse symlinks, non-regular files and
-// files readable by anyone but the owner. The file holds the identity's
-// token: it never leaves the container, and the CLI never prints it.
+// Directories and files are private (privatefs.Private: 0700/0600 on unix,
+// an owner-only ACL set at creation on Windows), all through a
+// privatefs.Tree anchored at Dir(home). A new entry is created exclusively
+// (Tree.Create, excl), so an existing file or a symlink (even a dangling
+// one) is refused. A refreshed token replaces the entry by writing a new
+// private temporary file in the same directory and renaming it over the
+// entry through its open handle. Reads refuse symlinks (on Windows any
+// reparse point), non-regular files and files anyone but the owner can
+// read (Tree.ReadPrivate). The file holds the identity's token: it never
+// leaves the container, and the CLI never prints it.
 
 const runDirPrefix = "run-"
 
@@ -106,6 +107,12 @@ func entryPath(home, profile, run, alias string) (string, error) {
 	return filepath.Join(dir, alias+".json"), nil
 }
 
+// entryRel returns an entry's path relative to Dir(home), the anchor of the
+// private tree, slash-separated. The names were validated by entryPath.
+func entryRel(profile, run, alias string) string {
+	return profile + "/" + runDirPrefix + run + "/" + alias + ".json"
+}
+
 // ErrEntryExists is returned by CreateEntry when the alias is cached.
 var ErrEntryExists = errors.New("alias already exists in this run")
 
@@ -117,55 +124,62 @@ func ReserveEntry(home, profile, run, alias string) (*Reservation, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := ensurePrivateDir(Dir(home), filepath.Dir(path)); err != nil {
+	t, err := ensurePrivateDir(Dir(home), filepath.Dir(path))
+	if err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	// Exclusive and private at creation; a symlink (on Windows any reparse
+	// point) at the alias path counts as an existing entry.
+	f, err := t.Create(entryRel(profile, run, alias), true, privatefs.Private)
 	if err != nil {
-		if errors.Is(err, os.ErrExist) || isSymlinkErr(err) {
+		_ = t.Close()
+		if errors.Is(err, os.ErrExist) || errors.Is(err, privatefs.ErrReparsePoint) {
 			return nil, fmt.Errorf("alias %q in run %q: %w (refusing to overwrite %s)", alias, run, ErrEntryExists, path)
 		}
 		return nil, err
 	}
-	if err := f.Chmod(0o600); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
-		return nil, err
-	}
-	return &Reservation{path: path, f: f}, nil
+	return &Reservation{path: path, t: t, f: f}, nil
 }
 
 // Reservation is an exclusively created, still empty cache file.
 type Reservation struct {
 	path string
+	t    *privatefs.Tree
 	f    *os.File
 }
 
 // Path returns the cache file path.
 func (r *Reservation) Path() string { return r.path }
 
-// Abandon closes and removes the empty file.
+// Abandon removes the empty file through its open handle and closes it.
 func (r *Reservation) Abandon() {
+	_ = r.t.RemoveOpen(r.f)
+	r.close()
+}
+
+func (r *Reservation) close() {
 	_ = r.f.Close()
-	_ = os.Remove(r.path)
+	_ = r.t.Close()
 }
 
 // Fill writes e and closes the file.
 func (r *Reservation) Fill(e *CacheEntry) error {
 	data, err := json.MarshalIndent(e, "", "  ")
 	if err != nil {
-		_ = r.f.Close()
+		r.close()
 		return err
 	}
 	if _, err := r.f.Write(append(data, '\n')); err != nil {
-		_ = r.f.Close()
+		r.close()
 		return err
 	}
 	if err := r.f.Sync(); err != nil {
-		_ = r.f.Close()
+		r.close()
 		return err
 	}
-	return r.f.Close()
+	err = r.f.Close()
+	_ = r.t.Close()
+	return err
 }
 
 // ReadEntry reads a cached alias.
@@ -174,7 +188,7 @@ func ReadEntry(home, profile, run, alias string) (*CacheEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := readPrivateFile(path)
+	data, err := readPrivateFile(home, entryRel(profile, run, alias), path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("no cached identity %q in run %q of profile %q (issue one with 'scion hub test-identity issue --as %s --run %s')", alias, run, profile, alias, run)
 	}
@@ -207,7 +221,7 @@ func ReplaceEntry(home string, e *CacheEntry) error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(path, append(data, '\n'))
+	return writeFileAtomic(home, entryRel(e.Profile, e.Run, e.Alias), append(data, '\n'))
 }
 
 // ListRun returns the aliases cached in a run, sorted.
@@ -325,76 +339,62 @@ func removeProfileCacheDir(home, profile string) error {
 	return os.RemoveAll(dir)
 }
 
-// readPrivateFile reads a regular file owned by the caller and readable by
-// nobody else, never following a symlink.
-func readPrivateFile(path string) ([]byte, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		if isSymlinkErr(err) {
-			return nil, fmt.Errorf("refusing %s: it is a symlink", path)
-		}
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-	fi, err := f.Stat()
+// readPrivateFile reads the regular file rel below Dir(home) through the
+// private tree (Tree.ReadPrivate): a symlink (on Windows any reparse point)
+// at any component below the anchor, a non-regular file and a file anyone
+// but the owner can read are refused. path names the file in errors.
+func readPrivateFile(home, rel, path string) ([]byte, error) {
+	t, err := privatefs.OpenTree(Dir(home), privatefs.TreeOptions{})
 	if err != nil {
 		return nil, err
 	}
-	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("refusing %s: it is not a regular file", path)
+	defer func() { _ = t.Close() }()
+	data, err := t.ReadPrivate(rel, 1<<20)
+	switch {
+	case errors.Is(err, privatefs.ErrReparsePoint):
+		return nil, fmt.Errorf("refusing %s: it is a symlink or junction: %w", path, err)
+	case errors.Is(err, privatefs.ErrNotPrivate):
+		return nil, fmt.Errorf("refusing %s: it is not private to you; it must be private to you (%s): %w", path, privatefs.Describe(privatefs.Private), err)
 	}
-	if fi.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("refusing %s: its mode %04o lets others read it; it must be 0600", path, fi.Mode().Perm())
-	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
-		return nil, fmt.Errorf("refusing %s: it is owned by another user", path)
-	}
-	return io.ReadAll(io.LimitReader(f, 1<<20))
+	return data, err
 }
 
-// writeFileAtomic writes data to a new exclusive 0600 temporary file in
-// path's directory and renames it over path. rename replaces a symlink at
-// path itself; it never writes through it.
-func writeFileAtomic(path string, data []byte) error {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
+// writeFileAtomic replaces rel below Dir(home) with data: a new private
+// temporary file is created exclusively in rel's directory through the
+// private tree, written, synced and renamed over rel through its open
+// handle (on Windows a handle rename; on unix rename(2), which replaces a
+// symlink at rel itself and never writes through it). On failure the
+// temporary file is removed through the same handle.
+func writeFileAtomic(home, rel string, data []byte) error {
+	t, err := privatefs.OpenTree(Dir(home), privatefs.TreeOptions{})
+	if err != nil {
 		return err
 	}
-	tmp := filepath.Join(filepath.Dir(path), "."+filepath.Base(path)+"."+hex.EncodeToString(b[:])+".tmp")
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	defer func() { _ = t.Close() }()
+	dir, leaf := "", rel
+	if i := strings.LastIndexByte(rel, '/'); i >= 0 {
+		dir, leaf = rel[:i], rel[i+1:]
+	}
+	f, _, err := t.CreateTemp(dir, "."+leaf+".*.tmp", privatefs.Private)
 	if err != nil {
 		return err
 	}
 	ok := false
 	defer func() {
 		if !ok {
+			_ = t.RemoveOpen(f)
 			_ = f.Close()
-			_ = os.Remove(tmp)
 		}
 	}()
-	if err := f.Chmod(0o600); err != nil {
-		return err
-	}
 	if _, err := f.Write(data); err != nil {
 		return err
 	}
 	if err := f.Sync(); err != nil {
 		return err
 	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		ok = true
+	if err := t.RenameOpen(f, rel); err != nil {
 		return err
 	}
 	ok = true
-	return nil
-}
-
-// isSymlinkErr reports whether err is the ELOOP O_NOFOLLOW returns for a
-// symlink.
-func isSymlinkErr(err error) bool {
-	return errors.Is(err, syscall.ELOOP)
+	return f.Close()
 }
