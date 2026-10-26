@@ -130,7 +130,9 @@ type LifecycleCounters interface {
 	// stale reason or unsettled_adoption.
 	StaleEcho(path, reason string)
 	// AttributionStale counts a cursor normalised to unattributed, or a
-	// malformed segment discarded (attribution design 7.1 and 3.3).
+	// malformed segment discarded (attribution design 7.1 and 3.3). A
+	// LEGACY cursor that also carries a CORRUPT field counts as corrupt,
+	// not legacy.
 	AttributionStale(reason string)
 }
 

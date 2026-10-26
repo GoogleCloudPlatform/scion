@@ -585,3 +585,61 @@ func TestLifecycleAttribution_T12MissingCursor(t *testing.T) {
 	assert.Equal(t, int64(1), f.counters.Get(telemetryemit.MetricAttributionStale, telemetryemit.AttributionStaleMissing))
 	assert.Equal(t, store.QuarantineUnknown, attrCursor(t, f, a.ID).QuarantineMode)
 }
+
+// TestLifecycleAttribution_T11mLegacyPartialMarker (contract review TA-1):
+// a LEGACY cursor (attribution_state "", NULL stamp) with a valid named
+// segment but a partial or malformed marker is CORRUPT: the valid segment
+// is untrusted and its closure omits launch_id. The controls: a valid
+// LEGACY cursor without a marker closes with its frozen pair (R4); an
+// exact-match marker on that segment omits.
+func TestLifecycleAttribution_T11mLegacyPartialMarker(t *testing.T) {
+	legacyWith := func(t *testing.T, marker func(u *ent.AgentLifecycleCursorUpdateOne)) (*lifecycleFixture, *store.Agent) {
+		f, a := newS2Fixture(t)
+		f.mint(a.ID, "R1")
+		f.startWrite(a.ID)
+		makeLegacy(t, f, a.ID)
+		if marker != nil {
+			editCursor(t, f, a.ID, true, marker)
+		}
+		return f, a
+	}
+	stop := func(t *testing.T, f *lifecycleFixture, id string) string {
+		f.stopRecord(id, "R1", "stopped")
+		evs := f.events(id)
+		return lcFull(evs[len(evs)-1:])
+	}
+	for _, tt := range []struct {
+		name   string
+		marker func(u *ent.AgentLifecycleCursorUpdateOne)
+	}{
+		{"run only", func(u *ent.AgentLifecycleCursorUpdateOne) { u.SetUntrustedOpenRun("R1") }},
+		{"run and generation, no revision", func(u *ent.AgentLifecycleCursorUpdateOne) {
+			u.SetUntrustedOpenRun("R1").SetUntrustedOpenRunGeneration("1")
+		}},
+		{"non-decimal generation", func(u *ent.AgentLifecycleCursorUpdateOne) {
+			u.SetUntrustedOpenRun("R1").SetUntrustedOpenRunGeneration("x").SetUntrustedOpenRunRev(2)
+		}},
+		{"revision without a run", func(u *ent.AgentLifecycleCursorUpdateOne) { u.SetUntrustedOpenRunRev(2) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			f, a := legacyWith(t, tt.marker)
+			assert.Equal(t, "stopped@3(stopped)[/1]", stop(t, f, a.ID))
+			assert.Equal(t, int64(1), f.counters.Get(telemetryemit.MetricAttributionStale, telemetryemit.AttributionStaleCorrupt))
+			assert.Zero(t, f.counters.Get(telemetryemit.MetricAttributionStale, telemetryemit.AttributionStaleLegacy))
+		})
+	}
+	t.Run("control: valid LEGACY without a marker names the frozen pair", func(t *testing.T) {
+		f, a := legacyWith(t, nil)
+		assert.Equal(t, "stopped@3(stopped)[R1/1]", stop(t, f, a.ID))
+		assert.Equal(t, int64(1), f.counters.Get(telemetryemit.MetricAttributionStale, telemetryemit.AttributionStaleLegacy))
+	})
+	t.Run("control: an exact-match marker on a LEGACY-state cursor omits", func(t *testing.T) {
+		f, a := legacyWith(t, nil)
+		c, err := f.cs.client.AgentLifecycleCursor.Get(context.Background(), uuid.MustParse(a.ID))
+		require.NoError(t, err)
+		editCursor(t, f, a.ID, true, func(u *ent.AgentLifecycleCursorUpdateOne) {
+			u.SetUntrustedOpenRun(c.OpenRun).SetUntrustedOpenRunGeneration(c.OpenRunGeneration).SetUntrustedOpenRunRev(c.OpenRunMetadataRevision)
+		})
+		assert.Equal(t, "stopped@3(stopped)[/1]", stop(t, f, a.ID))
+	})
+}

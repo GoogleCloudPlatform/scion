@@ -182,10 +182,17 @@ func segmentMalformed(r store.LifecycleRunState) bool {
 // attributionCorrupt reports a CORRUPT stored state (design 4.1). The
 // malformed segment identity is handled separately (discarded).
 func attributionCorrupt(a store.LifecycleAttribution, c *store.LifecycleCursor) bool {
-	if a.State == store.AttributionLegacy {
-		return c.AttributionStamp != nil
+	// LEGACY (attribution_state "") runs through the same checks as every
+	// other state (design 4.1; implementation review r1 RQ-1, contract
+	// review TA-1): only the state enum and the last_run/last_generation
+	// clause are scoped to non-LEGACY cursors, and a LEGACY cursor with a
+	// stamp is CORRUPT. A genuine pre-upgrade cursor (every column at its
+	// default, NULL stamp) passes and reads LEGACY.
+	legacy := a.State == store.AttributionLegacy
+	if legacy && c.AttributionStamp != nil {
+		return true
 	}
-	if a.State != store.AttributionClear && a.State != store.AttributionHeld {
+	if !legacy && a.State != store.AttributionClear && a.State != store.AttributionHeld {
 		return true
 	}
 	if a.State == store.AttributionHeld && a.AttributedRun != "" && a.AttributedGeneration == "" {
@@ -196,7 +203,7 @@ func attributionCorrupt(a store.LifecycleAttribution, c *store.LifecycleCursor) 
 			return true
 		}
 	}
-	if a.LastRun != "" && a.LastGeneration == "" {
+	if !legacy && a.LastRun != "" && a.LastGeneration == "" {
 		return true
 	}
 	quar, ok := parseQuar(a.QuarantinedRuns)

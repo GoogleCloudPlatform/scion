@@ -876,3 +876,57 @@ func TestLifecycleAttribution_T23dNormalisationPushOnEstablishingMint(t *testing
 	checkLaunchMap(t, evs, "B1")
 	assert.Empty(t, evs[len(evs)-1].LaunchID)
 }
+
+// corruptPatterns are the 4.1 CORRUPT patterns that apply to every state,
+// LEGACY included (implementation review r1 RQ-1, contract review TA-1).
+var corruptPatterns = []struct {
+	name string
+	edit func(u *ent.AgentLifecycleCursorUpdateOne)
+}{
+	{"partial marker: run only", func(u *ent.AgentLifecycleCursorUpdateOne) { u.SetUntrustedOpenRun("R1") }},
+	{"marker revision 0", func(u *ent.AgentLifecycleCursorUpdateOne) {
+		u.SetUntrustedOpenRun("R1").SetUntrustedOpenRunGeneration("1").SetUntrustedOpenRunRev(0)
+	}},
+	{"non-decimal marker generation", func(u *ent.AgentLifecycleCursorUpdateOne) {
+		u.SetUntrustedOpenRun("R1").SetUntrustedOpenRunGeneration("x").SetUntrustedOpenRunRev(2)
+	}},
+	{"invalid quarantine mode", func(u *ent.AgentLifecycleCursorUpdateOne) { u.SetQuarantineMode("weird") }},
+	{"unparsable quarantine list", func(u *ent.AgentLifecycleCursorUpdateOne) { u.SetQuarantinedRuns("A,,B") }},
+	{"non-decimal last generation", func(u *ent.AgentLifecycleCursorUpdateOne) { u.SetLastGeneration("x") }},
+	{"non-decimal attributed generation", func(u *ent.AgentLifecycleCursorUpdateOne) { u.SetAttributedGeneration("x") }},
+	{"witness without a base run", func(u *ent.AgentLifecycleCursorUpdateOne) { u.SetReincarnationMintRun("R1") }},
+}
+
+// TestLifecycleAttribution_T13CorruptOpenSegment (RQ-1, OP-2): every
+// CORRUPT pattern, on a LEGACY cursor (attribution_state "", NULL stamp)
+// and on a coherent clear cursor, with a VALID open segment R1/1: the
+// cursor is CORRUPT (counter reason corrupt), its valid segment is
+// untrusted, and the closure (a hard delete) omits launch_id while keeping
+// incarnation_id and segment_metadata_revision. The valid-LEGACY and
+// exact-marker controls are in TestLifecycleAttribution_T11mLegacyPartialMarker.
+func TestLifecycleAttribution_T13CorruptOpenSegment(t *testing.T) {
+	for _, legacy := range []bool{true, false} {
+		for _, p := range corruptPatterns {
+			name := "clear/" + p.name
+			if legacy {
+				name = "LEGACY/" + p.name
+			}
+			t.Run(name, func(t *testing.T) {
+				f, a := newS2Fixture(t)
+				f.mint(a.ID, "R1")
+				f.startWrite(a.ID)
+				if legacy {
+					makeLegacy(t, f, a.ID)
+				}
+				editCursor(t, f, a.ID, legacy, p.edit)
+				f.hardDelete(a.ID)
+				evs := f.events(a.ID)
+				del := evs[len(evs)-1]
+				assert.Equal(t, "deleted@3(hard)[/1]", lcFull(evs[len(evs)-1:]))
+				require.NotNil(t, del.SegmentMetadataRevision, "the closure keeps segment_metadata_revision")
+				assert.Equal(t, int64(1), f.counters.Get(telemetryemit.MetricAttributionStale, telemetryemit.AttributionStaleCorrupt))
+				assert.Zero(t, f.counters.Get(telemetryemit.MetricAttributionStale, telemetryemit.AttributionStaleLegacy))
+			})
+		}
+	}
+}

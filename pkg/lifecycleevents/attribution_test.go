@@ -108,6 +108,11 @@ func (c attrCase) build() (*store.LifecycleCursor, Facts, bool) {
 		a.State, a.LastRun, a.LastGeneration = store.AttributionClear, bRun, "1"
 		later := now.Add(time.Second)
 		cur.UpdatedAt = later
+	case "legacy-partial-marker", "legacy-bad-mode":
+		// LEGACY (state "", NULL stamp) carrying a CORRUPT field, set after
+		// the segment below (RQ-1, TA-1).
+		*a = store.LifecycleAttribution{}
+		cur.AttributionStamp = nil
 	case "corrupt":
 		a.State, a.LastRun, a.LastGeneration = "bogus", bRun, "1"
 	case "missing":
@@ -184,9 +189,15 @@ func (c attrCase) build() (*store.LifecycleCursor, Facts, bool) {
 		case "malformed":
 			cur.OpenRun, cur.OpenRunGeneration, cur.OpenRunMetadataRevision = segRun, "", 2
 		}
+		switch c.state {
+		case "legacy-partial-marker":
+			a.UntrustedOpenRun, a.UntrustedOpenRunGeneration, a.UntrustedOpenRunRev = segRun, "", 0
+		case "legacy-bad-mode":
+			a.QuarantineMode = "weird"
+		}
 		f.Cursor = CursorFacts{Exists: true, OpenRun: cur.OpenRun, Run: cur.RunState(), FingerprintMatches: true, Digest: "d"}
 	}
-	historyUnknown := c.state == "legacy" || c.state == "stale" || c.state == "corrupt" || c.state == "missing" || c.segment == "malformed"
+	historyUnknown := c.state == "legacy" || c.state == "stale" || c.corruptLike() || c.state == "missing" || c.segment == "malformed"
 	return cur, f, historyUnknown
 }
 
@@ -195,7 +206,7 @@ func (c attrCase) build() (*store.LifecycleCursor, Facts, bool) {
 // invariants on every point.
 func TestAttributionAxesExhaustive(t *testing.T) {
 	states := []string{"clear", "clear-run-mismatch", "clear-gen-mismatch", "clear-undo", "held-attr", "held-unattr",
-		"held-run-mismatch", "held-gen-mismatch", "legacy", "stale", "corrupt", "missing"}
+		"held-run-mismatch", "held-gen-mismatch", "legacy", "stale", "corrupt", "legacy-partial-marker", "legacy-bad-mode", "missing"}
 	segments := []string{"none", "trusted", "untrusted", "malformed"}
 	writes := []string{"mint-fresh", "mint-same", "mint-prev", "revert-quar", "revert-new", "adopt-quar", "adopt-new", "rebind",
 		"soft-finish", "soft-same", "bump", "bump-stop", "status-stop", "update", "hard-delete"}
@@ -272,7 +283,9 @@ func checkAttrCase(t *testing.T, c attrCase) {
 	if out.Has && out.State.State == store.AttributionHeld {
 		postHeldRun = out.State.LastRun
 	}
-	preSegUntrusted := cur != nil && c.segment == "untrusted" && c.state != "corrupt"
+	// Every valid segment on a CORRUPT cursor (LEGACY included) is
+	// untrusted (design 3.3 order step 2; OP-1, RQ-1).
+	preSegUntrusted := cur != nil && (c.segment == "untrusted" || (c.corruptLike() && c.segment == "trusted"))
 	for _, p := range plan.Events {
 		l := finalLaunch(f, p)
 		if l == "" {
@@ -309,8 +322,10 @@ func checkAttrCase(t *testing.T, c attrCase) {
 		// state (only reachable from one, T11s'), closes with its frozen
 		// pair unless this write pushes or holds that run (R5-1, R6-1).
 		segRun := cur0Seg(c)
+		// Design 10.2: the exception is LEGACY or stale only, never CORRUPT
+		// or missing (OP-1).
 		r4 := closure && c.segment == "trusted" && !firingSources(c, f)[segRun] &&
-			(historyUnknown || strings.HasPrefix(c.state, "held"))
+			(c.state == "legacy" || c.state == "stale" || strings.HasPrefix(c.state, "held"))
 		if !r4 && (l == preHeldRun && p.Row == RowBefore || l == postHeldRun && p.Row == RowAfter) {
 			fail("%s names the held run %s", p.Transition, l)
 		}
@@ -483,7 +498,7 @@ func firingSources(c attrCase, f Facts) map[string]bool {
 		return src
 	}
 	held := strings.HasPrefix(c.state, "held") || c.state == "clear-run-mismatch" || c.state == "clear-gen-mismatch" ||
-		c.state == "legacy" || c.state == "stale" || c.state == "corrupt" || c.state == "missing" || c.segment == "malformed"
+		c.state == "legacy" || c.state == "stale" || c.corruptLike() || c.state == "missing" || c.segment == "malformed"
 	quar := c.targetQuar
 	switch {
 	case f.AfterRunID != f.BeforeRunID:
@@ -499,4 +514,9 @@ func firingSources(c attrCase, f Facts) map[string]bool {
 		}
 	}
 	return src
+}
+
+// corruptLike reports a state that is CORRUPT under design 4.1.
+func (c attrCase) corruptLike() bool {
+	return c.state == "corrupt" || c.state == "legacy-partial-marker" || c.state == "legacy-bad-mode"
 }
