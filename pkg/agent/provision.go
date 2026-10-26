@@ -209,11 +209,16 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 	var repoRoot string
 	var externalAgentDir string
 	var hubAgentDir string // state dir resolved from hubProjectID, when distinct
-	// legacyAgentDir is the in-project state dir an agent of a shared
-	// project configuration had before the configuration moved to the
-	// project root (config.LegacySharedProjectAgentDir); removed with the
-	// agent so a later agent of the same name never resolves to it.
+	// legacyAgentDir is the retired in-project state dir an agent of a
+	// shared project configuration had before the configuration moved to
+	// the project root (config.LegacySharedProjectAgentDir); removed with
+	// the agent (ptone/scion#5835).
 	var legacyAgentDir string
+	// sharedStateDir is, for a shared project configuration, the agent's
+	// state dir in the broker-local external agents root (every sharing
+	// mode keeps it there), when hubAgentDir does not already name it: a
+	// delete without a Hub project ID removes it too.
+	var sharedStateDir string
 	var worktreeDir string // worktree-per-agent: agent's worktree path
 	// ownWorktreePaths lists the paths where this agent's own worktree may
 	// be registered. Only these entries are removed from git's worktree
@@ -285,6 +290,11 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 		}
 
 		hubAgentDir = hubStateDirToRemove(projectDir, agentName, hubProjectID, externalAgentDir)
+		if config.IsSharedProjectConfigDir(projectDir) {
+			if dir, err := config.AgentDirForProject(projectDir, agentName, false, hubProjectID); err == nil && (hubAgentDir == "" || !sameDir(dir, hubAgentDir)) {
+				sharedStateDir = dir
+			}
+		}
 	}
 
 	// Every removal below passes the guard (projectAgentFilesGuard): only
@@ -296,7 +306,7 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 	// ProvisionAgent's guard also trusts, and so is legacyAgentDir (when
 	// set); each is verified like an extra root (anchored at its parent, not
 	// trusted when it resolves elsewhere). An empty extra root is ignored.
-	keyRoots := []string{hubAgentDir, legacyAgentDir}
+	keyRoots := []string{hubAgentDir, legacyAgentDir, sharedStateDir}
 	if sharerKey != agentName && layout.sharedBaseIsRepo {
 		keyRoots = append(keyRoots, filepath.Join(layout.sharedBase, "worktrees", sharerKey))
 	}
@@ -307,7 +317,7 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 	// repository with a same-named branch, delete must only remove the
 	// agent's directories -- never a worktree, a sharer registration, a
 	// prune of the enclosing repo, or a branch.
-	emptyPerAgent := persistedEmptyPerAgent(agentsDirs, externalAgentDir, agentName)
+	emptyPerAgent := persistedEmptyPerAgent(agentsDirs, agentName, externalAgentDir, hubAgentDir, sharedStateDir)
 	if emptyPerAgent {
 		util.Debugf("delete: %s is empty-per-agent; skipping worktree and branch cleanup", agentName)
 		repoRoot = ""
@@ -548,7 +558,7 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 	// removed the same way: it holds a shared-workspace agent's state and
 	// no worktree. The guard trusts it as one of the agent's own
 	// directories (it is passed to the guard above).
-	for _, extDir := range []string{externalAgentDir, hubAgentDir} {
+	for _, extDir := range []string{externalAgentDir, hubAgentDir, sharedStateDir} {
 		if extDir == "" {
 			continue
 		}
@@ -798,15 +808,17 @@ func hubStateDirToRemove(projectDir, agentName, hubProjectID, externalAgentDir s
 }
 
 // persistedEmptyPerAgent reports whether the agent's persisted
-// scion-agent.json (in any of its agent dirs, or the external per-agent state
-// dir) records the empty-per-agent workspace mode.
-func persistedEmptyPerAgent(agentsDirs []string, externalAgentDir, agentName string) bool {
-	candidates := make([]string, 0, len(agentsDirs)+1)
+// scion-agent.json (in any of its agent dirs, or one of its per-agent state
+// dirs stateDirs, "" ignored) records the empty-per-agent workspace mode.
+func persistedEmptyPerAgent(agentsDirs []string, agentName string, stateDirs ...string) bool {
+	candidates := make([]string, 0, len(agentsDirs)+len(stateDirs))
 	for _, dir := range agentsDirs {
 		candidates = append(candidates, filepath.Join(dir, agentName))
 	}
-	if externalAgentDir != "" {
-		candidates = append(candidates, externalAgentDir)
+	for _, dir := range stateDirs {
+		if dir != "" {
+			candidates = append(candidates, dir)
+		}
 	}
 	for _, dir := range candidates {
 		if !config.ScionAgentConfigExists(dir) {
@@ -1288,7 +1300,7 @@ func reprovisionEmptyPerAgentPreflight(projectDir, agentName string, rt runtime.
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", ErrReprovisionRefused, err)
 	}
-	if !persistedEmptyPerAgent([]string{filepath.Dir(agentDir)}, "", agentName) {
+	if !persistedEmptyPerAgent([]string{filepath.Dir(agentDir)}, agentName) {
 		return "", fmt.Errorf("%w: agent %q was not created empty-per-agent", ErrReprovisionRefused, agentName)
 	}
 	agentWorkspace := filepath.Join(agentDir, "workspace")

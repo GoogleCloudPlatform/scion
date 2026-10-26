@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -202,12 +203,11 @@ func listTree(t *testing.T, dir string) []string {
 }
 
 // An agent started before its project's configuration moved to the shared
-// project root, in a mode whose state stayed in the legacy in-project dir,
-// is found there (look-up fallback). Its workspace is the legacy
-// broker-local project dir (project-scoped), which is never admitted from
-// the legacy tree, so a restart from the shared root is refused by the
-// workspace containment check, cleanly: nothing is provisioned in the
-// external root and the legacy state is left as it was.
+// project root, in a mode whose state stayed in the legacy in-project dir:
+// the legacy dir is retired, so no look-up resolves the agent to it, and a
+// restart from the shared root is refused (ErrLegacyAgentStateRetired),
+// cleanly: nothing is provisioned in the external root and the legacy state
+// is left as it was.
 func TestStart_SharedProjectRootLegacyAgentRestartRefusedCleanly(t *testing.T) {
 	f := newSharedDirStorageRunFixture(t)
 	mountRoot := filepath.Join(t.TempDir(), "nfs")
@@ -256,15 +256,15 @@ func TestStart_SharedProjectRootLegacyAgentRestartRefusedCleanly(t *testing.T) {
 	}
 	legacyAgent := filepath.Join(legacyScion, "agents", "test-agent")
 	before := listTree(t, legacyAgent)
-	if got := config.ResolveAgentDir(scionDir, "test-agent"); got != legacyAgent {
-		t.Fatalf("look-up from the shared root = %q, want the legacy dir %q", got, legacyAgent)
+	ext := filepath.Join(f.tmpDir, config.GlobalDir, config.ProjectConfigsDir, "web__"+strings.ReplaceAll(sharedRootUUID, "-", "")[:8], config.DotScion, "agents", "test-agent")
+	if got := config.ResolveAgentDir(scionDir, "test-agent"); got != ext {
+		t.Fatalf("look-up from the shared root = %q, want the external dir %q (the legacy fallback is retired)", got, ext)
 	}
 
 	err := start(root)
-	if err == nil || !strings.Contains(err.Error(), "outside the permitted workspace root") {
-		t.Fatalf("restart from the shared root = %v, want the workspace containment refusal", err)
+	if !errors.Is(err, ErrLegacyAgentStateRetired) {
+		t.Fatalf("restart from the shared root = %v, want ErrLegacyAgentStateRetired", err)
 	}
-	ext := filepath.Join(f.tmpDir, config.GlobalDir, config.ProjectConfigsDir, "web__"+strings.ReplaceAll(sharedRootUUID, "-", "")[:8], config.DotScion, "agents", "test-agent")
 	if _, err := os.Stat(filepath.Join(ext, "scion-agent.json")); !os.IsNotExist(err) {
 		t.Errorf("nothing may be provisioned in the external root (err %v)", err)
 	}
@@ -274,9 +274,11 @@ func TestStart_SharedProjectRootLegacyAgentRestartRefusedCleanly(t *testing.T) {
 }
 
 // A pre-move clone-per-agent agent (state and workspace in its legacy agent
-// dir) restarts from the shared project root with that workspace intact:
-// exactly its own legacy agent dir is admitted as a workspace root.
-func TestStart_SharedProjectRootRestartsLegacyClonePerAgent(t *testing.T) {
+// dir): the legacy workspace admission is retired, so its restart from the
+// shared project root is refused (ErrLegacyAgentStateRetired) before any
+// side effect, and its workspace, possibly with unpushed work, stays intact
+// in the legacy dir until the agent is deleted.
+func TestStart_SharedProjectRootLegacyClonePerAgentRefused(t *testing.T) {
 	f := newSharedDirStorageRunFixture(t)
 	// Clone-per-agent keeps a node-local workspace in the agent's own dir
 	// (the shared tree holds only the project configuration here).
@@ -336,22 +338,24 @@ func TestStart_SharedProjectRootRestartsLegacyClonePerAgent(t *testing.T) {
 	if err := os.WriteFile(work, []byte("work"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	preWorkspace := cfg.Workspace
+	cfg = runtime.RunConfig{}
 
-	if err := start(root); err != nil {
-		t.Fatalf("restart from the shared root: %v", err)
+	if err := start(root); !errors.Is(err, ErrLegacyAgentStateRetired) {
+		t.Fatalf("restart from the shared root = %v, want ErrLegacyAgentStateRetired", err)
 	}
-	if cfg.Workspace != preWorkspace {
-		t.Errorf("restart workspace = %q, want the agent's own legacy workspace %q", cfg.Workspace, preWorkspace)
+	if cfg.Workspace != "" {
+		t.Errorf("no container may be run: workspace %q", cfg.Workspace)
 	}
 	if data, err := os.ReadFile(work); err != nil || string(data) != "work" {
 		t.Errorf("the legacy workspace content must be intact: %q, %v", data, err)
 	}
 }
 
-// The legacy admission is exactly the agent's own legacy dir, reached through
-// the state fallback, for its own (agent-scoped) workspace.
-func TestLegacyAgentWorkspaceRoot(t *testing.T) {
+// The start refusal applies exactly to an agent of a shared project
+// configuration with no state in the external root and a legacy dir; an
+// agent with external state, a new agent, and an ordinary project are not
+// refused.
+func TestRefuseRetiredLegacyAgent(t *testing.T) {
 	root, home := sharedConfigProject(t)
 	scionDir := filepath.Join(root, config.DotScion)
 	legacyScion := filepath.Join(home, config.GlobalDir, config.ProjectsDir, "web", config.DotScion)
@@ -364,32 +368,85 @@ func TestLegacyAgentWorkspaceRoot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(legacy, "scion-agent.json"), []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	ext, err := config.AgentDirForProject(scionDir, "new", false, sharedCfgProjectID)
+	ext, err := config.AgentDirForProject(scionDir, "old", false, sharedCfgProjectID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cases := []struct {
-		name, agent, agentDir string
-		shared                bool
-		want                  string
-	}{
-		{"own legacy dir", "old", legacy, false, legacy},
-		{"shared or explicit workspace", "old", legacy, true, ""},
-		{"another agent naming the legacy dir", "new", legacy, false, ""},
-		{"an agent in the external root", "new", ext, false, ""},
-		{"no agent dir", "old", "", false, ""},
+	if err := refuseRetiredLegacyAgent(scionDir, "old", ext); !errors.Is(err, ErrLegacyAgentStateRetired) {
+		t.Fatalf("legacy-only agent: %v, want ErrLegacyAgentStateRetired", err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := legacyAgentWorkspaceRoot(scionDir, tc.agent, tc.agentDir, tc.shared); got != tc.want {
-				t.Errorf("legacyAgentWorkspaceRoot = %q, want %q", got, tc.want)
+	if strings.Contains(ErrLegacyAgentStateRetired.Error(), home) {
+		t.Error("the refusal must not name a host path")
+	}
+	newDir, _ := config.AgentDirForProject(scionDir, "new", false, sharedCfgProjectID)
+	if err := refuseRetiredLegacyAgent(scionDir, "new", newDir); err != nil {
+		t.Errorf("new agent: %v", err)
+	}
+	if err := refuseRetiredLegacyAgent(legacyScion, "old", legacy); err != nil {
+		t.Errorf("ordinary project: %v", err)
+	}
+	mustMkdirAll(t, ext)
+	if err := os.WriteFile(filepath.Join(ext, "scion-agent.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := refuseRetiredLegacyAgent(scionDir, "old", ext); err != nil {
+		t.Errorf("agent with external state: %v", err)
+	}
+}
+
+// Delete removes an agent's state in the forced external root of a shared
+// project configuration, with or without a Hub project ID, and leaves the
+// configuration and other agents alone; a Hub project ID naming another
+// project removes nothing there.
+func TestDeleteAgentFiles_SharedProjectExternalState(t *testing.T) {
+	for _, hubID := range []string{sharedCfgProjectID, ""} {
+		t.Run("hub id "+hubID, func(t *testing.T) {
+			root, _ := sharedConfigProject(t)
+			scionDir := filepath.Join(root, config.DotScion)
+			ext, err := config.AgentDirForProject(scionDir, "a1", false, sharedCfgProjectID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			other := filepath.Join(filepath.Dir(ext), "a2")
+			for _, d := range []string{ext, other} {
+				mustMkdirAll(t, filepath.Join(d, "home"))
+				if err := os.WriteFile(filepath.Join(d, "scion-agent.json"), []byte("{}"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if exists, err := LocalAgentDirExists("a1", root); err != nil || !exists {
+				t.Fatalf("LocalAgentDirExists = (%v, %v)", exists, err)
+			}
+			if _, err := DeleteAgentFilesForHubProject("a1", root, hubID, false); err != nil {
+				t.Fatalf("DeleteAgentFilesForHubProject: %v", err)
+			}
+			if _, err := os.Stat(ext); !os.IsNotExist(err) {
+				t.Errorf("the external state dir must be removed (err %v)", err)
+			}
+			if _, err := os.Stat(filepath.Join(other, "scion-agent.json")); err != nil {
+				t.Errorf("another agent's state must stay: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(scionDir, projectkeys.ProjectIDFile)); err != nil {
+				t.Errorf("the shared project configuration must stay: %v", err)
 			}
 		})
 	}
-	// An ordinary (local-backend) project has no legacy admission.
-	if got := legacyAgentWorkspaceRoot(legacyScion, "old", legacy, false); got != "" {
-		t.Errorf("local project: got %q, want \"\"", got)
-	}
+	t.Run("hub id of another project", func(t *testing.T) {
+		root, _ := sharedConfigProject(t)
+		scionDir := filepath.Join(root, config.DotScion)
+		ext, err := config.AgentDirForProject(scionDir, "a1", false, sharedCfgProjectID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustMkdirAll(t, ext)
+		if err := os.WriteFile(filepath.Join(ext, "scion-agent.json"), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = DeleteAgentFilesForHubProject("a1", root, "11111111-2222-3333-4444-555555555555", false)
+		if _, err := os.Stat(filepath.Join(ext, "scion-agent.json")); err != nil {
+			t.Errorf("state must stay when the Hub project ID names another project: %v", err)
+		}
+	})
 }
 
 // On a shared project root the repo-root candidate is the shared layout's

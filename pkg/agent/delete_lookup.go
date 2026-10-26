@@ -33,7 +33,9 @@ import (
 //     its agents here too);
 //   - the project's external agents root
 //     (config.GetGitProjectExternalAgentsDir), where a shared-workspace
-//     agent of a project with a project-id marker keeps its state.
+//     agent of a project with a project-id marker keeps its state;
+//   - for a shared project configuration, its broker-local external agents
+//     root and the agent's retired legacy in-project directory.
 //
 // The global agents root is not checked for any other project:
 // DeleteAgentFiles never removes from it then, so a directory found only
@@ -63,6 +65,14 @@ func LocalAgentDirExists(agentName, projectPath string) (bool, error) {
 	}
 	if extDir, err := config.GetGitProjectExternalAgentsDir(projectDir); err == nil && extDir != "" {
 		roots = append(roots, extDir)
+	}
+	// A shared project configuration keeps every agent's state in its
+	// broker-local external agents root; the retired legacy in-project dir
+	// is still found, so that a delete removes it.
+	if config.IsSharedProjectConfigDir(projectDir) {
+		if root, err := config.AgentsRootForProject(projectDir, false, ""); err == nil {
+			roots = append(roots, root)
+		}
 	}
 	if legacy := config.LegacySharedProjectAgentDir(projectDir, agentName); legacy != "" {
 		roots = append(roots, filepath.Dir(legacy))

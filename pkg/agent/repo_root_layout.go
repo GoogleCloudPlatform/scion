@@ -15,10 +15,9 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
-	"path/filepath"
-	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
@@ -88,35 +87,30 @@ func sharedLayoutWorkspaceRoot(settings *config.VersionedSettings, projectID, ba
 	return resolved.HostPath, nil
 }
 
-// legacyAgentWorkspaces records the agents whose legacy workspace admission
-// was logged (once per agent directory).
-var legacyAgentWorkspaces sync.Map
+// ErrLegacyAgentStateRetired refuses the start of an agent whose only state
+// is its legacy in-project directory: it was provisioned before its
+// project's configuration moved to the shared project root, and that
+// directory is no longer read (ptone/scion#5835). Deleting the agent removes
+// the directory; recreating it provisions its state in the external root.
+var ErrLegacyAgentStateRetired = errors.New("this agent was provisioned before its project's configuration moved to the shared project root, and its old state is no longer used; push its work and recreate the agent")
 
-// legacyAgentWorkspaceRoot returns the extra permitted workspace root of an
-// agent provisioned before its project's configuration moved to the shared
-// project root (ptone/scion#5823): exactly that agent's legacy state
-// directory ~/.scion/projects/<slug>/.scion/agents/<name>, and only when
-// agentDir (its resolved state dir) is that directory, reached through the
-// legacy look-up fallback (config.LegacySharedProjectAgentDir), and the
-// agent's workspace is its own (sharedOrExplicit false). An agent-scoped
-// workspace there (clone-per-agent, for example) may hold unpushed work, so
-// it keeps being admitted until the agent is recreated; a shared or
-// project-scoped workspace is never admitted from the legacy tree, nor is
-// another agent's directory. Temporary: retired with the legacy fallback
-// (ptone/scion#5835).
-func legacyAgentWorkspaceRoot(projectDir, agentName, agentDir string, sharedOrExplicit bool) string {
-	if sharedOrExplicit || agentDir == "" {
-		return ""
+// refuseRetiredLegacyAgent returns ErrLegacyAgentStateRetired when
+// projectDir is a shared project configuration, the agent has no state in
+// stateDir (its resolved state directory, the external root) and a legacy
+// in-project directory of the agent exists (config.LegacySharedProjectAgentDir).
+// Such an agent is neither started from the legacy directory nor provisioned
+// again over it, so its old workspace stays intact until it is deleted.
+func refuseRetiredLegacyAgent(projectDir, agentName, stateDir string) error {
+	if stateDir == "" || !config.IsSharedProjectConfigDir(projectDir) || agentStateProvisioned(stateDir) {
+		return nil
 	}
 	legacy := config.LegacySharedProjectAgentDir(projectDir, agentName)
-	if legacy == "" || filepath.Clean(agentDir) != filepath.Clean(legacy) {
-		return ""
+	if legacy == "" {
+		return nil
 	}
-	if _, logged := legacyAgentWorkspaces.LoadOrStore(legacy, struct{}{}); !logged {
-		slog.Warn("legacy agent workspace admitted until this agent is recreated; push its work and recreate it at your convenience",
-			"agent", agentName, "agent_dir", legacy)
-	}
-	return legacy
+	slog.Warn("start refused: the agent's state is in its retired legacy directory; push its work and recreate the agent",
+		"agent", agentName, "agent_dir", legacy)
+	return ErrLegacyAgentStateRetired
 }
 
 // composeSharedRepoRoot is composeRepoRoot for a workspace the backend placed

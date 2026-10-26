@@ -632,12 +632,5 @@ func AgentDirForProject(projectDir, agentName string, sharedWorkspace bool, hubP
 	if filepath.Dir(dir) != root || filepath.Base(dir) != agentName {
 		return "", fmt.Errorf("agent %q is not a single path element under %s", agentName, root)
 	}
-	if IsSharedProjectConfigDir(projectDir) {
-		// An agent provisioned before its project's configuration moved to
-		// the project root keeps its in-project state (look-up fallback).
-		if resolved, ok, err := sharedProjectAgentDir(projectDir, agentName); ok && err == nil {
-			return resolved, nil
-		}
-	}
 	return dir, nil
 }

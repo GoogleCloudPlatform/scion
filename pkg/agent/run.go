@@ -163,6 +163,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			logImageProvenanceError(opts.Name, provErr)
 			return nil, provErr
 		}
+		// An agent whose only state is in its retired legacy in-project
+		// directory is refused before any side effect.
+		if err := refuseRetiredLegacyAgent(projectDir, opts.Name, preDir); err != nil {
+			return nil, err
+		}
 	}
 
 	// Every new runtime entry carries a run ID (ptone/scion#2550). The hub
@@ -1809,9 +1814,6 @@ authDone:
 		roots, rootsErr = workspaceSourceRoots(explicitWorkspace, effectiveWorkspace, settings, projectDir)
 		if rootsErr != nil {
 			return nil, rootsErr
-		}
-		if legacy := legacyAgentWorkspaceRoot(projectDir, opts.Name, agentDir, explicitWorkspace || opts.SharedWorkspace); legacy != "" {
-			roots = append(roots, legacy)
 		}
 	}
 	resolvedWorkspace, err := runtime.ValidateWorkspaceSource(effectiveWorkspace, roots...)

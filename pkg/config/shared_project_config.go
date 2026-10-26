@@ -175,11 +175,12 @@ func sharedProjectExternalAgentsDir(projectDir string) (dir string, ok bool, err
 // agent of a shared project had before its configuration moved to the
 // project root (ptone/scion#5823): ~/.scion/projects/<slug>/.scion/agents/
 // <name>, when that directory holds a regular scion-agent.json and the
-// legacy .scion directory names the same project. It is a look-up
-// fallback for agents provisioned before the move: no new agent is ever
-// provisioned there (temporary; ptone/scion#5835). Every component below
-// the global dir is checked with Lstat (no symlink is followed). "" when
-// there is none.
+// legacy .scion directory names the same project. The directory is retired
+// (ptone/scion#5835): no look-up resolves an agent to it and no workspace in
+// it is admitted. It is found only so that deleting the agent removes it and
+// a start of such an agent is refused rather than provisioned again. Every
+// component below the global dir is checked with Lstat (no symlink is
+// followed). "" when there is none.
 func LegacySharedProjectAgentDir(projectDir, agentName string) string {
 	id, ok := sharedProjectConfigID(projectDir)
 	if !ok || agentName == "" || agentName != filepath.Base(agentName) || agentName == "." || agentName == ".." {
@@ -216,28 +217,18 @@ func LegacySharedProjectAgentDir(projectDir, agentName string) string {
 }
 
 // sharedProjectAgentDir resolves an agent's broker-side state directory
-// for a shared project configuration directory: the external agents root,
-// or, when the agent has no scion-agent.json there, its legacy in-project
-// directory (LegacySharedProjectAgentDir) if one exists.
+// for a shared project configuration directory: always in the external
+// agents root. The retired legacy in-project directory
+// (LegacySharedProjectAgentDir) is never returned.
 func sharedProjectAgentDir(projectDir, agentName string) (dir string, ok bool, err error) {
 	root, ok, err := sharedProjectExternalAgentsDir(projectDir)
 	if !ok {
 		return "", false, nil
 	}
-	if err != nil {
-		// root is the unused empty-slug broker-local root (or "" when the
-		// home directory is unknown); never the share.
-		if root == "" {
-			return "", true, err
-		}
-		return filepath.Join(root, agentName), true, err
+	if root == "" {
+		// The home directory is unknown; never the share.
+		return "", true, err
 	}
-	ext := filepath.Join(root, agentName)
-	if info, err := os.Lstat(filepath.Join(ext, "scion-agent.json")); err == nil && info.Mode().IsRegular() {
-		return ext, true, nil
-	}
-	if legacy := LegacySharedProjectAgentDir(projectDir, agentName); legacy != "" {
-		return legacy, true, nil
-	}
-	return ext, true, nil
+	// On an error root is the unused empty-slug broker-local root.
+	return filepath.Join(root, agentName), true, err
 }
