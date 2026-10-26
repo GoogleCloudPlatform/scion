@@ -308,16 +308,8 @@ The runtime target of one flat Runtime Broker instance, and the instance's own i
 | `safe_to_evict` | bool | kubernetes | `false` adds the `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` annotation to agent pods (on GKE Autopilot this requests extended run duration). `true` or unset adds nothing. An agent's own `kubernetes.safeToEvict`, `true` or `false`, wins. |
 | `priority_class_name` | string | kubernetes | Default PriorityClass of agent pods (DNS-1123 subdomain). The PriorityClass must already exist on the cluster. An agent's own `kubernetes.priorityClassName` wins. |
 | `gke` | bool | kubernetes | `true` turns on GKE mode for the instance. `false` or unset detects a GKE cluster automatically. |
-| `shared_dir_storage_backend` | string | both | `local` or `nfs`. Shared directory storage backend for the instance's new agents. Default: [`server.shared_dir_storage.backend`](#shared-directory-storage-servershared_dir_storage). |
-| `shared_dir_storage_backends` | map | both | Shared directory name to `local` or `nfs`, for the instance's new agents. A directory the map does not name uses `shared_dir_storage_backend`. |
-| `home_storage_backend` | string | kubernetes | `local` or `nfs`. Home storage of the instance's new agents. Default: [`server.home_storage.backend`](#agent-home-storage-serverhome_storage). The `nfs` backend still needs the `hub.k8s_nfs_home` experiment. |
-| `home_storage_leaf` | string | kubernetes | `pod` or `broker`: how the home directory is created on the export. Default: `server.home_storage.leaf`. |
 
-Notes on the storage backends:
-
-- **Recorded decisions are kept.** The backends apply only when an agent starts for the first time. An agent keeps the shared directory backends and the home storage it recorded then, even if the instance's settings change later.
-- **The nfs backend needs the global NFS block.** An instance that selects `nfs` for shared directories or for the home needs a complete [`server.shared_dir_storage.nfs`](#shared-directory-storage-servershared_dir_storage) block in the same file. Without one, startup is refused, as for any other invalid entry: none of the process's instances start until the settings are fixed.
-- **Plugins read the global settings.** Plugins resolve a shared directory's host path from the global settings, not from an instance. At startup, a warning is logged for each instance whose backend differs from the global one. Set the same backend in the global settings to keep them in agreement.
+A runtime target does not choose where its agents' storage lives: [`server.project_storage`](#project-storage-serverproject_storage) does, for every instance of the process. The former `shared_dir_storage_backend`, `shared_dir_storage_backends`, `home_storage_backend` and `home_storage_leaf` fields are removed and refuse startup with an error that names the field, `server.project_storage` and `volumes:`. For a node-local directory, use a `volumes:` entry.
 
 #### Flat instance agent defaults (`server.broker.instances[].agent_defaults`)
 
@@ -547,7 +539,154 @@ Backend for managing encrypted secrets. The `local` backend is read-only and rej
 | `gcp_credentials` | string | | Path to GCP service account JSON or the JSON content itself. Optional if using Application Default Credentials. |
 | `gcp_replication_locations` | list of strings | `[]` | GCP regions for user-managed secret replication (e.g. `["us-east1", "europe-west1"]`). When non-empty, secrets are created with user-managed replication restricted to these regions instead of automatic global replication. Required for GCP orgs enforcing `constraints/gcp.resourceLocations`. See [User-Managed Replication Locations](/scion/hosted/user/secrets/#user-managed-replication-locations). |
 
+### Project Storage (`server.project_storage`)
+
+The one storage block of a Hub and its Runtime Brokers. `backend` places the workspace **and** the shared directories of every project, with one value for both. `homes` places agent home directories, and is the only per-data-class choice. The block replaces [`server.workspace_storage`](#workspace-storage-serverworkspace_storage), [`server.shared_dir_storage`](#shared-directory-storage-servershared_dir_storage) and [`server.home_storage`](#agent-home-storage-serverhome_storage), which are deprecated and will be removed in a later release (see [Migrating from the deprecated blocks](#migrating-from-the-deprecated-blocks)).
+
+```yaml
+server:
+  project_storage:
+    backend: nfs        # local | nfs | cloudrun-volume | gke-shared-volume
+    homes: local        # local | nfs (nfs needs backend nfs)
+    nfs:
+      mount_root: /mnt/scion-nfs
+      subpath_root: projects
+      shares:
+        - id: shared
+          server: 10.0.0.2
+          export: /scion-projects
+          pv_name: scion-projects-pvc
+```
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `backend` | string | `"local"` | Where workspaces and shared directories live: `"local"` (node-local directories), `"nfs"` (an NFS export), `"cloudrun-volume"` (a Cloud Run platform-managed volume) or `"gke-shared-volume"` (a GKE shared CSI-backed PVC). Names are case-sensitive. |
+| `homes` | string | `"local"` | Where agent home directories live: `"local"` (in the pod, or on the broker host) or `"nfs"` (on the `nfs` share of this block). `"nfs"` needs `backend: nfs`. See [Agent home storage](#agent-home-storage-serverhome_storage). |
+| `nfs.*` | object | | The NFS block, with the same fields and defaults as [`server.workspace_storage.nfs`](#workspace-storage-serverworkspace_storage): `mount_root`, `mount_options`, `auto_mount`, `uid`, `gid`, `storage_class`, `subpath_root` and `shares` (`id`, `server`, `export`, `pv_name`). Used when `backend` is `"nfs"`. |
+| `cloudrun_volume.*` | object | | `volume_name` and `subpath_root`, as in [`server.workspace_storage.cloudrun_volume`](#workspace-storage-serverworkspace_storage). Used when `backend` is `"cloudrun-volume"`. |
+| `gke_shared_volume.*` | object | | `volume_name`, `pv_claim_name` and `subpath_root`, as in [`server.workspace_storage.gke_shared_volume`](#workspace-storage-serverworkspace_storage). Used when `backend` is `"gke-shared-volume"`. |
+| `homes_options.*` | object | | The operational knobs of agent homes, with the meaning and defaults they had under `server.home_storage`: `leaf` (`pod`), `stop_grace_seconds` (`30`), `termination_wait_seconds` (`15`), `skeleton_max_bytes` (`268435456`) and `allow_incomplete_phases` (`false`). See [Agent home storage](#agent-home-storage-serverhome_storage). |
+
+The operational content of the deprecated sections still applies to the same fields under `server.project_storage`: [startup validation](#startup-validation) of the backend blocks, [subpath_root](#subpath_root), [NFS mounts on the Runtime Broker](#nfs-mounts-on-the-runtime-broker), [NFS workspaces on Kubernetes](#nfs-workspaces-on-kubernetes), [cleanup on project delete](#cleanup-on-project-delete), the [503 safety gate](#ephemeral-storage--503-safety-gate), [agent groups on NFS shared directories](#agent-groups-on-nfs-shared-directories) and the `cloudrun` runtime's need for the `nfs` backend.
+
+#### Where each data class lives
+
+| `backend` | Workspaces | Shared directories |
+| :--- | :--- | :--- |
+| `local` | Node-local | Node-local, next to the project's local config |
+| `nfs` | `<mount_root>/<share id>/<subpath_root>/<project id>/...` on the export | `<subpath_root>/<project id>/shared-dirs/<name>` on the same export, on every runtime, including Docker and Podman |
+| `cloudrun-volume`, `gke-shared-volume` | `<subpath_root>/<project id>/...` on the volume | `<subpath_root>/<project id>/shared-dirs/<name>` on the same volume |
+
+- **Docker and Podman follow the backend.** With `backend: nfs`, shared directories are bind-mounted from the export on Docker and Podman too. Before this block existed, a broker with `server.workspace_storage.backend: nfs` and no `server.shared_dir_storage` kept Docker shared directories node-local; that is no longer the case. Shared directories already on node-local disk are moved by the project-storage migration.
+- **Volume backends open the shared-directory write gate.** Because `cloudrun-volume` and `gke-shared-volume` put shared directories on the volume, a Cloud Run Hub accepts shared-directory writes on those backends. A Cloud Run Hub without a shared backend refuses them with `503` and error code `shared_dir_writes_unavailable`, whose message names `server.project_storage`.
+- **Removing a shared directory deletes it.** Removing a shared directory declaration deletes its directory on the shared backends, as it does on local disk.
+- **Node-local directories are volumes.** A directory that must stay on the node, such as a build cache, is an ordinary `volumes:` entry on a profile, harness config or template, not a storage backend.
+
+#### Configuration source (Layer-0)
+
+`server.project_storage` is a [Layer-0](#layer-0--bootstrap-file--env-only) setting. The Hub and every Runtime Broker read it from their own global `settings.yaml` at startup; the Hub also reads `SCION_SERVER_PROJECT_STORAGE_*` environment variables. It is never read from the database or from a project's settings, cannot be written through the admin settings API, and a change needs a restart. Configure the same block on the Hub and on every Runtime Broker that serves its hub-native projects (see [Layout identity check](#layout-identity-check)).
+
+#### Validation
+
+The Hub refuses to start, and `scion config validate` reports an error, when the conditions below hold. A Runtime Broker does not refuse to start: it logs the error and reports the local layout, and the Hub then refuses shared-mode dispatches to it (see [Layout identity](#layout-identity-check)).
+
+- `server.project_storage` is set together with any of `server.workspace_storage`, `server.shared_dir_storage` or `server.home_storage`. Exactly one storage block configures a deployment; the error names the blocks to remove.
+- the backend block is invalid, by the same rules as [`server.workspace_storage`](#startup-validation), reported under `server.project_storage`;
+- `homes` is not `local` or `nfs`, or is `nfs` while `backend` is not `nfs`;
+- a `homes_options` value is invalid;
+- (Hub) the Hub cannot build its storage layout: for example, the share's host base is not an absolute path, because `nfs.mount_root` is empty or relative. The Hub serves files from its own mount, so it refuses to start rather than refuse every shared-directory request later;
+- (Hub) the global settings file, in any format, has a storage block key (`project_storage`, `workspace_storage`, `shared_dir_storage` or `home_storage`) as a parsed mapping key, but the block was not loaded: for example a block not under `server:`, a missing `schema_version: "1"`, or a server section that fails to decode. The Hub refuses to fall back to the local backend. A comment, or a key such as `shared_dir_storage_class` that only contains the name, never triggers this.
+
+#### Migrating from the deprecated blocks
+
+Without `server.project_storage`, the Hub and the Runtime Brokers synthesize it from the deprecated blocks at startup:
+
+- `server.workspace_storage` gives `backend` and the backend blocks.
+- `server.home_storage.backend` gives `homes`; its other fields give `homes_options`.
+- `server.shared_dir_storage` decides where shared directories go:
+  - `nfs` on the same tree as the workspace (same NFS server, export and `subpath_root`): nothing changes.
+  - `nfs` while the workspace is not on `nfs`: shared directories (and `nfs` homes) stay on the `shared_dir_storage` export and workspaces stay where they are. This transitional split exists only for synthesized configurations; it cannot be written as a `server.project_storage` block.
+  - `local` while the workspace is on `nfs`: shared directories are now placed on the export with the workspace, and a warning says so.
+  - unset while the workspace is on `nfs`: shared directories follow the workspace onto the export on every runtime (Docker, Podman and Apple agents kept them node-local before), and a warning says so. The project-storage migration copies node-local shared-directory trees.
+  - unset, or `local`, while the workspace is on `cloudrun-volume` or `gke-shared-volume`: shared directories stay where they are today (their own claims on Kubernetes) until `server.project_storage` is written. The Hub then treats them as non-durable, so a Cloud Run Hub refuses shared-directory writes with `503`. Writing the block moves shared directories onto the volume, and **the contents of the existing per-directory claims are not moved automatically**. While such a claim still exists, every agent start that now places that directory on the volume returns a warning naming the claim. Scion never deletes those claims.
+
+Every synthesis logs a startup warning that names the deprecated blocks in use and prints the exact `server.project_storage` block to write, with defaults filled in. The Hub's `project_storage_config` health check reports `degraded` until the block is written. For the transitional split, the printed block is `backend: nfs` on the shared-directory export: writing it moves workspaces onto the export too, because one backend places both.
+
+Synthesis is refused, and startup fails, only when the deprecated blocks are ambiguous:
+
+- `workspace_storage` and `shared_dir_storage` are both `nfs` but name different trees (a different NFS server or export, or a different `subpath_root`; the share id and `mount_root` are host-local naming and may differ). One storage block places both, so choosing either would hide the other's data. Move one tree onto the other's share, then write `server.project_storage` naming it.
+- `home_storage.backend` is `nfs` but neither `workspace_storage` nor `shared_dir_storage` is `nfs`, so there is no share for the homes.
+
+For example, a deployment with workspaces and shared directories on the same export and the broker home leaf:
+
+```yaml
+# Before (deprecated)
+server:
+  workspace_storage:
+    backend: nfs
+    nfs:
+      mount_root: /mnt/scion-nfs
+      shares:
+        - id: shared
+          server: 10.0.0.2
+          export: /scion-projects
+          pv_name: scion-projects-pvc
+  shared_dir_storage:
+    backend: nfs
+    nfs:
+      mount_root: /mnt/scion-nfs
+      shares:
+        - id: shared
+          server: 10.0.0.2
+          export: /scion-projects
+          pv_name: scion-projects-pvc
+  home_storage:
+    leaf: broker
+```
+
+```yaml
+# After
+server:
+  project_storage:
+    backend: nfs
+    nfs:
+      mount_root: /mnt/scion-nfs
+      shares:
+        - id: shared
+          server: 10.0.0.2
+          export: /scion-projects
+          pv_name: scion-projects-pvc
+    homes_options:
+      leaf: broker
+```
+
+Remove all three deprecated blocks in the same edit, on the Hub and on every Runtime Broker, and restart. After writing the block, run the project-storage migration to move data that the new block places elsewhere, for example hub-local workspaces or node-local shared directories that now belong on the export.
+
+#### Removing a shared directory deletes its data
+
+Removing a shared-directory declaration through the Hub deletes that directory and its contents on a shared backend (`nfs`, `cloudrun-volume`, `gke-shared-volume`, and the shared-directory export of the transitional split). The deletion uses the same confined, symlink-refusing walk as project deletion. The local backend is unchanged: the local directory is deleted, as before. The Required `scratchpad` cannot be removed while `project_defaults.default_scratchpad` is on (`409`).
+
+#### Removed storage overrides
+
+Storage placement is no longer chosen per runtime, per profile, per instance, per shared directory or per agent. These keys are removed:
+
+- `shared_dir_storage_backend` and `shared_dir_storage_backends` on `runtimes.<name>`, `profiles.<name>` and `server.broker.instances[].runtime_target`;
+- `home_storage_backend` and `home_storage_leaf` on the same three places.
+
+Settings validation, the Hub admin settings API (`PUT /api/v1/admin/server-config`) and flat Runtime Broker instance loading reject them with an error that names the key, `server.project_storage` and `volumes:`. Agents no longer record their own shared-directory backend, and the operation that changed an agent's recorded shared-directory backend is removed. For a node-local directory, use a `volumes:` entry instead.
+
+#### Layout identity check
+
+Every Runtime Broker reports its storage layout in its heartbeat descriptor: the backend, for `nfs` the share server, export, `subpath_root` and the export identity marker, and `homes`. When the Hub's own backend is shared (not `local`), it compares a broker's report with its own layout:
+
+- **Dispatch refusal**: the Hub refuses to dispatch an agent of a hub-native project in the shared-plain or worktree-per-agent sharing mode to a broker whose layout disagrees, with `409` and a message listing each difference (for example `nfs export: hub "/scion-projects", broker "/other"`) and asking for the same `server.project_storage` on the broker. A broker that reports no layout (an older version) is refused the same way; upgrade it. Linked projects, which the broker provides from its own path, and per-agent workspace modes are not checked.
+- **Health**: the admin health summary shows the differences as `layout_mismatch` in the broker's storage entry and counts the broker as a problem.
+
 ### Workspace Storage (`server.workspace_storage`)
+
+:::caution[Deprecated]
+`server.workspace_storage` is deprecated and will be removed in a later release. Write [`server.project_storage`](#project-storage-serverproject_storage) instead: its `backend`, `nfs`, `cloudrun_volume` and `gke_shared_volume` fields are the fields below, and they place shared directories as well as workspaces. Until you write it, this block is [synthesized](#migrating-from-the-deprecated-blocks) into it; setting both refuses startup. The field descriptions and the operational notes in this section apply to both blocks.
+:::
 
 Configures the backend and mount settings for storing and managing agent workspaces. This is a critical setting for high-availability deployments where multiple Hub and Broker replicas need shared, durable access to project workspaces.
 
@@ -578,7 +717,7 @@ The `cloudrun` runtime (Cloud Run Instances) only works with the `nfs` backend, 
 
 #### Startup validation
 
-The Hub checks `workspace_storage` when it starts, and refuses to start with an error naming the bad field when:
+The Hub checks `workspace_storage` (or the backend fields of `project_storage`) when it starts, and refuses to start with an error naming the bad field when:
 
 - `backend` is not one of the four names above;
 - `backend` is `"nfs"` and `nfs.shares` is empty;
@@ -594,7 +733,7 @@ The Hub's readiness check (`GET /readyz`) and its Cloud Run write guard still ap
 
 #### subpath_root
 
-`subpath_root` is the directory inside the share or volume that holds project trees, at `<subpath_root>/<project-id>/...`. It defaults to `"projects"` for every backend, and for `shared_dir_storage.nfs`. It must be a clean relative path: no leading `/`, no `.` or `..` components, no empty components and no trailing `/`. If a value is not clean, the error names the clean value to use instead (for example `projects` for `projects/`). It may have several components, for example `team/projects`. The Cloud Run runtime's NFS export paths use the same `nfs.subpath_root`.
+`subpath_root` is the directory inside the share or volume that holds project trees, at `<subpath_root>/<project-id>/...`. It defaults to `"projects"` for every backend, and for the deprecated `shared_dir_storage.nfs`. It must be a clean relative path: no leading `/`, no `.` or `..` components, no empty components and no trailing `/`. If a value is not clean, the error names the clean value to use instead (for example `projects` for `projects/`). It may have several components, for example `team/projects`. The Cloud Run runtime's NFS export paths use the same `nfs.subpath_root`.
 
 #### NFS Mounts on the Runtime Broker
 
@@ -614,11 +753,11 @@ In both modes, NFS problems are logged and reported per share in the `nfs_mounts
 
 With the `nfs` backend and a bound PV claim (`nfs.shares[].pv_name`), each Kubernetes agent pod gets a `workspace-provision` init container. It runs for both git and non-git agents. It creates the per-project subPath (or, if another pod is already provisioning it, waits for that pod to finish) and chowns it to the agent runtime uid (`1000`) and `nfs.gid` so the agent can write `/workspace`; `nfs.uid` is ignored on Kubernetes (see the `nfs.uid` row above). For git agents, it also clones the repository. The init container runs as root with only the `CHOWN`, `FOWNER`, and `DAC_OVERRIDE` capabilities and does not follow symlinks. If the chown fails, the agent start fails and the error names the failed init container, so the agent never runs with an unwritable workspace.
 
-Pods get `fsGroup` from `nfs.gid` (default `1000`). With `server.shared_dir_storage.backend: nfs`, Scion also adds each shared directory's own group to the pod's supplementary groups (see [Agent groups](#agent-groups-on-nfs-shared-directories)), so `nfs.gid` does not need to match it. Shared directories served from the workspace export (`workspace_storage` set to `nfs` without `shared_dir_storage`) do not get that group: there, set `nfs.gid` to the shared-directory leaf group, otherwise pods lose group access to the leaf.
+Pods get `fsGroup` from `nfs.gid` (default `1000`). For shared directories on the NFS export, Scion also adds each shared directory's own group to the pod's supplementary groups (see [Agent groups](#agent-groups-on-nfs-shared-directories)), so `nfs.gid` does not need to match it.
 
 #### Cleanup on project delete
 
-With the `nfs` backend, deleting a project also removes its `<subpath_root>/<project-id>` workspace tree from the export. The Hub removes it in the background from its own mount of the export, and provider Runtime Brokers remove it as part of their project cleanup. If the project exists again by the time cleanup runs, the tree is kept.
+With the `nfs` backend, deleting a project also removes its `<subpath_root>/<project-id>` tree (workspace and shared directories) from the export. The Hub removes it in the background from its own mount of the export, and provider Runtime Brokers remove it as part of their project cleanup. If the project exists again by the time cleanup runs, the tree is kept.
 
 #### Ephemeral Storage & 503 Safety Gate
 
@@ -626,10 +765,15 @@ To protect deployments from silent data loss, the Hub implements a strict **503 
 * If the Hub is deployed on serverless environments like Google Cloud Run with the `local` backend selected, its local workspace paths map to ephemeral, non-durable container storage.
 * The Hub detects this non-durable state and automatically intercepts all file write and modification endpoints (including inline file editing and git cloning).
 * Affected endpoints will return `503 Service Unavailable` with a descriptive message rather than allowing writes to persist ephemerally on the container's scratch space, enforcing the transition to a durable backend (`nfs`, `cloudrun-volume`, or `gke-shared-volume`) for production.
+* Shared-directory writes follow the same rule: on a Cloud Run Hub whose shared directories are not on a shared backend, they return `503` with error code `shared_dir_writes_unavailable`, and the message names `server.project_storage`.
 
 ### Shared Directory Storage (`server.shared_dir_storage`)
 
-Selects where project [shared directories](/scion/local/workspace/#5-project-shared-directories) are stored, independently of `server.workspace_storage`. With the `nfs` backend, every Runtime Broker resolves a project's shared directories to the same path on one NFS export, so agents on different brokers — Docker or Kubernetes — see the same files.
+:::caution[Deprecated]
+`server.shared_dir_storage` is deprecated and will be removed in a later release. Shared directories now follow [`server.project_storage.backend`](#project-storage-serverproject_storage), with the workspace. Until you write that block, this one is [synthesized](#migrating-from-the-deprecated-blocks) into it. Setting both refuses startup. The behaviour below for the `nfs` backend still applies to shared directories on a `server.project_storage` `nfs` backend.
+:::
+
+Selects where project [shared directories](/scion/local/workspace/#5-project-shared-directories) are stored. With the `nfs` backend, every Runtime Broker resolves a project's shared directories to the same path on one NFS export, so agents on different brokers — Docker or Kubernetes — see the same files.
 
 This setting is **global-only**: each broker process reads it from its own global `settings.yaml`, never from project settings. It is a [Layer-0](#layer-0--bootstrap-file--env-only) setting and requires a restart to take effect.
 
@@ -651,7 +795,7 @@ With the `nfs` backend, the Hub and brokers also apply the following:
 - **Leaf modes and ACLs**: A newly created shared directory gets mode `2775` (setgid, group-writable) and a minimal default POSIX ACL, so files agents create inside it inherit group write access regardless of umask. If the export does not support POSIX ACLs, a warning is logged once and the directory stays plain `2775` with no ACL. Files created inside such a directory follow each writer's umask (usually `022`), so they are not group-writable. Directories that already existed are never modified. See the [hybrid tier guide](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/hybrid-tier.md) for the manual fix-up recipe.
 - **Chat attachments**: The Hub copies chat attachments into the project's `scratchpad` shared directory at `.attachments/_webchat/<id>/<name>`. It resolves the directory the same way as the file browser, so on NFS the copy lands where agents mount the scratchpad, and every write goes through the same confined resolver. When `hub.attachment_artifacts` is on (the default when the Hub's resource storage is an object store), each attachment is delivered into the recipient's inbox (`~/.scion/inbox/<message-id>/`), and the message lists that inbox path first. The scratchpad copy is then made only for messages in a project topic thread, whose readers are the whole project. Direct and group conversations get inbox delivery only, because every agent that mounts the scratchpad can read a copy there. The message tags the copy's container path with its shared directory (`attachment_mounts` in the delivered envelope). An attachment that is not stored as an artifact has no inbox delivery. On shared storage (NFS) its scratchpad copy is likewise made only for project topic threads; a direct or group conversation's attachment is not copied there. On the workstation server (local storage) the copy is how an agent reads the file, so it is made for every message, direct conversations included. The other agents of the project can then read a direct message's attachment. This is a known limitation of that configuration, and it goes away once the Hub stores attachments as artifacts. Files an agent attaches with `scion message --attach` are read from the same directory. Scratchpad copies older than `messaging.attachment_inbox_retention_days` (default 7) are removed by the Hub's hourly maintenance pass, on every backend.
 - **Ownership on an export that does not squash ids**: the broker creates the project chain as its own user and never changes ownership. Upper directories get `2755` and the leaf `2775`, and each inherits the group of a setgid parent. Pods create nothing on this export; they mount the existing leaf by `subPath`. When agents with different uids share a directory, for example Docker agents and Kubernetes pods, give the share directory (`<mount_root>/<share id>`) a shared group with the setgid bit (for example `chgrp <gid>` and `chmod 2775`) so every leaf inherits it. Scion then adds that group to each agent that mounts the leaf; see [Agent groups](#agent-groups-on-nfs-shared-directories).
-- **Cleanup on delete**: Deleting a project removes its `<subpath_root>/<project id>/shared-dirs` tree from the export. Removing a single shared directory removes that directory's contents. Both are best-effort: failures are logged and never block or roll back the database change.
+- **Cleanup on delete**: Deleting a project removes its `<subpath_root>/<project id>/shared-dirs` tree from the export. Removing a single shared directory declaration deletes that directory. Both are best-effort: failures are logged and never block or roll back the database change.
 - **Startup summary**: At startup the server logs one `server.shared_dir_storage resolved layout: …` line, plus a warning if any ignored `nfs` fields are set.
 
 #### Agent groups on NFS shared directories
@@ -674,9 +818,12 @@ Some files are not upgraded:
 - Files copied or moved in with their modes preserved (for example `cp -p`, `rsync -a`, `tar -x` as the owner, or `mv` within the export) keep those modes.
 - Leaves created outside Scion, or before Scion added the leaf ACL, keep their existing mode and ACL. Scion only sets modes and ACLs on leaves it creates. Fix them by hand (see the hybrid tier guide).
 
+**Known limit, mixed writers**: when agents with different uids write to the same `nfs` directory and neither POSIX ACLs nor the cleared umask group bits apply, subdirectories and files they create follow each writer's umask, usually `022`, and one kind of agent cannot write into subdirectories the other created. Use the shared-group setup described above.
+
 The `local` backend (or an unset `shared_dir_storage`) behaves as before.
 
 ```yaml
+# Deprecated form; write server.project_storage instead
 server:
   shared_dir_storage:
     backend: nfs
@@ -690,224 +837,48 @@ server:
           pv_name: scion-shared-pvc
 ```
 
-#### Per-profile backend
-
-A runtime entry or a profile can override the backend with `shared_dir_storage_backend` (`local` or `nfs`). This lets one broker keep its Docker profile on `local` while a Kubernetes profile uses `nfs`. The backend for an agent is resolved when it starts, in this order:
-
-1. `profiles.<name>.shared_dir_storage_backend` for the agent's profile.
-2. `runtimes.<name>.shared_dir_storage_backend` for that profile's runtime entry.
-3. `server.shared_dir_storage.backend`.
-
-The `nfs` details always come from `server.shared_dir_storage.nfs`, so an `nfs` override needs a complete `nfs` block there. Settings validation rejects an `nfs` override without one. Validation checks configuration only and never looks at the mount. On a Hub that stores runtimes and profiles in the database, `server.shared_dir_storage.nfs` is edited only in `settings.yaml`, and such an edit is not checked against the overrides stored in the database; an `nfs` override left without a complete block fails at agent start with an error that names the key.
-
-```yaml
-runtimes:
-  docker:
-    type: docker
-  gke:
-    type: kubernetes
-    shared_dir_storage_backend: nfs
-profiles:
-  local:
-    runtime: docker
-  gke:
-    runtime: gke
-server:
-  shared_dir_storage:
-    backend: local
-    nfs:
-      mount_root: /mnt/scion-nfs
-      shares:
-        - id: shared
-          pv_name: scion-shared-pvc
-```
-
-- **Chosen from global settings**: like `server.shared_dir_storage`, the overrides are read from the broker's global settings, never from project settings. On a co-located Hub and broker whose runtimes and profiles are stored in the database, the stored values apply. This picks the backend for an agent's first start; after that, the agent's recorded backend applies (see below).
-- **No restart**: overrides are read again at every agent start, so a change made in `settings.yaml` or through the Hub settings API applies to the next agent start.
-- **Recorded per agent**: an agent records the backend its shared directories were set up with and keeps it on later starts, even if the settings change.
-  - The record is `shared-dir-storage.json` in the agent's directory on the broker, next to `scion-agent.json`. It is outside the agent's home. In the default layouts the agent's container does not mount it. In two older layouts the agent's directory sits inside the workspace mount, so the container sees the record there, as it sees `scion-agent.json`: a non-git project whose `.scion` directory is inside the project, and a shared-workspace git project without an external agents directory. Reincarnating the agent keeps the record, and moving a shared-workspace agent's state out of the project moves the record with it.
-  - If an agent recorded `nfs` and the `nfs` block was later removed, its start fails with an error that says so, before any host path is touched.
-  - An override that later fails validation does not block an agent that recorded a backend, because the agent does not use it. It still fails the first start of a new agent.
-  - A start that could not load the global settings records nothing, so the agent picks up its configured backend once the settings load again.
-  - Agents created before the backend was recorded use the current resolution.
-- **Host mount**: a broker that starts an `nfs`-resolved agent needs the export mounted at `<mount_root>/<share id>`, as with the global `nfs` backend. A missing mount fails only agents that resolve to `nfs`. Agents on the `local` backend, server startup, and health checks are not affected. The startup log has one line per profile whose backend comes from an override.
-- **Hub file browser and attachments**: the Hub's file browser, archive downloads and attachment staging use `server.shared_dir_storage.backend` only (or `server.workspace_storage` when that is `nfs`), not the per-profile or [per-directory](#per-directory-backend) overrides. See **Chat attachments** above.
-- **Cleanup on delete**: deleting a project removes its tree from the export whenever `server.shared_dir_storage.nfs` is complete, whatever the backend settings select. An agent can still be on `nfs` by its record after every setting has moved to `local`, and the Hub cannot read records kept on brokers. If the global backend is not `nfs` and the export is not mounted on the Hub's host, cleanup logs a warning and the delete still succeeds.
-
-#### Per-directory backend
-
-A runtime entry or a profile can also choose the backend for single shared directories with `shared_dir_storage_backends`, a map from shared directory name to `local` or `nfs`. For example, one project's `notes` directory can live on the NFS export, shared by Docker agents on several brokers and by Kubernetes pods, while a large `gocache` directory stays on local disk. A directory the map does not name uses the single `shared_dir_storage_backend` value, resolved as described above.
-
-For each shared directory the nearest level wins, in this order:
-
-1. `profiles.<name>.shared_dir_storage_backends.<dir>` for the agent's profile.
-2. `profiles.<name>.shared_dir_storage_backend`.
-3. `runtimes.<name>.shared_dir_storage_backends.<dir>` for that profile's runtime entry.
-4. `runtimes.<name>.shared_dir_storage_backend`.
-5. `server.shared_dir_storage.backend`.
-
-```yaml
-runtimes:
-  gke:
-    type: kubernetes
-profiles:
-  docker:
-    runtime: docker
-    shared_dir_storage_backends:
-      notes: nfs
-  gke:
-    runtime: gke
-    shared_dir_storage_backends:
-      notes: nfs
-server:
-  shared_dir_storage:
-    backend: local
-    nfs:
-      mount_root: /mnt/scion-nfs
-      shares:
-        - id: shared
-          pv_name: scion-shared-pvc
-```
-
-Because the profile is nearer than its runtime entry, a profile's single value wins over a per-directory entry on the runtime entry. In the following settings, `gocache` is on `nfs` for agents using the `fast` profile, even though the runtime entry names it `local`:
-
-```yaml
-runtimes:
-  gke:
-    type: kubernetes
-    shared_dir_storage_backends:
-      gocache: local
-profiles:
-  fast:
-    runtime: gke
-    shared_dir_storage_backend: nfs
-```
-
-To keep `gocache` on local disk for that profile, name it in the profile's own map:
-
-```yaml
-profiles:
-  fast:
-    runtime: gke
-    shared_dir_storage_backend: nfs
-    shared_dir_storage_backends:
-      gocache: local
-```
-
-- **Validation**: each key must be a valid shared directory name (lowercase letters, digits and hyphens) and each value `local` or `nfs`. An `nfs` entry needs a complete `server.shared_dir_storage.nfs` block, as for the single value. Errors name the key, for example `profiles.gke.shared_dir_storage_backends.notes`.
-- **Directories a project does not have**: settings are global and shared directories belong to each project, so an entry for a directory that a project does not have is valid and ignored for that project's agents.
-- **Recorded per agent**: the record in `shared-dir-storage.json` keeps the backend of each directory. Its `backend` field applies to every directory that its `dirs` map does not name. An agent whose directories all use one backend gets the same record as before, with no `dirs` map.
-  - A record written before per-directory backends existed has no `dirs` map, so all of that agent's directories keep its one recorded backend. Adding a per-directory entry to the settings does not move an existing agent's directories. No migration step is needed.
-  - A shared directory added to the project after the agent's first start uses the record's `backend`, not the current per-directory settings.
-- **Mounts**: Docker and Podman bind-mount each `nfs` directory from the export and each `local` directory from the broker's local layout. Kubernetes mounts each `nfs` directory from the `pv_name` claim by `subPath`, and each `local` directory as it would without `shared_dir_storage` (its own PersistentVolumeClaim, or the workspace claim when `server.workspace_storage` is `nfs`).
-- **Startup summary**: the startup log has one line per profile and shared directory whose backend comes from a `shared_dir_storage_backends` entry. An entry that a nearer setting overrides, such as a runtime entry's `gocache: local` under a profile with a single `nfs` value, produces no line.
-- **Changing an existing agent**: see [Changing an agent's shared directory to nfs](#changing-an-agents-shared-directory-to-nfs) and [Changing it back to local](#changing-an-agents-shared-directory-back-to-local).
-- **Known limit, mixed writers**: when agents with different uids write to the same `nfs` directory, for example Docker agents (the broker's uid) and Kubernetes pods (uid 1000 with `fsGroup`), subdirectories and files they create follow each writer's umask, usually `022`. Without POSIX ACLs on the export, one kind of agent cannot write into subdirectories the other created. Scion does not set a group-writable umask for agents in this version. Use the shared-group setup described above, and umask `002` for every agent that writes there.
-
-#### Changing an agent's shared directory to nfs
-
-Settings never move an existing agent's shared directories. To move one directory of an existing agent from `local` to `nfs`, reincarnate it with [`--shared-dir-backend`](/scion/reference/cli/#scion-reincarnate):
-
-```bash
-scion reincarnate my-agent --shared-dir-backend notes=nfs
-```
-
-The change is recorded per agent, but a shared directory belongs to the project: on the `local` backend every agent of the project on that broker uses the same local directory, and on `nfs` every agent of the project uses the same `nfs` directory. To move a directory for all of a project's agents:
-
-1. Stop every agent that uses the directory, so nothing writes to the local copy while you copy it.
-2. Copy the contents of the local directory into the `nfs` directory, `<mount_root>/<share id>/<subpath_root>/<project id>/shared-dirs/<name>`, keeping ownership, modes, the setgid bit and ACLs. Copy into the directory rather than replacing it, for example:
-
-   ```bash
-   rsync -aAX <local dir>/ <nfs dir>/
-   # or
-   cp -a --preserve=all <local dir>/. <nfs dir>/
-   ```
-
-   Then check the `nfs` directory with `getfacl <nfs dir>`: it must still show the setgid flag and its `default:` ACL entries. On NFS that inherited default ACL is what makes files one agent creates writable by the others, so a copy that drops it changes how agents can share the directory.
-3. Reincarnate each of those agents with `--shared-dir-backend <name>=nfs`. An agent you do not reincarnate keeps using the local directory.
-
-- **Record only**: the broker changes the agent's `shared-dir-storage.json` during the reincarnation. It never copies, moves or deletes data, and the local directory stays where it is.
-- **Checks**: the Hub checks the directory name and that the new backend is `nfs` or `local`. The broker then refuses the change when the directory is not one of the agent's shared directories, or `server.shared_dir_storage.nfs` is not complete on that broker, or the broker does not support the change. An agent without a record first gets one built from the settings of the profile it was created under, as its next start would have, with the change applied. In the rare case of an agent created with no saved profile, the active profile is used.
-- **Refusals stop the agent**: the broker's checks run after the Hub has stopped the agent, as with every reincarnation step on the broker. When the broker refuses, the reincarnation is recorded as failed and the agent stays stopped, with its record unchanged. Fix the cause and reincarnate again, or start the agent without the change. A `--dry-run` shows the change in the plan but does not run the broker's checks.
-- **Empty directory check**: the next start refuses with an error when the `nfs` directory is empty while the previous local directory is not, and names both paths. On Kubernetes the previous local storage is a PersistentVolumeClaim that the broker cannot read, so the start is refused whenever the `nfs` directory is empty. After copying the data, start the agent again; once the check passes it is not repeated. To start with an empty `nfs` directory anyway, run the reincarnation again with `--allow-empty-shared-dir`:
-
-  ```bash
-  scion reincarnate my-agent --shared-dir-backend notes=nfs --allow-empty-shared-dir
-  ```
-
-- **Brokers**: a broker that does not support the change fails the reincarnation instead of ignoring it.
-
-#### Changing an agent's shared directory back to local
-
-To move a directory back from `nfs` to `local`, for example to roll back an `nfs` pilot, reincarnate with `--shared-dir-backend <name>=local`. It works like the change to `nfs`, in the other direction:
-
-1. Stop every agent that uses the directory, so nothing writes to the `nfs` copy while you copy it.
-2. Copy the contents of the `nfs` directory, `<mount_root>/<share id>/<subpath_root>/<project id>/shared-dirs/<name>`, into the local directory, keeping ownership, modes, the setgid bit and ACLs, for example `rsync -aAX <nfs dir>/ <local dir>/`, then check the local directory with `getfacl <local dir>`. On Docker and Podman the local directory is the broker's local shared directory of the project, the path a refused start names. On Kubernetes it is the project's PersistentVolumeClaim `scion-shared-<project>-<name>`, which is reused by name: copy into it from a pod that mounts both the claim and the export.
-3. If no agent of the project should use `nfs` for this directory any more, change the settings back too: set `server.shared_dir_storage.backend`, or the `shared_dir_storage_backend` and `shared_dir_storage_backends` entries that select `nfs`, back to `local`. Settings never move an existing agent, but new agents follow them, and the chat plugins resolve shared directory files from the settings file and its active profile, not from an agent's record.
-4. Reincarnate each of those agents with `--shared-dir-backend <name>=local`. An agent you do not reincarnate keeps using the `nfs` directory.
-
-```bash
-scion reincarnate my-agent --shared-dir-backend notes=local
-```
-
-- **Record only**: as for the change to `nfs`, only the agent's `shared-dir-storage.json` changes. The `nfs` directory is never moved or deleted. The `nfs` settings need not be complete for this change, but the start check below reads the `nfs` directory.
-- **Same rules**: an agent cannot change its own backend, the change cannot be combined with a move to another Runtime Broker (`--broker` naming the current one is allowed), and the change is sent to the broker on that reincarnation only. Changing a directory back before any start has checked the change to `nfs` only drops that pending check.
-- **Empty directory check**: the next start refuses with an error when the local directory is empty while the `nfs` directory is not, and names both paths. When the `nfs` directory cannot be checked (the export is not mounted on the broker, `server.shared_dir_storage.nfs` is no longer complete, or a component below the export's mount is a symlink), the start is refused too. On Kubernetes the broker cannot read the claim, so when the `nfs` directory is not empty it only looks the claim up by name: a missing claim, which would start empty, or a lookup error refuses the start, and an existing claim passes with a warning in the broker log. **Known limit**: the content of an existing claim is not checked, so make sure your copy reached it. With `server.workspace_storage` set to `nfs` and a bound `pv_name` claim, Kubernetes serves local shared directories from the workspace claim instead of a claim of their own, and the check is skipped with a warning. A runtime that cannot look up claims also skips it with a warning; in both cases the `nfs` directory is not read.
-- **Broker versions**: a broker older than this change cannot read an agent record that still holds a pending check of a change back to `local`, and refuses to start that agent. Do not roll a broker back to such a version while a change to `local` is pending: start the agent on the current version first, so the check runs and is cleared, or remove the `previous` entry for the directory from the agent's `shared-dir-storage.json`.
-- **Retrying**: after a refusal, copy the data and run `scion start` again. Do not reincarnate again to retry. Once the check passes it is not repeated. To start with an empty local directory anyway, reincarnate with `--shared-dir-backend <name>=local --allow-empty-shared-dir`.
-
 ### Agent Home Storage (`server.home_storage`)
 
-Selects where the home directory of Kubernetes agents lives. With the default `local` backend the home is inside the pod and is filled from the broker's copy at every start. With `nfs`, each agent's home is a directory on the NFS export of its profile's [shared-dir storage](#shared-directory-storage-servershared_dir_storage), kept across stops, restarts and pod replacements.
+:::caution[Deprecated]
+`server.home_storage` is deprecated and will be removed in a later release. Its `backend` is now [`server.project_storage.homes`](#project-storage-serverproject_storage) and its other fields are `server.project_storage.homes_options`, with unchanged meaning. Until you write that block, this one is [synthesized](#migrating-from-the-deprecated-blocks) into it. Setting both refuses startup. The behaviour below applies to `homes` and `homes_options`.
+:::
 
-The `nfs` backend is in development. It takes effect only when the hub's `hub.k8s_nfs_home` [experiment](/scion/reference/experiments/) is on and `allow_incomplete_phases` is set. The export's group must be the pod group (gid 1000). See [Persistent Agent Home](/scion/hosted/ha/kubernetes/#persistent-agent-home-nfs) for how the home is created and used.
+Selects where the home directory of Kubernetes agents lives. With the default `local` value the home is inside the pod and is filled from the broker's copy at every start. With `nfs`, each agent's home is a directory on the NFS share of `server.project_storage` (which must have `backend: nfs`), kept across stops, restarts and pod replacements.
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `backend` | string | `local` | `local` or `nfs`. A runtime entry or profile can override it with `home_storage_backend`. |
-| `leaf` | string | `pod` | How an agent's home directory is created on the export: `pod` (an init container in the agent's pod) or `broker` (the broker, through its own mount of the export at the shared-dir storage `mount_root`). A runtime entry or profile can override it with `home_storage_leaf`. |
-| `stop_grace_seconds` | int | `30` | Termination grace period of pods with an NFS home. |
-| `termination_wait_seconds` | int | `15` | How long a start waits, beyond the grace period, for the agent's previous pod to stop. Keep `stop_grace_seconds` plus this below 90 (the hub's start window; the broker request timeout is 120); the server warns at startup and `scion config validate` warns when it is not. |
-| `skeleton_max_bytes` | int | `268435456` | Largest image home skeleton copied into a new home. |
-| `allow_incomplete_phases` | bool | `false` | Development only. Allows the `nfs` backend while the feature is incomplete. |
+The `nfs` value is in development. It takes effect only when the hub's `hub.k8s_nfs_home` [experiment](/scion/reference/experiments/) is on and `allow_incomplete_phases` is set. The export's group must be the pod group (gid 1000). See [Persistent Agent Home](/scion/hosted/ha/kubernetes/#persistent-agent-home-nfs) for how the home is created and used.
 
-The backend and leaf mode for an agent are resolved when it first starts, each in this order:
-
-1. `profiles.<name>.home_storage_backend` (or `home_storage_leaf`) for the agent's profile.
-2. `runtimes.<name>.home_storage_backend` (or `home_storage_leaf`) for that profile's runtime entry.
-3. `server.home_storage.backend` (or `leaf`).
-4. `local` (or `pod`).
+| `server.project_storage` field | Former `server.home_storage` field | Type | Default | Description |
+|-------|------|------|---------|-------------|
+| `homes` | `backend` | string | `local` | `local` or `nfs`. `nfs` needs `backend: nfs`. |
+| `homes_options.leaf` | `leaf` | string | `pod` | How an agent's home directory is created on the export: `pod` (an init container in the agent's pod) or `broker` (the broker, through its own mount of the export at `nfs.mount_root`). |
+| `homes_options.stop_grace_seconds` | `stop_grace_seconds` | int | `30` | Termination grace period of pods with an NFS home. |
+| `homes_options.termination_wait_seconds` | `termination_wait_seconds` | int | `15` | How long a start waits, beyond the grace period, for the agent's previous pod to stop. Keep `stop_grace_seconds` plus this below 90 (the hub's start window; the broker request timeout is 120); the server warns at startup and `scion config validate` warns when it is not. |
+| `homes_options.skeleton_max_bytes` | `skeleton_max_bytes` | int | `268435456` | Largest image home skeleton copied into a new home. |
+| `homes_options.allow_incomplete_phases` | `allow_incomplete_phases` | bool | `false` | Development only. Allows `nfs` homes while the feature is incomplete. |
 
 ```yaml
 server:
-  shared_dir_storage:
-    backend: local
+  project_storage:
+    backend: nfs
+    homes: nfs
     nfs:
       mount_root: /mnt/scion-nfs
       shares:
         - id: shared
-          pv_name: scion-shared-pvc
-  home_storage:
-    allow_incomplete_phases: true
-runtimes:
-  gke:
-    type: kubernetes
-profiles:
-  gke:
-    runtime: gke
-    shared_dir_storage_backend: nfs
-    home_storage_backend: nfs
-    home_storage_leaf: pod
-  docker:
-    runtime: docker
+          server: 10.0.0.2
+          export: /scion-projects
+          pv_name: scion-projects-pvc
+    homes_options:
+      leaf: pod
+      allow_incomplete_phases: true
 ```
 
-- **Kubernetes only**: agents on any other runtime always get a local home, whatever the settings say. An `nfs` value on a non-Kubernetes runtime entry or profile is accepted with a warning.
-- **Share**: the home uses the first share and claim of the profile's resolved `shared_dir_storage` `nfs` block. A profile that selects `home_storage_backend: nfs` without `shared_dir_storage` `nfs` fails to start agents, with an error naming the profile.
+- **One choice for the deployment**: homes are placed by `server.project_storage.homes` alone. The former per-runtime, per-profile and per-instance `home_storage_backend` and `home_storage_leaf` keys are [removed](#removed-storage-overrides).
+- **Kubernetes only**: agents on any other runtime always get a local home, whatever the settings say.
+- **Share**: the home uses the first share and claim of the `server.project_storage` `nfs` block.
 - **Hub agents only**: an NFS home is named after the agent's hub ID, at `<subpath_root>/<project id>/agents/<agent slug>/home-<agent id>` on the export. A start without a hub agent ID fails.
-- **Chosen from global settings**: like `server.shared_dir_storage`, the per-profile and per-runtime keys are read from the broker's global settings, never from project settings. On a co-located Hub and broker whose runtimes and profiles are stored in the database, the stored values apply, and an edit takes effect at the next agent start with no restart. `server.home_storage` itself is read from `settings.yaml` only.
-- **Recorded per agent**: a new agent's home storage is decided at its first start and recorded in `home-storage.json` in the agent's directory on the broker, next to `shared-dir-storage.json`. Later starts, restarts and reincarnations use the record, so a settings change never moves an existing home. A recorded `nfs` home whose share is no longer configured, or whose agent is started with the experiment off, fails to start rather than getting a new, empty home. Agents created before the record existed keep a local home.
-- **Startup summary**: the startup log has a warning for each invalid value and one line per profile that resolves to `nfs`.
+- **Read from global settings**: like the rest of `server.project_storage`, `homes` and `homes_options` are read from the global `settings.yaml` only, and a change needs a restart.
+- **Startup summary**: the startup log has a warning for each invalid value.
 
 ### Scheduler (`server.scheduler`)
 
@@ -1055,14 +1026,15 @@ The env also now overrides the settings that live at the top level of `settings.
 
 `server.log_format` and `server.env` have no environment variable. Neither is read by the Hub: both are accepted so existing settings files still load. The log output format is chosen at startup; set `SCION_LOG_GCP=true` for Cloud Logging JSON. `server.log_level` (or `SCION_SERVER_LOGLEVEL`) is applied when the server starts, and again when a file-mode admin server-config save or reload re-reads the config; clearing it reverts to `info`. `--debug` and `SCION_LOG_LEVEL` take precedence over it (see [Precedence](/scion/hosted/single-node/observability/#precedence)). Upgrade note: a Hub whose settings still contain `server.log_level: debug` from an earlier change now starts at `debug`, because earlier releases ignored the setting at startup.
 
-`server.keyring_file` (`--keyring-file`, `SCION_SERVER_KEYRING_FILE`) is an experimental session-cookie pilot (ptone/scion#1530). It is the path of a version-1 JSON keyring file holding versioned signing and encryption keys. Mount the file through your secret delivery mechanism; only the path belongs in settings. The hub and web server process reads it once at startup, and `--role relay` never reads it. Startup is refused when:
+`server.keyring_file` (`--keyring-file`, `SCION_SERVER_KEYRING_FILE`) is an experimental signing-key pilot (ptone/scion#1530). It is the path of a version-1 JSON keyring file holding versioned signing and encryption keys. Mount the file through your secret delivery mechanism; only the path belongs in settings. The hub and web server process reads it once at startup, and `--role relay` never reads it. Startup is refused when:
 
 - the `server.secret_rotation` experiment is off;
 - `--session-secret`, `SCION_SERVER_SESSION_SECRET` or `SESSION_SECRET` is also set;
-- the file is invalid (unknown fields, duplicate key IDs, more than three entries per ring, inconsistent deadlines or key lengths).
-- the file is writable or executable by others, or readable by others without `server.keyring_file_allow_world_readable`.
+- the file is invalid (unknown fields, duplicate key IDs, more than three entries per ring, inconsistent deadlines or key lengths);
+- the file is writable or executable by others, or readable by others without `server.keyring_file_allow_world_readable`;
+- `signing.emit` is `legacy` and the active signing key is not listed in `signing.legacy_read_ids` (it would issue values without a key ID that no reader accepts).
 
-In this release only web session cookies use the keyring. The active generation signs new cookies, and cookies signed by any generation in the file are accepted until that generation's `verify_until`. Once the active generation reaches its `sign_until`, the server stops issuing cookies and `/readyz` reports `signing_issuance_closed`. Every other purpose (JWTs, signed URLs, cursors, conduit tokens, local secret encryption) still uses the file's `legacy` entry unchanged. The `legacy` entry's deadlines govern session cookies only. Full server-secret rotation, and a procedure for it, are not available yet. The admin API never returns or accepts this setting.
+In this release web session cookies, signed skill file download URLs, artifact view URLs, list pagination cursors and attachment delivery URLs use the keyring's signing ring. The active generation signs new cookies, and cookies signed by any generation in the file are accepted until that generation's `verify_until`. Download URLs, view URLs, cursors and delivery URLs are signed by the active generation. One that carries no key ID (the only form this release writes) is accepted when a generation listed in `signing.legacy_read_ids` signed it; one that carries a key ID is accepted only from that generation. Either way, acceptance ends at that generation's `verify_until`. An unknown key ID is refused. Once the active generation reaches its `sign_until`, the server stops issuing them: skill file URLs are handed out unsigned, so brokers cannot download local-storage skill files, new artifact views and share-link views answer `503`, a list page that needs a continuation cursor answers `500`, and attachment deliveries get no download URL. `/readyz` also reports `signing_issuance_closed`. A cursor has no lifetime of its own: it stops working when its generation reaches `verify_until`, and the client must restart the listing from the first page. Every other purpose (JWTs, conduit tokens, local secret encryption) still uses the file's `legacy` entry unchanged. Full server-secret rotation, and a procedure for it, are not available yet. The admin API never returns or accepts this setting.
 
 File permissions: mount the keyring file with mode 0400 (0440 when a group must read it), for example Kubernetes `defaultMode: 0400`. A world-readable keyring file (such as the Kubernetes Secret volume default 0644, or 0444) refuses startup unless the operator sets `server.keyring_file_allow_world_readable` (`--keyring-file-allow-world-readable`, `SCION_SERVER_KEYRING_FILE_ALLOW_WORLD_READABLE`; default false), which loads it with a warning. A file writable or executable by others is always refused, and a group-readable file loads with a warning. The override is operator-only: the admin API never returns or accepts it.
 
@@ -1434,7 +1406,7 @@ Settings required before the database connection exists, or that are restart-bou
 | Database | `database.*` |
 | Listeners | `hub.port`, `hub.host`, `hub.read_timeout`, `hub.write_timeout`, `broker.*` |
 | Auth stack | `auth.mode`, `auth.dev_mode`, `auth.dev_token`, `auth.dev_token_file`, `auth.proxy.*`, `auth.transport.*`, `oauth.*`, `oidc_login.*` |
-| Secrets/storage | `secrets.*`, `storage.*`, `workspace_storage.*`, `shared_dir_storage.*` |
+| Secrets/storage | `secrets.*`, `storage.*`, `project_storage.*`, and the deprecated `workspace_storage.*`, `shared_dir_storage.*`, `home_storage.*` |
 | Identity/mode | `mode`, `env`, `hub.hub_id`, `hub.gcp_project_id` |
 | Logging | `log_level`, `log_format` (`log_format` is accepted but ignored) |
 | Server keyring | `keyring_file`, `keyring_file_allow_world_readable` (experimental; never returned or accepted by the admin API) |
@@ -1477,6 +1449,8 @@ Settings that can be changed at runtime and are shared across all replicas. Stor
 
 `agent_defaults.default_timezone` is the Hub default `TZ` for agent containers: an IANA zone name, used only when the agent has no pin and no `TZ` environment variable applies. Empty means no default (the image default, UTC). An invalid name or `Local` is rejected with `422`. In `settings.yaml`, and in the `PUT /api/v1/admin/server-config` request body, it is the top-level `default_timezone` field. It does not change how times are stored or displayed. See [Times and Timezones](/scion/reference/times-and-timezones/#hub-default-timezone).
 
+A saved change to `agent_delegation_policy` can briefly not be in effect on the Hub that saved it: when that Hub cannot re-read the settings right after the write, it applies the change on its next settings refresh (the settings event or the 60-second poll), as the other replicas do.
+
 ### Precedence
 
 On every driver, the effective value for any Layer-1 key is resolved in this order (highest priority first):
@@ -1496,9 +1470,20 @@ A `SCION_SERVER_*` variable on a Layer-1 key therefore does not override a row a
 
 Because env overrides on Layer-1 keys reintroduce per-node drift, the system warns administrators:
 
-- `GET /api/v1/admin/server-config` includes an `env_overrides` array listing every key, Layer-0 or Layer-1, that a `SCION_SERVER_*` variable sets on the serving node.
+- `GET /api/v1/admin/server-config` includes an `env_overrides` array listing every key, Layer-0 or Layer-1, that a `SCION_SERVER_*` variable sets on the serving node. Keys that no settings write path accepts (for example the hub class, the test identity settings, the relay-peer secret and the server keyring file) are left out, so the response does not reveal whether they are set.
+- The same response includes `env_values`, a map with exactly the `env_overrides` keys, each `{ "value": "********", "masked": true }` for a masked key, or `{ "value": ..., "in_effect": true|false, "saved_differs": true }` otherwise (`masked` and `saved_differs` are left out when false):
+  - `value` is the environment value as the Hub parsed it (string, number, boolean or list).
+  - `masked` is `true` when `value` is the placeholder `********`: the key is a secret (masked as in the rest of the response), it sits under `profiles`, `runtimes` or `harness_configs`, or its value cannot be shown safely.
+  - `in_effect` is `true` when the Hub on the serving node runs with the environment value:
+    - In `settings.yaml` mode the environment layer wins over the file, so it is `true`, except for the keys below that start-up sets afterwards.
+    - On database-backed Hubs a Layer-1 key is in effect only when the environment value equals the value the Hub applies (a saved database value, or a seeded row, wins). Other Layer-0 keys are read at startup with the environment on top and are in effect, except for the keys below.
+    - `scion server start` sets some keys after loading the settings, whatever the environment says: on a workstation Hub the hub host, the broker switch, dev auth, the storage provider and the secrets backend; and in any mode the keys of `--port`, `--host`, `--db`, `--enable-runtime-broker`, `--runtime-broker-port`, `--dev-auth`, `--storage-bucket` and `--storage-dir`. For these keys `in_effect` compares the environment value with the value start-up resolved. The `--conduit-*` flags are not compared (a known limitation): for their keys `in_effect` follows the settings precedence.
+  - `saved_differs` is `true` when a stored value exists (in `settings.yaml`, or in an admin-saved database row for a Layer-1 key) and differs from the environment value. A default, a seeded row, or a stored value equal to the environment value is not reported.
+  - A masked entry carries only `value` (`********`) and `masked`: neither `in_effect` nor `saved_differs` is computed or returned for it. Both compare the environment value with a stored or running value, so for a secret they would let a caller who can write settings confirm a guessed value.
+
+  `env_values` is additive; `env_overrides` is unchanged.
 - A startup `WARN` log lists any overridden Layer-1 keys.
-- The admin UI renders a visible warning banner when env overrides are detected, and an "Overridden by environment on this node" badge on each affected field, or on the section for the `runtimes` and `profiles` maps.
+- The admin UI renders a visible warning banner when env overrides are detected, and a badge on each affected field, or on the section for the `runtimes` and `profiles` maps: "Overridden by environment on this node" with the value in effect, "Environment value superseded by the saved setting" when a saved value wins, or "Environment value not in effect on this node" when a start-up default or flag wins.
 
 ### Admin API Behavior Notes
 

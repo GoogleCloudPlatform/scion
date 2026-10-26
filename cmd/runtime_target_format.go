@@ -74,9 +74,6 @@ func writeRuntimeTargetSections(w io.Writer, target *api.RuntimeTargetDescriptor
 		line("Priority class", t.PriorityClassName)
 		line("Shared dir storage class", t.SharedDirStorageClass)
 		line("Shared dir size", t.SharedDirSize)
-		line("Shared dir storage backend", t.SharedDirStorageBackend)
-		line("Shared dir backends", sortedPairs(t.SharedDirStorageBackends))
-		line("Home storage backend", t.HomeStorageBackend)
 	}
 	d := p.AgentDefaults
 	if d == nil {
@@ -145,22 +142,6 @@ func triState(b *bool) string {
 	default:
 		return "false"
 	}
-}
-
-func sortedPairs(m map[string]string) string {
-	if len(m) == 0 {
-		return ""
-	}
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	parts := make([]string, len(keys))
-	for i, k := range keys {
-		parts[i] = k + "=" + m[k]
-	}
-	return strings.Join(parts, ", ")
 }
 
 func formatPresentedVolume(v api.PresentedVolume) string {

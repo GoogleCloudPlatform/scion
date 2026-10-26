@@ -26,7 +26,6 @@ import (
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	yamlv3 "gopkg.in/yaml.v3"
 )
 
 // rawServerObject is rawRequestObject for the Server field.
@@ -507,7 +506,7 @@ var errServerSectionUnreadable = errors.New("server: request value is not a read
 
 // validateMergedServerSections re-runs the server checks whose result
 // depends on more than one field, on the merged settings: a request that
-// sends only part of home_storage or shared_dir_storage is combined with
+// sends only part of a storage block (project_storage or one it replaces) is combined with
 // the stored fields by the deep merge, so the request alone does not show
 // the result that will be written. Only sections the request sent are
 // checked, so a save is not blocked by an unrelated stored value.
@@ -523,45 +522,24 @@ func validateMergedServerSections(raw map[string]interface{}, rawServer json.Raw
 		// check.
 		return errServerSectionUnreadable
 	}
-	var sentHome, sentShared bool
+	sentStorage := false
 	for _, sf := range sent {
 		switch sf.field.Name {
-		case "HomeStorage":
-			sentHome = true
-		case "SharedDirStorage":
-			sentShared = true
+		case "ProjectStorage", "WorkspaceStorage", "SharedDirStorage", "HomeStorage":
+			sentStorage = true
 		}
 	}
-	if !sentHome && !sentShared {
+	if !sentStorage {
 		return nil
 	}
 	merged, err := serverConfigFromRaw(raw)
 	if err != nil || merged == nil {
 		return err
 	}
-	if sentHome {
-		if err := merged.HomeStorage.Validate(); err != nil {
-			return err
-		}
-	}
-	if sentShared {
-		data, err := yamlv3.Marshal(map[string]interface{}{
-			"runtimes": raw["runtimes"],
-			"profiles": raw["profiles"],
-		})
-		if err != nil {
-			return err
-		}
-		var rp struct {
-			Runtimes map[string]config.V1RuntimeConfig `yaml:"runtimes"`
-			Profiles map[string]config.V1ProfileConfig `yaml:"profiles"`
-		}
-		if err := yamlv3.Unmarshal(data, &rp); err != nil {
-			return err
-		}
-		if errs := config.ValidateSharedDirStorageBackends(rp.Runtimes, rp.Profiles, merged.SharedDirStorage); len(errs) > 0 {
-			return errs[0]
-		}
+	// The merged storage blocks must resolve to one server.project_storage
+	// (exactly one block, or deprecated blocks that synthesize it).
+	if _, _, err := config.ResolveProjectStorage(merged); err != nil {
+		return err
 	}
 	return nil
 }

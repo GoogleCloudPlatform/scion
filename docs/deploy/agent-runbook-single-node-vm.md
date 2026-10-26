@@ -547,6 +547,13 @@ Enabling the tier does six things, all additive:
    PV and in `server.shared_dir_storage`, and the Cloud Run proxy's
    backend address.
 
+   `server.shared_dir_storage` is deprecated in favour of
+   `server.project_storage`. A hub that runs with it keeps its current
+   placement and logs a warning that prints the `server.project_storage`
+   block to write; see
+   [Upgrading to `server.project_storage`](hybrid-tier.md#upgrading-to-serverproject_storage)
+   for the sequence, which also moves workspaces onto the export.
+
    **Restricted user access.** With the tier on, both writes also set
    `server.auth.user_access_mode`: `invite_only` by default, or
    `domain_restricted` when the config file sets it, plus

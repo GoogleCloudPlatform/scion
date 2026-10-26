@@ -34,6 +34,17 @@ type BrokerWorkspaceStorage struct {
 	// NFS describes the share agent workspaces are placed on. It is set only
 	// when Backend is "nfs" and the broker's NFS configuration is valid.
 	NFS *BrokerNFSWorkspaceStorage `json:"nfs,omitempty"`
+	// Volume identifies the shared volume the broker places project trees
+	// on, for the cloudrun-volume and gke-shared-volume backends.
+	Volume *BrokerVolumeWorkspaceStorage `json:"volume,omitempty"`
+	// SharedDirs is where the broker places shared dirs when that differs
+	// from Backend (a transitional split of deprecated storage settings):
+	// "local" or "nfs". Empty means with the workspace, on Backend.
+	SharedDirs string `json:"sharedDirs,omitempty"`
+	// Homes is where the broker places agent homes, server.project_storage
+	// homes: "local" or "nfs" (on the share described by NFS). Empty when
+	// the broker predates the field (unknown).
+	Homes string `json:"homes,omitempty"`
 }
 
 // BrokerNFSWorkspaceStorage identifies the NFS export a broker places agent
@@ -61,6 +72,16 @@ type BrokerNFSWorkspaceStorage struct {
 	ExportID string `json:"exportId,omitempty"`
 }
 
+// BrokerVolumeWorkspaceStorage identifies a shared volume backend's tree.
+type BrokerVolumeWorkspaceStorage struct {
+	// ClaimName is the PersistentVolumeClaim of the volume
+	// (gke-shared-volume pv_claim_name); empty for cloudrun-volume.
+	ClaimName string `json:"claimName,omitempty"`
+	// SubPathRoot is the directory under the volume holding the
+	// per-project trees.
+	SubPathRoot string `json:"subPathRoot"`
+}
+
 // ExportIDMarkerName is the export identity marker's file name, directly
 // under the NFS sub-path root of a broker's workspace share.
 const ExportIDMarkerName = ".scion-export-id"
@@ -83,6 +104,14 @@ const (
 // local mount roots are broker-local naming and are not compared. Health is
 // not part of identity.
 func SameWorkspaceExport(a, b *BrokerWorkspaceStorage) bool {
+	return sameWorkspaceExport(a, b)
+}
+
+// NormalizeExportPath drops trailing slashes from an export path, keeping
+// "/" itself, as SameWorkspaceExport compares exports.
+func NormalizeExportPath(p string) string { return normalizeExportPath(p) }
+
+func sameWorkspaceExport(a, b *BrokerWorkspaceStorage) bool {
 	if a == nil || b == nil || a.NFS == nil || b.NFS == nil {
 		return false
 	}

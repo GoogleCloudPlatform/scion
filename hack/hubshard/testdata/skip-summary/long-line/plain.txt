@@ -1,0 +1,5 @@
+direct @X200000@
+--- FAIL: TestLong (0.00s)
+    toy_test.go:107: log @X200000@
+    toy_test.go:108: err @X200000@
+FAIL

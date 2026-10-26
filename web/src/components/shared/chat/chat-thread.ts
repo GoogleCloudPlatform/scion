@@ -6363,6 +6363,8 @@ export class ScionChatThread extends LitElement {
             senderProjectSlug=${msg.senderProjectId
               ? this.resolveProjectSlug(msg.senderProjectId)
               : ''}
+            authorizingUserId=${msg.authorizingUserId || ''}
+            delegationGrantId=${msg.delegationGrantId || ''}
             @scroll-to-message=${this.handleScrollToMessage}
             @path-link-click=${(e: CustomEvent<{ path: string }>) =>
               this.handlePathLinkClick(e, msg)}

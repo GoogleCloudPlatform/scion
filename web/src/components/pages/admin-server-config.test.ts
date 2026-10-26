@@ -2998,45 +2998,44 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
-  describe('shared_dir_storage_backend on runtimes and profiles', () => {
-    function sdsConfig() {
-      // File mode (settings.yaml is authoritative), where every section
-      // without an env override is editable.
+  describe('removed storage overrides on runtimes and profiles', () => {
+    function overridesConfig() {
       return makeBaseConfig({
-        runtimes: { k8s: { type: 'kubernetes', shared_dir_storage_backend: 'nfs' } },
+        runtimes: {
+          k8s: {
+            type: 'kubernetes',
+            shared_dir_storage_backend: 'nfs',
+            home_storage_backend: 'nfs',
+            home_storage_leaf: 'broker',
+          },
+        },
         profiles: {
-          gke: { runtime: 'k8s', shared_dir_storage_backend: 'nfs', timezone: 'UTC' },
+          gke: {
+            runtime: 'k8s',
+            shared_dir_storage_backend: 'nfs',
+            shared_dir_storage_backends: { cache: 'local' },
+            home_storage_backend: 'nfs',
+            home_storage_leaf: 'pod',
+            timezone: 'UTC',
+          },
         },
       });
     }
 
-    async function saveAndCapture(el: HTMLElement): Promise<void> {
-      await (el as any).updateComplete;
-      const buttons = queryAll(el, 'sl-button[variant="primary"]');
-      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
-      (saveBtn as HTMLElement).click();
-      await new Promise((resolve) => setTimeout(resolve, 300));
-    }
-
-    it('shows the current value on the runtime and profile cards', async () => {
-      element = await createComponent(createFetchHandler(sdsConfig()));
-      const selects = queryAll(element, 'sl-select.shared-dir-storage-backend');
-      expect(selects.length).toBe(2);
-      for (const sel of selects) {
-        expect(sel.getAttribute('value')).toBe('nfs');
-      }
-    });
-
-    it('editing another profile field keeps the key in the PUT payload', async () => {
+    it('shows no editor for them and never sends them back', async () => {
       let capturedPayload: Record<string, any> | null = null;
       element = await createComponent(
-        createFetchHandler(sdsConfig(), {
+        createFetchHandler(overridesConfig(), {
           putHandler: (body) => {
             if ('profiles' in body) capturedPayload = body;
             return { status: 200, body: { reload: { applied: [] } } };
           },
         })
       );
+      await (element as any).updateComplete;
+      expect(queryAll(element, 'sl-select.shared-dir-storage-backend').length).toBe(0);
+      expect(queryAll(element, 'sl-select.home-storage-backend').length).toBe(0);
+      expect(queryAll(element, 'sl-select.home-storage-leaf').length).toBe(0);
 
       const registry = query(element, 'sl-input[placeholder="Override image registry"]') as
         | (HTMLElement & { value: string })
@@ -3044,40 +3043,25 @@ describe('scion-page-admin-server-config', () => {
       expect(registry).not.toBeNull();
       registry!.value = 'registry.example.com/team';
       registry!.dispatchEvent(new Event('sl-input'));
-      await saveAndCapture(element);
+      await (element as any).updateComplete;
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
 
       expect(capturedPayload).not.toBeNull();
       const gke = capturedPayload!.profiles.gke;
       expect(gke.image_registry).toBe('registry.example.com/team');
-      expect(gke.shared_dir_storage_backend).toBe('nfs');
       expect(gke.timezone).toBe('UTC');
-      expect(capturedPayload!.runtimes.k8s.shared_dir_storage_backend).toBe('nfs');
-    });
-
-    it('changing and clearing the select updates the payload', async () => {
-      let capturedPayload: Record<string, any> | null = null;
-      element = await createComponent(
-        createFetchHandler(sdsConfig(), {
-          putHandler: (body) => {
-            if ('profiles' in body) capturedPayload = body;
-            return { status: 200, body: { reload: { applied: [] } } };
-          },
-        })
-      );
-
-      const [runtimeSel, profileSel] = queryAll(
-        element,
-        'sl-select.shared-dir-storage-backend'
-      ) as (HTMLElement & { value: string })[];
-      runtimeSel.value = '';
-      runtimeSel.dispatchEvent(new Event('sl-change'));
-      profileSel.value = 'local';
-      profileSel.dispatchEvent(new Event('sl-change'));
-      await saveAndCapture(element);
-
-      expect(capturedPayload).not.toBeNull();
-      expect(capturedPayload!.profiles.gke.shared_dir_storage_backend).toBe('local');
-      expect('shared_dir_storage_backend' in capturedPayload!.runtimes.k8s).toBe(false);
+      for (const key of [
+        'shared_dir_storage_backend',
+        'shared_dir_storage_backends',
+        'home_storage_backend',
+        'home_storage_leaf',
+      ]) {
+        expect(key in gke).toBe(false);
+        expect(key in capturedPayload!.runtimes.k8s).toBe(false);
+      }
     });
   });
 
@@ -3340,87 +3324,6 @@ describe('scion-page-admin-server-config', () => {
     }
   });
 
-  describe('home storage on runtimes and profiles', () => {
-    function homeConfig() {
-      return makeBaseConfig({
-        runtimes: {
-          k8s: { type: 'kubernetes', home_storage_backend: 'nfs', home_storage_leaf: 'broker' },
-        },
-        profiles: {
-          gke: { runtime: 'k8s', home_storage_backend: 'nfs', home_storage_leaf: 'pod' },
-        },
-      });
-    }
-
-    async function saveAndCapture(el: HTMLElement): Promise<void> {
-      await (el as any).updateComplete;
-      const buttons = queryAll(el, 'sl-button[variant="primary"]');
-      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
-      (saveBtn as HTMLElement).click();
-      await new Promise((resolve) => setTimeout(resolve, 300));
-    }
-
-    it('shows the current values on the runtime and profile cards', async () => {
-      element = await createComponent(createFetchHandler(homeConfig()));
-      const backends = queryAll(element, 'sl-select.home-storage-backend');
-      expect(backends.map((s) => s.getAttribute('value'))).toEqual(['nfs', 'nfs']);
-      const leaves = queryAll(element, 'sl-select.home-storage-leaf');
-      expect(leaves.map((s) => s.getAttribute('value'))).toEqual(['broker', 'pod']);
-    });
-
-    it('editing another profile field keeps both keys in the PUT payload', async () => {
-      let capturedPayload: Record<string, any> | null = null;
-      element = await createComponent(
-        createFetchHandler(homeConfig(), {
-          putHandler: (body) => {
-            if ('profiles' in body) capturedPayload = body;
-            return { status: 200, body: { reload: { applied: [] } } };
-          },
-        })
-      );
-      const registry = query(element, 'sl-input[placeholder="Override image registry"]') as
-        | (HTMLElement & { value: string })
-        | null;
-      expect(registry).not.toBeNull();
-      registry!.value = 'registry.example.com/team';
-      registry!.dispatchEvent(new Event('sl-input'));
-      await saveAndCapture(element);
-
-      expect(capturedPayload).not.toBeNull();
-      expect(capturedPayload!.profiles.gke.home_storage_backend).toBe('nfs');
-      expect(capturedPayload!.profiles.gke.home_storage_leaf).toBe('pod');
-      expect(capturedPayload!.runtimes.k8s.home_storage_backend).toBe('nfs');
-      expect(capturedPayload!.runtimes.k8s.home_storage_leaf).toBe('broker');
-    });
-
-    it('changing and clearing the selects updates the payload', async () => {
-      let capturedPayload: Record<string, any> | null = null;
-      element = await createComponent(
-        createFetchHandler(homeConfig(), {
-          putHandler: (body) => {
-            if ('profiles' in body) capturedPayload = body;
-            return { status: 200, body: { reload: { applied: [] } } };
-          },
-        })
-      );
-      const [runtimeLeaf, profileLeaf] = queryAll(
-        element,
-        'sl-select.home-storage-leaf'
-      ) as (HTMLElement & {
-        value: string;
-      })[];
-      runtimeLeaf.value = '';
-      runtimeLeaf.dispatchEvent(new Event('sl-change'));
-      profileLeaf.value = 'broker';
-      profileLeaf.dispatchEvent(new Event('sl-change'));
-      await saveAndCapture(element);
-
-      expect(capturedPayload).not.toBeNull();
-      expect(capturedPayload!.profiles.gke.home_storage_leaf).toBe('broker');
-      expect('home_storage_leaf' in capturedPayload!.runtimes.k8s).toBe(false);
-      expect(capturedPayload!.runtimes.k8s.home_storage_backend).toBe('nfs');
-    });
-  });
   describe('Regression ptone/scion#1871 — masked secrets are not sent back', () => {
     const maskedServer = {
       notification_channels: [{ type: 'slack', params: { webhook_url: '********' } }],
@@ -5735,5 +5638,240 @@ describe('settings the page must not write unless changed (ptone/scion#3913)', (
       await save(element);
       expect(bodies[0]!.default_runtime_broker).toBe('');
     });
+  });
+});
+
+describe('env values in effect (env_values)', () => {
+  let element: HTMLElement | null = null;
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler(makeBaseConfig())));
+    await import('./admin-server-config.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  function fieldByLabel(el: HTMLElement, text: string): Element {
+    const label = queryAll(el, 'label').find((l) => l.textContent?.trim() === text);
+    expect(label, `label ${text}`).toBeDefined();
+    return label!.closest('.form-field')!;
+  }
+
+  function dbConfig(extra: Record<string, unknown>) {
+    const cfg = makeBaseConfig({ settings_tier: 'db', ...extra }) as any;
+    cfg.server.auth.authorized_domains = ['saved.example'];
+    cfg.server.hub.admin_emails = ['db@example.com'];
+    return cfg;
+  }
+
+  it('shows the environment value in effect as the primary value, the saved one as not in effect', async () => {
+    element = await createComponent(
+      createFetchHandler(
+        dbConfig({
+          env_overrides: ['server.auth.authorized_domains'],
+          env_values: {
+            'server.auth.authorized_domains': {
+              value: ['env-a.example', 'env-b.example'],
+              in_effect: true,
+              saved_differs: true,
+            },
+          },
+          // Even if listed, a key whose env value is in effect is not superseded.
+          superseded_keys: {
+            access: [{ key: 'server.auth.authorized_domains', source: 'server_env' }],
+          },
+        })
+      )
+    );
+    const field = fieldByLabel(element, 'Authorized Domains');
+    expect(field.querySelector('.env-value-in-effect')?.textContent).toContain(
+      'env-a.example, env-b.example'
+    );
+    expect(field.querySelector('.env-badge')?.textContent).toContain(
+      'Overridden by environment on this node'
+    );
+    expect(field.querySelector('.env-value-saved-label')?.textContent).toContain(
+      'not in effect on this node'
+    );
+    expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('saved.example');
+    expect(field.querySelector('.superseded-badge')).toBeNull();
+  });
+
+  it('says when the saved value wins over the environment value', async () => {
+    element = await createComponent(
+      createFetchHandler(
+        dbConfig({
+          env_overrides: ['server.hub.admin_emails'],
+          env_values: {
+            'server.hub.admin_emails': { value: ['env@example.com'], in_effect: false },
+          },
+        })
+      )
+    );
+    const field = fieldByLabel(element, 'Admin Emails');
+    expect(field.querySelector('.env-value-not-in-effect')?.textContent).toContain(
+      'env@example.com'
+    );
+    expect(field.querySelector('.env-value-in-effect')).toBeNull();
+    const badge = field.querySelector('.env-badge')?.textContent ?? '';
+    expect(badge).toContain('superseded by the saved setting');
+    expect(badge).not.toContain('Overridden by environment');
+    expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('db@example.com');
+  });
+
+  it('a masked entry (no in-effect state) keeps the plain badge and shows nothing raw', async () => {
+    element = await createComponent(
+      createFetchHandler(
+        dbConfig({
+          env_overrides: ['server.auth.authorized_domains'],
+          env_values: {
+            // The server sends neither in_effect nor saved_differs for a
+            // masked key; even if a value slipped in, the page must not show it.
+            'server.auth.authorized_domains': { value: 'not-the-placeholder', masked: true },
+          },
+        })
+      )
+    );
+    const field = fieldByLabel(element, 'Authorized Domains');
+    expect(field.querySelector('.env-badge')?.textContent).toContain(
+      'Overridden by environment on this node'
+    );
+    expect(field.querySelector('.env-value-in-effect')).toBeNull();
+    expect(field.querySelector('.env-value-not-in-effect')).toBeNull();
+    expect(field.querySelector('.env-value-saved-label')).toBeNull();
+    expect(shadowText(element)).not.toContain('not-the-placeholder');
+  });
+
+  it('a read-only env-pinned field shows the value in effect, the stored value as secondary', async () => {
+    const cfg = makeBaseConfig({
+      settings_tier: 'file',
+      env_overrides: ['server.hub.port'],
+      env_values: { 'server.hub.port': { value: 9090, in_effect: true, saved_differs: true } },
+    });
+    element = await createComponent(createFetchHandler(cfg));
+    const field = fieldByLabel(element, 'Port');
+    expect(field.querySelector('.read-only-badge')?.textContent).toContain('environment variable');
+    expect(field.querySelector('.env-value-primary')?.textContent?.trim()).toBe('9090');
+    expect(field.querySelector('.env-value-saved')?.textContent).toContain(
+      'settings.yaml value, not in effect on this node'
+    );
+    expect(field.querySelector('.env-value-saved')?.textContent).toContain('8080');
+  });
+
+  it('a hosted DB-tier Layer-0 field shows the environment value in effect with its badge', async () => {
+    const cfg = makeBaseConfig({
+      settings_tier: 'db',
+      layer0_editable: false,
+      env_overrides: ['server.hub.port'],
+      env_values: { 'server.hub.port': { value: 9090, in_effect: true, saved_differs: true } },
+    });
+    element = await createComponent(createFetchHandler(cfg));
+    const field = fieldByLabel(element, 'Port');
+    expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+      'Managed via deployment configuration'
+    );
+    expect(field.querySelector('.env-badge')?.textContent).toContain(
+      'Overridden by environment on this node'
+    );
+    expect(field.querySelector('.env-value-primary')?.textContent?.trim()).toBe('9090');
+    expect(field.querySelector('.env-value-saved')?.textContent).toContain(
+      'settings.yaml value, not in effect on this node: 8080'
+    );
+  });
+
+  it('never labels a default or an equal value as saved', async () => {
+    element = await createComponent(
+      createFetchHandler(
+        dbConfig({
+          env_overrides: ['server.hub.port', 'server.auth.authorized_domains'],
+          layer0_editable: false,
+          env_values: {
+            'server.hub.port': { value: 9090, in_effect: true },
+            'server.auth.authorized_domains': { value: ['saved.example'], in_effect: true },
+          },
+        })
+      )
+    );
+    const port = fieldByLabel(element, 'Port');
+    expect(port.querySelector('.env-value-primary')?.textContent?.trim()).toBe('9090');
+    expect(port.querySelector('.env-value-saved')).toBeNull();
+    const domains = fieldByLabel(element, 'Authorized Domains');
+    expect(domains.querySelector('.env-value-in-effect')).not.toBeNull();
+    expect(domains.querySelector('.env-value-saved-label')).toBeNull();
+  });
+
+  it('a read-only env-pinned field whose environment value is not in effect drops the env lock', async () => {
+    const cfg = makeBaseConfig({
+      settings_tier: 'file',
+      env_overrides: ['server.hub.host'],
+      env_values: { 'server.hub.host': { value: '10.0.0.1', in_effect: false } },
+    });
+    element = await createComponent(createFetchHandler(cfg));
+    const field = fieldByLabel(element, 'Host');
+    expect(field.querySelector('.read-only-badge')).toBeNull();
+    expect(field.querySelector('.env-badge')?.textContent).toContain(
+      'Environment value not in effect on this node'
+    );
+    expect(field.querySelector('.read-only-value')?.textContent?.trim()).toBe('0.0.0.0');
+    // The value shown is the configured one, not the start-up value in effect.
+    expect(field.querySelector('.env-value-configured-label')?.textContent).toContain(
+      'Configured value (settings.yaml or default), not the value in effect'
+    );
+    const line = field.querySelector('.env-value-not-in-effect')?.textContent ?? '';
+    expect(line).toContain('10.0.0.1');
+    expect(line).toContain('a start-up default or flag wins');
+  });
+
+  it('a value a saved setting wins with is not labelled as merely configured', async () => {
+    element = await createComponent(
+      createFetchHandler(
+        dbConfig({
+          env_overrides: ['server.hub.admin_emails'],
+          env_values: {
+            'server.hub.admin_emails': { value: ['env@example.com'], in_effect: false },
+          },
+        })
+      )
+    );
+    const field = fieldByLabel(element, 'Admin Emails');
+    expect(field.querySelector('.env-value-configured-label')).toBeNull();
+  });
+
+  it('the profiles section badge reflects env_values', async () => {
+    element = await createComponent(
+      createFetchHandler(
+        dbConfig({
+          env_overrides: ['profiles.local.runtime'],
+          env_values: {
+            // Profile keys are always masked, so the server reports no
+            // in-effect state for them.
+            'profiles.local.runtime': { value: '********', masked: true },
+          },
+        })
+      )
+    );
+    const items = queryAll(element, '.env-values-under li').map((li) => li.textContent ?? '');
+    const item = items.find((t) => t.includes('profiles.local.runtime'));
+    expect(item).toBeDefined();
+    expect(item).toContain('masked: whether it is in effect is not reported');
+    const badges = queryAll(element, '.env-badge').map((b) => b.textContent ?? '');
+    expect(badges.some((t) => t.includes('Overridden by environment on this node'))).toBe(true);
+    expect(badges.some((t) => t.includes('superseded by the saved setting'))).toBe(false);
+  });
+
+  it('without env_values the field renders as before', async () => {
+    element = await createComponent(
+      createFetchHandler(dbConfig({ env_overrides: ['server.auth.authorized_domains'] }))
+    );
+    const field = fieldByLabel(element, 'Authorized Domains');
+    expect(field.querySelector('.env-badge')?.textContent).toContain(
+      'Overridden by environment on this node'
+    );
+    expect(field.querySelector('.env-value-in-effect')).toBeNull();
+    expect(field.querySelector('.env-value-not-in-effect')).toBeNull();
   });
 });

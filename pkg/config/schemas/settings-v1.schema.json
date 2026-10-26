@@ -80,6 +80,7 @@
         "auth": { "$ref": "#/$defs/serverAuth" },
         "oauth": { "$ref": "#/$defs/serverOAuth" },
         "storage": { "$ref": "#/$defs/serverStorage" },
+        "project_storage": { "$ref": "#/$defs/serverProjectStorage" },
         "workspace_storage": { "$ref": "#/$defs/serverWorkspaceStorage" },
         "secrets": { "$ref": "#/$defs/serverSecrets" },
         "shared_dir_storage": { "$ref": "#/$defs/serverSharedDirStorage" },
@@ -2121,6 +2122,44 @@
         "bucket": { "type": "string", "description": "GCS bucket name.", "x-env-var": "SCION_SERVER_STORAGE_BUCKET" },
         "local_path": { "type": "string", "x-env-var": "SCION_SERVER_STORAGE_LOCALPATH" }
       }
+    },
+    "serverProjectStorage": {
+      "type": "object",
+      "description": "The one project storage block: backend places every project's workspace and shared dirs, homes places agent homes. Replaces workspace_storage, shared_dir_storage and home_storage (set it alone). Global-only, Layer-0 (restart to apply).",
+      "x-since": "1",
+      "properties": {
+        "backend": { "type": "string", "enum": ["", "local", "nfs", "cloudrun-volume", "gke-shared-volume"], "default": "local" },
+        "homes": { "type": "string", "enum": ["", "local", "nfs"], "default": "local", "description": "Where agent homes live: local (in the pod or on the broker host) or nfs (on the backend's share; needs backend nfs)." },
+        "nfs": { "$ref": "#/$defs/serverWorkspaceStorageNFS" },
+        "cloudrun_volume": {
+          "type": "object",
+          "properties": {
+            "volume_name": { "type": "string", "description": "Cloud Run volume declared in the service; mounted at /mnt/<volume_name>. Required when backend is cloudrun-volume." },
+            "subpath_root": { "type": "string", "default": "projects" }
+          }
+        },
+        "gke_shared_volume": {
+          "type": "object",
+          "properties": {
+            "volume_name": { "type": "string", "description": "Pod volume that mounts the shared PVC at /mnt/<volume_name>. Required when backend is gke-shared-volume." },
+            "pv_claim_name": { "type": "string" },
+            "subpath_root": { "type": "string", "default": "projects" }
+          }
+        },
+        "homes_options": {
+          "type": "object",
+          "description": "Operational knobs of agent homes on nfs (the former server.home_storage fields, unchanged meaning).",
+          "properties": {
+            "leaf": { "type": "string", "enum": ["", "pod", "broker"], "default": "pod" },
+            "stop_grace_seconds": { "type": "integer", "minimum": 0, "default": 30, "description": "Termination grace period of pods with an NFS home." },
+            "termination_wait_seconds": { "type": "integer", "minimum": 0, "default": 15, "description": "Extra time, beyond the grace period, a start waits for the agent's previous pod to stop." },
+            "skeleton_max_bytes": { "type": "integer", "minimum": 0, "default": 268435456, "description": "Largest image home skeleton copied into a new home." },
+            "allow_incomplete_phases": { "type": "boolean", "default": false, "description": "Development only. Allows nfs homes before the feature is complete." }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     },
     "serverWorkspaceStorage": {
       "type": "object",

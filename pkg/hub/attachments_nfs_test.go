@@ -114,13 +114,15 @@ func TestAttachmentStaging_NFSBackend_ProjectsIntoUUIDTree(t *testing.T) {
 	assert.Equal(t, "hello sibling", string(got))
 }
 
-// TestAttachmentStaging_WorkspaceStorageNFS_ProjectsIntoUUIDTree is the T4
-// case (only server.workspace_storage: nfs): the projection lands under the
-// workspace export's uuid tree, as phase 1 does for web uploads.
-func TestAttachmentStaging_WorkspaceStorageNFS_ProjectsIntoUUIDTree(t *testing.T) {
+// TestAttachmentStaging_ProjectStorageNFS_ProjectsIntoUUIDTree is the T4
+// case: server.project_storage with backend nfs (what a lone deprecated
+// server.workspace_storage: nfs block synthesizes to), so shared dirs are on
+// the same tree as workspaces and the projection lands under the export's
+// uuid tree, as phase 1 does for web uploads.
+func TestAttachmentStaging_ProjectStorageNFS_ProjectsIntoUUIDTree(t *testing.T) {
 	f := newSharedDirLayoutFixture(t)
 	t.Setenv("K_SERVICE", "scion-hub") // a Cloud Run Service: NFS is durable
-	f.srv.config.WorkspaceStorageConfig = nfsConfig(f.mountRoot)
+	f.srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(f.mountRoot))
 	require.NoError(t, os.MkdirAll(filepath.Join(f.mountRoot, "share1"), 0o755))
 
 	staging := f.srv.resolveAttachmentStaging(context.Background(), f.project.ID)
@@ -253,7 +255,7 @@ func TestResolveScratchpad_NFSResolutionError_SymlinkedPid_NoFallback(t *testing
 // mount_root).
 func TestResolveScratchpad_NFSResolutionError_InvalidBlock_NoFallback(t *testing.T) {
 	srv, project, _ := nfsAttachmentServer(t)
-	srv.config.SharedDirStorageConfig = invalidNFSSharedDirStorageTestConfig()
+	srv.config.ProjectStorageConfig = invalidNFSSharedDirStorageTestConfig()
 
 	home, err := os.UserHomeDir()
 	require.NoError(t, err)
@@ -268,7 +270,7 @@ func TestResolveScratchpad_NFSResolutionError_InvalidBlock_NoFallback(t *testing
 func TestResolveScratchpad_ResolveErrorWarnLoggedOncePerProject(t *testing.T) {
 	buf := captureSlog(t)
 	srv, project, _ := nfsAttachmentServer(t)
-	srv.config.SharedDirStorageConfig = invalidNFSSharedDirStorageTestConfig()
+	srv.config.ProjectStorageConfig = invalidNFSSharedDirStorageTestConfig()
 
 	_ = srv.resolveScratchpad(context.Background(), project.ID)
 	_ = srv.resolveScratchpad(context.Background(), project.ID)

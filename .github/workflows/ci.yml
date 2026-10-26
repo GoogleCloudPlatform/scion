@@ -371,6 +371,11 @@ jobs:
             exit 1
           fi
 
+      # Bash only: the skipped-tests summary the shard jobs print
+      # (hack/hubshard/lib.sh run_skip_summary), with a fake test binary.
+      - name: Test the pkg/hub shard skip summary
+        run: make hubshard-skip-summary-selftest
+
       - name: Check Annotation Prefix
         run: make check-annotation-prefix
 

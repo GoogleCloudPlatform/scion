@@ -512,7 +512,7 @@ WHAT THIS RELEASE DOES NOT YET DO
 
   workspaceStorage.nfs is enabled. The hub pod mounts the NFS export at
     {{ (include "scion-hub.nfsWorkspace" . | fromYaml).mountPath }}
-  and settings.yaml carries server.workspace_storage. The chart does not create
+  and settings.yaml carries server.project_storage. The chart does not create
   the Filestore instance, set the export's ownership, or create the
   PersistentVolumeClaim agent pods mount the share through:
     {{ (include "scion-hub.nfsWorkspace" . | fromYaml).pvName }}
