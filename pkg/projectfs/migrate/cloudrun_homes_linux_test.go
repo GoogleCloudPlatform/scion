@@ -209,7 +209,8 @@ func TestCloudRunHomes_RecheckDefersStartedAgent(t *testing.T) {
 func TestRun_CloudRunHomesStep(t *testing.T) {
 	l, proj := crhLayout(t)
 	locked, rechecked := 0, 0
-	lockKey := struct{}{}
+	type lockCtxKey struct{}
+	lockKey := lockCtxKey{}
 	rep, err := Run(context.Background(), HubInput{
 		Workspace:  l,
 		SharedDirs: projectfs.Layout{Backend: projectfs.BackendLocal},
