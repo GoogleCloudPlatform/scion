@@ -194,8 +194,10 @@ const AgentEditHeld = "hub.agent_edit_held"
 const AgentDelegation = "hub.agent_delegation"
 
 // FederationProjectVisitors gates project access for users of trusted
-// external issuers (ptone/scion#4603). While it is off, a verified
-// federated user token always yields the same federated user identity as
+// external issuers (ptone/scion#4603). It has both layers: the web layer
+// shows the project Visitors tab and the per-issuer visitor access switch,
+// and the server layer gates the hub behaviour below. While it is off, a
+// verified federated user token always yields the same federated user identity as
 // before; while it is on, a token whose (issuer, subject) is linked to an
 // active federated account yields that account's visitor identity. It also
 // gates POST /api/v1/auth/federation-token (404 while off), where this
@@ -298,9 +300,9 @@ var compiled = []Experiment{
 	{
 		Name:        FederationProjectVisitors,
 		Title:       "Project visitors from trusted issuers",
-		Description: "Lets a user of a trusted external issuer who is linked to a local federated account act as that account (a project visitor), and lets this hub's users obtain short-lived user access credentials for the peer hubs in server.oidc.user_token_audiences, and accepts user access credentials from peer hub issuers that have accept_user_tokens. While off, federated user tokens behave exactly as before, no user access credentials are issued, no user access credentials are accepted from peer hubs, and stored accounts are kept.",
+		Description: "Lets a user of a trusted external issuer who is linked to a local federated account act as that account (a project visitor), and lets this hub's users obtain short-lived user access credentials for the peer hubs in server.oidc.user_token_audiences, and accepts user access credentials from peer hub issuers that have accept_user_tokens. While off, federated user tokens behave exactly as before, no user access credentials are issued, no user access credentials are accepted from peer hubs, and stored accounts are kept. Web layer: shows the project Visitors tab and the visitor access switch on Admin > Federation. Server layer: the project visitor grant and rule routes (404 while off), visitor identities and user access credentials; the hub checks it on every request, whatever the UI shows.",
 		Default:     false,
-		Layers:      []Layer{LayerServer},
+		Layers:      []Layer{LayerWeb, LayerServer},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#4603",
 		Owner:       "federation",
