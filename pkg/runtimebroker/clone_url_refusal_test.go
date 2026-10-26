@@ -193,3 +193,33 @@ func TestCloneURLRefusal_AcceptedURLsDispatch(t *testing.T) {
 		})
 	}
 }
+
+// The in-container clone URL comes only from the hub's GitClone, after the
+// clone URL check: a request env entry (resolvedEnv or config.env) naming
+// one is dropped, with or without a GitClone.
+func TestCloneURLRefusal_RequestEnvCannotSetCloneURL(t *testing.T) {
+	const injected = "file:///srv/refused.example/repo"
+	for _, tc := range []struct{ name, gitClone, want string }{
+		{"no GitClone", "", ""},
+		{"GitClone", `, "gitClone": {"url": "https://github.com/org/repo.git"}`, "https://github.com/org/repo.git"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, mgr := clonePathServer("docker")
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(`{
+				"name": "env-agent",
+				"resolvedEnv": {"SCION_GIT_CLONE_URL": "`+injected+`"},
+				"config": {"template": "claude", "env": ["SCION_GIT_CLONE_URL=`+injected+`"]`+tc.gitClone+`}
+			}`))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+			require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+			got, set := mgr.lastEnv["SCION_GIT_CLONE_URL"]
+			if tc.want == "" {
+				assert.False(t, set, "a request env clone URL reached the agent: %q", got)
+				return
+			}
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}

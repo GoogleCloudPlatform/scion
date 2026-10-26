@@ -58,3 +58,26 @@ func TestTokenRemote_BrokerModeOnlyFromHub(t *testing.T) {
 		t.Errorf("harness-config dropped = %+v, want the token remote", hcDropped)
 	}
 }
+
+// For a hub-dispatched agent the in-container clone URL comes only from the
+// broker's env: a config-layer or harness-config value is dropped.
+func TestCloneURL_BrokerModeOnlyFromBroker(t *testing.T) {
+	const otherURL = "file:///srv/other/repo"
+	env, _, _, dropped := buildAgentEnv(&api.ScionConfig{Env: map[string]string{"SCION_GIT_CLONE_URL": otherURL}}, nil, nil, true)
+	if v, ok := envListToMap(env)["SCION_GIT_CLONE_URL"]; ok {
+		t.Errorf("config-layer clone URL reached the container: %q", v)
+	}
+	if len(dropped) != 1 || dropped[0].Key != "SCION_GIT_CLONE_URL" {
+		t.Errorf("dropped = %+v, want the config-layer clone URL", dropped)
+	}
+	settings := &config.VersionedSettings{
+		HarnessConfigs: map[string]config.HarnessConfigEntry{
+			"claude-cfg": {Harness: "claude", Env: map[string]string{"SCION_GIT_CLONE_URL": otherURL}},
+		},
+	}
+	opts := api.StartOptions{BrokerMode: true}
+	_, _ = resolveAuthEnvOverlay(&opts, settings, "", "claude-cfg")
+	if v, ok := opts.Env["SCION_GIT_CLONE_URL"]; ok {
+		t.Errorf("harness-config clone URL merged into opts.Env: %q", v)
+	}
+}

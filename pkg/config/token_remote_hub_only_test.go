@@ -26,3 +26,10 @@ func TestIsHubOnlyEnvKey_TokenRemote(t *testing.T) {
 		t.Errorf("%s must be a hub-only env key", api.EnvGitTokenRemote)
 	}
 }
+
+// The in-container clone URL is hub-only too.
+func TestIsHubOnlyEnvKey_CloneURL(t *testing.T) {
+	if !IsHubOnlyEnvKey("SCION_GIT_CLONE_URL") {
+		t.Error("SCION_GIT_CLONE_URL must be a hub-only env key")
+	}
+}

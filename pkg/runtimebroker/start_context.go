@@ -613,8 +613,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 
 	// The git token remote is set only from the hub's GitClone (below), never
 	// from the request's env, so an env entry cannot bind the git token to
-	// another remote.
+	// another remote. Likewise the in-container clone URL is set only from
+	// GitClone, after the clone URL check (refusedCloneURL), so an env entry
+	// cannot start a clone that check never saw.
 	delete(env, api.EnvGitTokenRemote)
+	delete(env, "SCION_GIT_CLONE_URL")
 
 	// 3. Hub auth token. Precedence (highest first):
 	//   1. in.AgentToken — the explicit hub-provided dedicated field (create path).
