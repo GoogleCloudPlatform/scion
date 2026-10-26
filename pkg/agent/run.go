@@ -2209,10 +2209,10 @@ authDone:
 	//
 	// The root was composed against the PRE-backend workspace. The derivation
 	// depends on the workspace, so when the backend actually changed it,
-	// recompose against the value RunConfig will use, exactly as the upstream
-	// broker-known-path derivation does on main: validatedWorktreeRepoRoot(
-	// candidate, ws) falling back to detectRepoRoot, with the record
-	// intersection re-applied (failing closed).
+	// recompose against the value RunConfig will use: validatedWorktreeRepoRoot(
+	// candidate, ws) falling back to the shared layout's workspace
+	// (composeSharedRepoRoot), with the record intersection re-applied
+	// (failing closed).
 	// On Kubernetes the runtime builds its workspace mounts from
 	// containerWorkspace and the NFS* fields above, not from repoRoot, and reads
 	// RepoRoot only to decide whether the shared workspace's in-project agents

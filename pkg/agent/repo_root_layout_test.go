@@ -159,3 +159,85 @@ func TestLocalLayoutWorkspaceRoot_Unchanged(t *testing.T) {
 		t.Fatalf("localLayoutWorkspaceRoot(\"\") = %q, want \"\"", got)
 	}
 }
+
+// composeSharedRepoRoot falls back to the shared layout's workspace and keeps
+// the record intersection of composeRepoRoot: a missing or equal record uses
+// the shared root, a different or unreadable record refuses, a refusal from
+// the layout is returned unchanged whatever the record, and an explicit
+// workspace derives no root. The non-shared path (composeRepoRoot) never
+// consults the shared layout.
+func TestComposeSharedRepoRoot(t *testing.T) {
+	mountRoot := t.TempDir()
+	settings := nfsProjectStorageSettings(mountRoot)
+	projectDir := filepath.Join(t.TempDir(), "home", config.GlobalDir, config.ProjectsDir, "p", config.DotScion)
+	if err := os.MkdirAll(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ws := filepath.Join(mountRoot, "share-a", "projects", layoutTestProjectID, "workspace")
+	mkGitRepo(t, ws)
+	other := filepath.Join(mountRoot, "share-a", "projects", "11111111-2222-3333-4444-555555555555", "workspace")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, layoutErr := sharedLayoutWorkspaceRoot(settings, layoutTestProjectID, other)
+	if layoutErr == nil {
+		t.Fatal("fixture: the other project's workspace should be refused by the layout")
+	}
+
+	missing := repoRootRecordState{status: recordMissing}
+	equal := repoRootRecordState{status: recordPresent, root: ws}
+	different := repoRootRecordState{status: recordPresent, root: filepath.Join(t.TempDir(), "local-root")}
+	unreadable := repoRootRecordState{status: recordUnreadable}
+	cases := []struct {
+		name      string
+		workspace string
+		explicit  bool
+		rec       repoRootRecordState
+		wantRoot  string
+		wantErr   string
+	}{
+		{"record missing: shared root", ws, false, missing, ws, ""},
+		{"record equal: shared root", ws, false, equal, ws, ""},
+		{"record different: refused", ws, false, different, "", "does not match"},
+		{"record unreadable: refused", ws, false, unreadable, "", "could not be read"},
+		{"layout refusal, record missing: unchanged", other, false, missing, "", layoutErr.Error()},
+		{"layout refusal, record present: unchanged", other, false, equal, "", layoutErr.Error()},
+		{"explicit workspace: no root", ws, true, equal, "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := composeSharedRepoRoot("a1", "", tc.rec, tc.workspace, projectDir, layoutTestProjectID, tc.explicit, settings)
+			if tc.wantErr == "" {
+				if err != nil || got != tc.wantRoot {
+					t.Fatalf("composeSharedRepoRoot = (%q, %v), want (%q, nil)", got, err, tc.wantRoot)
+				}
+				return
+			}
+			if err == nil || got != "" {
+				t.Fatalf("composeSharedRepoRoot = (%q, %v), want a refusal", got, err)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %q should contain %q", err, tc.wantErr)
+			}
+		})
+	}
+
+	t.Run("layout refusal is the layout's own error", func(t *testing.T) {
+		_, err := composeSharedRepoRoot("a1", "", missing, other, projectDir, layoutTestProjectID, false, settings)
+		if err == nil || err.Error() != layoutErr.Error() {
+			t.Fatalf("composeSharedRepoRoot error = %v, want exactly %v", err, layoutErr)
+		}
+	})
+	t.Run("non-shared path does not consult the shared layout", func(t *testing.T) {
+		// On the local layout the shared recomposition refuses, while
+		// composeRepoRoot derives through the local layout and does not.
+		if _, err := composeSharedRepoRoot("a1", "", missing, ws, projectDir, layoutTestProjectID, false, nil); err == nil ||
+			!strings.Contains(err.Error(), `project storage layout is "local"`) {
+			t.Fatalf("composeSharedRepoRoot on the local layout = %v, want the local-layout refusal", err)
+		}
+		if _, err := composeRepoRoot("a1", "", missing, ws, projectDir, false, nil); err != nil &&
+			strings.Contains(err.Error(), "project storage layout") {
+			t.Fatalf("composeRepoRoot consulted the shared layout: %v", err)
+		}
+	})
+}
