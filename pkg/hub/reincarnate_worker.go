@@ -660,9 +660,10 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	}
 	if move != nil {
 		// The broker reservation follows the agent to the target, moved
-		// only once this worker owns the provisioning step. When the
-		// target has no room the source reservation is restored and the
-		// agent stays stopped on the source.
+		// atomically (one store transaction) only once this worker owns
+		// the provisioning step. When the target has no room the source
+		// reservation is left untouched and the agent stays stopped on
+		// the source.
 		if err := s.moveBrokerQuota(ctx, agent, move); err != nil {
 			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, "target broker quota: "+err.Error(), recovery(store.AgentReincarnationStateProvisioning))
 			return
