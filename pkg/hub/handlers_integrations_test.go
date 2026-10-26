@@ -1234,6 +1234,14 @@ func TestFilterSensitiveConfig_DatabaseSettings(t *testing.T) {
 		"plugin_name":      "telegram",
 		"project_slug_map": "p1:s1",
 	}
+	for key := range hubKeys {
+		if _, ok := cfg[key]; !ok {
+			cfg[key] = "value-" + key
+		}
+	}
+	if len(cfg) != len(hubKeys)+1 {
+		t.Fatalf("test input must hold every hub key plus webhook_listen, got %v", cfg)
+	}
 
 	filtered := filterSensitiveConfig("telegram", cfg)
 
