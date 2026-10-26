@@ -74,7 +74,10 @@ def simulated_decoder_depth_limit(limit: int = SIMULATED_DECODER_DEPTH_LIMIT) ->
     real_loads = json.loads
 
     def loads(s, *args, **kwargs):
-        text = s.decode(json.detect_encoding(s)) if isinstance(s, (bytes, bytearray)) else s
+        text = s
+        if isinstance(s, (bytes, bytearray)):
+            # As json.loads decodes bytes.
+            text = s.decode(json.detect_encoding(s), "surrogatepass")
         cut = first_too_deep_offset(text, limit)
         if cut is None:
             return real_loads(s, *args, **kwargs)

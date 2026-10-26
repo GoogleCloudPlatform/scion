@@ -1666,7 +1666,7 @@ class TestAtomicWriteText(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# read_json_skipping_comment_lines
+# simulated JSON decoder depth limit (test helper, json_depth_testutil)
 # ---------------------------------------------------------------------------
 
 
@@ -1709,6 +1709,11 @@ class TestSimulatedDecoderDepthLimit(unittest.TestCase):
     def test_brackets_inside_strings_do_not_count(self):
         text = '["[[[{{{", "\\\"[[[", ["x"]]'
         self.assertEqual(self._loads(text), json.loads(text))
+
+
+# ---------------------------------------------------------------------------
+# read_json_skipping_comment_lines
+# ---------------------------------------------------------------------------
 
 
 class TestReadJsonSkippingComments(unittest.TestCase):
