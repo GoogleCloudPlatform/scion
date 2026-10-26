@@ -158,15 +158,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// GetAgent will use (AgentStateDir, including its effective
 	// shared-workspace detection). The record is read again, from that same
 	// dir, where image selection uses it.
+	// A create over a legacy agent directory no agent owns is refused
+	// before any side effect.
+	if err := refuseRetiredLegacyAgent(projectDir, opts); err != nil {
+		return nil, err
+	}
 	if preDir, _, dirErr := AgentStateDir(projectDir, opts.Name, opts.SharedWorkspace, opts.HubProjectID, opts.BrokerMode || opts.HubProjectID != ""); dirErr == nil {
 		if _, provErr := readImageProvenance(preDir); provErr != nil {
 			logImageProvenanceError(opts.Name, provErr)
 			return nil, provErr
-		}
-		// An agent whose only state is in its retired legacy in-project
-		// directory is refused before any side effect.
-		if err := refuseRetiredLegacyAgent(projectDir, opts.Name, preDir); err != nil {
-			return nil, err
 		}
 	}
 
@@ -1814,6 +1814,9 @@ authDone:
 		roots, rootsErr = workspaceSourceRoots(explicitWorkspace, effectiveWorkspace, settings, projectDir)
 		if rootsErr != nil {
 			return nil, rootsErr
+		}
+		if legacy := legacyAgentWorkspaceRoot(projectDir, opts.Name, agentDir, explicitWorkspace || opts.SharedWorkspace); legacy != "" {
+			roots = append(roots, legacy)
 		}
 	}
 	resolvedWorkspace, err := runtime.ValidateWorkspaceSource(effectiveWorkspace, roots...)

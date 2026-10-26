@@ -140,9 +140,7 @@ func isSharedHubProjectRoot(projectPath string) bool {
 // findAgentInSharedProject resolves, on the broker's shared Layout, the
 // configuration dir (<ProjectRoot>/.scion) of hub-managed project projectID
 // when agent agentName has state of it on this broker: in the broker-local
-// external agents root, or in its retired pre-move legacy dir (found so a
-// delete removes it and a start is refused cleanly, ptone/scion#5835;
-// config.LegacySharedProjectAgentDir). handled is true for
+// external agents root, or in its pre-move legacy dir. handled is true for
 // every request on a shared Layout with a project ID; the caller then uses
 // dir and err as the answer and never falls back to the broker-local
 // project scan. It is fail-closed like a dispatch: the share is checked

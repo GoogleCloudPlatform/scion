@@ -197,11 +197,10 @@ func TestSharedProjectAgentStateRootStableAcrossSeedMove(t *testing.T) {
 	}
 }
 
-// The legacy in-project state dir of an agent provisioned before the move
-// (~/.scion/projects/<slug>/.scion/agents/<name>) is retired: it is still
-// found (LegacySharedProjectAgentDir, for delete and the start refusal), but
-// no look-up resolves an agent to it; every look-up gives the external root.
-func TestSharedProjectLegacyAgentFallbackRetired(t *testing.T) {
+// An agent provisioned before the move keeps its in-project state dir under
+// ~/.scion/projects/<slug>/.scion/agents (look-up fallback) until
+// it has a scion-agent.json in the external root.
+func TestSharedProjectLegacyAgentFallback(t *testing.T) {
 	scionDir, home := sharedProjectFixture(t, "web")
 	legacyScion := filepath.Join(home, GlobalDir, ProjectsDir, "web", DotScion)
 	mustWrite(t, filepath.Join(legacyScion, projectkeys.ProjectIDFile), sharedTestProjectID+"\n")
@@ -212,18 +211,23 @@ func TestSharedProjectLegacyAgentFallbackRetired(t *testing.T) {
 	if got := LegacySharedProjectAgentDir(scionDir, "old"); got != legacy {
 		t.Fatalf("LegacySharedProjectAgentDir = %q, want %q", got, legacy)
 	}
-	want := filepath.Join(ext, "old")
-	if got, err := AgentDirForProject(scionDir, "old", false, sharedTestProjectID); err != nil || got != want {
-		t.Errorf("AgentDirForProject = (%q, %v), want the external dir %q", got, err, want)
+	if got, err := AgentDirForProject(scionDir, "old", false, sharedTestProjectID); err != nil || got != legacy {
+		t.Errorf("AgentDirForProject = (%q, %v), want the legacy dir", got, err)
 	}
-	if got := ResolveAgentDir(scionDir, "old"); got != want {
-		t.Errorf("ResolveAgentDir = %q, want the external dir", got)
+	if got := ResolveAgentDir(scionDir, "old"); got != legacy {
+		t.Errorf("ResolveAgentDir = %q, want the legacy dir", got)
 	}
-	if got := GetAgentDir(scionDir, "old", false); got != want {
-		t.Errorf("GetAgentDir = %q, want the external dir", got)
+	if got := GetAgentDir(scionDir, "old", false); got != legacy {
+		t.Errorf("GetAgentDir = %q, want the legacy dir", got)
 	}
 	if got := GetAgentDir(scionDir, "new", false); got != filepath.Join(ext, "new") {
 		t.Errorf("GetAgentDir for a new agent = %q, want the external root", got)
+	}
+
+	// The external root wins once it holds the agent's scion-agent.json.
+	mustWrite(t, filepath.Join(ext, "old", "scion-agent.json"), "{}")
+	if got := ResolveAgentDir(scionDir, "old"); got != filepath.Join(ext, "old") {
+		t.Errorf("ResolveAgentDir with external state = %q, want the external dir", got)
 	}
 
 	// A legacy .scion naming another project is never used.
