@@ -8,8 +8,10 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
 	"go.opentelemetry.io/otel/attribute"
@@ -71,20 +73,24 @@ func loadCaptureFixture(t *testing.T, name string) []*logspb.ResourceLogs {
 
 // usageOutcome runs the real native usage path for SCION_HARNESS=harness:
 // NewUsageDeriver selects the rules from the environment as in production,
-// and the selected rules then derive each capture record (observe, as
-// ProcessResourceLogs does) into a manual reader. It returns the outcome and the harness label of
-// every recorded point.
-func usageOutcome(t *testing.T, harness, fixture string) (string, map[string]bool) {
+// and the selected rules then derive each capture record (observeRecord
+// with the record's resource attributes, as ProcessResourceLogs does) into
+// a manual reader and an agent.usage analytics outbox. It returns the
+// outcome, the harness label of every recorded point and the harness field
+// of every staged agent.usage event.
+func usageOutcome(t *testing.T, harness, fixture string) (string, map[string]bool, map[string]bool) {
 	t.Helper()
 	t.Setenv("SCION_HARNESS", harness)
 	t.Setenv("SCION_USAGE_SOURCE", UsageSourceNative)
+	t.Setenv("SCION_AGENT_ID", "agent-1")
+	t.Setenv("SCION_PROJECT_ID", "proj-1")
 	selected, err := NewUsageDeriver(context.Background(), &Config{Enabled: true, GRPCPort: availableTCPPort(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { shutdownTestDeriver(selected) })
 	if len(selected.rules) == 0 {
-		return usageUnknown, nil
+		return usageUnknown, nil, nil
 	}
 
 	reader := sdkmetric.NewManualReader()
@@ -98,14 +104,23 @@ func usageOutcome(t *testing.T, harness, fixture string) (string, map[string]boo
 	if d.tokens, err = meter.Int64Counter(telemetrycontract.MetricUsageTokens); err != nil {
 		t.Fatal(err)
 	}
+	outbox, err := OpenAnalyticsOutbox(filepath.Join(t.TempDir(), "outbox"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.analytics = NewUsageAnalytics(outbox, telemetrycontract.UsageSourceNative)
 	// ProcessResourceLogs's loop, without its flush of the (absent)
 	// production providers.
 	for _, rl := range loadCaptureFixture(t, fixture) {
-		for _, sl := range rl.ScopeLogs {
-			for _, record := range sl.LogRecords {
-				d.observe(context.Background(), sl.GetScope().GetName(), record)
+		for _, sl := range rl.GetScopeLogs() {
+			for _, record := range sl.GetLogRecords() {
+				d.observeRecord(context.Background(), sl.GetScope().GetName(), rl.GetResource().GetAttributes(), record)
 			}
 		}
+	}
+	events := map[string]bool{}
+	for _, line := range stagingLines(t, outbox) {
+		events[decodeUsage(t, line).Harness] = true
 	}
 
 	var rm metricdata.ResourceMetrics
@@ -131,9 +146,12 @@ func usageOutcome(t *testing.T, harness, fixture string) (string, map[string]boo
 		if points != 0 {
 			t.Fatalf("no derived usage but %d points recorded", points)
 		}
-		return usageUnmatched, nil
+		if len(events) != 0 {
+			t.Fatalf("no derived usage but agent.usage events staged with harness %v", sortedKeys(events))
+		}
+		return usageUnmatched, nil, nil
 	}
-	return usageParsed, labels
+	return usageParsed, labels, events
 }
 
 // TestContainerHarnessCasesUsageOutcome checks, for each case of the shared
@@ -144,7 +162,9 @@ func usageOutcome(t *testing.T, harness, fixture string) (string, map[string]boo
 // the Generic implementation selects no rules, so usage stays unknown
 // rather than being parsed with the declared harness's rules; a legacy
 // "gemini" name and an empty name select no rules both before and after.
-// Derived points carry the emitted value as their harness label.
+// Derived points carry the emitted value as their harness label, and the
+// agent.usage events staged from the same records carry it as their
+// harness field; no event is staged when nothing is derived.
 func TestContainerHarnessCasesUsageOutcome(t *testing.T) {
 	for _, c := range loadContainerHarnessCases(t) {
 		t.Run(c.Name, func(t *testing.T) {
@@ -155,12 +175,15 @@ func TestContainerHarnessCasesUsageOutcome(t *testing.T) {
 				{"stale", c.StaleHarness, c.StaleUsage},
 			} {
 				t.Run(side.label, func(t *testing.T) {
-					got, labels := usageOutcome(t, side.harness, c.Fixture)
+					got, labels, events := usageOutcome(t, side.harness, c.Fixture)
 					if got != side.want {
 						t.Fatalf("SCION_HARNESS=%q over the %s capture: usage %s, want %s", side.harness, c.Fixture, got, side.want)
 					}
 					if got == usageParsed && (len(labels) != 1 || !labels[side.harness]) {
 						t.Fatalf("harness labels on derived points = %v, want only %q", sortedKeys(labels), side.harness)
+					}
+					if got == usageParsed && (len(events) != 1 || !events[side.harness]) {
+						t.Fatalf("agent.usage harness fields = %v, want only %q", sortedKeys(events), side.harness)
 					}
 				})
 			}
@@ -242,5 +265,83 @@ func TestContainerHarnessCasesResourceLabels(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// healthUsageFor builds the telemetry.health event a pipeline reports for
+// SCION_HARNESS=harness and SCION_USAGE_SOURCE=source, with the usage
+// source settled from the environment and, when the harness has native
+// rules and the source is native, a deriver with those rules active (as
+// Start installs one).
+func healthUsageFor(t *testing.T, harness, source string) *telemetrycontract.HealthEvent {
+	t.Helper()
+	t.Setenv("SCION_HARNESS", harness)
+	t.Setenv("SCION_USAGE_SOURCE", source)
+	t.Setenv("SCION_AGENT_ID", "agent-1")
+	t.Setenv("SCION_PROJECT_ID", "proj-1")
+	p := NewWithConfig(&Config{Enabled: true})
+	p.health.now, p.health.runID = time.Now, "run"
+	if rules := rulesForHarness(harness); source == UsageSourceNative && len(rules) > 0 {
+		p.usageDeriver.Store(bareUsageDeriver(rules...))
+	}
+	p.SettleUsageSource(nil, "")
+	ev, err := buildHealthEvent(p.healthSnapshotInputs(telemetrycontract.HealthTriggerPeriodic))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ev
+}
+
+// TestContainerHarnessCasesHealthUsageCollection: the telemetry.health
+// event reads SCION_HARNESS for its harness field and for whether a native
+// usage rule exists. For each case of the shared table, the value Start now
+// emits (and the stale value) is reported as the harness ("unknown" when
+// empty), and with the native source the usage-collection state follows
+// the usage outcome: enabled (source native) when the harness has rules,
+// disabled with reason no_harness_rule when it has none, as for "generic".
+func TestContainerHarnessCasesHealthUsageCollection(t *testing.T) {
+	for _, c := range loadContainerHarnessCases(t) {
+		t.Run(c.Name, func(t *testing.T) {
+			for _, side := range []struct {
+				label, harness, usage string
+			}{
+				{"emitted", c.ContainerHarness, c.WantUsage},
+				{"stale", c.StaleHarness, c.StaleUsage},
+			} {
+				t.Run(side.label, func(t *testing.T) {
+					ev := healthUsageFor(t, side.harness, UsageSourceNative)
+					wantHarness := side.harness
+					if wantHarness == "" {
+						wantHarness = "unknown"
+					}
+					if ev.Harness != wantHarness {
+						t.Fatalf("health harness = %q, want %q", ev.Harness, wantHarness)
+					}
+					wantState, wantReason := telemetrycontract.UsageCollectionEnabled, ""
+					if side.usage == usageUnknown {
+						wantState, wantReason = telemetrycontract.UsageCollectionDisabled, telemetrycontract.UsageDisabledNoHarnessRule
+					}
+					if ev.UsageCollection != wantState || ev.UsageDisabledReason != wantReason || ev.UsageSource != telemetrycontract.UsageSourceNative {
+						t.Fatalf("SCION_HARNESS=%q: usage collection %q reason %q source %q, want %q %q %q",
+							side.harness, ev.UsageCollection, ev.UsageDisabledReason, ev.UsageSource,
+							wantState, wantReason, telemetrycontract.UsageSourceNative)
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestHealthUsageCollectionGenericHooks: with the hooks source, a
+// Generic-launched agent reports usage collection enabled from hooks under
+// harness "generic", with no static capability row (capability status
+// unknown).
+func TestHealthUsageCollectionGenericHooks(t *testing.T) {
+	ev := healthUsageFor(t, "generic", telemetrycontract.UsageSourceHooks)
+	if ev.Harness != "generic" || ev.UsageCollection != telemetrycontract.UsageCollectionEnabled ||
+		ev.UsageSource != telemetrycontract.UsageSourceHooks || ev.UsageDisabledReason != "" ||
+		ev.UsageCapabilityStatus != telemetrycontract.UsageCapabilityStatusUnknown {
+		t.Fatalf("health = harness %q collection %q source %q reason %q capability status %q",
+			ev.Harness, ev.UsageCollection, ev.UsageSource, ev.UsageDisabledReason, ev.UsageCapabilityStatus)
 	}
 }
