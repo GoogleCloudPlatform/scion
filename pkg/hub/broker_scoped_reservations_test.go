@@ -197,6 +197,7 @@ type brokerScopedQueryCountingStore struct {
 	countByScopeCalls   int
 	perBrokerListCalls  int
 	perProjectListCalls int
+	ungroupedCountCalls int
 }
 
 func (c *brokerScopedQueryCountingStore) ListActiveReservationsByScopeType(ctx context.Context, limitDefinitionID, scopeType string) ([]*store.UsageReservation, error) {
@@ -217,6 +218,15 @@ func (c *brokerScopedQueryCountingStore) CountActiveReservationsByScope(ctx cont
 	return c.Store.CountActiveReservationsByScope(ctx, limitDefinitionID, scopeType)
 }
 
+func (c *brokerScopedQueryCountingStore) CountActiveReservations(ctx context.Context, limitDefinitionID, subjectID, scopeType, scopeID string) (int64, error) {
+	if c.fault.Active() {
+		c.mu.Lock()
+		c.ungroupedCountCalls++
+		c.mu.Unlock()
+	}
+	return c.Store.CountActiveReservations(ctx, limitDefinitionID, subjectID, scopeType, scopeID)
+}
+
 func (c *brokerScopedQueryCountingStore) ListActiveReservations(ctx context.Context, limitDefinitionID, scopeType, scopeID string) ([]*store.UsageReservation, error) {
 	if c.fault.Active() {
 		c.mu.Lock()
@@ -234,7 +244,7 @@ func (c *brokerScopedQueryCountingStore) ListActiveReservations(ctx context.Cont
 func (c *brokerScopedQueryCountingStore) reset() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.byScopeTypeCalls, c.countByScopeCalls, c.perBrokerListCalls, c.perProjectListCalls = 0, 0, 0, 0
+	c.byScopeTypeCalls, c.countByScopeCalls, c.perBrokerListCalls, c.perProjectListCalls, c.ungroupedCountCalls = 0, 0, 0, 0, 0
 }
 
 func (c *brokerScopedQueryCountingStore) counts() (byScopeType, countByScope, perBrokerList int) {
@@ -249,6 +259,14 @@ func (c *brokerScopedQueryCountingStore) perProjectLists() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.perProjectListCalls
+}
+
+// ungroupedCounts returns the CountActiveReservations calls, which count one
+// subject's reservations in one scope.
+func (c *brokerScopedQueryCountingStore) ungroupedCounts() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ungroupedCountCalls
 }
 
 // TestBrokerScopedReservations_OneReservationQueryPerCall pins the query
@@ -296,6 +314,7 @@ func TestBrokerScopedReservations_OneReservationQueryPerCall(t *testing.T) {
 		assert.Equal(t, 2, countByScope, "one aggregate call each for max_agents_per_broker and max_agents_per_project")
 		assert.Equal(t, 0, perBrokerList)
 		assert.Equal(t, 0, counting.perProjectLists())
+		assert.Equal(t, 0, counting.ungroupedCounts())
 	})
 
 	t.Run("reconcile", func(t *testing.T) {
@@ -333,6 +352,7 @@ func TestBrokerScopedReservations_OneReservationQueryPerCall(t *testing.T) {
 		assert.Equal(t, 2, countByScope, "one aggregate call each for max_agents_per_broker and max_agents_per_project")
 		assert.Equal(t, 0, perBrokerList)
 		assert.Equal(t, 0, counting.perProjectLists(), "no per-project reservation list")
+		assert.Equal(t, 0, counting.ungroupedCounts(), "no per-project reservation count")
 
 		var resp usageSummaryResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))

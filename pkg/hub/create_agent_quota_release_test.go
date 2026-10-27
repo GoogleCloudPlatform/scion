@@ -64,6 +64,8 @@ func TestCreateAgent_ProjectLimitRefusal_ReleasesBrokerReservation(t *testing.T)
 		Count:     1,
 		Max:       1,
 	})
+	require.Equal(t, projectRefusalMessage(project.ID, 1, 1), wantMessage,
+		"quotaRefusal builds the documented project-limit message")
 	require.Equal(t, wantMessage, errResp.Error.Message,
 		"the refusal must come from the project limit, after the broker reservation succeeded")
 
