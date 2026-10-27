@@ -317,7 +317,7 @@ func TestSetAgentEffectiveConfig_UpdatedRaceRetries(t *testing.T) {
 	bump := func(t *testing.T, s *AgentStore, id string) time.Time {
 		uid, err := parseUUID(id)
 		require.NoError(t, err)
-		at := time.Now().Add(time.Duration(time.Now().UnixNano()%1000+1) * time.Millisecond).UTC()
+		at := time.Now().Add(time.Duration(time.Now().UnixNano()%1000+1) * time.Millisecond).UTC().Truncate(time.Microsecond)
 		require.NoError(t, s.client.Agent.UpdateOneID(uid).SetUpdated(at).Exec(ctx))
 		return at
 	}

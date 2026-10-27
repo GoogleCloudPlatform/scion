@@ -78,6 +78,8 @@ type lifecycleEventsRuntime struct {
 }
 
 // errLifecycleUnsupported reports a store without lifecycle support.
+//
+//nolint:unused // test hook: called only from pkg/hub tests
 var errLifecycleUnsupported = errors.New("lifecycle events: the store does not support the lifecycle observer")
 
 // SetLifecycleEventsSink sets the sink the lifecycle drainer delivers to
@@ -178,6 +180,8 @@ func (s *Server) setLifecycleStateLocked(state string) {
 // whatever the experiment says (the slice 1 hook). The experiment reconcile
 // leaves an observer installed this way alone. It returns the resulting
 // state.
+//
+//nolint:unused // test hook: called only from pkg/hub tests
 func (s *Server) installLifecycleObserver() (string, error) {
 	ls, ok := s.store.(lifecycleEventStore)
 	if !ok {
