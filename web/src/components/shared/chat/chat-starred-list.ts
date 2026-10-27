@@ -890,7 +890,6 @@ export class ScionChatStarredList extends LitElement {
             <sl-button
               size="small"
               ?loading=${this.loadingMore}
-              aria-disabled=${this.loading ? 'true' : 'false'}
               @click=${(): void => void this.loadMore()}
               >${this.moreError ? 'Retry loading more' : 'Load more'}</sl-button
             >

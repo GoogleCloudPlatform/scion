@@ -219,4 +219,33 @@ describe('opening a starred message from the header', () => {
     expect(refocus).toHaveBeenCalledTimes(2);
     expect(navigateTo).not.toHaveBeenCalled();
   });
+
+  it('the real refocus moves focus from the body to the star button, and leaves other focus alone', async () => {
+    const PageClass = customElements.get('scion-page-chat') as unknown as {
+      prototype: { refocusStarredTrigger(this: { shadowRoot: ShadowRoot | null }): void };
+    };
+    const refocus = PageClass.prototype.refocusStarredTrigger;
+    // A connected stand-in for the page's shadow tree, holding a real list.
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = host.attachShadow({ mode: 'open' });
+    const list = document.createElement('scion-chat-starred-list') as HTMLElement & {
+      conversationKey: string;
+      updateComplete: Promise<boolean>;
+    };
+    list.conversationKey = 'topic-a';
+    root.appendChild(list);
+    await list.updateComplete;
+    const trigger = list.shadowRoot!.querySelector<HTMLButtonElement>('button.trigger')!;
+
+    (document.activeElement as HTMLElement | null)?.blur();
+    refocus.call({ shadowRoot: root });
+    expect(list.shadowRoot!.activeElement).toBe(trigger);
+
+    const other = document.createElement('button');
+    document.body.appendChild(other);
+    other.focus();
+    refocus.call({ shadowRoot: root });
+    expect(document.activeElement).toBe(other);
+  });
 });

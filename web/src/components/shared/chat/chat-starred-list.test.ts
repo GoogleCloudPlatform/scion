@@ -343,8 +343,8 @@ describe('scion-chat-starred-list: final presentation', () => {
     // Still showing the rows while the reload runs, marked busy.
     expect(entries(el)).toHaveLength(40);
     expect(el.shadowRoot!.querySelector('ul')?.getAttribute('aria-busy')).toBe('true');
-    // Busy, but not disabled: a keyboard user on Load more keeps focus.
-    expect(slButton(el, 'Load more')?.getAttribute('aria-disabled')).toBe('true');
+    // Busy (announced by the list's aria-busy), but Load more is not disabled:
+    // a keyboard user on it keeps focus.
     expect(slButton(el, 'Load more')?.hasAttribute('disabled')).toBe(false);
 
     release(json({ items: [item(99), ...first, ...second].slice(0, 40), nextCursor: 'c3' }));
@@ -589,6 +589,8 @@ describe('scion-chat-starred-list: final presentation', () => {
     more.focus();
     fakeStateManager.dispatchEvent(new CustomEvent('chat-stars-updated'));
     await el.updateComplete;
+    // The reconcile really started (it is held open by the second request).
+    expect(el.shadowRoot!.querySelector('ul[aria-busy="true"]')).not.toBeNull();
     expect(el.shadowRoot!.activeElement).toBe(more);
     expect(more.hasAttribute('disabled')).toBe(false);
   });
