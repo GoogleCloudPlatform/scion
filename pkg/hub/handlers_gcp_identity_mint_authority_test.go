@@ -613,6 +613,7 @@ func TestGCPServiceAccountUse_DecisionCarriesParentProof(t *testing.T) {
 	assert.Contains(t, d.Reason, "parent proof: gcp_service_account.assign")
 	require.NotNil(t, d.parentProof)
 	assert.Equal(t, ParentProof{
+		Kind:                 ParentProofKindParentPermission,
 		Permission:           "gcp_service_account.assign",
 		SourcePrincipal:      ProvenancePrincipal{Kind: store.DelegationPrincipalUser, ID: assigner},
 		SourceCredentialKind: store.SourceCredentialSession,
