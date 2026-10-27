@@ -59,5 +59,6 @@ func (s *Server) checkRemovedStorageOverrides(checks map[string]string) {
 		return
 	}
 	checks[storageOverridesCheck] = "degraded: removed storage overrides are set; agents of the affected profiles are refused at start " +
-		"(see storage_override_errors in the admin server config, or the hub startup log)"
+		"(see storage_override_errors in the admin server config, or the hub startup log; " +
+		"stored settings clear on save, a settings-file fix clears when the hub restarts)"
 }
