@@ -1057,9 +1057,25 @@ func TestPastCapOpsDoNotGrowTheRegistry(t *testing.T) {
 		}
 	}
 	m.sites.mu.RLock()
-	n := len(m.sites.ops)
+	n, full := len(m.sites.ops), m.sites.full
 	m.sites.mu.RUnlock()
-	if n != maxOps {
-		t.Fatalf("registry holds %d ops, want %d", n, maxOps)
+	if n != maxOps || !full {
+		t.Fatalf("registry holds %d ops (full=%v), want %d and full", n, full, maxOps)
+	}
+	// The past-cap fast path needs only the read lock: it must return while
+	// another reader holds it (the exclusive-lock path would block here).
+	m.sites.mu.RLock()
+	done := make(chan string, 1)
+	go func() { done <- m.sites.op(pcs[:1]) }()
+	select {
+	case got := <-done:
+		m.sites.mu.RUnlock()
+		if got != OpOther {
+			t.Fatalf("op = %q, want %q", got, OpOther)
+		}
+	case <-time.After(2 * time.Second):
+		m.sites.mu.RUnlock()
+		<-done
+		t.Fatal("past-cap op resolution waited for the exclusive lock")
 	}
 }
