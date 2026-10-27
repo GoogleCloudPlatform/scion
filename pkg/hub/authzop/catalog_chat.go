@@ -949,6 +949,27 @@ var chatOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
+		ID:          "chat.conversation.history.starred",
+		Domain:      "chat",
+		Description: "Read only the caller's starred messages of one conversation (?starred=true), in history order with a sealed cursor bound to the conversation, the caller and the filter. Needs the conversation's normal read access (project:read on a thread's project, participation in a DM) and inbox:read: a token needs inbox:read for the thread's or peer agent's project, or a hub boundary for a DM between users. An around target must itself be starred. 404 while web.chat_starred_messages is off, never unfiltered history",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/messages", Method: "GET", Variant: "starred"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "conversation-project",
+		BasePermission:   "inbox.read",
+		Effects:          []SecurityEffect{EffectReadOne, EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestChatStarredHistory_TokenSelectors"},
+			{Package: "pkg/hub", Function: "TestChatStarredHistory_GateAndValidation"},
+		},
+		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
 		ID:          "chat.star.remove",
 		Domain:      "chat",
 		Description: "Remove the caller's own star of a message; always 204. No message or conversation lookup; a project token removes only a star whose stored project is inside its boundary. 404 while web.chat_starred_messages is off",

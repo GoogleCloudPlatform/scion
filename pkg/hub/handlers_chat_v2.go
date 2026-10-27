@@ -2951,7 +2951,13 @@ func hasAgentReplyAfter(ctx context.Context, s store.Store, threadID string, aft
 //   - limit: page size (default 50, max 200)
 //   - cursor: keyset pagination cursor from the previous page's nextCursor (optional)
 //   - around: message ID to center the page around (optional)
+//   - starred: "true" lists only the caller's starred messages
+//     (handleStarredHistory); any other value is a 400
 func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Request, key string) {
+	if _, starred := r.URL.Query()["starred"]; starred {
+		s.handleStarredHistory(w, r, key)
+		return
+	}
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {
 		Forbidden(w)
@@ -3118,6 +3124,16 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	writeJSON(w, http.StatusOK, s.chatHistoryPage(ctx, wcs, key, historyConvID, result, canPost))
+}
+
+// chatHistoryPage enriches one page of conversation history for the
+// response: attachment metadata, the extension data (reply-to, edited,
+// deleted; a deleted message's text is stripped), reply previews of this
+// conversation's messages and the viewer's artifact references. Ordinary
+// history and the starred-only variant (handleStarredHistory) share it,
+// so the filtered page carries everything a normal page does.
+func (s *Server) chatHistoryPage(ctx context.Context, wcs WebChatStore, key, historyConvID string, result *store.ListResult[store.Message], canPost *bool) chatHistoryResponse {
 	if result.Items == nil {
 		result.Items = []store.Message{}
 	}
@@ -3251,7 +3267,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	writeJSON(w, http.StatusOK, chatHistoryResponse{
+	return chatHistoryResponse{
 		Messages:                    result.Items,
 		NextCursor:                  result.NextCursor,
 		TotalCount:                  result.TotalCount,
@@ -3261,7 +3277,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		MessageArtifactsUnavailable: messageArtifactsUnavailable,
 		MessageExtensions:           messageExtensions,
 		ReplyPreviews:               replyPreviews,
-	})
+	}
 }
 
 // ---------------------------------------------------------------------------

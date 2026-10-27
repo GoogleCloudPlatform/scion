@@ -293,6 +293,68 @@ SELECT st.message_id, st.conversation_key, COALESCE(st.project_id, ''),
 	return out, nil
 }
 
+func (s *pgWebChatStore) ListStarredHistory(ctx context.Context, q StarHistoryQuery) (StarHistoryPage, error) {
+	if !validStarHistoryQuery(q) {
+		return StarHistoryPage{}, fmt.Errorf("webchat store: list starred history: %w", store.ErrInvalidInput)
+	}
+	messagesTable, err := s.table(ctx, "messages")
+	if err != nil {
+		return StarHistoryPage{}, err
+	}
+	a := &pgArgs{}
+	conds := []string{
+		"st.user_id = " + a.add(q.UserID),
+		"st.conversation_key = " + a.add(q.Selector.ConversationKey),
+		pgStarSelectorSQL(a, q.Selector),
+		"NOT EXISTS (SELECT 1 FROM webchat_message_ext e WHERE e.message_id = st.message_id AND e.deleted_at IS NOT NULL)",
+	}
+	from := `
+  FROM webchat_message_star st
+  JOIN ` + messagesTable + ` m ON m.id = st.message_id::uuid
+ WHERE `
+
+	page := StarHistoryPage{Items: []MessagePosition{}}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*)`+from+strings.Join(conds, " AND "), a.vals...).Scan(&page.Total); err != nil {
+		return StarHistoryPage{}, fmt.Errorf("webchat store: list starred history: count: %w", err)
+	}
+
+	if !q.Before.IsZero() {
+		conds = append(conds, "m.created < "+a.add(q.Before.UTC())+"::timestamptz")
+	}
+	if !q.After.IsZero() {
+		conds = append(conds, "m.created > "+a.add(q.After.UTC())+"::timestamptz")
+	}
+	cmp, dir := "<", "DESC"
+	if q.Ascending {
+		cmp, dir = ">", "ASC"
+	}
+	if q.Cursor != nil {
+		at := a.add(q.Cursor.Created.UTC())
+		id := a.add(strings.ToLower(q.Cursor.ID))
+		conds = append(conds, "(m.created "+cmp+" "+at+"::timestamptz OR (m.created = "+at+"::timestamptz AND m.id "+cmp+" "+id+"::uuid))")
+	}
+	limit := a.add(q.Limit + 1)
+	rows, err := s.db.QueryContext(ctx, `SELECT m.id::text, m.created`+from+strings.Join(conds, " AND ")+`
+ ORDER BY m.created `+dir+`, m.id `+dir+`
+ LIMIT `+limit, a.vals...)
+	if err != nil {
+		return StarHistoryPage{}, fmt.Errorf("webchat store: list starred history: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var p MessagePosition
+		if err := rows.Scan(&p.ID, &p.Created); err != nil {
+			return StarHistoryPage{}, fmt.Errorf("webchat store: list starred history: %w", err)
+		}
+		p.Created = p.Created.UTC()
+		page.Items = append(page.Items, p)
+	}
+	if err := rows.Err(); err != nil {
+		return StarHistoryPage{}, fmt.Errorf("webchat store: list starred history: %w", err)
+	}
+	return trimStarHistoryPage(page, q.Limit), nil
+}
+
 // ---------------------------------------------------------------------------
 // Postgres lifecycle
 // ---------------------------------------------------------------------------

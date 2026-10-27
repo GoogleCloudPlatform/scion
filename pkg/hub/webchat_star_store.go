@@ -119,6 +119,57 @@ func (ref StarredMessageRef) matches(sel StarSelector) bool {
 	return ref.ThreadID == sel.ThreadID
 }
 
+// MessagePosition is a keyset position in history order: a message's
+// creation instant and its canonical lowercase ID.
+type MessagePosition struct {
+	Created time.Time
+	ID      string
+}
+
+// StarHistoryQuery selects one page of a user's starred messages in one
+// conversation, in history order (the starred-only center).
+type StarHistoryQuery struct {
+	UserID   string
+	Selector StarSelector
+	// Cursor resumes strictly past this position in the page's order;
+	// nil starts at the newest (or, ascending, the oldest) message.
+	Cursor *MessagePosition
+	// Before and After, when set, keep only messages created strictly
+	// before or after the instant (the two halves of an around page).
+	Before time.Time
+	After  time.Time
+	// Ascending orders oldest first; the default is newest first.
+	Ascending bool
+	// Limit is the page size (at least 1).
+	Limit int
+}
+
+// StarHistoryPage is one page of starred history. Items are in the
+// query's order; Next is the position to resume after when more may
+// remain, nil at the end.
+type StarHistoryPage struct {
+	Items []MessagePosition
+	Next  *MessagePosition
+	Total int
+}
+
+// trimStarHistoryPage cuts a page fetched with limit+1 rows to limit and
+// sets Next when the extra row showed that more remain.
+func trimStarHistoryPage(page StarHistoryPage, limit int) StarHistoryPage {
+	if len(page.Items) > limit {
+		page.Items = page.Items[:limit]
+		last := page.Items[limit-1]
+		page.Next = &last
+	}
+	return page
+}
+
+// validStarHistoryQuery reports whether q names a user, a conversation
+// and a page size.
+func validStarHistoryQuery(q StarHistoryQuery) bool {
+	return q.UserID != "" && q.Selector.ConversationKey != "" && q.Limit >= 1
+}
+
 // MessageStarStore persists starred messages. Both webchat store dialects
 // implement it; obtain it with messageStarStoreFrom. Every method takes
 // the owner's user ID and matches it, so one user can never read or
@@ -143,6 +194,12 @@ type MessageStarStore interface {
 	// ListStarredMessageIDs returns which of messageIDs the user starred
 	// and are live (not deleted), with their routing fields.
 	ListStarredMessageIDs(ctx context.Context, userID string, messageIDs []string) ([]StarredMessageRef, error)
+	// ListStarredHistory returns one page of the user's starred messages in
+	// the selector's conversation, in history order: the live messages of
+	// its history scope that the user starred, (created, id) newest first,
+	// or oldest first when q.Ascending. Total counts every live starred
+	// message of the conversation, whatever the bounds.
+	ListStarredHistory(ctx context.Context, q StarHistoryQuery) (StarHistoryPage, error)
 
 	// Lifecycle. These are not scoped to one owner: they remove or repair
 	// the associations of a message, conversation, user or project that
@@ -497,6 +554,84 @@ SELECT st.message_id, st.conversation_key, COALESCE(st.project_id, ''),
 		return nil, fmt.Errorf("webchat store: list starred message ids: %w", err)
 	}
 	return out, nil
+}
+
+// sqliteMessageCreatedExpr is messages.created on SQLite (Go's default time
+// text in UTC) without the monotonic-clock suffix (" m=+0.03") a row
+// written before the UTC store boundary may still carry; the entadapter's
+// timeColumnExpr form. Comparisons and order use it so such a row sorts
+// at its instant.
+const sqliteMessageCreatedExpr = `(CASE WHEN instr(m.created, ' m=') > 0 THEN substr(m.created, 1, instr(m.created, ' m=') - 1) ELSE m.created END)`
+
+// sqliteMessageTimeLayout is the layout of that text.
+const sqliteMessageTimeLayout = "2006-01-02 15:04:05.999999999 -0700 MST"
+
+// sqliteMessageTime is the text an instant compares equal to in
+// sqliteMessageCreatedExpr (the entadapter's timeArg on SQLite).
+func sqliteMessageTime(t time.Time) string {
+	return t.UTC().String()
+}
+
+func (s *sqliteWebChatStore) ListStarredHistory(ctx context.Context, q StarHistoryQuery) (StarHistoryPage, error) {
+	if !validStarHistoryQuery(q) {
+		return StarHistoryPage{}, fmt.Errorf("webchat store: list starred history: %w", store.ErrInvalidInput)
+	}
+	selCond, selArgs := sqliteStarSelectorSQL(q.Selector)
+	base := []string{"st.user_id = ?", "st.conversation_key = ?", selCond,
+		"NOT EXISTS (SELECT 1 FROM webchat_message_ext e WHERE e.message_id = st.message_id AND e.deleted_at IS NOT NULL)"}
+	baseArgs := append([]any{q.UserID, q.Selector.ConversationKey}, selArgs...)
+	from := `
+  FROM webchat_message_star st
+  JOIN messages m ON m.id = st.message_id
+ WHERE `
+
+	page := StarHistoryPage{Items: []MessagePosition{}}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*)`+from+strings.Join(base, " AND "), baseArgs...).Scan(&page.Total); err != nil {
+		return StarHistoryPage{}, fmt.Errorf("webchat store: list starred history: count: %w", err)
+	}
+
+	conds := append([]string{}, base...)
+	args := append([]any{}, baseArgs...)
+	if !q.Before.IsZero() {
+		conds = append(conds, sqliteMessageCreatedExpr+" < ?")
+		args = append(args, sqliteMessageTime(q.Before))
+	}
+	if !q.After.IsZero() {
+		conds = append(conds, sqliteMessageCreatedExpr+" > ?")
+		args = append(args, sqliteMessageTime(q.After))
+	}
+	cmp, dir := "<", "DESC"
+	if q.Ascending {
+		cmp, dir = ">", "ASC"
+	}
+	if q.Cursor != nil {
+		at := sqliteMessageTime(q.Cursor.Created)
+		conds = append(conds, "("+sqliteMessageCreatedExpr+" "+cmp+" ? OR ("+sqliteMessageCreatedExpr+" = ? AND m.id "+cmp+" ?))")
+		args = append(args, at, at, strings.ToLower(q.Cursor.ID))
+	}
+	args = append(args, q.Limit+1)
+	rows, err := s.db.QueryContext(ctx, `SELECT m.id, `+sqliteMessageCreatedExpr+from+strings.Join(conds, " AND ")+`
+ ORDER BY `+sqliteMessageCreatedExpr+` `+dir+`, m.id `+dir+`
+ LIMIT ?`, args...)
+	if err != nil {
+		return StarHistoryPage{}, fmt.Errorf("webchat store: list starred history: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id, created string
+		if err := rows.Scan(&id, &created); err != nil {
+			return StarHistoryPage{}, fmt.Errorf("webchat store: list starred history: %w", err)
+		}
+		t, err := time.Parse(sqliteMessageTimeLayout, created)
+		if err != nil {
+			return StarHistoryPage{}, fmt.Errorf("webchat store: list starred history: message time: %w", err)
+		}
+		page.Items = append(page.Items, MessagePosition{Created: t.UTC(), ID: id})
+	}
+	if err := rows.Err(); err != nil {
+		return StarHistoryPage{}, fmt.Errorf("webchat store: list starred history: %w", err)
+	}
+	return trimStarHistoryPage(page, q.Limit), nil
 }
 
 // ---------------------------------------------------------------------------
