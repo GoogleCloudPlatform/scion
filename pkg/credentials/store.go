@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
 const (
@@ -99,7 +101,8 @@ func Store(hubURL string, token *TokenResponse) error {
 
 	path := credentialsPath()
 
-	creds, _ := loadFile(path)
+	creds, err := loadFile(path)
+	warnReplacingRefused(path, err)
 	if creds == nil {
 		creds = &Credentials{Version: 1, Hubs: make(map[string]*HubCredentials)}
 	}
@@ -132,6 +135,7 @@ func Load(hubURL string) (*HubCredentials, error) {
 	path := credentialsPath()
 	creds, err := loadFile(path)
 	if err != nil {
+		reportRefusal(err)
 		return nil, err
 	}
 
@@ -256,11 +260,13 @@ var credentialsPath = func() string {
 	return filepath.Join(scionDir, CredentialsFile)
 }
 
-// loadFile reads and parses the credentials file.
+// loadFile reads and parses the credentials file. On Windows the file is
+// read through privatefs and refused unless only the current user (and
+// SYSTEM and Administrators) can access it; see readCredentialsFile.
 func loadFile(path string) (*Credentials, error) {
-	data, err := os.ReadFile(path)
+	data, err := readCredentialsFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, ErrNotAuthenticated
 		}
 		return nil, fmt.Errorf("failed to read credentials file: %w", err)
@@ -278,20 +284,25 @@ func loadFile(path string) (*Credentials, error) {
 	return &creds, nil
 }
 
-// saveFile writes credentials to the file with proper permissions.
+// saveFile writes credentials to the file as a private file: on unix mode
+// 0600 in a directory created 0700 if missing (as before); on Windows an
+// owner-only ACL set when the file is created, written by atomic replace,
+// so an existing too-open file is replaced by a private one.
 func saveFile(path string, creds *Credentials) error {
-	// Ensure directory exists
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	// The directory (normally ~/.scion) is the tree's anchor; missing
+	// components are created private.
+	tree, err := privatefs.OpenTree(filepath.Dir(path), privatefs.TreeOptions{CreateAnchor: true})
+	if err != nil {
 		return fmt.Errorf("failed to create credentials directory: %w", err)
 	}
+	defer func() { _ = tree.Close() }()
 
 	data, err := json.MarshalIndent(creds, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal credentials: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, FileMode); err != nil {
+	if err := tree.WriteFile(filepath.Base(path), data, privatefs.ForMode(FileMode)); err != nil {
 		return fmt.Errorf("failed to write credentials file: %w", err)
 	}
 

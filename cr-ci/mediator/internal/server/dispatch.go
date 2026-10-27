@@ -165,7 +165,7 @@ func (s *Server) dispatchLocked(ctx context.Context, v *view, repo githubapp.Rep
 		return fail("issue_claim", err)
 	}
 	ref, err := s.o.Launcher.Launch(ctx, launcher.LaunchSpec{
-		JobID: serve, RunID: runID, Repo: repo.String(), RunnerName: name, ClaimToken: token,
+		JobID: serve, RunID: runID, Repo: repo.String(), ServedRepos: s.servedRepos(repo), RunnerName: name, ClaimToken: token,
 	})
 	if err != nil {
 		s.o.Claims.DropJob(nameID)

@@ -91,7 +91,7 @@ func newStreamTestServer(t *testing.T, override func(*WebServerConfig)) (*WebSer
 	ws.SetEventPublisher(pub)
 	ws.SetAuthzService(NewAuthzService(mockSuperAdminStore(DevUserID), nil))
 	t.Cleanup(pub.Close)
-	ts := httptest.NewServer(ws.Handler())
+	ts := httptest.NewServer(devSignedIn(t, ws))
 	t.Cleanup(ts.Close)
 	return ws, pub, ts, logs
 }

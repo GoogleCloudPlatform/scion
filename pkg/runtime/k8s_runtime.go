@@ -25,12 +25,10 @@ import (
 	"maps"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -44,6 +42,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/termresize"
 	"github.com/google/uuid"
 	"golang.org/x/term"
 	corev1 "k8s.io/api/core/v1"
@@ -171,6 +170,14 @@ func (r *KubernetesRuntime) isGKEScheduling() bool {
 
 func (r *KubernetesRuntime) Name() string {
 	return "kubernetes"
+}
+
+// CopiesAgentHome implements CopiedAgentHomeRuntime. The pod never mounts the
+// host's agent home: Run fills the pod home (local or on the NFS export) by
+// exec-based sync from RunConfig.HomeDir, and the harness starts only after
+// the startup-gate touch, the last step of Run.
+func (r *KubernetesRuntime) CopiesAgentHome() bool {
+	return true
 }
 
 func (r *KubernetesRuntime) ExecUser() string {
@@ -3185,6 +3192,21 @@ func podDisruptionReason(pod *corev1.Pod) string {
 	return ""
 }
 
+// podDisruptionStartError returns the pod_disrupted *LaunchFailure in step
+// for a pod the cluster preempted or evicted (reason, from
+// podDisruptionReason) while the start waited for it to become ready. The
+// text says which of the two happened and gives the Kubernetes reason, never
+// the pod's or the condition's message. A non-nil cause (the Kubernetes
+// NotFound error, or the terminal-phase error) is wrapped after the text, so
+// its text and its error chain are kept for callers that match on them.
+func podDisruptionStartError(podName, step, reason string, cause error) error {
+	text := fmt.Sprintf("pod %q was %s while starting (%s) — start the agent again", podName, PodDisruptionKind(reason), reason)
+	if cause == nil {
+		return newLaunchFailure(api.LaunchCodePodDisrupted, step, reason, errors.New(text))
+	}
+	return newLaunchFailure(api.LaunchCodePodDisrupted, step, reason, fmt.Errorf("%s: %w", text, cause))
+}
+
 // podDisruptedError returns a pod_disrupted *LaunchFailure in step when the
 // pod is being deleted, or nil. Only the deletion timestamp makes it
 // terminal: Kubernetes can clear a DisruptionTarget condition whose
@@ -3195,8 +3217,7 @@ func podDisruptedError(pod *corev1.Pod, podName, step string) error {
 		return nil
 	}
 	if reason := podDisruptionReason(pod); reason != "" {
-		return newLaunchFailure(api.LaunchCodePodDisrupted, step, reason,
-			fmt.Errorf("pod %q was disrupted while starting (%s) — the cluster preempted or evicted it; start the agent again", podName, reason))
+		return podDisruptionStartError(podName, step, reason, nil)
 	}
 	return newLaunchFailure(api.LaunchCodePodDisrupted, step, "",
 		fmt.Errorf("pod %q was deleted while starting — if you did not stop it, start the agent again", podName))
@@ -3339,6 +3360,10 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 	lastStatus := ""
 	lastStep := ""
 	autopilotWaitLogged := false
+	// lastDisruption is the disruption reason (podDisruptionReason) of the
+	// last pod read, so a pod that is gone by the next poll is still
+	// reported as preempted or evicted.
+	lastDisruption := ""
 
 	fmt.Printf("Waiting for pod '%s' to be ready...\n", podName)
 	for {
@@ -3362,10 +3387,14 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 				if k8serrors.IsNotFound(err) && parentCtx.Err() == nil {
 					// The pod was removed (preempted, evicted or deleted)
 					// before it became ready.
+					if lastDisruption != "" {
+						return podDisruptionStartError(podName, failStep(lastStep), lastDisruption, err)
+					}
 					return newLaunchFailure(api.LaunchCodePodDisrupted, failStep(lastStep), "", err)
 				}
 				return err
 			}
+			lastDisruption = podDisruptionReason(pod)
 
 			if step := podLaunchStep(pod, r.isGKEScheduling()); step != lastStep {
 				lastStep = step
@@ -3374,7 +3403,7 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 
 			// A pod being deleted never becomes usable: fail now rather than
 			// wait for it to disappear. A pod already in a terminal phase
-			// keeps its error text below.
+			// is reported below.
 			if pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed {
 				if err := podDisruptedError(pod, podName, failStep(lastStep)); err != nil {
 					runtimeLog().Error("Pod disrupted while starting", "pod", podName, "reason", podDisruptionReason(pod), "phase", "wait-schedule")
@@ -3488,8 +3517,8 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 				if containerStatus != nil && containerStatus.State.Terminated != nil {
 					err = fmt.Errorf("pod failed to start: %s - %s", containerStatus.State.Terminated.Reason, containerStatus.State.Terminated.Message)
 				}
-				if reason := podDisruptionReason(pod); reason != "" {
-					return newLaunchFailure(api.LaunchCodePodDisrupted, failStep(lastStep), reason, err)
+				if lastDisruption != "" {
+					return podDisruptionStartError(podName, failStep(lastStep), lastDisruption, err)
 				}
 				return err
 			}
@@ -3812,15 +3841,31 @@ func k8sDisruptionExitReason(pod *corev1.Pod) string {
 		if cond.Type != corev1.DisruptionTarget || cond.Status != corev1.ConditionTrue {
 			continue
 		}
-		if cond.Reason == corev1.PodReasonPreemptionByScheduler {
-			return string(state.ExitReasonPreempted)
-		}
-		// TerminationByKubelet, EvictionByEvictionAPI, or any other
-		// DisruptionTarget reason (for example a taint-manager or pod-GC
-		// removal) is reported as evicted.
-		return string(state.ExitReasonEvicted)
+		return string(disruptionExitReason(cond.Reason))
 	}
 	return ""
+}
+
+// disruptionExitReason maps a Kubernetes disruption reason to preempted or
+// evicted: PreemptionByScheduler is a preemption; TerminationByKubelet,
+// EvictionByEvictionAPI, the pod status reason Evicted, or any other
+// DisruptionTarget reason (for example a taint-manager or pod-GC removal)
+// is reported as evicted.
+func disruptionExitReason(reason string) state.ExitReason {
+	if reason == corev1.PodReasonPreemptionByScheduler {
+		return state.ExitReasonPreempted
+	}
+	return state.ExitReasonEvicted
+}
+
+// PodDisruptionKind returns "preempted" or "evicted" for the Kubernetes
+// disruption reason a pod_disrupted LaunchFailure carries in Reason, or ""
+// when reason is empty (the pod was deleted without a disruption signal).
+func PodDisruptionKind(reason string) string {
+	if reason == "" {
+		return ""
+	}
+	return string(disruptionExitReason(reason))
 }
 
 // k8sPodWorkspaceRecoverable reports whether a later start of the agent can
@@ -4138,12 +4183,12 @@ func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 	}
 
 	// Monitor for resize signals (SIGWINCH)
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGWINCH)
+	resized, stopResize := termresize.Notify(attachCtx, fd)
+	defer stopResize()
 	go func() {
 		for {
 			select {
-			case <-sigChan:
+			case <-resized:
 				if w, h, err := term.GetSize(fd); err == nil {
 					sizeQueue.resizeChan <- remotecommand.TerminalSize{Width: uint16(w), Height: uint16(h)}
 				}
@@ -4152,7 +4197,6 @@ func (r *KubernetesRuntime) Attach(ctx context.Context, id string) error {
 			}
 		}
 	}()
-	defer signal.Stop(sigChan)
 
 	// Trigger a "resize dance" to force TUI redraw. Some TUIs only redraw
 	// when they receive a SIGWINCH where the dimensions actually change.

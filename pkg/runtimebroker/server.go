@@ -55,6 +55,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -555,7 +556,10 @@ type Server struct {
 	nfsStartupReconcileDone chan struct{}
 	nfsReconcileStopped     chan struct{}
 	nfsReconcileOnce        sync.Once
-	nfsReconcileCancel      context.CancelFunc
+	// sharedDirsMigrateOnce runs the node-local shared-dir migration hook
+	// once per process (startSharedDirsMigrationHook).
+	sharedDirsMigrateOnce sync.Once
+	nfsReconcileCancel    context.CancelFunc
 	// nfsReconcileInterval overrides DefaultNFSReconcileInterval (tests).
 	nfsReconcileInterval time.Duration
 
@@ -611,7 +615,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime, rec config.Run
 		runtimeRecord:     rec,
 		mux:               http.NewServeMux(),
 		startTime:         time.Now(),
-		version:           "0.1.0", // TODO: Get from build info
+		version:           version.Short(),
 		hubConnections:    make(map[string]*HubConnection),
 		dispatchAttempts:  make(map[string]*dispatchAttempt),
 		auxiliaryRuntimes: make(map[string]auxiliaryRuntime),
@@ -1575,6 +1579,10 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 	// reconciled.
 	s.startNFSReconcileLoop(ctx)
 
+	// Move shared dirs this broker kept node-local onto the shared tree
+	// its Layout now places them on (background, once per process).
+	s.startSharedDirsMigrationHook(ctx)
+
 	// Start all hub connections' services. Start is called without
 	// s.hubMu held: it takes the connection's lifecycle lock and, inside,
 	// s.hubMu itself.
@@ -1835,6 +1843,10 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 			}
 		}
 	}
+
+	// Hub-managed projects on shared project storage that this broker has
+	// agent state for (sharedProjectsWithLocalAgents).
+	projectPaths = append(projectPaths, s.sharedProjectsWithLocalAgents()...)
 
 	// Current project dir
 	if pd, _ := config.GetResolvedProjectDir(""); pd != "" {

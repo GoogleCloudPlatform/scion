@@ -41,6 +41,7 @@ import { chatConversationPath } from './chat-routes.js';
 import { canShowPushNotification } from './push-preference.js';
 import { stateManager } from './state.js';
 import { playChimeThrottled } from '../utils/audio.js';
+import { ATTACHMENT_ONLY_LABEL } from '../components/shared/chat/message-text.js';
 
 /** The fields of a chat message SSE payload this module reads. */
 export interface ChatMessagePayload {
@@ -177,9 +178,14 @@ export function chatMessageTitle(n: ChatMessagePayload, info: ConversationInfo |
   return thread ? `${sender} in #${thread}` : `${sender} posted in a thread`;
 }
 
-/** The popup body: the message text, shortened. */
+/**
+ * The popup body: the message text, shortened. A message without text is
+ * an attachment-only message (ptone/scion#6146): its body is the
+ * attachment label.
+ */
 export function chatMessageBody(n: ChatMessagePayload): string {
   const text = (n.msg ?? '').trim();
+  if (!text) return ATTACHMENT_ONLY_LABEL;
   return text.length > BODY_MAX_CHARS ? `${text.slice(0, BODY_MAX_CHARS - 1)}…` : text;
 }
 

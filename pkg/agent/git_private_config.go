@@ -16,12 +16,10 @@ package agent
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -56,11 +54,6 @@ func seedPrivateGitConfig(baseConfigPath, agentDir, branch string) (string, erro
 	if agentDir == "" {
 		return "", fmt.Errorf("seed private git config: empty agent dir")
 	}
-	gitDir := filepath.Join(agentDir, "git")
-	if err := os.MkdirAll(gitDir, 0700); err != nil {
-		return "", fmt.Errorf("seed private git config: %w", err)
-	}
-
 	raw, err := readBaseGitConfig(baseConfigPath)
 	if err != nil {
 		return "", fmt.Errorf("seed private git config: %w", err)
@@ -103,6 +96,12 @@ func seedPrivateGitConfig(baseConfigPath, agentDir, branch string) (string, erro
 	// preferences go in the agent's writable global git config in the agent home.
 	redacted = append(redacted, privateConfigUpstreamSeed(branch)...)
 
+	// Create the git dir only once the base config has been read, so a
+	// refused read (for example ErrUnsupported off unix) creates nothing.
+	gitDir := filepath.Join(agentDir, "git")
+	if err := os.MkdirAll(gitDir, 0700); err != nil {
+		return "", fmt.Errorf("seed private git config: %w", err)
+	}
 	tmp, err := os.CreateTemp(gitDir, "config.*.tmp") // O_EXCL
 	if err != nil {
 		return "", fmt.Errorf("seed private git config: temp: %w", err)
@@ -174,36 +173,4 @@ func privateConfigUpstreamSeed(branch string) []byte {
 		}
 	}
 	return []byte(b.String())
-}
-
-// readBaseGitConfig reads up to maxPrivateGitConfigSize bytes of the base
-// .git/config. A missing file is not an error (returns empty); a file larger
-// than the cap is.
-func readBaseGitConfig(path string) ([]byte, error) {
-	// Open with O_NOFOLLOW so a symlink at the base .git/config path cannot
-	// redirect the broker's read elsewhere, and confirm via fstat that the opened
-	// file is a regular file (not a FIFO/device). A missing file is not an error.
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer func() { _ = f.Close() }() // read-only; a close error cannot affect the bytes already read
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("base git config %s is not a regular file", path)
-	}
-	raw, err := io.ReadAll(io.LimitReader(f, maxPrivateGitConfigSize+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(raw) > maxPrivateGitConfigSize {
-		return nil, fmt.Errorf("base git config %s exceeds %d bytes", path, maxPrivateGitConfigSize)
-	}
-	return raw, nil
 }

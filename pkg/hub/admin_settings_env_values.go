@@ -198,8 +198,10 @@ func serverConfigResponseFromSettings(vs *config.VersionedSettings) ServerConfig
 }
 
 // hideNeverShownServerKeys clears, in a GET view, the server keys the GET
-// never returns: server.hub.class and server.hub.test_identities are never
-// API-writable, so a client that echoes the body back must not send them;
+// never returns: server.hub.class, server.hub.test_identities and
+// server.hub.gcp_project_id (the hub's GCP project, read once at startup;
+// ptone/scion#4942) are never API-writable, so a client that echoes the body
+// back must not send them;
 // nor is the relay-peer secret ever returned, nor the proxy driver settings
 // (WS2), nor the server keyring file path and its world-readable override
 // (ptone/scion#1530). Both tiers' GET builders and the env_values view use
@@ -211,6 +213,7 @@ func hideNeverShownServerKeys(srv *config.V1ServerConfig) {
 	if srv.Hub != nil {
 		srv.Hub.HubClass = ""
 		srv.Hub.TestIdentities = nil
+		srv.Hub.GCPProjectID = ""
 		if c := srv.Hub.Conduit; c != nil {
 			c.PeerSecret = ""
 		}

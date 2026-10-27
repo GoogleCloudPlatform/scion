@@ -15,7 +15,10 @@
 package hubclient
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -114,6 +117,35 @@ func TestBrokerHeartbeat_MarshalJSON(t *testing.T) {
 	}
 }
 
+// TestBrokerHeartbeat_Version pins the heartbeat version field: sent as
+// "version" when set, omitted when empty, so an older Hub sees no change
+// (ptone/scion#5972).
+func TestBrokerHeartbeat_Version(t *testing.T) {
+	data, err := json.Marshal(BrokerHeartbeat{Status: "online", Version: "1344d136"})
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if m["version"] != "1344d136" {
+		t.Errorf("version = %v, want 1344d136", m["version"])
+	}
+
+	data, err = json.Marshal(BrokerHeartbeat{Status: "online"})
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	m = nil
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if v, ok := m["version"]; ok {
+		t.Errorf("an empty version must be omitted, got %v", v)
+	}
+}
+
 func TestBrokerHeartbeat_UnmarshalJSON(t *testing.T) {
 	data := `{"status":"online","projects":[{"projectId":"p1","agentCount":2}]}`
 	var hb BrokerHeartbeat
@@ -171,5 +203,52 @@ func TestProjectHeartbeat_UnmarshalJSON_GroveIdKeyIgnored(t *testing.T) {
 	}
 	if ph.ProjectID != "" {
 		t.Errorf("Expected empty project ID (legacy 'groveId' key must not be honored), got '%s'", ph.ProjectID)
+	}
+}
+
+// TestRuntimeBrokers_ListAndGetVersionStatus pins that the client decodes
+// the list's hubVersion and each broker's versionStatus, and that a
+// response from an older Hub (neither field) decodes to empty values.
+func TestRuntimeBrokers_ListAndGetVersionStatus(t *testing.T) {
+	newer := true
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		switch {
+		case r.URL.Path == "/api/v1/runtime-brokers" && newer:
+			_, _ = w.Write([]byte(`{"brokers":[{"id":"b1","version":"v1.2.0","versionStatus":"mismatch"}],"hubVersion":"v1.3.0"}`))
+		case r.URL.Path == "/api/v1/runtime-brokers":
+			_, _ = w.Write([]byte(`{"brokers":[{"id":"b1","version":"v1.2.0"}]}`))
+		default:
+			_, _ = w.Write([]byte(`{"id":"b1","version":"v1.3.0","versionStatus":"match"}`))
+		}
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	list, err := client.RuntimeBrokers().List(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if list.HubVersion != "v1.3.0" || len(list.Brokers) != 1 || list.Brokers[0].VersionStatus != "mismatch" {
+		t.Errorf("List = hubVersion %q, brokers %+v; want v1.3.0 and one mismatch", list.HubVersion, list.Brokers)
+	}
+	got, err := client.RuntimeBrokers().Get(context.Background(), "b1")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if got.VersionStatus != "match" {
+		t.Errorf("Get VersionStatus = %q, want match", got.VersionStatus)
+	}
+
+	newer = false
+	list, err = client.RuntimeBrokers().List(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("List (older Hub) failed: %v", err)
+	}
+	if list.HubVersion != "" || list.Brokers[0].VersionStatus != "" {
+		t.Errorf("older Hub: hubVersion %q, versionStatus %q; want both empty", list.HubVersion, list.Brokers[0].VersionStatus)
 	}
 }

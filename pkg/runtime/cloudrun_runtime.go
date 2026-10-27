@@ -43,6 +43,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/startuplistener"
@@ -657,7 +658,8 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 	if err != nil {
 		return nil, err
 	}
-	paths, err := cloudRunNFSExportPaths(export, cfg.NFSSubPathRoot, cfg.ProjectID, agentID)
+	slug := cfg.Labels["scion.name"]
+	paths, err := cloudRunNFSExportPaths(export, cfg.NFSSubPathRoot, cfg.ProjectID, slug, agentID)
 	if err != nil {
 		return nil, err
 	}
@@ -667,7 +669,7 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 			"mount the Filestore export into the Hub/Broker and pass the resolved host path for %s, "+
 			"or run an external provisioner before creating Cloud Run instances", paths.workspaceExportPath)
 	}
-	hostPaths, err := cloudRunNFSHostPaths(cfg.Workspace, cfg.NFSSubPathRoot, cfg.ProjectID, agentID)
+	hostPaths, err := cloudRunNFSHostPaths(cfg.Workspace, cfg.NFSSubPathRoot, cfg.ProjectID, slug, agentID)
 	if err != nil {
 		return nil, err
 	}
@@ -677,6 +679,9 @@ func (r *CloudRunRuntime) provisionCloudRunNFS(ctx context.Context, cfg RunConfi
 	paths.secretsHostPath = hostPaths.secretsHostPath
 
 	if err := requireNFSFilesystem(hostPaths.hostBase); err != nil {
+		return nil, err
+	}
+	if err := refuseUnmigratedCloudRunHome(hostPaths, cfg.NFSSubPathRoot, cfg.ProjectID, agentID); err != nil {
 		return nil, err
 	}
 
@@ -749,9 +754,12 @@ func resolveCloudRunNFSTarget(runtimeServer, runtimeExport, shareServer, shareEx
 
 // cloudRunNFSExportPaths builds the server-side export paths of an agent's
 // workspace, home and secrets under <nfs_export>/<subpath_root>/<project>.
-// subPathRoot is workspace_storage.nfs.subpath_root as configured (empty
-// means the default); it is validated before any path is built from it.
-func cloudRunNFSExportPaths(nfsExport, subPathRoot, projectID, agentID string) (*cloudRunNFSProvisionPaths, error) {
+// The home and secrets are agents/<slug>/home-<agentID> and
+// agents/<slug>/secrets-<agentID>, as the layout authority places them for
+// every runtime (projectfs.Layout.AgentHome, ptone/scion#5825). subPathRoot
+// is workspace_storage.nfs.subpath_root as configured (empty means the
+// default); it is validated before any path is built from it.
+func cloudRunNFSExportPaths(nfsExport, subPathRoot, projectID, slug, agentID string) (*cloudRunNFSProvisionPaths, error) {
 	if nfsExport == "" {
 		return nil, fmt.Errorf("cloudrun: nfs_export must be non-empty when workspace backend is NFS")
 	}
@@ -769,13 +777,17 @@ func cloudRunNFSExportPaths(nfsExport, subPathRoot, projectID, agentID string) (
 	if err != nil {
 		return nil, fmt.Errorf("cloudrun: invalid NFS %w", err)
 	}
+	home, secrets, err := cloudRunAgentLeaves(root, projectID, slug, agentID)
+	if err != nil {
+		return nil, err
+	}
 	// Export paths are always slash-separated server paths, hence path.Join.
 	root = filepath.ToSlash(root)
 
 	paths := &cloudRunNFSProvisionPaths{
 		workspaceExportPath: path.Join(exportRoot, root, projectID, "workspace"),
-		homeExportPath:      path.Join(exportRoot, root, projectID, "agents", agentID, "home"),
-		secretsExportPath:   path.Join(exportRoot, root, projectID, "agents", agentID, "secrets"),
+		homeExportPath:      path.Join(exportRoot, filepath.ToSlash(home)),
+		secretsExportPath:   path.Join(exportRoot, filepath.ToSlash(secrets)),
 	}
 	for name, p := range map[string]string{
 		"workspace": paths.workspaceExportPath,
@@ -804,7 +816,7 @@ type cloudRunNFSHostProvisionPaths struct {
 // <subpath_root>/<project>/workspace. subPathRoot is
 // workspace_storage.nfs.subpath_root as configured (empty means the
 // default); it is validated before any path is built from it.
-func cloudRunNFSHostPaths(workspaceHostPath, subPathRoot, projectID, agentID string) (*cloudRunNFSHostProvisionPaths, error) {
+func cloudRunNFSHostPaths(workspaceHostPath, subPathRoot, projectID, slug, agentID string) (*cloudRunNFSHostProvisionPaths, error) {
 	if err := validateCloudRunNFSElement("project_id", projectID); err != nil {
 		return nil, err
 	}
@@ -815,6 +827,10 @@ func cloudRunNFSHostPaths(workspaceHostPath, subPathRoot, projectID, agentID str
 	root, err := config.ResolveSubPathRoot(subPathRoot)
 	if err != nil {
 		return nil, fmt.Errorf("cloudrun: invalid NFS %w", err)
+	}
+	home, secrets, err := cloudRunAgentLeaves(root, projectID, slug, agentID)
+	if err != nil {
+		return nil, err
 	}
 
 	workspaceHostPath = filepath.Clean(workspaceHostPath)
@@ -829,7 +845,6 @@ func cloudRunNFSHostPaths(workspaceHostPath, subPathRoot, projectID, agentID str
 			workspaceHostPath, expectedSuffix, filepath.ToSlash(root))
 	}
 
-	projectRoot := filepath.Dir(workspaceHostPath)
 	// The host base is what remains once the <subpath_root>/<project>/workspace
 	// suffix is removed; subpath_root may span several path segments.
 	hostBase := filepath.Clean(filepath.FromSlash(strings.TrimSuffix(hostSlash, "/"+suffixSlash)))
@@ -843,9 +858,48 @@ func cloudRunNFSHostPaths(workspaceHostPath, subPathRoot, projectID, agentID str
 		serverRelativePath: path.Join(filepath.ToSlash(root), projectID, "workspace"),
 		hostBase:           hostBase,
 		workspaceHostPath:  workspaceHostPath,
-		homeHostPath:       filepath.Join(projectRoot, "agents", agentID, "home"),
-		secretsHostPath:    filepath.Join(projectRoot, "agents", agentID, "secrets"),
+		homeHostPath:       filepath.Join(hostBase, home),
+		secretsHostPath:    filepath.Join(hostBase, secrets),
 	}, nil
+}
+
+// refuseUnmigratedCloudRunHome refuses to start an agent whose home is
+// still at the pre-upgrade Cloud Run location (agents/<agent ID>/home) and
+// not yet at agents/<slug>/home-<agent ID>: starting it would give it a new,
+// empty home that the project-storage migration could then no longer merge
+// into without conflicts (ptone/scion#5825). The migration moves the home of
+// a stopped agent; the agent starts normally afterwards.
+func refuseUnmigratedCloudRunHome(hp *cloudRunNFSHostProvisionPaths, subPathRoot, projectID, agentID string) error {
+	if _, err := os.Lstat(hp.homeHostPath); !errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	root, err := config.ResolveSubPathRoot(subPathRoot)
+	if err != nil {
+		return fmt.Errorf("cloudrun: invalid NFS %w", err)
+	}
+	legacyHome := filepath.Join(hp.hostBase, projectfs.LegacyCloudRunAgentDir(filepath.Join(root, projectID), agentID), "home")
+	if _, err := os.Lstat(legacyHome); err == nil {
+		return fmt.Errorf("cloudrun: agent %s has its home at the location used before this version; run the project-storage-migrate maintenance operation (with the agent stopped) before starting it", agentID)
+	}
+	return nil
+}
+
+// cloudRunAgentLeaves returns an agent's home and secrets paths relative to
+// the export (and to the host base), from the layout authority:
+// <root>/<project>/agents/<slug>/home-<agentID> and secrets-<agentID>, the
+// paths the Kubernetes NFS home uses for the same (project, agent)
+// (ptone/scion#5825). agentID must be the hub agent ID.
+func cloudRunAgentLeaves(root, projectID, slug, agentID string) (home, secrets string, err error) {
+	layout := projectfs.Layout{Backend: projectfs.BackendNFS, SubPathRoot: root}
+	h, err := layout.AgentHome(projectID, slug, agentID)
+	if err != nil {
+		return "", "", fmt.Errorf("cloudrun: invalid NFS home path: %w", err)
+	}
+	sec, err := layout.AgentSecrets(projectID, slug, agentID)
+	if err != nil {
+		return "", "", fmt.Errorf("cloudrun: invalid NFS secrets path: %w", err)
+	}
+	return h.RelPath, sec.RelPath, nil
 }
 
 func validateCloudRunNFSElement(name, value string) error {

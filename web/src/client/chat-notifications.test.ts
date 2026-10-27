@@ -170,6 +170,11 @@ describe('chat message content', () => {
     expect(long.endsWith('…')).toBe(true);
   });
 
+  it('labels a message without text as an attachment (ptone/scion#6146)', () => {
+    expect(chatMessageBody(thread({ msg: '' }))).toBe('Attachment');
+    expect(chatMessageBody(thread({ msg: '   ' }))).toBe('Attachment');
+  });
+
   it('tags per conversation so a busy thread collapses to one popup', () => {
     expect(chatMessageTag(thread({ id: 'a' }))).toBe(chatMessageTag(thread({ id: 'b' })));
     expect(chatMessageTag(thread())).not.toBe(chatMessageTag(dm()));

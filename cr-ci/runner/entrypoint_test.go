@@ -48,6 +48,9 @@ pwd > "$out/cwd"
   echo "GOLANGCI_LINT_CACHE=${GOLANGCI_LINT_CACHE:-}"
   echo "XDG_CACHE_HOME_SET=${XDG_CACHE_HOME+yes}"
   echo "TOKEN_SET=${RUNNER_CLAIM_TOKEN+yes}"
+  echo "ACTIONS_RUNNER_HOOK_JOB_STARTED=${ACTIONS_RUNNER_HOOK_JOB_STARTED:-}"
+  echo "CR_JOB_GUARD_REPOS=${CR_JOB_GUARD_REPOS:-}"
+  echo "CR_TEST_MODE_SET=${CR_TEST_MODE+yes}"
 } > "$out/env"
 echo "stub run.sh started"
 `
@@ -65,7 +68,7 @@ func (h *harness) setRunSh(script string) {
 
 func requireTools(t *testing.T) {
 	t.Helper()
-	for _, tool := range []string{"bash", "curl", "jq", "awk", "tar"} {
+	for _, tool := range []string{"bash", "curl", "jq", "awk", "tar", "sha256sum", "stat"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Fatalf("entrypoint harness needs %s on PATH: %v", tool, err)
 		}
@@ -221,6 +224,8 @@ type harness struct {
 	token, jit         string
 	idToken, audience  string
 	home               string       // HOME of the entrypoint run (and CR_EXPECTED_HOME)
+	guardHook          string       // test copy of cr-ci-job-guard.sh (CR_JOB_GUARD_HOOK)
+	guardSHAFile       string       // test copy of its pinned sha256 (CR_JOB_GUARD_SHA_FILE)
 	meta               *claimServer // fake metadata server, wired by default
 	env                map[string]string
 }
@@ -256,7 +261,14 @@ func newHarness(t *testing.T, mediatorURL string) *harness {
 	if err := os.WriteFile(filepath.Join(h.runnerDir, "run.sh"), []byte(stubRunSh), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	h.guardHook, h.guardSHAFile = installGuard(t, root)
 	h.env = map[string]string{
+		// Test mode (the entrypoint is not PID 1 here): the CR_* overrides take effect.
+		"CR_TEST_MODE":             "1",
+		"CR_JOB_GUARD_HOOK":        h.guardHook,
+		"CR_JOB_GUARD_SHA_FILE":    h.guardSHAFile,
+		"CR_JOB_GUARD_OWNER_UID":   strconv.Itoa(os.Getuid()),
+		"GH_REPOS":                 testRepoFull,
 		"PATH":                     os.Getenv("PATH"),
 		"HOME":                     root,
 		"CR_EXPECTED_HOME":         root,
@@ -402,6 +414,9 @@ func TestEntrypointSuccess(t *testing.T) {
 		"GOLANGCI_LINT_CACHE=" + h.home + "/.cache/golangci-lint",
 		"XDG_CACHE_HOME_SET=",
 		"TOKEN_SET=",
+		"ACTIONS_RUNNER_HOOK_JOB_STARTED=" + h.guardHook,
+		"CR_JOB_GUARD_REPOS=" + testRepoFull,
+		"CR_TEST_MODE_SET=",
 	} {
 		if !strings.Contains(env+"\n", want+"\n") {
 			t.Errorf("run.sh env lacks %q; got:\n%s", want, env)
@@ -712,9 +727,18 @@ func TestEntrypointScratchStatFailure(t *testing.T) {
 	if err := os.WriteFile(h.mountinfo, []byte("22 1 0:21 / / rw - overlay overlay rw\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	h.stubCommand("stat", "#!/usr/bin/env bash\necho 'stat: simulated failure' >&2\nexit 1\n")
+	// Fails for /scratch and its parent only (the job guard's own stat calls, on other
+	// paths, run first and must still work).
+	realStat, err := exec.LookPath("stat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.stubCommand("stat", fmt.Sprintf(`#!/usr/bin/env bash
+case ${!#} in %q | %q) echo 'stat: simulated failure' >&2; exit 1 ;; esac
+exec %q "$@"
+`, h.scratch, filepath.Dir(h.scratch), realStat))
 	res := h.run()
-	expectFailure(t, h, res, 2, "cannot stat")
+	expectFailure(t, h, res, 2, "cannot stat "+h.scratch+" to verify that it is a mount")
 	if n := len(cs.recorded()); n != 0 {
 		t.Errorf("claim requests = %d, want 0 (token must not be spent)", n)
 	}
@@ -886,14 +910,15 @@ func TestEntrypointIDTokenTrailingNewline(t *testing.T) {
 	}
 }
 
-// checkHomeLinks asserts the cache-parity layout: ~/work, ~/.cache and ~/go are
-// symlinks whose literal targets mirror HOME under the scratch dir.
+// checkHomeLinks asserts the cache-parity layout: ~/work, ~/.cache, ~/go and
+// ~/.npm are symlinks whose literal targets mirror HOME under the scratch dir.
 func (h *harness) checkHomeLinks() {
 	h.t.Helper()
 	for link, target := range map[string]string{
 		"work":   h.scratch + "/_work",
 		".cache": h.scratch + "/.cache",
 		"go":     h.scratch + "/go",
+		".npm":   h.scratch + "/.npm",
 	} {
 		got, err := os.Readlink(filepath.Join(h.home, link))
 		if err != nil || got != target {
@@ -906,7 +931,7 @@ func TestEntrypointHomeLinksKeptWhenCorrect(t *testing.T) {
 	var h *harness
 	cs := newClaimServer(t, func(w http.ResponseWriter) { respondJIT(h.jit)(w) })
 	h = newHarness(t, cs.URL)
-	for link, target := range map[string]string{"work": "/_work", ".cache": "/.cache", "go": "/go"} {
+	for link, target := range map[string]string{"work": "/_work", ".cache": "/.cache", "go": "/go", ".npm": "/.npm"} {
 		if err := os.Symlink(h.scratch+target, filepath.Join(h.home, link)); err != nil {
 			t.Fatal(err)
 		}
@@ -1315,7 +1340,7 @@ func warmupHarness(t *testing.T) (*harness, *claimServer) {
 	t.Helper()
 	cs := newClaimServer(t, respondStatus(http.StatusInternalServerError))
 	h := newHarness(t, cs.URL)
-	for _, k := range []string{"RUNNER_CLAIM_TOKEN", "MEDIATOR_URL", "GH_JOB_ID", "RUNNER_NAME"} {
+	for _, k := range []string{"RUNNER_CLAIM_TOKEN", "MEDIATOR_URL", "GH_JOB_ID", "RUNNER_NAME", "GH_REPOS"} {
 		delete(h.env, k)
 	}
 	h.env["RUNNER_WARMUP"] = "1"
