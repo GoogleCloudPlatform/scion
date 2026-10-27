@@ -504,8 +504,8 @@ func TestStartConduit(t *testing.T) {
 
 // TestStartConduitRelay_AdvertiseHostCheckOnlyInHA: the public-host rule
 // applies only in hosted HA. A single-node hub on http://localhost may
-// advertise localhost on its internal port; in hosted HA the same setting
-// is refused.
+// advertise https://localhost on its internal port; in hosted HA the same
+// setting is refused.
 func TestStartConduitRelay_AdvertiseHostCheckOnlyInHA(t *testing.T) {
 	t.Cleanup(resetServerFlags)
 	const hubEndpoint = "http://localhost:9810"
@@ -515,9 +515,9 @@ func TestStartConduitRelay_AdvertiseHostCheckOnlyInHA(t *testing.T) {
 		advertise string
 		wantErr   string // "" = the advertise check passes
 	}{
-		{name: "single node, localhost", advertise: "http://localhost:9811"},
+		{name: "single node, localhost", advertise: "https://localhost:9811"},
 		{name: "single node, cloud run host", advertise: "https://x.a.run.app"},
-		{name: "hosted HA, public hub host", requireHA: true, advertise: "http://localhost:9811", wantErr: "public hub host"},
+		{name: "hosted HA, public hub host", requireHA: true, advertise: "https://localhost:9811", wantErr: "public hub host"},
 		{name: "hosted HA, cloud run host", requireHA: true, advertise: "https://x.a.run.app", wantErr: "Cloud Run host"},
 	}
 	for _, tt := range tests {

@@ -30,6 +30,8 @@ func TestCheckRelayTransport(t *testing.T) {
 		"ws://127.0.0.1:9800",
 		"ws://[::1]:9800",
 		"HTTP://127.0.0.1:9800",
+		// An IPv4-mapped loopback literal is dialed and bound as 127.0.0.1.
+		"http://[::ffff:127.0.0.1]:9800",
 	} {
 		if err := CheckRelayTransport(u); err != nil {
 			t.Errorf("CheckRelayTransport(%q) = %v, want nil", u, err)
@@ -47,6 +49,8 @@ func TestCheckRelayTransport(t *testing.T) {
 		"http://LOCALHOST:9800",
 		"http://ip6-localhost:9800",
 		"http://localhost.:9800",
+		// A zone id does not parse as an IP literal: refused.
+		"http://[::1%25lo]:9800",
 		"http://relay.localhost:9800",
 		"ftp://localhost",
 		"http://",
@@ -75,7 +79,7 @@ func TestCheckRelayInternalListen(t *testing.T) {
 	}
 	// localhost and other names are refused: net.Listen would resolve them.
 	for _, l := range []string{":9800", "0.0.0.0:9800", "[::]:9800", "10.0.0.5:9800", "relay:9800", "garbage",
-		"localhost:9800", "LOCALHOST:1", "ip6-localhost:9800"} {
+		"localhost:9800", "LOCALHOST:1", "ip6-localhost:9800", "[::1%lo]:9800"} {
 		err := CheckRelayInternalListen("server.hub.conduit.internal_listen", l, false)
 		if !errors.Is(err, ErrPlaintextNonLoopback) || !strings.Contains(err.Error(), "server.hub.conduit.internal_listen") {
 			t.Errorf("CheckRelayInternalListen(%q, no TLS) = %v, want a refusal naming the setting", l, err)

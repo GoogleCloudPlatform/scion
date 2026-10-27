@@ -33,10 +33,9 @@ const relayTransportFix = "serve the internal listener with TLS (server.hub.cond
 //
 // A URL is accepted when its scheme is https or wss, or when its scheme is
 // http or ws and its host is a loopback IP literal (relayLoopbackLiteral).
-// Unlike CheckHubTransport, no name is loopback here, not even "localhost":
-// the hop is dialed and listened on by name, and a resolver that answered a
-// name with a network address would carry the hop in plaintext off the
-// host. Every other URL is refused, including any other scheme, a URL that
+// Unlike CheckHubTransport, no name is loopback here, not even "localhost",
+// because a name would be resolved when the hop is dialed or bound. Every
+// other URL is refused, including any other scheme, a URL that
 // does not parse and a URL without a host. The error wraps
 // ErrPlaintextNonLoopback. There is no override.
 func CheckRelayTransport(rawURL string) error {
