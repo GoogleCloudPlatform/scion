@@ -2954,7 +2954,7 @@ func hasAgentReplyAfter(ctx context.Context, s store.Store, threadID string, aft
 //   - starred: "true" lists only the caller's starred messages
 //     (handleStarredHistory); any other value is a 400
 func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Request, key string) {
-	if _, starred := r.URL.Query()["starred"]; starred {
+	if rawQueryHasKey(r.URL.RawQuery, "starred") {
 		s.handleStarredHistory(w, r, key)
 		return
 	}

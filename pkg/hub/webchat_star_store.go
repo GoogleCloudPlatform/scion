@@ -131,13 +131,12 @@ type MessagePosition struct {
 type StarHistoryQuery struct {
 	UserID   string
 	Selector StarSelector
-	// Cursor resumes strictly past this position in the page's order;
-	// nil starts at the newest (or, ascending, the oldest) message.
+	// Cursor resumes strictly past this position in the page's order
+	// (the (created, id) tuple, so a message sharing the cursor's instant
+	// is still found); nil starts at the newest (or, ascending, the
+	// oldest) message. The two halves of an around page are the anchor's
+	// position in both directions.
 	Cursor *MessagePosition
-	// Before and After, when set, keep only messages created strictly
-	// before or after the instant (the two halves of an around page).
-	Before time.Time
-	After  time.Time
 	// Ascending orders oldest first; the default is newest first.
 	Ascending bool
 	// Limit is the page size (at least 1).
@@ -592,14 +591,6 @@ func (s *sqliteWebChatStore) ListStarredHistory(ctx context.Context, q StarHisto
 
 	conds := append([]string{}, base...)
 	args := append([]any{}, baseArgs...)
-	if !q.Before.IsZero() {
-		conds = append(conds, sqliteMessageCreatedExpr+" < ?")
-		args = append(args, sqliteMessageTime(q.Before))
-	}
-	if !q.After.IsZero() {
-		conds = append(conds, sqliteMessageCreatedExpr+" > ?")
-		args = append(args, sqliteMessageTime(q.After))
-	}
 	cmp, dir := "<", "DESC"
 	if q.Ascending {
 		cmp, dir = ">", "ASC"

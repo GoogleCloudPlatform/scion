@@ -19,6 +19,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -51,6 +52,23 @@ const (
 	chatStarredHistoryDefault = 50
 	chatStarredHistoryMax     = 200
 )
+
+// rawQueryHasKey reports whether the raw query string names key, whether
+// or not its pair decodes. URL.Query drops a pair it cannot decode
+// (starred=%zz), which would serve a malformed filter as unfiltered
+// history; the starred variant must see it and answer 400.
+func rawQueryHasKey(rawQuery, key string) bool {
+	for _, pair := range strings.Split(rawQuery, "&") {
+		name, _, _ := strings.Cut(pair, "=")
+		if name == key {
+			return true
+		}
+		if unescaped, err := url.QueryUnescape(name); err == nil && unescaped == key {
+			return true
+		}
+	}
+	return false
+}
 
 // handleStarredHistory implements the starred=true variant of
 // handleConversationHistory.
@@ -211,10 +229,14 @@ func (s *Server) starredHistoryAround(w http.ResponseWriter, r *http.Request, ca
 
 	olderLimit := limit / 2
 	newerLimit := limit - olderLimit - 1
-	// The older half is always queried (one row when the page has no room
-	// for it) for the total and to know whether older messages remain.
+	// Both halves start at the anchor's (created, id) position, so a
+	// starred message sharing the anchor's instant falls in one of them
+	// by its ID. The older half is always queried (one row when the page
+	// has no room for it) for the total and to know whether older
+	// messages remain.
+	anchorPos := MessagePosition{Created: anchor.CreatedAt.UTC(), ID: aroundID}
 	olderQuery := base
-	olderQuery.Before = anchor.CreatedAt
+	olderQuery.Cursor = &anchorPos
 	olderQuery.Limit = max(olderLimit, 1)
 	older, err := call.stars.ListStarredHistory(ctx, olderQuery)
 	if err != nil {
@@ -223,7 +245,7 @@ func (s *Server) starredHistoryAround(w http.ResponseWriter, r *http.Request, ca
 	newer := StarHistoryPage{}
 	if newerLimit > 0 {
 		newerQuery := base
-		newerQuery.After = anchor.CreatedAt
+		newerQuery.Cursor = &anchorPos
 		newerQuery.Ascending = true
 		newerQuery.Limit = newerLimit
 		if newer, err = call.stars.ListStarredHistory(ctx, newerQuery); err != nil {
@@ -231,7 +253,6 @@ func (s *Server) starredHistoryAround(w http.ResponseWriter, r *http.Request, ca
 		}
 	}
 
-	anchorPos := MessagePosition{Created: anchor.CreatedAt.UTC(), ID: aroundID}
 	positions = make([]MessagePosition, 0, len(newer.Items)+1+len(older.Items))
 	for i := len(newer.Items) - 1; i >= 0; i-- {
 		positions = append(positions, newer.Items[i])

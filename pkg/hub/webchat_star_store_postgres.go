@@ -318,12 +318,6 @@ func (s *pgWebChatStore) ListStarredHistory(ctx context.Context, q StarHistoryQu
 		return StarHistoryPage{}, fmt.Errorf("webchat store: list starred history: count: %w", err)
 	}
 
-	if !q.Before.IsZero() {
-		conds = append(conds, "m.created < "+a.add(q.Before.UTC())+"::timestamptz")
-	}
-	if !q.After.IsZero() {
-		conds = append(conds, "m.created > "+a.add(q.After.UTC())+"::timestamptz")
-	}
 	cmp, dir := "<", "DESC"
 	if q.Ascending {
 		cmp, dir = ">", "ASC"

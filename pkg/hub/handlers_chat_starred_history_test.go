@@ -105,6 +105,9 @@ func TestChatStarredHistory_GateAndValidation(t *testing.T) {
 		base + "?starred=TRUE",
 		base + "?starred=",
 		base + "?starred",
+		// A value URL.Query cannot decode is still the starred variant.
+		base + "?starred=%zz",
+		base + "?x=1&starred=%",
 		starredHistoryPath(f.topicA, "starred=true"),
 		starredHistoryPath(f.topicA, "unknown=1"),
 		starredHistoryPath(f.topicA, "limit=0"),
@@ -321,6 +324,51 @@ func TestChatStarredHistory_Around(t *testing.T) {
 	}
 }
 
+// TestChatStarredHistory_AroundKeepsTiedStars: a starred message sharing
+// the anchor's instant is in the around page (by its ID), and paging older
+// from the page loses no starred message.
+func TestChatStarredHistory_AroundKeepsTiedStars(t *testing.T) {
+	for _, readSwitch := range []bool{true, false} {
+		t.Run(fmt.Sprintf("readSwitch=%t", readSwitch), func(t *testing.T) {
+			f := newStarFixture(t, readSwitch)
+			base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+			oldest := f.threadMsg(t, f.topicA, f.projA, "oldest", base)
+			a := f.threadMsg(t, f.topicA, f.projA, "tie a", base.Add(time.Minute))
+			b := f.threadMsg(t, f.topicA, f.projA, "tie b", base.Add(time.Minute))
+			newest := f.threadMsg(t, f.topicA, f.projA, "newest", base.Add(2*time.Minute))
+			for _, id := range []string{oldest, a, b, newest} {
+				f.starAs(t, f.admin, id, f.topicA)
+			}
+			tieNew, tieOld := newerID(a, b)
+			order := []string{newest, tieNew, tieOld, oldest}
+
+			for _, anchor := range []string{a, b} {
+				page := decodeHistory(t, f.session(t, f.admin, http.MethodGet, starredHistoryPath(f.topicA, "around="+anchor, "limit=5"), nil))
+				assert.Equal(t, order, historyIDs(page), "around %s keeps its tied sibling", anchor)
+
+				// Smallest page: the anchor, then everything older through the
+				// cursor, with nothing lost or repeated.
+				got := []string{}
+				one := decodeHistory(t, f.session(t, f.admin, http.MethodGet, starredHistoryPath(f.topicA, "around="+anchor, "limit=1"), nil))
+				got = append(got, historyIDs(one)...)
+				cursor := one.NextCursor
+				for i := 0; cursor != "" && i < 5; i++ {
+					p := decodeHistory(t, f.session(t, f.admin, http.MethodGet, starredHistoryPath(f.topicA, "limit=1", "cursor="+url.QueryEscape(cursor)), nil))
+					got = append(got, historyIDs(p)...)
+					cursor = p.NextCursor
+				}
+				at := 0
+				for i, id := range order {
+					if id == anchor {
+						at = i
+					}
+				}
+				assert.Equal(t, order[at:], got, "anchor %s then every older starred message", anchor)
+			}
+		})
+	}
+}
+
 func TestChatStarredHistory_DMs(t *testing.T) {
 	for _, readSwitch := range []bool{true, false} {
 		t.Run(fmt.Sprintf("readSwitch=%t", readSwitch), func(t *testing.T) {
@@ -329,8 +377,8 @@ func TestChatStarredHistory_DMs(t *testing.T) {
 			now := time.Now()
 			agentStar := f.dmMsg(t, d.agentKey, d.agentConv, f.projA, "agent:"+f.agentA.Slug, f.agentA.ID, "agent starred", "web", now.Add(-time.Hour))
 			agentPlain := f.dmMsg(t, d.agentKey, d.agentConv, f.projA, "agent:"+f.agentA.Slug, f.agentA.ID, "agent plain", "web", now.Add(-50*time.Minute))
-			humanStar := f.dmMsg(t, d.humanKey, d.humanConv, "", "user:"+f.owner+"@test.com", f.owner, "human starred", "web", now.Add(-time.Minute))
-			humanPlain := f.dmMsg(t, d.humanKey, d.humanConv, "", "user:"+f.owner+"@test.com", f.owner, "human plain", "web", now)
+			humanStar := f.dmMsg(t, d.humanKey, d.humanConv, uuid.Nil.String(), "user:"+f.owner+"@test.com", f.owner, "human starred", "web", now.Add(-time.Minute))
+			humanPlain := f.dmMsg(t, d.humanKey, d.humanConv, uuid.Nil.String(), "user:"+f.owner+"@test.com", f.owner, "human plain", "web", now)
 			f.starAs(t, f.member, agentStar, d.agentKey)
 			f.starAs(t, f.member, humanStar, d.humanKey)
 
@@ -379,7 +427,7 @@ func TestChatStarredHistory_TokenSelectors(t *testing.T) {
 	// project boundary, a hub boundary for a DM between users.
 	d := f.memberDMs(t)
 	agentMsg := f.dmMsg(t, d.agentKey, d.agentConv, f.projA, "user:"+f.member, f.member, "a", "web", time.Now())
-	humanMsg := f.dmMsg(t, d.humanKey, d.humanConv, "", "user:"+f.member, f.member, "h", "web", time.Now())
+	humanMsg := f.dmMsg(t, d.humanKey, d.humanConv, uuid.Nil.String(), "user:"+f.member, f.member, "h", "web", time.Now())
 	f.starAs(t, f.member, agentMsg, d.agentKey)
 	f.starAs(t, f.member, humanMsg, d.humanKey)
 	projAReader := f.mint(t, f.member, projectBoundary(f.projA), "inbox:read", "agent:read")

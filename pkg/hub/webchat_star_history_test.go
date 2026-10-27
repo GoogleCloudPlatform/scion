@@ -40,8 +40,9 @@ func starHistoryIDs(p StarHistoryPage) []string {
 // testStarredHistoryContract is the ListStarredHistory contract both
 // dialects must meet identically: only the user's live starred messages of
 // the selector's history scope, in (created, id) order with ties broken by
-// ID, keyset pages without duplicates, strict before/after bounds, and a
-// total of the conversation's live starred messages.
+// ID, keyset pages without duplicates in both directions (a cursor at a
+// tied message finds its sibling), and a total of the conversation's live
+// starred messages.
 func testStarredHistoryContract(t *testing.T, env starStoreEnv) {
 	ctx := context.Background()
 	st := env.stars
@@ -128,26 +129,29 @@ func testStarredHistoryContract(t *testing.T, env starStoreEnv) {
 		require.NoError(t, err)
 		assert.Equal(t, []string{m1, m2, tied[1], tied[0], m6}, starHistoryIDs(page))
 
-		// Strict bounds: an around page's halves exclude the anchor's
-		// instant, so both tied messages are outside both halves.
-		before := all
-		before.Before = at(3)
-		page, err = st.ListStarredHistory(ctx, before)
+		// The halves of an around page start at the anchor's (created, id)
+		// position: with the newer tied message as the anchor, its tied
+		// sibling is in the older half, and the reverse in the newer one.
+		tieNew := &MessagePosition{Created: at(3), ID: tied[0]}
+		tieOld := &MessagePosition{Created: at(3), ID: tied[1]}
+		older := all
+		older.Cursor = tieNew
+		page, err = st.ListStarredHistory(ctx, older)
 		require.NoError(t, err)
-		assert.Equal(t, []string{m2, m1}, starHistoryIDs(page))
-		assert.Equal(t, 5, page.Total, "the total ignores the bounds")
-		after := asc
-		after.After = at(3)
-		page, err = st.ListStarredHistory(ctx, after)
+		assert.Equal(t, []string{tied[1], m2, m1}, starHistoryIDs(page))
+		assert.Equal(t, 5, page.Total, "the total ignores the cursor")
+		newer := asc
+		newer.Cursor = tieOld
+		page, err = st.ListStarredHistory(ctx, newer)
 		require.NoError(t, err)
-		assert.Equal(t, []string{m6}, starHistoryIDs(page))
-		// A bounded page of one reports that more remain.
-		before.Limit = 1
-		page, err = st.ListStarredHistory(ctx, before)
+		assert.Equal(t, []string{tied[0], m6}, starHistoryIDs(page))
+		// A page of one past the anchor reports that more remain.
+		older.Limit = 1
+		page, err = st.ListStarredHistory(ctx, older)
 		require.NoError(t, err)
-		assert.Equal(t, []string{m2}, starHistoryIDs(page))
+		assert.Equal(t, []string{tied[1]}, starHistoryIDs(page))
 		require.NotNil(t, page.Next)
-		assert.Equal(t, m2, page.Next.ID)
+		assert.Equal(t, tied[1], page.Next.ID)
 	}
 
 	// Another user's stars are their own.
@@ -211,9 +215,9 @@ func TestStarredHistory_SQLiteLegacyTimeSuffix(t *testing.T) {
 	assert.Equal(t, []string{newer, legacy, older}, starHistoryIDs(page))
 	assert.True(t, page.Items[1].Created.Equal(base.Add(time.Minute)), "parsed without the suffix")
 
-	q.After = base.Add(time.Minute)
+	q.Cursor = &MessagePosition{Created: base.Add(time.Minute), ID: legacy}
 	q.Ascending = true
 	page, err = f.stars.ListStarredHistory(ctx, q)
 	require.NoError(t, err)
-	assert.Equal(t, []string{newer}, starHistoryIDs(page), "the legacy row is not after its own instant")
+	assert.Equal(t, []string{newer}, starHistoryIDs(page), "the legacy row is at its own instant, not after it")
 }
