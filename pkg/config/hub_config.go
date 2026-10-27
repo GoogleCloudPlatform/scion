@@ -1250,6 +1250,11 @@ type GlobalConfig struct {
 	EffectiveProjectStorage *V1ProjectStorageConfig `json:"-" yaml:"-" koanf:"-"`
 	// EffectiveProjectStorageWarnings are that resolution's warnings.
 	EffectiveProjectStorageWarnings []string `json:"-" yaml:"-" koanf:"-"`
+	// RemovedStorageOverridesFileError is the public message of the removed
+	// per-runtime or per-profile storage overrides the global settings file
+	// carries, set at hub startup (config.RemovedStorageOverridesError), or
+	// "". It is reported, never a refused start (ptone/scion#6371).
+	RemovedStorageOverridesFileError string `json:"-" yaml:"-" koanf:"-"`
 
 	// NativeChat controls the built-in chat feature. Nil (absent) means
 	// enabled. Populated from server.native_chat in settings.yaml.
