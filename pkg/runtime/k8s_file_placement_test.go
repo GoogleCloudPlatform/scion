@@ -1065,8 +1065,8 @@ func (b *lockedBuffer) String() string {
 
 // runPlacementWithMkdir runs the placement script like runPlacement, with
 // mkdir replaced by a stub whose body is given. The stub sees the path to
-// create as $last.
-func runPlacementWithMkdir(t *testing.T, home, mkdirBody string, placements []k8sFilePlacement) (string, error) {
+// create as $last; env adds variables the stub body can read.
+func runPlacementWithMkdir(t *testing.T, home, mkdirBody string, env []string, placements []k8sFilePlacement) (string, error) {
 	t.Helper()
 	bin := t.TempDir()
 	stub := "#!/bin/sh\nfor a; do last=$a; done\n" + mkdirBody + "\n"
@@ -1074,7 +1074,8 @@ func runPlacementWithMkdir(t *testing.T, home, mkdirBody string, placements []k8
 		t.Fatal(err)
 	}
 	cmd := exec.Command("sh", "-c", "umask 022\n"+k8sFilePlacementScript(home, placements))
-	cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = append(cmd.Env, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	err := cmd.Run()
@@ -1112,8 +1113,8 @@ func TestK8sFilePlacementScript_ReverifiesCreatedDirs(t *testing.T) {
 			t.Fatal(err)
 		}
 		target := filepath.Join(home, ".config", "creds.json")
-		stderr, err := runPlacementWithMkdir(t, home, `ln -s '`+elsewhere+`' "$last"`,
-			[]k8sFilePlacement{{Source: src, Target: target, Mode: 0o600}})
+		stderr, err := runPlacementWithMkdir(t, home, `ln -s "$STUB_LINK_TARGET" "$last"`,
+			[]string{"STUB_LINK_TARGET=" + elsewhere}, []k8sFilePlacement{{Source: src, Target: target, Mode: 0o600}})
 		if err == nil {
 			t.Fatal("expected placement to fail when a created directory is a symlink")
 		}
@@ -1131,7 +1132,7 @@ func TestK8sFilePlacementScript_ReverifiesCreatedDirs(t *testing.T) {
 		_, home, src := placementFixture(t)
 		target := filepath.Join(home, ".config", "gcloud", "adc.json")
 		stderr, err := runPlacementWithMkdir(t, home, `: > "$last"`,
-			[]k8sFilePlacement{{Source: src, Target: target, Mode: 0o600}})
+			nil, []k8sFilePlacement{{Source: src, Target: target, Mode: 0o600}})
 		if err == nil {
 			t.Fatal("expected placement to fail when a created directory is a regular file")
 		}
