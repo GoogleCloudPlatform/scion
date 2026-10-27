@@ -474,4 +474,63 @@ test.describe('Starred messages', () => {
       await setExperiment(env.devToken, true);
     }
   });
+
+  test('starred-only center: only the starred message, jump to it in full context, Back restores', async ({
+    page,
+  }) => {
+    // Phase 3. Star the target (outside the latest page) through the API, so this case
+    // does not depend on the order of the others.
+    const put = await api(env.devToken, 'PUT', `/api/v1/chat/stars/${targetId}`, {
+      conversationKey: topicId,
+    });
+    expect(put.status, JSON.stringify(put.body)).toBe(200);
+    try {
+      const filtered = await api(
+        env.devToken,
+        'GET',
+        `/api/v1/chat/conversations/${topicId}/messages?starred=true`
+      );
+      expect(filtered.status, JSON.stringify(filtered.body)).toBe(200);
+      const body = filtered.body as { messages: Array<{ id: string }>; totalCount: number };
+      expect(body.messages.map((m) => m.id)).toEqual([targetId]);
+      expect(body.totalCount).toBe(1);
+
+      const loadedAt = Date.now();
+      await page.goto(`/chat/space/${projectId}/thread/${topicId}?messages=starred`, {
+        waitUntil: 'domcontentloaded',
+      });
+      const banner = page.locator('scion-chat-thread .star-filter-banner');
+      await expect(banner).toBeVisible({ timeout: 20_000 });
+      await expect(banner).toContainText('Starred messages only');
+      // Slug canonicalization keeps the filter.
+      await expect(page).toHaveURL(
+        new RegExp(`/chat/(?!space/)[^/]+/${topicId}\\?messages=starred$`),
+        {
+          timeout: 20_000,
+        }
+      );
+      await expect(msgLocator(page, targetId)).toBeVisible({ timeout: 20_000 });
+      await expect(page.locator('scion-chat-thread scion-chat-message')).toHaveCount(1);
+      await expect(page.getByText('Mock filler message', { exact: false })).toHaveCount(0);
+      await expect(page.locator('scion-chat-thread scion-chat-composer')).toHaveCount(0);
+
+      await threadScrollIdle(page);
+      await openMenuItem(page, targetId, 'Jump to message in conversation', loadedAt);
+      await expect(page).toHaveURL(new RegExp(`/${topicId}#msg-${targetId}$`), { timeout: 20_000 });
+      await expect(banner).toHaveCount(0);
+      await expect(msgLocator(page, targetId)).toBeInViewport({ timeout: 20_000 });
+      // Full context: the unstarred filler is there too.
+      await expect(page.getByText('Mock filler message 0', { exact: true })).toBeAttached({
+        timeout: 20_000,
+      });
+
+      await page.goBack();
+      await expect(page).toHaveURL(/\?messages=starred$/, { timeout: 20_000 });
+      await expect(banner).toBeVisible({ timeout: 20_000 });
+      await expect(page.locator('scion-chat-thread scion-chat-message')).toHaveCount(1);
+      await expect(msgLocator(page, targetId)).toBeVisible();
+    } finally {
+      await api(env.devToken, 'DELETE', `/api/v1/chat/stars/${targetId}`);
+    }
+  });
 });
