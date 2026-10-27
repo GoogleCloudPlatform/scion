@@ -1400,6 +1400,12 @@ export interface RuntimeBroker {
    * Read-only and display-only; absent otherwise.
    */
   hostedByThisServer?: boolean;
+  /**
+   * The broker's version against the fleet hub version, compared by the
+   * hub: match, mismatch or unknown. Absent for a plugin record or from an
+   * older hub (shown as unknown).
+   */
+  versionStatus?: 'match' | 'mismatch' | 'unknown';
   autoProvide: boolean;
   endpoint?: string;
   labels?: Record<string, string>;
