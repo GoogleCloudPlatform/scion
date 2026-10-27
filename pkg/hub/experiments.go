@@ -143,9 +143,10 @@ var dispatchExperimentNames = []string{experiments.K8sNFSHome, experiments.Agent
 
 // dispatchExperiments returns the dispatch experiments that are enabled
 // now, resolved from one snapshot, or nil when none is. hub.conduit is a
-// derived entry: it is included only while this node serves conduit (the
-// experiment is on in the same snapshot and the relay is running), so an
-// agent dials conduit only where a relay can admit it.
+// derived entry: it is included only while a relay can admit an agent that
+// dials this hub, with the experiment on in the same snapshot: the
+// in-process relay is running (conduitServingIn), or, in external relay
+// mode, the ingress serves and a relay is eligible (conduitIngressServingIn).
 func (s *Server) dispatchExperiments() []string {
 	snap := s.experimentsSnapshot()
 	var out []string
@@ -154,7 +155,7 @@ func (s *Server) dispatchExperiments() []string {
 			out = append(out, name)
 		}
 	}
-	if s.conduitServingIn(snap) {
+	if s.conduitServingIn(snap) || s.conduitIngressServingIn(snap) {
 		out = append(out, conduitExperiment)
 	}
 	return out
