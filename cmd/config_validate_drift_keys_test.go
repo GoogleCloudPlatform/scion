@@ -45,7 +45,7 @@ func TestConfigValidateCmd_DriftKeysValidate(t *testing.T) {
 		{"runtimes cloudrun_instances", "runtimes:\n  cri:\n    type: cloudrun-instances\n    cloudrun_instances:\n      project_id: p\n      region: us-central1\n"},
 		{"runtimes cloudrun_sandbox", "runtimes:\n  crs:\n    type: cloudrun-sandbox\n    cloudrun_sandbox:\n      sandbox_bin: /usr/local/gcp/bin/sandbox\n"},
 		{"server.mode", "server:\n  mode: hosted\n"},
-		{"server.maintenance", "server:\n  maintenance:\n    deployment_tier: binary\n    release_channel: stable\n    update_policy: notify\n    check_interval_hours: 6\n    github_repo: owner/repo\n"},
+		{"server.maintenance", "server:\n  maintenance:\n    deployment_tier: binary\n    release_channel: stable\n    update_policy: notify\n    check_interval_hours: 6\n    github_repo: owner/repo\n    install_root: /opt/scion\n"},
 		{"server.notification_channels", "server:\n  notification_channels:\n    - type: slack\n      params:\n        webhook_url: https://example.com/hook\n      filter_types: [stalled]\n      filter_urgent_only: true\n"},
 		{"server.message_broker", "server:\n  message_broker:\n    enabled: true\n    type: inprocess\n    types: [inprocess]\n"},
 		{"server.native_chat", "server:\n  native_chat:\n    enabled: false\n"},

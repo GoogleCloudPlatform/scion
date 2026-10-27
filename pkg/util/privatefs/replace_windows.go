@@ -169,6 +169,13 @@ func openReplaceTarget(path string) (*Tree, string, error) {
 // ACL is accepted here: the caller replaces it with a private one (the
 // repair). A missing file is accepted (a new file).
 func (t *Tree) checkReplaceTarget(leaf string) error {
+	// A target whose name went after the open (errNoNames) is opened
+	// again.
+	return retryReplaced(t.display(leaf), func() error { return t.checkReplaceTargetOnce(leaf) })
+}
+
+// checkReplaceTargetOnce is one attempt of checkReplaceTarget.
+func (t *Tree) checkReplaceTargetOnce(leaf string) error {
 	h, _, err := t.openLeaf(leaf, windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES, windows.FILE_OPEN,
 		windows.FILE_NON_DIRECTORY_FILE, nil)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -179,6 +186,7 @@ func (t *Tree) checkReplaceTarget(leaf string) error {
 	}
 	f := os.NewFile(uintptr(h), t.display(leaf))
 	defer func() { _ = f.Close() }()
+	afterLinkCheckOpen(f.Name())
 	if err := checkSingleLink(f); err != nil {
 		return err
 	}

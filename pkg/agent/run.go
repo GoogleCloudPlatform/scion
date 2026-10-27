@@ -1527,13 +1527,16 @@ authDone:
 		}
 	}
 
-	// The co-located hub's dev token is the agent's hub token only when the
-	// hub issued none and the endpoint the agent will use is still the
-	// broker's trusted one. Checked here, after every endpoint override
-	// above: an endpoint from the agent config or the config env section
-	// that differs from trustedHubEndpoint drops it.
-	if token := colocatedHubDevTokenForAgent(opts, trustedHubEndpoint); token != "" && opts.Env["SCION_AUTH_TOKEN"] == "" {
-		opts.Env["SCION_AUTH_TOKEN"] = token
+	// The only hub credential an agent ever gets is the token the hub issued
+	// for it, written to the token file below. No other token is substituted,
+	// this process's own included: a hub-dispatched agent without one starts
+	// with no hub credential, and the start says so, in the log and in the
+	// hub's response.
+	noHubTokenWarning := noHubCredentialWarning(opts)
+	if noHubTokenWarning != "" {
+		slog.Warn("agent start: the hub issued no agent token; the agent starts without a hub credential",
+			"agent_id", agentID, "name", opts.Name)
+		warnings = append(warnings, noHubTokenWarning)
 	}
 
 	// Write the agent token to the canonical token file in the agent home
@@ -1569,6 +1572,12 @@ authDone:
 		if err := writeAgentTokenFile(agentHome, token); err != nil {
 			return nil, fmt.Errorf("cannot start agent %q without a hub credential: %w", opts.Name, err)
 		}
+	} else if err := writeAgentHome(ctx, func() error { return removeAgentTokenFile(agentHome) }); err != nil {
+		// No hub-issued token for this start: a token file left in a
+		// persisted agent home by an earlier start must not outlive it, since
+		// the container reads that file first. Refusing to start when it
+		// cannot be removed is the same choice as for a failed write above.
+		return nil, fmt.Errorf("cannot start agent %q: remove the previous hub credential: %w", opts.Name, err)
 	}
 
 	// Resolve host networking: when the hub endpoint is localhost or was
@@ -1699,6 +1708,10 @@ authDone:
 	// Host networking and the GCP metadata mode: refuse assign, warn the
 	// user for block. Decided on the merged env, before any container work.
 	var relayedWarnings []string
+	if noHubTokenWarning != "" {
+		// Relayed to the hub too: the user sees it in the start response.
+		relayedWarnings = append(relayedWarnings, noHubTokenWarning)
+	}
 	hostNetWarning, hostNetErr := checkHostNetworkMetadata(opts.Name, m.Runtime.Name(), networkMode, agentEnv)
 	if hostNetErr != nil {
 		slog.Warn("Start: refusing agent start: GCP metadata mode under host networking",
@@ -2923,6 +2936,27 @@ func resolvedClean(p string) string {
 	return filepath.Clean(p)
 }
 
+// removeAgentTokenFile removes the agent token file (and its temp file) from
+// the agent home, confined to the home (pkg/agenthome): a link there is
+// removed itself, never followed, and a linked directory component is
+// refused. A missing home or file is not an error.
+func removeAgentTokenFile(agentHome string) error {
+	home, err := agenthome.Open(agentHome)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = home.Close() }()
+	for _, rel := range []string{".scion/scion-token.tmp", ".scion/scion-token"} {
+		if err := home.Remove(rel); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // removeStaleAuthCandidates removes the staged auth-candidates.json from the
 // agent home, confined to the home (pkg/agenthome): a link there is removed
 // itself and a linked directory component is refused. A missing home or file
@@ -3590,23 +3624,17 @@ func refuseHostEnvForAgent(name string) bool {
 	return util.IsAgentRefusedHostEnvName(name)
 }
 
-// colocatedHubDevTokenForAgent returns opts.ColocatedHubDevToken when it may
-// become the agent's hub token: a broker-mode start, a non-empty
-// trustedHubEndpoint, and an agent hub endpoint (SCION_HUB_ENDPOINT and
-// SCION_HUB_URL in opts.Env, after all overrides) equal to it. Otherwise it
-// returns "", so a dev token is never sent to an endpoint other than the
-// co-located hub's.
-func colocatedHubDevTokenForAgent(opts api.StartOptions, trustedHubEndpoint string) string {
-	if !opts.BrokerMode || opts.ColocatedHubDevToken == "" || trustedHubEndpoint == "" {
+// noHubCredentialWarning returns the start warning for a hub-dispatched
+// agent (broker mode, with SCION_HUB_ENDPOINT or SCION_HUB_URL set) that has
+// no hub-issued token in opts.Env, or "" otherwise. It names no credential
+// value. The hub issues every agent a token unless its agent token service
+// is unavailable, so the warning points the operator at the hub log.
+func noHubCredentialWarning(opts api.StartOptions) string {
+	if !opts.BrokerMode || (opts.Env["SCION_HUB_ENDPOINT"] == "" && opts.Env["SCION_HUB_URL"] == "") || opts.Env["SCION_AUTH_TOKEN"] != "" {
 		return ""
 	}
-	if opts.Env["SCION_HUB_ENDPOINT"] != trustedHubEndpoint {
-		return ""
-	}
-	if hubURL, ok := opts.Env["SCION_HUB_URL"]; ok && hubURL != trustedHubEndpoint {
-		return ""
-	}
-	return opts.ColocatedHubDevToken
+	return fmt.Sprintf("Warning: the hub issued no agent token, so agent %s starts without a hub credential "+
+		"and cannot report its status to the hub or call it. Check the hub log: its agent token service may have failed to start.", opts.Name)
 }
 
 // expandConfigHubEndpoint returns the SCION_HUB_ENDPOINT value from a scion

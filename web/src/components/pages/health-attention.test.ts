@@ -190,6 +190,21 @@ describe('scion-health-attention', () => {
     expect(root.querySelector('a[href="/agents/ag1"]')).not.toBeNull();
   });
 
+  it('renders a broker_version_mismatch item as a warning linked to the broker (ptone/scion#5972)', async () => {
+    const root = await mount([
+      {
+        severity: 'warning',
+        kind: 'broker_version_mismatch',
+        subject: { type: 'runtime_broker', id: 'b 2', name: 'east' },
+        message: 'Runtime broker east runs v1.2.0; the hub runs v1.3.0',
+      },
+    ]);
+    const li = root.querySelector('li[data-kind="broker_version_mismatch"]')!;
+    expect(li.className).toBe('sev-warning');
+    expect(li.textContent).toContain('Runtime broker east runs v1.2.0; the hub runs v1.3.0');
+    expect(li.querySelector('a')?.getAttribute('href')).toBe('/brokers/b%202');
+  });
+
   it('shows Nothing needs attention for an empty list', async () => {
     const root = await mount([]);
     expect(root.querySelector('ul')).toBeNull();

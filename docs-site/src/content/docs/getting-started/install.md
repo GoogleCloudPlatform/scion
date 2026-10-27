@@ -17,6 +17,11 @@ through the whole setup in your browser — no config files to edit. Install Sci
 (below), then run `scion server start`.
 :::
 
+:::note[On Windows?]
+The Windows build is a Hub client only: it cannot run `scion server start`. See
+[Windows](/scion/hosted/user/windows/) for how to install it and which commands it supports.
+:::
+
 ## Install with Homebrew (recommended)
 
 The easiest way to get a ready-to-run Scion — CLI plus embedded web UI — is the community

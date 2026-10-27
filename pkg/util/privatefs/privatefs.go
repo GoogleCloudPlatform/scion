@@ -35,6 +35,7 @@ package privatefs
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/pathcanon"
@@ -94,6 +95,52 @@ var ErrNoACLs = errors.New("the volume does not support access control lists")
 // outside the tree. It is refused, never repaired: a second name cannot be
 // seen from here. A link count that cannot be read is refused too.
 var ErrHardLinked = errors.New("file has more than one name (hard link)")
+
+// ErrReplacedConcurrently is returned (wrapped) when a file was opened to
+// check its link count, but every time it was opened, its name had already
+// been removed or given to another file. This happens when another writer
+// renames a new file over the path or removes it. The check never accepts
+// a file that has no name. It opens the path again a few times
+// (replacedAttempts), and gives up with this error if the file keeps
+// changing.
+var ErrReplacedConcurrently = errors.New("file was replaced or removed while it was being checked")
+
+// errNoNames marks a link-count check that found zero names on the opened
+// file: the handle refers to a file that was unlinked after it was opened
+// (a stale handle, not a hard link). It never leaves the package: the
+// open is retried (retryReplaced), and ErrReplacedConcurrently reports a
+// file that keeps changing.
+var errNoNames = errors.New("file has no names (removed or replaced after it was opened)")
+
+// replacedAttempts bounds how many times an open and link-count check runs
+// while the opened file keeps turning out to have no names.
+const replacedAttempts = 5
+
+// testHookAfterLinkCheckOpen, when set (tests only), runs after a file has
+// been opened for its link-count check and before the count is read. Tests
+// use it to replace or remove the file at that moment.
+var testHookAfterLinkCheckOpen func(name string)
+
+func afterLinkCheckOpen(name string) {
+	if testHookAfterLinkCheckOpen != nil {
+		testHookAfterLinkCheckOpen(name)
+	}
+}
+
+// retryReplaced runs attempt, which opens name and checks its link count,
+// again while it fails with errNoNames, at most replacedAttempts times in
+// all. Any other result, success or error, is returned as is. If every
+// attempt finds no names, the file is refused with ErrReplacedConcurrently.
+func retryReplaced(name string, attempt func() error) error {
+	for i := 0; i < replacedAttempts; i++ {
+		err := attempt()
+		if !errors.Is(err, errNoNames) {
+			return err
+		}
+	}
+	return fmt.Errorf("refusing %s: it was replaced or removed each of the %d times it was opened: %w",
+		name, replacedAttempts, ErrReplacedConcurrently)
+}
 
 // TreeOptions configure OpenTree.
 type TreeOptions struct {
