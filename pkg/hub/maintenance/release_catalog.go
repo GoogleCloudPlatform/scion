@@ -174,7 +174,8 @@ func (s Snapshot) Lookup(tag string) (CatalogRelease, bool) {
 //
 // Both methods must return promptly once ctx is done. The catalog bounds
 // its calls through ctx; a load that ignores ctx is abandoned after its
-// timeout, but it holds a goroutine until it returns.
+// timeout, but it holds a goroutine until it returns. Save runs on the
+// refresh path; a Save that ignores ctx blocks refreshes.
 type CatalogStore interface {
 	LoadReleaseCatalog(ctx context.Context) ([]byte, error)
 	SaveReleaseCatalog(ctx context.Context, data []byte) error
@@ -218,8 +219,12 @@ type Catalog struct {
 	opts  CatalogOptions
 	group singleflight.Group
 	// onWait, when set (tests only), runs after a caller has joined a fetch
-	// and before it waits for the result.
-	onWait func()
+	// and before it waits for the result. onLoadWait does the same for a
+	// store read, and onLoadDone runs when a store read has returned and
+	// been processed.
+	onWait     func()
+	onLoadWait func()
+	onLoadDone func()
 	// loadTimeout bounds one store read or write; catalogLoadTimeout (tests
 	// lower it).
 	loadTimeout time.Duration
@@ -228,7 +233,8 @@ type Catalog struct {
 	loaded      bool
 	inflight    bool
 	loading     bool
-	abandoned   bool      // a waiter gave up on the current load
+	abandoned   bool      // the current load overran loadWait
+	loadSeq     int       // identifies the current load for its watchdog
 	lastLoad    time.Time // last store read attempt
 	state       catalogState
 	lastAttempt time.Time
@@ -414,21 +420,30 @@ func (c *Catalog) ensureLoaded(ctx context.Context) {
 		c.load(ctx)
 		return nil, nil
 	})
-	timer := time.NewTimer(c.loadTimeout)
+	if c.onLoadWait != nil {
+		c.onLoadWait()
+	}
+	timer := time.NewTimer(c.loadWait())
 	defer timer.Stop()
 	select {
 	case <-done:
 	case <-ctx.Done():
 	case <-timer.C:
+		// Stop waiting. The flag is set here too (silently), so that a
+		// caller arriving before the load's watchdog fires does not join.
 		c.mu.Lock()
 		if c.loading {
 			c.abandoned = true
-			logging.Subsystem("hub.maintenance.release-catalog").Warn(
-				"Persisted release catalog read did not return within its timeout; continuing without it",
-				"timeout", c.loadTimeout)
 		}
 		c.mu.Unlock()
 	}
+}
+
+// loadWait is how long a store read may run before it is abandoned. The
+// grace over loadTimeout lets a store that honours ctx return its deadline
+// error first, so it is not taken for one that ignores ctx.
+func (c *Catalog) loadWait() time.Duration {
+	return c.loadTimeout + c.loadTimeout/2
 }
 
 // needsLoadLocked reports whether a store read is due.
@@ -451,7 +466,26 @@ func (c *Catalog) load(ctx context.Context) {
 	}
 	c.lastLoad = c.opts.Now()
 	c.loading = true
+	c.loadSeq++
+	seq := c.loadSeq
 	c.mu.Unlock()
+	if c.onLoadDone != nil {
+		defer c.onLoadDone()
+	}
+	log := logging.Subsystem("hub.maintenance.release-catalog")
+
+	// The loader's watchdog abandons the read once it overruns loadWait
+	// and logs that once per load.
+	watchdog := time.AfterFunc(c.loadWait(), func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.loading && c.loadSeq == seq {
+			c.abandoned = true
+			log.Warn("Persisted release catalog read did not return in time (the store ignores ctx); continuing without it",
+				"timeout", c.loadTimeout)
+		}
+	})
+	defer watchdog.Stop()
 
 	lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.loadTimeout)
 	defer cancel()
@@ -461,7 +495,6 @@ func (c *Catalog) load(ctx context.Context) {
 	defer c.mu.Unlock()
 	c.loading = false
 	c.abandoned = false
-	log := logging.Subsystem("hub.maintenance.release-catalog")
 	if err != nil {
 		log.Warn("Failed to load the persisted release catalog; retrying later", "error", err,
 			"retry_after", c.opts.RefreshInterval)

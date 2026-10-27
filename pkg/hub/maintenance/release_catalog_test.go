@@ -261,8 +261,9 @@ type catalogMemStore struct {
 	loads    int
 	loadErrs int  // the next loadErrs loads fail
 	block    bool // loads hang until their ctx ends (a stalled database)
-	// hang, when set, makes loads wait for it to close, ignoring ctx (a
-	// store that breaks the CatalogStore contract).
+	// hang, when set, makes loads wait for it to close and then return
+	// data, ignoring ctx throughout (a store that breaks the CatalogStore
+	// contract).
 	hang chan struct{}
 }
 
@@ -273,6 +274,9 @@ func (s *catalogMemStore) LoadReleaseCatalog(ctx context.Context) ([]byte, error
 	s.mu.Unlock()
 	if hang != nil {
 		<-hang
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		return slices.Clone(s.data), nil
 	}
 	if block {
 		<-ctx.Done()
@@ -1114,25 +1118,47 @@ func TestCatalog_StalledStoreIsBounded(t *testing.T) {
 }
 
 func TestCatalog_CtxIgnoringStoreIsAbandoned(t *testing.T) {
-	const bound = 10 * time.Second // far above loadTimeout; only catches a hang
-	f := newCatalogFake(t, catalogGood("nightly-20261024", catalogDay(24)))
+	const bound = 10 * time.Second // far above loadWait; only catches a hang
 	clock := newCatalogClock()
+
+	// What the stuck read will finally return: a persisted catalog with a
+	// different latest nightly.
+	other := &catalogMemStore{}
+	mustGet(t, newTestCatalog(newCatalogFake(t, catalogGood("nightly-20261030", catalogDay(30))), clock,
+		func(o *CatalogOptions) { o.Store = other }), false)
+
+	f := newCatalogFake(t, catalogGood("nightly-20261024", catalogDay(24)))
 	store := &catalogMemStore{hang: make(chan struct{})}
 	c := newTestCatalog(f, clock, func(o *CatalogOptions) { o.Store = store })
 	c.loadTimeout = 50 * time.Millisecond
+	var joinsMu sync.Mutex
+	joins := 0
+	c.onLoadWait = func() {
+		joinsMu.Lock()
+		joins++
+		joinsMu.Unlock()
+	}
+	loadDone := make(chan struct{}, 1)
+	c.onLoadDone = func() { loadDone <- struct{}{} }
 
 	// The first caller gives up on the stuck read and fetches from GitHub.
 	snap, err := getWithin(t, c, bound)
 	if err != nil || snap.Channel("nightly").Latest != "nightly-20261024" {
 		t.Fatalf("Get with a ctx-ignoring store = %+v, %v", snap, err)
 	}
-	// Later callers neither join the stuck read nor start another, even
-	// after the backoff and the TTL (refetching from GitHub as usual).
+	// While the read is still stuck, later callers neither join it nor
+	// start another, even after the backoff and the TTL.
 	clock.Advance(DefaultCatalogTTL)
 	for range 3 {
 		if _, err := getWithin(t, c, bound); err != nil {
 			t.Fatal(err)
 		}
+	}
+	joinsMu.Lock()
+	gotJoins := joins
+	joinsMu.Unlock()
+	if gotJoins != 1 {
+		t.Errorf("callers that waited on the store read = %d, want 1 (only the first)", gotJoins)
 	}
 	if n := store.loadCount(); n != 1 {
 		t.Errorf("store loads = %d, want 1", n)
@@ -1141,12 +1167,22 @@ func TestCatalog_CtxIgnoringStoreIsAbandoned(t *testing.T) {
 		t.Errorf("list calls = %d, want 2 (initial fetch and one after the TTL)", n)
 	}
 
-	// The stuck read finally returns: the fetched catalog is kept.
+	// The stuck read finally returns another catalog: it is discarded in
+	// favour of the fetched one.
+	other.mu.Lock()
+	persisted := slices.Clone(other.data)
+	other.mu.Unlock()
+	store.mu.Lock()
+	store.data = persisted
+	store.mu.Unlock()
 	close(store.hang)
-	clock.Advance(DefaultCatalogRefreshInterval)
+	<-loadDone
 	snap, err = getWithin(t, c, bound)
-	if err != nil || snap.FetchedAt.IsZero() {
-		t.Errorf("after the stuck read returned: %+v, %v", snap, err)
+	if err != nil || snap.Channel("nightly").Latest != "nightly-20261024" {
+		t.Errorf("after the late read: %+v, %v; want the fetched catalog kept", snap, err)
+	}
+	if _, ok := snap.Lookup("nightly-20261030"); ok {
+		t.Error("the late read replaced the fetched catalog")
 	}
 }
 
