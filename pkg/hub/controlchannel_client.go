@@ -495,9 +495,10 @@ func (c *ControlChannelBrokerClient) CleanupProject(ctx context.Context, brokerI
 	if err != nil {
 		return err
 	}
-	// Allow 404 for idempotent cleanup
-	if resp.StatusCode == http.StatusNotFound {
-		return nil
+	// Allow 404 for idempotent cleanup; any other error status is the
+	// broker's answer (a 409 keeps its project directory), as over HTTP.
+	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound {
+		return &brokerStatusError{StatusCode: resp.StatusCode, Body: string(resp.Body), RetryAfter: resp.Headers["Retry-After"]}
 	}
 	return nil
 }

@@ -166,13 +166,13 @@ func TestClaimReleasers_OnlyKubernetesRuntimes(t *testing.T) {
 }
 
 // A project delete keeps the project directory, whole, while this broker
-// still runs an agent of the project: a forced delete can reach a broker
-// whose agents were not stopped, and the directory holds their legacy agent
-// directories (with their clone-per-agent workspaces). The directory is
-// audited as kept and the delete answers 409. Stopped agents, agents of
-// other projects and an empty listing do not block the removal; a listing
-// that fails does.
-func TestDeleteProject_KeepsDirWithAgentsRunningOnThisBroker(t *testing.T) {
+// still lists an agent of the project in any phase: a forced delete can
+// reach a broker whose agents were not deleted, and the directory holds
+// their legacy agent directories (with their clone-per-agent workspaces, a
+// stopped agent's included). The directory is audited as kept and the
+// delete answers 409. Agents of other projects and an empty listing do not
+// block the removal; a listing that fails does.
+func TestDeleteProject_KeepsDirWithAgentsOnThisBroker(t *testing.T) {
 	withPhase := func(a api.AgentInfo, phase string) api.AgentInfo {
 		a.Phase = phase
 		return a
@@ -197,11 +197,23 @@ func TestDeleteProject_KeepsDirWithAgentsRunningOnThisBroker(t *testing.T) {
 			return []api.AgentInfo{unlabelledAt(d, "running")}
 		}},
 		{name: "listing fails", keep: true, listErr: errors.New("runtime unreachable"), agents: func(string) []api.AgentInfo { return nil }},
-		{name: "stopped agent of the project", agents: func(d string) []api.AgentInfo {
+		{name: "stopped agent of the project", keep: true, agents: func(d string) []api.AgentInfo {
 			return []api.AgentInfo{withPhase(labelled("dev", "cid-a", scopeProjA, d), "stopped")}
+		}},
+		{name: "stopped legacy agent of the project", keep: true, agents: func(d string) []api.AgentInfo {
+			return []api.AgentInfo{unlabelledAt(d, "stopped")}
+		}},
+		{name: "legacy agent of the project in error", keep: true, agents: func(d string) []api.AgentInfo {
+			return []api.AgentInfo{unlabelledAt(d, "error")}
+		}},
+		{name: "halted agent of the project", keep: true, agents: func(d string) []api.AgentInfo {
+			return []api.AgentInfo{withPhase(labelled("dev", "cid-a", scopeProjA, d), "halted")}
 		}},
 		{name: "running agent of another project", agents: func(string) []api.AgentInfo {
 			return []api.AgentInfo{withPhase(labelled("dev", "cid-b", scopeProjB, "/elsewhere/.scion"), "running")}
+		}},
+		{name: "stopped agent of another project", agents: func(string) []api.AgentInfo {
+			return []api.AgentInfo{withPhase(labelled("dev", "cid-b", scopeProjB, "/elsewhere/.scion"), "stopped")}
 		}},
 		{name: "no agents", agents: func(string) []api.AgentInfo { return nil }},
 	}
@@ -235,16 +247,16 @@ func TestDeleteProject_KeepsDirWithAgentsRunningOnThisBroker(t *testing.T) {
 			kept := false
 			for _, l := range lines {
 				if strings.Contains(l, "outcome=deleted") {
-					t.Errorf("nothing may be removed while the project has running agents here: %s", l)
+					t.Errorf("nothing may be removed while the project has agents here: %s", l)
 				}
 				if strings.Contains(l, "tree=project-dir") && strings.Contains(l, "outcome=kept") &&
 					strings.Contains(l, "deleter=broker") && strings.Contains(l, "project_id="+scopeProjA) &&
-					strings.Contains(l, liveAgentsKeptReason) {
+					strings.Contains(l, agentsKeptReason) {
 					kept = true
 				}
 			}
 			if !kept {
-				t.Errorf("the kept project directory must be audited as kept (%q):\n%s", liveAgentsKeptReason, strings.Join(lines, "\n"))
+				t.Errorf("the kept project directory must be audited as kept (%q):\n%s", agentsKeptReason, strings.Join(lines, "\n"))
 			}
 		})
 	}

@@ -3958,11 +3958,31 @@ func (s *Server) cleanupBrokerProjectDirectoriesFromInputs(ctx context.Context, 
 			continue
 		}
 		if err := client.CleanupProject(ctx, provider.BrokerID, broker.Endpoint, project.Slug, project.ID); err != nil {
+			if isBrokerStatus(err, http.StatusConflict) {
+				// The broker kept its project directory: it still has
+				// agents of the project (a forced delete), or another
+				// Runtime Broker instance of its host does. That is the
+				// outcome, not a failure: the delete has committed and
+				// stands.
+				s.projectsLogger().Info("project directory kept on broker",
+					"project_id", project.ID, "slug", project.Slug, "broker", provider.BrokerID)
+				s.auditStorage(ctx, s.projectsLogger(), project.ID, "", []projectfs.Deletion{{
+					Tree: projectfs.TreeProjectDir, Path: "projects/" + project.Slug, Outcome: projectfs.OutcomeKept,
+					Reason: brokerProjectDirKeptReason(provider.BrokerID),
+				}})
+				continue
+			}
 			s.projectsLogger().Warn("failed to cleanup project on broker",
 				"project_id", project.ID, "slug", project.Slug,
 				"broker", provider.BrokerID, "endpoint", broker.Endpoint, "error", err)
 		}
 	}
+}
+
+// brokerProjectDirKeptReason is the audit reason of a broker project
+// directory the broker kept (it answered the cleanup with 409).
+func brokerProjectDirKeptReason(brokerID string) string {
+	return "kept on Runtime Broker " + brokerID + ": it still has agents of the project, or another instance of its host does"
 }
 
 // brokerUsesSlugProjectDir reports whether provider's broker keeps project
