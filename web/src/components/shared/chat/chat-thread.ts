@@ -5311,7 +5311,12 @@ export class ScionChatThread extends LitElement {
     // the anchor (or, if it left, its nearest loaded neighbours) instead of
     // the newest window, which would not contain it.
     const anchorAt = anchor ? before.indexOf(anchor.messageId) : -1;
-    const deep = !wasPinned && anchorAt >= 0 && before.length - anchorAt > HISTORY_MAX_PAGE_SIZE;
+    // A window already around an older message is deep too: the newest page
+    // would not hold the anchor, whatever its distance in the loaded list.
+    const deep =
+      !wasPinned &&
+      anchorAt >= 0 &&
+      (this.viewingAroundMessage || before.length - anchorAt > HISTORY_MAX_PAGE_SIZE);
     const requests: URLSearchParams[] = [];
     if (deep) {
       for (let d = 0; d <= FILTER_AROUND_TRIES && requests.length < FILTER_AROUND_TRIES; d++) {
@@ -5348,10 +5353,12 @@ export class ScionChatThread extends LitElement {
     if (fetchId !== this.fetchId || !this.filtered) return;
     this.replaceHistoryWindow(data, recentFilesGeneration);
     // A window around an older message is not the tail: Jump to latest and
-    // the bottom pin treat it as such.
+    // the bottom pin treat it as such. The newest page is the tail again.
     if (around) {
       this.viewingAroundMessage = true;
       this.pinnedToBottom = false;
+    } else {
+      this.viewingAroundMessage = false;
     }
     if (wasPinned || !anchor) {
       this.scrollToBottomAfterRender();

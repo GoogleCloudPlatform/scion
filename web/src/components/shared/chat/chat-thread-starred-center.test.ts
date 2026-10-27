@@ -481,6 +481,16 @@ describe('scion-chat-thread starred-only center', () => {
     expect(refetch[0]).toContain(`around=${target}`);
     expect(refetch[0]).toContain('starred=true');
     await vi.waitFor(() => expect(renderedIds(el)).toContain(target));
+
+    // A second invalidation (an unstar here is followed by the hub's own
+    // stars event) keeps refetching around the reader, never the tail page.
+    const second = historyCalls().length;
+    fakeStateManager.dispatchEvent(new CustomEvent('chat-stars-updated', { detail: {} }));
+    await vi.waitFor(() => expect(historyCalls().length).toBeGreaterThan(second));
+    await new Promise((r) => setTimeout(r, 30));
+    const refetch2 = historyCalls().slice(second);
+    expect(refetch2.every((u) => u.includes('around='))).toBe(true);
+    expect(renderedIds(el)).toContain(target);
   });
 
   it('a filtered page arriving after the filter changed is dropped', async () => {
