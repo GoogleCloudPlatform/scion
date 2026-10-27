@@ -62,7 +62,12 @@ const (
 	UpdateModeRelease = "release"
 )
 
-// Channel sources reported by update-status.
+// Channel sources reported by update-status. ChannelSourceSelection means
+// an operator-initiated update (an explicit target, channel and pin from the
+// API or UI) was verified and recorded as system.release_selection; it then
+// takes precedence over the configured release_channel. Auto-updates never
+// record a selection, so on a hub without one the configured channel stays
+// in effect, and a later config edit applies.
 const (
 	ChannelSourceSelection = "selection"
 	ChannelSourceConfig    = "config"
@@ -164,11 +169,17 @@ func (s *Server) readReleaseSelection(ctx context.Context) (*ReleaseSelection, e
 }
 
 // selectionFromPending is the release selection a verified pending update
-// records. ok is false for a row written before Phase 2 (no channel): that
-// update carried no operator selection.
-func selectionFromPending(p PendingUpdate, at time.Time) (sel ReleaseSelection, ok bool) {
-	if p.Channel == "" {
-		return ReleaseSelection{}, false
+// records. Only an operator-initiated update records one: skip says why
+// none is recorded for a row written before Phase 2 (no channel) or for an
+// auto-update run (started by system:auto-update). Neither carried an
+// operator choice, and recording one would silently override the configured
+// release_channel from then on.
+func selectionFromPending(p PendingUpdate, at time.Time) (sel ReleaseSelection, skip string) {
+	switch {
+	case p.Channel == "":
+		return ReleaseSelection{}, "the pending update has no channel (written before release selections)"
+	case p.SetBy == autoUpdateStartedBy:
+		return ReleaseSelection{}, "the update was started by the auto-update policy, not an operator"
 	}
 	pin := p.Pin
 	if pin == "" {
@@ -182,7 +193,7 @@ func selectionFromPending(p PendingUpdate, at time.Time) (sel ReleaseSelection, 
 		SetBy:   p.SetBy,
 		SetAt:   at.UTC().Format(time.RFC3339),
 		RunID:   p.RunID,
-	}, true
+	}, ""
 }
 
 // updateInstaller returns the Installer detected at startup, or an
@@ -305,13 +316,13 @@ func (s *Server) reconcilePendingUpdate(ctx context.Context, running string) err
 		// hub runs it. A failed write keeps pending_update, so the next
 		// boot records it.
 		if status == LastUpdateVerified {
-			if sel, ok := selectionFromPending(p, time.Now()); ok {
+			if sel, skip := selectionFromPending(p, time.Now()); skip == "" {
 				if err := s.writeHubSettingJSON(ctx, HubSettingSectionReleaseSelection, sel); err != nil {
 					return err
 				}
 			} else {
-				log.Debug("Pending update has no channel (written before release selections); no release selection recorded",
-					"run_id", p.RunID, "to", p.To)
+				log.Debug("No release selection recorded for the verified update",
+					"run_id", p.RunID, "to", p.To, "reason", skip)
 			}
 		}
 		// The update is confirmed only now; the update-binary hook leaves
@@ -445,7 +456,10 @@ type updateStatusMode struct {
 type updateStatusChannel struct {
 	Effective  string `json:"effective"`
 	Configured string `json:"configured"`
-	Source     string `json:"source"`
+	// Source is where Effective came from: ChannelSourceSelection (an
+	// operator-initiated update's recorded choice; auto-updates never
+	// record one), ChannelSourceConfig or ChannelSourceDetected.
+	Source string `json:"source"`
 }
 
 // runningBuild identifies the running binary for update-status.

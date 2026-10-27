@@ -536,6 +536,22 @@ func TestBinaryUpdate_LatestChannel(t *testing.T) {
 		}
 	})
 
+	t.Run("latest of another channel that is older is refused before download", func(t *testing.T) {
+		gh := newFakeGitHub(t)
+		gh.addRelease("nightly-20261023", "2026-10-23T04:00:00Z", "nightly-20261023")
+		gh.addRelease("v0.3.0-preview.4", "2026-10-22T18:00:00Z", "v0.3.0-preview.4")
+		inst := &fakeInstaller{}
+		e := newTestExecutor(gh, inst, "nightly-20261023")
+		hooked, err := run(e, map[string]string{"target_version": "latest:preview", "channel": "preview"})
+		wantCode(t, err, CodeDowngradeNotYetSupported)
+		if hooked != nil || len(inst.calls) != 1 {
+			t.Fatalf("installer calls = %v, hook = %+v; want preflight only", inst.calls, hooked)
+		}
+		if gh.requested("/releases/download/v0.3.0-preview.4/scion-") {
+			t.Fatal("the older release was downloaded")
+		}
+	})
+
 	t.Run("already on latest", func(t *testing.T) {
 		gh := newFakeGitHub(t)
 		gh.addRelease("nightly-20261023", "2026-10-23T04:00:00Z", "nightly-20261023")

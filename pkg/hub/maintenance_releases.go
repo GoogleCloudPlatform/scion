@@ -108,7 +108,8 @@ func (c hubReleaseCatalogStore) SaveReleaseCatalog(ctx context.Context, data []b
 }
 
 // memoReleaseSource remembers single-tag lookups: a found release for good
-// (its publish date never changes), a failure for retry.
+// (its publish date never changes), an upstream failure for retry. A lookup
+// ended by the caller's context is not remembered.
 type memoReleaseSource struct {
 	src   maintenance.ReleaseSource
 	retry time.Duration
@@ -134,6 +135,12 @@ func (m *memoReleaseSource) ReleaseByTag(ctx context.Context, tag string) (*main
 	m.mu.Unlock()
 
 	rel, err := m.src.ReleaseByTag(ctx, tag)
+	// A lookup cut short by the caller (cancelled request, deadline) says
+	// nothing about the release; remembering it would serve that failure
+	// to every caller for the retry window.
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return rel, err
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()

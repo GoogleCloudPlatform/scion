@@ -784,8 +784,11 @@ func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 		}
 		result, err := maintenance.CheckForReleaseUpdates(r.Context(), opts)
 		if err != nil {
+			// The error is the catalog's fetch error; it goes to the log,
+			// and the answer says what failed, as the releases endpoint does.
+			s.maintenanceLog.Warn("Release update check failed", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-				"Failed to check for release updates: "+err.Error(), nil)
+				"Failed to check for release updates: the release list could not be fetched from GitHub; try again later", nil)
 			return
 		}
 		writeJSON(w, http.StatusOK, result)

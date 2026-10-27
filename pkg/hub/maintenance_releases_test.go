@@ -62,10 +62,13 @@ type countingReleaseSource struct {
 	calls int
 }
 
-func (c *countingReleaseSource) ReleaseByTag(_ context.Context, tag string) (*maintenance.Release, error) {
+func (c *countingReleaseSource) ReleaseByTag(ctx context.Context, tag string) (*maintenance.Release, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.calls++
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if d, ok := c.rels[tag]; ok {
 		return &maintenance.Release{Tag: tag, PublishedAt: d}, nil
 	}
@@ -242,6 +245,9 @@ func TestHandleMaintenanceReleases(t *testing.T) {
 		if _, ok := body["error"]; ok {
 			t.Errorf("the fetch error must not be returned: %v", body)
 		}
+		if strings.Contains(rr.Body.String(), "GitHub said no") {
+			t.Errorf("the fetch error leaks under some field: %s", rr.Body)
+		}
 		channels := body["channels"].(map[string]any)
 		if len(channels) != 3 {
 			t.Fatalf("channels = %v", channels)
@@ -361,6 +367,51 @@ func TestMemoReleaseSource(t *testing.T) {
 	if n := src.callCount(); n != 3 {
 		t.Fatalf("lookups = %d, want 3 (only the failure retried)", n)
 	}
+
+	t.Run("a cancelled caller is not remembered", func(t *testing.T) {
+		src := &countingReleaseSource{rels: map[string]time.Time{"v0.2.0": now}}
+		m := &memoReleaseSource{src: src, retry: time.Hour, now: func() time.Time { return now }}
+		cancelled, cancel := context.WithCancel(ctx)
+		cancel()
+		if _, err := m.ReleaseByTag(cancelled, "v0.2.0"); !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled lookup = %v", err)
+		}
+		rel, err := m.ReleaseByTag(ctx, "v0.2.0")
+		if err != nil || rel == nil || rel.Tag != "v0.2.0" {
+			t.Fatalf("lookup after a cancelled one = %v, %v; the cancellation was remembered", rel, err)
+		}
+		if n := src.callCount(); n != 2 {
+			t.Fatalf("lookups = %d, want 2", n)
+		}
+	})
+
+	t.Run("a deadline error from the source is not remembered", func(t *testing.T) {
+		src := &deadlineOnceReleaseSource{}
+		m := &memoReleaseSource{src: src, retry: time.Hour, now: func() time.Time { return now }}
+		if _, err := m.ReleaseByTag(ctx, "v0.2.0"); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("first lookup = %v", err)
+		}
+		if _, err := m.ReleaseByTag(ctx, "v0.2.0"); err != nil {
+			t.Fatalf("second lookup = %v; the deadline error was remembered", err)
+		}
+	})
+}
+
+// deadlineOnceReleaseSource fails its first lookup with a deadline error
+// (a request timeout inside the source) and finds the release afterwards.
+type deadlineOnceReleaseSource struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (d *deadlineOnceReleaseSource) ReleaseByTag(_ context.Context, tag string) (*maintenance.Release, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.calls++
+	if d.calls == 1 {
+		return nil, context.DeadlineExceeded
+	}
+	return &maintenance.Release{Tag: tag}, nil
 }
 
 func TestHubReleaseCatalogStore(t *testing.T) {
@@ -569,9 +620,66 @@ func TestReconcilePendingUpdate_ReleaseSelection(t *testing.T) {
 	t.Run("a missing pin is latest", func(t *testing.T) {
 		p := pending("r1")
 		p.Pin = ""
-		sel, ok := selectionFromPending(p, time.Now())
-		if !ok || sel.Pin != maintenance.PinLatest {
-			t.Errorf("selection = %+v, %v", sel, ok)
+		sel, skip := selectionFromPending(p, time.Now())
+		if skip != "" || sel.Pin != maintenance.PinLatest {
+			t.Errorf("selection = %+v, skip %q", sel, skip)
+		}
+	})
+
+	t.Run("an auto-update records no selection", func(t *testing.T) {
+		srv, s := newTestServerWithStore(t)
+		srv.config.MaintenanceConfig = MaintenanceConfig{DeploymentTier: "binary", ReleaseChannel: "nightly"}
+		run := newRestartingRun(t, s)
+		p := pending(run.ID)
+		p.To, p.Channel, p.Pin, p.SetBy = "nightly-20261024", "nightly", maintenance.PinLatest, autoUpdateStartedBy
+		putPendingUpdate(t, s, p)
+		if err := srv.reconcilePendingUpdate(ctx, "nightly-20261024"); err != nil {
+			t.Fatal(err)
+		}
+		if last := getLastUpdate(t, s); last == nil || last.Status != LastUpdateVerified {
+			t.Fatalf("lastUpdate = %+v", last)
+		}
+		if sel := getReleaseSelection(t, s); sel != nil {
+			t.Fatalf("an auto-update wrote a selection: %+v", sel)
+		}
+		// The operator's later config edit takes effect.
+		srv.config.MaintenanceConfig.ReleaseChannel = "preview"
+		st, err := srv.buildUpdateStatus(ctx, runningBuild{Version: "nightly-20261024"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Channel != (updateStatusChannel{Effective: "preview", Configured: "preview", Source: ChannelSourceConfig}) {
+			t.Errorf("channel after a config edit = %+v", st.Channel)
+		}
+	})
+
+	t.Run("an auto-update leaves an operator selection unchanged", func(t *testing.T) {
+		srv, s := newTestServerWithStore(t)
+		prev := ReleaseSelection{Mode: UpdateModeRelease, Channel: "nightly", Pin: maintenance.PinLatest,
+			Version: "nightly-20261023", SetBy: "admin@example.com", SetAt: "2026-10-23T05:00:00Z", RunID: "r0"}
+		putReleaseSelection(t, s, prev)
+		run := newRestartingRun(t, s)
+		p := pending(run.ID)
+		p.To, p.Channel, p.Pin, p.SetBy = "nightly-20261024", "nightly", maintenance.PinLatest, autoUpdateStartedBy
+		putPendingUpdate(t, s, p)
+		if err := srv.reconcilePendingUpdate(ctx, "nightly-20261024"); err != nil {
+			t.Fatal(err)
+		}
+		if sel := getReleaseSelection(t, s); sel == nil || *sel != prev {
+			t.Errorf("selection = %+v, want unchanged %+v", sel, prev)
+		}
+	})
+
+	t.Run("skip reasons", func(t *testing.T) {
+		p := pending("r1")
+		p.SetBy = autoUpdateStartedBy
+		if _, skip := selectionFromPending(p, time.Now()); skip == "" {
+			t.Error("an auto-update row must be skipped")
+		}
+		p = pending("r1")
+		p.Channel = ""
+		if _, skip := selectionFromPending(p, time.Now()); skip == "" {
+			t.Error("a row without a channel must be skipped")
 		}
 	})
 }
