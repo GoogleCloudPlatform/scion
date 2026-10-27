@@ -508,7 +508,7 @@ describe('space rail — Starred and the experiment', () => {
     expect(el._starredPoll).toBeNull();
   });
 
-  it('server flags applied with the experiment off leave Starred at once', async () => {
+  it('a flag change with the experiment off leaves Starred at once', async () => {
     const { setFeatureFlag } = await import('../../../utils/feature-flags.js');
     starredPages = [{ items: ROWS }];
     const el = await mount();
