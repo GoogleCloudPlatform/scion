@@ -2036,8 +2036,22 @@ func (a *AuthzService) accessConstraintRestrictions(
 	if err != nil {
 		return nil, err
 	}
+	return restrictionsFromConstraints(constraints, closure, resource), nil
+}
+
+// restrictionsFromConstraints is accessConstraintRestrictions after its load:
+// it converts the loaded constraints, keeps those that apply to closure in
+// the scope resource.ProjectID selects (the system scope when it is empty),
+// and returns them as kernel restrictions. It does no I/O, so a caller that
+// evaluates many resources in one request can load the table once and call
+// this per resource.
+func restrictionsFromConstraints(
+	constraints []*store.AccessConstraint,
+	closure map[string]struct{},
+	resource ResourceContext,
+) []Restriction {
 	if len(constraints) == 0 {
-		return nil, nil
+		return nil
 	}
 
 	// Convert store constraints to hub AccessConstraint and filter.
@@ -2096,7 +2110,7 @@ func (a *AuthzService) accessConstraintRestrictions(
 		ri++
 	}
 
-	return restrictions, nil
+	return restrictions
 }
 
 // loadAllAccessConstraints loads all access constraints by paging through

@@ -46,6 +46,7 @@ func TestSAParentCeiling_UserSourceExactSAAllows(t *testing.T) {
 	d := f.eval(t)
 	assertParentCeilingAllowed(t, d)
 	assert.Equal(t, ParentProof{
+		Kind:                 ParentProofKindParentPermission,
 		Permission:           "gcp_service_account.assign",
 		SourcePrincipal:      ProvenancePrincipal{Kind: store.DelegationPrincipalUser, ID: f.assigner},
 		SourceCredentialKind: store.SourceCredentialSession,
