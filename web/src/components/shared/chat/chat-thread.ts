@@ -5381,6 +5381,9 @@ export class ScionChatThread extends LitElement {
       }
     }
     if (!keep) {
+      // Nothing of the old window survived: follow the newest message (the
+      // bottom pin, else scrollToBottomAfterRender would not move).
+      this.pinnedToBottom = true;
       this.scrollToBottomAfterRender();
       return;
     }

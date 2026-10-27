@@ -493,6 +493,85 @@ describe('scion-chat-thread starred-only center', () => {
     expect(renderedIds(el)).toContain(target);
   });
 
+  it('a refresh whose around targets are all gone falls back to the tail and leaves the around state', async () => {
+    const many = Array.from({ length: 260 }, (_, i) =>
+      message(`00000000-0000-4000-8000-${(2000 + i).toString(16).padStart(12, '0')}`, 0)
+    );
+    many.forEach((m, i) => {
+      m.createdAt = new Date(Date.parse('2026-10-20T00:00:00Z') + i * 60_000).toISOString();
+    });
+    let aroundGone = false;
+    apiFetch.mockImplementation((url: string) => {
+      if (url.includes('/messages?')) {
+        const params = new URL(url, 'http://x').searchParams;
+        const around = params.get('around');
+        if (around) {
+          if (aroundGone) return Promise.resolve(json({}, 404));
+          const at = many.findIndex((m) => m.id === around);
+          return Promise.resolve(
+            json({ messages: many.slice(Math.max(0, at - 25), at + 25).reverse() })
+          );
+        }
+        const cursor = params.get('cursor');
+        const limit = Number(params.get('limit') ?? 50);
+        const end = cursor ? Number(cursor.slice(2)) : many.length;
+        const page = many.slice(Math.max(0, end - limit), end);
+        return Promise.resolve(
+          json({
+            messages: [...page].reverse(),
+            ...(end - limit > 0 ? { nextCursor: `c-${end - limit}` } : {}),
+          })
+        );
+      }
+      return Promise.resolve(json({ starredMessageIds: [] }));
+    });
+    const el = await mount();
+    const internals = el as unknown as {
+      loadOlderMessagesV2(scroller: HTMLElement): Promise<void>;
+      _scrollAnchor: {
+        conversationKey: string;
+        messageId: string;
+        offset: number;
+        pinnedToBottom: boolean;
+      } | null;
+      pinnedToBottom: boolean;
+      viewingAroundMessage: boolean;
+      captureScrollAnchor(): void;
+    };
+    const scroller = el.shadowRoot?.querySelector('.messages-scroll') as HTMLElement;
+    for (let i = 0; i < 5; i++) await internals.loadOlderMessagesV2(scroller);
+    await vi.waitFor(() => expect(renderedIds(el).length).toBe(260));
+    const target = many[10].id;
+    internals.captureScrollAnchor = (): void => {
+      internals._scrollAnchor = {
+        conversationKey: TOPIC,
+        messageId: target,
+        offset: 0,
+        pinnedToBottom: false,
+      };
+    };
+    internals.pinnedToBottom = false;
+    // First refresh: around the reader (an around window).
+    fakeStateManager.dispatchEvent(new CustomEvent('chat-stars-updated', { detail: {} }));
+    await vi.waitFor(() => expect(internals.viewingAroundMessage).toBe(true));
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('.jump-to-latest')).not.toBeNull();
+
+    // Every around target is gone now: the next refresh falls back to the tail.
+    aroundGone = true;
+    const before = historyCalls().length;
+    fakeStateManager.dispatchEvent(new CustomEvent('chat-stars-updated', { detail: {} }));
+    await vi.waitFor(() => expect(internals.viewingAroundMessage).toBe(false));
+    await el.updateComplete;
+    const refetch = historyCalls().slice(before);
+    const last = refetch[refetch.length - 1];
+    expect(last).toContain('limit=');
+    expect(last).not.toContain('around=');
+    expect(last).toContain('starred=true');
+    expect(internals.pinnedToBottom).toBe(true);
+    expect(el.shadowRoot?.querySelector('.jump-to-latest')).toBeNull();
+  });
+
   it('a filtered page arriving after the filter changed is dropped', async () => {
     let releaseFiltered!: () => void;
     const gate = new Promise<void>((r) => (releaseFiltered = r));
