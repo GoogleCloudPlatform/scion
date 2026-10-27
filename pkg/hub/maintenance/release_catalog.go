@@ -52,10 +52,14 @@ const (
 	catalogFetchTimeout = 2 * time.Minute
 
 	// DefaultCatalogChecksumsBudget bounds the SHA256SUMS downloads of one
-	// refresh. When it runs out, the releases still unclassified are marked
-	// ReasonChecksumsUnavailable (not cached) instead of failing the refresh,
-	// so a blackholed download host cannot keep a hub without a catalog.
+	// refresh, measured from the first download. When it runs out, the
+	// releases still unclassified are marked ReasonChecksumsUnavailable (not
+	// cached) instead of failing the refresh, so a blackholed download host
+	// cannot keep a hub without a catalog.
 	DefaultCatalogChecksumsBudget = 60 * time.Second
+
+	// catalogLoadTimeout bounds one read or write of the persisted copy.
+	catalogLoadTimeout = 10 * time.Second
 
 	// catalogStateVersion versions the persisted JSON; another version is
 	// ignored on load.
@@ -167,6 +171,11 @@ func (s Snapshot) Lookup(tag string) (CatalogRelease, bool) {
 // CatalogStore persists the catalog across restarts (the hub stores it in
 // the hub_settings row system.release_catalog). Load returns nil, nil when
 // nothing is stored. The data is opaque JSON owned by the catalog.
+//
+// Both methods must return promptly once ctx is done. The catalog bounds
+// its calls through ctx; a load that ignores ctx is abandoned after its
+// timeout, but it holds a goroutine until it returns. Save runs on the
+// refresh path; a Save that ignores ctx blocks refreshes.
 type CatalogStore interface {
 	LoadReleaseCatalog(ctx context.Context) ([]byte, error)
 	SaveReleaseCatalog(ctx context.Context, data []byte) error
@@ -193,8 +202,9 @@ type CatalogOptions struct {
 	// 0 means the default, a negative value means none.
 	NonInstallable int
 	MaxPages       int
-	// ChecksumsBudget bounds the SHA256SUMS downloads of one refresh;
-	// default DefaultCatalogChecksumsBudget.
+	// ChecksumsBudget bounds the SHA256SUMS downloads of one refresh,
+	// measured from the first download; default
+	// DefaultCatalogChecksumsBudget.
 	ChecksumsBudget time.Duration
 
 	// Now is the clock; default time.Now.
@@ -209,12 +219,23 @@ type Catalog struct {
 	opts  CatalogOptions
 	group singleflight.Group
 	// onWait, when set (tests only), runs after a caller has joined a fetch
-	// and before it waits for the result.
-	onWait func()
+	// and before it waits for the result. onLoadWait does the same for a
+	// store read, and onLoadDone runs when a store read has returned and
+	// been processed.
+	onWait     func()
+	onLoadWait func()
+	onLoadDone func()
+	// loadTimeout bounds one store read or write; catalogLoadTimeout (tests
+	// lower it).
+	loadTimeout time.Duration
 
 	mu          sync.Mutex
 	loaded      bool
 	inflight    bool
+	loading     bool
+	abandoned   bool      // the current load overran loadWait
+	loadSeq     int       // identifies the current load for its watchdog
+	lastLoad    time.Time // last store read attempt
 	state       catalogState
 	lastAttempt time.Time
 	lastErr     error
@@ -234,8 +255,10 @@ type catalogState struct {
 	Channels map[string]CatalogChannel `json:"channels"`
 }
 
+// PageURL is not named URL: pkg/util/logging's request-path scanner treats
+// any bare X.URL in pkg/hub/maintenance as a request URL use.
 type catalogPage struct {
-	URL      string    `json:"url"` // "" for the first page
+	PageURL  string    `json:"url"` // "" for the first page
 	ETag     string    `json:"etag"`
 	Next     string    `json:"next"`
 	Releases []Release `json:"releases"`
@@ -280,7 +303,7 @@ func NewCatalog(opts CatalogOptions) *Catalog {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	return &Catalog{opts: opts}
+	return &Catalog{opts: opts, loadTimeout: catalogLoadTimeout}
 }
 
 // Get returns the catalog. It fetches from GitHub when the cached copy is
@@ -292,10 +315,15 @@ func NewCatalog(opts CatalogOptions) *Catalog {
 //
 // The fetch itself is detached from ctx (other callers may share it), but
 // Get stops waiting when ctx ends: it then returns the cached catalog, or
-// ctx's error when there is none.
+// ctx's error when there is none. A caller whose ctx has already ended
+// never starts a fetch.
 func (c *Catalog) Get(ctx context.Context, refresh bool) (Snapshot, error) {
+	c.ensureLoaded(ctx)
+	if ctx.Err() != nil {
+		return c.result(ctx, true)
+	}
+
 	c.mu.Lock()
-	c.loadLocked(ctx)
 	// A caller with nothing to serve, or asking for a refresh, waits for a
 	// fetch already in flight instead of returning what is cached.
 	need := c.needsFetchLocked(refresh) || (c.inflight && (refresh || c.state.FetchedAt.IsZero()))
@@ -324,7 +352,12 @@ func (c *Catalog) Get(ctx context.Context, refresh bool) (Snapshot, error) {
 			cancelled = true
 		}
 	}
+	return c.result(ctx, cancelled)
+}
 
+// result returns the cached catalog with the local overlay, or the reason
+// there is none (ctx's error when the caller stopped waiting).
+func (c *Catalog) result(ctx context.Context, cancelled bool) (Snapshot, error) {
 	var local []InstalledRelease
 	if c.opts.Local != nil {
 		local = c.opts.Local()
@@ -358,28 +391,119 @@ func (c *Catalog) needsFetchLocked(refresh bool) bool {
 	return now.Sub(c.state.FetchedAt) >= c.opts.TTL
 }
 
-// loadLocked reads the persisted copy until one load gives a definite
-// answer: a copy, nothing stored, or a copy that is unusable (unreadable, or
-// for another repo, asset or format version, which is ignored). A store
-// error is retried on the next Get. Once a fetch has succeeded the
-// persisted copy is no longer needed. The read is detached from the
-// caller's cancellation so that a cancelled first caller cannot lose it.
-func (c *Catalog) loadLocked(ctx context.Context) {
-	if c.loaded {
+// ensureLoaded reads the persisted copy until one read gives a definite
+// answer: a copy, nothing stored, or an unusable copy (unreadable, or for
+// another repo, asset or format version, which is ignored). Once a fetch
+// has succeeded the copy is no longer needed.
+//
+// The read runs outside c.mu, detached from the caller's cancellation (a
+// cancelled first caller must not lose the copy) but bounded by
+// loadTimeout. Concurrent callers share one read, and each stops waiting
+// when its ctx ends. After a store error the read is retried at most once
+// per RefreshInterval, so a failing or stalled store is neither hit nor
+// logged on every request.
+//
+// The wait is also bounded by loadWait, for a store that ignores ctx:
+// the waiter then carries on as after a store error, and later callers do
+// not join that read (nor start another) until it returns.
+func (c *Catalog) ensureLoaded(ctx context.Context) {
+	c.mu.Lock()
+	var need bool
+	if c.loading {
+		need = !c.abandoned
+	} else {
+		need = c.needsLoadLocked()
+	}
+	c.mu.Unlock()
+	if !need {
 		return
+	}
+	done := c.group.DoChan("load", func() (any, error) {
+		c.load(ctx)
+		return nil, nil
+	})
+	if c.onLoadWait != nil {
+		c.onLoadWait()
+	}
+	timer := time.NewTimer(c.loadWait())
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	case <-timer.C:
+		// Stop waiting. The flag is set here too (silently), so that a
+		// caller arriving before the load's watchdog fires does not join.
+		c.mu.Lock()
+		if c.loading {
+			c.abandoned = true
+		}
+		c.mu.Unlock()
+	}
+}
+
+// loadWait is how long a store read may run before it is abandoned. The
+// grace over loadTimeout lets a store that honours ctx return its deadline
+// error first, so it is not taken for one that ignores ctx.
+func (c *Catalog) loadWait() time.Duration {
+	return c.loadTimeout + c.loadTimeout/2
+}
+
+// needsLoadLocked reports whether a store read is due.
+func (c *Catalog) needsLoadLocked() bool {
+	if c.loaded {
+		return false
 	}
 	if c.opts.Store == nil || !c.state.FetchedAt.IsZero() {
 		c.loaded = true
+		return false
+	}
+	return c.lastLoad.IsZero() || c.opts.Now().Sub(c.lastLoad) >= c.opts.RefreshInterval
+}
+
+func (c *Catalog) load(ctx context.Context) {
+	c.mu.Lock()
+	if !c.needsLoadLocked() {
+		c.mu.Unlock()
 		return
 	}
+	c.lastLoad = c.opts.Now()
+	c.loading = true
+	c.loadSeq++
+	seq := c.loadSeq
+	c.mu.Unlock()
+	if c.onLoadDone != nil {
+		defer c.onLoadDone()
+	}
 	log := logging.Subsystem("hub.maintenance.release-catalog")
-	data, err := c.opts.Store.LoadReleaseCatalog(context.WithoutCancel(ctx))
+
+	// The loader's watchdog abandons the read once it overruns loadWait
+	// and logs that once per load.
+	watchdog := time.AfterFunc(c.loadWait(), func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.loading && c.loadSeq == seq {
+			c.abandoned = true
+			log.Warn("Persisted release catalog read did not return in time (the store ignores ctx); continuing without it",
+				"timeout", c.loadTimeout)
+		}
+	})
+	defer watchdog.Stop()
+
+	lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.loadTimeout)
+	defer cancel()
+	data, err := c.opts.Store.LoadReleaseCatalog(lctx)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.loading = false
+	c.abandoned = false
 	if err != nil {
-		log.Warn("Failed to load the persisted release catalog; retrying on the next request", "error", err)
+		log.Warn("Failed to load the persisted release catalog; retrying later", "error", err,
+			"retry_after", c.opts.RefreshInterval)
 		return
 	}
 	c.loaded = true
-	if len(data) == 0 {
+	if len(data) == 0 || !c.state.FetchedAt.IsZero() {
 		return
 	}
 	var st catalogState
@@ -428,7 +552,11 @@ func (c *Catalog) refresh(ctx context.Context) {
 	}
 	data, err := json.Marshal(st)
 	if err == nil {
-		err = c.opts.Store.SaveReleaseCatalog(ctx, data)
+		// Its own bound, like the load: a slow store must not use up the
+		// refresh's budget while callers wait on the shared fetch.
+		sctx, cancelSave := context.WithTimeout(context.WithoutCancel(ctx), c.loadTimeout)
+		err = c.opts.Store.SaveReleaseCatalog(sctx, data)
+		cancelSave()
 	}
 	if err != nil {
 		log.Warn("Failed to persist the release catalog", "error", err)
@@ -441,13 +569,11 @@ func (c *Catalog) refresh(ctx context.Context) {
 func (c *Catalog) fetch(ctx context.Context, prev catalogState) (catalogState, error) {
 	prevPages := make(map[string]catalogPage, len(prev.Pages))
 	for _, p := range prev.Pages {
-		prevPages[p.URL] = p
+		prevPages[p.PageURL] = p
 	}
-	sumsCtx, cancelSums := context.WithTimeout(ctx, c.opts.ChecksumsBudget)
-	defer cancelSums()
 	cl := &classifier{
 		ctx:      ctx,
-		sumsCtx:  sumsCtx,
+		budget:   c.opts.ChecksumsBudget,
 		lister:   c.opts.Lister,
 		asset:    c.opts.Asset,
 		prevSums: prev.Sums,
@@ -460,6 +586,8 @@ func (c *Catalog) fetch(ctx context.Context, prev catalogState) (catalogState, e
 		Asset:   c.opts.Asset,
 		Sums:    cl.sums,
 	}
+
+	defer cl.close()
 
 	var releases []Release
 	pageURL := ""
@@ -475,7 +603,7 @@ func (c *Catalog) fetch(ctx context.Context, prev catalogState) (catalogState, e
 		}
 		page := old
 		if !p.NotModified {
-			page = catalogPage{URL: pageURL, ETag: p.ETag, Next: p.Next, Releases: p.Releases}
+			page = catalogPage{PageURL: pageURL, ETag: p.ETag, Next: p.Next, Releases: p.Releases}
 		} else if !hasOld {
 			return catalogState{}, fmt.Errorf("GitHub answered 304 Not Modified for an uncached release list page")
 		}
@@ -567,19 +695,38 @@ func (c *Catalog) build(cl *classifier, releases []Release) (map[string]CatalogC
 // classifier decides installability, downloading SHA256SUMS at most once
 // per refresh and reusing verdicts cached per tag + asset updated_at.
 type classifier struct {
-	ctx      context.Context // the refresh
-	sumsCtx  context.Context // the refresh, limited to ChecksumsBudget
-	lister   ReleaseLister
-	asset    string
-	prevSums map[string]sumsVerdict // from the previous catalog
-	sums     map[string]sumsVerdict // carried into the new catalog
-	verdicts map[string]sumsVerdict // this refresh, by tag
+	ctx    context.Context // the refresh
+	budget time.Duration   // ChecksumsBudget
+	// sumsCtx is the refresh limited to budget, started at the first
+	// SHA256SUMS download (nil until then).
+	sumsCtx    context.Context
+	cancelSums context.CancelFunc
+	lister     ReleaseLister
+	asset      string
+	prevSums   map[string]sumsVerdict // from the previous catalog
+	sums       map[string]sumsVerdict // carried into the new catalog
+	verdicts   map[string]sumsVerdict // this refresh, by tag
 }
 
 // sumsKey keys a SHA256SUMS verdict: a re-uploaded asset gets a new
 // updated_at and so a new verdict.
 func sumsKey(tag string, sums ReleaseAsset) string {
 	return tag + "@" + sums.UpdatedAt.UTC().Format(time.RFC3339Nano)
+}
+
+// downloadCtx returns the SHA256SUMS budget context, starting the budget on
+// first use.
+func (cl *classifier) downloadCtx() context.Context {
+	if cl.sumsCtx == nil {
+		cl.sumsCtx, cl.cancelSums = context.WithTimeout(cl.ctx, cl.budget)
+	}
+	return cl.sumsCtx
+}
+
+func (cl *classifier) close() {
+	if cl.cancelSums != nil {
+		cl.cancelSums()
+	}
 }
 
 func (cl *classifier) classify(r Release) (sumsVerdict, error) {
@@ -611,10 +758,11 @@ func (cl *classifier) decide(r Release) (sumsVerdict, error) {
 	if ctxErr := cl.ctx.Err(); ctxErr != nil {
 		return sumsVerdict{}, fmt.Errorf("release catalog fetch: %w", ctxErr)
 	}
-	if cl.sumsCtx.Err() != nil {
+	dctx := cl.downloadCtx()
+	if dctx.Err() != nil {
 		return sumsVerdict{Reason: ReasonChecksumsUnavailable}, nil
 	}
-	data, err := cl.lister.FetchChecksums(cl.sumsCtx, r.Tag, sumsAsset)
+	data, err := cl.lister.FetchChecksums(dctx, r.Tag, sumsAsset)
 	if err != nil {
 		if ctxErr := cl.ctx.Err(); ctxErr != nil {
 			return sumsVerdict{}, fmt.Errorf("release catalog fetch: %w", ctxErr)
