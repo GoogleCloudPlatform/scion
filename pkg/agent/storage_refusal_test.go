@@ -218,3 +218,11 @@ func TestStart_RefusedStorageCreatesNothing(t *testing.T) {
 	_, statErr := os.Stat(recPath)
 	assert.NoError(t, statErr, "the record is kept")
 }
+
+// CheckProfileStorageRefusal is the profile check the runtime broker runs
+// at create admission.
+func TestCheckProfileStorageRefusal(t *testing.T) {
+	refusalGlobalHome(t, refusalSettings, nil)
+	requireStorageRefusal(t, CheckProfileStorageRefusal(context.Background(), "shared-nfs"), "profiles.shared-nfs.shared_dir_storage_backend")
+	assert.NoError(t, CheckProfileStorageRefusal(context.Background(), "plain"))
+}

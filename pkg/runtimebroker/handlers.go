@@ -887,6 +887,19 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A profile (or its runtime entry) that still carries a removed storage
+	// override is refused here, before the dispatch attempt and any
+	// preparation of the start: no workspace bootstrap, download or
+	// provisioning, and no cluster object (ptone/scion#6371). Manager.Start
+	// repeats the check as a backstop.
+	if err := agent.CheckProfileStorageRefusal(ctx, createRequestProfile(req)); err != nil {
+		if se, ok := storageMigrationRequiredFrom(err); ok {
+			span.SetStatus(codes.Error, ErrCodeStorageMigrationRequired)
+			s.writeStorageMigrationRequired(w, se, "create agent", req.ID, nil)
+			return
+		}
+	}
+
 	attemptKey := req.ID
 	if attemptKey == "" {
 		attemptKey = req.Name

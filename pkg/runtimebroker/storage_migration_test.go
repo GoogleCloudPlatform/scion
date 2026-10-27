@@ -20,11 +20,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // storageRefusalErr is the agent manager's refusal of a start whose
@@ -139,5 +142,69 @@ func TestHealth_StorageOverridesCheckCached(t *testing.T) {
 	srv.GetHealthInfo(context.Background())
 	if calls != 1 {
 		t.Errorf("check called %d times, want 1 within the cache TTL", calls)
+	}
+}
+
+// createAdmissionSettings is a global settings file whose "nfs-p" profile
+// carries a removed storage override and whose "local" profile does not.
+const createAdmissionSettings = `schema_version: "1"
+active_profile: local
+profiles:
+    local:
+        runtime: mock
+    nfs-p:
+        runtime: mock
+        shared_dir_storage_backend: nfs
+runtimes:
+    mock:
+        type: mock
+`
+
+// A create whose profile carries a removed storage override is refused at
+// admission with 422 storage_migration_required, before any preparation:
+// no workspace download, no provisioning, no start and so no runtime
+// object (ptone/scion#6371). A create of another profile is admitted.
+func TestCreateAgent_StorageRefusalBeforeAnyPreparation(t *testing.T) {
+	srv, mgr, globalScion := dispatchTestEnv(t, true)
+	if err := os.WriteFile(filepath.Join(globalScion, "settings.yaml"), []byte(createAdmissionSettings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	downloads := 0
+	srv.SetWorkspaceDownloader(func(ctx context.Context, bucket, prefix, localPath string) error {
+		downloads++
+		return nil
+	})
+	runs := 0
+	srv.runtime = &runtime.MockRuntime{
+		NameFunc: func() string { return "mock" },
+		RunFunc:  func(ctx context.Context, cfg runtime.RunConfig) (string, error) { runs++; return "id", nil },
+	}
+
+	for _, provisionOnly := range []bool{false, true} {
+		body := fmt.Sprintf(`{"name": "r1", "id": "id-r1", "slug": "r1", "requestId": "req-r1-%t", "provisionOnly": %t,
+			"workspaceStoragePath": "workspaces/r1", "workspaceStorageBucket": "bucket",
+			"config": {"template": "none", "profile": "nfs-p"}}`, provisionOnly, provisionOnly)
+		code, resp := postJSON(t, srv, "/api/v1/agents", body)
+		if code != http.StatusUnprocessableEntity || !strings.Contains(resp, ErrCodeStorageMigrationRequired) ||
+			!strings.Contains(resp, "profiles.nfs-p.shared_dir_storage_backend") {
+			t.Fatalf("provisionOnly=%t: want 422 %s naming the key, got %d: %s", provisionOnly, ErrCodeStorageMigrationRequired, code, resp)
+		}
+	}
+	if mgr.provisionCalled || mgr.startCalled || downloads != 0 || runs != 0 {
+		t.Fatalf("a refused create prepared the start: provision=%v start=%v downloads=%d runs=%d",
+			mgr.provisionCalled, mgr.startCalled, downloads, runs)
+	}
+	if _, err := os.Stat(filepath.Join(globalScion, "agents", "r1")); !os.IsNotExist(err) {
+		t.Errorf("a refused create wrote agent files: %v", err)
+	}
+
+	// The unaffected profile is admitted and provisioned.
+	code, resp := postJSON(t, srv, "/api/v1/agents",
+		`{"name": "ok1", "id": "id-ok1", "slug": "ok1", "provisionOnly": true, "config": {"template": "none", "profile": "local"}}`)
+	if code == http.StatusUnprocessableEntity || strings.Contains(resp, ErrCodeStorageMigrationRequired) {
+		t.Fatalf("unaffected profile refused: %d %s", code, resp)
+	}
+	if !mgr.provisionCalled {
+		t.Errorf("the unaffected profile's create was not provisioned (code %d: %s)", code, resp)
 	}
 }

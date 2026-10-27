@@ -68,6 +68,19 @@ func checkStartStorageRefusals(ctx context.Context, agentDir, profile string) er
 	return sharedDirRecordPinRefusal(agentDir, layout, sd)
 }
 
+// CheckProfileStorageRefusal is the profile half of the agent-start
+// storage refusal, for callers that must refuse before any preparation of
+// the start (the runtime broker's create admission, before the workspace
+// bootstrap, the download and provisioning): a
+// *config.StorageMigrationRequiredError when the profile (else the active
+// profile) or its runtime entry, in the global settings with any hub
+// overlay as ctx's view reads them, carries a removed storage override.
+// Settings that cannot be loaded refuse nothing here. Start repeats the
+// check, with the per-agent record check, as a backstop.
+func CheckProfileStorageRefusal(ctx context.Context, profile string) error {
+	return checkStartStorageRefusals(ctx, "", profile)
+}
+
 // sharedDirRecordPinRefusal returns a *config.StorageMigrationRequiredError
 // when the agent's per-agent shared-dir backend record
 // (legacySharedDirStorageRecordFile, or the copy retireSharedDirRecord
