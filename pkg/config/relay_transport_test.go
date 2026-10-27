@@ -26,8 +26,10 @@ func TestCheckRelayTransport(t *testing.T) {
 		"wss://relay.internal:9443/x",
 		"http://127.0.0.1:9800",
 		"http://[::1]:9800",
-		"http://localhost:9800",
+		"http://127.0.0.5:9800",
 		"ws://127.0.0.1:9800",
+		"ws://[::1]:9800",
+		"HTTP://127.0.0.1:9800",
 	} {
 		if err := CheckRelayTransport(u); err != nil {
 			t.Errorf("CheckRelayTransport(%q) = %v, want nil", u, err)
@@ -38,6 +40,12 @@ func TestCheckRelayTransport(t *testing.T) {
 		"ws://relay:9800",
 		"http://0.0.0.0:9800",
 		"http://[::]:9800",
+		// Names are never loopback for the internal hop, not even
+		// localhost: they would be resolved at dial (design: literals only).
+		"http://localhost:9800",
+		"ws://localhost:9800",
+		"http://LOCALHOST:9800",
+		"http://ip6-localhost:9800",
 		"http://localhost.:9800",
 		"http://relay.localhost:9800",
 		"ftp://localhost",
@@ -60,12 +68,14 @@ func TestCheckRelayTransport(t *testing.T) {
 }
 
 func TestCheckRelayInternalListen(t *testing.T) {
-	for _, l := range []string{"127.0.0.1:9800", "[::1]:9800", "localhost:9800", "LOCALHOST:1"} {
+	for _, l := range []string{"127.0.0.1:9800", "127.0.0.5:9800", "[::1]:9800"} {
 		if err := CheckRelayInternalListen("k", l, false); err != nil {
 			t.Errorf("CheckRelayInternalListen(%q, no TLS) = %v, want nil", l, err)
 		}
 	}
-	for _, l := range []string{":9800", "0.0.0.0:9800", "[::]:9800", "10.0.0.5:9800", "relay:9800", "garbage"} {
+	// localhost and other names are refused: net.Listen would resolve them.
+	for _, l := range []string{":9800", "0.0.0.0:9800", "[::]:9800", "10.0.0.5:9800", "relay:9800", "garbage",
+		"localhost:9800", "LOCALHOST:1", "ip6-localhost:9800"} {
 		err := CheckRelayInternalListen("server.hub.conduit.internal_listen", l, false)
 		if !errors.Is(err, ErrPlaintextNonLoopback) || !strings.Contains(err.Error(), "server.hub.conduit.internal_listen") {
 			t.Errorf("CheckRelayInternalListen(%q, no TLS) = %v, want a refusal naming the setting", l, err)
@@ -84,11 +94,33 @@ func TestCheckRelayTransportDoesNotEchoAmbiguousURL(t *testing.T) {
 	if !errors.Is(err, ErrPlaintextNonLoopback) {
 		t.Fatalf("CheckRelayTransport = %v, want ErrPlaintextNonLoopback", err)
 	}
-	if strings.Contains(err.Error(), "127.0.0.1") || !strings.Contains(err.Error(), "not shown") {
+	// The endpoint itself is not echoed (the remedy text names 127.0.0.1 as
+	// the literal to use, so match the endpoint's host:port and fragments).
+	if strings.Contains(err.Error(), "127.0.0.1:9810") || strings.Contains(err.Error(), "@127.0.0.1") ||
+		strings.Contains(err.Error(), "relay.internal") || !strings.Contains(err.Error(), "not shown") {
 		t.Errorf("unparsable endpoint with '@' is echoed: %q", err)
 	}
 	err = CheckRelayTransport("http://10.0.0.5:9810")
 	if err == nil || !strings.Contains(err.Error(), `host "10.0.0.5"`) {
 		t.Errorf("refusal %v does not name the host", err)
+	}
+}
+
+// TestCheckRelayTransportLocalhostRefusalIsActionable: a localhost endpoint
+// or listener is refused with a message that names the literals to use.
+func TestCheckRelayTransportLocalhostRefusalIsActionable(t *testing.T) {
+	for name, err := range map[string]error{
+		"endpoint": CheckRelayTransport("http://localhost:9800"),
+		"listener": CheckRelayInternalListen("server.hub.conduit.internal_listen", "localhost:9800", false),
+	} {
+		if !errors.Is(err, ErrPlaintextNonLoopback) {
+			t.Errorf("%s: %v, want ErrPlaintextNonLoopback", name, err)
+			continue
+		}
+		for _, want := range []string{"127.0.0.1 or ::1", "not localhost"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("%s: refusal %q does not say %q", name, err, want)
+			}
+		}
 	}
 }
