@@ -1176,7 +1176,11 @@ func TestCatalog_CtxIgnoringStoreIsAbandoned(t *testing.T) {
 	store.data = persisted
 	store.mu.Unlock()
 	close(store.hang)
-	<-loadDone
+	select {
+	case <-loadDone:
+	case <-time.After(bound):
+		t.Fatal("the stuck store read did not finish after it was released")
+	}
 	snap, err = getWithin(t, c, bound)
 	if err != nil || snap.Channel("nightly").Latest != "nightly-20261024" {
 		t.Errorf("after the late read: %+v, %v; want the fetched catalog kept", snap, err)

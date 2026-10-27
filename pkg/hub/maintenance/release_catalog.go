@@ -403,7 +403,7 @@ func (c *Catalog) needsFetchLocked(refresh bool) bool {
 // per RefreshInterval, so a failing or stalled store is neither hit nor
 // logged on every request.
 //
-// The wait is also bounded by loadTimeout, for a store that ignores ctx:
+// The wait is also bounded by loadWait, for a store that ignores ctx:
 // the waiter then carries on as after a store error, and later callers do
 // not join that read (nor start another) until it returns.
 func (c *Catalog) ensureLoaded(ctx context.Context) {
