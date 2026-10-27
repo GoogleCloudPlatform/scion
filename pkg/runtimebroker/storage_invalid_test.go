@@ -143,14 +143,14 @@ func TestStorageInvalid_HealthAndDescriptor(t *testing.T) {
 }
 
 func TestStorageInvalidMessage(t *testing.T) {
-	if got := storageInvalidMessage(errors.New("plain")); got != "plain" {
+	if got := storageInvalidMessage(errors.New(`plain "10.0.0.2"`)); got != "server.project_storage: invalid; ask a hub admin; the hub log has the details" {
 		t.Errorf("plain error: %q", got)
 	}
 	got := storageInvalidMessage(config.FieldErrorList{
 		{Path: "a.b", Rule: "must be set"},
-		{Path: "a.c", Rule: "must be a clean path", Value: "/x/"},
+		{Path: "a.c", Rule: "must be a clean path (use \"/x\")", Value: "/x/"},
 	})
-	if got != "a.b: must be set; a.c: must be a clean path" {
+	if got != "a.b: invalid; a.c: invalid; ask a hub admin; the hub log has the details" {
 		t.Errorf("field errors: %q", got)
 	}
 }

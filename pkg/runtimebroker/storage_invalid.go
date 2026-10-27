@@ -17,10 +17,10 @@ package runtimebroker
 import (
 	"errors"
 	"net/http"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 )
 
 // ErrCodeStorageInvalid marks an agent create, start or restart refused
@@ -49,27 +49,21 @@ func (s *Server) refuseIfStorageInvalid(w http.ResponseWriter, op, agentID strin
 	msg := storageInvalidMessage(s.config.StorageError)
 	s.agentLifecycleLog.Info("Agent "+op+" refused: project storage settings are invalid", "agent_id", agentID, "reason", msg)
 	writeError(w, http.StatusUnprocessableEntity, ErrCodeStorageInvalid,
-		"Failed to "+op+" agent: this runtime broker's project storage settings are invalid ("+msg+"); fix them on the broker host and restart it", nil)
+		"Failed to "+op+" agent: this runtime broker's project storage settings are invalid ("+msg+")", nil)
 	return true
 }
 
-// storageInvalidMessage is the reason a refusal carries: the settings path
-// and rule of each invalid field, without the configured values, which the
-// requester need not see. Any other error is reported as is.
+// storageInvalidMessage is the reason a refusal carries: the settings
+// path of each invalid field, never the configured values (the requester
+// may not be a hub admin; projectfs.ViewPublic). An error that is not a
+// list of field errors is reported as the block being invalid; the startup
+// log has the details.
 func storageInvalidMessage(err error) string {
 	var fields config.FieldErrorList
 	if !errors.As(err, &fields) {
-		return err.Error()
+		return config.ProjectStorageKey + ": invalid; " + projectfs.LayoutIssuesRemediation
 	}
-	parts := make([]string, len(fields))
-	for i, f := range fields {
-		if f.Path != "" && !strings.HasPrefix(f.Rule, f.Path) {
-			parts[i] = f.Path + ": " + f.Rule
-		} else {
-			parts[i] = f.Rule
-		}
-	}
-	return strings.Join(parts, "; ")
+	return projectfs.LayoutIssueSummary(fields.Issues(), projectfs.ViewPublic)
 }
 
 // InvalidStorageDescriptor returns the workspace storage descriptor of a

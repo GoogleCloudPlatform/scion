@@ -24,6 +24,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 )
 
@@ -54,7 +55,10 @@ func (o Origin) String() string {
 
 // FieldError is one rule a project storage field breaks: the settings path
 // of the field (for example server.project_storage.nfs.shares[0].id), the
-// rule, and the offending value.
+// rule, and the offending value. Error() carries the value: use it only for
+// logs and responses authorized for a hub admin. Any other response renders
+// FieldErrorList.Issues with projectfs.ViewPublic, which names the fields
+// only.
 type FieldError struct {
 	Path  string `json:"field"`
 	Rule  string `json:"rule"`
@@ -82,6 +86,16 @@ func (l FieldErrorList) Error() string {
 		parts[i] = e.Error()
 	}
 	return strings.Join(parts, "; ")
+}
+
+// Issues returns l as projectfs layout issues, for rendering with
+// projectfs.RenderLayoutIssues.
+func (l FieldErrorList) Issues() []projectfs.LayoutIssue {
+	out := make([]projectfs.LayoutIssue, len(l))
+	for i, e := range l {
+		out[i] = projectfs.NewFieldIssue(e.Path, e.Rule, e.Value)
+	}
+	return out
 }
 
 // Paths returns the settings path of each error, in order.
