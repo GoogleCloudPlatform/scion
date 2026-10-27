@@ -260,13 +260,12 @@ function replaceMatches(
  * Run one link pass over the text nodes under `root`. An element `skip`
  * matches is stepped over together with everything inside it. `linkify`
  * returns the pieces that replace a text node's text, or null to leave it.
- * Returns whether anything changed.
  */
 function linkifyTextNodes(
   root: DocumentFragment,
   skip: (el: Element) => boolean,
   linkify: (text: string) => LinkPiece[] | null
-): boolean {
+): void {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
     acceptNode: (node) => {
       if (node.nodeType !== Node.ELEMENT_NODE) return NodeFilter.FILTER_ACCEPT;
@@ -276,14 +275,11 @@ function linkifyTextNodes(
   // Collect first: replacing a node while walking would move the walker.
   const texts: Text[] = [];
   for (let node = walker.nextNode(); node; node = walker.nextNode()) texts.push(node as Text);
-  let changed = false;
   for (const node of texts) {
     const pieces = linkify(node.data);
     if (!pieces) continue;
     node.replaceWith(...pieces.filter((p) => p !== ''));
-    changed = true;
   }
-  return changed;
 }
 
 /** A skip test for elements with any of these (lowercase) local names. */
@@ -579,31 +575,25 @@ function styleMentionsInText(text: string): LinkPiece[] | null {
  * - GitHub refs: code and existing links; a ref inside backticks is
  *   literal text.
  *
- * Returns the input unchanged when nothing was linked.
+ * Works in place on the nodes the markdown renderer returned, with DOM calls
+ * only: link text is set as text, never parsed as markup.
  */
-function linkifyRenderedHtml(htmlStr: string, opts: { artifacts: boolean; gcs: boolean }): string {
-  const tpl = document.createElement('template');
-  tpl.innerHTML = htmlStr;
-  const root = tpl.content;
+function linkifyRenderedFragment(
+  root: DocumentFragment,
+  opts: { artifacts: boolean; gcs: boolean }
+): void {
   const isCode = elementsNamed('pre', 'code');
-  let changed = false;
   const artifactLinks = new WeakSet<Element>();
   if (opts.artifacts) {
-    changed =
-      linkifyTextNodes(root, elementsNamed('pre', 'code', 'a'), (text) =>
-        styleArtifactLinksInText(text, artifactLinks)
-      ) || changed;
+    linkifyTextNodes(root, elementsNamed('pre', 'code', 'a'), (text) =>
+      styleArtifactLinksInText(text, artifactLinks)
+    );
   }
-  changed =
-    linkifyTextNodes(root, (el) => isCode(el) || artifactLinks.has(el), styleMentionsInText) ||
-    changed;
-  changed =
-    linkifyTextNodes(root, elementsNamed('pre', 'a'), (text) =>
-      styleEntityLinksInText(text, opts.gcs)
-    ) || changed;
-  changed =
-    linkifyTextNodes(root, elementsNamed('pre', 'a', 'code'), styleGithubRefsInText) || changed;
-  return changed ? tpl.innerHTML : htmlStr;
+  linkifyTextNodes(root, (el) => isCode(el) || artifactLinks.has(el), styleMentionsInText);
+  linkifyTextNodes(root, elementsNamed('pre', 'a'), (text) =>
+    styleEntityLinksInText(text, opts.gcs)
+  );
+  linkifyTextNodes(root, elementsNamed('pre', 'a', 'code'), styleGithubRefsInText);
 }
 
 /** True when the file is a Markdown document. */
@@ -836,8 +826,14 @@ export class ScionChatMessage extends LitElement {
   @property()
   currentUserId = '';
 
+  /**
+   * The rendered body: a `.md-content` element holding the markdown
+   * renderer's nodes, or null to show the body as plain text. Built once per
+   * body, and kept as one element so later renders move it rather than
+   * rebuild it.
+   */
   @state()
-  private renderedHtml = '';
+  private renderedContent: HTMLElement | null = null;
 
   /** Preview load state per attachment ID. Replaced, never mutated. */
   @state()
@@ -1871,7 +1867,7 @@ export class ScionChatMessage extends LitElement {
     if (changed.has('body') || changed.has('plain')) {
       void this.renderContent();
     }
-    if (changed.has('renderedHtml')) {
+    if (changed.has('renderedContent')) {
       this.wrapTables();
       this.injectCopyButtons();
       this.injectSyntaxHighlighting();
@@ -2167,24 +2163,36 @@ export class ScionChatMessage extends LitElement {
 
   private async renderContent(): Promise<void> {
     if (!this.body || this.plain) {
-      this.renderedHtml = '';
+      this.renderedContent = null;
       return;
     }
     const taskId = ++this.renderTaskId;
     try {
       const renderer = await getMarkdownRenderer();
       if (taskId !== this.renderTaskId) return;
+      const fragment = renderer.renderFragment(this.body);
       // gs:// links are gated on the server-reported feature flag AND the
       // message being agent-sent — a user-sent message never links, however
       // the body happens to be spelled.
-      this.renderedHtml = linkifyRenderedHtml(renderer.render(this.body), {
+      linkifyRenderedFragment(fragment, {
         artifacts: isFeatureEnabled(ARTIFACTS_FLAG),
         gcs: this.senderIsAgent && isFeatureEnabled('web.gcs_links'),
       });
+      this.renderedContent = fragment.hasChildNodes() ? this.contentElement(fragment) : null;
     } catch {
       if (taskId !== this.renderTaskId) return;
-      this.renderedHtml = '';
+      this.renderedContent = null;
     }
+  }
+
+  /** Wraps rendered nodes in the clickable `.md-content` element. */
+  private contentElement(fragment: DocumentFragment): HTMLElement {
+    const content = document.createElement('div');
+    content.className = 'md-content';
+    content.addEventListener('click', (e) => this.handleContentClick(e));
+    content.addEventListener('auxclick', (e) => this.handleContentAuxClick(e));
+    content.append(fragment);
+    return content;
   }
 
   /**
@@ -2506,15 +2514,10 @@ export class ScionChatMessage extends LitElement {
   }
 
   private renderBody() {
-    if (this.plain || !this.renderedHtml) {
+    if (this.plain || !this.renderedContent) {
       return html`<div class="plain-text">${this.body}</div>`;
     }
-    return html`<div
-      class="md-content"
-      @click=${this.handleContentClick}
-      @auxclick=${(e: MouseEvent) => this.handleContentAuxClick(e)}
-      .innerHTML=${this.renderedHtml}
-    ></div>`;
+    return this.renderedContent;
   }
 
   private renderBadges() {

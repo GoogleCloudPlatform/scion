@@ -528,7 +528,7 @@ export class ScionCodeEditor extends LitElement {
       if (!container) return;
 
       // Clear mount point
-      container.innerHTML = '';
+      container.replaceChildren();
 
       this.editorView = new EditorView({
         state: EditorState.create({
