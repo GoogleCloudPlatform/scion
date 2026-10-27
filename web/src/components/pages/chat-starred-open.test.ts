@@ -164,7 +164,7 @@ describe('opening a starred message from the header', () => {
     open(page, M1);
     held.get(M1)?.(star(M1, 'topic-a'));
     await settle();
-    expect(thread.scrollToMessageById).toHaveBeenCalledWith(M1);
+    expect(thread.scrollToMessageById).toHaveBeenCalledWith(M1, true, true);
     expect(navigateTo).not.toHaveBeenCalled();
   });
 

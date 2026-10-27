@@ -600,3 +600,87 @@ describe('scion-chat-thread starred-only center', () => {
     expect(el.shadowRoot?.querySelector('.star-filter-banner')).toBeNull();
   });
 });
+
+describe('scion-chat-thread starred-only center: reconcile and semantics', () => {
+  let now = 1_000_000;
+
+  beforeEach(() => {
+    apiFetch.mockReset();
+    showToastMock.mockReset();
+    setFlag(true);
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    document.body.innerHTML = '';
+    delete (window as unknown as { __SCION_FEATURES__?: unknown }).__SCION_FEATURES__;
+  });
+
+  function returnToPage(): void {
+    now += 10_000;
+    document.dispatchEvent(new Event('visibilitychange'));
+  }
+
+  const stateCalls = (): string[] => calls((u) => u.startsWith('/api/v1/chat/stars/state'));
+
+  it('refetches the starred list on returning to the page', async () => {
+    routeHub({ starred: () => [message(S1, 1)] });
+    const el = await mount();
+    await vi.waitFor(() => expect(renderedIds(el)).toEqual([S1]));
+    const before = historyCalls().length;
+    returnToPage();
+    await vi.waitFor(() => expect(historyCalls().length).toBe(before + 1));
+    expect(historyCalls().at(-1)).toContain('starred=true');
+  });
+
+  it('the full conversation refetches star state on return, not history', async () => {
+    routeHub({ starred: () => [], all: [message(S1, 1), message(S2, 2)] });
+    const el = await mount('');
+    await vi.waitFor(() => expect(renderedIds(el)).toEqual([S1, S2]));
+    await vi.waitFor(() => expect(stateCalls().length).toBe(1));
+    const history = historyCalls().length;
+    returnToPage();
+    await vi.waitFor(() => expect(stateCalls().length).toBe(2));
+    expect(historyCalls().length).toBe(history);
+  });
+
+  it('stops reconciling once removed', async () => {
+    routeHub({ starred: () => [message(S1, 1)] });
+    const el = await mount();
+    await vi.waitFor(() => expect(renderedIds(el)).toEqual([S1]));
+    el.remove();
+    const before = apiFetch.mock.calls.length;
+    returnToPage();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(apiFetch.mock.calls.length).toBe(before);
+  });
+
+  it('labels the starred list region and announces the empty state', async () => {
+    routeHub({ starred: () => [message(S1, 1)] });
+    const el = await mount();
+    await vi.waitFor(() => expect(renderedIds(el)).toEqual([S1]));
+    const region = el.shadowRoot!.querySelector('.messages-scroll')!;
+    expect(region.getAttribute('role')).toBe('region');
+    expect(region.getAttribute('aria-label')).toBe('Starred messages');
+
+    document.body.innerHTML = '';
+    apiFetch.mockReset();
+    routeHub({ starred: () => [] });
+    const empty = await mount();
+    await vi.waitFor(() =>
+      expect(empty.shadowRoot!.querySelector('.star-filter-empty')?.getAttribute('role')).toBe(
+        'status'
+      )
+    );
+  });
+
+  it('the full conversation keeps its unlabelled scroller', async () => {
+    routeHub({ starred: () => [], all: [message(S1, 1)] });
+    const el = await mount('');
+    await vi.waitFor(() => expect(renderedIds(el)).toEqual([S1]));
+    const scroller = el.shadowRoot!.querySelector('.messages-scroll')!;
+    expect(scroller.hasAttribute('role')).toBe(false);
+    expect(scroller.hasAttribute('aria-label')).toBe(false);
+  });
+});

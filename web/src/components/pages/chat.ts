@@ -6945,7 +6945,7 @@ export class ScionPageChat extends LitElement {
       // also from the starred-only center.
       const thread = this.threadElement();
       if (this.centerMessageFilter) thread?.openInFullContext(item.messageId);
-      else void thread?.scrollToMessageById(item.messageId);
+      else void thread?.scrollToMessageById(item.messageId, true, true);
       return;
     }
     navigateTo(item.permalink);

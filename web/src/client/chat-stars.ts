@@ -509,7 +509,8 @@ const RETURN_DEDUPE_MS = 2_000;
  * the starred-only center) in step when invalidations were missed:
  *
  * - while started and the document is visible, `run` is called once
- *   `intervalMs` has passed since the last refetch, whatever caused it;
+ *   `intervalMs` has passed since the last refetch, whatever caused it
+ *   (a null interval: no polling, only the return below);
  * - returning to the page (visibility or window focus) calls `run` at once;
  * - nothing runs while the document is hidden.
  *
@@ -524,8 +525,8 @@ export class VisibleReconciler {
 
   constructor(
     private readonly run: () => void,
-    private readonly intervalMs: number = STAR_SURFACE_RECONCILE_MS,
-    private readonly now: () => number = Date.now
+    private readonly intervalMs: number | null = STAR_SURFACE_RECONCILE_MS,
+    private readonly now: () => number = () => Date.now()
   ) {}
 
   get started(): boolean {
@@ -559,6 +560,8 @@ export class VisibleReconciler {
 
   private schedule(): void {
     if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    if (this.intervalMs === null) return;
     const wait = Math.max(0, this.last + this.intervalMs - this.now());
     this.timer = setTimeout(this.tick, wait);
   }
