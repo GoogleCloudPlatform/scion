@@ -242,7 +242,9 @@ func TestBuildStartContext_DebugNotPropagatedExplicitLogLevelKept(t *testing.T) 
 //     NOT be clobbered by the broker's own dev SCION_AUTH_TOKEN. This is the
 //     regression case for the resume 401 ("compact JWS format must have three
 //     parts").
-//  3. the broker dev token is used only when neither of the above is present.
+//  3. the broker dev token is never put into env; with neither of the above
+//     it is only offered in StartOptions.ColocatedHubDevToken, and only for
+//     the co-located hub (TestBuildStartContext_ColocatedHubDevToken).
 func TestBuildStartContext_AuthTokenPrecedence(t *testing.T) {
 	// Valid-looking JWT (three dot-separated parts) minted by the hub.
 	const hubToken = "header.payload.signature"
@@ -301,7 +303,7 @@ func TestBuildStartContext_AuthTokenPrecedence(t *testing.T) {
 		}
 	})
 
-	t.Run("broker dev token used as last resort", func(t *testing.T) {
+	t.Run("broker dev token not used without a co-located hub", func(t *testing.T) {
 		t.Setenv("SCION_AUTH_TOKEN", devToken)
 
 		cfg := DefaultServerConfig()
@@ -318,8 +320,11 @@ func TestBuildStartContext_AuthTokenPrecedence(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := sc.Opts.Env["SCION_AUTH_TOKEN"]; got != devToken {
-			t.Errorf("expected SCION_AUTH_TOKEN=%q (broker dev fallback), got %q", devToken, got)
+		if got, ok := sc.Opts.Env["SCION_AUTH_TOKEN"]; ok {
+			t.Errorf("SCION_AUTH_TOKEN in env (len %d), want unset (no hub connection)", len(got))
+		}
+		if sc.Opts.ColocatedHubDevToken != "" {
+			t.Error("ColocatedHubDevToken set without a co-located hub connection")
 		}
 	})
 }

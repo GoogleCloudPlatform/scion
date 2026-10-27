@@ -39,7 +39,7 @@ func (s *Server) listAgentsSorted(w http.ResponseWriter, r *http.Request, filter
 
 	if p.cursor != "" {
 		if _, err := store.DecodeAgentCursor(p.cursor, p.sort, p.dir, binding); err != nil {
-			BadRequest(w, "invalid cursor")
+			writeInvalidCursor(w)
 			return
 		}
 	}
@@ -151,7 +151,7 @@ func (s *Server) buildGlobalAgentPage(ctx context.Context, identity Identity, it
 	}
 	for i, cap := range s.authzService.ComputeCapabilitiesBatch(ctx, identity, resources, "agent") {
 		item := items[i]
-		item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, s.envViewAllowed(ctx, identity, &item, cap))
+		item.AppliedConfig, item.PendingConfig = redactAgentConfigsForResponse(item.AppliedConfig, item.PendingConfig, s.envViewAllowed(ctx, identity, &item, cap))
 		agents = append(agents, AgentWithCapabilities{Agent: item, Cap: cap})
 	}
 	capsDone()

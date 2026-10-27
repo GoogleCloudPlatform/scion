@@ -227,6 +227,12 @@ func prepareSSH(ctx context.Context, env *sshCommandEnv, ref string, remote []st
 		return nil, nil, tunnelclient.Errorf(tunnelclient.ExitError, "scion executable path %q is not a clean absolute path", env.exe)
 	}
 	host := sshHostName(hub.label, entry.projectSlug, entry.agentSlug)
+	// Every ProxyCommand word is checked before the temporary directory is
+	// made.
+	proxy, err := sshProxyCommand(env.exe, hub.hubArg, entry.projectSlug, entry.agentSlug, "", "")
+	if err != nil {
+		return nil, nil, tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
+	}
 
 	dir, err := os.MkdirTemp("", "scion-ssh-")
 	if err != nil {
@@ -234,24 +240,25 @@ func prepareSSH(ctx context.Context, env *sshCommandEnv, ref string, remote []st
 	}
 	cleanup := func() { _ = os.RemoveAll(dir) }
 	knownHosts := filepath.Join(dir, "known_hosts")
-	// ssh splits UserKnownHostsFile on whitespace and expands % tokens in it.
-	if hasSpaceOrControl(knownHosts) || strings.Contains(knownHosts, "%") {
-		return nil, cleanup, tunnelclient.Errorf(tunnelclient.ExitError, "temporary directory %s contains whitespace or %%; set TMPDIR to a plain path", dir)
+	knownHostsArg, err := sshKnownHostsOptionValue(knownHosts)
+	if err != nil {
+		return nil, cleanup, tunnelclient.Errorf(tunnelclient.ExitError, "temporary directory %s %v", dir, err)
 	}
-	if err := os.WriteFile(knownHosts, []byte(host+" "+norm+"\n"), sshFileMode); err != nil {
+	// The shared atomic writer: a new private file in
+	// the fresh temporary directory.
+	if err := writeFileAtomic(knownHosts, []byte(host+" "+norm+"\n"), sshFileMode); err != nil {
 		return nil, cleanup, tunnelclient.Errorf(tunnelclient.ExitError, "writing known hosts: %v", err)
 	}
 
-	proxy := strings.Join([]string{
-		sshShellQuote(env.exe), "tunnel", "--stdio", "--ssh",
-		"--hub", sshShellQuote(hub.hubArg),
-		"--project", sshShellQuote(entry.projectSlug),
-		sshShellQuote(entry.agentSlug),
-	}, " ")
 	sshArgs := []string{
 		"-o", "ProxyCommand=" + proxy,
 		"-o", "HostKeyAlias=" + host,
-		"-o", "UserKnownHostsFile=" + knownHosts,
+		"-o", "UserKnownHostsFile=" + knownHostsArg,
+		// /dev/null on every OS: Win32-OpenSSH maps it to NUL when it opens
+		// a file (contrib/win32/win32compat/misc.c w32_fopen_utf8 and
+		// fileio.c fileio_open, NULL_DEVICE in misc_internal.h,
+		// PowerShell/openssh-portable latestw_all 274893f8), and Git for
+		// Windows' ssh (MSYS) has /dev/null natively.
 		"-o", "GlobalKnownHostsFile=/dev/null",
 		"-o", "StrictHostKeyChecking=yes",
 		"-o", "BatchMode=yes",
@@ -261,4 +268,36 @@ func prepareSSH(ctx context.Context, env *sshCommandEnv, ref string, remote []st
 	// ssh stops option parsing at the host, so the rest is the remote command.
 	sshArgs = append(sshArgs, remote...)
 	return sshArgs, cleanup, nil
+}
+
+// sshKnownHostsOptionValue returns path as the value of ssh's
+// UserKnownHostsFile option. ssh splits that value into words (it may list
+// several files) and expands % tokens in it.
+//
+// On unix a path with whitespace, a control character or '%' is refused,
+// as before, and the hint names TMPDIR (os.TempDir).
+//
+// On Windows (sshQuoteForWindows) the temp directory is under %TMP% or
+// %TEMP%, typically C:\Users\<account>\AppData\Local\Temp, and account
+// names with spaces are common. So the path is written with forward
+// slashes (ssh's word splitter treats a backslash as an escape; both
+// Win32-OpenSSH and Git for Windows' ssh accept C:/ paths) and wrapped in
+// double quotes when it has a space, which ssh's option parser reads as
+// one word. Only a control character, '%' or '"' is refused there, and the
+// hint names TMP and TEMP.
+func sshKnownHostsOptionValue(path string) (string, error) {
+	if !sshQuoteForWindows {
+		if hasSpaceOrControl(path) || strings.Contains(path, "%") {
+			return "", errors.New("contains whitespace or %; set TMPDIR to a plain path")
+		}
+		return path, nil
+	}
+	if hasControl(path) || strings.ContainsAny(path, `%"`) {
+		return "", errors.New(`contains a control character, % or "; set TMP and TEMP to a plain path`)
+	}
+	v := strings.ReplaceAll(path, `\`, "/")
+	if strings.ContainsAny(v, " \t") {
+		v = `"` + v + `"`
+	}
+	return v, nil
 }

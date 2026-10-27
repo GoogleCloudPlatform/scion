@@ -110,6 +110,16 @@ func DispatchOutcome(v string) predicate.Notification {
 	return predicate.Notification(sql.FieldEQ(FieldDispatchOutcome, v))
 }
 
+// DispatchReason applies equality check predicate on the "dispatch_reason" field. It's identical to DispatchReasonEQ.
+func DispatchReason(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldEQ(FieldDispatchReason, v))
+}
+
+// NextAttemptAt applies equality check predicate on the "next_attempt_at" field. It's identical to NextAttemptAtEQ.
+func NextAttemptAt(v time.Time) predicate.Notification {
+	return predicate.Notification(sql.FieldEQ(FieldNextAttemptAt, v))
+}
+
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
 func Created(v time.Time) predicate.Notification {
 	return predicate.Notification(sql.FieldEQ(FieldCreated, v))
@@ -618,6 +628,121 @@ func DispatchOutcomeEqualFold(v string) predicate.Notification {
 // DispatchOutcomeContainsFold applies the ContainsFold predicate on the "dispatch_outcome" field.
 func DispatchOutcomeContainsFold(v string) predicate.Notification {
 	return predicate.Notification(sql.FieldContainsFold(FieldDispatchOutcome, v))
+}
+
+// DispatchReasonEQ applies the EQ predicate on the "dispatch_reason" field.
+func DispatchReasonEQ(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldEQ(FieldDispatchReason, v))
+}
+
+// DispatchReasonNEQ applies the NEQ predicate on the "dispatch_reason" field.
+func DispatchReasonNEQ(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldNEQ(FieldDispatchReason, v))
+}
+
+// DispatchReasonIn applies the In predicate on the "dispatch_reason" field.
+func DispatchReasonIn(vs ...string) predicate.Notification {
+	return predicate.Notification(sql.FieldIn(FieldDispatchReason, vs...))
+}
+
+// DispatchReasonNotIn applies the NotIn predicate on the "dispatch_reason" field.
+func DispatchReasonNotIn(vs ...string) predicate.Notification {
+	return predicate.Notification(sql.FieldNotIn(FieldDispatchReason, vs...))
+}
+
+// DispatchReasonGT applies the GT predicate on the "dispatch_reason" field.
+func DispatchReasonGT(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldGT(FieldDispatchReason, v))
+}
+
+// DispatchReasonGTE applies the GTE predicate on the "dispatch_reason" field.
+func DispatchReasonGTE(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldGTE(FieldDispatchReason, v))
+}
+
+// DispatchReasonLT applies the LT predicate on the "dispatch_reason" field.
+func DispatchReasonLT(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldLT(FieldDispatchReason, v))
+}
+
+// DispatchReasonLTE applies the LTE predicate on the "dispatch_reason" field.
+func DispatchReasonLTE(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldLTE(FieldDispatchReason, v))
+}
+
+// DispatchReasonContains applies the Contains predicate on the "dispatch_reason" field.
+func DispatchReasonContains(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldContains(FieldDispatchReason, v))
+}
+
+// DispatchReasonHasPrefix applies the HasPrefix predicate on the "dispatch_reason" field.
+func DispatchReasonHasPrefix(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldHasPrefix(FieldDispatchReason, v))
+}
+
+// DispatchReasonHasSuffix applies the HasSuffix predicate on the "dispatch_reason" field.
+func DispatchReasonHasSuffix(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldHasSuffix(FieldDispatchReason, v))
+}
+
+// DispatchReasonEqualFold applies the EqualFold predicate on the "dispatch_reason" field.
+func DispatchReasonEqualFold(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldEqualFold(FieldDispatchReason, v))
+}
+
+// DispatchReasonContainsFold applies the ContainsFold predicate on the "dispatch_reason" field.
+func DispatchReasonContainsFold(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldContainsFold(FieldDispatchReason, v))
+}
+
+// NextAttemptAtEQ applies the EQ predicate on the "next_attempt_at" field.
+func NextAttemptAtEQ(v time.Time) predicate.Notification {
+	return predicate.Notification(sql.FieldEQ(FieldNextAttemptAt, v))
+}
+
+// NextAttemptAtNEQ applies the NEQ predicate on the "next_attempt_at" field.
+func NextAttemptAtNEQ(v time.Time) predicate.Notification {
+	return predicate.Notification(sql.FieldNEQ(FieldNextAttemptAt, v))
+}
+
+// NextAttemptAtIn applies the In predicate on the "next_attempt_at" field.
+func NextAttemptAtIn(vs ...time.Time) predicate.Notification {
+	return predicate.Notification(sql.FieldIn(FieldNextAttemptAt, vs...))
+}
+
+// NextAttemptAtNotIn applies the NotIn predicate on the "next_attempt_at" field.
+func NextAttemptAtNotIn(vs ...time.Time) predicate.Notification {
+	return predicate.Notification(sql.FieldNotIn(FieldNextAttemptAt, vs...))
+}
+
+// NextAttemptAtGT applies the GT predicate on the "next_attempt_at" field.
+func NextAttemptAtGT(v time.Time) predicate.Notification {
+	return predicate.Notification(sql.FieldGT(FieldNextAttemptAt, v))
+}
+
+// NextAttemptAtGTE applies the GTE predicate on the "next_attempt_at" field.
+func NextAttemptAtGTE(v time.Time) predicate.Notification {
+	return predicate.Notification(sql.FieldGTE(FieldNextAttemptAt, v))
+}
+
+// NextAttemptAtLT applies the LT predicate on the "next_attempt_at" field.
+func NextAttemptAtLT(v time.Time) predicate.Notification {
+	return predicate.Notification(sql.FieldLT(FieldNextAttemptAt, v))
+}
+
+// NextAttemptAtLTE applies the LTE predicate on the "next_attempt_at" field.
+func NextAttemptAtLTE(v time.Time) predicate.Notification {
+	return predicate.Notification(sql.FieldLTE(FieldNextAttemptAt, v))
+}
+
+// NextAttemptAtIsNil applies the IsNil predicate on the "next_attempt_at" field.
+func NextAttemptAtIsNil() predicate.Notification {
+	return predicate.Notification(sql.FieldIsNull(FieldNextAttemptAt))
+}
+
+// NextAttemptAtNotNil applies the NotNil predicate on the "next_attempt_at" field.
+func NextAttemptAtNotNil() predicate.Notification {
+	return predicate.Notification(sql.FieldNotNull(FieldNextAttemptAt))
 }
 
 // CreatedEQ applies the EQ predicate on the "created" field.

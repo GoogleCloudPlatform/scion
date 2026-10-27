@@ -63,6 +63,7 @@ func TestLoadDefaults(t *testing.T) {
 		AppPrivateKeySecretName: "cr-runner-gh-app-private-key",
 		WebhookSecretName:       "cr-runner-gh-webhook-secret",
 		ClaimTTL:                300 * time.Second,
+		RunnerIdleTimeout:       10 * time.Minute,
 	}
 	if !reflect.DeepEqual(c, want) {
 		t.Errorf("Load defaults:\n got %+v\nwant %+v", c, want)
@@ -192,7 +193,13 @@ var invalidCases = []struct {
 	{EnvRunnerDiskGi, "0"},
 	{EnvRunnerDiskGi, "101"}, // above Cloud Run's 100 GiB per volume
 	{EnvRunnerBuildCacheInRAM, "yes"},
+	{EnvRunnerIdleTimeout, "30s"}, // below 1m
+	{EnvRunnerIdleTimeout, "30m"}, // more than half of the default TASK_TIMEOUT (45m)
+	{EnvRunnerIdleTimeout, "10"},  // not a duration
 	{EnvRunnerBuildCacheInRAM, "TRUE"},
+	{EnvMediatorMinInstances, "2"}, // max-instances is 1
+	{EnvMediatorMinInstances, "-1"},
+	{EnvMediatorMinInstances, "one"},
 	{EnvMaxConcurrentRunners, "-1"},
 	{EnvTaskTimeout, "45"},
 	{EnvTaskTimeout, "30s"},
@@ -330,7 +337,10 @@ var validCases = []map[string]string{
 	{EnvRunnerDiskGi: "100"}, // Cloud Run's per-volume maximum
 	{EnvRunnerBuildCacheInRAM: "true"},
 	{EnvRunnerBuildCacheInRAM: "true", EnvRunnerMemory: "32768Mi"},
-	{EnvGitHubInstallScope: ""}, // defaults to repo
+	{EnvGitHubInstallScope: ""},      // defaults to repo
+	{EnvRunnerIdleTimeout: "22m30s"}, // exactly half of 45m
+	{EnvMediatorMinInstances: "1"},
+	{EnvRunnerIdleTimeout: "30m", EnvTaskTimeout: "2h"}, // fine with a longer TASK_TIMEOUT
 }
 
 // invalidComboCases are multi-key changes to validEnv that Load must reject,

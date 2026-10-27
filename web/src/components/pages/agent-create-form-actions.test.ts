@@ -421,3 +421,46 @@ describe('Create Agent form actions', () => {
     });
   });
 });
+
+// The create and start requests go through apiFetch with
+// `authErrors: 'caller'` (ptone/scion#5641): the page reports a refused start
+// itself, so the helper's access-denied toast and sign-in redirect stay out.
+describe('Create Agent start refusals are handled by the page', () => {
+  let globalAuthEvents: string[] = [];
+  const record = (e: Event): void => {
+    globalAuthEvents.push(e.type);
+  };
+
+  beforeEach(() => {
+    globalAuthEvents = [];
+    window.addEventListener('scion:access-denied', record);
+    window.addEventListener('scion:account-teardown', record);
+  });
+
+  afterEach(() => {
+    window.removeEventListener('scion:access-denied', record);
+    window.removeEventListener('scion:account-teardown', record);
+  });
+
+  it.each([
+    [403, 'forbidden', 'not allowed to start agents'],
+    [401, 'unauthorized', 'session expired'],
+  ])('reports a %i start once, with no global auth handling', async (status, code, message) => {
+    stubFetch(undefined, { ok: false, status, body: { error: { code, message } } });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const el = await mountAgentCreate();
+    const page = el as unknown as AgentCreateInternals;
+    page.name = 'test-agent';
+    page.projectId = 'p1';
+
+    await clickStart(el);
+
+    expect(showToast).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledWith(
+      `Agent was created but did not start: ${message}`,
+      'danger'
+    );
+    expect(globalAuthEvents).toEqual([]);
+    expect(navigations).toEqual(['/agents/agent-1']);
+  });
+});

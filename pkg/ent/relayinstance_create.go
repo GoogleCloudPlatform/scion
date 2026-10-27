@@ -84,6 +84,20 @@ func (_c *RelayInstanceCreate) SetNillableDraining(v *bool) *RelayInstanceCreate
 	return _c
 }
 
+// SetFeatures sets the "features" field.
+func (_c *RelayInstanceCreate) SetFeatures(v string) *RelayInstanceCreate {
+	_c.mutation.SetFeatures(v)
+	return _c
+}
+
+// SetNillableFeatures sets the "features" field if the given value is not nil.
+func (_c *RelayInstanceCreate) SetNillableFeatures(v *string) *RelayInstanceCreate {
+	if v != nil {
+		_c.SetFeatures(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *RelayInstanceCreate) SetID(v string) *RelayInstanceCreate {
 	_c.mutation.SetID(v)
@@ -231,6 +245,10 @@ func (_c *RelayInstanceCreate) createSpec() (*RelayInstance, *sqlgraph.CreateSpe
 	if value, ok := _c.mutation.Draining(); ok {
 		_spec.SetField(relayinstance.FieldDraining, field.TypeBool, value)
 		_node.Draining = value
+	}
+	if value, ok := _c.mutation.Features(); ok {
+		_spec.SetField(relayinstance.FieldFeatures, field.TypeString, value)
+		_node.Features = &value
 	}
 	if nodes := _c.mutation.SessionsIDs(); len(nodes) > 0 {
 		edge := &sqlgraph.EdgeSpec{
@@ -384,6 +402,24 @@ func (u *RelayInstanceUpsert) UpdateDraining() *RelayInstanceUpsert {
 	return u
 }
 
+// SetFeatures sets the "features" field.
+func (u *RelayInstanceUpsert) SetFeatures(v string) *RelayInstanceUpsert {
+	u.Set(relayinstance.FieldFeatures, v)
+	return u
+}
+
+// UpdateFeatures sets the "features" field to the value that was provided on create.
+func (u *RelayInstanceUpsert) UpdateFeatures() *RelayInstanceUpsert {
+	u.SetExcluded(relayinstance.FieldFeatures)
+	return u
+}
+
+// ClearFeatures clears the value of the "features" field.
+func (u *RelayInstanceUpsert) ClearFeatures() *RelayInstanceUpsert {
+	u.SetNull(relayinstance.FieldFeatures)
+	return u
+}
+
 // UpdateNewValues updates the mutable fields using the new values that were set on create except the ID field.
 // Using this option is equivalent to using:
 //
@@ -527,6 +563,27 @@ func (u *RelayInstanceUpsertOne) SetDraining(v bool) *RelayInstanceUpsertOne {
 func (u *RelayInstanceUpsertOne) UpdateDraining() *RelayInstanceUpsertOne {
 	return u.Update(func(s *RelayInstanceUpsert) {
 		s.UpdateDraining()
+	})
+}
+
+// SetFeatures sets the "features" field.
+func (u *RelayInstanceUpsertOne) SetFeatures(v string) *RelayInstanceUpsertOne {
+	return u.Update(func(s *RelayInstanceUpsert) {
+		s.SetFeatures(v)
+	})
+}
+
+// UpdateFeatures sets the "features" field to the value that was provided on create.
+func (u *RelayInstanceUpsertOne) UpdateFeatures() *RelayInstanceUpsertOne {
+	return u.Update(func(s *RelayInstanceUpsert) {
+		s.UpdateFeatures()
+	})
+}
+
+// ClearFeatures clears the value of the "features" field.
+func (u *RelayInstanceUpsertOne) ClearFeatures() *RelayInstanceUpsertOne {
+	return u.Update(func(s *RelayInstanceUpsert) {
+		s.ClearFeatures()
 	})
 }
 
@@ -840,6 +897,27 @@ func (u *RelayInstanceUpsertBulk) SetDraining(v bool) *RelayInstanceUpsertBulk {
 func (u *RelayInstanceUpsertBulk) UpdateDraining() *RelayInstanceUpsertBulk {
 	return u.Update(func(s *RelayInstanceUpsert) {
 		s.UpdateDraining()
+	})
+}
+
+// SetFeatures sets the "features" field.
+func (u *RelayInstanceUpsertBulk) SetFeatures(v string) *RelayInstanceUpsertBulk {
+	return u.Update(func(s *RelayInstanceUpsert) {
+		s.SetFeatures(v)
+	})
+}
+
+// UpdateFeatures sets the "features" field to the value that was provided on create.
+func (u *RelayInstanceUpsertBulk) UpdateFeatures() *RelayInstanceUpsertBulk {
+	return u.Update(func(s *RelayInstanceUpsert) {
+		s.UpdateFeatures()
+	})
+}
+
+// ClearFeatures clears the value of the "features" field.
+func (u *RelayInstanceUpsertBulk) ClearFeatures() *RelayInstanceUpsertBulk {
+	return u.Update(func(s *RelayInstanceUpsert) {
+		s.ClearFeatures()
 	})
 }
 

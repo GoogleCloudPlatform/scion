@@ -326,6 +326,11 @@ type agentEditAccess struct {
 	// reincarnating it: agent.lifecycle on the agent, and authority to
 	// delegate the agent's role.
 	CanChangeRole bool
+	// HeldEdits is whether held config edits are on (hub.agent_edit_held).
+	// Without them a config key of an agent with a live or transitional
+	// container is locked; with them it is held (T1, and a T2 key the
+	// broker re-renders at start) or reincarnate (other T2).
+	HeldEdits bool
 	// Broker is what the agent's broker applies at a start
 	// (agentBrokerStartSupport): with changedFields, provision-rendered
 	// keys of an agent with no container are editable "now"; with
@@ -334,8 +339,9 @@ type agentEditAccess struct {
 }
 
 // buildAgentEditability applies the table to agent for a caller with
-// access. Held edits of a running agent are not available yet, so a held
-// disposition is reported locked.
+// access. Without held edits (access.HeldEdits false) a held disposition,
+// and every other config key of an agent with a live or transitional
+// container, is reported locked.
 func buildAgentEditability(agent *store.Agent, access agentEditAccess) *AgentEditability {
 	if agent == nil {
 		return nil
@@ -354,13 +360,21 @@ func buildAgentEditability(agent *store.Agent, access agentEditAccess) *AgentEdi
 		if rerendered {
 			d = EditNow
 		}
-		// Held edits do not exist yet, and a config PATCH of an agent
-		// with a live or transitional container is refused, so every
-		// config key of such an agent is locked, provision-rendered keys
-		// included: the reincarnate endpoint takes no config patch for
-		// them either. The role and GCP identity keep "reincarnate"; they
-		// change through the reincarnate endpoint.
-		if d == EditHeld || (live && d != EditLocked && strings.HasPrefix(f.Key, agentConfigKeyPrefix)) {
+		// With held edits on, such a key of an agent with a live or
+		// transitional container is held: the next start's fold applies it
+		// and lists it in changed_fields.
+		rerenderedHeld := access.HeldEdits && d == EditReincarnate && live && access.Broker.appliesAtStart(f.Key)
+		if rerenderedHeld {
+			d = EditHeld
+		}
+		// Without held edits a config PATCH of an agent with a live or
+		// transitional container is refused, so every config key of such
+		// an agent is locked, provision-rendered keys included: the
+		// reincarnate endpoint takes no config patch for them either. The
+		// role and GCP identity keep "reincarnate"; they change through
+		// the reincarnate endpoint. With held edits the table's own
+		// disposition stands (held, or reincarnate for T2).
+		if !access.HeldEdits && (d == EditHeld || (live && d != EditLocked && strings.HasPrefix(f.Key, agentConfigKeyPrefix))) {
 			d, reason = EditLocked, editReasonRunning
 		}
 		if d != EditLocked {
@@ -375,7 +389,7 @@ func buildAgentEditability(agent *store.Agent, access agentEditAccess) *AgentEdi
 		// merge keeps, and for a re-rendered key whose clear the start
 		// merge keeps too (agent_instructions, skills, services; the
 		// system prompt's clear is applied through cleared_fields).
-		clearHeld := (f.Tier == EditTierContainer && strings.HasPrefix(f.Key, agentConfigKeyPrefix)) || rerendered
+		clearHeld := (f.Tier == EditTierContainer && strings.HasPrefix(f.Key, agentConfigKeyPrefix)) || rerendered || rerenderedHeld
 		st := FieldEditState{
 			Tier:                  f.Tier,
 			Disposition:           d,
@@ -425,13 +439,21 @@ type patchRefusal struct {
 // Config keys the table does not know are ignored, as encoding/json ignores
 // them.
 func lockedPatchKeys(agent *store.Agent, top []string, rawConfig map[string]json.RawMessage, cfg, applied *api.ScionConfig) *patchRefusal {
-	ed := buildAgentEditability(agent, agentEditAccess{CanUpdate: true, CanChangeRole: true})
+	return lockedPatchKeysFor(agent, false, top, rawConfig, cfg, applied)
+}
+
+// lockedPatchKeysFor is lockedPatchKeys with held edits on or off. With
+// held edits on (heldEdits), rule 2 does not apply: a live or transitional
+// phase holds config keys instead of refusing them, and a fixed key there
+// follows rule 3.
+func lockedPatchKeysFor(agent *store.Agent, heldEdits bool, top []string, rawConfig map[string]json.RawMessage, cfg, applied *api.ScionConfig) *patchRefusal {
+	ed := buildAgentEditability(agent, agentEditAccess{CanUpdate: true, CanChangeRole: true, HeldEdits: heldEdits})
 	var stored *api.ScionConfig
 	if agent.AppliedConfig != nil {
 		stored = agent.AppliedConfig.InlineConfig
 	}
 	deleted := !agent.DeletedAt.IsZero()
-	configPhase := configPatchPhase(agent.Phase)
+	configPhase := configPatchPhase(agent.Phase) || (heldEdits && phaseHasLiveOrTransitionalContainer(agent.Phase))
 	ref := &patchRefusal{Fields: map[string]string{}}
 	check := func(f agentEditField) {
 		k, isConfig := strings.CutPrefix(f.Key, agentConfigKeyPrefix)
@@ -599,12 +621,12 @@ type AgentUpdateDisposition struct {
 	// creation (start, restart, resume or reincarnation), or at once for
 	// metadata.
 	Applied []string `json:"applied"`
-	// Held is reserved for config edits kept aside while a container is
-	// live and applied at the next container creation after the current
-	// run. It is always empty until such edits are held rather than
-	// refused (ptone/scion#3976). A timezone pin edited while a container
-	// is live is listed under Applied; the response warns only when the
-	// zone the next start gets changes.
+	// Held lists the config keys kept in the agent's pending config while
+	// a container is live or being created or removed, applied at the next
+	// container creation after the current run (with hub.agent_edit_held
+	// on; empty otherwise, because such edits are refused). A timezone pin
+	// edited while a container is live is listed under Applied; the
+	// response warns only when the zone the next start gets changes.
 	Held []string `json:"held"`
 	// HeldForReincarnate lists the keys whose edit takes effect only at the
 	// next reincarnation.

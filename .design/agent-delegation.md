@@ -347,7 +347,7 @@ the claim transaction.
 | --- | --- | --- | --- |
 | `agent.delegation.revoke` | `DELETE /api/v1/agents/{agentId}/delegations/{grantId}` | session; the bound agent's own agent JWT | the issuer; the bound agent (relinquish its own grant); the agent's current owner; hub admins (any grant); project admins of P, for project(P)-bounded grants only |
 | `agent.delegation.credential.revoke` | `DELETE /api/v1/agents/{agentId}/delegations/{grantId}/credentials/{credentialId}` | as above | as above |
-| `agent.delegation.revoke_all` | `POST /api/v1/users/me/delegations/revoke-all` (the caller's own grants); `POST /api/v1/agents/{agentId}/delegations/revoke-all` | session | the issuer, for their own grants; per agent, the same rule per grant. Grants the caller may not revoke are skipped and reported, not revoked |
+| `agent.delegation.revokeall` (permission `agent.delegation.revoke_all`; operation IDs take no underscore) | `POST /api/v1/users/me/delegations/revoke-all` (the caller's own grants); `POST /api/v1/agents/{agentId}/delegations/revoke-all` | session | the issuer, for their own grants; per agent, the same rule per grant. Grants the caller may not revoke are skipped and reported, not revoked |
 | `agent.delegation.list` | `GET /api/v1/agents/{agentId}/delegations`; `GET /api/v1/users/me/delegations` | session; the bound agent's own agent JWT (its own grants, metadata only) | as revoke, per grant. Grants outside the caller's authority are left out, not counted |
 | `agent.delegation.read` | `GET /api/v1/agents/{agentId}/delegations/{grantId}` | as list | as list, per grant. A grant outside the caller's authority returns 404 `grant_not_found` |
 
@@ -860,7 +860,16 @@ each, with a test:
 - `catalogListReadBatch` (`authorized_list.go:127`): deny-all, ahead of the default arm.
 - `scopedCursorBinding` (`authorized_list.go:404`): a delegated arm (§11.8).
 - `authorizeAgentMessage` (`authorize_message.go:232`): a delegated arm that runs G's decision for
-  `agent.message` before any ancestor or owner allow, and grants no piercing of message modes.
+  `agent.message` before any ancestor or owner allow, and grants no piercing of message modes. The
+  actor agent's send is then evaluated exactly as the agent's own send would be (both message
+  modes, the same-project mode matrix or every cross-project gate, including the hub setting, the
+  sender's hub mode and the destination's inbound policy, and the agent's standing), and both must
+  allow; a refusal carries the agent send's denial code. Before anything is written, the send also
+  gets the agent send's delivery checks (dispatch availability, a held target, the target's phase)
+  and is charged to the agent's send budget. It allows only the agent the route admitted, so
+  mention, group and other fan-out targets are refused, and a delegated request may carry only a
+  direct text message (the project visitor allow-list: no thread, conversation, mention,
+  notification, interrupt or wake field).
 - `authorizeAgentTargetAction` (`authorize.go:429`): deny, because no lifecycle operation is
   delegable in v1.
 - The reincarnation self-exemption (`handlers_agent_reincarnate.go:188-201`) keys on an
@@ -893,7 +902,7 @@ each, with a test:
   | --- | --- | --- | --- |
   | `agent.read` | project, hub | `GET` agent (`agents.byId`, operation `agent.read`) | G.2-a |
   | `project.read` | project, hub | `GET` project (operation `project.read`) | G.3-a |
-  | `agent.message` | project, hub | the HTTP agent message route, once it is catalogued (today `agent.message.send` has only a broker-call entry point and the HTTP route is pending a catalog entry) | G.3-a |
+  | `agent.message` | project, hub | the HTTP agent message route, operation `agent.action.message`, by ID (`agents.action.message`) and in the project form (`projects.agents.action.message`). `agent.message.send` (broker call) is not admitted | G.3-a |
   | `agent.attach` | project, hub | the PTY WebSocket (`agents.pty`, operation `agent.attach`) only. `agent.lifecycle.exec`, `.env` and `.resetauth` share the permission but are **not** admitted | G.3-a |
   | `agent.list`; skill and template read and list | project, hub | per D.2's merged list operations (at `abc63c5`, skill and template listing is served by the `skill.read` and `template.read` operations) | G.3-L |
 
@@ -997,8 +1006,11 @@ does not change that schema.
 
 ### 14.5 Messages
 
-A message sent with a delegated credential is stored with `Sender = "agent:<A>"` and `SenderID = A`,
-plus two new nullable columns, `AuthorizingUserID` and `DelegationGrantID`. Recipients, the web UI
+A message sent with a delegated credential is stored with `Sender = "agent:<A>"` (A's slug),
+`SenderID = A` and `SenderProjectID` = A's project, like every other agent-sender row (from G.3-a),
+plus two new nullable columns (G.3-b), `AuthorizingUserID` and `DelegationGrantID` (stored as
+`authorizing_user_id` and `delegation_grant_id`, returned as `authorizingUserId` and
+`delegationGrantId`, empty on every other message). Recipients, the web UI
 and the CLI render it as "from agent A, authorized by <issuer> via delegation <grantId>". A
 recipient never sees it as sent by the issuer.
 
@@ -1027,8 +1039,9 @@ sciontool delegation helper can use it.
 ### 16.1 Transactional revocation through B.3 hooks
 
 G registers one `AgentTxHook` in each of the four registries (§3.4). Each hook revokes the agent's
-active grants and their credentials, with `revoke_reason` and a mutation audit, on the
-transaction-scoped store. A hook error rolls back the lifecycle operation.
+unrevoked grants (expired ones included) and their unrevoked credentials, with `revoke_reason` and a
+mutation audit, on the transaction-scoped store. A hook error rolls back the lifecycle operation.
+The revoke route (§7) and every lifecycle revocation share one per-grant revocation body.
 
 | Registry | Revoke reason | Why it must be transactional |
 | --- | --- | --- |
@@ -1066,7 +1079,14 @@ These cascades are best-effort, because use-time checks are authoritative:
   does. Revoke-all is the way to end grants.
 - **Project delete** (`ProjectDeletionService`): it runs no agent lifecycle hooks. G adds an
   explicit step that revokes grants and credentials of the project's agents to the project deletion
-  cascade.
+  cascade. The step runs inside the cascade transaction, like every other cascade step, so a
+  revocation failure fails the project delete.
+- **Revoke reasons of these paths:** `agent_suspended` (agent suspend and auto-suspend),
+  `issuer_suspended` (`updateUser` setting the status to suspended), `issuer_deleted` (after
+  `deleteUser` or the test identity purge commits) and `project_deleted`. The best-effort paths run
+  in a transaction of their own after the change has committed; a failure is logged and never fails
+  the change. Each revoked grant gets one `agent_delegation_grant_revoke` mutation record, as in §7,
+  attributed to the principal whose action caused it (the hub when there is none).
 - **Purge of soft-deleted agents:** no hooks. Grants were already revoked at soft delete.
 - **Failed-create cleanup** (`compensateAgentCreate`, `agent_create_tx.go`): no hooks. If a grant
   was issued for an agent whose create is later rolled back, the agent row is removed, so exchange
@@ -1096,7 +1116,10 @@ These cascades are best-effort, because use-time checks are authoritative:
 
 Revoking a grant or credential denies the next attach handshake or reconnect. An established
 session can outlive both the credential's expiry and revocation, so the 60-minute credential
-lifetime is not a maximum session duration. A future PTY ticket mint must deny for delegated
+lifetime is not a maximum session duration. In v1 a delegated attach takes only the runtime
+broker's terminal path: an attach that would take the agent's conduit path (for example, an agent
+on a managed runtime) is refused before the upgrade with 503 `runtime_attach_unsupported`, reason
+`delegated_credential_broker_path_only`. A future PTY ticket mint must deny for delegated
 credentials, or re-run `decideAgentDelegation` when the ticket is redeemed.
 
 ## 17. Concrete flows
@@ -1121,8 +1144,10 @@ credentials, or re-run `decideAgentDelegation` when the ticket is redeemed.
    until it expires (at most 2 active). A third exchange supersedes the oldest. After a refresh of
    A's agent JWT, credentials exchanged with the old agent credential deny, and A re-exchanges.
 5. **Super-admin across projects.** Super-admin S issues a hub grant for `agent:read` and
-   `agent:message` to S's agent. It can read and message agents in any project while S remains
-   super-admin. Messages show "from agent, authorized by S".
+   `agent:message` to S's agent. It can read agents in any project while S remains super-admin,
+   and message them subject to the cross-project gates that apply to the agent's own send (the hub
+   setting, the agent's hub mode and the destination project's inbound policy). Messages show
+   "from agent, authorized by S".
 6. **Ordinary automation is unaffected.** With the experiment off or on, Alice's hub UAT works
    exactly as D specifies, and agent A keeps using its project JWT for its own scopes.
 
@@ -1324,7 +1349,7 @@ New catalog specs in a G-owned `pkg/hub/authzop/catalog_agent_delegation.go`:
 | `agent.delegation.create` | `session_jwt` | `SessionOnly(ReasonCredentialManagement)` | issue credential | governance and atomic audit |
 | `agent.delegation.exchange` | `agent_jwt` | `NonUser()` with a `Pin` naming G's UAT and session refusal test | mint credential | the bearer matrix skips non-user operations, so G pins its own test |
 | `agent.delegation.revoke`, `.credential.revoke`, `.list`, `.read` | `session_jwt`, `agent_jwt` | `SessionOnly(ReasonCredentialManagement)` | revoke authority (revokes); read (list, read) | the handler takes the bound-agent branch first and then requires a session, so a UAT gets 403 with `details.reason = CREDENTIAL_MANAGEMENT` and `details.credential = session_required` |
-| `agent.delegation.revoke_all` | `session_jwt` | `SessionOnly(ReasonCredentialManagement)` | revoke authority | |
+| `agent.delegation.revokeall` (permission `agent.delegation.revoke_all`; operation IDs take no underscore) | `session_jwt` | `SessionOnly(ReasonCredentialManagement)` | revoke authority | |
 
 No G operation lists `scoped_uat`. Operations admitted for delegated use (§13) add
 `PrincipalAgentDelegated` and `CredentialDelegatedAgent` as they are admitted.

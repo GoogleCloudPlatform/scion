@@ -176,6 +176,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "GET /api/v1/test-infra/status", RouteID: "testInfra.status",
 		Classification: RoutePublic,
 	},
+	"POST /api/v1/csp-reports": {
+		Pattern: "POST /api/v1/csp-reports", RouteID: "cspReports.create",
+		Classification: RoutePublic,
+	},
 	"/github-app/setup": {
 		Pattern: "/github-app/setup", RouteID: "github-app.setup",
 		Classification: RoutePublic,
@@ -276,6 +280,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/users/me/delegations": {
 		Pattern: "/api/v1/users/me/delegations", RouteID: "users.me.delegations",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/users/me/delegations/revoke-all": {
+		Pattern: "/api/v1/users/me/delegations/revoke-all", RouteID: "users.me.delegations.revokeAll",
 		Classification: RouteAuthenticated,
 	},
 	"/api/v1/users/me/terminal-workspace": {
@@ -694,6 +702,19 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
 	},
+	// chat.stars and chat.stars.byId serve the caller's own starred
+	// messages; every read and add also needs read access to the message's
+	// thread (project.read), checked per conversation by the handler.
+	"/api/v1/chat/stars": {
+		Pattern: "/api/v1/chat/stars", RouteID: "chat.stars",
+		Classification: RoutePolicy,
+		Permission:     "project.read", Resource: "project", Action: "read",
+	},
+	"/api/v1/chat/stars/": {
+		Pattern: "/api/v1/chat/stars/", RouteID: "chat.stars.byId",
+		Classification: RoutePolicy,
+		Permission:     "project.read", Resource: "project", Action: "read",
+	},
 	// chat.attachments.list and chat.attachments.byId are wrapped by
 	// chatAttachmentRoute: an agent credential is admitted on the collection
 	// only, for POST (upload) and GET (the capability probe), and must pass
@@ -791,6 +812,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/admin/maintenance/restart": {
 		Pattern: "/api/v1/admin/maintenance/restart", RouteID: "admin.maintenance.restart",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
+	},
+	"/api/v1/admin/maintenance/update-status": {
+		Pattern: "/api/v1/admin/maintenance/update-status", RouteID: "admin.maintenance.updateStatus",
 		Classification: RouteHubAdmin,
 		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
 	},

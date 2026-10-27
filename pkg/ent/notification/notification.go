@@ -36,6 +36,10 @@ const (
 	FieldDispatchAttempts = "dispatch_attempts"
 	// FieldDispatchOutcome holds the string denoting the dispatch_outcome field in the database.
 	FieldDispatchOutcome = "dispatch_outcome"
+	// FieldDispatchReason holds the string denoting the dispatch_reason field in the database.
+	FieldDispatchReason = "dispatch_reason"
+	// FieldNextAttemptAt holds the string denoting the next_attempt_at field in the database.
+	FieldNextAttemptAt = "next_attempt_at"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// Table holds the table name of the notification in the database.
@@ -56,6 +60,8 @@ var Columns = []string{
 	FieldAcknowledged,
 	FieldDispatchAttempts,
 	FieldDispatchOutcome,
+	FieldDispatchReason,
+	FieldNextAttemptAt,
 	FieldCreated,
 }
 
@@ -88,6 +94,8 @@ var (
 	DispatchAttemptsValidator func(int) error
 	// DefaultDispatchOutcome holds the default value on creation for the "dispatch_outcome" field.
 	DefaultDispatchOutcome string
+	// DefaultDispatchReason holds the default value on creation for the "dispatch_reason" field.
+	DefaultDispatchReason string
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// DefaultID holds the default value on creation for the "id" field.
@@ -155,6 +163,16 @@ func ByDispatchAttempts(opts ...sql.OrderTermOption) OrderOption {
 // ByDispatchOutcome orders the results by the dispatch_outcome field.
 func ByDispatchOutcome(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldDispatchOutcome, opts...).ToFunc()
+}
+
+// ByDispatchReason orders the results by the dispatch_reason field.
+func ByDispatchReason(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDispatchReason, opts...).ToFunc()
+}
+
+// ByNextAttemptAt orders the results by the next_attempt_at field.
+func ByNextAttemptAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldNextAttemptAt, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

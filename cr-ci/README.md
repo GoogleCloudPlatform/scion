@@ -90,8 +90,8 @@ each step needs are in [docs/permissions-matrix.md](docs/permissions-matrix.md).
     ([step 7](docs/github-setup.md#7-poc-run-before-any-routing); P6, needs
     ptone's go-ahead).
 13. **Route.** `scripts/set-routing-variable.sh --repo <owner/repo> --apply`
-    sets `SCION_LARGE_RUNNER`. It has no effect on CI until P7 puts the routing
-    expression into `ci.yml`. Fallback: `--clear --apply`
+    sets `SCION_LARGE_RUNNER`. It has no effect on CI until the routing expression
+    is in the workflows (P7: the primary-runner workflow PRs). Fallback: `--clear --apply`
     ([step 8](docs/github-setup.md#8-route-jobs-the-actions-variable-scion_large_runner-g10)).
 
 Two orderings matter. The App comes before the mediator, because the mediator
@@ -106,14 +106,26 @@ proven on a manually dispatched job before any CI job depends on it.
 | [`config.example.env`](config.example.env) | The single config contract (names only, never secret values) |
 | [`mediator/`](mediator/) | Go Cloud Run service: `/webhook`, `/internal/claim`, `/reconcile`, `/health`; standard library only. Must run with `max-instances=1` |
 | [`runner/`](runner/) | Runner image (`Dockerfile`, `entrypoint.sh`, offline harness); see [`runner/README.md`](runner/README.md) |
+| [`runner/golangci-lint/`](runner/golangci-lint/) | The patched golangci-lint build (dominikh/go-tools#1839): pins, patch, `build.sh`. **Upstream `.github/workflows/ci.yml` and the root `Makefile` use it too**, so they depend on this cr-ci path; see below |
 | [`scripts/`](scripts/) | Deploy, secret and teardown scripts (dry-run by default, `--apply` to execute), their test harness and golden transcripts; see [`scripts/README.md`](scripts/README.md) |
-| [`workflows/`](workflows/) | Workflow templates, not active: the PoC workflow and the `ci.yml` lint routing snippet, with static checks; see [`workflows/README.md`](workflows/README.md) |
+| [`workflows/`](workflows/) | Workflow templates, not active: the PoC workflow, with static checks (the live routing is in `.github/workflows`); see [`workflows/README.md`](workflows/README.md) |
 | [`docs/architecture.md`](docs/architecture.md) | Flow, security model, failure modes, fallback |
 | [`docs/permissions-matrix.md`](docs/permissions-matrix.md) | **Who needs which GitHub or GCP role for every step, fork vs upstream (future)**; the PAT alternative (not implemented) |
 | [`docs/github-setup.md`](docs/github-setup.md) | GitHub App (manifest at [`scripts/github-app-manifest.json`](scripts/github-app-manifest.json)), installation on the fork (upstream: future), webhook check, fork-PR precondition, routing variable and fallback |
 | [`docs/gcp-setup.md`](docs/gcp-setup.md) | GCP project, IAM, secrets, deploy (outline; P4) |
 | [`docs/poc-checklist.md`](docs/poc-checklist.md) | Every runtime checkpoint for the P6 PoC (open U-items, runner checkpoints, cache sharing, success criteria) with commands and expected results |
 | [`docs/operations.md`](docs/operations.md) | Rollout, fallback, rotation, quotas, troubleshooting (outline) |
+
+## A repository-wide dependency on cr-ci
+
+[`runner/golangci-lint/`](runner/golangci-lint/README.md) is the single copy of
+the interim golangci-lint build with the go-tools#1839 patch. Three users run
+its `build.sh`: the `lint` job of `.github/workflows/ci.yml` (on GitHub-hosted
+runners and the cr-ci runner alike), `make golangci-lint`, and the runner image
+([`runner/Dockerfile`](runner/Dockerfile)). So upstream CI **depends on a
+`cr-ci/` path**: moving, renaming or deleting that directory breaks the lint
+job, and a change there re-runs it (the `changes` job's regex covers it). Its
+README has the removal plan for when a golangci-lint release ships the fix.
 
 ## Go module
 
@@ -135,7 +147,7 @@ go build -o /dev/null ./... && go vet ./... && go test ./... && gofmt -l .
 | P4 | Idempotent deploy and teardown scripts with `--dry-run` | implemented (in review) |
 | P5 | GitHub setup guide, App manifest, workflow templates | implemented (in review) |
 | P6 | Live PoC on the chosen target (needs ptone's go-ahead); [checklist](docs/poc-checklist.md) | gated |
-| P7 | `ci.yml` `runs-on` change (separate PR, outside `cr-ci/`) | gated |
+| P7 | Routing in `.github/workflows` (primary-runner PR-wf1 phase A, PR-wf2 phase B; separate PRs, outside `cr-ci/`) | in review |
 
 Nothing in this directory touches live GitHub or GCP resources. Running the
 scripts against real resources is a separate step that needs explicit approval

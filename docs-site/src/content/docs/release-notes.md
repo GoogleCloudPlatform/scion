@@ -4,11 +4,11 @@ title: Release Notes
 
 Scion release notes are published weekly.
 
-## Latest: Week of October 12 -- 18, 2026
+## Latest: Week of October 19 -- 25, 2026
 
-The CLI's local-only mode is gone. Every agent command now goes through a Hub, picked from a per-user list of named Hubs and a current context set with `scion use`. Async agent launch became the `hub.async_agent_launch` experiment, with per-step progress, typed failures and launches that survive Runtime Broker restarts. User access tokens now need matching selectors for chat, quota, agent and user-scope operations, and can now administer invitations, membership and schedules, create global skills and manage skill registries. `scion ssh` and `scion vscode` open shells and editors on agents, and the terminal workspace left its experiment.
+Scion now mounts repository git metadata into agents read-only with a private, credential-stripped `.git/config`, mounts project `.scion` directories read-only in shared layouts, and requires clone-per-agent for Kubernetes git projects that would otherwise share one repository across agents. Project storage consolidated into a single `server.project_storage` block and layout authority that backs the Files tab and chat attachments, while WebDAV, project-level `scion sync`, the Hub project copy and GCS workspace sync were retired. Agent-bound delegation added in-memory credential exchange over `~/.scion/delegation.sock`, lifecycle revocation, revoke-all endpoints and visible delegation attribution on messages, alongside `project.chat_post` for project thread posts and expanded User Access Token scopes for users, groups, roles, access boundaries and project creation. Across the web client, CLI and Runtime Brokers, API responses and static assets are compressed, the Agent Edit page replaced Configure, a single model channel feeds the harness `--model` argument, and `scion reincarnate --broker <target> --force` can move agents by recreating their workspace on another Runtime Broker.
 
-[Read the full release notes for this week ->](/scion/release-notes/2026-10-12/)
+[Read the full release notes for this week ->](/scion/release-notes/2026-10-19/)
 
 ## Templates describe the job, not the environment
 
@@ -46,6 +46,10 @@ A template now describes the agent's **job** (harness config, model, instruction
 
 **Minimum Runtime Broker version and upgrade order** ([ptone/scion#4224](https://github.com/ptone/scion/issues/4224)): the Hub no longer sends telemetry in the old inline form. Runtime Brokers older than the release that introduced the `templateTiers` capability (TS-2a, [ptone/scion#4218](https://github.com/ptone/scion/issues/4218)) keep working but receive no Hub telemetry default and no project telemetry policy; the Hub logs a warning once per such Runtime Broker. **Upgrade all Runtime Brokers to at least that release before upgrading the Hub to this one.** This replaces the earlier advice to upgrade the Hub first. While the Hub is still older, an upgraded Runtime Broker receives Hub `agent_defaults.resources` only at create. It also gets no live template env: the older Hub sends no template identity on start, so the Runtime Broker uses the template version the agent was provisioned from if that version is still in its cache, and otherwise applies no template env, with a start warning.
 
+## `scion templates sync` and `push` accept a directory path
+
+`scion templates sync` and `scion templates push` now also take a template directory path: `.` or `..`, an absolute path, or one that contains a path separator (such as `./name`). The directory is synced as is, and the Hub name defaults to its base name (`--name` overrides it). Agents that share the project workspace see the project's `.scion` directory read-only, so they now edit a template elsewhere in their checkout and sync it by path, for example `scion templates sync ./templates/planner --name planner`. **An argument containing a `/`, and `.` or `..`, is now read relative to the current directory**: before, `sync a/b` looked up `<templates dir>/a/b`, and `sync .` resolved to the templates directory itself. Bare names are looked up as before. See [Templates & Roles](/scion/local/templates/#hub-commands).
+
 ## The harness command line uses the Hub-resolved model
 
 The `--model` argument a Runtime Broker passes to the harness now carries the same model as `SCION_MODEL`: the model the Hub resolved (request, then project default, then template, then Hub default), or an explicit `SCION_MODEL` from `--env`. Before, the argument came from the Runtime Broker's own config, so a project or Hub default model could be shown on the agent while codex, gemini-cli or claude ran on the harness-config default. A size alias the Hub could not resolve is now resolved through the harness-config's `model_aliases`, else the harness's built-in alias table, instead of being replaced by the Runtime Broker's own model. `scion create` also gains `--model` and `--thinking-level`, as on `scion start` ([ptone/scion#3914](https://github.com/ptone/scion/issues/3914), [ptone/scion#378](https://github.com/ptone/scion/issues/378)). See [Settings Precedence](/scion/reference/settings-precedence/#b1-harness-configuration-model-thinking-level-and-scalar-limits).
@@ -57,6 +61,14 @@ The Create Agent form used to pre-select a harness config (the template's, else 
 ## `scion project list` lists projects across hubs
 
 `scion project list` (and `scion projects list`) now lists the projects on all your registered hubs, each with its hub, merged with the project directories on this machine. Use `--hub <hub>` to show one hub and `--refresh` to fetch each logged-in hub's project list. The earlier output, the project directories on this machine with their type, agent count, status and workspace, moved to `scion project list --local`, which keeps that format byte for byte, JSON included. **Scripts that parse `scion project list` should switch to `scion project list --local`.**
+
+## Posting in project chat threads needs `project.chat_post`
+
+Reading a project's chat threads still needs `project.read`. Posting in them, and promoting a direct message with one of the project's agents into a thread, now also needs the new `project.chat_post` permission on the project. The built-in `project-owner`, `project-admin` and `project-member` roles and the `hub-admin` and `super-admin` system roles get it automatically on upgrade, so their holders keep posting. A send without it answers `403 chat_post_denied`, and the web thread shows a read-only notice instead of the message box ([ptone/scion#5518](https://github.com/ptone/scion/issues/5518)). See [Chat posting](/scion/hosted/ha/permissions/#chat-posting). These chat writes do not check `project.chat_post` yet: thread create; thread rename, default-agent change and delete; project attachment upload; message edit and delete; and thread posts sent through the agent message endpoint (`POST /api/v1/agents/{id}/message` with a thread key). They keep their existing checks, and are tracked in [ptone/scion#5519](https://github.com/ptone/scion/issues/5519).
+
+A new token scope, `project:chat_post`, keeps that permission on a user access token so the token can grant roles that include it. A token that grants `project-member`, or any other role that holds `project.chat_post`, through `project:manage` now also needs `project:chat_post`; mint a new token for existing membership automation. Posting by token is unchanged: `inbox:write` on the token and `project.chat_post` on your account.
+
+Upgrade note: **custom project roles are not changed.** A principal whose only access to a project is a custom role that holds `project.read` but not `project.chat_post` can no longer post in that project's threads, and their scheduled chat messages fail with `no_access` when they come due. This is intended: a role that only reads should not post. If such a role should keep posting, an administrator must add `project.chat_post` to it (Role & Binding Management).
 
 ## Timezone handling changes
 
@@ -78,6 +90,7 @@ Upgrade note: on the first start after upgrading, the Hub has no record yet, so 
 
 ## Previous Weeks
 
+- [Week of October 12 -- 18, 2026](/scion/release-notes/2026-10-12/)
 - [Week of October 5 -- 11, 2026](/scion/release-notes/2026-10-05/)
 - [Week of September 28 -- October 4, 2026](/scion/release-notes/2026-09-28/)
 - [Week of September 21 -- 27, 2026](/scion/release-notes/2026-09-21/)

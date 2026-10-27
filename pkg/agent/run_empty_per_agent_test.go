@@ -55,6 +55,13 @@ profiles:
 	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
 		t.Fatal(err)
 	}
+	// The storage blocks are Layer-0: they take effect only from the global
+	// settings file (the test HOME).
+	if storage != "" {
+		if err := writeGlobalStorageSettings(t, "schema_version: \"1\"\nserver:\n"+storage); err != nil {
+			t.Fatal(err)
+		}
+	}
 	hcDir := filepath.Join(projectScionDir, "harness-configs", "test-harness")
 	if err := os.MkdirAll(hcDir, 0755); err != nil {
 		t.Fatal(err)

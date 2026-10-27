@@ -141,16 +141,69 @@ func chatSendPath(key string) string {
 	return "/api/v1/chat/conversations/" + key + "/messages"
 }
 
+// chatPostAction is the project action a user's account needs to post
+// into the chat threads of a project (ptone/scion#5518). Read access to
+// the project reads its threads; it does not post in them. These chat
+// writes do not check it yet: thread create; thread rename, default-agent
+// change and delete; project attachment upload; message edit and delete;
+// thread posts sent through the agent message endpoint's thread key. They
+// are tracked in ptone/scion#5519.
+const chatPostAction = ActionChatPost
+
+// chatSendPostDenied is the refusal for a sender who may read a thread
+// but may not post in it. It is a 403, not "Thread not found": the
+// sender can already see the thread.
+func chatSendPostDenied() *chatSendError {
+	return newChatSendError(http.StatusForbidden, ErrCodeChatPostDenied,
+		"You can read this thread but not post in it", map[string]interface{}{
+			"resource_type": "project",
+			"denied_action": string(chatPostAction),
+		})
+}
+
+// chatPostIdentity is the identity whose account decides chatPostAction:
+// the holder of a user access token, the caller otherwise. A token keeps
+// needing only inbox:write for a send; the post permission is a property
+// of the account the token acts for, so it is checked on that account and
+// never widens what the token may do. The project:chat_post selector does
+// not change this: it only keeps project.chat_post in the token's ceiling,
+// so the token can delegate roles that include it.
+func chatPostIdentity(user UserIdentity) UserIdentity {
+	if scoped, ok := user.(*ScopedUserIdentity); ok && scoped != nil && scoped.UserIdentity != nil {
+		return scoped.UserIdentity
+	}
+	return user
+}
+
+// chatMayPost decides whether user's account may post into the chat
+// threads of project.
+func (s *Server) chatMayPost(ctx context.Context, user UserIdentity, project *store.Project) Decision {
+	return s.authzService.CheckAccess(ctx, chatPostIdentity(user), projectResource(project), chatPostAction)
+}
+
 // authorizeChatSend runs the conversation access checks of a chat send:
 // for a DM, a well-formed key naming the sender as a participant; for a
-// topic, an existing topic whose current project exists and grants the
-// sender read access. It needs no request, so every caller of
-// sendChatMessage runs the same checks.
+// topic, an existing topic whose current project exists, grants the
+// sender read access and lets the sender's account post (chatMayPost).
+// It needs no request, so every caller of sendChatMessage runs the same
+// checks.
 //
 // A sender who may not use the conversation gets the same answer as for a
 // conversation that does not exist ("Thread not found"); the reason is
-// written to the server log only.
+// written to the server log only. A sender who may read a topic but not
+// post in it gets 403 chat_post_denied.
 func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key string) (*chatSendTarget, *chatSendError) {
+	return s.authorizeChatConversation(ctx, user, key, true)
+}
+
+// authorizeChatSendRead runs the checks of authorizeChatSend without the
+// post check, for routes that act only on the sender's own rows of a
+// conversation it can read (listing its scheduled messages).
+func (s *Server) authorizeChatSendRead(ctx context.Context, user UserIdentity, key string) (*chatSendTarget, *chatSendError) {
+	return s.authorizeChatConversation(ctx, user, key, false)
+}
+
+func (s *Server) authorizeChatConversation(ctx context.Context, user UserIdentity, key string, requirePost bool) (*chatSendTarget, *chatSendError) {
 	if user == nil {
 		return nil, chatSendForbidden()
 	}
@@ -162,7 +215,8 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 	}
 
 	target := &chatSendTarget{Key: key, wcs: wcs}
-	if strings.HasPrefix(key, "dm:") {
+	audience, topic := chatKeyReadAudience(ctx, wcs, key)
+	if audience == chatAudienceParticipants {
 		target.IsDM = true
 		if serr := authorizeDMKeyParticipant(ctx, user, key, chatSendPath(key)); serr != nil {
 			return nil, serr
@@ -176,9 +230,8 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 		return target, nil
 	}
 
-	// Topic key: look up the topic to get its project and check access.
-	topic, err := wcs.GetTopic(ctx, key)
-	if err != nil || topic == nil {
+	// Topic key: the topic gives its project, whose read access decides.
+	if audience != chatAudienceProject {
 		return nil, chatSendNotFound("Thread")
 	}
 	project, err := s.store.GetProject(ctx, topic.ProjectID)
@@ -202,9 +255,52 @@ func (s *Server) authorizeChatSend(ctx context.Context, user UserIdentity, key s
 		slog.InfoContext(ctx, "chat send refused as not found", logAttrs...)
 		return nil, chatSendRefusedAsNotFound("Thread")
 	}
+	if requirePost {
+		if post := s.chatMayPost(ctx, user, project); !post.Allowed {
+			logReq := (&http.Request{URL: &url.URL{Path: chatSendPath(key)}}).WithContext(ctx)
+			logAuthzDenial(logReq, user, resource, chatPostAction, post.Reason)
+			return nil, chatSendPostDenied()
+		}
+	}
 	target.ProjectID = topic.ProjectID
 	target.Topic = topic
 	return target, nil
+}
+
+// chatKeyAudience is how reading a chat conversation key is authorized.
+type chatKeyAudience int
+
+const (
+	// chatAudienceNone: no such conversation (or the lookup failed).
+	chatAudienceNone chatKeyAudience = iota
+	// chatAudienceParticipants: a DM key, read by its participants only.
+	chatAudienceParticipants
+	// chatAudienceProject: a topic, read by anyone with read access to its
+	// project.
+	chatAudienceProject
+)
+
+// chatKeyReadAudience classifies key by how reading it is authorized: a
+// "dm:" key by its participant list, any other key as a topic, read by
+// read access to its project (the topic is returned). It is the
+// read-authorization classifier shared by the send authorization
+// (authorizeChatSend), the conversation access check
+// (authorizeConversationAccess) and the attachment projection decision
+// (projectionAudienceIsProject), so those three cannot disagree. Other
+// handlers still test the "dm:" prefix for their own key-shape handling.
+// A topic that cannot be loaded is chatAudienceNone.
+func chatKeyReadAudience(ctx context.Context, wcs WebChatStore, key string) (chatKeyAudience, *WebChatTopic) {
+	if strings.HasPrefix(key, "dm:") {
+		return chatAudienceParticipants, nil
+	}
+	if wcs == nil || key == "" {
+		return chatAudienceNone, nil
+	}
+	topic, err := wcs.GetTopic(ctx, key)
+	if err != nil || topic == nil {
+		return chatAudienceNone, nil
+	}
+	return chatAudienceProject, topic
 }
 
 // authorizeDMKeyParticipant runs the first two DM steps of

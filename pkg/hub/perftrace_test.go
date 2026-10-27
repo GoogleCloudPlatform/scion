@@ -463,9 +463,17 @@ type perfSentinelStore struct {
 	got []string
 }
 
-var perfSentinelErr = map[string]error{}
+// perfSentinelErr holds one error per method name, so repeated calls
+// return the same value. The mutex makes it safe for tests that run in
+// parallel or call the store from several goroutines.
+var (
+	perfSentinelMu  sync.Mutex
+	perfSentinelErr = map[string]error{}
+)
 
 func perfSentinel(name string) error {
+	perfSentinelMu.Lock()
+	defer perfSentinelMu.Unlock()
 	if _, ok := perfSentinelErr[name]; !ok {
 		perfSentinelErr[name] = errors.New("sentinel error " + name)
 	}

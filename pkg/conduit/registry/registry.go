@@ -81,6 +81,9 @@ func New(store Store, cfg Config) *Registry {
 
 func (r *Registry) now() time.Time { return r.cfg.Clock.Now().UTC() }
 
+// Now is the registry clock: the time last_seen is written and judged by.
+func (r *Registry) Now() time.Time { return r.now() }
+
 // RegisterRelay registers (or re-registers) a relay instance and returns its
 // new generation, which is strictly greater than any generation previously
 // returned for the same instance_id. In hosted-HA mode the caller must run

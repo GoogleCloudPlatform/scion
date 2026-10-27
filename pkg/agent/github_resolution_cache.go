@@ -33,6 +33,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
 const (
@@ -261,20 +262,23 @@ type resolutionCacheFile struct {
 }
 
 // NewGitHubResolutionCache creates or loads a resolution cache at the
-// given directory with the specified TTL. The directory is created with
-// mode 0700, and an existing directory or cache file with looser
-// permissions is tightened (see resolutionCacheDirMode). opts adjust the
-// defaults (see ResolutionCacheOption).
+// given directory with the specified TTL. The directory and any missing
+// parents are created private (mode 0700; on Windows an owner-only ACL).
+// On unix an existing directory or cache file with looser permissions is
+// tightened (see resolutionCacheDirMode); on Windows a too-open cache file
+// owned by the user is repaired, and a too-open directory is only warned
+// about (see tightenCacheDir). opts adjust the defaults (see
+// ResolutionCacheOption).
 func NewGitHubResolutionCache(dir string, ttl time.Duration, opts ...ResolutionCacheOption) (*GitHubResolutionCache, error) {
-	if err := os.MkdirAll(dir, resolutionCacheDirMode); err != nil {
+	tree, err := privatefs.OpenTree(dir, privatefs.TreeOptions{CreateAnchor: true})
+	if err != nil {
 		return nil, err
 	}
-	// MkdirAll leaves an existing directory as it is, and a new one is
-	// subject to the umask, so set the mode explicitly in both cases.
-	if err := tightenMode(dir, resolutionCacheDirMode); err != nil {
+	_ = tree.Close()
+	if err := tightenCacheDir(dir); err != nil {
 		// For example a directory owned by another user. The cache still
 		// works; only its permissions are not what this process would set.
-		fmt.Fprintf(os.Stderr, "github: WARNING: cannot set mode of resolution cache directory: %v\n", err)
+		fmt.Fprintf(os.Stderr, "github: WARNING: %s\n", err)
 	}
 	c := &GitHubResolutionCache{
 		dir:       dir,
@@ -289,26 +293,6 @@ func NewGitHubResolutionCache(dir string, ttl time.Duration, opts ...ResolutionC
 	c.load()
 	return c, nil
 }
-
-// tightenMode sets path's permission bits to mode if it grants anything
-// more than mode does. A missing path is not an error.
-func tightenMode(path string, mode os.FileMode) error {
-	info, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	if info.Mode().Perm()&^mode == 0 {
-		return nil
-	}
-	return chmod(path, mode)
-}
-
-// chmod is os.Chmod, replaceable by tests to simulate a path the process
-// cannot change.
-var chmod = os.Chmod
 
 // Get returns a cached ResolvedSkill for the given URI if it exists
 // and has not expired. The returned value is a deep copy safe for
@@ -605,10 +589,10 @@ func (c *GitHubResolutionCache) load() {
 		}
 		return
 	}
-	// The file may predate the 0600 mode; tighten it now rather than
-	// waiting for the next rewrite.
-	if err := tightenMode(c.filePath, resolutionCacheFileMode); err != nil {
-		fmt.Fprintf(os.Stderr, "github: WARNING: cannot set mode of resolution cache file: %v\n", err)
+	// The file may predate the 0600 mode (on Windows, the owner-only ACL);
+	// tighten it now rather than waiting for the next rewrite.
+	if err := tightenCacheFile(c.filePath); err != nil {
+		fmt.Fprintf(os.Stderr, "github: WARNING: %s\n", err)
 	}
 
 	var f resolutionCacheFile
@@ -653,19 +637,26 @@ func (c *GitHubResolutionCache) save(entries map[string]*resolutionCacheEntry) {
 }
 
 func (c *GitHubResolutionCache) writeFileAtomic(data []byte) (err error) {
-	// os.CreateTemp creates the file with mode 0600 (resolutionCacheFileMode),
-	// and a umask can only narrow that, so no further chmod is needed. An
-	// existing cache file with a wider mode is tightened in load.
-	tmp, err := os.CreateTemp(c.dir, resolutionCacheFileName+".tmp-*")
+	// The temp file is created private (mode 0600; on Windows an owner-only
+	// ACL set at creation) in a Tree anchored at the cache directory, and
+	// renamed over the cache file through its still-open handle, so the
+	// result is private whatever the old file's protection was. A failed
+	// write deletes the temp file through the same handle.
+	tree, err := privatefs.OpenTree(c.dir, privatefs.TreeOptions{})
 	if err != nil {
 		return err
 	}
-	tmpPath := tmp.Name()
+	defer func() { _ = tree.Close() }()
+	tmp, _, err := tree.CreateTemp("", resolutionCacheFileName+".tmp-*", privatefs.ForMode(resolutionCacheFileMode))
+	if err != nil {
+		return err
+	}
+	renamed := false
 	defer func() {
-		if err != nil {
-			_ = tmp.Close()
-			_ = os.Remove(tmpPath)
+		if !renamed {
+			_ = tree.RemoveOpen(tmp)
 		}
+		_ = tmp.Close()
 	}()
 	write := c.writeData
 	if write == nil {
@@ -680,10 +671,11 @@ func (c *GitHubResolutionCache) writeFileAtomic(data []byte) (err error) {
 	if err = tmp.Sync(); err != nil {
 		return err
 	}
-	if err = tmp.Close(); err != nil {
+	if err = tree.RenameOpen(tmp, resolutionCacheFileName); err != nil {
 		return err
 	}
-	if err = os.Rename(tmpPath, c.filePath); err != nil {
+	renamed = true
+	if err = tmp.Close(); err != nil {
 		return err
 	}
 	// Sync the directory so the rename itself survives a crash. Not all
@@ -725,6 +717,22 @@ func (c *GitHubResolutionCache) getStale(uri string) (ResolvedSkill, bool) {
 	if len(entry.Skill.Files) > 0 {
 		skill.Files = make([]ResolvedFile, len(entry.Skill.Files))
 		copy(skill.Files, entry.Skill.Files)
+	}
+	return skill, true
+}
+
+// legacyModelessEntry returns the entry under uri if it is one recorded
+// before file modes were carried (some file has no Mode) and could still
+// be served: fresh, or, for a branch ref, within MaxResolutionStaleAge.
+// GitHubSkillResolver serves it only when re-resolving the ref failed
+// (ptone/scion#5781).
+func (c *GitHubResolutionCache) legacyModelessEntry(uri string, isBranchRef bool) (ResolvedSkill, bool) {
+	skill, ok := c.Get(uri)
+	if !ok && isBranchRef {
+		skill, ok = c.getStale(uri)
+	}
+	if !ok || skillFilesHaveModes(skill.Files) {
+		return ResolvedSkill{}, false
 	}
 	return skill, true
 }
@@ -1035,7 +1043,15 @@ func (c *GitHubResolutionCache) coalesceFetchAccept(
 		if res.Err != nil {
 			return ResolvedSkill{}, res.Err
 		}
-		return res.Val.(ResolvedSkill), nil
+		// The function above always returns a ResolvedSkill, but a flight
+		// started elsewhere under the same key (for example a test joining
+		// the group with its own function) can deliver anything, including
+		// nil. Fail that caller instead of panicking (ptone/scion#6181).
+		skill, ok := res.Val.(ResolvedSkill)
+		if !ok {
+			return ResolvedSkill{}, fmt.Errorf("GitHub skill resolution of %s returned no result", logRef)
+		}
+		return skill, nil
 	case <-ctx.Done():
 		// A waiter whose own deadline (e.g. the resolve budget) expires
 		// before the shared flight finishes is a timeout, so classify it as

@@ -203,7 +203,7 @@ export class ScionTerminalPane extends LitElement {
   @state() private uploadEnabled = false;
   @state() private uploadDisabledReason = '';
   @state() private uploadTargetDir = ''; // shared dir name (e.g. "scratchpad")
-  @state() private uploadBasePath = ''; // container path (e.g. "/scion-volumes/scratchpad")
+  @state() private uploadBasePath = ''; // container path of the target dir, from the hub (SharedDir.target)
   @state() private isDragOver = false;
   @state() private isUploading = false;
   @state() private uploadStatus = ''; // progress/error message in overlay
@@ -1467,13 +1467,14 @@ export class ScionTerminalPane extends LitElement {
       }
       const data = (await resp.json()) as { sharedDirs?: SharedDir[] };
       const dirs = data.sharedDirs ?? [];
-      // Filter: writable, non-in_workspace
-      const candidates = dirs.filter((d) => !d.read_only && !d.in_workspace);
+      // Filter: writable, non-in_workspace, with a container path from the
+      // hub (the layout authority computes it; the UI never builds one).
+      const candidates = dirs.filter((d) => !d.read_only && !d.in_workspace && !!d.target);
       const target = candidates.find((d) => d.name === 'scratchpad') || candidates[0];
-      if (target) {
+      if (target && target.target) {
         this.uploadEnabled = true;
         this.uploadTargetDir = target.name;
-        this.uploadBasePath = `/scion-volumes/${target.name}`;
+        this.uploadBasePath = target.target;
       } else {
         this.uploadEnabled = false;
         this.uploadDisabledReason = 'No writable shared directory available for file upload';

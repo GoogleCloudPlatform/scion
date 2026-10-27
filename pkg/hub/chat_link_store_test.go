@@ -27,22 +27,14 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 )
 
 // newTestChatLinkStore creates a ChatLinkStore backed by an in-memory SQLite DB
 // with the schema auto-migrated. Each test gets an isolated database.
 func newTestChatLinkStore(t *testing.T) *ChatLinkStore {
 	t.Helper()
-
-	client, err := entc.OpenSQLite(fmt.Sprintf("file:%s?mode=memory&cache=shared", t.Name()), entc.PoolConfig{MaxOpenConns: 1})
-	require.NoError(t, err)
-	t.Cleanup(func() { client.Close() }) //nolint:errcheck
-
-	ctx := context.Background()
-	require.NoError(t, entc.AutoMigrate(ctx, client))
-
-	return NewChatLinkStore(client)
+	return NewChatLinkStore(enttest.NewClient(t))
 }
 
 // ---------------------------------------------------------------------------

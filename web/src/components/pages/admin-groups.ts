@@ -31,6 +31,7 @@ import { customElement, state } from 'lit/decorators.js';
 import { setDocumentTitle } from '../../client/page-title.js';
 import { navigateTo, replaceSearch } from '../../client/navigation.js';
 import { listGroups, listMyGroups, GroupsApiError } from '../../client/groups-api.js';
+import { apiFetch } from '../../client/api.js';
 import type {
   AdminGroup,
   GroupType,
@@ -616,7 +617,7 @@ export class ScionPageAdminGroups extends LitElement {
 
   private async loadCurrentUser(): Promise<void> {
     try {
-      const res = await fetch('/auth/me', { credentials: 'include' });
+      const res = await apiFetch('/auth/me', { authErrors: 'caller' });
       if (res.ok) {
         const data = (await res.json()) as { id?: string };
         this.currentUserId = data.id || null;

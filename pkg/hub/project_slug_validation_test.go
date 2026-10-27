@@ -42,7 +42,7 @@ func TestValidateProjectSlug_ErrorNamesTheRule(t *testing.T) {
 
 func TestIsDirectChildOfAny(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "projects")
-	other := filepath.Join(t.TempDir(), "hub-projects")
+	other := filepath.Join(t.TempDir(), "other-root")
 	roots := []string{root, other}
 
 	assert.True(t, isDirectChildOfAny(filepath.Join(root, "p1"), roots))

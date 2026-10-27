@@ -120,10 +120,13 @@ func newFlatHubFixture(t *testing.T, opts flatHubOpts) *flatHubFixture {
 	}
 	require.NoError(t, s.CreateRuntimeBroker(ctx, flat))
 
-	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{ProjectID: project.ID, BrokerID: legacy.ID, BrokerName: legacy.Name, Status: store.BrokerStatusOnline}))
+	// Both brokers are remote and serve the hub-managed project from their
+	// own checkout (LocalPath); a remote broker without one is refused at
+	// create (ptone/scion#5813).
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{ProjectID: project.ID, BrokerID: legacy.ID, BrokerName: legacy.Name, LocalPath: fixtureProviderCheckout(t), Status: store.BrokerStatusOnline}))
 	project.DefaultRuntimeBrokerID = legacy.ID
 	if opts.linkFlat {
-		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{ProjectID: project.ID, BrokerID: flat.ID, BrokerName: flat.Name, Status: store.BrokerStatusOnline}))
+		require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{ProjectID: project.ID, BrokerID: flat.ID, BrokerName: flat.Name, LocalPath: fixtureProviderCheckout(t), Status: store.BrokerStatusOnline}))
 	}
 	require.NoError(t, s.UpdateProject(ctx, project))
 

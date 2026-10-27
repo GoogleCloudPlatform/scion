@@ -105,6 +105,35 @@ All icons in the web frontend use the Shoelace `<sl-icon>` component (Bootstrap 
 - Browser-side flag values are user-editable and only affect presentation; if an experiment changes hub behaviour, register it with the server layer and check it in the hub (`requireExperiment` / `experimentEnabled`).
 - Do not add ad-hoc `scion:feature:` string literals or new booleans to `/api/v1/settings/public`.
 
+## Platform seams (Windows CLI)
+
+`./cmd/scion` also builds for Windows, as a client-only CLI (hub, messaging, conversation, config, ssh/vscode). The server, the Runtime Broker and agent provisioning are unix-only. Keep these seams in place in any code that `./cmd/scion` compiles:
+
+- **Unix-only code** goes in a `*_unix.go` file that starts with `//go:build unix`. Go does not treat `_unix` in a file name as a build constraint, so the line is required. Pair it with a `*_other.go` file (`//go:build !unix`) that has the same signatures and **fails closed**: it returns an error wrapping `errors.ErrUnsupported` (`fmt.Errorf("...: %w on this platform", errors.ErrUnsupported)`). It never returns nil success and never falls back to a weaker path-based version. Examples: `pkg/runtime/git_bind_source_{unix,other}.go`, `pkg/agent/git_base_config_{unix,other}.go`. Tests of unix behaviour also get `//go:build unix` (`cmd/ssh_links_unix_test.go`, `pkg/util/privatefs/privatefs_unix_test.go`).
+- **Private files** (tokens, credentials, settings, per-user state) are written only through `pkg/util/privatefs`:
+  - Open the directory with `privatefs.OpenTree(dir, privatefs.TreeOptions{CreateAnchor: true})`.
+  - Write with `tree.WriteFile`, `tree.MkdirAll` or `tree.Create`, using `privatefs.Private` (or `privatefs.ForMode(mode)`).
+  - Read with `tree.ReadPrivate`, or check an open handle with `privatefs.CheckPrivate`.
+  - Use `privatefs.ReplaceFollowing` for a file the user may have symlinked.
+
+  On Windows, these calls put an owner-only DACL on the file when it is created. There, `os.WriteFile(p, b, 0o600)`, `os.MkdirAll(d, 0o700)` and `os.Chmod` protect nothing. Use `pathcanon.Within` (`pkg/util/pathcanon`) for path containment and `filelock.Acquire` (`pkg/util/filelock`) for lock files. Callers to copy: `pkg/credentials/store.go`, `pkg/config/cli_context.go`.
+- **Command gate:** `windowsAllowed` in `cmd/platform_gate.go` is an allowlist of dot-separated command paths (`hub.env.set`; list each parent too). Every new cobra command is hidden and refused on Windows until it is added there. Add a command only when it runs entirely on the client (hub API calls, no server, broker or agent-provisioning work) and every local file it writes goes through privatefs, pathcanon or filelock. Adding one is a product decision, so say so in the PR. `cmd/platform_gate_test.go` guards the gate: `TestWindowsGate_AllowlistEntriesExist` rejects stale keys, and the other `TestWindowsGate_*` tests cover refusal, hiding, and leaving unix untouched. This gate is separate from `agentAllowed` (`cmd/cli_mode.go`).
+- **`hack/winsec-guard.sh`** runs in CI as part of "Build & Test". It checks every non-test Go file in the `GOOS=windows` build of `./cmd/scion` and fails on any of these:
+  - (a) `Chmod` or `Fchmod` used as protection;
+  - (b) `filepath.Rel` followed by `HasPrefix(rel, "..")` (containment decided on strings);
+  - (c) an `O_NOFOLLOW` or `openNoFollow` set to 0 in a file built off unix;
+  - (d) `return nil` in a `check*Private*` function in a file built off unix.
+
+  Fix the code first. If a line really is not about protection, mark it `//winsec:not-protection <reason>` or `//winsec:not-containment <reason>`. If a whole file is reachable only from gated commands, add it to `hack/winsec-unprotected.txt` as `<path> not protected on Windows: gated (<why>)`, keeping the file sorted. After changing the script itself, run `bash hack/winsec-guard.sh --self-test`.
+- **Windows tests:** the `windows-latest` job (`.github/workflows/windows.yml`) runs only what `.github/windows-test-packages.txt` lists. The format is one package per line with no `./...`; a line may add an anchored `-run=^(TestA|TestB)$`, and every test it names must run and pass. A skipped test fails the job, so link tests use `internal/testutil/wintest` and fail rather than skip (`TestNoSkipOnSymlinkPaths` in `pkg/util/privatefs` enforces this). Put Windows-only tests in `*_windows_test.go` files with `TestWindows*` names. Never list `./pkg/hub` itself, a `./pkg/hub/...` wildcard, or a package whose test binary links pkg/hub (the unsharded pkg/hub test compile needs about 12 GiB). `./pkg/hub/<sub>` packages that do not link it are fine.
+- **Check locally** (no Windows host needed; the first command compiles pkg/hub as a dependency, the same as CI's "Windows cross-build (guard)"):
+  ```bash
+  GOOS=windows GOARCH=amd64 go build -buildvcs=false -o /dev/null ./cmd/scion
+  GOOS=windows GOARCH=amd64 go vet ./pkg/util/privatefs/... ./pkg/util/pathcanon/... ./pkg/util/filelock/... ./pkg/tunnelclient/... ./pkg/<yours>/...
+  bash hack/winsec-guard.sh
+  ```
+  `GOOS=windows go test -c -o /dev/null ./pkg/<yours>` checks that Windows-only tests compile. They only run on Windows.
+
 ## Glossary and project development terminology
 
 > **Canonical engineering glossary:** See [`GLOSSARY.md`](./GLOSSARY.md) at the repo root for the canonical, opinionated terminology used throughout the codebase — the preferred term for each concept and the synonyms to avoid. Prefer these terms in new code, comments, and docs.
@@ -157,7 +186,7 @@ If a rebase or merge results in conflicts:
 ### 5. Sandbox gotchas (Go toolchain, CI, worktrees)
 Learned the hard way; these are specific to running inside this container.
 
-* **Go toolchain & `gofmt`:** the project targets **Go 1.26.1** (`go.mod`), which matches the `core-base` build image (`image-build/core-base/Dockerfile` `GO_VERSION`) and the sandbox toolchain; CI installs it via `go-version-file: go.mod` (see `.github/workflows/ci.yml`). So the toolchain is aligned everywhere — but `fmt-check` failures are still usually genuine, not noise: the grove→project rename widened struct fields (e.g. `groveId`→`projectId`) without re-running `gofmt`, leaving neighboring fields misaligned. Fix with `make fmt`, and eyeball the diff to confirm it is *pure alignment* before committing. (Note: the `extras/*` submodules are separate Go modules still on older `go` directives / `golang:1.25.x` Dockerfile pins — bump those in a coordinated change if needed.)
+* **Go toolchain & `gofmt`:** the project targets **Go 1.26.1** (`go.mod`), which matches the `core-base` build image (`image-build/core-base/Dockerfile` `GO_VERSION`) and the sandbox toolchain; CI installs it via `go-version-file: go.mod` (see `.github/workflows/ci.yml`). So the toolchain is aligned everywhere — but `fmt-check` failures are still usually genuine, not noise: the grove→project rename widened struct fields (e.g. `groveId`→`projectId`) without re-running `gofmt`, leaving neighboring fields misaligned. Fix with `make fmt`, and eyeball the diff to confirm it is *pure alignment* before committing. (Note: the `extras/*` submodules are separate Go modules with their own `go` directives, some still older than the root module's. Each extras Dockerfile's `golang` base image must be at least its module's `go` version, or the image build needs a toolchain download and fails with `GOTOOLCHAIN=local`; `make check-extras-go-images` enforces this. When you bump an extras module's `go` line, bump its Dockerfile image in the same change.)
 * **`go build ./...` fails with `error obtaining VCS status: exit status 128`** inside a worktree. Use `go build -buildvcs=false ./...`.
 * **Inspecting `main` without disturbing it:** you cannot `git worktree add` the `main` *branch* — it is already checked out in the primary repo dir (e.g. `/repo-root`), which may not even be a usable module root. To run or read code at main's tip, add a **detached** worktree at the commit SHA: `git worktree add --detach /tmp/check <main-sha>`, then `git worktree remove --force /tmp/check` when done. Prefer `git show main:path/to/file` for quick single-file reads.
 * **`golangci-lint` can OOM (exit 137)** over `./...` in the sandbox. Scope it to the packages you touched and lower GC pressure, e.g. `GOGC=40 golangci-lint run --new-from-rev=main --concurrency=1 ./pkg/foo/... ./cmd/...`. The `--new-from-rev=main` filter (what `make golangci-lint` uses) hides pre-existing issues so you only see what your change introduced.

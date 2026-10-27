@@ -79,6 +79,8 @@ type options struct {
 	hubID          string
 	hubName        string
 	instanceID     string
+	// serviceName is the service.name resource attribute ("" = scion-hub).
+	serviceName string
 	// exporterOpts are extra Cloud Monitoring exporter options. Tests use
 	// them to point the exporter at an in-process fake API server.
 	exporterOpts []mexporter.Option
@@ -97,6 +99,12 @@ func WithHubID(id string) Option {
 // WithHubName sets the scion.hub.name resource attribute.
 func WithHubName(name string) Option {
 	return func(o *options) { o.hubName = name }
+}
+
+// WithServiceName sets the service.name resource attribute (default
+// "scion-hub"); a separate relay process uses "scion-relay".
+func WithServiceName(name string) Option {
+	return func(o *options) { o.serviceName = name }
 }
 
 // WithInstanceID sets the service.instance.id resource attribute to the hub
@@ -170,8 +178,12 @@ func NewResource(ctx context.Context, opts ...Option) (*resource.Resource, error
 
 // newResource builds the OTel resource attached to every hub metric.
 func newResource(ctx context.Context, o *options) (*resource.Resource, error) {
+	serviceName := o.serviceName
+	if serviceName == "" {
+		serviceName = "scion-hub"
+	}
 	resAttrs := []attribute.KeyValue{
-		semconv.ServiceName("scion-hub"),
+		semconv.ServiceName(serviceName),
 	}
 	if o.hubID != "" {
 		resAttrs = append(resAttrs, attribute.String(HubIDAttribute, o.hubID))

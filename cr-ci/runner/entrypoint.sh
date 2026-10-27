@@ -4,7 +4,7 @@
 #   1. Verify that /scratch is a mounted, writable volume (the Cloud Run
 #      ephemeral-disk). The container root filesystem is in memory on Cloud
 #      Run, so running without /scratch would silently eat RAM. Fail loudly.
-#   2. Link ~/work, ~/.cache and ~/go into /scratch and export ubuntu-latest's cache
+#   2. Link ~/work, ~/.cache, ~/go and ~/.npm into /scratch and export ubuntu-latest's cache
 #      paths, so actions/cache entries restore identically on both runner types while
 #      the bytes land on the ephemeral disk (see section 3).
 #   3. Exchange the one-time RUNNER_CLAIM_TOKEN with the mediator for the JIT
@@ -30,6 +30,8 @@
 # Optional env (set on the job by deploy-job.sh from config.env):
 #   RUNNER_BUILD_CACHE_IN_RAM  true: keep ~/.cache (Go build cache, analysis cache) in
 #                              RAM instead of on /scratch (section 3); default false
+#   RUNNER_IDLE_TIMEOUT_SECONDS stop the runner (exit 0) if it has not started a job within
+#                              this many seconds of the container start (default 600; section 5)
 #
 # Required env (set by the mediator as Cloud Run Job overrides):
 #   RUNNER_CLAIM_TOKEN  32 lowercase hex chars, single use
@@ -39,10 +41,14 @@
 #
 # Exit codes:
 #   2  configuration error: missing or invalid env (HOME included), /scratch missing or
-#      not writable, a HOME link (~/work, ~/.cache, ~/go) that is not the expected symlink
+#      not writable, a HOME link (~/work, ~/.cache, ~/go, ~/.npm) that is not the expected symlink
 #   3  claim failed: 401, 410, other non-retryable response (mediator or
 #      metadata server), or retries exhausted; run.sh not started
 #   128+n  SIGTERM (143) or SIGINT (130) received before run.sh started; run.sh not started
+#   0      also when the runner was stopped for its idle timeout (logged as "idle_timeout")
+#   4      the idle stop raced a job start: the SIGTERM cancelled a job that started just
+#          as the deadline passed (logged as "ERROR idle_timeout_raced_job"; a 4 without
+#          that line is run.sh's own code)
 #   otherwise run.sh's exit code, or, when run.sh exits 0, the runner exit code that
 #      run-helper.sh reported as unknown (for example 134 after an abort)
 #
@@ -56,6 +62,7 @@
 #   CR_METADATA_URL          metadata server origin       (default http://metadata.google.internal;
 #                            otherwise only http://127.0.0.1[:port] or http://localhost[:port])
 #   CR_FIFO_TMPDIR           where the runner-output FIFOs go (default /tmp)
+# (RUNNER_IDLE_TIMEOUT_SECONDS, below, is set on the job by deploy-job.sh; tests use small values.)
 #   CR_RAM_CACHE_DIR         RAM target of /scratch/.cache when RUNNER_BUILD_CACHE_IN_RAM=true
 #                            (default /tmp/cr-ci-build-cache)
 #   CR_WATCHER_GRACE_SECONDS how long to wait for the output watcher (default 5)
@@ -65,6 +72,7 @@ set -euo pipefail
 readonly CLAIM_MAX_ATTEMPTS=5
 readonly EXIT_CONFIG=2
 readonly EXIT_CLAIM=3
+readonly EXIT_IDLE_RACE=4
 
 scratch=${CR_SCRATCH_DIR:-/scratch}
 mountinfo=${CR_MOUNTINFO:-/proc/self/mountinfo}
@@ -166,6 +174,11 @@ if [[ $metadata_base != http://metadata.google.internal &&
   die "$EXIT_CONFIG" "CR_METADATA_URL must be http://metadata.google.internal or a loopback origin, got '$metadata_base'"
 fi
 
+idle_timeout=${RUNNER_IDLE_TIMEOUT_SECONDS:-600}
+if [[ ! $idle_timeout =~ ^[1-9][0-9]{0,5}$ ]]; then
+  die "$EXIT_CONFIG" "RUNNER_IDLE_TIMEOUT_SECONDS must be a positive whole number of seconds"
+fi
+
 if [[ ! $backoff =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
   die "$EXIT_CONFIG" "CR_CLAIM_BACKOFF_SECONDS must be a non-negative number"
 fi
@@ -245,6 +258,8 @@ rm -f -- "$probe"
 #   ~/work   -> /scratch/_work   (the mediator's JIT work_folder is /home/runner/work)
 #   ~/.cache -> /scratch/.cache  (GOCACHE, GOLANGCI_LINT_CACHE, any XDG cache)
 #   ~/go     -> /scratch/go      (GOPATH, GOMODCACHE)
+#   ~/.npm   -> /scratch/.npm    (npm's cache; actions/setup-node's npm cache step also
+#                                 requires the directory to exist, as on ubuntu-latest)
 # The links are the parents of the cached paths, so tar never replaces a link.
 # XDG_CACHE_HOME stays unset, as on ubuntu-latest; tools then default to ~/.cache.
 # The runner sets its own RUNNER_WORKSPACE and RUNNER_TEMP for job steps; the
@@ -282,6 +297,7 @@ if ((cache_in_ram)); then
 fi
 ensure_link "$HOME/.cache" "$scratch/.cache"
 ensure_link "$HOME/go" "$scratch/go"
+ensure_link "$HOME/.npm" "$scratch/.npm"
 unset XDG_CACHE_HOME
 
 export RUNNER_WORKSPACE="$HOME/work"
@@ -295,7 +311,7 @@ export GOLANGCI_LINT_CACHE="$HOME/.cache/golangci-lint"
 # The runner's _diag (its own logs) is NOT on /scratch (see Dockerfile): a job that
 # fills /scratch must not take the runner, and the job's log, down with it.
 mkdir -p -- "$RUNNER_TEMP" "$GOCACHE" "$GOMODCACHE" "$GOLANGCI_LINT_CACHE"
-log "work folder, temp and caches on $scratch ($scratch_fstype) via $HOME/{work,.cache,go}"
+log "work folder, temp and caches on $scratch ($scratch_fstype) via $HOME/{work,.cache,go,.npm}"
 
 # Check the runner before spending the single-use token.
 if [[ ! -x $runner_dir/run.sh ]]; then
@@ -314,8 +330,11 @@ fifo_dir=$(mktemp -d "${CR_FIFO_TMPDIR:-/tmp}/cr-ci-entrypoint.XXXXXX") ||
   die "$EXIT_CONFIG" "cannot create a private temp directory"
 out_fifo="$fifo_dir/runner-output"
 done_fifo="$fifo_dir/watcher-done"
+idle_fifo="$fifo_dir/idle-wait"
 listener_code_file="$fifo_dir/listener-exit-code"
-mkfifo -m 600 -- "$out_fifo" "$done_fifo" || die "$EXIT_CONFIG" "cannot create FIFOs in $fifo_dir"
+job_started_file="$fifo_dir/job-started"
+idle_stopped_file="$fifo_dir/idle-stopped"
+mkfifo -m 600 -- "$out_fifo" "$done_fifo" "$idle_fifo" || die "$EXIT_CONFIG" "cannot create FIFOs in $fifo_dir"
 
 # --- 4. Claim exchange (claim contract v2) -----------------------------------
 
@@ -485,6 +504,10 @@ watch_runner_output() {
     if [[ $line =~ ^Exiting\ with\ unknown\ error\ code:\ (0|[1-9][0-9]{0,2})$ ]]; then
       printf '%s\n' "${BASH_REMATCH[1]}" >"$listener_code_file"
     fi
+    # The runner listener logs "<time>: Running job: <name>" when it starts a job.
+    if [[ ! -e $job_started_file && $line == *"Running job: "* ]]; then
+      : >"$job_started_file"
+    fi
   done <"$out_fifo"
   printf 'done\n' >&"$done_fd"
 }
@@ -497,8 +520,11 @@ watcher_pid=$!
 
 log "starting run.sh (ephemeral JIT runner)"
 set -m
-# {done_fd}>&-: the watcher's done FIFO is not passed on to run.sh or the job steps.
-./run.sh --jitconfig "$jit_config" >"$out_fifo" 2>&1 {done_fd}>&- &
+# Opened read-write (never blocks); nothing is ever written, so read -t on it is a
+# timer that needs no external sleep.
+exec {idle_fd}<>"$idle_fifo"
+# {done_fd}>&- {idle_fd}>&-: the watcher's FIFOs are not passed on to run.sh or the job steps.
+./run.sh --jitconfig "$jit_config" >"$out_fifo" 2>&1 {done_fd}>&- {idle_fd}>&- &
 runner_pid=$!
 set +m
 jit_config=""
@@ -507,6 +533,27 @@ if [[ -n $pending_signal ]]; then
   log "forwarding SIG$pending_signal, which arrived while run.sh was starting"
   kill -s "$pending_signal" "$runner_pid" 2>/dev/null || true
 fi
+
+# Idle deadline. GitHub may hand ANY queued job with this label to an idle runner, and
+# that job only gets what is left of this execution's task timeout. A runner that has
+# not started a job within RUNNER_IDLE_TIMEOUT_SECONDS of the container start ($SECONDS
+# counts from the script start, so the claim and checks count too) is stopped gracefully
+# (SIGTERM to run.sh, as for a cancel), so a job never inherits less than TASK_TIMEOUT
+# minus the idle timeout. The watchdog is a subshell timing out on read -t: no child
+# process to orphan.
+idle_left=$((idle_timeout - SECONDS))
+((idle_left >= 1)) || idle_left=1
+(
+  trap - TERM INT
+  read -r -t "$idle_left" -u "$idle_fd" _ || true
+  [[ -e $job_started_file ]] && exit 0
+  # Not atomic with the TERM below: a job assigned now, or whose "Running job:" line is
+  # still in the pipe, is cancelled by it. The exit logic reports that as a race (exit 4).
+  : >"$idle_stopped_file"
+  log "idle timeout: no job started within ${idle_timeout}s of the container start; stopping the runner gracefully"
+  kill -s TERM "$runner_pid" 2>/dev/null || true
+) {done_fd}>&- &
+idle_pid=$!
 
 runner_rc=0
 while :; do
@@ -524,15 +571,34 @@ else
   ((rc == 127)) || runner_rc=$rc
 fi
 trap - TERM INT
+kill "$idle_pid" 2>/dev/null || true
 
 # Let the watcher drain the last lines (bounded: a process left holding the pipe
 # open must not keep the execution alive).
 read -r -t "${CR_WATCHER_GRACE_SECONDS:-5}" -u "$done_fd" _ || log "warning: runner output watcher did not finish in time"
 listener_code=""
 [[ -s $listener_code_file ]] && listener_code=$(<"$listener_code_file")
+idle_stopped=0
+[[ -e $idle_stopped_file ]] && idle_stopped=1
+job_started=0
+[[ -e $job_started_file ]] && job_started=1
 kill "$watcher_pid" 2>/dev/null || true
 rm -rf -- "$fifo_dir"
 
+if ((idle_stopped && job_started)); then
+  # The watchdog found no job and sent SIGTERM, but a job started in that gap (or its
+  # "Running job:" line was still in the pipe): the SIGTERM cancelled that job. Rare, and
+  # not reversible; fail the execution so it does not pass for an idle stop.
+  log "ERROR idle_timeout_raced_job: the idle stop after ${idle_timeout}s raced a job start; the job was cancelled (run.sh exited $runner_rc); exiting $EXIT_IDLE_RACE"
+  exit "$EXIT_IDLE_RACE"
+fi
+if ((idle_stopped)); then
+  # Expected, not a failure: the unused registration is reaped by the mediator's next
+  # /reconcile (offline, idle, older than the reap age), which also re-serves any job
+  # still queued for this label.
+  log "idle_timeout: runner stopped after ${idle_timeout}s without a job (run.sh exited $runner_rc); exiting 0"
+  exit 0
+fi
 if ((runner_rc != 0)); then
   log "run.sh exited $runner_rc"
   exit "$runner_rc"

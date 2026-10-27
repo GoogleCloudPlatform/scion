@@ -33,11 +33,16 @@ type RelayServerConfig struct {
 	// PublicURL is the relay's own public URL (its
 	// relay_instances.public_endpoint).
 	PublicURL string `json:"publicUrl,omitempty" yaml:"publicUrl,omitempty" koanf:"publicUrl"`
+	// Singleton asserts a non-HA singleton relay (design §3.9 "Cloud Run
+	// singleton"): required on Cloud Run (K_SERVICE set), together with
+	// max_instances=1, min_instances=1 and cpu_idle=false; allowed
+	// elsewhere, where it labels the relay non-HA.
+	Singleton bool `json:"singleton,omitempty" yaml:"singleton,omitempty" koanf:"singleton"`
 }
 
 // IsZero reports whether nothing is configured.
 func (c RelayServerConfig) IsZero() bool {
-	return c.HubInternalURL == "" && c.PublicURL == ""
+	return c.HubInternalURL == "" && c.PublicURL == "" && !c.Singleton
 }
 
 // Validate checks the configured values. Whether a value is required

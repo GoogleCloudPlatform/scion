@@ -49,12 +49,15 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/cspreport"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
+	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/GoogleCloudPlatform/scion/pkg/lifecyclehooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -63,12 +66,14 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/ssemetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/asyncwrite"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/GoogleCloudPlatform/scion/resources"
 	"github.com/google/uuid"
 )
@@ -84,6 +89,15 @@ const (
 type ServerConfig struct {
 	// Port is the HTTP port to listen on.
 	Port int
+	// StartupServerSettings is the server settings block as start-up
+	// resolved it, after the workstation defaults and the command-line flags
+	// (config.ConvertGlobalToV1ServerConfig of the final config). The
+	// server-config GET compares environment values with it, for the keys
+	// start-up overrides (startupOverriddenServerKeys), to report whether an
+	// environment value is in effect. It is never returned by any API. Nil
+	// when the caller does not set it; env_values then keeps the loader's
+	// precedence for those keys.
+	StartupServerSettings *config.V1ServerConfig
 	// NodeImageRegistry is this hub process's SCION_IMAGE_REGISTRY
 	// (config.ImageRegistryFromEnv, read once at startup): the node env
 	// layer of hub-scope image_registry reads (setup status, image pull,
@@ -130,6 +144,26 @@ type ServerConfig struct {
 	// Operators enabling it must provide a SharedSigningSecret or pre-provision
 	// the signing keys; otherwise first boot will (correctly) refuse to start.
 	RequireStableSigningKey bool
+	// Keyring is the server keyring loaded from server.keyring_file
+	// (ptone/scion#1530), or nil without one (legacy single-secret mode). In
+	// this release only the web session cookies use its signing ring; every
+	// other purpose uses SharedSigningSecret, which must then be the
+	// keyring's "legacy" signing entry. Explicit AgentTokenConfig/
+	// UserTokenConfig signing keys are refused with it. When the active
+	// signing generation reaches its sign_until, /readyz reports not ready.
+	Keyring *keyring.Keyring
+	// KeyringNow is the clock for keyring deadlines (nil: time.Now). A seam
+	// for tests; production leaves it nil.
+	KeyringNow func() time.Time
+	// ValueCipher is the server's one shared encryption object
+	// (ptone/scion#1530 §5), the same pointer the local secret backend
+	// holds: it encrypts and decrypts every locally stored Hub ciphertext
+	// (signing-key backups, OIDC key and keyset, conduit grant ring). Nil
+	// builds it from Keyring (a keyring file) or else from
+	// SharedSigningSecret (legacy mode; an empty secret disables
+	// encryption, as before). With a keyring file it must wrap that file's
+	// encryption ring.
+	ValueCipher *secret.ValueCipher
 
 	// ConduitTCPAllowedPorts is the operator allow-list of agent-local
 	// loopback ports a Conduit tcp stream grant may target in addition to
@@ -257,6 +291,11 @@ type ServerConfig struct {
 	// returned in X-Scion-Perf-* headers to admin requests that opt in. Off by
 	// default; observe only. See perftrace.go.
 	PerfTrace bool
+	// CSPReportRawSamples (server.hub.csp_report_raw_samples) adds each
+	// browser policy report's sample to its csp_violation log record. Off
+	// by default: a sample can hold the start of page content, such as a
+	// chat message. For a short diagnosis only; startup only.
+	CSPReportRawSamples bool
 	// MembershipSweepReportOnly (server.hub.membership_sweep_report_only)
 	// puts the membership-standing sweep in report-only mode: it logs and
 	// audits each agent it would hold (mutation type
@@ -485,25 +524,20 @@ type ServerConfig struct {
 	// in non-dev/non-workstation modes.
 	Mode string
 
-	// WorkspaceStorageConfig selects the workspace storage backend for
-	// hub-managed project workspaces. When Backend is "nfs",
-	// "cloudrun-volume" or "gke-shared-volume", hubManagedProjectPath returns
-	// a path on the configured durable mount instead of the node-local home
-	// directory.
-	// Nil or Backend=="" / "local" preserves the legacy ephemeral behavior.
-	WorkspaceStorageConfig *config.V1WorkspaceStorageConfig
-
-	// SharedDirStorageConfig is the hub's server.shared_dir_storage, read
-	// once at startup from the global settings file through the same
-	// env-free loader the brokers use (config.LoadHubSharedDirStorage);
-	// never re-read per request, never from the DB or project settings.
-	// With WorkspaceStorageConfig it decides where the hub's shared-dir
-	// browser resolves shared dirs (sharedDirLayout).
-	SharedDirStorageConfig *config.V1SharedDirStorageConfig
-	// SharedDirStorageError is set when the settings file plausibly
-	// configures server.shared_dir_storage but could not be loaded; shared-dir
-	// resolution then fails closed rather than using the local layout.
-	SharedDirStorageError error
+	// ProjectStorageConfig is the hub's one storage block,
+	// server.project_storage, as resolved at startup
+	// (config.ResolveGlobalProjectStorage: written, or synthesized from the
+	// deprecated workspace_storage/shared_dir_storage/home_storage blocks).
+	// The hub builds its projectfs Layout from it (projectStorageLayout);
+	// never from a per-request settings-file read, the DB or project
+	// settings. Its workspace view (WorkspaceStorage) selects where
+	// hub-managed project workspaces live. Nil or backend "" / "local"
+	// preserves the node-local behavior.
+	ProjectStorageConfig *config.V1ProjectStorageConfig
+	// ProjectStorageWarnings are the warnings of that resolution (non-empty
+	// when the block was synthesized from the deprecated blocks); the hub
+	// reports them as a degraded health check until the block is written.
+	ProjectStorageWarnings []string
 
 	// NativeChatEnabled controls whether the built-in chat feature is active:
 	// the /api/v1/chat/* routes are registered and the web UI is told to show
@@ -556,8 +590,9 @@ type MaintenanceConfig struct {
 
 	// DeploymentTier selects the update strategy: "source" (git-based) or "binary" (release-based).
 	DeploymentTier string
-	// ReleaseChannel selects which release channel to track: "stable" or "preview".
-	// When empty, derived from the running binary's version string.
+	// ReleaseChannel selects which release channel to track: "nightly",
+	// "preview" or "stable". When empty, derived from the running binary's
+	// version string.
 	ReleaseChannel string
 	// UpdatePolicy controls automatic update behavior: "auto", "notify", or "disabled".
 	UpdatePolicy string
@@ -567,6 +602,14 @@ type MaintenanceConfig struct {
 	// GitHubRepo is the GitHub repository for release lookups.
 	// Default: "GoogleCloudPlatform/scion".
 	GitHubRepo string
+	// InstallRoot is the versioned install root of the symlink layout
+	// (server.maintenance.install_root, SCION_MAINTENANCE_INSTALL_ROOT;
+	// default /opt/scion).
+	InstallRoot string
+	// Installer installs release binaries and restarts the hub. It is
+	// detected once at startup (DetectMaintenanceInstaller); nil means
+	// unsupported.
+	Installer maintenance.Installer
 }
 
 // GitHubAppServerConfig holds the GitHub App configuration for the Hub server.
@@ -834,6 +877,11 @@ type StartExtras struct {
 	LaunchID               string
 	LaunchTimeoutSeconds   int
 	LaunchKeepaliveSeconds int
+	// PreviousProjectIDs are earlier IDs of the agent's project that the
+	// broker may carry a git project's agent over from after a re-link
+	// (wire key previousProjectIds; see previousProjectIDs). Set on start
+	// and restart; empty sends nothing.
+	PreviousProjectIDs []string
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -916,6 +964,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if len(extras.ResolvedSecrets) > 0 {
 		payload["resolvedSecrets"] = extras.ResolvedSecrets
+	}
+	if len(extras.PreviousProjectIDs) > 0 {
+		payload["previousProjectIds"] = extras.PreviousProjectIDs
 	}
 	if extras.AsyncLaunch {
 		payload["asyncLaunch"] = true
@@ -1398,11 +1449,6 @@ type RemoteCreateAgentRequest struct {
 	// catalog rather than reused (`scion reincarnate`, design §3.4). See
 	// runtimebroker.CreateAgentRequest.Reprovision, the wire twin this maps to.
 	Reprovision bool `json:"reprovision,omitempty"`
-	// SharedDirBackendChanges and AllowEmptySharedDir mirror
-	// runtimebroker.CreateAgentRequest's fields of the same names. Set only
-	// on a reprovision for `scion reincarnate --shared-dir-backend`.
-	SharedDirBackendChanges map[string]string `json:"sharedDirBackendChanges,omitempty"`
-	AllowEmptySharedDir     bool              `json:"allowEmptySharedDir,omitempty"`
 	// ExpectExistingNFSWorkspace mirrors
 	// runtimebroker.CreateAgentRequest.ExpectExistingNFSWorkspace: on a
 	// ProvisionOnly request for an agent moved from another broker, the
@@ -1475,6 +1521,11 @@ type RemoteCreateAgentRequest struct {
 	// (e.g. "shared", "per-agent", "worktree-per-agent"). Threaded from the
 	// Hub so the broker can branch dispatch without re-deriving from labels.
 	WorkspaceMode string `json:"workspaceMode,omitempty"`
+
+	// PreviousProjectIDs are earlier IDs of the agent's project that the
+	// broker may carry a git project's agent over from after a re-link
+	// (see previousProjectIDs). An older broker ignores the key.
+	PreviousProjectIDs []string `json:"previousProjectIds,omitempty"`
 
 	// ProvisionCredentials carries project-scope secrets for use by core provision
 	// logic (skill resolution, URI variable substitution, credential helpers).
@@ -1628,12 +1679,6 @@ type RemoteAgentResponse struct {
 	// instead, which must not be reported as reincarnate success.
 	Reprovisioned bool `json:"reprovisioned,omitempty"`
 
-	// SharedDirBackendsChanged mirrors
-	// runtimebroker.CreateAgentResponse.SharedDirBackendsChanged.
-	// dispatchProvision fails a reprovision that asked for a shared dir
-	// backend change when the broker does not confirm it.
-	SharedDirBackendsChanged bool `json:"sharedDirBackendsChanged,omitempty"`
-
 	// LaunchPending, LaunchID and LaunchInstanceID mirror
 	// runtimebroker.CreateAgentResponse's async launch echo. LaunchPending
 	// with a LaunchID equal to the request's means the broker accepted the
@@ -1721,6 +1766,10 @@ type Server struct {
 	// nfsCleanupWG tracks background NFS project tree removals started by
 	// project delete (startHubNFSProjectTreeCleanup), so tests can wait.
 	nfsCleanupWG sync.WaitGroup
+	// projectConfigIdentity records shared-backend projects whose
+	// <ProjectRoot>/.scion/project-id names another project
+	// (project_config_identity health check).
+	projectConfigIdentity projectConfigIdentityState
 
 	// startupLayer1 holds the startup values ApplySnapshot reverts to when
 	// a saved Layer-1 setting is cleared (recordStartupLayer1Values).
@@ -1742,22 +1791,25 @@ type Server struct {
 	// ApplySnapshot returns to it when the configured hub_name is unset.
 	// See startupHubNameOrDefault. In file mode a name removed from
 	// settings.yaml therefore stays in use until restart (ptone/scion#3070).
-	startupHubName     string
-	store              store.Store
-	httpServer         *http.Server
-	mux                *http.ServeMux
-	mu                 sync.RWMutex
-	startTime          time.Time
-	dispatcher         AgentDispatcher      // Optional dispatcher for co-located runtime broker
-	storage            storage.Storage      // Optional storage backend for templates
-	secretBackend      secret.SecretBackend // Optional secret backend
-	agentTokenService  *AgentTokenService   // Agent JWT token service
-	userTokenService   *UserTokenService    // User JWT token service
-	downloadSigningKey []byte               // HMAC key for skill file capability URLs (#1792)
-	artifactViewKey    []byte               // HMAC key for artifact view capabilities (pkg/artifacts RouteView)
-	// attachmentDeliveryKey signs attachment delivery capabilities
-	// (ptone/scion#4596, attachment_delivery.go).
-	attachmentDeliveryKey []byte
+	startupHubName    string
+	store             store.Store
+	httpServer        *http.Server
+	mux               *http.ServeMux
+	mu                sync.RWMutex
+	startTime         time.Time
+	dispatcher        AgentDispatcher      // Optional dispatcher for co-located runtime broker
+	storage           storage.Storage      // Optional storage backend for templates
+	secretBackend     secret.SecretBackend // Optional secret backend
+	agentTokenService *AgentTokenService   // Agent JWT token service
+	userTokenService  *UserTokenService    // User JWT token service
+	// downloadKeys sign skill file capability URLs (#1792); artifactViewKeys
+	// sign artifact view capabilities (pkg/artifacts RouteView);
+	// attachmentDeliveryKeys sign attachment delivery capabilities
+	// (ptone/scion#4596). Each is a signing-ring purpose in keyring mode and
+	// one fixed legacy key otherwise (capability_keys.go).
+	downloadKeys           capabilityKeys
+	artifactViewKeys       capabilityKeys
+	attachmentDeliveryKeys capabilityKeys
 
 	// chatSpacesBatch sets the GET /chat/spaces rollup batch sizes; the
 	// zero value uses the defaults (handlers_chat_v2.go).
@@ -1876,7 +1928,6 @@ type Server struct {
 	maintenance      *MaintenanceState // Runtime maintenance mode state
 	hubID            string            // Unique hub instance ID for secret namespacing
 	instanceID       string            // Unique per-process ID (uuid); affinity key for broker dispatch
-	encryptionKey    []byte            // AES-256 key for encrypting backup secrets; nil disables encryption
 	embeddedBrokerID string            // Broker ID when running in hub+broker combo mode
 	// profileRefs counts built-in profile references for the co-located
 	// broker's settings overlay (ptone/scion#5113; profile_references.go).
@@ -2000,6 +2051,9 @@ type Server struct {
 	// Attachment file store for chat attachments (W7). Nil = attachments disabled.
 	// HA limitation: LocalDiskAttachmentStore is single-node only; see attachments.go.
 	attachmentStore AttachmentStore
+	// attachmentRetention paces the attachment retention sweep inside the
+	// artifact maintenance loop (attachments_retention.go).
+	attachmentRetention attachmentRetention
 
 	// Presence manager for in-memory user presence tracking (nil = disabled).
 	// Single-node only; see design §4.5 HA limitation.
@@ -2103,6 +2157,18 @@ type Server struct {
 	// resolved at startup (signingKeySource). Labels only, never keys.
 	signingKeySourcesMu sync.Mutex
 	signingKeySources   map[string]string
+
+	// signingNotReadyLogged is set once /readyz has logged that the
+	// keyring's signing ring cannot issue (signingNotReadyReason).
+	signingNotReadyLogged atomic.Bool
+	// cipher is the shared encryption object for stored backups
+	// (ptone/scion#1530 §5; ServerConfig.ValueCipher). Never nil after New.
+	cipher *secret.ValueCipher
+	// encryptionAudit is the startup encryption audit (ptone/scion#1530
+	// §5), written once in New and read by readiness and the backup
+	// writers' overwrite guard.
+	encryptionAudit   EncryptionAudit
+	encryptionAuditMu sync.RWMutex
 
 	// OIDC identity provider (nil = OIDC IdP disabled)
 	oidcKeyManager       *OIDCKeyManager
@@ -2289,11 +2355,6 @@ type Server struct {
 	// server.hub.perf_trace is on; nil otherwise.
 	perfTraceLog *slog.Logger
 
-	// hubWorkspaceDownload replaces gcp.SyncFromGCS for downloads of a
-	// workspace upload into a hub workspace when set (tests only). Guarded
-	// by mu; see setHubWorkspaceDownloader and hubWorkspaceDownloader.
-	hubWorkspaceDownload func(ctx context.Context, bucket, prefix, localPath string) error
-
 	// templateSourceFetcher downloads template sources for reimport. nil
 	// selects the default fetcher (newTemplateSourceFetcher); tests replace it.
 	templateSourceFetcher templateSourceFetcher
@@ -2385,10 +2446,9 @@ type Server struct {
 	// When non-nil, Telegram/Discord/Teams link services delegate to it.
 	chatLinkStore *ChatLinkStore
 
-	// warnedEphemeralProjects holds the project slugs already reported as being
-	// served from ephemeral local storage, keeping that warning to one line per
-	// slug on a request path. See warnEphemeralProjectPath.
-	warnedEphemeralProjects sync.Map
+	// storageMigrationNotice caches the dry-run plan of the project storage
+	// migration behind the Files tab notice (workspace_migration_notice.go).
+	storageMigrationNotice storageMigrationNoticeCache
 
 	// GE Google credential exchange service (nil = exchange disabled).
 	geExchangeService *GEExchangeService
@@ -2408,6 +2468,13 @@ type Server struct {
 	// kept here too so Start can run its cleanup goroutine, the same way
 	// geExchangeRateLimiter's is started below.
 	externalBearerRateLimiter *externalBearerRateLimiter
+
+	// cspReports is the browser policy report endpoint (csp_reports.go),
+	// and cspReportLimiter its rate limit, kept here so Start can run its
+	// cleanup goroutine. Both are set by New; nil on a Server built
+	// without it.
+	cspReports       *cspreport.Handler
+	cspReportLimiter *cspReportLimiter
 
 	// experiments is the compiled feature-flag registry (pkg/experiments).
 	// Nil in production and in most tests; always read through the
@@ -2436,6 +2503,10 @@ type Server struct {
 	// proxy right after the port-forward tunnel returns, before the
 	// answer is written. Only tests set it, on their own Server.
 	legacyPortTunnelReturnedTestHook func()
+
+	// hubRestartReservedAt is the UnixNano time Restart Hub reserved the
+	// hub-binary exclusive group (0: none); see reserveHubRestart.
+	hubRestartReservedAt atomic.Int64
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -2486,13 +2557,13 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	if err := validateVisitorRoutes(startupRouteMetadata()); err != nil {
 		return nil, err
 	}
-	for _, warning := range sharedDirLayoutWarnings(cfg.WorkspaceStorageConfig, cfg.SharedDirStorageConfig) {
-		slog.Warn(warning)
-	}
 	// The test-identity expiry and feature checks run in the auth
 	// middleware's per-request user-row block, which needs a user store.
 	if cfg.EnableTestIdentities && s == nil {
 		return nil, fmt.Errorf("--test-mode requires a user store; none is configured")
+	}
+	if err := validateKeyringConfig(cfg); err != nil {
+		return nil, err
 	}
 	// The test admin tier gate is re-checked here (cmd validated it first)
 	// so a Server can never be built with an inconsistent gate.
@@ -2621,12 +2692,21 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		srv.secretBackend = cfg.SecretBackend
 	}
 
-	// Derive AES-256 encryption key for encrypting signing key backups in
-	// SQLite. This uses the same shared secret as LocalBackend so that values
-	// written by backupSigningKeyToStore are encrypted at rest, closing the
-	// gap where signing key material was stored in cleartext (miller79/scion#5).
-	if cfg.SharedSigningSecret != "" {
-		srv.encryptionKey = secret.DeriveLocalEncryptionKey(cfg.SharedSigningSecret)
+	// The shared encryption object for signing-key, OIDC and grant-ring
+	// backups (ptone/scion#1530 §5): the cipher the local secret backend
+	// holds, so every stored ciphertext uses one ring (miller79/scion#5
+	// closed the cleartext backup gap with the same key).
+	cipher, err := serverValueCipher(cfg)
+	if err != nil {
+		return nil, err
+	}
+	srv.cipher = cipher
+
+	// Before any key synchronization or backup write: refuse an instance
+	// the database encryption policy does not admit, and audit every
+	// stored payload (§5, §6).
+	if err := srv.startupEncryptionChecks(context.Background(), s); err != nil {
+		return nil, err
 	}
 
 	// Initialize update tracker for HA integration completion detection.
@@ -2867,7 +2947,8 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 			IssuerURL:               oidcIssuerURL,
 			RequireStableSigningKey: cfg.RequireStableSigningKey,
 			Log:                     logging.Subsystem("hub.oidc"),
-			EncryptionKey:           srv.encryptionKey,
+			ValueCipher:             srv.cipher,
+			ExistingRecordFlagged:   srv.auditFlagged,
 		})
 		if err != nil {
 			if isGCPBackend || cfg.RequireStableSigningKey {
@@ -2901,7 +2982,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// Test admin tier (ptone/scion#4240 phase A0): every signing-key class
 	// must resolve from a hub-local source (G7) before the gate is captured.
 	// The gate is captured exactly once, here, and has no setter.
-	srv.recordSigningKeySource(conduitGrantKeySecretName, conduitGrantKeySource(srv.encryptionKey))
+	srv.recordSigningKeySource(conduitGrantKeySecretName, conduitGrantKeySource(srv.cipher))
 	srv.recordSigningKeySource(webSessionKeyName, cfg.WebSessionKeySource)
 	if cfg.TestAdminGate.requested() {
 		if err := srv.verifyTestAdminSigningKeys(cfg.OIDCConfig.Enabled); err != nil {
@@ -3029,6 +3110,12 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		s, srv.authzService,
 		logging.Subsystem("hub.project-deletion"),
 	)
+	// Project delete removes the project's shared-dir tree from the hub's
+	// in-memory shared-dir Layout (server.project_storage).
+	srv.deletionService.sharedDirLayout = func() (projectfs.Layout, error) {
+		layout, _, err := srv.sharedDirLayout()
+		return layout, err
+	}
 
 	// RS4: Initialize user access token service with authorization, audit, and
 	// transactional support via the bounded domain service pattern.
@@ -3170,8 +3257,16 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		slog.Warn("Failed to seed github_resolution_cache settings", "error", err)
 	}
 
+	// Reconcile an update whose hub restart was pending (the restart that
+	// started this process, usually) before the abort sweep below: the run
+	// is completed or failed from the version this binary reports.
+	if err := srv.reconcilePendingUpdate(ctx, version.Version); err != nil {
+		slog.Warn("Failed to reconcile the pending update", "error", err)
+	}
+
 	// Abort any maintenance operations/migrations left in "running" state from
-	// a previous server instance that was restarted mid-operation.
+	// a previous server instance that was restarted mid-operation. Runs left
+	// "restarting" are not touched; reconcilePendingUpdate settles them.
 	if runs, migrations, err := s.AbortRunningMaintenanceOps(ctx); err != nil {
 		slog.Warn("Failed to abort stalled maintenance operations", "error", err)
 	} else if runs > 0 || migrations > 0 {
@@ -3288,6 +3383,10 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// A restored agent whose root user is no longer admitted to its project
 	// comes back held (ptone/scion#3433).
 	srv.registerMembershipRestoreHook()
+	// Agent delete, restore and the reincarnation claim revoke the agent's
+	// delegation grants in their own transaction
+	// (.design/agent-delegation.md §16.1).
+	srv.registerAgentDelegationLifecycleHooks()
 
 	// Wire the proxy user provisioner (wraps provisionUser with 60s cache)
 	if cfg.ProxyAuth != nil {
@@ -3407,6 +3506,12 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// one.
 	srv.externalBearerRateLimiter = newExternalBearerRateLimiter(cfg.TrustedProxies)
 	srv.authConfig.ExternalBearerLimiter = srv.externalBearerRateLimiter
+
+	srv.cspReportLimiter = newCSPReportLimiter(cfg.TrustedProxies)
+	srv.cspReports = newCSPReportHandler(srv.cspReportLimiter, cfg.CSPReportRawSamples)
+	if cfg.CSPReportRawSamples {
+		slog.Warn("Browser policy report samples are logged (server.hub.csp_report_raw_samples); samples can hold page content")
+	}
 
 	// Initialize GE Google credential exchange service, sharing the validator
 	// and resolver above so both mechanisms produce identical decisions
@@ -3575,15 +3680,13 @@ func (s *Server) ensureSigningKeyWithSource(ctx context.Context, keyName string,
 			// migration or generate a new key rather than silently returning nil.
 			slog.Warn("Store contains empty signing key value (secret backend reference row); treating as not found", "key", keyName)
 		} else {
-			// The stored value may be AES-256-GCM encrypted (enc:v1: prefix).
-			// Decrypt transparently; legacy plaintext passes through as-is.
-			if s.encryptionKey != nil {
-				plaintext, _, decErr := secret.DecryptValue(val, s.encryptionKey)
-				if decErr != nil {
-					return nil, "", fmt.Errorf("failed to decrypt signing key %s from store: %w", keyName, decErr)
-				}
-				val = plaintext
+			// Decrypt with the shared cipher; a failure is a typed error,
+			// never a missing key (legacy-mode plaintext passes through).
+			plaintext, decErr := s.cipher.Decrypt(val)
+			if decErr != nil {
+				return nil, "", fmt.Errorf("failed to decrypt signing key %s from store: %w", keyName, decErr)
 			}
+			val = plaintext
 			slog.Info("Loaded existing signing key from store", "key", keyName)
 			key, decErr := base64.StdEncoding.DecodeString(val)
 			if decErr != nil {
@@ -3634,15 +3737,14 @@ func (s *Server) ensureSigningKeyWithSource(ctx context.Context, keyName string,
 				if legacyErr != nil {
 					continue
 				}
-				// Decrypt if the stored value is encrypted.
-				if s.encryptionKey != nil {
-					plaintext, _, decErr := secret.DecryptValue(rawVal, s.encryptionKey)
-					if decErr != nil {
-						slog.Warn("Failed to decrypt legacy signing key from store", "key", keyName, "legacyScopeID", legacyScopeID, "error", decErr)
-						continue
-					}
-					rawVal = plaintext
+				// Decrypt with the shared cipher. An unreadable legacy record
+				// is skipped here and preserved (the startup audit reports it).
+				plaintext, decErr := s.cipher.Decrypt(rawVal)
+				if decErr != nil {
+					slog.Warn("Failed to decrypt legacy signing key from store", "key", keyName, "legacyScopeID", legacyScopeID, "error", decErr)
+					continue
 				}
+				rawVal = plaintext
 				val = rawVal
 			}
 			slog.Info("Loaded signing key from legacy scope ID, will migrate", "key", keyName, "legacyScopeID", legacyScopeID)
@@ -3765,9 +3867,22 @@ func (s *Server) ensureSigningKeyWithSource(ctx context.Context, keyName string,
 // syncSigningKeyToBackend syncs a signing key (found in SQLite) to the secret backend
 // and maintains a local SQLite backup. When isGCPBackend is true, a sync failure is
 // treated as a fatal error since the key would not survive a database reset.
+//
+// A non-GCP backend stores the value in the same database row as the local
+// backup, so the sync is skipped (and the record preserved) when that row
+// exists but is unreadable with the configured keys (ptone/scion#1530 §5:
+// an unreadable record is never replaced as a startup repair). The GCP
+// backend keeps the row's backup bytes on its reference-only update.
 func (s *Server) syncSigningKeyToBackend(ctx context.Context, keyName, encodedValue, hubID string, isGCPBackend bool) error {
 	if s.secretBackend == nil {
 		return nil
+	}
+	if !isGCPBackend {
+		if err := s.guardBackupOverwrite(ctx, keyName, store.ScopeHub, hubID); err != nil {
+			slog.Warn("Not syncing signing key to secret backend: the existing record is preserved",
+				"key", keyName, "error", err)
+			return nil
+		}
 	}
 	input := &secret.SetSecretInput{
 		Name:        keyName,
@@ -3805,16 +3920,17 @@ func logSigningKeyFailure(keyType string, err error) {
 // If a record already exists (e.g. with a SecretRef from GCPBackend.Set), only the
 // EncryptedValue is updated — the SecretRef is preserved so the UI and other consumers
 // can see that the secret is backed by Secret Manager.
+//
+// It refuses (errExistingRecordUnreadable) to overwrite an existing record
+// that is unreadable with the configured keys (ptone/scion#1530 §5).
 func (s *Server) backupSigningKeyToStore(ctx context.Context, keyName, encodedValue, hubID string) error {
-	// Encrypt the value before writing to SQLite so that signing key material
-	// is stored at rest under AES-256-GCM, consistent with LocalBackend.Set().
-	valueToStore := encodedValue
-	if s.encryptionKey != nil {
-		encrypted, err := secret.EncryptValue(encodedValue, s.encryptionKey)
-		if err != nil {
-			return fmt.Errorf("encrypting signing key backup: %w", err)
-		}
-		valueToStore = encrypted
+	if err := s.guardBackupOverwrite(ctx, keyName, store.ScopeHub, hubID); err != nil {
+		return err
+	}
+	// Encrypt with the shared cipher, consistent with LocalBackend.Set().
+	valueToStore, err := s.cipher.Encrypt(encodedValue)
+	if err != nil {
+		return fmt.Errorf("encrypting signing key backup: %w", err)
 	}
 
 	existing, err := s.store.GetSecret(ctx, keyName, store.ScopeHub, hubID)
@@ -4932,6 +5048,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	}
 
 	dispatcher := NewHTTPAgentDispatcherWithClient(s.store, client, s.config.Debug, logging.Subsystem("hub.dispatcher"))
+	dispatcher.SetStorageLayout(s.projectStorageLayout)
 
 	// Configure token generator if available
 	if s.agentTokenService != nil {
@@ -4975,11 +5092,6 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	}
 	if s.authzService != nil {
 		dispatcher.SetAuthzService(s.authzService)
-	}
-
-	// In dev-auth mode, pass the dev token so agents get it for fallback auth
-	if s.config.DevAuthToken != "" {
-		dispatcher.SetDevAuthToken(s.config.DevAuthToken)
 	}
 
 	// Configure GitHub App token minter if the app is configured
@@ -5240,7 +5352,6 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	}
 	stopRunID := agent.RunID
 	if agent.RuntimeBrokerID != "" {
-		s.syncWorkspaceOnStop(ctx, agent)
 		// As for suspend, record work in an ephemeral workspace that
 		// the suspend discards, so the next start reports it. There is
 		// no response to carry a warning (ptone/scion#4387).
@@ -5307,6 +5418,9 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	// suspendAgent's HTTP-path behavior.
 	s.releaseBrokerQuota(ctx, agent)
 	releaseClaim()
+	// As for suspendAgent: the agent's delegation grants end with the
+	// suspension, best effort (.design/agent-delegation.md §16.3).
+	s.revokeAgentDelegationGrantsBestEffort(ctx, store.AgentDelegationGrantFilter{AgentID: agent.ID}, revokeReasonAgentSuspended)
 	s.events.PublishAgentStatus(ctx, agent)
 	return true
 }
@@ -6542,10 +6656,10 @@ func (s *Server) registerSchedulerHandlers() {
 		s.scheduler.RegisterRecurringSingleton("github-app-health-check", interval, store.LockGitHubAppHealthCheck, s.githubAppHealthCheckHandler())
 	}
 
-	// Register scheduled release update check for binary-tier deployments.
-	// Conditional on deployment tier and update policy (design doc §6).
+	// Register the scheduled release update check unless the update policy
+	// is disabled. The handler skips hubs whose effective mode is git.
 	mc := s.config.MaintenanceConfig
-	if mc.DeploymentTier == "binary" && mc.UpdatePolicy != "disabled" {
+	if shouldRegisterReleaseUpdateCheck(mc) {
 		intervalHours := mc.CheckIntervalHours
 		if intervalHours < 1 {
 			intervalHours = 6 // default
@@ -6609,6 +6723,15 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// created with a locally generated one.
 	s.startClonedProjectIdentityAlignment(ctx)
 
+	// Ensure project-id and project-slug in every shared-backend project's
+	// configuration (<ProjectRoot>/.scion), in the background (never
+	// blocks start or readiness).
+	s.startProjectConfigIdentityEnsure(ctx)
+
+	// Plan the project storage migration in the background so the Files
+	// tab notice is known early (never blocks start or readiness).
+	s.startStorageMigrationNoticePlan(ctx)
+
 	// Pause schedules whose cron expression carries an unsupported zone
 	// prefix before the evaluator's first tick, so it never runs them.
 	s.startScheduler(ctx)
@@ -6649,6 +6772,9 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	if s.externalBearerRateLimiter != nil {
 		s.externalBearerRateLimiter.StartCleanup(ctx)
 	}
+	if s.cspReportLimiter != nil {
+		s.cspReportLimiter.StartCleanup(ctx)
+	}
 
 	// Start OIDC key cleanup loop to remove expired rotated keys from JWKS.
 	if s.oidcKeyManager != nil {
@@ -6657,6 +6783,10 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 
 	// Start the scheduled chat message sweeper (exits when ctx is cancelled).
 	s.startScheduledSendSweeper(ctx)
+
+	// Starred messages need a chat store with the star capability; report
+	// a misconfiguration at startup (requests answer 503 meanwhile).
+	s.validateMessageStarStore()
 
 	// Start the migration of personal chat thread groups into project
 	// thread groups (ptone/scion#4424). It exits when ctx is cancelled.
@@ -7203,6 +7333,7 @@ func (s *Server) registerRoutes() {
 	// Agent delegation grants the caller issued (.design/agent-delegation.md
 	// §7); session only, and available while hub.agent_delegation is off.
 	s.mux.HandleFunc("/api/v1/users/me/delegations", s.guarded("/api/v1/users/me/delegations", s.handleUserMeDelegations))
+	s.mux.HandleFunc("/api/v1/users/me/delegations/revoke-all", s.guarded("/api/v1/users/me/delegations/revoke-all", s.handleUserMeDelegationsRevokeAll))
 
 	// User-scoped terminal workspace persistence (/users/me/terminal-workspace)
 	s.mux.HandleFunc("/api/v1/users/me/terminal-workspace", s.guarded("/api/v1/users/me/terminal-workspace", s.handleUserMeTerminalWorkspace))
@@ -7241,6 +7372,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/maintenance/check-updates", s.guarded("/api/v1/admin/maintenance/check-updates", s.handleCheckForUpdates))
 	s.mux.HandleFunc("/api/v1/admin/maintenance/update-available", s.guarded("/api/v1/admin/maintenance/update-available", s.handleUpdateAvailable))
 	s.mux.HandleFunc("/api/v1/admin/maintenance/restart", s.guarded("/api/v1/admin/maintenance/restart", s.handleAdminRestart))
+	s.mux.HandleFunc("/api/v1/admin/maintenance/update-status", s.guarded("/api/v1/admin/maintenance/update-status", s.handleUpdateStatus))
 	s.mux.HandleFunc("/api/v1/admin/scheduler", s.guarded("/api/v1/admin/scheduler", s.handleAdminScheduler))
 	s.mux.HandleFunc("/api/v1/admin/allow-list", s.guarded("/api/v1/admin/allow-list", s.handleAdminAllowList))
 	s.mux.HandleFunc("/api/v1/admin/allow-list/", s.guarded("/api/v1/admin/allow-list/", s.handleAdminAllowListByEmail))
@@ -7339,6 +7471,9 @@ func (s *Server) registerRoutes() {
 		s.mux.HandleFunc("/api/v1/chat/user-prefs", s.guarded("/api/v1/chat/user-prefs", s.chatRoute(s.handleChatUserPrefs)))
 		s.mux.HandleFunc("/api/v1/chat/presence", s.guarded("/api/v1/chat/presence", s.chatRoute(s.handleChatPresence)))
 		s.mux.HandleFunc("/api/v1/chat/search", s.guarded("/api/v1/chat/search", s.chatRoute(s.handleChatSearch)))
+		// Starred messages (web.chat_starred_messages; 404 while off).
+		s.mux.HandleFunc("/api/v1/chat/stars", s.guarded("/api/v1/chat/stars", s.chatRoute(s.handleChatStars)))
+		s.mux.HandleFunc("/api/v1/chat/stars/", s.guarded("/api/v1/chat/stars/", s.chatRoute(s.handleChatStarRoutes)))
 		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.chatAttachmentRoute(s.handleChatAttachments)))
 		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.chatAttachmentRoute(s.handleChatAttachmentByID)))
 	}
@@ -7362,6 +7497,9 @@ func (s *Server) registerRoutes() {
 	// Test-identity gate status for the web test-hub banner, readable
 	// without authentication (ptone/scion#4240).
 	s.mux.HandleFunc("GET /api/v1/test-infra/status", s.guarded("GET /api/v1/test-infra/status", s.handleTestInfraStatus))
+
+	// Policy reports from browsers showing the web pages; no sign-in (browsers send reports on their own).
+	s.mux.HandleFunc("POST /api/v1/csp-reports", s.guarded("POST /api/v1/csp-reports", s.handleCSPReport))
 
 	// Resolved experiments map for signed-in callers (ptone/scion#2217).
 	s.mux.HandleFunc("/api/v1/experiments", s.guarded("/api/v1/experiments", s.handleExperiments))

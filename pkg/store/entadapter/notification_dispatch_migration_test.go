@@ -103,6 +103,10 @@ func assertLegacyNotificationsUpgraded(t *testing.T, cs *CompositeStore) {
 	assert.False(t, pending.Dispatched, "an undispatched legacy row must stay undispatched")
 	assert.Zero(t, pending.DispatchAttempts)
 	assert.Empty(t, pending.DispatchOutcome)
+	for _, n := range []*store.Notification{delivered, pending} {
+		assert.Empty(t, n.DispatchReason, "legacy rows have no recorded reason (ptone/scion#5763)")
+		assert.Nil(t, n.NextAttemptAt, "legacy rows have no retry backoff (ptone/scion#5763)")
+	}
 
 	claimed, err := cs.ClaimNotificationForDispatch(ctx, legacyNotifDelivered)
 	require.NoError(t, err)
@@ -112,7 +116,7 @@ func assertLegacyNotificationsUpgraded(t *testing.T, cs *CompositeStore) {
 	require.NoError(t, err)
 	require.True(t, claimed, "an undispatched legacy row must still be retried")
 	require.NoError(t, cs.RecordNotificationDispatchAttempt(ctx, legacyNotifPending))
-	applied, err := cs.SetNotificationDispatchOutcome(ctx, legacyNotifPending, store.NotificationOutcomeFailed)
+	applied, err := cs.SetNotificationDispatchOutcome(ctx, legacyNotifPending, store.NotificationOutcomeFailed, "")
 	require.NoError(t, err)
 	require.True(t, applied, "a legacy row with no outcome takes one")
 
@@ -160,6 +164,11 @@ func TestNotificationDispatchFields_UpgradeFromLegacySchema_SQLite(t *testing.T)
 	require.Contains(t, cols, "dispatch_outcome")
 	assert.True(t, cols["dispatch_outcome"].notNull)
 	assert.Contains(t, cols["dispatch_outcome"].dflt.String, "''")
+	require.Contains(t, cols, "dispatch_reason")
+	assert.True(t, cols["dispatch_reason"].notNull)
+	assert.Contains(t, cols["dispatch_reason"].dflt.String, "''")
+	require.Contains(t, cols, "next_attempt_at")
+	assert.False(t, cols["next_attempt_at"].notNull, "next_attempt_at is nullable")
 
 	assertLegacyNotificationsUpgraded(t, cs)
 }
@@ -187,6 +196,7 @@ func TestNotificationDispatchFields_UpgradeFromLegacySchema_Postgres(t *testing.
 	for _, c := range []struct{ col, dflt string }{
 		{"dispatch_attempts", "0"},
 		{"dispatch_outcome", "''"},
+		{"dispatch_reason", "''"},
 	} {
 		var nullable string
 		var dflt sql.NullString
@@ -197,6 +207,12 @@ func TestNotificationDispatchFields_UpgradeFromLegacySchema_Postgres(t *testing.
 		assert.Equal(t, "NO", nullable, c.col)
 		assert.Contains(t, dflt.String, c.dflt, c.col)
 	}
+	var nullable string
+	require.NoError(t, raw.QueryRowContext(ctx,
+		`SELECT is_nullable FROM information_schema.columns
+		  WHERE table_schema = current_schema() AND table_name = 'notifications' AND column_name = 'next_attempt_at'`,
+	).Scan(&nullable))
+	assert.Equal(t, "YES", nullable, "next_attempt_at is nullable")
 
 	assertLegacyNotificationsUpgraded(t, cs)
 }

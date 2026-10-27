@@ -20,13 +20,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/filelock"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
 // RecordSchema is the version of the status record format.
@@ -99,11 +102,18 @@ func StateDir(xdgRuntimeDir, scionDir string) string {
 	return filepath.Join(scionDir, "run", "tunnels")
 }
 
-// FileStore keeps one record per tunnel process in Dir (mode 0700, files
-// 0600). Each process holds an exclusive flock on its own lock file for
-// its whole life; a record counts as live only while that lock is held.
-// The record itself (<id>.json) is rewritten through a temporary file and
-// a rename, so a reader never sees a partial record.
+// FileStore keeps one record per tunnel process in Dir. Each process
+// holds an exclusive lock on its own lock file for its whole life; a
+// record counts as live only while that lock is held. The record itself
+// (<id>.json) is rewritten through a temporary file and a rename, so a
+// reader never sees a partial record.
+//
+// Dir and its files are private (privatefs.Private: mode 0700/0600 on
+// unix, an owner-only protected DACL on Windows). Every file operation goes
+// through a privatefs.Tree anchored at Dir's parent, so on Windows no
+// component from the anchor down may be a reparse point, and the privacy
+// of Dir, of each record and of each lock file is checked on the handle
+// that is then read or locked, never on a path checked beforehand.
 type FileStore struct {
 	Dir string
 }
@@ -111,71 +121,100 @@ type FileStore struct {
 const (
 	recordSuffix = ".json"
 	lockSuffix   = ".lock"
+	// maxRecordSize bounds a record read; a larger record is refused.
+	maxRecordSize = 1 << 20
 )
 
-// checkPrivate refuses a path that is group- or world-accessible or owned
-// by another user.
-func checkPrivate(path string, fi fs.FileInfo) error {
-	if fi.Mode().Perm()&0o077 != 0 {
-		return fmt.Errorf("refusing tunnel state %s: it is group- or world-accessible (mode %04o)", path, fi.Mode().Perm())
+// openTree opens the tree anchored at Dir's parent (creating the anchor
+// when create is set) and returns it with Dir's name within it.
+func (f FileStore) openTree(create bool) (*privatefs.Tree, string, error) {
+	t, err := privatefs.OpenTree(filepath.Dir(f.Dir), privatefs.TreeOptions{CreateAnchor: create})
+	if err != nil {
+		return nil, "", err
 	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
-		return fmt.Errorf("refusing tunnel state %s: it is owned by another user", path)
-	}
-	return nil
+	return t, filepath.Base(f.Dir), nil
 }
 
-// checkDir verifies the store directory.
-func (f FileStore) checkDir() error {
-	fi, err := os.Lstat(f.Dir)
+// openDir opens the store directory through the tree and verifies, on its
+// handle, that it is a private directory.
+func (f FileStore) openDir(t *privatefs.Tree, base string) (*os.File, error) {
+	d, err := t.OpenDir(base)
 	if err != nil {
-		return err
+		return nil, refuse(err)
 	}
-	if !fi.IsDir() {
-		return fmt.Errorf("refusing tunnel state %s: not a directory", f.Dir)
+	if err := privatefs.CheckPrivate(d); err != nil {
+		_ = d.Close()
+		return nil, refuse(err)
 	}
-	return checkPrivate(f.Dir, fi)
+	return d, nil
+}
+
+// refuse prefixes a privacy or reparse-point refusal; other errors (such
+// as fs.ErrNotExist) pass unchanged.
+func refuse(err error) error {
+	if errors.Is(err, privatefs.ErrNotPrivate) || errors.Is(err, privatefs.ErrReparsePoint) {
+		return fmt.Errorf("refusing tunnel state: %w", err)
+	}
+	return err
 }
 
 // Open implements StateStore.
 func (f FileStore) Open() (RecordWriter, error) {
-	if err := os.MkdirAll(f.Dir, 0o700); err != nil {
+	t, base, err := f.openTree(true)
+	if err != nil {
 		return nil, err
 	}
-	if err := f.checkDir(); err != nil {
+	ok := false
+	defer func() {
+		if !ok {
+			_ = t.Close()
+		}
+	}()
+	if err := t.MkdirAll(base, privatefs.Private); err != nil {
+		return nil, refuse(err)
+	}
+	d, err := f.openDir(t, base)
+	if err != nil {
 		return nil, err
 	}
+	_ = d.Close()
 	var rnd [6]byte
 	if _, err := rand.Read(rnd[:]); err != nil {
 		return nil, err
 	}
 	id := fmt.Sprintf("%d-%s", os.Getpid(), hex.EncodeToString(rnd[:]))
-	lockPath := filepath.Join(f.Dir, id+lockSuffix)
+	lockRel := base + "/" + id + lockSuffix
 	// The lock is created and locked under a dot-prefixed name that List
-	// ignores, then renamed into place, so List never sees an unlocked
-	// lock file of a live process.
-	tmpLock := filepath.Join(f.Dir, "."+id+lockSuffix+".tmp")
-	lf, err := os.OpenFile(tmpLock, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	// ignores, then renamed into place while held, so List never sees an
+	// unlocked lock file of a live process. Its handle shares delete
+	// access, so the rename (and Close's removal) work while it is open.
+	tmpLock := base + "/." + id + lockSuffix + ".tmp"
+	lf, err := t.Create(tmpLock, true, privatefs.Private)
 	if err != nil {
-		return nil, err
+		return nil, refuse(err)
 	}
-	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	lock, err := filelock.LockFile(lf, 0)
+	if err != nil {
+		_ = t.RemoveOpen(lf)
 		_ = lf.Close()
-		_ = os.Remove(tmpLock)
 		return nil, err
 	}
-	if err := os.Rename(tmpLock, lockPath); err != nil {
-		_ = lf.Close()
-		_ = os.Remove(tmpLock)
+	// Rename and, on failure, delete through the locked handle itself, so
+	// nothing swapped in under the temporary name becomes the lock file.
+	if err := t.RenameOpen(lf, lockRel); err != nil {
+		_ = t.RemoveOpen(lf)
+		lock.Unlock()
 		return nil, err
 	}
-	return &fileRecord{dir: f.Dir, path: filepath.Join(f.Dir, id+recordSuffix), lockPath: lockPath, lock: lf}, nil
+	ok = true
+	return &fileRecord{tree: t, base: base, rel: base + "/" + id + recordSuffix, lockRel: lockRel, lock: lock}, nil
 }
 
 // fileRecord is one process's record in a FileStore.
 type fileRecord struct {
-	dir, path, lockPath string
-	lock                *os.File
+	tree               *privatefs.Tree
+	base, rel, lockRel string
+	lock               *filelock.Lock
 }
 
 // Write implements RecordWriter: temporary file, fsync, rename.
@@ -184,62 +223,67 @@ func (r *fileRecord) Write(rec Record) error {
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(r.dir, ".tmp-*")
+	tmp, _, err := r.tree.CreateTemp(r.base, ".tmp-*", privatefs.Private)
 	if err != nil {
 		return err
 	}
-	name := tmp.Name()
 	ok := false
 	defer func() {
 		if !ok {
-			_ = os.Remove(name)
+			// Delete through the open handle, never by name.
+			_ = r.tree.RemoveOpen(tmp)
+			_ = tmp.Close()
 		}
 	}()
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
 	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
 		return err
 	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(name, r.path); err != nil {
+	// Rename through the still-open handle, so the file renamed into place
+	// is the one just written, whatever happened to its temporary name.
+	if err := r.tree.RenameOpen(tmp, r.rel); err != nil {
 		return err
 	}
 	ok = true
-	return nil
+	return tmp.Close()
 }
 
 // Close implements RecordWriter: delete the record, then release the lock.
 func (r *fileRecord) Close() error {
-	err := os.Remove(r.path)
+	err := r.tree.Remove(r.rel)
 	if errors.Is(err, fs.ErrNotExist) {
 		err = nil
 	}
-	_ = os.Remove(r.lockPath)
-	_ = syscall.Flock(int(r.lock.Fd()), syscall.LOCK_UN)
-	_ = r.lock.Close()
+	_ = r.tree.Remove(r.lockRel)
+	r.lock.Unlock()
+	_ = r.tree.Close()
 	return err
 }
 
 // List implements StateStore. A missing directory has no records. A
-// directory or record that is group- or world-accessible or owned by
-// another user is refused.
+// directory, record or lock file that is accessible to others or owned by
+// another user, or that is a symlink (on Windows: any reparse point), is
+// refused.
 func (f FileStore) List() ([]Record, error) {
-	if err := f.checkDir(); err != nil {
+	t, base, err := f.openTree(false)
+	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	entries, err := os.ReadDir(f.Dir)
+	defer func() { _ = t.Close() }()
+	d, err := f.openDir(t, base)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	entries, err := d.ReadDir(-1)
+	_ = d.Close()
 	if err != nil {
 		return nil, err
 	}
@@ -259,7 +303,7 @@ func (f FileStore) List() ([]Record, error) {
 	}
 	var out []Record
 	for id := range ids {
-		rec, live, err := f.read(id)
+		rec, live, err := read(t, base, id)
 		if err != nil {
 			return nil, err
 		}
@@ -276,54 +320,72 @@ func (f FileStore) List() ([]Record, error) {
 	return out, nil
 }
 
+// openPrivate opens rel read-only through the tree, verified private on
+// the opened handle. A missing file returns (nil, nil).
+func openPrivate(t *privatefs.Tree, rel string) (*os.File, error) {
+	fh, err := t.OpenPrivate(rel, os.O_RDONLY)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, refuse(err)
+	}
+	return fh, nil
+}
+
 // read returns the record id and whether its process is live. A record
 // whose lock can be taken belongs to an ended process: it is removed
 // while the lock is held, then the lock is released.
-func (f FileStore) read(id string) (*Record, bool, error) {
-	recPath := filepath.Join(f.Dir, id+recordSuffix)
-	lockPath := filepath.Join(f.Dir, id+lockSuffix)
-	for _, p := range []string{recPath, lockPath} {
-		fi, err := os.Lstat(p)
-		if errors.Is(err, fs.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return nil, false, err
-		}
-		if !fi.Mode().IsRegular() {
-			return nil, false, fmt.Errorf("refusing tunnel state %s: not a regular file", p)
-		}
-		if err := checkPrivate(p, fi); err != nil {
-			return nil, false, err
-		}
-	}
-	lf, err := os.OpenFile(lockPath, os.O_RDWR, 0)
-	if errors.Is(err, fs.ErrNotExist) {
-		// No lock: the process ended between removing its lock and its
-		// record, or never finished starting. Nothing can hold it.
-		_ = os.Remove(recPath)
-		return nil, false, nil
-	}
+//
+// The record and the lock are each checked private on the handle that is
+// then read or locked. The liveness probe locks that same verified handle
+// (filelock.LockFile), rather than reopening the lock by path. The record
+// is opened before the probe and read after it, so it may be one rewrite
+// older than the newest (each rewrite is a complete record).
+func read(t *privatefs.Tree, base, id string) (*Record, bool, error) {
+	recRel := base + "/" + id + recordSuffix
+	lockRel := base + "/" + id + lockSuffix
+	rf, err := openPrivate(t, recRel)
 	if err != nil {
 		return nil, false, err
 	}
-	defer func() { _ = lf.Close() }()
-	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
-		// Not held: the process has ended. Prune under the lock.
-		_ = os.Remove(recPath)
-		_ = os.Remove(lockPath)
-		_ = syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
-		return nil, false, nil
-	} else if !errors.Is(err, syscall.EWOULDBLOCK) {
+	if rf != nil {
+		defer func() { _ = rf.Close() }()
+	}
+	lf, err := openPrivate(t, lockRel)
+	if err != nil {
 		return nil, false, err
 	}
-	data, err := os.ReadFile(recPath)
-	if errors.Is(err, fs.ErrNotExist) {
+	if lf == nil {
+		// No lock: the process ended between removing its lock and its
+		// record, or never finished starting. Nothing can hold it.
+		if rf != nil {
+			_ = t.Remove(recRel)
+		}
+		return nil, false, nil
+	}
+	lock, err := filelock.LockFile(lf, 0)
+	if err == nil {
+		// Not held: the process has ended. Prune under the lock.
+		_ = t.Remove(recRel)
+		_ = t.Remove(lockRel)
+		lock.Unlock()
+		return nil, false, nil
+	}
+	_ = lf.Close()
+	if !errors.Is(err, filelock.ErrTimeout) {
+		return nil, false, err
+	}
+	if rf == nil {
 		// Live, but the first record is not written yet.
 		return nil, true, nil
 	}
+	data, err := io.ReadAll(io.LimitReader(rf, maxRecordSize+1))
 	if err != nil {
 		return nil, false, err
+	}
+	if len(data) > maxRecordSize {
+		return nil, false, fmt.Errorf("refusing tunnel state %s: record larger than %d bytes", recRel, maxRecordSize)
 	}
 	var rec Record
 	if err := json.Unmarshal(data, &rec); err != nil || rec.Schema != RecordSchema {

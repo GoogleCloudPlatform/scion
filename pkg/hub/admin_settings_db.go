@@ -189,6 +189,10 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 		}
 	}
 
+	// The settings.yaml values, for env_values' saved_differs (taken before
+	// the response below shares and changes vs.Server; never returned).
+	fileStored := fileStoredValues(&vs)
+
 	// Start with file-based response for Layer-0 fields.
 	resp := ServerConfigDBResponse{
 		ServerConfigResponse: ServerConfigResponse{
@@ -226,23 +230,18 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	iam := s.currentGCPIAMSettings()
 	resp.Server.Hub.GCPIAMCheckMode = iam.CheckMode
 	resp.Server.Hub.GCPIAMDenyUnknownPolicy = iam.denyUnknownPolicy()
-	// server.hub.class and server.hub.test_identities are never
-	// API-writable, so they are not shown either: a client that echoes
-	// this body back must not send them.
-	resp.Server.Hub.HubClass = ""
-	resp.Server.Hub.TestIdentities = nil
-	// Nor is the relay-peer secret, which is never returned.
-	if c := resp.Server.Hub.Conduit; c != nil {
-		c.PeerSecret = ""
-	}
-	// Likewise the proxy driver settings (WS2).
-	hideNeverAPIWritableProxyKeys(resp.Server)
+	// The keys GET never returns: the hub class, test identities, the
+	// relay-peer secret, the proxy driver settings (WS2) and the server
+	// keyring file path (ptone/scion#1530).
+	hideNeverShownServerKeys(resp.Server)
 
 	// Build section metadata from the cache.
 	resp.SectionMeta = s.buildSectionMetadata(ctx, ops)
 
 	// Env overrides.
-	overrides := ops.EnvOverriddenKeys()
+	// Never-API-writable keys are not listed: GET does not reveal which of
+	// them are set.
+	overrides := withoutNeverAPIWritableKeys(ops.EnvOverriddenKeys())
 	sort.Strings(overrides)
 	resp.EnvOverrides = overrides
 	// How the hub endpoint was resolved at startup (ptone/scion#3905).
@@ -262,6 +261,12 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	// (ptone/scion#5113): the overlay-level set, read-only.
 	if overlay, _, _ := s.profileRefs.target(); overlay != nil {
 		resp.RetainedBuiltinProfiles, resp.RetainedBuiltinRuntimes = overlay.RetainedState()
+	}
+
+	// The environment values of the overridden keys and whether each is in
+	// effect, compared with the unmasked view built above.
+	if ops.envKoanf != nil {
+		resp.EnvValues = s.dbTierEnvValues(ops.envKoanf, resp.EnvOverrides, &resp.ServerConfigResponse, dbStoredValues(fileStored, ops))
 	}
 
 	// Mask sensitive fields — same logic as file mode.
@@ -378,11 +383,14 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 		}
 	}
 
-	// Federation — populate from snapshot's FederationConfig.
+	// Federation — populate from snapshot's FederationConfig, which is set
+	// whenever the stored (or bootstrap) federation settings have enabled or
+	// trusted_issuers. It is reported in full, also when it is disabled and
+	// has no trusted issuers, so a stored section with only algorithms or
+	// intervals is shown (ptone/scion#5694).
 	if snap.FederationConfig != nil {
-		gc := &config.GlobalConfig{Federation: *snap.FederationConfig}
-		v1Server := config.ConvertGlobalToV1ServerConfig(gc)
-		resp.Federation = v1Server.Federation
+		fc := *snap.FederationConfig
+		resp.Federation = config.ConvertFederationToV1(&fc)
 	}
 	// server.federation reports the same value, the one in effect, never
 	// the settings.yaml seed (ptone/scion#4326). resp.Server is set above;
@@ -520,6 +528,12 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 
 		var superseded []SupersededKey
 		for key, bootstrapVal := range bootstrapMap {
+			if koanfPath := opsettings.KoanfPathFromSectionKey(sec.Name, key); startupOnlyLayer1Keys[koanfPath] != nil {
+				// The hub does not apply the saved value of this key, so it
+				// supersedes nothing: the startup value stays in effect
+				// (ptone/scion#6000).
+				continue
+			}
 			if sec.Name == "endpoints" && key == "public_url" && publicURLPinned {
 				// An operator setting pins the endpoint on this node, so
 				// the database value does not supersede it; the field's
@@ -1022,7 +1036,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// body that held nothing else is not an empty request: it still
 	// answers as an update that changes nothing.
 	sentBody := rawBody
-	rawBody = dropEmptyPeerSecret(rawBody)
+	rawBody = dropEmptySecretSettings(rawBody)
 	// The read-only image_registry provenance of a GET body sent back is
 	// ignored, so the echo of a changed report is not refused
 	// (ptone/scion#3916).
@@ -1035,6 +1049,21 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	if s.rejectTestAdminSettingsWrite(w, r, settingsBodyKeys(rawBody), nil) {
 		return
 	}
+	// telemetry.cloud.cloud_logging is read only at startup, before the
+	// settings database is opened: a changed value is refused, an unchanged
+	// echo of GET is dropped (ptone/scion#5664), in DB and workstation mode
+	// alike.
+	cl, err := s.checkCloudLoggingDBWrite(r.Context(), ops, rawBody)
+	if err != nil {
+		slog.Error("PUT server-config: failed to build GET view for the cloud_logging check", "error", err)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+		return
+	}
+	if cl.refused {
+		writeCloudLoggingDBWriteRefused(w)
+		return
+	}
+	rawBody = cl.body
 	var req ServerConfigUpdateDBRequest
 	if err := json.Unmarshal(rawBody, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
@@ -1533,24 +1562,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
 			return
 		}
-		if errs := config.ValidateHomeStorageOverrides(runtimes, profiles); len(errs) > 0 {
+		// The per-runtime and per-profile storage overrides are removed
+		// (server.project_storage decides storage; volumes: replaces
+		// node-local overrides).
+		if errs := config.RemovedStorageOverrideErrors(runtimes, profiles, nil); len(errs) > 0 {
 			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
 			return
-		}
-		// shared_dir_storage_backend "nfs" needs a complete
-		// server.shared_dir_storage.nfs block, which lives only in the
-		// global settings file. Configuration only; no mount is checked.
-		if len(runtimes) > 0 || len(profiles) > 0 {
-			if gs, _, gErr := config.LoadGlobalSettings(); gErr == nil {
-				var sdGlobal *config.V1SharedDirStorageConfig
-				if gs != nil && gs.Server != nil {
-					sdGlobal = gs.Server.SharedDirStorage
-				}
-				if errs := config.ValidateSharedDirStorageBackends(runtimes, profiles, sdGlobal); len(errs) > 0 {
-					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
-					return
-				}
-			}
 		}
 		// safe_to_evict on a non-Kubernetes runtime is accepted and ignored,
 		// with the same warning as config validate. A section missing from
@@ -1690,6 +1707,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 
 	applied := make(map[string]int64)
 	var unchanged []string // sections whose write was skipped (unchangedManagedRow)
+	// Sections written but not in this hub's self-apply (the post-write
+	// re-read failed or kept losing; ptone/scion#5691).
+	notInEffect := map[string]bool{}
 	var conflicted []map[string]interface{}
 
 	sortedSections := make([]string, 0, len(sectionDocs))
@@ -1762,7 +1782,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			}
 		}
 
-		newRev, err := ops.Update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
+		newRev, inEffect, err := ops.update(r.Context(), secName, doc, updatedBy, expectedRev, "managed")
 		if publicURLChange && err != nil {
 			s.auditPublicURLNotApplied(r.Context(), gcpIAMSurfaceSave, publicURLBefore, publicURLAfter, err)
 		}
@@ -1792,6 +1812,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		applied[secName] = newRev
+		if !inEffect {
+			notInEffect[secName] = true
+		}
 	}
 
 	sort.Strings(unchanged)
@@ -1828,8 +1851,21 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		writtenDocs["endpoints"] = hubNameInEffectDoc(writtenDocs["endpoints"], bootstrapName)
 	}
 	// The keys the write's self-apply skipped are reported as skipped, not
-	// applied (ptone/scion#4466).
-	keyReport := reportSavedKeys(beforeDocs, writtenDocs).withSkipped(s.layer1ApplySkips())
+	// applied (ptone/scion#4466). So are the keys of a section the
+	// self-apply did not include (ptone/scion#5691).
+	inEffectDocs := make(map[string]json.RawMessage, len(writtenDocs))
+	notInEffectDocs := make(map[string]json.RawMessage)
+	for sec, doc := range writtenDocs {
+		if notInEffect[sec] {
+			notInEffectDocs[sec] = doc
+		} else {
+			inEffectDocs[sec] = doc
+		}
+	}
+	keyReport := reportSavedKeys(beforeDocs, inEffectDocs).withSkipped(s.layer1ApplySkips())
+	if len(notInEffectDocs) > 0 {
+		keyReport = keyReport.withNotYetApplied(reportSavedKeys(beforeDocs, notInEffectDocs))
+	}
 
 	if len(conflicted) > 0 {
 		fileTxn.abort()
@@ -2201,6 +2237,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.HubClass != "" {
 				keys = append(keys, config.HubClassKey)
 			}
+			if hub.GCPProjectID != "" {
+				keys = append(keys, config.HubGCPProjectIDKey)
+			}
 			if hub.TestIdentities != nil {
 				keys = append(keys, config.TestIdentitiesKey)
 			}
@@ -2209,6 +2248,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			}
 			if hub.PerfTrace != nil {
 				keys = append(keys, "server.hub.perf_trace")
+			}
+			if hub.CSPReportRawSamples != nil {
+				keys = append(keys, "server.hub.csp_report_raw_samples")
 			}
 			if hub.MembershipSweepReportOnly != nil {
 				keys = append(keys, "server.hub.membership_sweep_report_only")
@@ -2282,6 +2324,9 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 		}
 		if srv.Secrets != nil && !isZeroStruct(srv.Secrets) {
 			keys = append(keys, "server.secrets")
+		}
+		if srv.ProjectStorage != nil && !isZeroStruct(srv.ProjectStorage) {
+			keys = append(keys, "server.project_storage")
 		}
 		if srv.WorkspaceStorage != nil && !isZeroStruct(srv.WorkspaceStorage) {
 			keys = append(keys, "server.workspace_storage")

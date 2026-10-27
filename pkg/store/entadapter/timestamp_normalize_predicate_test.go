@@ -32,6 +32,7 @@ import (
 func TestNonCanonicalSQL_MatchesGoCanonicalForms(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	require.NoError(t, err)
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	_, err = db.Exec("CREATE TABLE t (v DATETIME)")
 	require.NoError(t, err)
@@ -95,6 +96,7 @@ func TestNonCanonicalSQL_MatchesGoCanonicalForms(t *testing.T) {
 func TestUnreadableSQL_MatchesFourDigitAbbreviations(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	require.NoError(t, err)
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	match := func(v any) bool {
 		t.Helper()
@@ -130,6 +132,7 @@ func TestUnreadableSQL_MatchesFourDigitAbbreviations(t *testing.T) {
 func TestIsSQLiteDialect(t *testing.T) {
 	db, err := sql.Open("sqlite", ":memory:")
 	require.NoError(t, err)
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	for d, want := range map[string]bool{"sqlite3": true, "sqlite": true, "postgres": false} {
 		got, err := isSQLiteDialect(db, d)

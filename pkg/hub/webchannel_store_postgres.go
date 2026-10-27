@@ -265,6 +265,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_webchat_topic_project_name
 		return err
 	}
 
+	// Starred messages (webchat_star_store*.go); created whether or not
+	// the web.chat_starred_messages experiment is on.
+	if err := s.initMessageStars(); err != nil {
+		return err
+	}
+
 	// Run idempotent migrations.
 	if err := s.runMigrations(); err != nil {
 		return fmt.Errorf("webchat store: migrations: %w", err)

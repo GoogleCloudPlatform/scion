@@ -27,7 +27,9 @@
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
+import { browserPath, loadPage } from '../../client/navigation.js';
 
+import { apiFetch } from '../../client/api.js';
 import {
   TestHubBannerController,
   renderTestHubBanner,
@@ -156,7 +158,7 @@ export class ScionPageInvite extends LitElement {
 
     // Check auth status
     try {
-      const res = await fetch('/auth/me', { credentials: 'include' });
+      const res = await apiFetch('/auth/me', { authErrors: 'caller' });
       if (res.ok) {
         // Authenticated — redeem the code
         await this.redeemCode(code);
@@ -173,7 +175,7 @@ export class ScionPageInvite extends LitElement {
 
   private async loadProviders(): Promise<void> {
     try {
-      const res = await fetch('/auth/providers', { credentials: 'include' });
+      const res = await apiFetch('/auth/providers', { authErrors: 'caller' });
       if (res.ok) {
         const data = (await res.json()) as Record<string, boolean>;
         this.googleEnabled = data.google === true;
@@ -189,9 +191,9 @@ export class ScionPageInvite extends LitElement {
   private async redeemCode(code: string): Promise<void> {
     this.pageState = 'redeeming';
     try {
-      const res = await fetch('/api/v1/auth/invite/redeem', {
+      const res = await apiFetch('/api/v1/auth/invite/redeem', {
         method: 'POST',
-        credentials: 'include',
+        authErrors: 'caller',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code }),
       });
@@ -225,7 +227,8 @@ export class ScionPageInvite extends LitElement {
 
   private handleLogin(provider: string): void {
     // Redirect to OAuth login, preserving the invite page as returnTo
-    window.location.href = `/auth/login/${provider}?returnTo=${encodeURIComponent('/invite')}`;
+    // returnTo is the browser URL the server redirects to after login.
+    loadPage(`/auth/login/${provider}?returnTo=${encodeURIComponent(browserPath('/invite'))}`);
   }
 
   override render() {
@@ -293,7 +296,7 @@ export class ScionPageInvite extends LitElement {
         variant="primary"
         size="large"
         @click=${() => {
-          window.location.href = '/';
+          loadPage('/');
         }}
       >
         Go to Dashboard
@@ -309,7 +312,7 @@ export class ScionPageInvite extends LitElement {
       <sl-button
         variant="default"
         @click=${() => {
-          window.location.href = '/';
+          loadPage('/');
         }}
       >
         Go to Home
@@ -327,7 +330,7 @@ export class ScionPageInvite extends LitElement {
       <sl-button
         variant="default"
         @click=${() => {
-          window.location.href = '/';
+          loadPage('/');
         }}
       >
         Go to Home

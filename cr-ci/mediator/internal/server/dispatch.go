@@ -144,9 +144,14 @@ func (s *Server) dispatchLocked(ctx context.Context, v *view, repo githubapp.Rep
 		return skip("not_queued", outNotQueue, "job_status", job.Status)
 	}
 
-	// Labels: RUNNER_LABEL only (see servable).
+	// Labels: RUNNER_LABEL (the only one jobs may ask for, see servable) and
+	// the stack label (reap scoping, see Options.StackLabel).
+	labels := []string{s.o.RunnerLabel}
+	if s.o.StackLabel != "" {
+		labels = append(labels, s.o.StackLabel)
+	}
 	runnerID, jit, err := s.o.GitHub.GenerateJITConfig(ctx, repo, githubapp.JITRequest{
-		Name: name, RunnerGroupID: s.o.RunnerGroupID, Labels: []string{s.o.RunnerLabel}, WorkFolder: WorkFolder,
+		Name: name, RunnerGroupID: s.o.RunnerGroupID, Labels: labels, WorkFolder: WorkFolder,
 	})
 	if err != nil {
 		if runnerID != 0 {

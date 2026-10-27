@@ -30,6 +30,13 @@ var validGHComponent = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 // pkg/agent/github_uri.go.
 var validGHSecretName = regexp.MustCompile(`^[A-Z][A-Z0-9_]*$`)
 
+// schemeName matches a URI scheme name (RFC 3986 section 3.1).
+var schemeName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*$`)
+
+// supportedSkillInputs lists the skill URI forms NormalizeSkillURI accepts,
+// for its error texts.
+const supportedSkillInputs = "supported inputs: gh://owner/repo/skill, skill://name, or a GitHub URL (https://github.com/...)"
+
 // NormalizeSkillURI accepts a user-supplied skill URI in any supported input
 // form and returns the canonical stored form.
 //
@@ -74,9 +81,14 @@ func NormalizeSkillURI(input string) (string, error) {
 		}
 		return input, nil
 	case strings.Contains(input, "://"):
-		// Unknown scheme
+		// Unknown scheme. The error quotes the text before "://" only when
+		// it is a scheme name; anything else (a query, user info) is not
+		// echoed.
 		scheme := input[:strings.Index(input, "://")]
-		return "", fmt.Errorf("unsupported scheme %q; supported inputs: gh://owner/repo/skill, skill://name, or a GitHub URL (https://github.com/...)", scheme)
+		if !schemeName.MatchString(scheme) {
+			return "", fmt.Errorf("unsupported scheme; %s", supportedSkillInputs)
+		}
+		return "", fmt.Errorf("unsupported scheme %q; %s", scheme, supportedSkillInputs)
 	default:
 		// Bare skill name
 		if _, err := ParseSkillURI(input); err != nil {

@@ -45,6 +45,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -54,6 +55,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -119,7 +121,10 @@ type ServerConfig struct {
 	// HubEnabled indicates whether this Runtime Broker should connect to a Hub
 	// for template hydration and other centralized services.
 	HubEnabled bool
-	// HubToken is the authentication token for the Hub API.
+	// HubToken is an operator-configured bearer token for the Hub API. It is
+	// not the dev token: in dev-auth mode the broker authenticates with the
+	// dev token through DevAuthHubOptions, which sends it only to a loopback
+	// hub (a HubToken that is the dev token gets the same rule).
 	HubToken string
 	// HostCredentials makes a co-located broker eligible to give its agents
 	// the host's harness-declared credential files. The caller sets it only
@@ -211,6 +216,14 @@ type ServerConfig struct {
 	// (see BuildWorkspaceStorageDescriptor).
 	WorkspaceStorageBackend string
 
+	// StorageLayout is the broker's projectfs Layout, built at startup from
+	// the same server.project_storage struct the hub builds its own from
+	// (config.ResolveProjectStorage, config.ProjectStorageLayout). Its
+	// Homes is reported in the workspace storage descriptor, so the hub
+	// can refuse shared-mode dispatch to a broker whose layout disagrees
+	// with its own (projectfs.Layout.DescriptorDiff).
+	StorageLayout projectfs.Layout
+
 	// DefaultProfile is the broker's default (active) profile name from its
 	// settings (active_profile), reported to the hub on every heartbeat. A
 	// pointer to "" reports that the settings name no active profile; nil
@@ -301,10 +314,9 @@ type Server struct {
 	// each replaces its real implementation when set (see the setters in
 	// workspace_handlers.go), per Server, so tests can fake one without
 	// racing parallel tests. Guarded by mu.
-	workspaceUpload      func(ctx context.Context, localPath, bucket, prefix string) error
-	manifestUpload       func(ctx context.Context, bucket, storagePath string, manifest *transfer.Manifest) error
-	projectWorkspaceStat func(path string) (os.FileInfo, error)
-	projectPathAbs       func(path string) (string, error)
+	workspaceUpload func(ctx context.Context, localPath, bucket, prefix string) error
+	manifestUpload  func(ctx context.Context, bucket, storagePath string, manifest *transfer.Manifest) error
+	projectPathAbs  func(path string) (string, error)
 	// projectConfigsRemove, when set (tests), replaces
 	// removeProjectConfigsSubtree for a project delete's project-configs
 	// entry (removeProjectConfigs).
@@ -415,6 +427,10 @@ type Server struct {
 	// ownedStarts maps a run ID to its in-flight ownership mirror
 	// (installOwnedStart / completeOwnedStart).
 	ownedStarts sync.Map
+	// ownedHolds counts the in-flight holds on each owned run
+	// (holdOwnedRun), guarded by ownedHoldsMu.
+	ownedHoldsMu sync.Mutex
+	ownedHolds   map[ownedRunKey]int
 	// unmirroredUIDs holds the object UIDs from the journals of this
 	// instance's launches whose ownership recording failed; launch cleanup
 	// may delete them although the record may lack them (launchHandleOwned).
@@ -596,7 +612,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime, rec config.Run
 		runtimeRecord:     rec,
 		mux:               http.NewServeMux(),
 		startTime:         time.Now(),
-		version:           "0.1.0", // TODO: Get from build info
+		version:           version.Short(),
 		hubConnections:    make(map[string]*HubConnection),
 		dispatchAttempts:  make(map[string]*dispatchAttempt),
 		auxiliaryRuntimes: make(map[string]auxiliaryRuntime),
@@ -1041,7 +1057,7 @@ func (s *Server) createHubConnection(name string, creds *brokercredentials.Broke
 	}
 
 	// Build hub client options
-	opts := buildHubClientOpts(creds, secretKey)
+	opts := buildHubClientOpts(creds, secretKey, hubEndpoint)
 
 	// Resolve transport auth once and share between REST client and control channel
 	var transportSrc transportauth.TokenSource
@@ -1091,16 +1107,24 @@ func (s *Server) createHubConnection(name string, creds *brokercredentials.Broke
 }
 
 // createHubConnectionFromConfig creates a HubConnection from server config
-// (bearer token or dev-auth), without file-based credentials.
+// (bearer token or dev-auth), without file-based credentials. HubToken is an
+// operator-configured bearer and is sent as configured. The server's dev
+// token reaches the hub only through DevAuthHubOptions (loopback hubs only);
+// a HubToken that is the dev token gets the same loopback rule.
 func (s *Server) createHubConnectionFromConfig() (*HubConnection, error) {
 	var opts []hubclient.Option
 
-	if s.config.HubToken != "" {
+	switch {
+	case s.config.HubToken != "" && isDevAuthToken(s.config.HubToken):
+		if devTokenAllowedFor(s.config.HubEndpoint, "config") {
+			opts = append(opts, hubclient.WithBearerToken(s.config.HubToken))
+			slog.Info("Hub client using dev token authentication")
+		}
+	case s.config.HubToken != "":
 		opts = append(opts, hubclient.WithBearerToken(s.config.HubToken))
 		slog.Info("Hub client using bearer token authentication")
-	} else {
-		opts = append(opts, hubclient.WithAutoDevAuth())
-		slog.Info("Hub client using auto dev authentication")
+	default:
+		opts = append(opts, DevAuthHubOptions(s.config.HubEndpoint, "config")...)
 	}
 
 	// Resolve transport auth once from env and share between REST client and control channel
@@ -3121,7 +3145,6 @@ func (s *Server) registerRoutes() {
 	// Workspace sync routes (for Hub-initiated sync via control channel)
 	s.mux.HandleFunc("/api/v1/workspace/upload", s.handleWorkspaceUpload)
 	s.mux.HandleFunc("/api/v1/workspace/apply", s.handleWorkspaceApply)
-	s.mux.HandleFunc("/api/v1/workspace/project-upload", s.handleProjectWorkspaceUpload)
 }
 
 // applyMiddleware wraps the handler with middleware.

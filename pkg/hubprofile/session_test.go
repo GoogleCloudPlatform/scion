@@ -278,9 +278,7 @@ func TestSession_IssueCachesAndAliasUsesFixtureToken(t *testing.T) {
 	assert.Equal(t, testDelegation, e.DelegationID)
 
 	path := filepath.Join(h.home, ".scion", "hub-profiles", "t1", "run-r1", "owner.json")
-	fi, err := os.Lstat(path)
-	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
+	assertPrivateFile(t, path)
 
 	// The identity's purpose names the run, for teardown.
 	assert.Equal(t, "scion-run:r1/owner journey", h.target.Purpose(e.IdentityID))
@@ -288,7 +286,7 @@ func TestSession_IssueCachesAndAliasUsesFixtureToken(t *testing.T) {
 	// A second issue of the same alias is refused before any request.
 	before := len(h.target.Recorded())
 	s := h.mustOpen(p, "", "r1")
-	_, err = IssueToCache(context.Background(), s, IssueRequest{Alias: "owner"})
+	_, err := IssueToCache(context.Background(), s, IssueRequest{Alias: "owner"})
 	require.ErrorIs(t, err, ErrEntryExists)
 	assert.Len(t, h.target.Recorded(), before, "a taken alias costs no request")
 
@@ -383,8 +381,7 @@ func TestSession_MemberAutoReissueBeforeExpiry(t *testing.T) {
 	assert.True(t, got.TokenExpiresAt.After(e.TokenExpiresAt))
 	last := h.target.Recorded()[len(h.target.Recorded())-1]
 	assert.Equal(t, "Bearer "+got.Token, last.Header.Get("Authorization"), "the request used the new token")
-	fi, _ := os.Lstat(filepath.Join(h.home, ".scion", "hub-profiles", "t1", "run-r1", "owner.json"))
-	assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
+	assertPrivateFile(t, filepath.Join(h.home, ".scion", "hub-profiles", "t1", "run-r1", "owner.json"))
 
 	// Expired identity: refused, nothing sent.
 	h.clk.Set(got.ExpiresAt.Add(time.Second))

@@ -519,58 +519,6 @@ func TestWorkspaceHandlerErrors_FixedText(t *testing.T) {
 				return apply(srv), logs, bootstrapDetail
 			},
 		},
-		{
-			name: "project-upload/access", op: opAccessWorkspacePath, wantText: "Failed to access workspace path",
-			logKey: "project_id", logValue: bootstrapProjectID,
-			run: func(t *testing.T) (*httptest.ResponseRecorder, *syncBuffer, string) {
-				srv, _ := agentServer(t, nil)
-				logs := captureLifecycleJSONLog(srv)
-				installFailingWorkspaceTransfers(t, srv)
-				const statDetail = "stat /srv/broker-7/projects/secret: permission denied"
-				srv.setProjectWorkspaceStatter(func(string) (os.FileInfo, error) { return nil, errors.New(statDetail) })
-				return doProjectUploadRequest(t, srv, ProjectWorkspaceUploadRequest{
-					ProjectID: bootstrapProjectID, StoragePath: "workspaces/p/w", WorkspacePath: t.TempDir(),
-				}), logs, statDetail
-			},
-		},
-		{
-			name: "project-upload/manifest", op: opBuildWorkspaceManifest, wantText: "Failed to build workspace manifest",
-			logKey: "project_id", logValue: bootstrapProjectID,
-			run: func(t *testing.T) (*httptest.ResponseRecorder, *syncBuffer, string) {
-				srv, _ := agentServer(t, nil)
-				logs := captureLifecycleJSONLog(srv)
-				installFailingWorkspaceTransfers(t, srv)
-				ws := t.TempDir()
-				locked := unreadableSubdir(t, ws)
-				return doProjectUploadRequest(t, srv, ProjectWorkspaceUploadRequest{
-					ProjectID: bootstrapProjectID, StoragePath: "workspaces/p/w", WorkspacePath: ws,
-				}), logs, filepath.Base(locked)
-			},
-		},
-		{
-			name: "project-upload/gcs", op: opUploadWorkspace, wantText: "Failed to upload workspace to GCS",
-			logKey: "project_id", logValue: bootstrapProjectID,
-			run: func(t *testing.T) (*httptest.ResponseRecorder, *syncBuffer, string) {
-				srv, _ := agentServer(t, nil)
-				logs := captureLifecycleJSONLog(srv)
-				installWorkspaceTransfers(srv, fakeWorkspaceTransfers{toErr: gcsErr})
-				return doProjectUploadRequest(t, srv, ProjectWorkspaceUploadRequest{
-					ProjectID: bootstrapProjectID, StoragePath: "workspaces/p/w", WorkspacePath: t.TempDir(),
-				}), logs, bootstrapDetail
-			},
-		},
-		{
-			name: "project-upload/manifest-upload", op: opUploadManifest, wantText: "Failed to upload manifest",
-			logKey: "project_id", logValue: bootstrapProjectID,
-			run: func(t *testing.T) (*httptest.ResponseRecorder, *syncBuffer, string) {
-				srv, _ := agentServer(t, nil)
-				logs := captureLifecycleJSONLog(srv)
-				installWorkspaceTransfers(srv, fakeWorkspaceTransfers{manifestErr: gcsErr})
-				return doProjectUploadRequest(t, srv, ProjectWorkspaceUploadRequest{
-					ProjectID: bootstrapProjectID, StoragePath: "workspaces/p/w", WorkspacePath: t.TempDir(),
-				}), logs, bootstrapDetail
-			},
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

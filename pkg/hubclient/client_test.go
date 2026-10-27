@@ -17,9 +17,11 @@ package hubclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -173,6 +175,49 @@ func TestAgentsGet(t *testing.T) {
 	}
 	if agent.Name != "Test Agent" {
 		t.Errorf("expected name 'Test Agent', got %q", agent.Name)
+	}
+}
+
+func TestAgentsGet_UnfollowedRedirect(t *testing.T) {
+	var originCalls, targetCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/redirected" {
+			targetCalls.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		originCalls.Add(1)
+		if r.URL.Path != "/api/v1/agents/test-agent" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		w.Header().Set("Location", "/redirected")
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Request-ID", "redirect-request")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+		_, _ = w.Write([]byte(`{"error":{"code":"wrong_endpoint","message":"use the new endpoint"}}`))
+	}))
+	defer server.Close()
+
+	hc := server.Client()
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	client, err := New(server.URL, WithHTTPClient(hc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := client.Agents().Get(t.Context(), "test-agent")
+	if originCalls.Load() != 1 || targetCalls.Load() != 0 {
+		t.Errorf("requests = (%d origin, %d target), want (1, 0)", originCalls.Load(), targetCalls.Load())
+	}
+	if agent != nil {
+		t.Errorf("returned an agent from a redirect error body: %+v", agent)
+	}
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected an APIError for an unfollowed redirect, got %v", err)
+	}
+	if apiErr.StatusCode != http.StatusTemporaryRedirect || apiErr.RequestID != "redirect-request" ||
+		apiErr.Code != "wrong_endpoint" || apiErr.Message != "use the new endpoint" {
+		t.Errorf("redirect error details not preserved: %+v", apiErr)
 	}
 }
 

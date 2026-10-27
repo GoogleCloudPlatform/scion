@@ -63,7 +63,7 @@ import (
 // Returns the fresh config, any warnings to surface on the plan (e.g. the
 // legacy-fallback notice), and an error only for a genuine failure (missing
 // AppliedConfig, or a workspace storage timeout from deriveAgentConfig,
-// which wraps errWorkspaceContentTimeout).
+// which wraps errWorkspaceStorageUnavailable).
 func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent, project *store.Project, imageRegistry string) (*store.AgentAppliedConfig, []string, error) {
 	return s.buildPatchedAppliedConfig(ctx, agent, project, fixedImageRegistry(imageRegistry), nil)
 }
@@ -570,9 +570,6 @@ func computeReincarnationPlan(old, fresh *store.AgentAppliedConfig, warnings []s
 		EnvKeys:    diffEnvKeys(old.Env, fresh.Env),
 		Branch:     fresh.Branch,
 		Warnings:   warnings,
-
-		SharedDirBackends:   fresh.SharedDirBackendChanges,
-		AllowEmptySharedDir: fresh.AllowEmptySharedDir,
 	}
 	if old.Image != "" && config.RewriteImageRegistry(old.Image, imageRegistry) == fresh.Image {
 		plan.Image.Old = fresh.Image

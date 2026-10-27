@@ -3,13 +3,34 @@
   "files": {
     "assets/main.js": { "raw": 240000, "gzip": 65000 }
   },
+  "manualChunks": {
+    "$comment": "Packages vite.config.ts places in a named chunk; forbiddenModules rules refer to them with chunkPackages, so the list lives in one place. Only packages no other code uses may be listed (isolatedChunks checks the result).",
+    "review-editor": "node_modules/(@milkdown/|prosemirror-|remark-|remark/|micromark|mdast-|unist-|unified/|vfile)"
+  },
   "chunks": {
     "$comment": "CodeMirror editor core (ptone/scion#5351). Each language is its own lazily loaded lang-<name> chunk (vite.config.ts), so this chunk holds only the core: @codemirror/view, state, language, autocomplete, commands, search and @lezer/common, highlight (409,273 B raw at the split, from 783,936 B with every language). The design's 350,000 B estimate assumed about 430 KB of languages; they measured about 350 KB, so the limit was revised to 420,000 B with webperf-lead approval.",
-    "assets/codemirror-": { "raw": 420000, "gzip": 140000 }
+    "assets/codemirror-": { "raw": 420000, "gzip": 140000 },
+    "$comment-review-editor": "The graphical review editor (ptone/scion#5913): Milkdown, ProseMirror and the remark stack (about 149 kB gzip measured in the design spike) plus the editor modules, loaded only when a review opens in the graphical view. combined: the limit is for all review-editor-* chunks together (the packages chunk and the editor modules' chunk). Interim limit 165,000 B gzip / 535,000 B raw, measured from 159,982 B gzip / 515,143 B raw with the editor's load and save checks; the follow-up trims unused editor parts and then sets the final limit (ptone/scion#5914).",
+    "assets/review-editor-": { "raw": 535000, "gzip": 165000, "combined": true }
   },
   "entryClosure": {
     "entry": "src/client/main.ts",
     "gzip": 140000
+  },
+  "$comment-isolatedChunks": "The review editor chunks (ptone/scion#5913) are reached only through import(): no other chunk, lazy ones included, may import them statically (a shared package placed in them would make, for example, the CodeMirror chunk download the whole editor).",
+  "isolatedChunks": ["assets/review-editor-"],
+  "chunkImports": {
+    "$comment": "The review editor chunks (ptone/scion#5913) may import statically only each other, the small shared chunks made for them (key names, CommonJS helpers) and what the artifact page has already loaded (the entry, Lit, Shoelace, the preview frame and the Markdown renderer).",
+    "assets/review-editor-": [
+      "assets/review-editor-",
+      "assets/w3c-keyname-",
+      "assets/commonjs-helpers-",
+      "assets/main.js",
+      "assets/lit-",
+      "assets/shoelace-",
+      "assets/untrusted-view-frame-",
+      "assets/markdown-"
+    ]
   },
   "requiredChunks": [
     "assets/terminal-workspace-",
@@ -21,7 +42,8 @@
     "assets/lang-markdown-",
     "assets/lang-python-",
     "assets/lang-rust-",
-    "assets/lang-yaml-"
+    "assets/lang-yaml-",
+    "assets/review-editor-"
   ],
   "forbiddenModules": [
     {
@@ -40,6 +62,23 @@
         {
           "path": "src/client/terminal-workspace-events.ts",
           "reason": "Event-name and drag-MIME constants only (no workspace code); the header imports TERMINAL_SESSION_COUNT_EVENT on every route."
+        }
+      ]
+    },
+    {
+      "$comment": "The graphical review editor (ptone/scion#5913) loads lazily through review-editor-loader.ts. None of its modules, nor Milkdown, ProseMirror or the remark stack, may be in what the entry, the login and home routes or the artifact page load statically, so plain artifact viewing never downloads it.",
+      "roots": [
+        "src/client/main.ts",
+        "src/components/pages/login.ts",
+        "src/components/pages/home.ts",
+        "src/components/pages/artifact-detail.ts"
+      ],
+      "pathPattern": "src/components/artifact-review/",
+      "chunkPackages": "review-editor",
+      "allow": [
+        {
+          "path": "src/components/artifact-review/review-editor-loader.ts",
+          "reason": "The lazy loader itself (a single-flight import of the editor chunk, no editor code); the artifact page must reach it statically."
         }
       ]
     }

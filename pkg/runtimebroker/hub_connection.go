@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -572,7 +573,7 @@ func (hc *HubConnection) reinitialize(ctx context.Context, server *Server, creds
 	hc.mu.Unlock()
 
 	// Create new Hub client, resolving transport auth once for both REST and WebSocket
-	opts := buildHubClientOpts(creds, secretKey)
+	opts := buildHubClientOpts(creds, secretKey, creds.HubEndpoint)
 	src, mode, err := transportauth.ResolveBrokerTransport(creds.TransportMode, creds.TransportAudience, adcsource.New)
 	if err != nil {
 		hc.setStatus(ConnectionStatusError)
@@ -619,14 +620,15 @@ func (hc *HubConnection) reinitialize(ctx context.Context, server *Server, creds
 	return hc.start(ctx, server)
 }
 
-// buildHubClientOpts creates hub client options from credentials.
-func buildHubClientOpts(creds *brokercredentials.BrokerCredentials, secretKey []byte) []hubclient.Option {
+// buildHubClientOpts creates hub client options from credentials, for a
+// client of the hub at endpoint (the endpoint the client is built for, which
+// decides whether the dev token may be attached).
+func buildHubClientOpts(creds *brokercredentials.BrokerCredentials, secretKey []byte, endpoint string) []hubclient.Option {
 	var opts []hubclient.Option
 
 	switch creds.AuthMode {
 	case brokercredentials.AuthModeDevAuth:
-		opts = append(opts, hubclient.WithAutoDevAuth())
-		slog.Info("Hub client using auto dev authentication", "name", creds.Name)
+		opts = append(opts, DevAuthHubOptions(endpoint, creds.Name)...)
 	case brokercredentials.AuthModeBearer:
 		// Bearer mode could use a token from the credentials, but currently
 		// there's no token field in BrokerCredentials for bearer auth.
@@ -638,12 +640,55 @@ func buildHubClientOpts(creds *brokercredentials.BrokerCredentials, secretKey []
 			opts = append(opts, hubclient.WithHMACAuth(creds.BrokerID, secretKey))
 			slog.Info("Hub client using HMAC authentication", "name", creds.Name, "brokerID", creds.BrokerID)
 		} else {
-			opts = append(opts, hubclient.WithAutoDevAuth())
-			slog.Info("Hub client using auto dev authentication (no secret key)", "name", creds.Name)
+			opts = append(opts, DevAuthHubOptions(endpoint, creds.Name)...)
 		}
 	}
 
 	return opts
+}
+
+// DevAuthHubOptions returns the hub client options that authenticate a
+// broker's own connection to the hub at endpoint with the dev token
+// (SCION_DEV_TOKEN, SCION_DEV_TOKEN_FILE or ~/.scion/dev-token). The dev
+// token is only used for a local hub: it is attached when endpoint is a
+// loopback address (the rule the CLI applies to dev credentials). For any
+// other hub it returns no option, so the client sends no dev token, and logs
+// one line saying so. name identifies the connection in the log.
+func DevAuthHubOptions(endpoint, name string) []hubclient.Option {
+	if !devTokenAllowedFor(endpoint, name) {
+		return nil
+	}
+	slog.Info("Hub client using auto dev authentication", "name", name)
+	return []hubclient.Option{hubclient.WithAutoDevAuth()}
+}
+
+// devTokenAllowedFor reports whether a broker hub client may send the dev
+// token to the hub at endpoint: only when endpoint is a loopback address.
+// For any other hub it logs one line saying the dev token is not sent; the
+// line names the connection and the redacted endpoint, nothing else.
+func devTokenAllowedFor(endpoint, name string) bool {
+	if isLocalhostEndpoint(endpoint) {
+		return true
+	}
+	slog.Warn("Hub client: the dev token is used only for a local hub; it is not sent", "name", name, "hub", config.RedactURL(endpoint))
+	return false
+}
+
+// isDevAuthToken reports whether token is the dev token: it has the dev
+// token prefix, or it equals the dev token resolved from SCION_DEV_TOKEN,
+// SCION_DEV_TOKEN_FILE or ~/.scion/dev-token. The server exports the dev
+// token it initialised as SCION_DEV_TOKEN, so a hub token it derived from dev
+// auth always matches, whatever the token's form. Any other token is one an
+// operator configured.
+func isDevAuthToken(token string) bool {
+	if token == "" {
+		return false
+	}
+	if apiclient.IsDevToken(token) {
+		return true
+	}
+	dev := apiclient.ResolveDevToken()
+	return dev != "" && apiclient.ValidateDevToken(token, dev)
 }
 
 // HubClientForCredentials builds the Hub client a connection with creds

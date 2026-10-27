@@ -24,6 +24,8 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const outsideContent = "outside-secret"
@@ -268,4 +270,39 @@ func TestOpenUnknownBackend(t *testing.T) {
 	if _, err := (Resolved{Backend: "gcs", HostPath: t.TempDir()}).Open(false); err == nil {
 		t.Fatal("Open on an unknown backend should fail")
 	}
+}
+
+// TestEnsureProjectConfigDir: <ProjectRoot>/.scion on a shared backend is
+// created 02755 through the confined walk, an existing one is accepted, a
+// symlinked project root is refused, and invalid IDs and the local backend
+// are refused.
+func TestEnsureProjectConfigDir(t *testing.T) {
+	base := t.TempDir()
+	l := Layout{Backend: BackendNFS, HostBase: base, SubPathRoot: "projects"}
+	dir, err := l.EnsureProjectConfigDir(testPID)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(base, "projects", testPID, ".scion"), dir)
+	fi, err := os.Lstat(dir)
+	require.NoError(t, err)
+	assert.Equal(t, os.ModeDir|os.ModeSetgid|0o755, fi.Mode())
+	again, err := l.EnsureProjectConfigDir(testPID)
+	require.NoError(t, err)
+	assert.Equal(t, dir, again, "idempotent")
+
+	cfg, err := l.ProjectConfig(testPID)
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join("projects", testPID, ".scion"), cfg.RelPath)
+
+	other := "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+	victim := t.TempDir()
+	require.NoError(t, os.Symlink(victim, filepath.Join(base, "projects", other)))
+	_, err = l.EnsureProjectConfigDir(other)
+	require.Error(t, err, "a symlinked project root is refused")
+	entries, _ := os.ReadDir(victim)
+	assert.Empty(t, entries)
+
+	_, err = l.EnsureProjectConfigDir("../escape")
+	require.Error(t, err)
+	_, err = Layout{Backend: BackendLocal, HostBase: base}.EnsureProjectConfigDir(testPID)
+	require.Error(t, err, "defined for shared backends only")
 }

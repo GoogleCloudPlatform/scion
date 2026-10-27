@@ -309,23 +309,6 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 			w = normalizeConstraintAuditAuthFailures(w, r)
 			ctx := r.Context()
 
-			if cfg.Debug {
-				authHeader := r.Header.Get("Authorization")
-				hasAuth := authHeader != ""
-				authPrefix := ""
-				if len(authHeader) > 20 {
-					authPrefix = authHeader[:20] + "..."
-				} else if hasAuth {
-					authPrefix = authHeader
-				}
-				log.Debug("Auth check",
-					slog.String("method", r.Method),
-					slog.String("path", logging.RequestPath(r)),
-					slog.Bool("has_auth", hasAuth),
-					slog.String("auth_prefix", authPrefix),
-				)
-			}
-
 			// Skip auth for unauthenticated endpoints (health checks, CLI OAuth)
 			if isUnauthenticatedEndpoint(r.URL.Path) {
 				if cfg.Debug {
@@ -366,9 +349,6 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						ctx = contextWithIdentity(ctx, identity)
 						ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(identity))
 						ctx = contextWithAuthType(ctx, AuthTypeAgent)
-						if cfg.Debug {
-							log.Debug("Agent authenticated", "subject", claims.Subject)
-						}
 						serveAfterAuth(w, next, r.WithContext(ctx))
 						return
 					} else if r.Header.Get("X-Scion-Agent-Token") != "" {
@@ -1062,6 +1042,8 @@ func isUnauthenticatedEndpoint(path string) bool {
 	case "/api/v1/settings/public": // Public settings (no auth required)
 		return true
 	case "/api/v1/test-infra/status": // Test-identity gate status for the web banner (four bools and the issuer audience)
+		return true
+	case "/api/v1/csp-reports": // Browser policy reports for the web pages (no sign-in; browsers send reports on their own)
 		return true
 	}
 	return false

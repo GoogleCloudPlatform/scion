@@ -763,12 +763,8 @@ func TestRenewalDriver_NonAdvancingUntilNeverLoops(t *testing.T) {
 // brokerMemoWaitTestHook.
 func TestConduitTestSeamsNeverSetInProduction(t *testing.T) {
 	seams := map[string]bool{"AuthzClock": true, "conduitScopeOfTest": true, "conduitAuthorizeActionTestHook": true, "conduitRouteCanRenewTest": true, "withoutStreamRenewer": true, "legacyPortTunnelReturnedTestHook": true, "conduitIngressSampleTestHook": true, "brokerMemoWaitTestHook": true}
-	// pkgmove:scan-covers pkg/hub/apierr
-	// scanned through guardScanSubdirs; guards conduit test seam assignments (pkg/hub only; ../../cmd is globbed alone).
-	// pkgmove:scan-covers pkg/hub/internal/principal
-	// scanned through guardScanSubdirs; guards conduit test seam assignments (pkg/hub only; ../../cmd is globbed alone).
-	// pkgmove:scan-covers pkg/hub/maintenance
-	// scanned through guardScanSubdirs once it exists; guards conduit test seam assignments (pkg/hub only; ../../cmd is globbed alone).
+	// pkgmove:scan-covers guardScanSubdirs
+	// scanned through guardScanSubdirs; guards conduit test seam assignments (pkg/hub and its guardScanSubdirs entries; ../../cmd is globbed alone).
 	for _, dir := range []string{".", filepath.Join("..", "..", "cmd")} {
 		var files []string
 		var err error

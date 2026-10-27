@@ -100,11 +100,23 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enforce authorization for every caller kind. A user passes on ActionAttach
-	// against the agent; an agent passes on ScopeAgentLifecycle within its own
-	// project. Attaching a PTY is not read-class, so the agent project read
-	// baseline deliberately does not reach it.
-	if !s.authorizeAgentLifecycle(w, r, agent, ActionAttach) {
+	// An agent delegated credential is decided by its own procedure, on
+	// this handshake only; the established session is not re-checked
+	// (.design/agent-delegation.md §16.6). Every other caller kind keeps
+	// the shared agent-target rule below.
+	if !admitDelegatedAgentHandler(w, r, opAgentAttach, agent) {
+		return
+	}
+	if isDelegatedAgentIdentity(identity) {
+		if !s.authorizeDelegatedAttach(w, r, identity, agent) {
+			return
+		}
+	} else if !s.authorizeAgentLifecycle(w, r, agent, ActionAttach) {
+		// Enforce authorization for every caller kind. A user passes on
+		// ActionAttach against the agent; an agent passes on
+		// ScopeAgentLifecycle within its own project. Attaching a PTY is not
+		// read-class, so the agent project read baseline deliberately does
+		// not reach it.
 		return
 	}
 
@@ -168,6 +180,25 @@ func (s *Server) handleAgentPTY(w http.ResponseWriter, r *http.Request) {
 
 	code, reason := session.CloseCause()
 	logPTYSessionEnded(agentID, agent.Slug, agent.RuntimeBrokerID, code, reason)
+}
+
+// authorizeDelegatedAttach decides agent.attach on agent for an agent
+// delegated credential at the PTY handshake (and so at every reconnect,
+// which is a new handshake). A denial answers 403 forbidden and never
+// carries the decision's reason (.design/agent-delegation.md §11.4).
+func (s *Server) authorizeDelegatedAttach(w http.ResponseWriter, r *http.Request, identity Identity, agent *store.Agent) bool {
+	decision := s.authzService.Decide(r.Context(), AuthzRequest{
+		Principal:  principalContextForIdentity(identity),
+		Credential: credentialContextForIdentity(identity),
+		Resource:   agentResource(agent),
+		Action:     ActionAttach,
+		Permission: "agent.attach",
+	})
+	if !decision.Allowed {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, agentTargetDenyMessage, nil)
+		return false
+	}
+	return true
 }
 
 // logPTYSessionStarted logs the start of a PTY session. routedBrokerID is

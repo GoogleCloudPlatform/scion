@@ -227,8 +227,9 @@ func TestResolveAgentTZ_ProfileSettingsAreNotARung(t *testing.T) {
 			},
 		},
 	}, nil)
+	prevOverlay := config.GetGlobalSettingsOverlay()
 	config.SetGlobalSettingsOverlay(overlay)
-	defer config.SetGlobalSettingsOverlay(nil)
+	t.Cleanup(func() { config.SetGlobalSettingsOverlay(prevOverlay) })
 
 	tests := []struct {
 		hubDefault string

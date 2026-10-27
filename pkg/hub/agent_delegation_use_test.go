@@ -333,6 +333,8 @@ func TestAgentDelegationPolicyNarrowing_DeniesAtIssuanceExchangeAndUse(t *testin
 // permission. A new key fails here until it has a case.
 func TestAgentDelegablePermissions_EachExercisedThroughItsRoute(t *testing.T) {
 	f := newADTFixture(t, "adt-keys")
+	f.adtMessageWorld(t)
+	attachTarget, _ := f.adtAttachTarget(t, "adt-keys")
 	cases := map[string]struct {
 		selector string
 		request  func(token string) *httptest.ResponseRecorder
@@ -340,6 +342,12 @@ func TestAgentDelegablePermissions_EachExercisedThroughItsRoute(t *testing.T) {
 		"agent.read": {"agent:read", func(token string) *httptest.ResponseRecorder { return f.getAgent(t, token, f.agentB.ID) }},
 		"project.read": {"project:read", func(token string) *httptest.ResponseRecorder {
 			return f.getProject(t, token, f.other.ID)
+		}},
+		"agent.message": {"agent:message", func(token string) *httptest.ResponseRecorder {
+			return f.sendMessage(t, token, agentMessagePath(f.agentB.ID), adtText("key check"))
+		}},
+		"agent.attach": {"agent:attach", func(token string) *httptest.ResponseRecorder {
+			return f.do(t, http.MethodGet, adtPTYPath(attachTarget.ID), nil, adtBearer(token))
 		}},
 	}
 	for perm := range permissions.AgentDelegableRegistry {

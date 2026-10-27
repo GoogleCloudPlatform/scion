@@ -75,7 +75,6 @@ var projectSubRouteTable = map[string]projectSubRouteKind{
 	"discover-harness-configs": projectSubRouteCatalogImport,
 	"import-templates":         projectSubRouteCatalogImport,
 	"import-harness-configs":   projectSubRouteCatalogImport,
-	"sync":                     projectSubRouteWorkspace,
 	"workspace":                projectSubRouteWorkspace,
 	"github-installation":      projectSubRouteGitHub,
 	"github-status":            projectSubRouteGitHub,

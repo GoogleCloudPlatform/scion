@@ -44,7 +44,7 @@ func relinkSiblings(t *testing.T, projectID string) (*relinkFixture, *partitionI
 func TestFlatRelink_SiblingInstanceAgentOfOldIDRefuses(t *testing.T) {
 	f, a := relinkSiblings(t, relinkOldID)
 
-	err := a.srv.relinkSharedProjectIdentity(context.Background(), f.root, "", relinkNewID, relinkAgent)
+	err := a.srv.relinkSharedProjectIdentity(context.Background(), f.root, "", relinkNewID, relinkAgent, nil, false)
 	var relinkErr *projectRelinkError
 	if !errors.As(err, &relinkErr) || !strings.Contains(err.Error(), "running") {
 		t.Fatalf("expected an in-use projectRelinkError, got %v", err)
@@ -64,7 +64,7 @@ func TestFlatRelink_SiblingInstanceAgentOfOldIDRefuses(t *testing.T) {
 func TestFlatRelink_SiblingInstanceAgentOfOtherProjectDoesNotBlock(t *testing.T) {
 	f, a := relinkSiblings(t, relinkOtherID)
 
-	if err := a.srv.relinkSharedProjectIdentity(context.Background(), f.root, "", relinkNewID, relinkAgent); err != nil {
+	if err := a.srv.relinkSharedProjectIdentity(context.Background(), f.root, "", relinkNewID, relinkAgent, nil, false); err != nil {
 		t.Fatalf("relink: %v", err)
 	}
 	assertState(t, f.newRoot)
@@ -104,7 +104,7 @@ func TestFlatRelink_UnreadableSiblingRefuses(t *testing.T) {
 	if busy, err := a.srv.otherProjectAgentsInUse(context.Background(), relinkOldID, ""); err != nil || !busy {
 		t.Fatalf("unreadable sibling: busy=%v err=%v, want busy", busy, err)
 	}
-	err := a.srv.relinkSharedProjectIdentity(context.Background(), f.root, "", relinkNewID, relinkAgent)
+	err := a.srv.relinkSharedProjectIdentity(context.Background(), f.root, "", relinkNewID, relinkAgent, nil, false)
 	var relinkErr *projectRelinkError
 	if !errors.As(err, &relinkErr) {
 		t.Fatalf("expected a projectRelinkError, got %v", err)

@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/spf13/cobra"
 )
@@ -2060,29 +2061,52 @@ func uniqueDest(dir, basename string) (string, error) {
 	}
 }
 
+// scratchpadTargets returns the container paths the scratchpad shared dir
+// may be mounted at, in probe order. The layout authority computes them
+// (projectfs.SharedDirTargets); a variable so tests can point it at a
+// temporary directory.
+var scratchpadTargets = func() []string {
+	return projectfs.SharedDirTargets(projectfs.ScratchpadName, "")
+}
+
+// findScratchpad returns the first scratchpad target that is a directory in
+// this container, or "" when none is.
+func findScratchpad() string {
+	for _, target := range scratchpadTargets() {
+		if info, err := os.Stat(target); err == nil && info.IsDir() {
+			return target
+		}
+	}
+	return ""
+}
+
 // stageAttachments copies attachment files to the scratchpad shared volume
 // and returns the new paths. Returns an error if the scratchpad is not
 // available — attachments require shared storage for cross-agent delivery.
 func stageAttachments(paths []string) (staged []string, err error) {
-	scratchpad := "/scion-volumes/scratchpad"
+	scratchpad := findScratchpad()
 
 	// Check scratchpad availability — hard error if absent
-	if _, err := os.Stat(scratchpad); os.IsNotExist(err) {
+	if scratchpad == "" {
 		return nil, fmt.Errorf("scratchpad volume not available at %s; "+
 			"attachments require a scratchpad shared volume for cross-agent "+
 			"file transfer. Create one with: scion shared-dir create scratchpad",
-			scratchpad)
+			strings.Join(scratchpadTargets(), " or "))
 	}
 
 	// Determine agent slug for per-agent directory
 	agentSlug := os.Getenv("SCION_AGENT_NAME")
 	if agentSlug == "" {
-		agentSlug = "_user"
+		agentSlug = projectfs.AttachmentChannelUser
 	}
 
 	// Generate per-message staging directory under agent slug
 	msgID := api.NewUUID()
-	stageDir := filepath.Join(scratchpad, ".attachments", agentSlug, msgID)
+	relDir, err := projectfs.AttachmentRelDir(agentSlug, msgID)
+	if err != nil {
+		return nil, fmt.Errorf("attachment staging directory: %w", err)
+	}
+	stageDir := filepath.Join(scratchpad, filepath.FromSlash(relDir))
 	if err := os.MkdirAll(stageDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create attachment staging directory: %w", err)
 	}

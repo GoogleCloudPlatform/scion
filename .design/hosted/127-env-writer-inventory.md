@@ -31,7 +31,7 @@ Classification kinds per §3.2.1 (updated with Q2 bootstrap kind):
 | H11 | `httpdispatcher.go:729` | `SCION_GITHUB_APP_ENABLED` | Literal `"true"` | **plain** |
 | H12 | `httpdispatcher.go:730` | `SCION_GITHUB_TOKEN_EXPIRY` | GitHub App token expiry timestamp | **plain** |
 | H13 | `httpdispatcher.go:731` | `SCION_GITHUB_TOKEN_PATH` | Literal `"/tmp/.github-token"` | **plain** |
-| H14 | `httpdispatcher.go:816` | `SCION_DEV_TOKEN` | `d.devAuthToken` (dev-mode auth token) | **secret-injected** |
+| H14 | (removed) | `SCION_DEV_TOKEN` | No longer written. Agents authenticate with their minted agent token only. | n/a |
 | H15 | `httpdispatcher.go:830-834` | `SCION_TRANSPORT_TOKEN`, `SCION_TRANSPORT_AUDIENCE`, `SCION_TRANSPORT_TOKEN_EXPIRY`, `SCION_TRANSPORT_MODE` | `transportMinter.MintIDToken` — IAP/Cloud Run invoker token | **secret-bootstrap** (token), **plain** (audience, expiry, mode) |
 
 ## Hub-side writers into `req.ResolvedEnv` (DispatchAgentStart)
@@ -173,7 +173,6 @@ via `SCION_SECRET_KEYS` + fetch. P3b must find an alternative delivery channel.
 | Key | Origin | Notes |
 |-----|--------|-------|
 | `GITHUB_TOKEN` (from GitHub App) | `MintGitHubAppTokenForProject` | Ephemeral, expires, not in secret store |
-| `SCION_DEV_TOKEN` | `d.devAuthToken` (dev mode only) | Dev-mode fallback |
 | `SCION_GIT_CLONE_URL` | `gc.URL` from GitClone config | May embed credentials — the original #127 bug |
 | `SCION_STAGED_SECRETS` | `serializeSecrets(ResolvedSecrets)` | Base64 blob of all secrets — injected at runtime level |
 | `gcloud-adc` (ResolvedSecret) | Host ADC file (colocated broker) | **FILE**, not an env var. Content from host ADC, not in hub secret store |

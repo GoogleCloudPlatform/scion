@@ -82,9 +82,16 @@ type TokenVerifier interface {
 
 // Options configures a Server.
 type Options struct {
-	TargetRepos   []githubapp.Repo
-	OrgScope      bool // runners are org-level: one runner list per owner
-	RunnerLabel   string
+	TargetRepos []githubapp.Repo
+	OrgScope    bool // runners are org-level: one runner list per owner
+	RunnerLabel string
+	// StackLabel is an extra label on every runner this stack registers
+	// (StackLabel(); region plus job name, unique per project). Reconcile
+	// reaps registrations with this label, or with no stack label at all,
+	// after ReapAfter; another stack's only after TaskTimeout + ReapAfter
+	// offline, so two stacks that serve the same repo (a region move) do not
+	// reap each other's live runners. Empty: no extra label.
+	StackLabel    string
 	MaxConcurrent int
 	RunnerGroupID int64
 	// MediatorURL is the public https origin. While it is empty the mediator
@@ -202,6 +209,29 @@ func detached(parent context.Context, d time.Duration) (context.Context, context
 // they run even if the operation they undo ran out of time.
 func cleanupContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), cleanupTimeout)
+}
+
+// stackLabelPrefix starts every stack label.
+const stackLabelPrefix = "crci-stack-"
+
+// StackLabel returns the label that marks the runners of the stack whose
+// runner job is job in region: crci-stack-<region>-<job>. Region and job names
+// are lowercase letters, digits and hyphens, valid in a runner label.
+func StackLabel(region, job string) string { return stackLabelPrefix + region + "-" + job }
+
+// otherStack reports whether a registration carries a stack label that is not
+// this stack's. Registrations without a stack label (made before stack labels
+// existed) count as this stack's.
+func (s *Server) otherStack(rn githubapp.Runner) bool {
+	if s.o.StackLabel == "" {
+		return false
+	}
+	for _, l := range rn.Labels {
+		if strings.HasPrefix(strings.ToLower(l.Name), stackLabelPrefix) && !strings.EqualFold(l.Name, s.o.StackLabel) {
+			return true
+		}
+	}
+	return false
 }
 
 // RunnerName is the runner name for a GitHub job ID.

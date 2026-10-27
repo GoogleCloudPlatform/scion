@@ -112,6 +112,12 @@ type Agent struct {
 	// Applied configuration (stored as JSON)
 	AppliedConfig *AgentAppliedConfig `json:"appliedConfig,omitempty"`
 
+	// PendingConfig holds config edits the hub stored instead of applying
+	// (see AgentPendingConfig); nil when there are none. UpdateAgent writes
+	// it with the rest of the row; UpdateAgentConfig writes it with the
+	// applied config alone.
+	PendingConfig *AgentPendingConfig `json:"pendingConfig,omitempty"`
+
 	// Timestamps
 	Created           time.Time `json:"created"`
 	Updated           time.Time `json:"updated"`
@@ -418,16 +424,6 @@ type AgentAppliedConfig struct {
 	Branch        string              `json:"branch,omitempty"`    // Git branch name (defaults to agent slug if empty)
 	Workspace     string              `json:"workspace,omitempty"` // Host path to mount as /workspace (overrides default project root)
 	GitClone      *api.GitCloneConfig `json:"gitClone,omitempty"`
-
-	// SharedDirBackendChanges and AllowEmptySharedDir are a reincarnation's
-	// explicit shared dir backend change (`scion reincarnate
-	// --shared-dir-backend`), set on that generation's config only and sent
-	// to the broker on its reprovision. They are one-shot: the hub drops
-	// them once the broker confirms the change (a stored config can still
-	// hold them after some failures), and neither a later reincarnation nor
-	// a re-render of this config sends them again.
-	SharedDirBackendChanges map[string]string `json:"sharedDirBackendChanges,omitempty"`
-	AllowEmptySharedDir     bool              `json:"allowEmptySharedDir,omitempty"`
 
 	// Template info for Runtime Broker hydration
 	TemplateID   string `json:"templateId,omitempty"`   // Hub template ID for fetching
@@ -877,7 +873,24 @@ const (
 	// global project (value "true"), as the embedded registration creates it.
 	LabelSystemProject = "scion.io/system"
 	LabelGlobalProject = "scion.io/global"
+	// LabelProjectOrigin records how a project came to exist. It is
+	// server-owned: ProjectOriginLinked when the project is created by
+	// registration from an existing checkout (registerProject),
+	// ProjectOriginHub when it is created on the hub (create, clone).
+	// Projects created before the label existed have none. Clients cannot
+	// set, change or remove it. It distinguishes a linked project without a
+	// git remote from a hub-managed one, which provider records cannot when
+	// the only provider is a remote broker without a local path.
+	LabelProjectOrigin  = "scion.dev/project-origin"
+	ProjectOriginLinked = "linked"
+	ProjectOriginHub    = "hub"
 )
+
+// IsLinkedOrigin reports whether the project was created by registration
+// from an existing checkout (LabelProjectOrigin).
+func (p *Project) IsLinkedOrigin() bool {
+	return p != nil && p.Labels[LabelProjectOrigin] == ProjectOriginLinked
+}
 
 // Project members group marker annotations (ptone/scion#2556).
 const (
@@ -2393,6 +2406,19 @@ const (
 	MessageDispatchNoRecipient = "no_recipient"
 )
 
+// MessageEnteredPendingLogMsg is the text of the one structured log line
+// written whenever a message row is persisted in dispatch_state "pending"
+// (ptone/scion#4827). The line carries message_id, sender, recipient, type
+// (messages.LogType) and creation_path, and never the body. The hub call
+// sites and the store-level default share this text so a row reported by
+// the stuck-pending sweep can be traced to its writer with one search.
+const MessageEnteredPendingLogMsg = "message dispatch: row entered pending"
+
+// MessagePendingPathStoreDefault is the creation_path logged when a writer
+// left Message.DispatchState empty and the store schema default ("pending")
+// applied. No current hub writer should reach it.
+const MessagePendingPathStoreDefault = "store_default"
+
 // MessageExpiredStuckPendingReason is the exact DispatchFailureReason the
 // stuck-message sweep (pkg/hub/sweep.go's brokerMessageSweepHandler) writes
 // when ExpireStuckPendingMessages flips a stuck-pending row to "failed". The
@@ -2502,6 +2528,13 @@ type Notification struct {
 	// stored before outcomes were recorded, whose Dispatched flag keeps its
 	// old meaning).
 	DispatchOutcome string `json:"dispatchOutcome"`
+	// DispatchReason says why a NotificationOutcomeFailed outcome was
+	// recorded (a NotificationReason* value). Empty for any other outcome
+	// and for rows stored before reasons were recorded.
+	DispatchReason string `json:"dispatchReason,omitempty"`
+	// NextAttemptAt is the earliest time the dispatch sweep may claim the
+	// notification again after a failed delivery; nil means at once.
+	NextAttemptAt *time.Time `json:"nextAttemptAt,omitempty"`
 }
 
 // Notification.DispatchOutcome values.
@@ -2515,6 +2548,57 @@ const (
 	// stays dispatched so the sweep does not retry it.
 	NotificationOutcomeFailed = "failed"
 )
+
+// Notification.DispatchReason values, recorded with
+// NotificationOutcomeFailed.
+const (
+	// NotificationReasonExpired: the notification was still undelivered
+	// when it reached the maximum retry age, for example because its
+	// subscriber stayed suspended or had no runtime broker.
+	NotificationReasonExpired = "expired"
+	// NotificationReasonSubscriptionGone: the subscription was deleted.
+	NotificationReasonSubscriptionGone = "subscription_gone"
+	// NotificationReasonSubscriberGone: the subscriber agent was deleted.
+	NotificationReasonSubscriberGone = "subscriber_gone"
+	// NotificationReasonWatchedAgentGone: the watched agent was deleted.
+	NotificationReasonWatchedAgentGone = "watched_agent_gone"
+)
+
+// ValidNotificationReason reports whether reason is a known
+// NotificationReason* value.
+func ValidNotificationReason(reason string) bool {
+	switch reason {
+	case NotificationReasonExpired, NotificationReasonSubscriptionGone,
+		NotificationReasonSubscriberGone, NotificationReasonWatchedAgentGone:
+		return true
+	}
+	return false
+}
+
+// Notification retry backoff bounds. The base equals the dispatch sweep
+// cadence (a shorter delay would have no effect); the cap keeps a
+// subscriber that recovers on its own reachable within an hour.
+const (
+	NotificationRetryBackoffBase = 5 * time.Minute
+	NotificationRetryBackoffMax  = time.Hour
+)
+
+// NotificationRetryBackoff returns how long the dispatch sweep waits
+// before retrying a notification whose latest delivery attempt failed.
+// attempts is the number of delivery attempts made so far, including the
+// failed one. The delay starts at NotificationRetryBackoffBase for the
+// first attempt and doubles with each further attempt, up to
+// NotificationRetryBackoffMax.
+func NotificationRetryBackoff(attempts int) time.Duration {
+	d := NotificationRetryBackoffBase
+	for i := 1; i < attempts; i++ {
+		d *= 2
+		if d >= NotificationRetryBackoffMax {
+			return NotificationRetryBackoffMax
+		}
+	}
+	return d
+}
 
 // ListOptions provides pagination and filtering for list operations.
 type ListOptions struct {
@@ -3248,6 +3332,14 @@ type Message struct {
 	SenderProjectID    *string `json:"senderProjectId,omitempty"`
 	RecipientProjectID *string `json:"recipientProjectId,omitempty"`
 
+	// AuthorizingUserID and DelegationGrantID attribute a message sent
+	// with an agent delegated credential (.design/agent-delegation.md
+	// §14.5): the user who issued the grant and the grant. Sender and
+	// SenderID name the actor agent, never the issuer. Empty for every
+	// other message.
+	AuthorizingUserID string `json:"authorizingUserId,omitempty"`
+	DelegationGrantID string `json:"delegationGrantId,omitempty"`
+
 	// DispatchState tracks cross-node delivery of the message to the broker:
 	// pending|dispatched|failed. The message row is its own durable dispatch
 	// intent (design §5.2/§6.1).
@@ -3792,6 +3884,11 @@ const (
 	MaintenanceStatusRunning   = "running"
 	MaintenanceStatusCompleted = "completed"
 	MaintenanceStatusFailed    = "failed"
+	// MaintenanceStatusRestarting marks an operation run (update-binary)
+	// whose binary is installed and whose hub restart has been requested.
+	// It is written before the restart; boot reconciliation completes it.
+	// AbortRunningMaintenanceOps leaves it alone (it only aborts "running").
+	MaintenanceStatusRestarting = "restarting"
 )
 
 // =============================================================================
@@ -3839,6 +3936,7 @@ type SkillVersion struct {
 	Version            string         `json:"version"`
 	Status             string         `json:"status"`
 	ContentHash        string         `json:"contentHash,omitempty"`
+	ContentHashV2      string         `json:"contentHashV2,omitempty"` // skill content hash v2 (ptone/scion#5935): derived by the hub for responses while hub.skill_content_hash_v2 is on, never stored
 	Files              []TemplateFile `json:"files,omitempty"`
 	PublisherID        string         `json:"publisherId,omitempty"`
 	DeprecationMessage string         `json:"deprecationMessage,omitempty"`
@@ -4294,7 +4392,8 @@ type EdgeDeactivationCause string
 const (
 	EdgeDeactivationAgentSoftDelete EdgeDeactivationCause = "agent_soft_delete"
 	EdgeDeactivationAgentHardDelete EdgeDeactivationCause = "agent_hard_delete"
-	// EdgeDeactivationDelegatorDeleted is reserved: no path records it.
+	// EdgeDeactivationDelegatorDeleted is recorded by a user delete on the
+	// edges where the deleted user is the delegator (ptone/scion#2143).
 	// Agent deletes deactivate only the edges where the agent is the
 	// delegate, and a project delete records agent_hard_delete on both
 	// sides. ValidEdgeDeactivationCause accepts it.

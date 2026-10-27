@@ -448,7 +448,7 @@ config:
   # three auth.transport values, runtime.gke set to anything but true and the
   # workspaceStorage.nfs values fail the render when set together with this
   # (NOTES.txt prints the exact list). Your file carries runtimes.kubernetes.gke
-  # and any server.workspace_storage itself, and the chart mounts no share.
+  # and any server.project_storage itself, and the chart mounts no share.
   # auth.proxy.provider is not on either list: its only legal value is its
   # default, so there is nothing an operator could set that goes quiet.
   # auth.mode carries it instead - under proxy mode the chart writes
@@ -700,17 +700,17 @@ storage:
   bucket: ""
 
 # The shared workspace share that agent pods mount, rendered as
-# server.workspace_storage in settings.yaml. NOT the hub's blob store (storage,
+# server.project_storage in settings.yaml. NOT the hub's blob store (storage,
 # above): that is GCS, this is an NFS export such as a Filestore share.
 workspaceStorage:
   nfs:
-    # true renders server.workspace_storage with backend nfs AND mounts the
+    # true renders server.project_storage with backend nfs AND mounts the
     # export into the hub pod. Both come from this one block on purpose: with
     # backend nfs the hub's /readyz returns 503 unless <mountRoot>/<shareId>
     # exists in the hub container, and the chart's probes use /readyz. A
     # settings block without the mount, or a mount at a different path, is a
     # pod that never becomes ready - so they cannot be set separately, and
-    # config.extra.server.workspace_storage is refused while this is enabled.
+    # config.extra.server.project_storage (or a deprecated storage block) is refused while this is enabled.
     # Refused together with config.existingSecret, where the chart would mount
     # a share your own file may not describe.
     #

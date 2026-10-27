@@ -179,26 +179,6 @@ func (r *KubernetesRuntime) nfsHomeEnv(config RunConfig) ([]corev1.EnvVar, error
 	return env, nil
 }
 
-// withHomeStorageAnnotation returns annotations with
-// k8sHomeStorageAnnotation set when nfsHome is true and removed otherwise.
-// The input map is not modified; it is returned as is when no change is
-// needed.
-func withHomeStorageAnnotation(annotations map[string]string, nfsHome bool) map[string]string {
-	_, has := annotations[k8sHomeStorageAnnotation]
-	if !nfsHome && !has {
-		return annotations
-	}
-	out := make(map[string]string, len(annotations)+1)
-	for k, v := range annotations {
-		out[k] = v
-	}
-	delete(out, k8sHomeStorageAnnotation)
-	if nfsHome {
-		out[k8sHomeStorageAnnotation] = HomeStorageNFS
-	}
-	return out
-}
-
 // k8sHomeLinksResult is the content of k8sHomeLinksResultFile, written in
 // the pod by the step that places the links. Targets are relative to the
 // home. State is "linked" or "skipped" (a user file was kept at the

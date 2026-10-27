@@ -138,6 +138,12 @@ const (
 	// deleteBlocksStart).
 	ErrCodeDeleteInProgress = "delete_in_progress"
 
+	// ErrCodeEncryptionPolicyMismatch is returned (409) when the database
+	// encryption policy refuses a secret payload write from this hub's
+	// encryption keyring (ptone/scion#1530 §6). Nothing was written; there
+	// is no unencrypted fallback.
+	ErrCodeEncryptionPolicyMismatch = "encryption_policy_mismatch"
+
 	// ErrCodeStartOutcomeUnknown is returned (504) by a create or env
 	// submit whose synchronous dispatch to the runtime broker ended without
 	// an answer (the dispatch deadline, or no response to a sent request).
@@ -178,6 +184,10 @@ const (
 	// missing". Without this, the request would silently fall through to the
 	// DM branch and serve wrong data (G3-f).
 	ErrCodeThreadProjectRequired = "thread_project_required"
+
+	// ErrCodeChatPostDenied is returned (403) when the caller may read a
+	// chat thread but its account may not post in it (project.chat_post).
+	ErrCodeChatPostDenied = "chat_post_denied"
 
 	// Addressee resolution error codes (DEF-126).
 
@@ -267,6 +277,13 @@ const (
 	// remove the last direct-user project-owner binding.
 	// D7: normalized from SCREAMING_SNAKE to lower_snake_case (approved breaking change).
 	ErrCodeLastOwner = "last_owner"
+
+	// ErrCodeUserDeleteBlocked is returned with 409 when a user cannot be
+	// deleted because agents or active delegations depend on the user.
+	// details.agents and details.edges list them (each capped) and
+	// details.truncated reports more. GET /api/v1/users/{id}/delete-blockers
+	// returns the same lists without attempting the delete.
+	ErrCodeUserDeleteBlocked = "user_delete_blocked"
 
 	// ErrCodeInvalidCursor is returned for every authorizedList pagination
 	// cursor failure: malformed input, truncation, a tampered byte, a
@@ -364,6 +381,17 @@ type httpStatusError interface {
 // ErrDeleteInProgress) and deleteInProgressRefusal.
 const DeleteInProgressMessage = "a delete is in progress for this agent; wait for it to finish, or force the delete"
 
+// InvalidCursorMessage is the client-facing message of every 400
+// invalid_cursor answer: a cursor that cannot be used, whatever the reason,
+// means "discard it and restart from the first page".
+const InvalidCursorMessage = "invalid cursor: restart pagination from the first page"
+
+// WriteInvalidCursor writes the uniform 400 invalid_cursor answer for a
+// pagination cursor or page token that cannot be used.
+func WriteInvalidCursor(w http.ResponseWriter) {
+	WriteError(w, http.StatusBadRequest, ErrCodeInvalidCursor, InvalidCursorMessage, nil)
+}
+
 // StoreMembersGroupPrincipalMessage is the client-facing message for a store
 // refusal (store.ErrProjectMembersGroupPrincipal), shared by WriteErrorFromErr
 // and storeMembersGroupPrincipalDecision so both routes return the same text.
@@ -403,6 +431,10 @@ func WriteErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusConflict
 		code = ErrCodeDeleteInProgress
 		message = DeleteInProgressMessage
+	case errors.Is(err, store.ErrEncryptionPolicyMismatch):
+		statusCode = http.StatusConflict
+		code = ErrCodeEncryptionPolicyMismatch
+		message = "The database encryption policy refused this write: this hub's encryption keyring does not match it. Nothing was stored."
 	case errors.Is(err, store.ErrVersionConflict):
 		statusCode = http.StatusConflict
 		code = ErrCodeVersionConflict
@@ -425,6 +457,13 @@ func WriteErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusBadRequest
 		code = ErrCodeInvalidRequest
 		message = StoreMembersGroupPrincipalMessage
+	case errors.Is(err, store.ErrInvalidCursor):
+		// Must precede ErrInvalidInput, which it wraps. Every malformed
+		// cursor gets the same answer as an authorizedList cursor failure
+		// (ptone/scion#3062).
+		statusCode = http.StatusBadRequest
+		code = ErrCodeInvalidCursor
+		message = InvalidCursorMessage
 	case errors.Is(err, store.ErrInvalidInput):
 		statusCode = http.StatusBadRequest
 		code = ErrCodeValidationError

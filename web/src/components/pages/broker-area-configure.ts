@@ -41,6 +41,7 @@ import type { BrokerSettingsResponse, RuntimeBroker } from '../../shared/types.j
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { showToast } from '../../utils/toast.js';
+import { navigateTo } from '../../client/navigation.js';
 import { brokerAreaStyles } from '../shared/broker-area-styles.js';
 import { effectiveLimitText, limitSourceLabel } from '../../shared/broker-capacity.js';
 
@@ -305,7 +306,7 @@ export class ScionBrokerAreaConfigure extends LitElement {
       if (!res.ok) {
         throw new Error(await extractApiError(res, 'Failed to unregister broker'));
       }
-      window.location.href = '/brokers';
+      navigateTo('/brokers');
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to unregister broker', 'danger');
     } finally {

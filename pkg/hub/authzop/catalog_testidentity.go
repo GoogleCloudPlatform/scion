@@ -178,7 +178,7 @@ var testIdentityOperations = []OperationSpec{
 			BeforeFields:  []string{"user_id", "role", "issued_by", "purpose", "expires_at"},
 			Atomic:        true,
 		},
-		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound, DenialConflict},
+		DenialCodes: []DenialCode{DenialForbidden, DenialResourceNotFound, DenialUserDeleteBlocked, DenialConflict},
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestTestIdentity_Delete"},

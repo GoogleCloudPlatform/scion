@@ -855,8 +855,9 @@ func TestPlacementGuard_WorkspaceTunnelRefusedBeforeSend(t *testing.T) {
 
 	// Every agent workspace request goes through the wrapper: outside the
 	// wrapper's own body (which delegates to tunnelWorkspaceRequest), no
-	// caller tunnels to agent.RuntimeBrokerID directly, and the three callers
-	// (sync-to-hub upload, apply, stop sync-back) call the wrapper.
+	// caller tunnels to agent.RuntimeBrokerID directly, and the two callers
+	// (sync-to-hub upload, apply) call the wrapper. The stop sync-back of a
+	// hub-managed workspace no longer exists.
 	direct := regexp.MustCompile(`tunnelWorkspaceRequest\([^)]*agent\.RuntimeBrokerID`)
 	wrapperFunc := regexp.MustCompile(`(?s)\nfunc tunnelAgentWorkspaceRequest\(.*?\n}\n`)
 	wrapped := 0
@@ -867,7 +868,7 @@ func TestPlacementGuard_WorkspaceTunnelRefusedBeforeSend(t *testing.T) {
 		assert.Empty(t, direct.FindAllString(outside, -1), "%s tunnels an agent workspace request without the placement wrapper", file)
 		wrapped += strings.Count(outside, "tunnelAgentWorkspaceRequest(")
 	}
-	assert.Equal(t, 3, wrapped, "the sync-to-hub upload, the apply and the stop sync-back call the wrapper")
+	assert.Equal(t, 2, wrapped, "the sync-to-hub upload and the apply call the wrapper")
 }
 
 // --- guidance ----------------------------------------------------------------

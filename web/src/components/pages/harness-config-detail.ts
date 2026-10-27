@@ -39,6 +39,7 @@ import { HarnessConfigFileEditorDataSource } from '../shared/file-editor.js';
 import type { FileEditorDataSource } from '../shared/file-editor.js';
 import '../shared/hash-display.js';
 import { showToast } from '../../utils/toast.js';
+import { navigateTo } from '../../client/navigation.js';
 import { describeSourceUrl } from '../../shared/source-url.js';
 
 /**
@@ -1528,7 +1529,7 @@ export class ScionPageHarnessConfigDetail extends LitElement {
       this.deleteDialogOpen = false;
       // Navigate back to the list view
       const backLink = this.backLinks()[0];
-      window.location.href = backLink.href;
+      navigateTo(backLink.href);
     } catch (err) {
       this.deleteError = err instanceof Error ? err.message : 'Delete failed';
     } finally {

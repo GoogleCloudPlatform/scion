@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"entgo.io/ent/dialect"
@@ -127,16 +128,21 @@ func nullIfEmpty(v string) any {
 // behaviour.
 func (s *ConduitRegistryStore) RegisterRelay(ctx context.Context, r registry.RelayInstance) (int64, error) {
 	q := fmt.Sprintf(`INSERT INTO relay_instances
-  (instance_id, generation, internal_endpoint, public_endpoint, started_at, last_seen, draining)
-VALUES (%s, %s, %s, %s, %s, %s, %s)
+  (instance_id, generation, internal_endpoint, public_endpoint, started_at, last_seen, draining, features)
+VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT (instance_id) DO UPDATE SET
   generation = relay_instances.generation + 1,
   internal_endpoint = excluded.internal_endpoint,
   public_endpoint = excluded.public_endpoint,
   started_at = excluded.started_at,
   last_seen = excluded.last_seen,
-  draining = excluded.draining
-RETURNING generation`, s.ph(1), s.ph(2), s.ph(3), s.ph(4), s.ph(5), s.ph(6), s.ph(7))
+  draining = excluded.draining,
+  features = excluded.features
+RETURNING generation`, s.ph(1), s.ph(2), s.ph(3), s.ph(4), s.ph(5), s.ph(6), s.ph(7), s.ph(8))
+	features, err := encodeRelayFeatures(r.Features)
+	if err != nil {
+		return 0, fmt.Errorf("conduit registry store: register relay %q: %w", r.InstanceID, err)
+	}
 	seed := r.Generation
 	if seed <= 0 {
 		seed = 1
@@ -149,8 +155,11 @@ RETURNING generation`, s.ph(1), s.ph(2), s.ph(3), s.ph(4), s.ph(5), s.ph(6), s.p
 	var gen int64
 	if err := t.tx.QueryRowContext(ctx, q,
 		r.InstanceID, seed, r.InternalEndpoint, nullIfEmpty(r.PublicEndpoint),
-		r.StartedAt.UTC(), r.LastSeen.UTC(), false,
+		r.StartedAt.UTC(), r.LastSeen.UTC(), false, features,
 	).Scan(&gen); err != nil {
+		if missingRelayFeaturesColumn(err) {
+			return 0, fmt.Errorf("conduit registry store: register relay %q: %w (%v)", r.InstanceID, registry.ErrRelayFeaturesColumnMissing, err)
+		}
 		return 0, fmt.Errorf("conduit registry store: register relay %q: %w", r.InstanceID, err)
 	}
 	if err := t.commit(); err != nil {
@@ -492,9 +501,52 @@ func (s *ConduitRegistryStore) ListRelays(ctx context.Context) ([]registry.Relay
 		if ri.PublicEndpoint != nil {
 			rel.PublicEndpoint = *ri.PublicEndpoint
 		}
+		rel.Features = decodeRelayFeatures(ri.Features)
 		out = append(out, rel)
 	}
 	return out, nil
+}
+
+// missingRelayFeaturesColumn reports whether err is the database refusing
+// the features column because it does not exist: PostgreSQL's undefined
+// column (SQLSTATE 42703: column "features" of relation "relay_instances"
+// does not exist) or SQLite's "table relay_instances has no column named
+// features".
+func missingRelayFeaturesColumn(err error) bool {
+	msg := err.Error()
+	if !strings.Contains(msg, "features") {
+		return false
+	}
+	return strings.Contains(msg, "42703") || strings.Contains(msg, "does not exist") ||
+		strings.Contains(msg, "no column named") || strings.Contains(msg, "no such column")
+}
+
+// encodeRelayFeatures is relay_instances.features for features: a JSON
+// array of strings, or NULL when there are none.
+func encodeRelayFeatures(features []string) (any, error) {
+	if len(features) == 0 {
+		return nil, nil
+	}
+	b, err := json.Marshal(features)
+	if err != nil {
+		return nil, err
+	}
+	return string(b), nil
+}
+
+// decodeRelayFeatures reads relay_instances.features: NULL, empty or a
+// value that is not a JSON array of strings reads as no features (a
+// reader never fails on the column; unknown feature names are kept and
+// ignored by readers that do not know them).
+func decodeRelayFeatures(v *string) []string {
+	if v == nil || *v == "" {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(*v), &out); err != nil || len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // CountRelaySessions implements registry.Store: one COUNT over the

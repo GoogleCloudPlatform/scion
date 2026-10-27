@@ -73,7 +73,43 @@ func startFakeAgent(t *testing.T, h *fakeHub, mod func(*Options)) *fakeAgent {
 			mod(o)
 		}
 	})
+	// Registered after startAgent's cleanup, so it runs first, while the
+	// agent still runs (ptone/scion#5037).
+	t.Cleanup(func() {
+		if t.Failed() {
+			fa.logSessionState(t)
+		}
+	})
 	return fa
+}
+
+// logSessionState logs, for a failed test, the agent's side of its live
+// session and how often the agent dialed the hub, so a session that ended
+// under the test names its own error and shows whether the agent redialed.
+func (fa *fakeAgent) logSessionState(t *testing.T) {
+	t.Helper()
+	fa.a.mu.Lock()
+	live := fa.a.live
+	fa.a.mu.Unlock()
+	dials := fa.h.conduitHits.Load()
+	if live == nil {
+		t.Logf("agent session state: no live session (hub saw %d dials)", dials)
+		return
+	}
+	ended := "open"
+	select {
+	case <-live.Done():
+		ended = "ended"
+	default:
+	}
+	goAway := false
+	select {
+	case <-live.GoAwayReceived():
+		goAway = true
+	default:
+	}
+	t.Logf("agent session state: session %s %s, err %v, GoAway received %v (hub saw %d dials)",
+		live.Info().SessionID, ended, live.Err(), goAway, dials)
 }
 
 // keysFetched waits for the outcome of the agent's first key fetch: on
@@ -110,6 +146,26 @@ func (fa *fakeAgent) deadline(t *testing.T, s core.LocalSession, st core.Stream)
 		t.Fatal("stream not tracked")
 	}
 	return d
+}
+
+// waitTracked waits, for at most 10 seconds, until the agent tracks the
+// deadline of st. The agent accepts a stream before it registers the
+// stream's deadline (handleTCP), so a test that renews a stream it has
+// just opened waits for the registration first; a renewal that arrives
+// earlier is refused as untracked.
+func (fa *fakeAgent) waitTracked(t *testing.T, s core.LocalSession, st core.Stream) {
+	t.Helper()
+	b := target.Binding{SessionID: s.Info().SessionID, ConnectionEpoch: s.Info().ConnectionEpoch}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, ok := fa.a.deadlines.Deadline(b, st.ID()); ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("stream deadline not tracked within 10s")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // mustRefuse opens o on s and requires a 4403 refusal.
@@ -426,6 +482,7 @@ func TestAgentStreamClosesAtDeadline(t *testing.T) {
 	until := now.Add(10 * time.Second)
 	open := openAt(t, k1, s, echoListener(t), now, withDeadline("open-1", until, time.Minute))
 	st := mustOpen(t, s, open, "stream with a deadline")
+	fa.waitTracked(t, s, st)
 
 	r := st.(core.StreamRenewer)
 	refused := [][]byte{
@@ -474,6 +531,7 @@ func TestAgentRenewalExtendsDeadline(t *testing.T) {
 	until := now.Add(10 * time.Second)
 	open := openAt(t, k1, s, echoListener(t), now, withDeadline("open-1", until, time.Minute))
 	st := mustOpen(t, s, open, "stream with a deadline")
+	fa.waitTracked(t, s, st)
 
 	renewed := until.Add(20 * time.Second)
 	if err := st.(core.StreamRenewer).Renew(renewalFor(t, k1, s, st, open, now, "open-1", renewed, nil)); err != nil {
@@ -524,6 +582,7 @@ func TestAgentRenewalUnknownKidDoesNotStallFrames(t *testing.T) {
 	now := fakeStart
 	open := openAt(t, k1, s, echoListener(t), now, withDeadline("open-1", now.Add(time.Minute), time.Hour))
 	st := mustOpen(t, s, open, "stream with a deadline")
+	fa.waitTracked(t, s, st)
 
 	h.set(func(h *fakeHub) { h.keys = []grant.PublicKey{k1.public, k2.public} })
 	blocking.Store(true)
@@ -573,6 +632,7 @@ func TestAgentRenewalQueueFull(t *testing.T) {
 	now := fakeStart
 	open := openAt(t, k1, s, echoListener(t), now, withDeadline("open-1", now.Add(time.Minute), time.Hour))
 	st := mustOpen(t, s, open, "stream with a deadline")
+	fa.waitTracked(t, s, st)
 
 	h.set(func(h *fakeHub) { h.keys = []grant.PublicKey{k1.public, k2.public} })
 	blocking.Store(true)

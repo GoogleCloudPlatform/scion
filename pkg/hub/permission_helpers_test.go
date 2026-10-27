@@ -65,12 +65,8 @@ func loadReferenceConstants(t *testing.T) referenceConstants {
 		{"permissions", "permissions."},
 		{filepath.Join("..", "store"), "store."},
 	}
-	// pkgmove:scan-covers pkg/hub/apierr
+	// pkgmove:scan-covers guardScanSubdirs
 	// loadReferenceConstants reads the constants of each guardScanSubdirs directory (through parseNonTestGoFiles, under its package prefix) for the permission ID reference checks.
-	// pkgmove:scan-covers pkg/hub/internal/principal
-	// loadReferenceConstants reads the constants of each guardScanSubdirs directory (through parseNonTestGoFiles, under its package prefix) for the permission ID reference checks.
-	// pkgmove:scan-covers pkg/hub/maintenance
-	// loadReferenceConstants reads the constants of each guardScanSubdirs directory (through parseNonTestGoFiles, under its package prefix) for the permission ID reference checks, once the directory exists.
 	for _, rel := range mustGuardScanDirs(t, ".") {
 		if rel == "." {
 			continue

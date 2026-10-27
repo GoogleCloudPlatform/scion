@@ -33,6 +33,9 @@ import (
 // mirroring the legacy SQLite implementation.
 type SecretStore struct {
 	client *ent.Client
+	// inTx is set when client wraps the ambient WithTx transaction
+	// (newTxCompositeStore), so fenced writes run on it directly.
+	inTx bool
 }
 
 // NewSecretStore creates a new Ent-backed SecretStore.
@@ -75,8 +78,23 @@ func entSecretRowToStore(e *ent.Secret, includeValue bool) store.Secret {
 	return s
 }
 
-// CreateSecret creates a new secret.
+// CreateSecret creates a new secret. The value passes the encryption
+// policy fence (store.SecretEncryptionStore) in the same transaction.
 func (s *SecretStore) CreateSecret(ctx context.Context, secret *store.Secret) error {
+	return runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		policy, err := loadEncryptionPolicyForWrite(ctx, c)
+		if err != nil {
+			return err
+		}
+		if !policy.AllowsWrite(secret.EncryptedValue, secret.SecretRef) {
+			return store.ErrEncryptionPolicyMismatch
+		}
+		return createSecretRow(ctx, c, secret)
+	})
+}
+
+// createSecretRow inserts the row on c (no fence; callers fence).
+func createSecretRow(ctx context.Context, c *ent.Client, secret *store.Secret) error {
 	uid, err := parseUUID(secret.ID)
 	if err != nil {
 		return err
@@ -97,7 +115,7 @@ func (s *SecretStore) CreateSecret(ctx context.Context, secret *store.Secret) er
 		secret.InjectionMode = store.InjectionModeAsNeeded
 	}
 
-	create := s.client.Secret.Create().
+	create := c.Secret.Create().
 		SetID(uid).
 		SetKey(secret.Key).
 		SetEncryptedValue(secret.EncryptedValue).
@@ -133,7 +151,11 @@ func (s *SecretStore) CreateSecret(ctx context.Context, secret *store.Secret) er
 // GetSecret retrieves secret metadata (including the encrypted value) by key,
 // scope, and scopeID.
 func (s *SecretStore) GetSecret(ctx context.Context, key, scope, scopeID string) (*store.Secret, error) {
-	e, err := s.client.Secret.Query().
+	return getSecretRow(ctx, s.client, key, scope, scopeID)
+}
+
+func getSecretRow(ctx context.Context, c *ent.Client, key, scope, scopeID string) (*store.Secret, error) {
+	e, err := c.Secret.Query().
 		Where(
 			entsecret.KeyEQ(key),
 			entsecret.ScopeEQ(scope),
@@ -147,8 +169,20 @@ func (s *SecretStore) GetSecret(ctx context.Context, key, scope, scopeID string)
 	return &sec, nil
 }
 
-// UpdateSecret updates an existing secret, incrementing its version.
+// UpdateSecret updates an existing secret, incrementing its version. A
+// changed value passes the encryption policy fence in the same
+// transaction; an unchanged value (a metadata-only update) does not.
 func (s *SecretStore) UpdateSecret(ctx context.Context, secret *store.Secret) error {
+	return runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		if err := fenceValueChange(ctx, c, secret.Key, secret.Scope, secret.ScopeID, secret.EncryptedValue, &secret.SecretRef); err != nil {
+			return err
+		}
+		return updateSecretRow(ctx, c, secret)
+	})
+}
+
+// updateSecretRow updates the row on c (no fence; callers fence).
+func updateSecretRow(ctx context.Context, c *ent.Client, secret *store.Secret) error {
 	secret.Updated = time.Now()
 	secret.Version++ // Increment version on each update
 
@@ -162,7 +196,7 @@ func (s *SecretStore) UpdateSecret(ctx context.Context, secret *store.Secret) er
 		secret.InjectionMode = store.InjectionModeAsNeeded
 	}
 
-	update := s.client.Secret.Update().
+	update := c.Secret.Update().
 		Where(
 			entsecret.KeyEQ(secret.Key),
 			entsecret.ScopeEQ(secret.Scope),
@@ -245,22 +279,39 @@ func (s *SecretStore) UpdateSecretRefIfMatches(ctx context.Context, key, scope, 
 // UpdateSecretValueIfVersion conditionally replaces the encrypted value,
 // applying the change and incrementing Version only when the row's current
 // Version equals expectedVersion. Every other column is left untouched.
+//
+// A changed value passes the encryption policy fence in the same
+// transaction.
 func (s *SecretStore) UpdateSecretValueIfVersion(ctx context.Context, key, scope, scopeID string, expectedVersion int, newEncryptedValue string) (bool, error) {
-	n, err := s.client.Secret.Update().
-		Where(
-			entsecret.KeyEQ(key),
-			entsecret.ScopeEQ(scope),
-			entsecret.ScopeIDEQ(scopeID),
-			entsecret.VersionEQ(expectedVersion),
-		).
-		SetEncryptedValue(newEncryptedValue).
-		AddVersion(1).
-		SetUpdated(time.Now()).
-		Save(ctx)
+	applied := false
+	err := runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		if err := fenceValueChange(ctx, c, key, scope, scopeID, newEncryptedValue, nil); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nil // no row: not applied
+			}
+			return err
+		}
+		n, err := c.Secret.Update().
+			Where(
+				entsecret.KeyEQ(key),
+				entsecret.ScopeEQ(scope),
+				entsecret.ScopeIDEQ(scopeID),
+				entsecret.VersionEQ(expectedVersion),
+			).
+			SetEncryptedValue(newEncryptedValue).
+			AddVersion(1).
+			SetUpdated(time.Now()).
+			Save(ctx)
+		if err != nil {
+			return mapError(err)
+		}
+		applied = n > 0
+		return nil
+	})
 	if err != nil {
-		return false, mapError(err)
+		return false, err
 	}
-	return n > 0, nil
+	return applied, nil
 }
 
 // UpdateSecretMeta updates only metadata columns of an existing secret without
@@ -320,34 +371,51 @@ func (s *SecretStore) UpdateSecretMeta(ctx context.Context, key, scope, scopeID 
 	return existing, nil
 }
 
-// UpsertSecret creates or updates a secret, keyed by (key, scope, scopeID).
+// UpsertSecret creates or updates a secret, keyed by (key, scope, scopeID),
+// in one transaction. A new or changed value passes the encryption policy
+// fence; re-writing the stored value unchanged does not.
 func (s *SecretStore) UpsertSecret(ctx context.Context, secret *store.Secret) (bool, error) {
-	now := time.Now()
-	secret.Updated = now
+	created := false
+	err := runInEntTx(ctx, s.client, s.inTx, func(c *ent.Client) error {
+		now := time.Now()
+		secret.Updated = now
 
-	existing, err := s.GetSecret(ctx, secret.Key, secret.Scope, secret.ScopeID)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return false, err
-	}
-
-	if existing != nil {
-		// Update existing: preserve identity/creation metadata. UpdateSecret
-		// increments the version from the existing baseline.
-		secret.ID = existing.ID
-		secret.Created = existing.Created
-		secret.CreatedBy = existing.CreatedBy
-		secret.Version = existing.Version
-		if err := s.UpdateSecret(ctx, secret); err != nil {
-			return false, err
+		// Lock order: policy, then the secret row.
+		policy, err := loadEncryptionPolicyForWrite(ctx, c)
+		if err != nil {
+			return err
 		}
-		return false, nil
-	}
+		existing, err := lockSecretRowForWrite(ctx, c, secret.Key, secret.Scope, secret.ScopeID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		if (existing == nil || existing.EncryptedValue != secret.EncryptedValue) &&
+			!policy.AllowsWrite(secret.EncryptedValue, secret.SecretRef) {
+			return store.ErrEncryptionPolicyMismatch
+		}
 
-	secret.Created = now
-	if err := s.CreateSecret(ctx, secret); err != nil {
+		if existing != nil {
+			// Update existing: preserve identity/creation metadata.
+			// updateSecretRow increments the version from the existing
+			// baseline.
+			secret.ID = existing.ID
+			secret.Created = existing.Created
+			secret.CreatedBy = existing.CreatedBy
+			secret.Version = existing.Version
+			return updateSecretRow(ctx, c, secret)
+		}
+
+		secret.Created = now
+		if err := createSecretRow(ctx, c, secret); err != nil {
+			return err
+		}
+		created = true
+		return nil
+	})
+	if err != nil {
 		return false, err
 	}
-	return true, nil
+	return created, nil
 }
 
 // DeleteSecret removes a secret by key, scope, and scopeID.

@@ -74,6 +74,12 @@ type TelemetryHandler struct {
 	// handler, so without it a session's counts are lost between events.
 	SessionState SessionStateStore
 
+	// Analytics, if set, receives one agent.usage event per accepted
+	// model-end usage increment (SCION_USAGE_SOURCE=hooks only), appended
+	// to the analytics outbox before the counters are updated. Set by the
+	// hook command only when the GCP exporter is configured.
+	Analytics *telemetry.UsageAnalytics
+
 	// Metric instruments
 	usageTokens  metric.Int64Counter // scion.usage.tokens{token_type} (design §3.5; replaces scion.hook.tokens.*)
 	toolCalls    metric.Int64Counter
@@ -532,6 +538,23 @@ func (h *TelemetryHandler) metricAttrs() []attribute.KeyValue {
 	return attrs
 }
 
+// apiCallsAttrs returns the producer point labels of gen_ai.api.calls:
+// harness, model and status. Like scion.usage.tokens it carries no
+// unprefixed agent_id or project_id: the pipeline stamps the canonical
+// scion_agent_id, scion_project_id and scion_agent_slug labels on every
+// exported point, so both usage metrics share one identity label set
+// (ptone/scion#3668). The native UsageDeriver emits the same set.
+func apiCallsAttrs(model, status string) []attribute.KeyValue {
+	var attrs []attribute.KeyValue
+	if v := os.Getenv("SCION_HARNESS"); v != "" {
+		attrs = append(attrs, attribute.String(telemetrycontract.HarnessLabel, v))
+	}
+	return append(attrs,
+		attribute.String(telemetrycontract.ModelLabel, model),
+		attribute.String(telemetrycontract.StatusLabel, status),
+	)
+}
+
 // usageHookRecordingEnabled reports whether this process should record
 // hook-sourced usage (gen_ai.api.calls and scion.usage.tokens). Per design
 // D4/D10 and §3.5 "Single source":
@@ -604,13 +627,16 @@ func (h *TelemetryHandler) recordEndMetrics(event *hooks.Event, startEventType s
 
 	case hooks.EventModelStart:
 		usageEnabled := usageHookRecordingEnabled()
+		if usageEnabled {
+			// Outbox first, then counters (WP2 design section 2).
+			h.recordUsageAnalytics(event)
+		}
 		if h.apiCalls != nil && usageEnabled {
 			status := telemetrycontract.StatusSuccess
 			if event.Data.Error != "" {
 				status = telemetrycontract.StatusError
 			}
-			attrs := append(baseAttrs, attribute.String(telemetrycontract.ModelLabel, hookModelLabel(event)))
-			attrs = append(attrs, attribute.String(telemetrycontract.StatusLabel, status))
+			attrs := apiCallsAttrs(hookModelLabel(event), status)
 			h.apiCalls.Add(ctx, 1, metric.WithAttributes(attrs...))
 		}
 		if h.apiDuration != nil {
@@ -646,13 +672,16 @@ func (h *TelemetryHandler) recordUnpairedEndMetrics(event *hooks.Event, startEve
 
 	case hooks.EventModelStart:
 		usageEnabled := usageHookRecordingEnabled()
+		if usageEnabled {
+			// Outbox first, then counters (WP2 design section 2).
+			h.recordUsageAnalytics(event)
+		}
 		if h.apiCalls != nil && usageEnabled {
 			status := telemetrycontract.StatusSuccess
 			if event.Data.Error != "" {
 				status = telemetrycontract.StatusError
 			}
-			attrs := append(baseAttrs, attribute.String(telemetrycontract.ModelLabel, hookModelLabel(event)))
-			attrs = append(attrs, attribute.String(telemetrycontract.StatusLabel, status))
+			attrs := apiCallsAttrs(hookModelLabel(event), status)
 			h.apiCalls.Add(ctx, 1, metric.WithAttributes(attrs...))
 		}
 
@@ -675,9 +704,9 @@ func toOTelAttrs(kvs []telemetrycontract.LabelKV) []attribute.KeyValue {
 }
 
 // recordTokenMetrics records token usage counters from an event's token
-// fields. Unlike gen_ai.api.calls (which keeps agent_id/project_id for
-// descriptor compatibility, design §3.2), scion.usage.tokens's producer
-// label set is exactly harness, model and token_type -- nothing else. The
+// fields. scion.usage.tokens's producer label set is exactly harness, model
+// and token_type -- nothing else (gen_ai.api.calls has harness, model and
+// status, see apiCallsAttrs; design §3.2). The
 // GCP allowlist for this one metric is cloudUsageTokenFields, narrower than
 // the general hook-counter allowlist cloudPointFields
 // (gcp_metric_identity.go): a point carrying any other key, such as

@@ -262,8 +262,8 @@ func forEachModuleGoFile(t *testing.T, fn func(path string, f *ast.File)) {
 	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
 		t.Fatalf("module root %s has no go.mod: %v", root, err)
 	}
-	// pkgmove:scan-covers pkg/hub/maintenance
-	// recursive walk already includes pkg/hub/maintenance (walks the whole module; skips only dot, node_modules, testdata, web, docs-site and nested-module directories).
+	// pkgmove:scan-covers pkg/hub/...
+	// recursive walk of the whole module: skips only dot, node_modules, testdata, web and docs-site directories and nested modules (a directory with its own go.mod), so it covers every package directory below pkg/hub.
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err

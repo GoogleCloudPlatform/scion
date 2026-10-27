@@ -171,6 +171,28 @@ func doRequest(t *testing.T, srv *Server, method, path string, body interface{})
 	return rec
 }
 
+// assertInvalidCursorBody asserts the uniform malformed-cursor answer: code
+// invalid_cursor and its fixed message, whatever list or decoder rejected
+// the cursor (ptone/scion#3062).
+func assertInvalidCursorBody(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode error body: %v; body: %s", err, rec.Body.String())
+	}
+	if body.Error.Code != "invalid_cursor" {
+		t.Errorf("error code = %q, want %q; body: %s", body.Error.Code, "invalid_cursor", rec.Body.String())
+	}
+	if want := "invalid cursor: restart pagination from the first page"; body.Error.Message != want {
+		t.Errorf("error message = %q, want %q", body.Error.Message, want)
+	}
+}
+
 // doRequestNoAuth performs an HTTP request without authentication.
 // Use this for testing unauthenticated access or auth endpoints themselves.
 func doRequestNoAuth(t *testing.T, srv *Server, method, path string, body interface{}) *httptest.ResponseRecorder {

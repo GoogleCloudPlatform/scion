@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Package projectfs is the single authority for where a project's storage
-// lives (design fs-cleanup design-v4 §P1, ptone/scion#5805). It answers
+// lives (design fs-cleanup design §P1, ptone/scion#5805). It answers
 // "host path / subPath / server path for (project, agent, Mount)" for every
 // component, keyed by the project UUID on shared backends and by today's
 // slug-keyed layout on the local backend.
@@ -49,13 +49,31 @@ const (
 	// BackendNFS is a shared NFS export mounted at HostBase, with the
 	// UUID-keyed tree <SubPathRoot>/<projectID>/...
 	BackendNFS Backend = "nfs"
+	// BackendCloudRunVolume is a platform volume declared on a Cloud Run
+	// service and mounted at HostBase (/mnt/<volume name>), with the same
+	// UUID-keyed tree as nfs.
+	BackendCloudRunVolume Backend = "cloudrun-volume"
+	// BackendGKESharedVolume is a shared RWX volume mounted into GKE pods at
+	// HostBase (/mnt/<volume name>), with the same UUID-keyed tree as nfs.
+	BackendGKESharedVolume Backend = "gke-shared-volume"
 )
+
+// Shared reports whether the backend is storage shared by the hub and every
+// broker of a project, laid out as the UUID-keyed tree
+// <SubPathRoot>/<projectID>/... under HostBase.
+func (b Backend) Shared() bool {
+	switch b {
+	case BackendNFS, BackendCloudRunVolume, BackendGKESharedVolume:
+		return true
+	}
+	return false
+}
 
 // Durable reports whether data written to this backend survives the loss
 // of the process's own instance (a Cloud Run instance recycle). Only shared
 // backends are durable; local disk is not.
 func (b Backend) Durable() bool {
-	return b == BackendNFS
+	return b.Shared()
 }
 
 // Scope says whether a Mount is one directory for all agents of a project or
@@ -187,17 +205,6 @@ func SharedDirMount(sd api.SharedDir, containerWorkspace string) Mount {
 	}
 }
 
-// Realize (design §P1) is deferred to phase 3 (fs-cleanup-arch R3): its
-// first callers are the k8s buildPod fold (ptone/scion#5823) and the
-// docker/podman/apple run arguments. The intended shape, so phases 3 and 5
-// implement one function rather than two:
-//
-//	func (l Layout) Realize(r Resolved, runtime RuntimeKind) (Realized, error)
-//
-// where Realized carries either a host bind mount (source HostPath, target
-// r.Target, read-only) or a pod volume plus volume mount (claim, SubPath,
-// target), and container targets are never computed by callers.
-
 // ErrNoMount is returned for a Mount the project does not declare.
 var ErrNoMount = errors.New("projectfs: mount is not declared for this project")
 
@@ -232,6 +239,26 @@ type Layout struct {
 	SubPathRoot string
 	Share       Share
 	UID, GID    int
+	// Homes is where agent homes live (design §P2 homes: local | nfs):
+	// BackendLocal (in the pod or on the broker host, the default when
+	// empty) or BackendNFS (on this Layout's share).
+	Homes Backend
+	// SharedDirs, when set, is where shared-dir Mounts (and nfs homes)
+	// resolve instead of this Layout: a transitional split kept only for a
+	// hub still on the deprecated storage blocks whose shared dirs are on
+	// an nfs export while its workspaces are not (design M1,
+	// ptone/scion#5821). It is never configurable and goes
+	// away with the old blocks in phase 6.
+	SharedDirs *Layout
+}
+
+// SharedDirLayout returns the Layout shared-dir Mounts resolve on: the
+// transitional SharedDirs split when set, else l.
+func (l Layout) SharedDirLayout() Layout {
+	if l.SharedDirs != nil {
+		return *l.SharedDirs
+	}
+	return l
 }
 
 // Project identifies the project a Mount is resolved for.
@@ -271,6 +298,11 @@ type Resolved struct {
 	// Kind and Name are the resolved Mount's.
 	Kind Kind
 	Name string
+	// ReadOnly is the resolved Mount's: the realized mount is read-only.
+	ReadOnly bool
+	// ClaimName is the PersistentVolumeClaim of the share this directory
+	// is on (the Layout's Share.PVName), for pod mounts; empty on local.
+	ClaimName string
 }
 
 const (
@@ -331,7 +363,7 @@ func validSharedDirName(name string) error {
 // ProjectRoot resolves the root of a project's tree on a shared backend:
 // <SubPathRoot>/<projectID>.
 func (l Layout) ProjectRoot(projectID string) (Resolved, error) {
-	if l.Backend != BackendNFS {
+	if !l.Backend.Shared() {
 		return Resolved{}, fmt.Errorf("projectfs: ProjectRoot is defined for shared backends, not %q", l.Backend)
 	}
 	if err := validProjectID(projectID); err != nil {
@@ -342,6 +374,22 @@ func (l Layout) ProjectRoot(projectID string) (Resolved, error) {
 		return Resolved{}, err
 	}
 	return l.shared(filepath.Join(root, projectID), Mount{}), nil
+}
+
+// ProjectConfigDirName is the name of a project's configuration directory.
+const ProjectConfigDirName = ".scion"
+
+// ProjectConfig resolves a project's configuration directory on a shared
+// backend: <SubPathRoot>/<projectID>/.scion, beside workspace/ and inside
+// no Mount. Hub-seeded: project settings, the hub
+// connection and project identity. A .scion inside the workspace is
+// repository content and never supplies those.
+func (l Layout) ProjectConfig(projectID string) (Resolved, error) {
+	pr, err := l.ProjectRoot(projectID)
+	if err != nil {
+		return Resolved{}, err
+	}
+	return l.shared(filepath.Join(pr.RelPath, ProjectConfigDirName), Mount{}), nil
 }
 
 // AgentRoot resolves an agent's directory on a shared backend:
@@ -368,6 +416,8 @@ func (l Layout) shared(rel string, m Mount) Resolved {
 		SubPathRoot: root,
 		SubPath:     filepath.ToSlash(rel),
 		Target:      m.Target,
+		ReadOnly:    m.ReadOnly,
+		ClaimName:   l.Share.PVName,
 		Kind:        m.Kind,
 		Name:        m.Name,
 	}
@@ -400,25 +450,31 @@ func (l Layout) Resolve(p Project, agent string, m Mount) (Resolved, error) {
 		if err := validSharedDirName(m.Name); err != nil {
 			return Resolved{}, err
 		}
+		if l.SharedDirs != nil {
+			if l.SharedDirs.SharedDirs != nil {
+				return Resolved{}, errors.New("projectfs: nested shared-dir layouts are not supported")
+			}
+			return l.SharedDirs.Resolve(p, agent, m)
+		}
 	}
 	if agent != "" {
 		if err := validAgentSlug(agent); err != nil {
 			return Resolved{}, err
 		}
 	}
-	switch l.Backend {
-	case BackendNFS:
-		return l.resolveNFS(p, agent, m)
-	case BackendLocal:
+	switch {
+	case l.Backend.Shared():
+		return l.resolveShared(p, agent, m)
+	case l.Backend == BackendLocal:
 		return l.resolveLocal(p, agent, m)
 	default:
 		return Resolved{}, fmt.Errorf("projectfs: unsupported backend %q", l.Backend)
 	}
 }
 
-func (l Layout) resolveNFS(p Project, agent string, m Mount) (Resolved, error) {
+func (l Layout) resolveShared(p Project, agent string, m Mount) (Resolved, error) {
 	if p.ID == "" {
-		return Resolved{}, errors.New("projectfs: project ID is required on the nfs backend")
+		return Resolved{}, fmt.Errorf("projectfs: project ID is required on the %s backend", l.Backend)
 	}
 	pr, err := l.ProjectRoot(p.ID)
 	if err != nil {
@@ -453,7 +509,7 @@ func (l Layout) resolveNFS(p Project, agent string, m Mount) (Resolved, error) {
 
 func (l Layout) resolveLocal(p Project, agent string, m Mount) (Resolved, error) {
 	local := func(hostPath string) Resolved {
-		return Resolved{Backend: BackendLocal, HostPath: hostPath, Target: m.Target, Kind: m.Kind, Name: m.Name}
+		return Resolved{Backend: BackendLocal, HostPath: hostPath, Target: m.Target, Kind: m.Kind, Name: m.Name, ReadOnly: m.ReadOnly}
 	}
 	switch m.Kind {
 	case KindSharedDir:
@@ -507,4 +563,17 @@ func LocalConfigDirName(slug, projectID string) string {
 		short = short[:8]
 	}
 	return fmt.Sprintf("%s__%s", slug, short)
+}
+
+// Key is a value identity of l, stable across calls and copies: two Layouts
+// with the same fields (and the same transitional SharedDirs split, by
+// value) have the same Key. Use it, not fmt's %v of the struct, as a cache
+// key: SharedDirs is a pointer.
+func (l Layout) Key() string {
+	k := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%d|%d|%s",
+		l.Backend, l.HostBase, l.SubPathRoot, l.Share.ID, l.Share.Server, l.Share.Export, l.Share.PVName, l.UID, l.GID, l.Homes)
+	if l.SharedDirs != nil {
+		k += "|sd{" + l.SharedDirs.Key() + "}"
+	}
+	return k
 }

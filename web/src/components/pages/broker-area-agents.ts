@@ -34,6 +34,8 @@ export interface BrokerAreaProject {
   gitRemote?: string;
   agentCount: number;
   localPath?: string;
+  /** True when this broker is the project's default Runtime Broker. */
+  isDefault?: boolean;
 }
 
 @customElement('scion-broker-area-agents')

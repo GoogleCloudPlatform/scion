@@ -289,13 +289,7 @@ func assertFlatEquivalent(t *testing.T, vs *VersionedSettings, p string, inst V1
 		}
 	}
 
-	// Dirs and harness configs any of the tiers names, plus one none does.
-	dirs := map[string]bool{"unnamed-dir": true}
-	for _, m := range []map[string]string{prof.SharedDirStorageBackends, rt.SharedDirStorageBackends, inst.RuntimeTarget.SharedDirStorageBackends} {
-		for d := range m {
-			dirs[d] = true
-		}
-	}
+	// Harness configs any of the tiers names, plus one none does.
 	hcs := map[string]bool{"unnamed-hc": true}
 	for hc := range vs.HarnessConfigs {
 		hcs[hc] = true
@@ -310,14 +304,6 @@ func assertFlatEquivalent(t *testing.T, vs *VersionedSettings, p string, inst V1
 	}
 
 	// Docker and Kubernetes.
-	for d := range dirs {
-		lb, _, lp := vs.ResolveSharedDirStorageBackend(p, d)
-		fb, _, fp := flat.ResolveSharedDirStorageBackend("", d)
-		check("shared dir backend of "+d, []interface{}{lb, lp}, []interface{}{fb, fp})
-	}
-	lcfg, _ := vs.ResolveSharedDirStorage(p)
-	fcfg, _ := flat.ResolveSharedDirStorage("")
-	check("shared dir storage", lcfg, fcfg)
 	lcd, _ := vs.ResolveCloneDepthWithSource(p)
 	fcd, _ := flat.ResolveCloneDepthWithSource("")
 	check("clone depth", lcd, fcd)
@@ -353,8 +339,6 @@ func assertFlatEquivalent(t *testing.T, vs *VersionedSettings, p string, inst V1
 	fc, fsz := flat.ResolveSharedDirDefaults("")
 	check("shared dir defaults", []string{lc, lsz}, []string{fc, fsz})
 	check("safe_to_evict", vs.ResolveSafeToEvict(p), flat.ResolveSafeToEvict(""))
-	lh, fh := vs.ResolveHomeStorage(p), flat.ResolveHomeStorage("")
-	check("home storage", []string{lh.Backend, lh.Leaf}, []string{fh.Backend, fh.Leaf})
 	lrt, _, err := vs.ResolveRuntime(p)
 	if err != nil {
 		t.Fatalf("profile %s: %v", p, err)
@@ -383,22 +367,31 @@ func assertFlatEquivalent(t *testing.T, vs *VersionedSettings, p string, inst V1
 	check("block service account", []interface{}{lb, lbok}, []interface{}{fb, fb != ""})
 }
 
-// B4: a profile's single backend shadows its runtime entry's per-dir map.
-// Dir x is nfs for the legacy profile and on the converted instance; an
-// independent per-key merge would put it on local.
-func TestConvert_PerDirShadowedByProfileSingle(t *testing.T) {
+// The removed storage overrides are not converted (design OQ2-A): the
+// instance carries none of them, and each one set is reported as a
+// legacy_field_removed finding naming server.project_storage and volumes:.
+func TestConvert_RemovedStorageOverridesNotConverted(t *testing.T) {
 	f := loadConversionFixture(t, "per_dir_shadowed_by_profile_single")
 	got := ConvertProfilesToInstances(f.in)
 	if len(got.Instances) != 1 {
 		t.Fatalf("want one instance, got %+v", got.Instances)
 	}
-	legacy, _, _ := f.in.Settings.ResolveSharedDirStorageBackend("batch", "x")
-	flat, _, _ := f.in.Settings.ForFlatInstance(NewFlatInstancePolicy(got.Instances[0])).ResolveSharedDirStorageBackend("", "x")
-	if legacy != "nfs" || flat != "nfs" {
-		t.Fatalf("dir x: legacy %q, flat %q, want nfs for both", legacy, flat)
+	rt := got.Instances[0].RuntimeTarget
+	if rt.SharedDirStorageBackend != "" || len(rt.SharedDirStorageBackends) != 0 || rt.HomeStorageBackend != "" || rt.HomeStorageLeaf != "" {
+		t.Fatalf("the instance must carry no storage override, got %+v", rt)
 	}
-	if m := got.Instances[0].RuntimeTarget.SharedDirStorageBackends; len(m) != 0 {
-		t.Fatalf("the instance must not carry the shadowed per-dir map, got %v", m)
+	removed := 0
+	for _, fd := range got.Findings {
+		if fd.Code != ConversionLegacyFieldRemoved {
+			continue
+		}
+		removed++
+		if fd.Severity != ConversionSeverityNotice || !strings.Contains(fd.Message, "server.project_storage") || !strings.Contains(fd.Message, "volumes:") {
+			t.Errorf("finding %+v: want a notice naming server.project_storage and volumes:", fd)
+		}
+	}
+	if removed != 2 {
+		t.Fatalf("want 2 legacy_field_removed findings, got %d: %+v", removed, got.Findings)
 	}
 }
 
@@ -510,13 +503,13 @@ func TestConvert_InvalidChoicesBlock(t *testing.T) {
 	vs := &VersionedSettings{
 		Runtimes: map[string]V1RuntimeConfig{"cluster": {Type: "kubernetes", Namespace: "agents"}},
 		Profiles: map[string]V1ProfileConfig{
-			"a": {Runtime: "cluster", ImageRegistry: "reg/a", SharedDirStorageBackend: "nfs"},
-			"b": {Runtime: "cluster", ImageRegistry: "reg/b", SharedDirStorageBackend: "local"},
+			"a": {Runtime: "cluster", ImageRegistry: "reg/a", SharedDirSize: "10Gi"},
+			"b": {Runtime: "cluster", ImageRegistry: "reg/b", SharedDirSize: "20Gi"},
 		},
 	}
 	valid := []ConversionChoice{
 		{TargetGroup: "k8s-agents", Field: "image_registry", ChosenProfile: "a"},
-		{TargetGroup: "k8s-agents", Field: "shared_dir_storage_backend", ChosenProfile: "b"},
+		{TargetGroup: "k8s-agents", Field: "shared_dir_size", ChosenProfile: "b"},
 	}
 	// Without an invalid choice the group converts cleanly.
 	clean := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs, Choices: valid})
@@ -567,11 +560,11 @@ func TestConvert_TemplateChoiceRefusedForInfraField(t *testing.T) {
 	vs := &VersionedSettings{
 		Runtimes: map[string]V1RuntimeConfig{"cluster": {Type: "kubernetes", Namespace: "agents"}},
 		Profiles: map[string]V1ProfileConfig{
-			"a": {Runtime: "cluster", SharedDirStorageBackend: "nfs", HomeStorageBackend: "nfs", SharedDirSize: "10Gi"},
-			"b": {Runtime: "cluster", SharedDirStorageBackend: "local", HomeStorageBackend: "local", SharedDirSize: "20Gi"},
+			"a": {Runtime: "cluster", SharedDirStorageClass: "rwx-a", SharedDirSize: "10Gi"},
+			"b": {Runtime: "cluster", SharedDirStorageClass: "rwx-b", SharedDirSize: "20Gi"},
 		},
 	}
-	for i, field := range []string{"shared_dir_storage_backend", "home_storage_backend", "shared_dir_size"} {
+	for i, field := range []string{"shared_dir_storage_class", "shared_dir_size"} {
 		choice := ConversionChoice{TargetGroup: "k8s-agents", Field: field, ChosenProfile: ConversionChoiceTemplatePrefix + "batch"}
 		got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs, Choices: []ConversionChoice{choice}})
 		refused, conflict := false, false
