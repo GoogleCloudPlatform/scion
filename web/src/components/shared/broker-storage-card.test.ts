@@ -96,10 +96,12 @@ describe('scion-broker-storage-card', () => {
     expect(root.querySelector('.storage-compare-note')).toBeNull();
   });
 
-  it('says the comparison is not available without Health access', async () => {
+  it('says the comparison is not available when it is not known', async () => {
     const root = await mount(nfsStorage(), null);
     expect(root.querySelector('.storage-mismatch-alert')).toBeNull();
-    expect(root.querySelector('.storage-compare-note')).not.toBeNull();
+    expect(root.querySelector('.storage-compare-note')?.textContent?.trim()).toBe(
+      "The comparison with the hub's layout is not available."
+    );
   });
 
   it('says no layout was reported for an older broker', async () => {

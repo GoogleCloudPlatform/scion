@@ -41,7 +41,8 @@ export class ScionBrokerStorageCard extends LitElement {
 
   /**
    * The hub's layout comparison lines; null when the comparison is not
-   * available to this user (no health summary access).
+   * available (for example no health summary access, or no summary row for
+   * this broker).
    */
   @property({ type: Array })
   mismatch: string[] | null = null;
@@ -86,7 +87,7 @@ export class ScionBrokerStorageCard extends LitElement {
           : html`<p class="tab-note storage-none">No storage layout reported (older broker).</p>`}
         ${this.mismatch === null
           ? html`<p class="presentation-caption storage-compare-note">
-              The comparison with the hub's layout is shown to users who can read Health.
+              The comparison with the hub's layout is not available.
             </p>`
           : nothing}
         <p class="presentation-caption storage-source-note">${STORAGE_SOURCE_NOTE}</p>

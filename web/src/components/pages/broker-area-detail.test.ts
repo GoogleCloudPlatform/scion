@@ -68,6 +68,7 @@ const SETTINGS = {
 let broker: RuntimeBroker;
 let summaryStatus = 200;
 let summaryItems: HealthSummaryItem[] = [];
+let summaryTruncated = false;
 let patchResponse: Partial<RuntimeBroker> = {};
 /** What GET returns after a PATCH (the stored record); null = unchanged. */
 let afterPatch: RuntimeBroker | null = null;
@@ -105,6 +106,7 @@ describe('scion-page-broker-area-detail', () => {
     vi.stubGlobal('EventSource', FakeEventSource);
     summaryStatus = 200;
     summaryItems = [];
+    summaryTruncated = false;
     patchResponse = {};
     afterPatch = null;
     providerProjects = [];
@@ -124,7 +126,7 @@ describe('scion-page-broker-area-detail', () => {
         if (summaryStatus !== 200) {
           return jsonResponse({ error: { code: 'forbidden', message: 'no' } }, summaryStatus);
         }
-        return jsonResponse(healthSummary(summaryItems));
+        return jsonResponse(healthSummary(summaryItems, summaryTruncated));
       }
       return jsonResponse({}, 404);
     });
@@ -211,6 +213,27 @@ describe('scion-page-broker-area-detail', () => {
     const health = el.shadowRoot!.querySelector('scion-broker-area-health') as Page;
     await health.updateComplete;
     expect(health.shadowRoot!.querySelector('.storage-layout-mismatch')).toBeNull();
+  });
+
+  it('Project storage: comparison not available when a truncated summary has no row for the broker', async () => {
+    vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
+    summaryItems = [{ id: 'other-broker', layout_mismatch: LAYOUT_MISMATCH }];
+    summaryTruncated = true;
+    const el = await mount({ ...FLAT_K8S, workspaceStorage: nfsStorage() });
+    const card = el.shadowRoot!.querySelector('scion-broker-storage-card') as Page;
+    await card.updateComplete;
+    expect(card.shadowRoot!.querySelector('.storage-mismatch-alert')).toBeNull();
+    expect(card.shadowRoot!.querySelector('.storage-compare-note')).not.toBeNull();
+  });
+
+  it('Project storage: comparison not available when the summary has no row for the broker', async () => {
+    vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
+    summaryItems = [{ id: 'other-broker', layout_mismatch: LAYOUT_MISMATCH }];
+    const el = await mount({ ...FLAT_K8S, workspaceStorage: nfsStorage() });
+    const card = el.shadowRoot!.querySelector('scion-broker-storage-card') as Page;
+    await card.updateComplete;
+    expect(card.shadowRoot!.querySelector('.storage-mismatch-alert')).toBeNull();
+    expect(card.shadowRoot!.querySelector('.storage-compare-note')).not.toBeNull();
   });
 
   it('Default for project: taken from isDefault in the providers listing, with no project reads', async () => {
