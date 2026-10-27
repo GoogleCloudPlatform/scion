@@ -44,7 +44,11 @@ const DOC = [
   '',
   'The second paragraph stays as written.',
   '',
-  '- a list item',
+  '* a list item',
+  '',
+  '| Col | Val |',
+  '|:----|----:|',
+  '| a | 1 |',
   '',
   '```js',
   'code();',
@@ -248,7 +252,8 @@ test('edits become suggestions, comments work by button and shortcut, and the re
   afterDelete = await editorText(page);
   expect(afterDelete).toContain('{==written==}{>>Why?<<}');
 
-  // Refusals: a paragraph break, formatting, a list item and code change nothing.
+  // Refusals: a paragraph break, formatting, a new list item or table
+  // line, and code change nothing.
   const before = await editorText(page);
   await endOf(page, 'second paragraph');
   await page.keyboard.press('Enter');
@@ -256,14 +261,33 @@ test('edits become suggestions, comments work by button and shortcut, and the re
   await selectWord(page, 'paragraph');
   await page.keyboard.press('Control+b');
   await expect(hint(page)).toContainText("Formatting can't be suggested here.");
-  await editor(page).locator('li').click();
-  await page.keyboard.type('x');
-  await expect(hint(page)).toContainText("Lists and tables can't take suggestions here yet.");
+  await endOf(page, 'a list item');
+  await page.keyboard.press('Enter');
+  await expect(hint(page)).toContainText(
+    "List and table structure can't be changed in a suggestion."
+  );
+  await editor(page).locator('td', { hasText: /^a$/ }).click();
+  await page.keyboard.press('Enter');
+  await expect(hint(page)).toContainText(
+    "List and table structure can't be changed in a suggestion."
+  );
   await editor(page).locator('pre').click();
   await page.keyboard.type('x');
   await expect(hint(page)).toContainText("Code blocks can't take suggestions.");
   expect(await editorText(page)).toBe(before);
   await expect(editor(page).locator('li')).toHaveText('a list item');
+
+  // Typing in a list item and in a table cell is recorded, and the list's
+  // bullet and the table's alignment stay as written.
+  await endOf(page, 'a list item');
+  await page.keyboard.type('s');
+  await expect.poll(() => editorText(page)).toContain('* a list item{++s++}\n');
+  await editor(page).locator('td', { hasText: /^a$/ }).click();
+  await page.keyboard.press('End');
+  await page.keyboard.type('b');
+  await expect
+    .poll(() => editorText(page))
+    .toContain('| Col | Val |\n|:----|----:|\n| a{++b++} | 1 |\n');
 
   if (browserName === 'chromium') {
     // An IME composition is recorded as an insertion.

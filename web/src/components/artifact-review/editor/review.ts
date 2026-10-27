@@ -49,14 +49,12 @@ export interface CommentPlan {
  * textblock that touches no mark and no code is highlighted and the note
  * follows it ({==sel==}{>>note<<}); otherwise the note goes on its own at
  * the end of the selection. Returns the hint to show where no comment can
- * go in this version of the editor (code, lists and tables).
+ * go (code).
  */
 export function planComment(state: EditorState): CommentPlan | { refuse: HintKind } {
   const { from, to, $from, $to } = state.selection;
   const $at = state.doc.resolve(to);
-  const container = containerClass($at) ?? containerClass($from);
-  if (container === 'code') return { refuse: 'code' };
-  if (container) return { refuse: 'list-table' };
+  if (containerClass($at) === 'code' || containerClass($from) === 'code') return { refuse: 'code' };
   if (!$at.parent.isTextblock) return { refuse: 'generic' };
   const code = state.schema.marks.inlineCode;
   const inCode = (pos: number): boolean => {

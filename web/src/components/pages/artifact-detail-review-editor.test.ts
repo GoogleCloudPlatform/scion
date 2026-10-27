@@ -52,6 +52,11 @@ class FakeReviewEditor extends HTMLElement {
   hasOwnMarks(): boolean {
     return this.own;
   }
+  /** isComposing() answer. */
+  composing = false;
+  isComposing(): boolean {
+    return this.composing;
+  }
   flush(): string | null {
     if (this.unwritable) return null;
     return this.next ?? this.content;
@@ -320,7 +325,7 @@ describe('artifact page: graphical review editor experiment', () => {
     );
     await settle(el);
     expect($(el, '.hint-strip')!.textContent).toContain(
-      "Lists and tables can't take suggestions here yet."
+      "List and table structure can't be changed in a suggestion."
     );
     byText(el, '.hint-strip sl-button', 'Open Source view')!.click();
     await settle(el);
@@ -441,5 +446,18 @@ describe('artifact page: graphical review editor experiment', () => {
     expect($(el, 'scion-review-editor')).not.toBeNull();
     expect($(el, '.g-work scion-code-editor.review-editor')).toBeNull();
     expect(window.localStorage.getItem('scion:artifact-review-view')).not.toBe('source');
+  });
+
+  it('asks to finish typing when Save comes while an input method composition runs', async () => {
+    mockFetch();
+    const el = await mount(true);
+    await startReview(el);
+    const editor = $<FakeReviewEditor>(el, 'scion-review-editor')!;
+    editor.unwritable = true;
+    editor.composing = true;
+    byText(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el);
+    expect(writes).toEqual([]);
+    expect($(el, '.hint-strip')!.textContent).toContain("Finish the text you're typing first.");
   });
 });
