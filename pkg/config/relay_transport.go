@@ -24,24 +24,45 @@ import (
 // relayTransportFix is the remedy every relay internal hop refusal names.
 const relayTransportFix = "serve the internal listener with TLS (server.hub.conduit.internal_tls_cert_file and " +
 	"internal_tls_key_file; a private or internal CA also REQUIRES server.hub.conduit.internal_tls_ca_file on every node) " +
-	"and use https://, or use a loopback address"
+	"and use https://, or use a loopback IP literal (127.0.0.1 or ::1; not localhost)"
 
 // CheckRelayTransport is the transport rule for the conduit relay internal
 // hop: hub to hub, hub to relay, relay to hub and relay to relay, including
 // the hub ingress upgrade. That hop carries user and agent credentials and
 // session content, so it must be encrypted whenever it leaves the host.
 //
-// It applies the same accept rule as CheckHubTransport (https or wss, or
-// http or ws to a literal loopback host; names are never resolved) and
-// differs only in its message. The error wraps ErrPlaintextNonLoopback.
-// There is no override.
+// A URL is accepted when its scheme is https or wss, or when its scheme is
+// http or ws and its host is a loopback IP literal (relayLoopbackLiteral).
+// Unlike CheckHubTransport, no name is loopback here, not even "localhost":
+// the hop is dialed and listened on by name, and a resolver that answered a
+// name with a network address would carry the hop in plaintext off the
+// host. Every other URL is refused, including any other scheme, a URL that
+// does not parse and a URL without a host. The error wraps
+// ErrPlaintextNonLoopback. There is no override.
 func CheckRelayTransport(rawURL string) error {
-	if err := CheckHubTransport(rawURL); err != nil {
-		return fmt.Errorf("%w: conduit relay internal endpoint %s is not https:// and not loopback, so relay "+
-			"traffic would cross the network unencrypted; %s",
-			ErrPlaintextNonLoopback, relayEndpointShown(rawURL), relayTransportFix)
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err == nil && u.Host != "" {
+		switch strings.ToLower(u.Scheme) {
+		case "https", "wss":
+			return nil
+		case "http", "ws":
+			if relayLoopbackLiteral(u.Hostname()) {
+				return nil
+			}
+		}
 	}
-	return nil
+	return fmt.Errorf("%w: conduit relay internal endpoint %s is not https:// and not loopback (only a loopback IP literal "+
+		"counts: 127.0.0.0/8 or ::1, never a name such as localhost), so relay "+
+		"traffic would cross the network unencrypted; %s",
+		ErrPlaintextNonLoopback, relayEndpointShown(rawURL), relayTransportFix)
+}
+
+// relayLoopbackLiteral reports whether host is a loopback IP literal
+// (127.0.0.0/8 or ::1). It never resolves a name, so "localhost" and every
+// other host name are not loopback for the relay internal hop.
+func relayLoopbackLiteral(host string) bool {
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // relayEndpointShown is how a refused endpoint is named: masked, with its
@@ -61,20 +82,21 @@ func relayEndpointShown(rawURL string) string {
 }
 
 // CheckRelayInternalListen is the listener half of the relay internal hop
-// rule: a listener that does not serve TLS must bind a literal loopback
-// host (127.0.0.0/8, ::1 or "localhost"). A wildcard bind (":p",
-// "0.0.0.0:p", "[::]:p") or any other host is refused. A TLS listener may
-// bind any address. key names the setting in the error. The error wraps
-// ErrPlaintextNonLoopback.
+// rule: a listener that does not serve TLS must bind a loopback IP literal
+// (127.0.0.0/8 or ::1; relayLoopbackLiteral). A wildcard bind (":p",
+// "0.0.0.0:p", "[::]:p"), "localhost" (it would be resolved at listen) and
+// any other host are refused. A TLS listener may bind any address. key
+// names the setting in the error. The error wraps ErrPlaintextNonLoopback.
 func CheckRelayInternalListen(key, listen string, servesTLS bool) error {
 	if servesTLS {
 		return nil
 	}
 	host, _, err := net.SplitHostPort(strings.TrimSpace(listen))
-	if err == nil && host != "" && IsLoopbackHost(strings.ToLower(host)) {
+	if err == nil && relayLoopbackLiteral(host) {
 		return nil
 	}
-	return fmt.Errorf("%w: %s %q is not a loopback address and the listener has no TLS certificate, so relay "+
+	return fmt.Errorf("%w: %s %q is not a loopback address (only a loopback IP literal counts: 127.0.0.0/8 or ::1, "+
+		"never a name such as localhost) and the listener has no TLS certificate, so relay "+
 		"traffic would cross the network unencrypted; %s (for example 127.0.0.1:<port> behind a same-host "+
 		"TLS terminator advertised as https://)", ErrPlaintextNonLoopback, key, listen, relayTransportFix)
 }
