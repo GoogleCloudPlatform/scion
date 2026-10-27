@@ -111,7 +111,7 @@ func TestHealth_StorageOverridesCheck(t *testing.T) {
 	t.Cleanup(func() { storageOverridesCacheTTL = old })
 
 	srv, _, _ := dispatchTestEnv(t, true)
-	var checkErr error = errors.New("removed overrides")
+	checkErr := errors.New("removed overrides")
 	calls := 0
 	srv.config.StorageOverridesCheck = func() error { calls++; return checkErr }
 

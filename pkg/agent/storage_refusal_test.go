@@ -84,7 +84,9 @@ func refusalGlobalHome(t *testing.T, content string, overlay *config.SettingsOve
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(content), 0o644))
 }
 
-func requireStorageRefusal(t *testing.T, err error, wantKeys ...string) *config.StorageMigrationRequiredError {
+// storageRefusalOf asserts err is a *config.StorageMigrationRequiredError
+// whose log and public texts both name each of wantKeys, and returns it.
+func storageRefusalOf(t *testing.T, err error, wantKeys ...string) *config.StorageMigrationRequiredError {
 	t.Helper()
 	var se *config.StorageMigrationRequiredError
 	require.ErrorAs(t, err, &se)
@@ -95,11 +97,18 @@ func requireStorageRefusal(t *testing.T, err error, wantKeys ...string) *config.
 	return se
 }
 
+// requireStorageRefusal is storageRefusalOf for callers that do not read
+// the refusal.
+func requireStorageRefusal(t *testing.T, err error, wantKeys ...string) {
+	t.Helper()
+	_ = storageRefusalOf(t, err, wantKeys...)
+}
+
 func TestCheckStartStorageRefusals_ProfileChain(t *testing.T) {
 	refusalGlobalHome(t, refusalSettings, nil)
 	ctx := context.Background()
 
-	se := requireStorageRefusal(t, checkStartStorageRefusals(ctx, "", "shared-nfs"), "profiles.shared-nfs.shared_dir_storage_backend")
+	se := storageRefusalOf(t, checkStartStorageRefusals(ctx, "", "shared-nfs"), "profiles.shared-nfs.shared_dir_storage_backend")
 	assert.Contains(t, se.Error(), `pv_name "share-a-pv"`, "the log text names the claim")
 	assert.NotContains(t, se.PublicMessage(), "share-a-pv", "the public text names no claim")
 	assert.NotContains(t, se.Error(), "runtimes.cluster-homes", "only the start's own chain is named")
@@ -168,7 +177,7 @@ func TestSharedDirRecordPinRefusal(t *testing.T) {
 				assert.NoError(t, err)
 				return
 			}
-			se := requireStorageRefusal(t, err, tc.wantRefuse, tc.file, "server.shared_dir_storage.backend")
+			se := storageRefusalOf(t, err, tc.wantRefuse, tc.file, "server.shared_dir_storage.backend")
 			assert.Contains(t, se.Error(), `pv_name "share-a-pv"`)
 			_, statErr := os.Stat(path)
 			assert.NoError(t, statErr, "the record is kept")
