@@ -151,6 +151,8 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 			if caps != nil && !capabilityAllows(caps[i], ActionRead) {
 				continue
 			}
+			// Storage layout values are shown to hub admins only.
+			broker = brokerStorageForViewer(ctx, broker, false)
 			eb := RuntimeBrokerWithProvider{
 				RuntimeBroker: brokerForDisplay(broker),
 				LocalPath:     brokerLocalPaths[broker.ID],
@@ -194,6 +196,8 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 		if caps != nil && !capabilityAllows(caps[i], ActionRead) {
 			continue
 		}
+		// Storage layout values are shown to hub admins only.
+		broker = brokerStorageForViewer(ctx, broker, false)
 		resp := RuntimeBrokerWithCapabilities{RuntimeBroker: withHostIdentity(brokerForDisplay(broker), false)}
 		resp.HostedByThisServer = embedded.has(broker.ID)
 		resp.VersionStatus = runtimeBrokerVersionStatus(&result.Items[i], hubVersion)
@@ -414,13 +418,17 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 		}
 	}
 
+	// Storage layout values are shown to hub admins and the broker itself
+	// only.
+	shown := brokerStorageForViewer(ctx, *broker, brokerSelf)
+
 	// Compute capabilities for the requesting user
-	resp := RuntimeBrokerWithCapabilities{RuntimeBroker: withHostIdentity(brokerForDisplay(*broker), false)}
+	resp := RuntimeBrokerWithCapabilities{RuntimeBroker: withHostIdentity(brokerForDisplay(shown), false)}
 	resp.HostedByThisServer = s.embeddedBrokerSnapshot().has(broker.ID)
 	resp.VersionStatus = runtimeBrokerVersionStatus(broker, s.hubFleetVersion(ctx))
 	if ident := GetIdentityFromContext(ctx); ident != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, ident, brokerResource(broker))
-		resp.RuntimeBroker = brokerForDisplayWithCap(*broker, resp.Cap)
+		resp.RuntimeBroker = brokerForDisplayWithCap(shown, resp.Cap)
 		s.reportBrokerDispatchCapability(ctx, resp.Cap, broker, nil)
 	}
 
@@ -613,7 +621,7 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	}
 
 	// The caller holds broker.update (checked above).
-	writeJSON(w, http.StatusOK, withHostIdentity(brokerForDisplay(*after), true))
+	writeJSON(w, http.StatusOK, withHostIdentity(brokerForDisplay(brokerStorageForViewer(ctx, *after, false)), true))
 }
 
 func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id string) {
