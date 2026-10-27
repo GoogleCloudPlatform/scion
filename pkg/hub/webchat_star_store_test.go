@@ -54,6 +54,15 @@ type starStoreEnv struct {
 	reinit func(t *testing.T)
 	// migrationRows counts the star migration's webchat_migrations rows.
 	migrationRows func(t *testing.T) int
+
+	// The lifecycle contract (webchat_star_lifecycle_test.go) also needs:
+	// projectID is an existing project; addTopic creates topics in it.
+	projectID string
+	// addUser creates a user row.
+	addUser func(t *testing.T, id string)
+	// insertStar stores an association directly, bypassing the add guard
+	// (rows an older binary or a lost race could leave behind).
+	insertStar func(t *testing.T, userID, messageID, key, projectID string, at time.Time)
 }
 
 func threadSel(key string) StarSelector {
@@ -288,9 +297,21 @@ func TestMessageStarStore_SQLite(t *testing.T) {
 			require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM webchat_migrations WHERE name = ?`, messageStarTableMigration).Scan(&n))
 			return n
 		},
+		projectID: projectID,
+		addUser: func(t *testing.T, id string) {
+			require.NoError(t, s.CreateUser(context.Background(), &store.User{
+				ID: id, Email: id + "@stars.test", DisplayName: "u", Role: "member", Status: store.UserStatusActive,
+			}))
+		},
+		insertStar: func(t *testing.T, userID, messageID, key, projectID string, at time.Time) {
+			_, err := db.Exec(`INSERT INTO webchat_message_star (user_id, message_id, conversation_key, project_id, starred_at) VALUES (?, ?, ?, ?, ?)`,
+				userID, messageID, key, nullableString(projectID), sqliteStarTime(at))
+			require.NoError(t, err)
+		},
 	}
 	require.NotNil(t, env.stars)
 	testMessageStarStoreContract(t, env)
+	testMessageStarLifecycleContract(t, env)
 }
 
 // TestMessageStarStore_SQLite_FixedWidthTime pins the SQLite TEXT form:
@@ -327,6 +348,17 @@ func TestMessageStarStore_Postgres(t *testing.T) {
     id uuid PRIMARY KEY, project_id uuid, created timestamptz NOT NULL, channel text, thread_id text,
     conversation_id uuid, msg text, sender text, sender_id text, recipient text, recipient_id text)`)
 	require.NoError(t, err)
+	// The Ent-managed tables the lifecycle contract reaches: users and
+	// projects (existence only) and conversations (a promotion creates one).
+	_, err = db.ExecContext(ctx, `CREATE TABLE users (id uuid PRIMARY KEY);
+CREATE TABLE projects (id uuid PRIMARY KEY);
+CREATE TABLE conversations (
+    id uuid PRIMARY KEY, project_id uuid, kind text, surface text, external_ref text, parent_ref text,
+    display_name text, default_agent_id uuid, drift_state text, last_activity_at timestamptz, created_at timestamptz)`)
+	require.NoError(t, err)
+	projectID := uuid.NewString()
+	_, err = db.ExecContext(ctx, `INSERT INTO projects (id) VALUES ($1)`, projectID)
+	require.NoError(t, err)
 	wcs := NewWebChatStore(db, "postgres")
 	require.NoError(t, wcs.Init())
 	env := starStoreEnv{
@@ -347,7 +379,7 @@ VALUES ($1, $2, $3, $4, $5, $6, 'user:x@test.com')`, id, created, channel, threa
 		},
 		addTopic: func(t *testing.T, id string) {
 			_, err := db.Exec(`INSERT INTO webchat_topic (id, project_id, name, created_by, created_at) VALUES ($1, $2, $3, $4, NOW())`,
-				id, uuid.NewString(), "t-"+id[:8], "u")
+				id, projectID, "t-"+id[:8], "u")
 			require.NoError(t, err)
 		},
 		deleteTopic: func(t *testing.T, id string) {
@@ -365,7 +397,18 @@ VALUES ($1, $2, $3, $4, $5, $6, 'user:x@test.com')`, id, created, channel, threa
 			require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM webchat_migrations WHERE name = $1`, messageStarTableMigration).Scan(&n))
 			return n
 		},
+		projectID: projectID,
+		addUser: func(t *testing.T, id string) {
+			_, err := db.Exec(`INSERT INTO users (id) VALUES ($1)`, id)
+			require.NoError(t, err)
+		},
+		insertStar: func(t *testing.T, userID, messageID, key, projectID string, at time.Time) {
+			_, err := db.Exec(`INSERT INTO webchat_message_star (user_id, message_id, conversation_key, project_id, starred_at) VALUES ($1, $2, $3, $4, $5)`,
+				userID, messageID, key, nullableString(projectID), at.UTC().Truncate(starTimePrecision))
+			require.NoError(t, err)
+		},
 	}
 	require.NotNil(t, env.stars)
 	testMessageStarStoreContract(t, env)
+	testMessageStarLifecycleContract(t, env)
 }
