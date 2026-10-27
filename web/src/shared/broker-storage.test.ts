@@ -71,6 +71,19 @@ describe('mismatchLines', () => {
     );
   });
 
+  it('redacts the rest of a mismatch line after an unpaired quote', () => {
+    const out = redactMismatchLine('nfs server: hub "filer", broker "user:pw@filer');
+    expect(out).toBe('nfs server: hub "filer", broker "***');
+    expect(out).not.toContain('user');
+    expect(out).not.toContain(':pw');
+  });
+
+  it('redacts the rest of a mismatch line after an unpaired quote with an escaped quote', () => {
+    const out = redactMismatchLine('nfs server: hub "filer", broker "a\\"b@c');
+    expect(out).toBe('nfs server: hub "filer", broker "***');
+    expect(out).not.toContain('b@c');
+  });
+
   it('is empty for null, undefined or no lines', () => {
     expect(mismatchLines(null)).toEqual([]);
     expect(mismatchLines(undefined)).toEqual([]);

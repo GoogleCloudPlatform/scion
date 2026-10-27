@@ -130,4 +130,12 @@ describe('scion-broker-storage-card', () => {
     expect(root.textContent).not.toContain('user:p');
     expect(root.textContent).not.toContain('\\"w@');
   });
+
+  it('redacts the rest of a difference line after an unpaired quote', async () => {
+    const root = await mount(nfsStorage(), ['nfs server: hub "filer", broker "user:pw@filer']);
+    expect(root.querySelector('.storage-mismatch-alert li')?.textContent?.trim()).toBe(
+      'nfs server: hub "filer", broker "***'
+    );
+    expect(root.textContent).not.toContain('user:pw');
+  });
 });

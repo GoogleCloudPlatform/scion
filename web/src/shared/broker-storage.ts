@@ -49,13 +49,21 @@ export function redactUserinfo(value: string): string {
 
 /**
  * A double-quoted value whose embedded quotes and backslashes are escaped
- * with a backslash; the match runs to the first unescaped quote.
+ * with a backslash; the match runs to the first unescaped quote. A quote
+ * with no closing quote matches the second alternative, which runs to the
+ * end of the line.
  */
-const QUOTED = /"((?:[^"\\]|\\.)*)"/g;
+const QUOTED = /"((?:[^"\\]|\\.)*)"|"[\s\S]*$/g;
 
-/** A layout comparison line with every double-quoted value redacted. */
+/**
+ * A layout comparison line with every double-quoted value redacted. The
+ * rest of the line after a quote with no closing quote is replaced by
+ * "***", so a value that is not closed is never shown.
+ */
 export function redactMismatchLine(line: string): string {
-  return line.replace(QUOTED, (_, v: string) => `"${redactUserinfo(v)}"`);
+  return line.replace(QUOTED, (_, v: string | undefined) =>
+    v === undefined ? '"***' : `"${redactUserinfo(v)}"`
+  );
 }
 
 /** The hub's layout comparison lines, redacted for display; [] for none. */
