@@ -21,7 +21,7 @@
  * the broker's own settings, never from the Hub, so nothing here is editable.
  */
 
-import { LitElement, html, nothing } from 'lit';
+import { LitElement, html, nothing, type TemplateResult } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
 import type { BrokerWorkspaceStorage } from '../../shared/types.js';
@@ -48,7 +48,7 @@ export class ScionBrokerStorageCard extends LitElement {
 
   static override styles = brokerAreaStyles;
 
-  private renderMismatch() {
+  private renderMismatch(): TemplateResult | typeof nothing {
     const lines = mismatchLines(this.mismatch);
     if (lines.length === 0) return nothing;
     return html`
@@ -63,7 +63,7 @@ export class ScionBrokerStorageCard extends LitElement {
     `;
   }
 
-  override render() {
+  override render(): TemplateResult {
     const rows = storageRows(this.storage);
     return html`
       <div class="section runtime-target-card storage-card">
