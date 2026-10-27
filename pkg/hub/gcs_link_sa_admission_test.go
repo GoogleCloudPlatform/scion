@@ -216,8 +216,12 @@ func TestGCSLink_Allowed_VerifiedProjectServiceAccount(t *testing.T) {
 
 	t.Run("hub scoped with enforce check mode", func(t *testing.T) {
 		f := newGCSFixture(t)
-		setMode(f.srv, SAAssignCheckEnforce)
+		// Enforce mode also checks actAs for the assignment's recorded
+		// source (authorizeGCSLinkServiceAccountUse); this checker allows it.
+		checker := store.NewFakeCallerPermissionChecker()
+		gcsEnforceActAs(f.srv, checker)
 		sc := gcsSAAdmissionScenario(t, f, "verifiedhub", gcsHubScopedSA(t, f, "verifiedhub"))
+		checker.AllowTarget(sc.sa.Email)
 
 		rec := sc.fetch(t, f)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

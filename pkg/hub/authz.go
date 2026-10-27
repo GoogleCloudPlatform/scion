@@ -348,6 +348,14 @@ type Decision struct {
 	// flag. Authorization-neutral: it never changes Allowed or Reason.
 	AlwaysAudit bool `json:"-"`
 
+	// parentProof is the parent authority a resource parent ceiling
+	// checked at step 10 (authz_resource_parent_ceiling.go), set on allow
+	// and on deny as far as known, and nil when the permission has no
+	// parent ceiling. Unexported and untagged: a caller in this package
+	// reads it to compose a check that depends on the recorded source (the
+	// GCP token mint's actAs check). It never changes Allowed.
+	parentProof *ParentProof
+
 	// DenyCause classifies certain deny decisions structurally, so callers
 	// can react to *why* access was denied without parsing or matching
 	// substrings of Reason (which is prose, for logs and explain, and is
@@ -1267,7 +1275,24 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// the grant source (kernel or relationship grant). The ceiling
 	// evaluates the exact permission resolved above. A failed lookup
 	// denies.
-	if decision.Allowed && isAgentPrincipal(principal.Kind) {
+	//
+	// A permission with a reviewed resource parent ceiling
+	// (ResourceParentCeilingFor) takes that ceiling in place of the chain
+	// check: the recorded source must live-hold the parent permission on
+	// the exact resource, within the recorded effect ceiling. The chain
+	// check would ask whether each delegator holds the decision permission
+	// itself, which no delegator does by design. The chain states the chain
+	// check denies from what was recorded (an unrecorded or sentinel hop,
+	// local development provenance this server does not admit, a missing
+	// edge after the backfill or above the agent) still deny such a
+	// permission first (parentCeilingChainDeny). The parent ceiling is the
+	// only proof for such a permission, so an agent-kind principal whose
+	// identity is not an AgentIdentity denies here instead of passing
+	// unchecked.
+	if m, ok := ResourceParentCeilingFor(permissionID); ok && decision.Allowed && isAgentPrincipal(principal.Kind) {
+		agent, _ := principal.Identity.(AgentIdentity)
+		decision = a.applyResourceParentCeiling(maskAuthzInputs(ctx), m, agent, request.Resource, decision)
+	} else if decision.Allowed && isAgentPrincipal(principal.Kind) {
 		if agent, ok := principal.Identity.(AgentIdentity); ok {
 			if getDelegationCeilingCache(ctx) == nil {
 				ctx = contextWithDelegationCeilingCache(ctx)
