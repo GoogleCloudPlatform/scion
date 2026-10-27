@@ -70,3 +70,13 @@
 - The Go hub tests run per shard; see `hack/hubshard`, and locate the new tests at the exact commit.
 - Mocked browser cases: `web/e2e/chat-mobile/star-rail.pw.ts` (hub mock in `star-rail-mock.ts`). Chromium ran under
   a 1 s session RSS watcher with a kill limit (peak about 600 MB).
+
+## Follow-ups (accepted in code review round 4d for the post-dev-run fix batch)
+
+1. The rail's batched DM check (`starDMPeer`) also refuses a DM key that is not canonical
+   (`canonicalStarDMKey(key) != key`, a failed canonicalisation counting as not canonical), so a legacy star stored
+   under a swapped key can no longer produce a rail row that opens to a 400; the session parity test gains such a
+   row, inserted directly with the read switch off.
+2. `decideStarState` leaves a conversation whose stored key is not canonical out of a state batch (like the drift
+   case) instead of answering 400; a test with a directly inserted legacy row.
+3. `TestChatStars_DMKeyMustBeCanonical`'s doc comment states exactly what it covers.
