@@ -50,3 +50,28 @@ delivers a managed block).
 - Applying a hub-managed block on the broker.
 - Removing the per-agent re-reads of the settings file. Agent start paths still read the global
   settings, not the immutable startup Layout.
+
+## Reporting storage differences by field name
+
+`projectfs.LayoutIssue` and `projectfs.RenderLayoutIssues(items, view)` are now the one place where
+storage layout values become text. There are three views:
+
+- **Public:** field names only, plus a fixed "ask a hub admin" remediation.
+- **Admin:** adds the values.
+- **Log:** the full form, with values.
+
+`Layout.DescriptorIssues` returns the hub/broker comparison as issues (`DescriptorDiff` is now its
+log view), and `config.FieldErrorList.Issues` converts validation errors. These responses now use
+the public view:
+
+- the dispatch refusal for a layout mismatch, in both its message and its `storageLayoutDiff`
+  details;
+- agent-move refusals between brokers on different exports, or with different export identity
+  markers;
+- the broker's refusal of agent starts for an invalid block;
+- the health summary's `layout_mismatch` for non-admin readers;
+- broker records read by non-admins. Their storage descriptor drops the server, export, subpath
+  root, export identity marker and claim.
+
+Hub admins, the admin settings validation responses, and the broker reading its own record still
+see values. A test checks that pkg/hub code never formats layout value fields with `fmt`.
