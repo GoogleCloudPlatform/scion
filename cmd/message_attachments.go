@@ -250,6 +250,37 @@ func resolveAttachMode(client hubclient.Client, paths []string, toAgent bool) (*
 	return nil, paths, nil
 }
 
+// attachNeedsArtifactsRefusal is the error for --attach to a direct or
+// group conversation when the hub does not take the files as uploads.
+const attachNeedsArtifactsRefusal = "attachments to direct or group conversations require attachment artifacts on this hub"
+
+// attachTargetAllowsStaging reports whether the --attach files of a send to
+// convRef (nil when the recipient is not a conversation reference) may be
+// staged into the project's scratchpad when the hub does not take them as
+// uploads. Every agent of the project reads the scratchpad, so only a
+// #<thread> reference, a thread every member of the project reads,
+// qualifies. Agents, users, group[...] recipients and conv:<id>
+// references (whose audience the CLI cannot tell) are refused.
+func attachTargetAllowsStaging(convRef *messaging.Reference) bool {
+	return convRef != nil && convRef.Kind == messaging.RefThread
+}
+
+// resolveAttachModeFor is resolveAttachMode for a send to convRef (nil when
+// the recipient is not a conversation reference): when the hub does not
+// take the files as uploads and convRef does not allow staging
+// (attachTargetAllowsStaging), the send is refused before anything is
+// staged.
+func resolveAttachModeFor(client hubclient.Client, paths []string, toAgent bool, convRef *messaging.Reference) (*attachmentUpload, []string, error) {
+	upload, staged, err := resolveAttachMode(client, paths, toAgent)
+	if err != nil {
+		return nil, nil, err
+	}
+	if upload == nil && !attachTargetAllowsStaging(convRef) {
+		return nil, nil, errors.New(attachNeedsArtifactsRefusal)
+	}
+	return upload, staged, nil
+}
+
 // validateStagedAttachmentPaths is today's validation of --attach paths for
 // staging: each must be under an allowed root and be a regular file.
 func validateStagedAttachmentPaths(paths []string) error {

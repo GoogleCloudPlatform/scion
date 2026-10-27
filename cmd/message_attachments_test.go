@@ -440,3 +440,83 @@ func TestAttachUpload_OutboundAndConversationRefSendIDs(t *testing.T) {
 	require.Equal(t, []string{"att-1", "att-2"}, h.sends["/api/v1/projects/proj-attach/agents/sender/outbound-message"],
 		"one upload for each send, named on the outbound route")
 }
+
+// TestAttachTargetAllowsStaging: when the hub does not take --attach files
+// as uploads, only a #<thread> recipient may have them staged into the
+// project's scratchpad; every direct or group target, and a conv:<id>
+// reference, is refused.
+func TestAttachTargetAllowsStaging(t *testing.T) {
+	for _, c := range []struct {
+		recipient string
+		want      bool
+	}{
+		{"#general", true},
+		{"builder", false},
+		{"agent:builder", false},
+		{"@builder", false},
+		{"@alice@example.com", false},
+		{"conv:0b0d6a9e-2f61-4c39-9b6e-7f0d6d0b8a51", false},
+		{"user:alice@example.com", false},
+		{"alice@example.com", false},
+		{"group[builder,reviewer]", false},
+	} {
+		parsed, err := parseRecipientArg(c.recipient)
+		require.NoError(t, err, c.recipient)
+		assert.Equal(t, c.want, attachTargetAllowsStaging(parsed.convRef), c.recipient)
+	}
+	assert.Equal(t, "attachments to direct or group conversations require attachment artifacts on this hub", attachNeedsArtifactsRefusal)
+}
+
+// TestResolveAttachModeFor: with a hub that does not take uploads (the
+// answer "legacy", or an old hub), a send to an agent, a user, a group or a
+// conv:<id> reference is refused before anything is staged; a #<thread>
+// send gets its paths for staging. With "artifact" every target uploads.
+func TestResolveAttachModeFor(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	origRoots := attachmentRoots
+	attachmentRoots = []string{root}
+	t.Cleanup(func() { attachmentRoots = origRoots })
+	inRoot := writeAttachFile(t, root, "notes.txt", "notes")
+
+	refused := []string{"builder", "@builder", "conv:0b0d6a9e-2f61-4c39-9b6e-7f0d6d0b8a51", "user:alice@example.com", "group[builder,reviewer]"}
+	for _, tc := range []struct {
+		name    string
+		uploads string
+		status  int
+	}{
+		{"legacy", "legacy", 0},
+		{"old hub", "artifact", http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, srv := newAttachHub(t, tc.uploads)
+			h.probeStatus = tc.status
+			c := attachHubClient(t, srv)
+			for _, recipient := range refused {
+				parsed, err := parseRecipientArg(recipient)
+				require.NoError(t, err)
+				upload, staged, err := resolveAttachModeFor(c, []string{inRoot}, true, parsed.convRef)
+				require.Error(t, err, recipient)
+				assert.Equal(t, attachNeedsArtifactsRefusal, err.Error(), recipient)
+				assert.Nil(t, upload, recipient)
+				assert.Nil(t, staged, recipient)
+			}
+			parsed, err := parseRecipientArg("#general")
+			require.NoError(t, err)
+			upload, staged, err := resolveAttachModeFor(c, []string{inRoot}, false, parsed.convRef)
+			require.NoError(t, err)
+			assert.Nil(t, upload)
+			assert.Equal(t, []string{inRoot}, staged, "a project thread keeps staging")
+		})
+	}
+
+	_, srv := newAttachHub(t, "artifact")
+	for _, recipient := range append(refused, "#general") {
+		parsed, err := parseRecipientArg(recipient)
+		require.NoError(t, err)
+		upload, staged, err := resolveAttachModeFor(attachHubClient(t, srv), []string{inRoot}, true, parsed.convRef)
+		require.NoError(t, err, recipient)
+		assert.NotNil(t, upload, recipient)
+		assert.Nil(t, staged, recipient)
+	}
+}

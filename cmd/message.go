@@ -371,12 +371,13 @@ Examples:
 
 		// Attachments: ask the hub where uploads go first (ptone/scion#4596).
 		// With "artifact", the files are checked and uploaded for each
-		// recipient send, which names them by id; otherwise today's path
-		// validation and staging run unchanged.
+		// recipient send, which names them by id; otherwise the files are
+		// staged into the project's scratchpad, which only a project thread
+		// target allows (attachTargetAllowsStaging).
 		msgAttachUpload = nil
 		if len(msgAttach) > 0 {
 			toAgent := agentName != "" || (convRef != nil && convRef.Kind == messaging.RefAgent) || groupHasAgent(groupRecipients)
-			upload, staged, err := resolveAttachMode(hubCtx.Client, msgAttach, toAgent)
+			upload, staged, err := resolveAttachModeFor(hubCtx.Client, msgAttach, toAgent, convRef)
 			if err != nil {
 				return err
 			}
@@ -1941,7 +1942,7 @@ func init() {
 	messageCmd.Flags().BoolVarP(&msgInterrupt, "interrupt", "i", false, "Interrupt the harness before sending the message")
 	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
 	messageCmd.Flags().StringArrayVar(&msgArtifacts, "artifact", nil, "Reference a published artifact (work product to review, version or find later; use --attach for a file that is part of this message) (scion://artifact/<id>[@<seq>]), repeatable, at most 10. The reference is added to the message text and the recipient is shown how to fetch it; the hub attaches only artifacts you can read.")
-	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach a file as part of this message, repeatable (use --artifact for work product to review, version or find later). When the hub stores attachments as artifacts, the file is uploaded and an agent recipient gets it in ~/.scion/inbox/<message-id>/; HTML and SVG are refused. Otherwise use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace); attachments the hub cannot read are reported as warnings after an agent's send.")
+	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach a file as part of this message, repeatable (use --artifact for work product to review, version or find later). When the hub stores attachments as artifacts, the file is uploaded and an agent recipient gets it in ~/.scion/inbox/<message-id>/; HTML and SVG are refused. Otherwise only a #<thread> recipient takes attachments, as paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace), and other recipients are refused; attachments the hub cannot read are reported as warnings after an agent's send.")
 	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args ('-' reads stdin; trailing CR/LF characters are trimmed)")
 
 	// Deprecated flags — still functional, emit warnings when used.
