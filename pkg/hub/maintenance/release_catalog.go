@@ -114,7 +114,9 @@ type CatalogChannel struct {
 }
 
 // Snapshot is the release catalog at one point in time. It is a value: the
-// caller may keep and read it without locking.
+// caller may keep and read it without locking. It is not the API wire DTO:
+// the hub builds the D5 response from it (adding class, and mapping an
+// empty Latest to null and a zero PublishedAt to omitted).
 type Snapshot struct {
 	Repo string `json:"repo"`
 	// FetchedAt is when the release list was last fetched successfully.
