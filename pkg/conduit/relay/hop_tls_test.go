@@ -194,52 +194,45 @@ func TestHopRelayRefusesPlaintextNonLoopbackEndpoint(t *testing.T) {
 	}
 }
 
-// TestHopServerTLSReloadsRotatedCertificate: the internal listener picks
-// up a certificate rotated through a Kubernetes-style symlink swap
-// (tls.crt -> ..data/tls.crt, ..data -> a new directory) at the next
-// check after HopCertReloadInterval, and keeps serving the current
-// certificate when the new pair does not load.
-func TestHopServerTLSReloadsRotatedCertificate(t *testing.T) {
+// TestHopServerTLSReloadsRewrittenCertificate: the internal listener picks up
+// a certificate pair rewritten in place at the next check after
+// HopCertReloadInterval, and keeps serving the current certificate when the
+// rewritten pair does not load. It runs on every platform; the Kubernetes
+// Secret-volume symlink swap is TestHopServerTLSReloadsRotatedCertificate.
+func TestHopServerTLSReloadsRewrittenCertificate(t *testing.T) {
 	dir := t.TempDir()
-	gen := func(name string) string {
+	certPath, keyPath := filepath.Join(dir, "tls.crt"), filepath.Join(dir, "tls.key")
+	pair := func() (certPEM, keyPEM []byte) {
+		t.Helper()
 		f := relaytest.NewHopTLSFiles(t, hopServerName)
-		d := filepath.Join(dir, name)
-		if err := os.Mkdir(d, 0o700); err != nil {
+		certPEM, err := os.ReadFile(f.CertFile)
+		if err != nil {
 			t.Fatal(err)
 		}
-		for src, dst := range map[string]string{f.CertFile: "tls.crt", f.KeyFile: "tls.key"} {
-			b, err := os.ReadFile(src)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(d, dst), b, 0o600); err != nil {
-				t.Fatal(err)
-			}
+		keyPEM, err = os.ReadFile(f.KeyFile)
+		if err != nil {
+			t.Fatal(err)
 		}
-		return name
+		return certPEM, keyPEM
 	}
-	swap := func(target string) {
-		tmp := filepath.Join(dir, "..data_tmp")
-		if err := os.Symlink(target, tmp); err != nil {
+	write := func(certPEM, keyPEM []byte) {
+		t.Helper()
+		if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Rename(tmp, filepath.Join(dir, "..data")); err != nil {
+		if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	swap(gen("gen1"))
-	for _, f := range []string{"tls.crt", "tls.key"} {
-		if err := os.Symlink(filepath.Join("..data", f), filepath.Join(dir, f)); err != nil {
-			t.Fatal(err)
-		}
-	}
+	write(pair())
 	now := time.Now()
 	clock := func() time.Time { return now }
-	cfg, err := relay.NewHopServerTLSWithClockForTest(filepath.Join(dir, "tls.crt"), filepath.Join(dir, "tls.key"), clock)
+	cfg, err := relay.NewHopServerTLSWithClockForTest(certPath, keyPath, clock)
 	if err != nil {
 		t.Fatal(err)
 	}
 	leaf := func() []byte {
+		t.Helper()
 		c, err := cfg.GetCertificate(&tls.ClientHelloInfo{})
 		if err != nil {
 			t.Fatal(err)
@@ -248,27 +241,18 @@ func TestHopServerTLSReloadsRotatedCertificate(t *testing.T) {
 	}
 	first := leaf()
 
-	swap(gen("gen2"))
+	write(pair())
 	if !bytes.Equal(leaf(), first) {
 		t.Fatal("the certificate changed before the reload interval")
 	}
 	now = now.Add(relay.HopCertReloadInterval)
 	second := leaf()
 	if bytes.Equal(second, first) {
-		t.Fatal("the rotated certificate was not picked up after the reload interval")
+		t.Fatal("the rewritten certificate was not picked up after the reload interval")
 	}
 
-	// A broken rotation keeps the current certificate.
-	broken := filepath.Join(dir, "gen3")
-	if err := os.Mkdir(broken, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for _, f := range []string{"tls.crt", "tls.key"} {
-		if err := os.WriteFile(filepath.Join(broken, f), []byte("not pem"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	swap("gen3")
+	// A rewrite that does not load keeps the current certificate.
+	write([]byte("not pem"), []byte("not pem"))
 	now = now.Add(relay.HopCertReloadInterval)
 	if !bytes.Equal(leaf(), second) {
 		t.Fatal("a pair that does not load replaced the current certificate")
