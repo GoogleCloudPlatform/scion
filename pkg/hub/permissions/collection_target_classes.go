@@ -85,6 +85,7 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	// it, never as a collection-level request.
 	"agent.delegation.revoke": {}, "agent.delegation.credential.revoke": {},
 	"agent.delegation.list": {}, "agent.delegation.read": {},
+	"agent.delegation.revoke_all": {},
 
 	// project.* — create/list are CapabilityScope; register/clone are
 	// CapabilityResource (register/clone target an EXISTING project — the

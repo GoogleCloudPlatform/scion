@@ -54,30 +54,104 @@ func NFSLayout(nfs *V1NFSConfig) (projectfs.Layout, error) {
 	}, nil
 }
 
-// LoadHubSharedDirStorage reads server.shared_dir_storage the way the
-// brokers' agent-start path does: from the global settings file only,
-// through LoadGlobalSettings (no SCION_ environment provider, no DB overlay,
-// never a project's settings.yaml), so the hub and its brokers resolve shared
-// dirs from the same source. The hub calls it once at startup.
-//
-// It returns (nil, nil) when the block is genuinely unset. It fails closed
-// with an error when the file plausibly configures the block but cannot be
-// used: it fails to load and mentions shared_dir_storage, or it loaded as the
-// legacy format and mentions the key without a block being loaded.
-func LoadHubSharedDirStorage() (*V1SharedDirStorageConfig, error) {
-	gs, _, err := LoadGlobalSettings()
+// DefaultVolumeMountBase is where the cloudrun-volume and
+// gke-shared-volume backends are mounted: <base>/<volume_name>. Neither
+// volume block has a mount path field; the volume name identifies the mount
+// point.
+const DefaultVolumeMountBase = "/mnt"
+
+// ProjectStorageLayout translates server.project_storage into the layout
+// authority's Layout: the local Layout for the local backend (and a nil
+// block), NFSLayout for nfs, and for the volume backends the volume mounted
+// at <volumeBase>/<volume_name> with the validated subpath_root. Homes is
+// the block's homes value (local when unset). It is the one place the block
+// becomes a projectfs.Layout, for the hub and the brokers alike. Call it on
+// a block that passed Validate.
+func ProjectStorageLayout(ps *V1ProjectStorageConfig, volumeBase string) (projectfs.Layout, error) {
+	homes := projectfs.BackendLocal
+	if ps != nil && ps.Homes == HomeStorageBackendNFS {
+		homes = projectfs.BackendNFS
+	}
+	var layout projectfs.Layout
+	switch ps.EffectiveBackend() {
+	case WorkspaceStorageBackendLocal:
+		layout = projectfs.Layout{Backend: projectfs.BackendLocal}
+	case WorkspaceStorageBackendNFS:
+		l, err := NFSLayout(ps.NFS)
+		if err != nil {
+			return projectfs.Layout{}, fmt.Errorf("%s.nfs: %w", ProjectStorageKey, err)
+		}
+		layout = l
+	case WorkspaceStorageBackendCloudRunVolume:
+		v := ps.CloudRunVolume
+		if v == nil || v.VolumeName == "" {
+			return projectfs.Layout{}, fmt.Errorf("%s.cloudrun_volume.volume_name is not set", ProjectStorageKey)
+		}
+		l, err := volumeLayout(projectfs.BackendCloudRunVolume, volumeBase, v.VolumeName, v.SubPathRoot, "")
+		if err != nil {
+			return projectfs.Layout{}, fmt.Errorf("%s.cloudrun_volume: %w", ProjectStorageKey, err)
+		}
+		layout = l
+	case WorkspaceStorageBackendGKESharedVolume:
+		v := ps.GKESharedVolume
+		if v == nil || v.VolumeName == "" {
+			return projectfs.Layout{}, fmt.Errorf("%s.gke_shared_volume.volume_name is not set", ProjectStorageKey)
+		}
+		l, err := volumeLayout(projectfs.BackendGKESharedVolume, volumeBase, v.VolumeName, v.SubPathRoot, v.PVClaimName)
+		if err != nil {
+			return projectfs.Layout{}, fmt.Errorf("%s.gke_shared_volume: %w", ProjectStorageKey, err)
+		}
+		layout = l
+	default:
+		return projectfs.Layout{}, fmt.Errorf("%s.backend %q is not supported", ProjectStorageKey, ps.Backend)
+	}
+	layout.Homes = homes
+	if ps != nil && ps.LegacySharedDirsLocal {
+		layout.SharedDirs = &projectfs.Layout{Backend: projectfs.BackendLocal, Homes: homes}
+	}
+	if ps != nil && ps.LegacySharedDirsNFS != nil {
+		sdLayout, err := NFSLayout(ps.LegacySharedDirsNFS)
+		if err != nil {
+			return projectfs.Layout{}, fmt.Errorf("%s.nfs: %w", sharedDirStorageKey, err)
+		}
+		sdLayout.Homes = homes
+		layout.SharedDirs = &sdLayout
+	}
+	return layout, nil
+}
+
+func volumeLayout(backend projectfs.Backend, volumeBase, volumeName, subPathRoot, claim string) (projectfs.Layout, error) {
+	if volumeBase == "" {
+		volumeBase = DefaultVolumeMountBase
+	}
+	if filepath.Base(volumeName) != volumeName || volumeName == "." || volumeName == ".." {
+		return projectfs.Layout{}, fmt.Errorf("volume_name %q must be a single path component", volumeName)
+	}
+	root, err := ResolveSubPathRoot(subPathRoot)
 	if err != nil {
-		if GlobalSettingsMentions("shared_dir_storage") {
-			return nil, fmt.Errorf("server.shared_dir_storage: global settings unreadable: %w", err)
-		}
-		return nil, nil
+		return projectfs.Layout{}, err
 	}
-	if gs == nil || gs.Server == nil || gs.Server.SharedDirStorage == nil {
-		if GlobalSettingsIsLegacyFormat() && GlobalSettingsMentions("shared_dir_storage") {
-			return nil, errors.New(
-				"server.shared_dir_storage: global settings mention it but it was not loaded (missing schema_version \"1\"?)")
-		}
-		return nil, nil
+	return projectfs.Layout{
+		Backend:     backend,
+		HostBase:    filepath.Join(volumeBase, volumeName),
+		SubPathRoot: root,
+		Share:       projectfs.Share{ID: volumeName, PVName: claim},
+	}, nil
+}
+
+// ValidateHubProjectStorageLayout checks that ps builds a Layout a hub can
+// serve files from: ProjectStorageLayout succeeds and every shared host
+// base (the backend's, and the transitional shared-dir split's) is an
+// absolute path on this host.
+func ValidateHubProjectStorageLayout(ps *V1ProjectStorageConfig) error {
+	layout, err := ProjectStorageLayout(ps, DefaultVolumeMountBase)
+	if err != nil {
+		return err
 	}
-	return gs.Server.SharedDirStorage, nil
+	for _, l := range []projectfs.Layout{layout, layout.SharedDirLayout()} {
+		if l.Backend.Shared() && !filepath.IsAbs(l.HostBase) {
+			return fmt.Errorf("the %s share must be mounted at an absolute path on the hub (mount_root gives host base %q)", l.Backend, l.HostBase)
+		}
+	}
+	return nil
 }

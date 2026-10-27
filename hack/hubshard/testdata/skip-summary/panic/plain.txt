@@ -1,0 +1,3 @@
+direct stdout
+--- FAIL: TestPanic (0.00s)
+    toy_test.go:95: before panic

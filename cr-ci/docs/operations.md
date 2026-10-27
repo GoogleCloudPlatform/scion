@@ -15,8 +15,10 @@ Per repository, in this order (details in
 2. The [deploy preconditions](architecture.md#deploy-preconditions) hold,
    above all "Require approval for **all** external contributors".
 3. The P6 [PoC checklist](poc-checklist.md) passed on this target.
-4. `ci.yml` carries the routing expression (P7). Until then, the variable
-   changes nothing.
+4. The workflows carry the routing expression on the routed jobs (primary-runner
+   PR-wf1 for phase A, PR-wf2 for phase B; see
+   [workflows/README.md](../workflows/README.md#routing-in-githubworkflows)). Until
+   then, the variable changes nothing.
 5. `scripts/set-routing-variable.sh --repo <owner/repo> --apply` sets
    `ROUTING_VARIABLE_NAME` to `RUNNER_LABEL` (needs write access).
 6. Watch for 48 hours: `dispatch` and `claim_consumed` for every routed job,
@@ -211,7 +213,14 @@ lint job uses too: a change there changes both.
 ## Capacity and quotas
 
 `MAX_CONCURRENT_RUNNERS` caps running executions; jobs above it stay queued
-and are dispatched first in, first out as executions finish. Each execution
+and are dispatched first in, first out as executions finish: by the next
+scheduled `/reconcile` (`RECONCILE_SCHEDULE`), since nothing else dispatches a
+job that was left queued. With cr-ci as a repository's primary runner, run it every
+minute (`*/1 * * * *`, Cloud Scheduler's minimum), so an over-capacity job is
+served within about a minute of a slot freeing. The mediator has no in-process
+timer for this on purpose: it runs with Cloud Run's request-based CPU allocation
+(min-instances 0, no `--no-cpu-throttling`), so work after a response would be
+throttled until the next request arrives. Each execution
 uses `RUNNER_DISK_GI` of the regional ephemeral-disk quota (default 100 GiB:
 5 x 10 GiB fits, 4 x 25 GiB fits). Above 10 GiB per runner, the per-instance
 quota must be raised as well. To raise the cap, first request the quota increase
@@ -249,7 +258,7 @@ logged (a unit test enforces this).
 | `launch_failed` | ERROR | `jobs.run` failed; registration deleted, job retried by reconcile |
 | `cancel` | INFO | Job finished while queued: its idle runner stopped, or left alone because it runs another job (`action=none_busy`) |
 | `claim_consumed` / `claim_rejected` | INFO / WARNING | Runner fetched its JIT config / was refused: `identity_missing` or `identity_invalid` (401, claim kept; repeated ones from outside the runner are worth a look), or an unknown, used or expired token (410) |
-| `SECURITY_REJECT_FORK_PR` | WARNING | Fork-PR or `pull_request_target` run refused a runner. **Alert on this.** |
+| `SECURITY_REJECT_FORK_PR` | WARNING | A run outside the allowlist was refused a runner: a fork PR (`reason=head_repository_differs`), or any event but `push` and `pull_request` (`reason=event_not_allowed:<event>`). **Alert on this.** |
 | `SECURITY_KILL_HIJACKED_RUNNER` | ERROR | An untrusted job started on a cr-ci runner minted for another job; the execution was cancelled and the registration deleted ([architecture](architecture.md#residual-risk-label-matched-job-assignment)). **Alert on this and review the run.** |
 | `runner_swap` | INFO | A runner started a different legitimate job; harmless. `inherited_budget` is the task time that job has left (`TASK_TIMEOUT` minus `execution_age`) |
 | `runner_swap_low_budget` | WARNING | That job inherited less than 20 minutes; if it fails on the task timeout, re-run it. Frequent ones: lower `RUNNER_IDLE_TIMEOUT` or raise `TASK_TIMEOUT` ([architecture](architecture.md#flow)) |
@@ -291,6 +300,29 @@ logged (a unit test enforces this).
   than wait for a job it could only give part of the task timeout. The next
   `/reconcile` reaps its registration (`runner_reaped`) and re-serves its job if
   that is still queued.
+- **Runner execution exits 2 with `job guard: ... refusing to start the runner`:**
+  the image's job-started hook or its pinned sha256 (`/etc/cr-ci/job-guard.sha256`)
+  is missing, not root-owned and read-only, or does not match. The runner was not
+  started and no claim was spent. This means a broken or tampered image: rebuild it
+  from the repository (the Docker build checks the same thing) and redeploy. A line
+  `ignoring CR_...: test overrides take effect only in test mode` means a test
+  override was set on the job; remove it.
+- **Runner execution exits 5 with `ERROR job_guard_refused`:** GitHub assigned the
+  runner a job cr-ci does not run (a fork PR, a disallowed event, or a job of a
+  repository outside the runner's served list, `GH_REPOS`; typically one queued on
+  the label), and the runner's job-started hook stopped the runner before any of the
+  job's steps. The execution's log line (Cloud Logging) names the reason, event,
+  head, the job's repository and the served list (`served=`, comma-separated). The
+  job's own log in GitHub shows only the reason code: it may be public, and under org
+  scope the served list can name private repositories. In org scope the served list is
+  every `TARGET_REPOS` entry of the owner, so a job of another served repository
+  runs; `reason=repository_not_served` then means a repository of the org that is
+  not in `TARGET_REPOS` queued a job on the label (add it to `TARGET_REPOS`, or drop
+  the label from its workflow). `served_repositories_missing` or
+  `served_repositories_malformed` means a launch without a valid `GH_REPOS`, which
+  the mediator never produces (the entrypoint exits 2 first). The mediator's hijack guard deletes the registration, and the job
+  shows as failed in GitHub. This is the guard working; look at who queued that job
+  on the label (`SECURITY_REJECT_FORK_PR` in the mediator log for the same run).
 - **Runner execution exits 4 with `ERROR idle_timeout_raced_job`:** the idle stop
   and a job start crossed (a job was assigned just as the idle deadline passed),
   and the stop cancelled that job. Re-run the job. Frequent ones would mean jobs

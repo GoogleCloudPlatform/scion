@@ -1635,56 +1635,12 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 	}
 
 	if includeUser {
-		eligible, err := s.progenyEligibleSecretIDs(ctx, facts.Agent)
-		if err != nil {
+		var userOK bool
+		secrets, items, userOK = s.agentListUserSecrets(ctx, agentID, ident, facts, secrets, items)
+		if !userOK {
 			emitListExitItem(store.ScopeUser, facts.Root.ID, GrantProgeny, "")
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to list secrets", nil)
 			return
-		}
-		metas, err := s.secretBackend.List(ctx, secret.Filter{
-			Scope:   store.ScopeUser,
-			ScopeID: facts.Root.ID,
-		})
-		if err != nil {
-			emitListExitItem(store.ScopeUser, facts.Root.ID, GrantProgeny, "")
-			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to list secrets", nil)
-			return
-		}
-		for _, m := range metas {
-			if m.SecretType == store.SecretTypeInternal {
-				continue
-			}
-			if !m.AllowProgeny || !eligible[m.ID] {
-				continue
-			}
-			live, kind, _, lerr := s.progenySourceLive(ctx, m)
-			if lerr != nil {
-				// A liveness-check error is not the same as "not shared":
-				// logged distinctly so an operator is not left to guess
-				// which one occurred, and recorded as a per-row item so the
-				// audit event shows the row was skipped rather than simply
-				// absent.
-				slog.Error("agent list secrets: progeny source liveness check failed",
-					"agent_id", agentID, "key", m.Name, "err", lerr)
-				items = append(items, materialSelectionItem(ItemResult{
-					Candidate: Candidate{Kind: MaterialKindSecret, Key: m.Name, Scope: store.ScopeUser, ScopeID: facts.Root.ID, Grant: GrantProgeny, Meta: m},
-					Reason:    ReasonBackendError,
-				}, "", ""))
-				continue
-			}
-			if !live {
-				continue
-			}
-			var src *SourceRef
-			if kind != "" {
-				src = &SourceRef{Kind: kind, ID: m.CreatedBy}
-			}
-			secrets = append(secrets, AgentSecretMeta{Key: m.Name, Type: m.SecretType, Target: m.Target})
-			items = append(items, materialSelectionItem(ItemResult{
-				Candidate: Candidate{Kind: MaterialKindSecret, Key: m.Name, Scope: store.ScopeUser, ScopeID: facts.Root.ID, Grant: GrantProgeny, SharingSource: src, Meta: m},
-				Allowed:   true,
-				Reason:    ReasonAllowed,
-			}, "", ""))
 		}
 	}
 

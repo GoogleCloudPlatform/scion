@@ -150,7 +150,7 @@ func runNormalize(t *testing.T, db *sql.DB, opts entadapter.TimestampNormalizeOp
 // canonical form, tables that were unreadable become readable, and a second
 // run changes nothing.
 func TestUTCTimestampNormalize_RewritesBothFamilies(t *testing.T) {
-	wcs, s, db := newEntWebChatStore(t)
+	wcs, s, db := hubNewEntWebChatStore(t)
 	ctx := context.Background()
 	proj := normProject(t, s, "norm-families")
 
@@ -218,7 +218,7 @@ func TestUTCTimestampNormalize_RewritesBothFamilies(t *testing.T) {
 // ptone/scion#2473 shape: a fire_at stored from a time with a nameless
 // FixedZone makes ListScheduledEvents fail until the operation runs.
 func TestUTCTimestampNormalize_ScheduledEventFixedZone(t *testing.T) {
-	_, s, db := newEntWebChatStore(t)
+	_, s, db := hubNewEntWebChatStore(t)
 	ctx := context.Background()
 	proj := normProject(t, s, "norm-sched")
 
@@ -248,7 +248,7 @@ func TestUTCTimestampNormalize_ScheduledEventFixedZone(t *testing.T) {
 // same day (including sub-second neighbours) page, search, threshold and
 // list in instant order with no repeats or gaps.
 func TestUTCTimestampNormalize_OrderingOverMigratedAndNewRows(t *testing.T) {
-	wcs, s, db := newEntWebChatStore(t)
+	wcs, s, db := hubNewEntWebChatStore(t)
 	ctx := context.Background()
 	proj := normProject(t, s, "norm-order")
 
@@ -399,7 +399,7 @@ func TestUTCTimestampNormalize_OrderingOverMigratedAndNewRows(t *testing.T) {
 // value no layout parses is reported by table, column and rowid only, and is
 // not changed.
 func TestUTCTimestampNormalize_UnparseableLeftAloneAndNotLogged(t *testing.T) {
-	wcs, s, db := newEntWebChatStore(t)
+	wcs, s, db := hubNewEntWebChatStore(t)
 	ctx := context.Background()
 	proj := normProject(t, s, "norm-bad")
 
@@ -428,7 +428,7 @@ func TestUTCTimestampNormalize_UnparseableLeftAloneAndNotLogged(t *testing.T) {
 // result as one uninterrupted run.
 func TestUTCTimestampNormalize_ResumesAfterInterruption(t *testing.T) {
 	seed := func(t *testing.T) *sql.DB {
-		wcs, s, db := newEntWebChatStore(t)
+		wcs, s, db := hubNewEntWebChatStore(t)
 		ctx := context.Background()
 		proj := normProject(t, s, "norm-resume")
 		for i, c := range legacyEntCases() {
@@ -564,7 +564,7 @@ func TestUTCTimestampNormalize_ExecutorWiring(t *testing.T) {
 // only non-canonical values left are unparseable, the check points at the
 // run log and starts no run.
 func TestUTCTimestampNormalize_StartupCheckUnparseableOnly(t *testing.T) {
-	_, s, db := newEntWebChatStore(t)
+	_, s, db := hubNewEntWebChatStore(t)
 	ctx := context.Background()
 	srv := &Server{store: s}
 	proj := normProject(t, s, "norm-startup-bad")
@@ -626,7 +626,7 @@ func TestUTCTimestampNormalize_UnreadableProbeMatchesEntReads(t *testing.T) {
 		"2026-10-01 04:00:00 +0000 UTC",
 	} {
 		t.Run(text, func(t *testing.T) {
-			_, s, db := newEntWebChatStore(t)
+			_, s, db := hubNewEntWebChatStore(t)
 			ctx := context.Background()
 			proj := normProject(t, s, "norm-unreadable")
 			id := tid("norm-unreadable-msg")
@@ -731,7 +731,9 @@ func TestUTCTimestampNormalize_StartupCheckRunsInBackground(t *testing.T) {
 // parses strictly and compares lexically. The normalizer must leave it
 // byte-identical, while it still rewrites the other webchat time columns.
 func TestUTCTimestampNormalize_LeavesStarTimesFixedWidth(t *testing.T) {
-	wcs, s, db := newEntWebChatStore(t)
+	wcs, s, db := hubNewEntWebChatStore(t)
+	stars, ok := wcs.(MessageStarStore)
+	require.True(t, ok, "the webchat store must implement MessageStarStore")
 	ctx := context.Background()
 	proj := normProject(t, s, "norm-stars")
 	topicID := tid("norm-star-topic")
@@ -750,7 +752,7 @@ func TestUTCTimestampNormalize_LeavesStarTimesFixedWidth(t *testing.T) {
 			ID: ids[i], ProjectID: proj.ID, Sender: "user:alice", Recipient: "chat",
 			Msg: fmt.Sprintf("star %d", i), Type: "chat", Channel: "web", ThreadID: topicID, CreatedAt: normBase,
 		}))
-		_, changed, err := wcs.AddMessageStar(ctx, "u1", StarTarget{MessageID: ids[i], ProjectID: proj.ID, Selector: sel})
+		_, changed, err := stars.AddMessageStar(ctx, "u1", StarTarget{MessageID: ids[i], ProjectID: proj.ID, Selector: sel})
 		require.NoError(t, err)
 		require.True(t, changed)
 		execOne(t, db, "UPDATE webchat_message_star SET starred_at = ? WHERE message_id = ?", sqliteStarTime(at), ids[i])
@@ -772,11 +774,11 @@ func TestUTCTimestampNormalize_LeavesStarTimesFixedWidth(t *testing.T) {
 	assert.NotContains(t, log, "webchat_message_star")
 
 	// The star store still reads both, in keyset order.
-	rec, err := wcs.GetMessageStar(ctx, "u1", ids[1])
+	rec, err := stars.GetMessageStar(ctx, "u1", ids[1])
 	require.NoError(t, err)
 	require.NotNil(t, rec)
 	requireUTCInstant(t, rec.StarredAt, frac)
-	page, err := wcs.ListMessageStarCandidates(ctx, StarFilter{UserID: "u1", Selector: sel, Limit: 10})
+	page, err := stars.ListMessageStarCandidates(ctx, StarFilter{UserID: "u1", Selector: sel, Limit: 10})
 	require.NoError(t, err)
 	require.Len(t, page.Items, 2)
 	assert.Equal(t, ids[1], page.Items[0].MessageID, "newest star first")

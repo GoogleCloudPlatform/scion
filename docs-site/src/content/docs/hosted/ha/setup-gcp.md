@@ -224,7 +224,7 @@ When creating a project through the Hub web UI, Scion includes a default **"scra
 - **The Catch:** GKE Autopilot's default storage class (`standard-rwo`) **only supports `ReadWriteOnce` (RWO)**. Attempting to dispatch an agent will fail with an opaque scheduling error: `VolumeCapabilities is invalid: specified multi writer with mount access type`, and the Hub will output `pods not found`.
 - **The Fix (Option A - Easiest):** If you do not require shared directories, navigate to your project settings in the Hub UI *after* installation and **remove or disable the default shared directory** (e.g., delete the scratchpad entry).
 - **The Fix (Option B - Production):** Set up Google Cloud Filestore or a compatible NFS server, configure the Filestore CSI driver, and define the custom storage class in your GKE runtime profile to support native ReadWriteMany volumes.
-- **The Fix (Option C - Shared NFS export):** Set [`server.shared_dir_storage.backend`](/scion/reference/server-config/#shared-directory-storage-servershared_dir_storage) to `nfs` with a static PVC (`pv_name`) bound to your Filestore or NFS export. Pods then mount shared directories from that single claim by `subPath` instead of requesting a new RWX PVC per directory.
+- **The Fix (Option C - Shared NFS export):** Set [`server.project_storage.backend`](/scion/reference/server-config/#project-storage-serverproject_storage) to `nfs` with a static PVC (`pv_name`) bound to your Filestore or NFS export. This places workspaces on the export too. Pods then mount shared directories from that single claim by `subPath` instead of requesting a new RWX PVC per directory.
 :::
 
 Create the agent namespace:
@@ -1034,7 +1034,7 @@ deployment is not HA (see [HA overview](/scion/hosted/ha/overview/)).
 
 :::caution[More than one replica requires shared workspace storage]
 The `settings.yaml` above leaves
-[`server.workspace_storage`](/scion/reference/server-config/#workspace-storage-serverworkspace_storage)
+[`server.project_storage`](/scion/reference/server-config/#project-storage-serverproject_storage)
 at its default `local` backend. With that backend each replica keeps
 hub-managed project workspaces on its own container storage, so replicas
 can see different workspace content, and the content is lost when an
@@ -1082,18 +1082,18 @@ mounted.
 
 ```yaml
 server:
-  workspace_storage:
+  project_storage:
     backend: cloudrun-volume
     cloudrun_volume:
       volume_name: VOLUME_NAME       # the volume declared on the service
       subpath_root: projects         # default
 ```
 
-The Hub derives every workspace path from `/mnt/<volume_name>`. If the
+The Hub derives every workspace and shared-directory path from `/mnt/<volume_name>`. If the
 volume is not mounted there, `GET /readyz` returns `503` instead of the
 Hub writing workspaces to container storage. A missing `volume_name`
 stops the Hub at startup. See
-[Workspace Storage](/scion/reference/server-config/#workspace-storage-serverworkspace_storage)
+[Project Storage](/scion/reference/server-config/#project-storage-serverproject_storage)
 for all backends and fields.
 :::
 

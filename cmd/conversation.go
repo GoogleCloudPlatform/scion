@@ -393,13 +393,18 @@ func runConversationMessages(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	label := newUserLabeler(ctx, client)
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "TIME\tFROM\tMESSAGE")
-	for _, msg := range result.Items {
+	for i := range result.Items {
+		msg := &result.Items[i]
 		timeStr := clitime.Format(msg.CreatedAt, clitime.Clock)
 		from := truncateRunes(msg.Sender, 20, true)
 		body := truncateRunes(msg.Msg, 60, true)
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", timeStr, from, body)
+		if authorizedBy := messageAuthorizedBy(msg, label); authorizedBy != "" {
+			_, _ = fmt.Fprintf(tw, "\t\t%s\n", authorizedBy)
+		}
 	}
 	return tw.Flush()
 }
@@ -669,6 +674,13 @@ func runConversationGetMessage(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintf(tw, "SENDER\t%s\n", msg.Sender)
 	_, _ = fmt.Fprintf(tw, "SENDER ID\t%s\n", msg.SenderID)
 	_, _ = fmt.Fprintf(tw, "SENDER PROJECT ID\t%s\n", senderProjectID)
+	// A message sent with an agent delegated credential also names the
+	// user who authorized it and the grant; other messages print no rows.
+	if msg.AuthorizingUserID != "" {
+		_, _ = fmt.Fprintf(tw, "AUTHORIZED BY\t%s\n", newUserLabeler(ctx, client)(msg.AuthorizingUserID))
+		_, _ = fmt.Fprintf(tw, "AUTHORIZING USER ID\t%s\n", msg.AuthorizingUserID)
+		_, _ = fmt.Fprintf(tw, "DELEGATION GRANT ID\t%s\n", msg.DelegationGrantID)
+	}
 	_, _ = fmt.Fprintf(tw, "RECIPIENT\t%s\n", msg.Recipient)
 	_, _ = fmt.Fprintf(tw, "RECIPIENT ID\t%s\n", msg.RecipientID)
 	_, _ = fmt.Fprintf(tw, "RECIPIENT PROJECT ID\t%s\n", recipientProjectID)
@@ -838,13 +850,18 @@ func runConversationCatchUp(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	label := newUserLabeler(ctx, client)
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "TIME\tFROM\tMESSAGE")
-	for _, msg := range result.Items {
+	for i := range result.Items {
+		msg := &result.Items[i]
 		timeStr := clitime.Format(msg.CreatedAt, clitime.Clock)
 		from := truncateRunes(msg.Sender, 20, true)
 		body := truncateRunes(msg.Msg, 60, true)
 		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", timeStr, from, body)
+		if authorizedBy := messageAuthorizedBy(msg, label); authorizedBy != "" {
+			_, _ = fmt.Fprintf(tw, "\t\t%s\n", authorizedBy)
+		}
 		// A deferred message was never dispatched, so its attachments never
 		// reached this agent's home (ptone/scion#4596). The hub lists them
 		// only to a reader.

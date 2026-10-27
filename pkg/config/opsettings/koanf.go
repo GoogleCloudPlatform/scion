@@ -56,6 +56,7 @@ var layer0Prefixes = []string{
 	// Secrets/storage
 	"server.secrets",
 	"server.storage",
+	"server.project_storage",
 	"server.workspace_storage",
 	"server.shared_dir_storage",
 	"server.home_storage",

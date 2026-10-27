@@ -191,7 +191,8 @@ type WebServerConfig struct {
 	Now func() time.Time
 	// BaseURL is the public URL for OAuth redirects (e.g., "https://scion.example.com").
 	BaseURL string
-	// DevAuthToken is the dev token for auto-login (empty = disabled).
+	// DevAuthToken is the dev token; when set, browsers sign in as the dev
+	// user from a dev sign-in link (empty = disabled).
 	DevAuthToken string
 	// AuthMode is the configured human auth mode (server.auth.mode). "proxy"
 	// is the only value the code checks: in proxy mode, OAuth providers are
@@ -291,6 +292,10 @@ type WebServer struct {
 
 	// testLoginLimiter rate-limits POST /api/v1/auth/test-login per source IP.
 	testLoginLimiter *testLoginLimiter
+
+	// devSignIn holds the pending dev sign-in codes (web_devsignin.go);
+	// nil unless dev auth is on.
+	devSignIn *devSignInCodes
 
 	// testIdentityHub is the hub whose test identity state backs test
 	// identity web sessions (SetTestIdentityWebSessions), or nil.
@@ -703,7 +708,7 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	// protects against any code path that constructs a WebServer directly.
 	if cfg.DevAuthToken != "" && !IsLoopbackHost(cfg.Host) {
 		log.Fatalf("dev auth cannot be enabled when the server is bound to a non-loopback address (%s). "+
-			"Dev auth auto-logs in all requests as admin and must only be used on localhost. "+
+			"Dev auth signs browsers in as admin and must only be used on localhost. "+
 			"Either bind to 127.0.0.1/::1/localhost (--host 127.0.0.1) or disable dev auth.", cfg.Host)
 	}
 
@@ -719,6 +724,9 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 	}
 	if strings.TrimSpace(cfg.ProxyDriverTokenAudience) != "" {
 		ws.driverTokenValidator = NewGoogleCredentialValidator(nil)
+	}
+	if cfg.DevAuthToken != "" {
+		ws.devSignIn = newDevSignInCodes()
 	}
 
 	// Initialize session store
@@ -1145,6 +1153,9 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 			// handle browser proxy requests instead of returning a raw 401.
 			session, _ = ws.sessionStore.New(r, webSessionName)
 		}
+		// A dev session keeps its cookie attributes when a token refresh
+		// below saves it again.
+		ws.applyDevSessionCookieOptions(session)
 
 		// See isReservedPlatformIdentity: a session for the reserved identity
 		// must not have a hub token minted or refreshed from it — including
@@ -1229,9 +1240,13 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 			// Browser-navigated request to a proxy route with no session:
 			// redirect to login instead of letting the Hub return a raw JSON 401.
 			if isBrowserRequest(r) && isProxyRoute(r.URL.Path) {
-				session.Values[sessKeyReturnTo] = r.URL.RequestURI()
-				_ = session.Save(r, w)
-				http.Redirect(w, r, "/auth/login", http.StatusFound)
+				if !ws.keepsNoAnonymousSession(r) {
+					session.Values[sessKeyReturnTo] = localRedirectPath(r.URL.RequestURI())
+					_ = session.Save(r, w)
+					http.Redirect(w, r, "/auth/login", http.StatusFound)
+					return
+				}
+				http.Redirect(w, r, ws.noSessionLoginLocation(r.URL.RequestURI()), http.StatusFound)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -1358,6 +1373,8 @@ func (ws *WebServer) registerRoutes() {
 	ws.mux.HandleFunc("/auth/me", ws.handleAuthMe)
 	ws.mux.HandleFunc("/auth/providers", ws.handleAuthProviders)
 	ws.mux.HandleFunc("/auth/debug", ws.handleAuthDebug)
+	ws.mux.HandleFunc(devLaunchPath, ws.handleDevLaunch)
+	ws.mux.HandleFunc(devSignInPath, ws.handleDevSignIn)
 	// Test identity web sessions (ptone/scion#4240, WS1): redeem a
 	// single-use web-login code. 404 unless available on this hub.
 	ws.mux.HandleFunc("/auth/test-identity/redeem", ws.handleTestIdentityRedeem)
@@ -3085,10 +3102,11 @@ func isCreateCollectionPath(path string) bool {
 	return len(segs) == 3 && segs[0] == "projects" && segs[1] != "" && segs[2] == "agents"
 }
 
-const devAuthLastLoginInterval = 5 * time.Minute
-
-// devAuthMiddleware auto-populates the session with the dev user identity
-// when a dev token is configured and no user is already in the session.
+// devAuthMiddleware loads the user of an existing session into the request
+// context when a dev token is configured. It never creates a session: a dev
+// session comes only from a sign-in link (handleDevSignIn), so a request
+// with no session continues without a user and takes the normal login
+// path, and /api/v1 gets no Authorization header from it.
 func (ws *WebServer) devAuthMiddleware(next http.Handler) http.Handler {
 	if ws.config.DevAuthToken == "" {
 		return next
@@ -3135,62 +3153,8 @@ func (ws *WebServer) devAuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// No user — auto-login with dev identity.
-		// Read from the store so any identity set via the onboarding wizard is reflected.
-		devEmail := "dev@localhost"
-		devName := "Development User"
-		if ws.store != nil {
-			if dbUser, err := ws.store.GetUser(r.Context(), DevUserID); err == nil {
-				if dbUser.Email != "" {
-					devEmail = dbUser.Email
-				}
-				if dbUser.DisplayName != "" {
-					devName = dbUser.DisplayName
-				}
-				// Throttle writes for clients that do not retain session cookies.
-				now := time.Now()
-				if dbUser.LastLogin.IsZero() || now.Sub(dbUser.LastLogin) > devAuthLastLoginInterval {
-					if err := ws.store.UpdateUserLastLogin(r.Context(), dbUser.ID, now); err != nil {
-						ws.logger().Warn("Failed to update dev-auth last login", "error", err)
-					}
-				}
-			}
-		}
-		devUser := &webSessionUser{
-			UserID:    DevUserID,
-			Email:     devEmail,
-			Name:      devName,
-			AvatarURL: "",
-			Role:      "admin",
-		}
-
-		session.Values[sessKeyUserID] = devUser.UserID
-		session.Values[sessKeyUserEmail] = devUser.Email
-		session.Values[sessKeyUserName] = devUser.Name
-		session.Values[sessKeyUserAvatar] = devUser.AvatarURL
-		session.Values[sessKeyUserRole] = devUser.Role
-
-		// Generate Hub JWTs so the session-to-bearer middleware can
-		// authenticate API requests, mirroring handleOAuthCallback.
-		if ws.userTokenSvc != nil {
-			if _, ok := session.Values[sessKeyHubAccessToken].(string); !ok {
-				accessToken, refreshToken, expiresIn, err := ws.userTokenSvc.GenerateTokenPair(
-					devUser.UserID, devUser.Email, devUser.Name, "admin", ClientTypeWeb,
-				)
-				if err == nil {
-					session.Values[sessKeyHubAccessToken] = accessToken
-					session.Values[sessKeyHubRefreshToken] = refreshToken
-					session.Values[sessKeyHubTokenExpiry] = time.Now().Add(time.Duration(expiresIn) * time.Second).UnixMilli()
-				}
-			}
-		}
-
-		if err := session.Save(r, w); err != nil {
-			ws.logger().Error("Failed to save dev-auth session", "error", err)
-		}
-
-		ctx := context.WithValue(r.Context(), webUserContextKey{}, devUser)
-		next.ServeHTTP(w, r.WithContext(ctx))
+		// No user: no session is created here (see handleDevSignIn).
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -3697,8 +3661,14 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 
 		// No authenticated user
 		if isBrowserRequest(r) {
-			// Store returnTo for post-login redirect
-			session.Values[sessKeyReturnTo] = r.URL.Path
+			// Store returnTo for post-login redirect. On a dev sign-in
+			// server, a request without a session cookie carries it in
+			// the redirect instead (see keepsNoAnonymousSession).
+			if ws.keepsNoAnonymousSession(r) {
+				http.Redirect(w, r, ws.noSessionLoginLocation(r.URL.Path), http.StatusFound)
+				return
+			}
+			session.Values[sessKeyReturnTo] = localRedirectPath(r.URL.Path)
 			_ = session.Save(r, w)
 			http.Redirect(w, r, "/auth/login", http.StatusFound)
 			return
@@ -3728,7 +3698,7 @@ func (ws *WebServer) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 			session, _ = ws.sessionStore.New(r, webSessionName)
 		}
 		if returnTo := r.URL.Query().Get("returnTo"); returnTo != "" {
-			session.Values[sessKeyReturnTo] = returnTo
+			session.Values[sessKeyReturnTo] = localRedirectPath(returnTo)
 			_ = session.Save(r, w)
 		}
 		http.Redirect(w, r, "/login", http.StatusFound)
@@ -3766,6 +3736,11 @@ func (ws *WebServer) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 		session, _ = ws.sessionStore.New(r, webSessionName)
 	}
 	session.Values[sessKeyOAuthState] = state
+	// The sign-in page passes returnTo on when a provider is picked; only
+	// a path on this server is stored.
+	if returnTo := r.URL.Query().Get("returnTo"); returnTo != "" {
+		session.Values[sessKeyReturnTo] = localRedirectPath(returnTo)
+	}
 	if err := session.Save(r, w); err != nil {
 		ws.logger().Error("Failed to save OAuth state to session", "error", err)
 		http.Error(w, "session error", http.StatusInternalServerError)
@@ -3826,7 +3801,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	// Check for error from provider
 	if errParam := r.URL.Query().Get("error"); errParam != "" {
 		ws.logger().Warn("OAuth provider returned error", "provider", provider, "error", errParam)
-		http.Redirect(w, r, "/login?error="+errParam, http.StatusFound)
+		http.Redirect(w, r, "/login?error="+url.QueryEscape(errParam), http.StatusFound)
 		return
 	}
 
@@ -3862,7 +3837,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	if denial := checkSignInDenial(ctx, userInfo.Email, ws.authorizedDomains(), ws.adminEmails(), ws.userAccessMode(), ws.store); denial != "" {
 		ws.logger().Warn("Unauthorized user", "email", userInfo.Email, "reason", denial)
 		ws.auditSignInDenied(ctx, userInfo.Email, denial)
-		http.Redirect(w, r, "/login?error="+denial, http.StatusFound)
+		http.Redirect(w, r, "/login?error="+url.QueryEscape(denial), http.StatusFound)
 		return
 	}
 
@@ -4040,10 +4015,9 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if returnTo == "" {
-		returnTo = "/"
-	}
-	http.Redirect(w, r, returnTo, http.StatusFound)
+	// The redirect goes to a path on this server only, whatever the
+	// session holds.
+	http.Redirect(w, r, localRedirectPath(returnTo), http.StatusFound)
 }
 
 // handleLogout clears the session and redirects to login (or returns JSON for API).
@@ -4199,7 +4173,11 @@ func (ws *WebServer) handleAuthProviders(w http.ResponseWriter, r *http.Request)
 	resp := struct {
 		Providers []providerInfo `json:"providers"`
 		AuthMode  string         `json:"authMode,omitempty"`
+		// DevSignIn is true when this server signs browsers in from a
+		// dev sign-in link (see handleDevSignIn).
+		DevSignIn bool `json:"devSignIn,omitempty"`
 	}{}
+	resp.DevSignIn = ws.config.DevAuthToken != "" && ws.config.AuthMode != "proxy"
 
 	// In proxy mode, no OAuth providers are active (auth is handled by the proxy).
 	if ws.config.AuthMode == "proxy" {
@@ -4346,7 +4324,8 @@ func (ws *WebServer) buildHandler() http.Handler {
 	// Proxy auth middleware (auto-creates session from IAP assertions in proxy mode)
 	handler = ws.proxyAuthMiddleware(handler)
 
-	// Dev-auth middleware (auto-populates session when dev token configured)
+	// Dev-auth middleware (loads an existing dev session; sessions come
+	// only from a sign-in link, see handleDevSignIn)
 	handler = ws.devAuthMiddleware(handler)
 
 	// Refuse new requests once shutdown has begun (ptone/scion#5054); the

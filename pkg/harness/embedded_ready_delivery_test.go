@@ -73,7 +73,8 @@ func TestEmbeddedHarnessConfigs_Validate(t *testing.T) {
 
 // TestEmbeddedHarnessConfigs_ValuesMatchLegacyTable pins every bundle's ready
 // and delivery blocks to the behaviour they replace: the hook-mode harnesses
-// of the in-container readiness table use hook, every other bundle uses
+// of the in-container readiness table use hook (except copilot, whose
+// sessionStart fires only on the first prompt), every other bundle uses
 // delay, and every bundle's delivery equals the historical hard-coded Enter
 // x3 at 300ms. The blocks must be written out explicitly, not left to
 // defaults, so authors can see the values.
@@ -81,7 +82,6 @@ func TestEmbeddedHarnessConfigs_ValuesMatchLegacyTable(t *testing.T) {
 	legacyHook := map[string]bool{
 		"claude":     true,
 		"gemini-cli": true,
-		"copilot":    true,
 		"grok-build": true,
 	}
 	wantHook := api.ReadySpec{Strategy: "hook", Settle: 1500 * time.Millisecond, Timeout: 90 * time.Second}

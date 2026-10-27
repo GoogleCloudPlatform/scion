@@ -4,11 +4,15 @@ title: Release Notes
 
 Scion release notes are published weekly.
 
-## Latest: Week of October 12 -- 18, 2026
+## Latest: Week of October 19 -- 25, 2026
 
-The CLI's local-only mode is gone. Every agent command now goes through a Hub, picked from a per-user list of named Hubs and a current context set with `scion use`. Async agent launch became the `hub.async_agent_launch` experiment, with per-step progress, typed failures and launches that survive Runtime Broker restarts. User access tokens now need matching selectors for chat, quota, agent and user-scope operations, and can now administer invitations, membership and schedules, create global skills and manage skill registries. `scion ssh` and `scion vscode` open shells and editors on agents, and the terminal workspace left its experiment.
+Scion now mounts repository git metadata into agents read-only with a private, credential-stripped `.git/config`, mounts project `.scion` directories read-only in shared layouts, and requires clone-per-agent for Kubernetes git projects that would otherwise share one repository across agents. Project storage consolidated into a single `server.project_storage` block and layout authority that backs the Files tab and chat attachments, while WebDAV, project-level `scion sync`, the Hub project copy and GCS workspace sync were retired. Agent-bound delegation added in-memory credential exchange over `~/.scion/delegation.sock`, lifecycle revocation, revoke-all endpoints and visible delegation attribution on messages, alongside `project.chat_post` for project thread posts and expanded User Access Token scopes for users, groups, roles, access boundaries and project creation. Across the web client, CLI and Runtime Brokers, API responses and static assets are compressed, the Agent Edit page replaced Configure, a single model channel feeds the harness `--model` argument, and `scion reincarnate --broker <target> --force` can move agents by recreating their workspace on another Runtime Broker.
 
-[Read the full release notes for this week ->](/scion/release-notes/2026-10-12/)
+[Read the full release notes for this week ->](/scion/release-notes/2026-10-19/)
+
+## Lifecycle hooks re-check their writer before minting a token
+
+An `http` lifecycle hook with an execution identity now mints its service-account token only if the hook's writer (`createdBy`) still qualifies at that moment. The writer must still be an active user created before the hook, must still hold `hub.lifecycle_hooks.update`, and, when the GCP IAM check is enforced, must still be able to act as the service account. The service account must still be verified and in scope. Before, these were checked only when the hook was written. When a check fails, the request is not sent, and the execution audit records `hook writer no longer authorized` with the failed check, at most once every 10 minutes per hook and cause. **Existing hooks stop authenticating** if their writer was deleted, suspended or demoted, if the writer's email changed, or, with the IAM check enforced, if the writer lost `actAs`. Updating a hook does not change its writer. To restore such a hook, an admin who holds the authority today re-creates it. On a Hub that uses development authentication, every `http` hook fails if the development user's stored email differs from the configured development identity's email. Re-creating does not help there: make the configured email match the stored one, or update the stored email. `webhook` actions are unchanged. See [Lifecycle Hooks](/scion/hosted/ha/lifecycle-hooks/#the-writers-authority-is-re-checked-every-time-a-token-is-minted).
 
 ## Templates describe the job, not the environment
 
@@ -90,6 +94,7 @@ Upgrade note: on the first start after upgrading, the Hub has no record yet, so 
 
 ## Previous Weeks
 
+- [Week of October 12 -- 18, 2026](/scion/release-notes/2026-10-12/)
 - [Week of October 5 -- 11, 2026](/scion/release-notes/2026-10-05/)
 - [Week of September 28 -- October 4, 2026](/scion/release-notes/2026-09-28/)
 - [Week of September 21 -- 27, 2026](/scion/release-notes/2026-09-21/)

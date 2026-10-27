@@ -66,22 +66,27 @@ func (s *Server) handleAdminProjectDefaults(w http.ResponseWriter, r *http.Reque
 // the DB row with the compiled default. When no DB row exists, the compiled
 // default is returned (default_scratchpad: true).
 func (s *Server) handleGetProjectDefaults(w http.ResponseWriter) {
-	enabled := true // compiled default
-
-	if ops := s.GetOperationalSettings(); ops != nil {
-		enabled = ops.ProjectDefaultScratchpad()
-	} else {
-		s.mu.RLock()
-		if s.config.DefaultScratchpad != nil {
-			// No OperationalSettings: read from settings.yaml via ApplySnapshot.
-			enabled = *s.config.DefaultScratchpad
-		}
-		s.mu.RUnlock()
-	}
-
+	enabled := s.defaultScratchpadEnabled()
 	writeJSON(w, http.StatusOK, opsettings.ProjectDefaultsSettings{
 		DefaultScratchpad: &enabled,
 	})
+}
+
+// defaultScratchpadEnabled reports the hub's project_defaults
+// default_scratchpad: the operational settings when present, else the
+// server config, else the compiled default (true). While it is on, every
+// project's scratchpad shared dir is a Required Mount.
+func (s *Server) defaultScratchpadEnabled() bool {
+	if ops := s.GetOperationalSettings(); ops != nil {
+		return ops.ProjectDefaultScratchpad()
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.config.DefaultScratchpad != nil {
+		// No OperationalSettings: read from settings.yaml via ApplySnapshot.
+		return *s.config.DefaultScratchpad
+	}
+	return true
 }
 
 // handlePutProjectDefaults accepts a partial update to the project_defaults

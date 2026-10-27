@@ -1592,7 +1592,7 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(legacyDir, "scion-agent.json"), []byte(`{"harness":"claude"}`), 0644); err != nil {
 		t.Fatalf("write legacy scion-agent.json: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(legacyDir, sharedDirStorageRecordFile), []byte(`{"backend":"nfs"}`+"\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(legacyDir, legacySharedDirStorageRecordFile), []byte(`{"backend":"nfs"}`+"\n"), 0644); err != nil {
 		t.Fatalf("write legacy shared-dir storage record: %v", err)
 	}
 
@@ -1620,7 +1620,7 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(legacyDir, "scion-agent.json")); err == nil {
 		t.Errorf("legacy in-project scion-agent.json still exists after migration")
 	}
-	if _, err := os.Stat(filepath.Join(legacyDir, sharedDirStorageRecordFile)); err == nil {
+	if _, err := os.Stat(filepath.Join(legacyDir, legacySharedDirStorageRecordFile)); err == nil {
 		t.Errorf("legacy in-project shared-dir storage record still exists after migration")
 	}
 
@@ -1633,13 +1633,10 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	if string(data) != "old task" {
 		t.Errorf("migrated prompt.md content = %q, want %q", string(data), "old task")
 	}
-	// The recorded shared-dir storage backend moves with the agent state.
-	recorded, err := readSharedDirStorageRecord(extAgentDir)
-	if err != nil {
-		t.Fatalf("reading the migrated shared-dir storage record: %v", err)
-	}
-	if recorded != "nfs" {
-		t.Errorf("migrated shared-dir storage backend = %q, want %q", recorded, "nfs")
+	// The legacy shared-dir storage record (no longer read) moves with the
+	// agent state, so the legacy directory can be removed.
+	if _, err := os.Stat(filepath.Join(extAgentDir, legacySharedDirStorageRecordFile)); err != nil {
+		t.Errorf("the legacy shared-dir storage record was not moved: %v", err)
 	}
 }
 

@@ -1062,3 +1062,90 @@ func (b *lockedBuffer) String() string {
 	defer b.mu.Unlock()
 	return b.buf.String()
 }
+
+// runPlacementWithMkdir runs the placement script like runPlacement, with
+// mkdir replaced by a stub whose body is given. The stub sees the path to
+// create as $last; env adds variables the stub body can read.
+func runPlacementWithMkdir(t *testing.T, home, mkdirBody string, env []string, placements []k8sFilePlacement) (string, error) {
+	t.Helper()
+	bin := t.TempDir()
+	stub := "#!/bin/sh\nfor a; do last=$a; done\n" + mkdirBody + "\n"
+	if err := os.WriteFile(filepath.Join(bin, "mkdir"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", "-c", "umask 022\n"+k8sFilePlacementScript(home, placements))
+	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = append(cmd.Env, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stderr.String(), err
+}
+
+// TestK8sFilePlacementScript_ReverifiesCreatedDirs checks that every
+// directory the script creates is checked again after mkdir: a nested path
+// of real directories is placed as before, and a created component that is
+// a symlink or a regular file stops placement with a clear error before any
+// file is written.
+func TestK8sFilePlacementScript_ReverifiesCreatedDirs(t *testing.T) {
+	requireTools(t, "sh", "cp", "mkdir", "chmod", "rm", "mv", "ln")
+
+	t.Run("nested_real_dirs", func(t *testing.T) {
+		_, home, src := placementFixture(t)
+		target := filepath.Join(home, "a", "b", "c", "creds.json")
+		if stderr, err := runPlacement(t, home, []k8sFilePlacement{{Source: src, Target: target, Mode: 0o600}}); err != nil {
+			t.Fatalf("placement failed: %v (stderr: %s)", err, stderr)
+		}
+		for _, d := range []string{"a", "a/b", "a/b/c"} {
+			if m := modeOf(t, filepath.Join(home, d)); !m.IsDir() {
+				t.Errorf("%s mode = %v, want a directory", d, m)
+			}
+		}
+		if got, err := os.ReadFile(target); err != nil || string(got) != "staged-content" {
+			t.Errorf("target = %q (%v), want the staged content", got, err)
+		}
+	})
+
+	t.Run("created_component_is_symlink", func(t *testing.T) {
+		root, home, src := placementFixture(t)
+		elsewhere := filepath.Join(root, "elsewhere")
+		if err := os.MkdirAll(elsewhere, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(home, ".config", "creds.json")
+		stderr, err := runPlacementWithMkdir(t, home, `ln -s "$STUB_LINK_TARGET" "$last"`,
+			[]string{"STUB_LINK_TARGET=" + elsewhere}, []k8sFilePlacement{{Source: src, Target: target, Mode: 0o600}})
+		if err == nil {
+			t.Fatal("expected placement to fail when a created directory is a symlink")
+		}
+		created := filepath.Join(home, ".config")
+		if !strings.Contains(stderr, "failed to place file at "+target) ||
+			!strings.Contains(stderr, "created directory "+created+" is a symbolic link") {
+			t.Errorf("stderr = %q, want the target and the created component named", stderr)
+		}
+		if entries, err := os.ReadDir(elsewhere); err != nil || len(entries) != 0 {
+			t.Errorf("files written behind the created component: %v (%v)", entries, err)
+		}
+	})
+
+	t.Run("created_component_is_regular_file", func(t *testing.T) {
+		_, home, src := placementFixture(t)
+		target := filepath.Join(home, ".config", "gcloud", "adc.json")
+		stderr, err := runPlacementWithMkdir(t, home, `: > "$last"`,
+			nil, []k8sFilePlacement{{Source: src, Target: target, Mode: 0o600}})
+		if err == nil {
+			t.Fatal("expected placement to fail when a created directory is a regular file")
+		}
+		created := filepath.Join(home, ".config")
+		if !strings.Contains(stderr, "failed to place file at "+target) ||
+			!strings.Contains(stderr, "created directory "+created+" is not a directory") {
+			t.Errorf("stderr = %q, want the target and the created component named", stderr)
+		}
+		if m := modeOf(t, created); !m.IsRegular() {
+			t.Errorf("%s mode = %v, want the stub's regular file left as is", created, m)
+		}
+		if _, err := os.Lstat(filepath.Join(home, ".config", "gcloud")); err == nil {
+			t.Error("placement continued past the failed component")
+		}
+	})
+}

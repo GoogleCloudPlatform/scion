@@ -25,7 +25,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -98,14 +97,21 @@ func (s journalState) String() string {
 
 // journalTerminal is the terminal report a launch has decided to send.
 // AgentInfo is the identifier-only echo of a succeeded launch
-// (hubclient.AgentLaunchReportInfo, built in runLaunch).
+// (hubclient.AgentLaunchReportInfo, built in runLaunch). StartFailed marks a
+// failed terminal whose launch's Start failed on this broker, and
+// PostCompleted one sent after the hub had already answered completed
+// (ptone/scion#5368); recovery classifies their answers with
+// startFailureCleanup. Both are omitted when false, so a record from an
+// older broker reads them as false and journalVersion stays 1.
 type journalTerminal struct {
-	Succeeded bool                             `json:"succeeded"`
-	Step      string                           `json:"step,omitempty"`
-	ErrorCode string                           `json:"errorCode,omitempty"`
-	Message   string                           `json:"message,omitempty"`
-	Cause     string                           `json:"cause,omitempty"`
-	AgentInfo *hubclient.AgentLaunchReportInfo `json:"agentInfo,omitempty"`
+	Succeeded     bool                             `json:"succeeded"`
+	Step          string                           `json:"step,omitempty"`
+	ErrorCode     string                           `json:"errorCode,omitempty"`
+	Message       string                           `json:"message,omitempty"`
+	Cause         string                           `json:"cause,omitempty"`
+	StartFailed   bool                             `json:"startFailed,omitempty"`
+	PostCompleted bool                             `json:"postCompleted,omitempty"`
+	AgentInfo     *hubclient.AgentLaunchReportInfo `json:"agentInfo,omitempty"`
 }
 
 // journalOwnedRun is a flat instance's ownership key of the launch's run
@@ -286,46 +292,6 @@ func mkdirPrivate(dir string) error {
 // errJournalLocked is returned by lockJournalInstance when another process
 // holds the instance's lock.
 var errJournalLocked = errors.New("launch journal instance is locked by a live process")
-
-// lockJournalInstance takes the exclusive flock on <root>/<id>.lock without
-// blocking. It retries when the lock file was replaced between open and
-// flock (a recovery removing a dead instance's lock), so the lock it returns
-// is always on the file at the path.
-func lockJournalInstance(root, instanceID string, mustExist bool) (*os.File, error) {
-	path := filepath.Join(root, instanceID+".lock")
-	for attempt := 0; attempt < 5; attempt++ {
-		flags := os.O_RDWR
-		if !mustExist {
-			flags |= os.O_CREATE
-		}
-		f, err := os.OpenFile(path, flags, journalFileMode)
-		if err != nil {
-			return nil, err
-		}
-		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-			_ = f.Close()
-			if errors.Is(err, syscall.EWOULDBLOCK) {
-				return nil, errJournalLocked
-			}
-			return nil, err
-		}
-		held, herr := f.Stat()
-		cur, cerr := os.Stat(path)
-		if herr == nil && cerr == nil && os.SameFile(held, cur) {
-			return f, nil
-		}
-		unlockJournalInstance(f)
-		if mustExist && errors.Is(cerr, os.ErrNotExist) {
-			return nil, cerr
-		}
-	}
-	return nil, fmt.Errorf("launch journal lock %s kept changing", path)
-}
-
-func unlockJournalInstance(f *os.File) {
-	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	_ = f.Close()
-}
 
 // journalEntry is one launch's journal record. Every write goes through
 // write, under mu (design wave 3 §1 C-a, R4).

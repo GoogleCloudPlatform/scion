@@ -129,7 +129,7 @@ scion hub env set --broker=my-gpu-node CUDA_VISIBLE_DEVICES=0
 
 ## Managing Secrets
 
-Secrets are write-only from host-level CLI commands and the Web Dashboard. Once set, their values cannot be read back by users. However, authorized agents running inside their containers can securely retrieve project-scoped secrets at runtime via the Hub API or the `sciontool` utility.
+Secrets are write-only from host-level CLI commands and the Web Dashboard. Once set, their values cannot be read back by users. However, authorized agents running inside their containers can securely retrieve project-scoped secrets at runtime via the Hub API or the `scion secret` CLI commands (and write secrets via `sciontool secret set`).
 
 ### Setting Secrets
 Secrets can be set manually via the CLI or Web Dashboard, or gathered interactively during agent creation.
@@ -157,16 +157,18 @@ scion secret list
 scion secret get ANTHROPIC_API_KEY
 ```
 
+`scion secret get --value KEY` prints the secret's value instead, which only works inside an agent container (see [Agent Runtime Secret Retrieval](#agent-runtime-secret-retrieval) below).
+
 :::tip[Graceful Raw vs. Base64 Fallback]
 To prevent silent integration failures (such as when the web UI sends raw plaintext but the underlying REST endpoint accepts base64), all four of Scion's secret-write API handlers (Hub, User, Project, and Broker scopes) feature a **graceful fallback mechanism**.
 
 When writing a secret, the Hub checks if the payload is a valid base64-encoded string. If it is, the Hub decodes it back to raw bytes before encrypting. If it is not valid base64 (or if decoding fails), the Hub gracefully falls back to treating the payload as raw plaintext. This ensures that both base64-encoded binary payloads (e.g. key files) and raw plaintext API keys are accepted reliably.
 
-To prevent accidental base64-decoding when setting plaintext secrets that happen to look like valid base64 (e.g., specific API keys), the CLI commands `scion hub secret set` and `scion secret set` explicitly send `encoding: raw` to bypass server-side base64 validation and ensure the secret is stored exactly as typed.
+To prevent accidental base64-decoding when setting plaintext secrets that happen to look like valid base64 (e.g., specific API keys), `scion hub secret set` explicitly sends `encoding: raw` for plaintext values to bypass server-side base64 validation and ensure the secret is stored exactly as typed. `scion secret set` instead base64-encodes every value on the client (file contents from `@file` included), so the Hub decodes it back to exactly the bytes given.
 :::
 
 **Interactive Secrets-Gather:**
-If a template requires specific secrets or environment variables (defined in `scion-agent.yaml`), Scion utilizes an interactive gather pipeline during agent start and resume. For secrets, it prompts you for missing values and sends them for this agent only; they are not stored (store a secret on the Hub with `scion hub secret set` to reuse it), so sensitive credentials are never written to plain text configuration files. For environment variables found in your local environment, interactive `scion start` and `scion resume` prompt before sending them (confirmed automatically by `--yes`), while non-interactive `scion start` and `scion resume` send local environment values only when `--send-env` is passed and fail without it, naming the missing keys and the `--send-env` flag.
+If a template requires specific secrets or environment variables (defined in `scion-agent.yaml`), Scion utilizes an interactive gather pipeline during agent start and resume. For secrets, it prompts you for missing values and sends them for this agent only; they are not stored (store a secret on the Hub with `scion hub secret set` to reuse it), so sensitive credentials are never written to plain text configuration files. For environment variables found in your local environment, interactive `scion start` and `scion resume` prompt before sending them (confirmed automatically by `--yes`), while non-interactive `scion start` and `scion resume` send local environment values only when `--send-env` is passed and fail without it, naming the missing keys and the `--send-env` flag. When the CLI sends gathered environment values without showing the confirmation prompt (with `--yes`, with `--send-env` in a non-interactive run, or with `--format json`), it prints one line to `stderr` naming the keys, sorted (`Sending N environment value(s) to the Hub: KEY_A, KEY_B`), never the values.
 
 ### Secret Types
 Secrets can be projected into the agent container in three ways:
@@ -226,31 +228,29 @@ Once set, every agent that starts will have the credential file mounted at `~/.s
 
 While environment and file-based injection deliver secrets at agent startup, Scion also supports **dynamic runtime secret retrieval** from inside the agent container. This enables harnesses or scripts to request project-scoped secrets programmatically as-needed, reducing initial environment exposure.
 
-This runtime retrieval is accessible either via the `sciontool` helper utility or directly through the Hub API.
+This runtime retrieval is accessible either via the `scion` CLI or directly through the Hub API.
 
-#### Using `sciontool`
-From inside an agent container, use the `sciontool secret` command suite:
+#### Using the `scion` CLI inside an agent
+From inside an agent container, read secrets with `scion secret`. The calls are made as the agent, with its own hub identity:
 
-*   **List Available Secrets**: Lists metadata (keys, types, and injection targets) for all secrets in the agent's project. Sensitive values are omitted.
+*   **List Available Secrets**: Lists metadata (keys, types, versions and update times) for all secrets in the agent's project. Values are omitted.
     ```bash
-    sciontool secret list
-    ```
-    *Output:*
-    ```text
-    KEY              TYPE         TARGET
-    ---              ----         ------
-    MY_API_KEY       environment  MY_API_KEY
-    CLAUDE_AUTH      file         ~/.claude/.credentials.json
+    scion secret list
     ```
 
-*   **Retrieve a Secret Value**: Decodes and outputs the raw bytes of a specific secret to stdout (ideal for piping or scripting).
+*   **Retrieve a Secret Value**: Decodes and writes the raw bytes of a specific secret to stdout, with no added newline (ideal for piping or scripting).
     ```bash
-    sciontool secret get MY_API_KEY
+    scion secret get --value MY_API_KEY
     ```
     *Example script usage:*
     ```bash
-    export API_KEY=$(sciontool secret get MY_API_KEY)
+    export API_KEY=$(scion secret get --value MY_API_KEY)
     ```
+    Without `--value` (or with `--metadata`), `scion secret get MY_API_KEY` prints the secret's metadata. `--format json` returns metadata only and cannot be combined with `--value`.
+
+`sciontool secret get` has moved to `scion secret get --value`, and `sciontool secret list` to `scion secret list`; the old commands now print a message naming the `scion` command and exit `1`.
+
+#### Writing secrets with `sciontool`
 
 *   **Set a Secret**: You can write/update secrets from inside the container to persist credentials discovered or generated at runtime. Secrets can be scoped to either the **project** (visible to all agents in the project) or the **user** (personal secrets visible only to your own agents):
     ```bash
@@ -269,7 +269,7 @@ From inside an agent container, use the `sciontool secret` command suite:
     the web UI or `scion hub secret set --project`.*
 
 #### Using the Hub API Directly
-Under the hood, `sciontool` interacts with the Hub's agent-specific secrets API:
+Under the hood, `scion secret` and `sciontool` interact with the Hub's agent-specific secrets API:
 
 *   **`GET /api/v1/agents/{agentID}/secrets`**: Lists available secret metadata in the agent's project.
 *   **`GET /api/v1/agents/{agentID}/secrets/{key}`**: Retrieves a single secret's metadata and its base64-encoded value.
@@ -279,7 +279,7 @@ Under the hood, `sciontool` interacts with the Hub's agent-specific secrets API:
 #### Security & Audit Logging
 *   **Authentication**: API access is restricted to the running agent container. The agent must include its unique Hub-issued JWT (loaded from `SCION_HUB_TOKEN`) in the `Authorization: Bearer <token>` header of every request.
 *   **Authorization**: Agents are strictly bounded to their own project's secrets. They can also access user-scoped (personal) secrets belonging to their originating user (the user who kicked off the agent chain), which are resolved on the Hub via the agent JWT's `OriginUserID` (the user who originally started the agent chain). Agents cannot access secrets in other projects, other users' secrets, or global Hub secrets unless explicitly shared via progeny policies (descendant access).
-*   **Fail-Closed Reads**: Every runtime secret read goes through one check sequence: project permission, then an originating user who is still active and either an active member of the project (any active project role binding counts, built-in or custom, direct or through a group, except `project-visitor`) or holds system-level authority for the exact `secret.use` permission, then progeny sharing. Membership alone does not grant reads: the project permission check (`project.secret_read`) still applies. A value is fetched only for the version recorded in the secret's metadata. If a value cannot be retrieved, that key is reported as unavailable in the response rather than returned as an empty value; other keys in the same request are unaffected. When the Hub itself cannot resolve an agent's secrets, or cannot read its stored environment settings, create, start, restart, resume and waking an agent for a direct message answer `503` (`agent secrets could not be resolved; the agent was not started`, `... not created` for a create, or the environment settings equivalent) instead of starting the agent without them: a start leaves the agent as it was, a restart (which stops the agent first) leaves it stopped, and a failed create is rolled back. A provision-only create still succeeds, and the agent's later start fails closed. A reincarnation answers `202` and then fails at its start leg; it is recorded as failed with the same message and the previous config is restored. The message names no secret or value. Having no secrets or settings is not an error.
+*   **Fail-Closed Reads**: Every runtime secret read goes through one check sequence: project permission, then an originating user who is still active and either an active member of the project (any active project role binding counts, built-in or custom, direct or through a group, except `project-visitor`) or holds system-level authority for the exact `secret.use` permission, then progeny sharing. For an agent whose delegation chain carries recorded delegation provenance, a user-scoped secret shared with progeny is also bounded by that chain: every recorded delegation on the chain must allow secret use (`secret.use`), every agent on the chain must be live and hold `project:secret:read`, and the user at the root of the chain must be the secret's owner, active, admitted to the project and not restricted from `secret.use` by an access constraint. The agent secret list applies the same rule, so it lists a user-scoped key exactly when a read of that key would return it. Membership alone does not grant reads: the project permission check (`project.secret_read`) still applies. A value is fetched only for the version recorded in the secret's metadata. If a value cannot be retrieved, that key is reported as unavailable in the response rather than returned as an empty value; other keys in the same request are unaffected. When the Hub itself cannot resolve an agent's secrets, or cannot read its stored environment settings, create, start, restart, resume and waking an agent for a direct message answer `503` (`agent secrets could not be resolved; the agent was not started`, `... not created` for a create, or the environment settings equivalent) instead of starting the agent without them: a start leaves the agent as it was, a restart (which stops the agent first) leaves it stopped, and a failed create is rolled back. A provision-only create still succeeds, and the agent's later start fails closed. A reincarnation answers `202` and then fails at its start leg; it is recorded as failed with the same message and the previous config is restored. The message names no secret or value. Having no secrets or settings is not an error.
 *   **Audit Trail**: To ensure accountability, every runtime read and write operation is fully audited on the Hub. Each retrieval request logs one audit event (`agent_secret_read`) identifying the calling agent, the requested keys, and the outcome.
 
 ---
@@ -368,7 +368,7 @@ Other scopes use the same names, read from their own credentials only:
 
 In every scope the first match wins, and with no match the fetch is unauthenticated, which works for public repos only. A global or user-scope import never reads project credentials.
 
-Reimporting an existing template (`POST /api/v1/templates/{id}/reimport`) uses the same lookup order for the template's own scope: a project template's project credentials and App token, a global template's Hub credentials, and a user template's credentials only when you are that user. With a credential, the Hub requests the archive from `api.github.com` and sends the credential only there.
+Reimporting an existing template (`POST /api/v1/templates/{id}/reimport`) uses the same lookup order for the template's own scope: a project template's project credentials and App token, a global template's Hub credentials, and a user template's credentials only when you are that user. With a credential, the Hub requests the archive from `api.github.com`. When an import runs `git` instead (`git ls-remote` to resolve a branch name that contains `/`, or a sparse checkout when the archive download fails), the credential reaches `git` only through a credential helper scoped to `https://github.com`, with terminal prompts off (and `GIT_LFS_SKIP_SMUDGE=1` for the checkout); it is never put in the repository URL. The CLI's own imports work the same way.
 
 Only GitHub folder URLs use a credential. Archive URLs (`.tar.gz`, `.tgz`, `.zip`, including `github.com/.../archive/...` links), rclone sources and other hosts are always fetched without one.
 
@@ -402,10 +402,12 @@ To use secrets in production, the Hub must be configured with a production-grade
 
 ### Secrets Backend
 
-Scion uses a secrets backend to store secret values securely. The recommended backend for production is **GCP Secret Manager**, while the default `local` backend stores values directly in the Hub database using AES-256-GCM encryption at rest (derived from the hub signing secret).
+Scion uses a secrets backend to store secret values securely. The recommended backend for production is **GCP Secret Manager**, while the default `local` backend stores values directly in the Hub database using AES-256-GCM encryption at rest.
 
-:::note[Encryption at Rest]
-Secret values are never stored in plaintext. If using the default `local` backend, values are encrypted using AES-256-GCM (derived from the hub signing secret) before being written to the database. Legacy plaintext values migrate transparently on next read.
+:::note[Encryption at Rest & Startup Audit]
+Secret values stored in the `local` backend and Hub-stored infrastructure backups in the database (signing keys for agent/user tokens, skill downloads, artifact views, attachment delivery, and list cursors; the OIDC signing key and `oidc_signing_keyset`; and the Conduit grant key ring) are encrypted with the Hub's versioned value cipher (`enc:v1:` or `enc:v2:<kid>:`). Legacy `enc:v1:` values remain readable while their key is in the legacy v1 read set; in legacy mode without a keyring file, legacy plaintext rows can still be read and are rewritten as `enc:v1:` on the next write, whereas managed keyring mode (`server.keyring_file`) rejects unencrypted rows on runtime reads and admits them only during an explicit encryption migration.
+
+When a database encryption policy row is present, the Hub checks at startup that its local cipher satisfies the policy (running with `server.keyring_file`, writing `enc:v2:` under an allowed writer key ID, and holding every required reader key ID) and refuses to start on any mismatch. Before synchronizing or writing any backup keys, a startup encryption audit verifies all locally stored secret payloads and the decrypted structure of Hub-scoped infrastructure backups. Unreadable records are preserved and never overwritten: in keyring mode, an unreadable infrastructure backup keeps the Hub not ready (`/readyz` returns `503` with `reason: "backup_unreadable"`), while in legacy mode the Hub logs an `UNHEALTHY` error naming the affected record IDs and continues serving.
 :::
 
 #### Configuring GCP Secret Manager
@@ -490,6 +492,7 @@ For external messaging integrations (such as Discord, Telegram, or Google Chat) 
 - **Automatic One-Shot Migration**: When starting up or activating a plugin (e.g., via the runtime activation path in `activateInstalledIntegration`), the Hub automatically scans the integration's configuration—including per-plugin external configuration files and inline config blocks. Any discovered secret keys are automatically migrated into the configured secure **Secrets Backend** (such as GCP Secret Manager).
 - **Copy-Before-Strip Safety**: After migrating the secrets, Scion strips the raw values in-place from the integration's file-based and inline configurations (`stripSecretKeysInPlace`) using a secure copy-before-strip helper to avoid any risk of partial writes or configuration corruption, while deduplicating warning logs.
 - **Boot and Activation Consistency**: This migration-and-strip sequence runs consistently during both the Hub's boot-up routine and dynamic runtime integration activation, ensuring that secrets are never stored or exposed in plaintext configs.
+- **Redacted Wiring & Database Settings**: Integration detail responses (`GET /api/v1/admin/integrations/{name}`) omit secret keys, internal runtime keys (`bot_id`, `config_file`), and Hub wiring and database keys (`hub_url`, `broker_id`, `hmac_key`, `plugin_name`, `project_slug_map`, `database_driver`, `database_url`) from `settings`. When configuring or restarting a plugin, live Hub wiring and database values always override any cached values for those keys.
 
 ### Resolution Hierarchy
 When an agent starts, the Runtime Broker requests a "Resolved Environment" from the Hub and combines it with the template `env` block. For the same key, a later entry in this list wins over an earlier one:

@@ -1,4 +1,5 @@
 {
   "autoUpdate": false,
-  "banner": "never"
+  "banner": "never",
+  "remoteSessions": false
 }

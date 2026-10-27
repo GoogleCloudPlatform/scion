@@ -115,15 +115,13 @@ runtimes:
 | `shared_dir_storage_class` | string | (Kubernetes) Default StorageClass for shared-dir PVCs. Must support `ReadWriteMany`. A profile's value wins over this, and an agent's inline config `kubernetes.shared_dir_storage_class` wins over both (a template's value is ignored). Default: the cluster's default class. |
 | `shared_dir_size` | string | (Kubernetes) Default size for each shared-dir PVC, as a positive Kubernetes quantity (e.g. `10Gi`, `1Ti`). Same precedence as `shared_dir_storage_class`. Default: `10Gi`. |
 | `safe_to_evict` | bool | (Kubernetes) Set to `false` to add the `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` annotation to agent pods. Only `false` has an effect; unset or `true` adds nothing. A profile's value wins over this, and an agent's inline config `kubernetes.safeToEvict` wins over both (a template's value is ignored). Ignored, with a validation warning, on other runtime types. |
-| `shared_dir_storage_backend` | string | `local` or `nfs`. Overrides [`server.shared_dir_storage.backend`](/scion/reference/server-config/#per-profile-backend) for agents whose profile uses this runtime. A profile's value wins over this. Read from global settings only. |
-| `shared_dir_storage_backends` | map | Shared directory name to `local` or `nfs`, for agents whose profile uses this runtime. A directory it does not name uses `shared_dir_storage_backend`. A profile's values, single or per directory, win over this. See [per-directory backend](/scion/reference/server-config/#per-directory-backend). Read from global settings only. |
-| `home_storage_backend` | string | (Kubernetes) `local` or `nfs`. Overrides [`server.home_storage.backend`](/scion/reference/server-config/#agent-home-storage-serverhome_storage) for agents whose profile uses this runtime. A profile's value wins over this. Ignored, with a validation warning, on other runtime types. Read from global settings only. |
-| `home_storage_leaf` | string | (Kubernetes) `pod` or `broker`. Overrides `server.home_storage.leaf` for agents whose profile uses this runtime. A profile's value wins over this. |
 | `kubernetes_service_account_mappings` | map | (Kubernetes) Map of lowercase GCP service account email to Kubernetes ServiceAccount name, used by GCP identity mode `assign`: the agent pod runs as the mapped ServiceAccount through GKE Workload Identity. The ServiceAccount must already exist in this entry's namespace and be bound to the service account; Scion does not create or bind it. A profile's entry for the same email wins over this. Without an entry, the broker uses the one ServiceAccount in the namespace annotated `iam.gke.io/gcp-service-account` with the email, if there is exactly one; that discovery needs `list` on `serviceaccounts` in the namespace. Read from global settings only; a project's `settings.yaml` value is ignored. See [GCP identity mode "assign"](/scion/hosted/ha/kubernetes/#gcp-identity-mode-assign-workload-identity-mapping). |
 | `kubernetes_block_service_account` | string | (Kubernetes) Kubernetes ServiceAccount the agent pod runs as when its GCP identity mode is `block`. Use a dedicated ServiceAccount with no Workload Identity annotation and no IAM grants; Scion does not create or check it. Unset or empty: the pod runs as the namespace's default ServiceAccount. A profile's value wins over this. Read from global settings only. See [block](/scion/hosted/ha/kubernetes/#block). |
 | `env` | map | Environment variables to set for the runtime. |
 
-The `cloudrun` runtime needs an NFS (Filestore) workspace share: set [`server.workspace_storage.backend`](/scion/reference/server-config/#workspace-storage-serverworkspace_storage) to `nfs` with the share in `nfs.shares[0]`. Agent start on `cloudrun` with any other workspace backend is refused before an instance is created.
+Storage placement is not a per-runtime or per-profile setting. The former `shared_dir_storage_backend`, `shared_dir_storage_backends`, `home_storage_backend` and `home_storage_leaf` keys are removed: settings validation, the Hub admin settings API and flat Runtime Broker instance loading reject them with an error that names [`server.project_storage`](/scion/reference/server-config/#project-storage-serverproject_storage), which places every agent's workspace, shared directories and home. For a node-local directory, such as a build cache, use an ordinary `volumes:` entry instead.
+
+The `cloudrun` runtime needs an NFS (Filestore) workspace share: set [`server.project_storage.backend`](/scion/reference/server-config/#project-storage-serverproject_storage) to `nfs` with the share in `nfs.shares[0]`. Agent start on `cloudrun` with any other workspace backend is refused before an instance is created.
 
 :::note
 The `tmux` field is now deprecated. All agent sessions are wrapped in tmux by default.
@@ -244,12 +242,10 @@ profiles:
 | `shared_dir_size` | string | (Kubernetes) Size for each shared-dir PVC created under this profile. Same precedence as `shared_dir_storage_class`. |
 | `safe_to_evict` | bool | (Kubernetes) Safe-to-evict setting for agent pods created under this profile. Wins over the runtime entry's value; an agent's inline config `kubernetes.safeToEvict` wins over this (a template's value is ignored). |
 | `clone_depth` | string or int | Git clone depth for clone-per-agent workspaces of agents under this profile: `full` for a full (non-shallow) clone, or an integer N from 1 to 999999999 for a clone of depth N. A template or agent `clone_depth` wins over this. Unset (absent, null or empty) keeps the default shallow (depth 1) clone. Applies only when the workspace is cloned (a new agent, or a recreated workspace). |
-| `shared_dir_storage_backend` | string | `local` or `nfs`. Overrides [`server.shared_dir_storage.backend`](/scion/reference/server-config/#per-profile-backend) for agents using this profile. Wins over the runtime entry's value. Read from global settings only. |
-| `shared_dir_storage_backends` | map | Shared directory name to `local` or `nfs`, for agents using this profile. A directory it does not name uses `shared_dir_storage_backend`. Wins over the runtime entry's values. See [per-directory backend](/scion/reference/server-config/#per-directory-backend). Read from global settings only. |
-| `home_storage_backend` | string | (Kubernetes) `local` or `nfs`. Overrides [`server.home_storage.backend`](/scion/reference/server-config/#agent-home-storage-serverhome_storage) for agents using this profile. Wins over the runtime entry's value. Read from global settings only. |
-| `home_storage_leaf` | string | (Kubernetes) `pod` or `broker`. Overrides `server.home_storage.leaf` for agents using this profile. Wins over the runtime entry's value. |
 | `kubernetes_service_account_mappings` | map | (Kubernetes) Per-profile override of the runtime entry's `kubernetes_service_account_mappings`: for each service account email listed here, this ServiceAccount name wins over the runtime entry's. Other emails fall through to the runtime entry. Read from global settings only. |
 | `kubernetes_block_service_account` | string | (Kubernetes) Per-profile override of the runtime entry's `kubernetes_block_service_account`. Read from global settings only. |
+
+A profile cannot choose where its agents' storage lives: the removed `shared_dir_storage_backend`, `shared_dir_storage_backends`, `home_storage_backend` and `home_storage_leaf` keys are rejected (see the note under the runtime entry table above). Use `volumes` for a node-local directory.
 
 **Shared-dir PVC class and size (Kubernetes).** Each key is resolved separately, and the first source that sets it wins: the agent's inline config `kubernetes:` block (a template's is ignored), then the profile, then the profile's runtime entry, then the built-in default (the cluster's default class and `10Gi`). On GKE Autopilot, set an RWX class such as `standard-rwx`. See [Shared Directory PVCs](/scion/hosted/ha/kubernetes/#shared-directory-pvcs).
 
@@ -300,6 +296,8 @@ Settings for forwarding telemetry to a cloud OTLP backend.
 | `enabled` | bool | `true` | Enable cloud forwarding. |
 | `endpoint` | string | — | Cloud OTLP endpoint URL. |
 | `protocol` | string | `grpc` | Transport protocol: `grpc` or `http`. |
+| `provider` | string | — | Cloud provider name (for example `gcp`). |
+| `cloud_logging` | bool | `false` | Send the Scion server's (Hub's) own logs directly to Google Cloud Logging. Read once at server startup; `SCION_CLOUD_LOGGING`, when set (even to `false`), takes precedence over the file. Agents do not use it: the value is carried into the agent's resolved telemetry config (`telemetry.cloud.cloud_logging`) but is not passed to the agent as an environment variable. On a database-backed Hub it cannot be changed through `PUT /api/v1/admin/server-config` (`422 startup_only_key_rejected`). |
 | `headers` | map | — | Additional headers for OTLP export (e.g., `Authorization`). |
 | `tls.enabled` | bool | `true` | Enable TLS for the connection. |
 | `tls.insecure_skip_verify` | bool | `false` | Skip TLS certificate verification (development only). |
@@ -371,6 +369,7 @@ Settings can be overridden using environment variables with the `SCION_` prefix.
 | `cli.autohelp` | `SCION_CLI_AUTOHELP` |
 | `telemetry.enabled` | `SCION_TELEMETRY_ENABLED` |
 | `telemetry.cloud.enabled` | `SCION_TELEMETRY_CLOUD_ENABLED` |
+| `telemetry.cloud.cloud_logging` (server process only) | `SCION_CLOUD_LOGGING` |
 | `telemetry.cloud.endpoint` | `SCION_OTEL_ENDPOINT` |
 | `telemetry.cloud.protocol` | `SCION_OTEL_PROTOCOL` |
 | `telemetry.cloud.tls.enabled` (inverted) | `SCION_OTEL_INSECURE` |

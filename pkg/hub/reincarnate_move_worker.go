@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -157,19 +158,42 @@ func withBroker(a *store.Agent, brokerID string) *store.Agent {
 	return &c
 }
 
+// moveBrokerQuotaTestHook, when set, is called by moveBrokerQuota once,
+// immediately after its first quota write returns, outside any transaction.
+// Tests only; nil in production. An atomic pointer, so a move worker left
+// over from an earlier test that reads it while a test sets it is not a
+// data race.
+var moveBrokerQuotaTestHook atomic.Pointer[func(ctx context.Context)]
+
 // moveBrokerQuota moves the agent's broker reservation from the source to
-// the target. Release comes first: Reserve refuses a request while the agent
-// holds an active reservation on another broker (ReservationScopeConflictError),
-// so reserving first would always fail. If the source release itself fails,
-// the target reserve returns that conflict and the move fails with the slot
-// still on the source. When the target has no room, the source reservation
-// is re-asserted and the error returned.
+// the target in one store transaction, with the cap check on the target
+// (QuotaService.TransferBroker). The source slot is freed only in the commit
+// that secures the target, so when the target is full, the lock is
+// contended or the store fails, the error is returned and the source
+// reservation is untouched: there is nothing to restore. A reservation
+// already on the target (a self-move) is left as it is. An agent holding no
+// reservation (an idle release can free the source slot while the agent is
+// stopped for the move) gets the plain checked reservation on the target.
 func (s *Server) moveBrokerQuota(ctx context.Context, a *store.Agent, mv *reincarnationMove) error {
-	src := withBroker(a, mv.SourceBrokerID)
-	s.releaseBrokerQuota(ctx, src)
-	if _, err := s.checkAndReserveBrokerQuota(ctx, withBroker(a, mv.TargetBrokerID)); err != nil {
-		s.restoreBrokerReservation(ctx, src)
+	if s.quotaService == nil {
+		return nil
+	}
+	res, limited, err := s.quotaService.TransferBroker(ctx, a.ID, mv.TargetBrokerID, TransferOpts{})
+	if h := moveBrokerQuotaTestHook.Load(); h != nil {
+		(*h)(ctx)
+	}
+	switch {
+	case err != nil:
 		return err
+	case !limited:
+		return nil
+	case res.Outcome == store.TransferAbsent:
+		_, err = s.checkAndReserveBrokerQuota(ctx, withBroker(a, mv.TargetBrokerID))
+		return err
+	case res.Outcome == store.TransferMoved && (res.FromScopeType != store.QuotaScopeBroker || res.FromScopeID != mv.SourceBrokerID):
+		s.agentLifecycleLog.Info("move: the agent's reservation was not on the source broker; moved it to the target",
+			"agent_id", a.ID, "from_scope_type", res.FromScopeType, "from_scope_id", res.FromScopeID,
+			"source_broker_id", mv.SourceBrokerID, "target_broker_id", mv.TargetBrokerID)
 	}
 	return nil
 }

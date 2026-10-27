@@ -402,6 +402,10 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the web server serves the event stream, not the hub API handler the matrix drives; the web server admits only a signed-in web session",
 		Pin:    "TestWebEventStream_RefusesUserAccessToken",
 	},
+	{OperationID: "user.admin.provision", Method: "POST", Pattern: "/api/v1/users"}: {
+		Reason: "the matrix server runs with dev authentication, and user provisioning is refused for every caller on such a hub (403 dev_auth_not_supported); the dedicated test drives the route on a hub without dev authentication with real tokens on both boundaries and with sessions",
+		Pin:    "TestProvisionToken_RequiresInviteSelectorAndHubBoundary",
+	},
 }
 
 // bearerMatrixKinds are the entry point kinds a request can reach.

@@ -31,7 +31,7 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestAttachment_CreateAndGet(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer db.Close() //nolint:errcheck
 
 	ctx := context.Background()
@@ -61,7 +61,7 @@ func TestAttachment_CreateAndGet(t *testing.T) {
 }
 
 func TestAttachment_Delete(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer db.Close() //nolint:errcheck
 
 	ctx := context.Background()
@@ -84,7 +84,7 @@ func TestAttachment_Delete(t *testing.T) {
 }
 
 func TestAttachment_GetNotFound(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer db.Close() //nolint:errcheck
 
 	_, err := store.GetAttachment(context.Background(), "nonexistent")
@@ -92,7 +92,7 @@ func TestAttachment_GetNotFound(t *testing.T) {
 }
 
 func TestAttachment_LinkToMessage(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer db.Close() //nolint:errcheck
 
 	ctx := context.Background()
@@ -127,7 +127,7 @@ func TestAttachment_LinkToMessage(t *testing.T) {
 }
 
 func TestAttachment_LinkIdempotent(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer db.Close() //nolint:errcheck
 
 	ctx := context.Background()
@@ -152,7 +152,7 @@ func TestAttachment_LinkIdempotent(t *testing.T) {
 }
 
 func TestAttachment_GetByMessageEmpty(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer db.Close() //nolint:errcheck
 
 	refs, err := store.GetAttachmentsByMessage(context.Background(), "msg-no-attachments")
@@ -161,7 +161,7 @@ func TestAttachment_GetByMessageEmpty(t *testing.T) {
 }
 
 func TestAttachment_GetByMessagesBatch(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer db.Close() //nolint:errcheck
 
 	ctx := context.Background()
@@ -190,7 +190,7 @@ func TestAttachment_GetByMessagesBatch(t *testing.T) {
 }
 
 func TestAttachment_GetByMessagesBatch_Empty(t *testing.T) {
-	store, db := newTestWebChatStoreV2(t)
+	store, db := hubNewTestWebChatStoreV2(t)
 	defer db.Close() //nolint:errcheck
 
 	result, err := store.GetAttachmentsByMessages(context.Background(), nil)
@@ -232,7 +232,7 @@ func TestUploadHandler_ValidFile(t *testing.T) {
 }
 
 func TestWebchatAttachmentTableExists(t *testing.T) {
-	_, db := newTestWebChatStoreV2(t)
+	_, db := hubNewTestWebChatStoreV2(t)
 	defer db.Close() //nolint:errcheck
 
 	for _, table := range []string{"webchat_attachment", "webchat_message_attachment"} {

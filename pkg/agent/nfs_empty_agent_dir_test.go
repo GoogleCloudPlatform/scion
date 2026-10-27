@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// These tests exercise unix-only, Windows-gated agent storage code.
+//go:build unix
+
 package agent
 
 import (
@@ -115,15 +118,13 @@ func TestStartNFSEmptyAgentDir_RestartKeepsFiles(t *testing.T) {
 	assert.FileExists(t, filepath.Join(ws, "notes.txt"))
 }
 
-// The export not mounted on the broker: the pod still uses the agent
-// directory, and the node creates it.
+// The export not mounted on the broker: the start is refused
+// (ptone/scion#5823).
 func TestStartNFSEmptyAgentDir_ExportNotMounted(t *testing.T) {
 	mountRoot := filepath.Join(t.TempDir(), "nfs")
-	cfg, _, _, err := startNFSAgentDirAgentNamed(t, "test-agent", "kubernetes", mountRoot, emptyPerAgentEnv, nil)
-	require.NoError(t, err)
-	assert.Equal(t, "test-agent", cfg.NFSAgentDirName)
-	assert.True(t, cfg.NFSAgentDirEmpty)
-	assert.False(t, cfg.NFSWorkspacePreCreated)
+	_, _, _, err := startNFSAgentDirAgentNamed(t, "test-agent", "kubernetes", mountRoot, emptyPerAgentEnv, nil)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrProjectShareNotMounted), "err = %v", err)
 	assert.NoDirExists(t, mountRoot)
 }
 

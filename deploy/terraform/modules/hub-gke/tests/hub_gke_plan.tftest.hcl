@@ -145,6 +145,11 @@ run "client_id_set_installs_the_hub" {
   }
 
   assert {
+    condition     = try(output.chart_values.config.extra.server.project_storage, null) == null
+    error_message = "config.extra must not carry server.project_storage; the chart renders it from workspaceStorage.nfs."
+  }
+
+  assert {
     condition     = !contains(keys(output.chart_values.hub), "podAnnotations")
     error_message = "no rotation marker means no rotation annotation."
   }
