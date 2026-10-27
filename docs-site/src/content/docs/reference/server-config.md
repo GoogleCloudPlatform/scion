@@ -127,7 +127,7 @@ Settings for the in-process conduit relay and its stream grants. They take effec
 - `internal_listen` is not a loopback address and `internal_tls_cert_file` and `internal_tls_key_file` are not set;
 - `internal_advertise`, or on a separate relay `server.relay.hub_internal_url`, is `http://` to a host that is not loopback.
 
-Hub and relay clients also refuse to send anything to a peer endpoint that is `http://` to a host that is not loopback. There is no override. To fix a refusal, give every node a certificate and set `internal_tls_cert_file` and `internal_tls_key_file`. If that certificate comes from a private or internal CA, also set `internal_tls_ca_file` on every node. Alternatively, bind `internal_listen` to `127.0.0.1` behind a TLS terminator on the same host, and advertise that terminator's `https://` address.
+Hub and relay clients also refuse to send anything to a peer endpoint that is `http://` to a host that is not loopback. There is no override. To fix a refusal, give every node a certificate and set `internal_tls_cert_file` and `internal_tls_key_file`. If that certificate comes from a private or internal CA, also set `internal_tls_ca_file` on every node. Alternatively, bind `internal_listen` to `127.0.0.1` behind a TLS terminator on the same host, and advertise that terminator's `https://` address. When upgrading multi-node hubs or separate relays, set these keys on every node in the settings file or the environment (not as `--internal-tls-*` flags, which older binaries refuse) before upgrading, then upgrade all hubs and relays together; see [Upgrading](/scion/hosted/ha/separate-relay/#upgrading).
 
 **Hosted HA.** In an HA deployment each hub node runs a relay that other nodes must reach directly, so the hub refuses to start when:
 
