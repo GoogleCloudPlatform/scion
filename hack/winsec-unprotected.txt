@@ -37,6 +37,7 @@ pkg/brokeridentity/identity.go not protected on Windows: gated (broker identity;
 pkg/brokerregistration/registration.go not protected on Windows: gated (broker registration credentials)
 pkg/harness/container_script_harness.go not protected on Windows: gated (harness files in an agent home)
 pkg/harness/project_hook.go not protected on Windows: gated (harness project hook script)
+pkg/hub/maintenance/installer_symlink.go not protected on Windows: gated (hub server self-update; Linux only, Detect returns the unsupported installer off Linux)
 pkg/hub/maintenance/maintenance_executors.go not protected on Windows: gated (hub server maintenance)
 pkg/hub/resource_import.go not protected on Windows: gated (hub server resource import)
 pkg/hub/template_source_fetch.go not protected on Windows: gated (hub server template fetch)
