@@ -85,3 +85,5 @@
 - Held for the fix batch after the hub dev runs: add `?x=1;starred=true` to the experiment-off 404 list in
   `TestChatStarredHistory_GateAndValidation` (the routing already sends it to the starred variant, which is a 404 while the
   experiment is off).
+- Held for the same batch: a web unit case where a refresh in the middle of the starred-only list leaves it empty: the empty state
+  renders, there is no Jump to latest, and Show all opens the full conversation with no anchor.
