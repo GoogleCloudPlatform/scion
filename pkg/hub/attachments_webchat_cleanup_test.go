@@ -145,3 +145,82 @@ func TestWebChatCopyCleanupOnce_FromMaintenancePass(t *testing.T) {
 	f.srv.attachmentRetention.mu.Unlock()
 	assert.True(t, done)
 }
+
+// cleanupPassDone reports whether this process recorded the one-shot
+// cleanup as complete.
+func cleanupPassDone(f *refFixture) bool {
+	f.srv.attachmentRetention.mu.Lock()
+	defer f.srv.attachmentRetention.mu.Unlock()
+	return f.srv.attachmentRetention.copyCleanupDone
+}
+
+// TestWebChatCopyCleanupOnce_PartialRunRetried: a run that does not finish
+// (here, its pass is cancelled) records nothing, neither the hub setting
+// nor the in-process flag, so the next pass runs it again; that pass
+// removes the DM and group copies, keeps the project-audience copy and
+// records completion, and a later pass removes nothing.
+func TestWebChatCopyCleanupOnce_PartialRunRetried(t *testing.T) {
+	f := newRefFixture(t)
+	ctx := context.Background()
+	webchat := f.enableScratchpad(t)
+	dm := dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID)
+	group := seedGroupConversation(t, f.st, f.projA.ID, "crew")
+	dmCopy := cleanupCopy(t, webchat, cleanupAttachment(t, f, dm))
+	groupCopy := cleanupCopy(t, webchat, cleanupAttachment(t, f, group))
+	topicCopy := cleanupCopy(t, webchat, cleanupAttachment(t, f, f.topicA))
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	f.srv.webChatCopyCleanupOnce(cancelled)
+	assert.False(t, cleanupPassDone(f), "a partial run is not recorded in the process")
+	_, err := f.st.GetHubSetting(ctx, webChatCopyCleanupMarker)
+	require.ErrorIs(t, err, store.ErrNotFound, "a partial run is not recorded in the hub settings")
+
+	f.srv.webChatCopyCleanupOnce(ctx)
+	assert.True(t, cleanupPassDone(f))
+	_, err = f.st.GetHubSetting(ctx, webChatCopyCleanupMarker)
+	require.NoError(t, err)
+	assert.NoDirExists(t, dmCopy)
+	assert.NoDirExists(t, groupCopy)
+	assert.DirExists(t, topicCopy)
+
+	// A later pass removes nothing, even a copy that appears afterwards.
+	lateCopy := cleanupCopy(t, webchat, cleanupAttachment(t, f, dm))
+	f.srv.webChatCopyCleanupOnce(ctx)
+	assert.DirExists(t, lateCopy)
+	assert.DirExists(t, topicCopy)
+}
+
+// TestWebChatCopyCleanupOnce_ReplicaReadsTheHubSetting: replicas share the
+// hub setting, not the in-process flag. A replica whose own run has not
+// completed keeps checking the setting on every pass: while another
+// replica's run has failed (no setting) it runs the cleanup itself; once a
+// run anywhere has recorded completion it removes nothing and stops.
+func TestWebChatCopyCleanupOnce_ReplicaReadsTheHubSetting(t *testing.T) {
+	t.Run("another replica completed", func(t *testing.T) {
+		f := newRefFixture(t)
+		ctx := context.Background()
+		webchat := f.enableScratchpad(t)
+		dmCopy := cleanupCopy(t, webchat, cleanupAttachment(t, f, dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID)))
+		_, err := f.st.UpsertHubSetting(ctx, webChatCopyCleanupMarker, []byte(`{"completed_at":"2026-10-27T00:00:00Z"}`), "system", -1, "seeded")
+		require.NoError(t, err)
+
+		f.srv.webChatCopyCleanupOnce(ctx)
+		assert.True(t, cleanupPassDone(f))
+		assert.DirExists(t, dmCopy, "the cleanup ran once already, elsewhere")
+	})
+	t.Run("another replica failed", func(t *testing.T) {
+		f := newRefFixture(t)
+		ctx := context.Background()
+		webchat := f.enableScratchpad(t)
+		dmCopy := cleanupCopy(t, webchat, cleanupAttachment(t, f, dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID)))
+
+		// Another replica's run failed: no hub setting was written. This
+		// replica's pass runs the cleanup.
+		_, err := f.st.GetHubSetting(ctx, webChatCopyCleanupMarker)
+		require.ErrorIs(t, err, store.ErrNotFound)
+		f.srv.webChatCopyCleanupOnce(ctx)
+		assert.True(t, cleanupPassDone(f))
+		assert.NoDirExists(t, dmCopy)
+	})
+}
