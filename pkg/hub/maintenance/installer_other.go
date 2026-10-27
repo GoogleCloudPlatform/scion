@@ -17,11 +17,12 @@ package maintenance
 
 import (
 	"errors"
+	"fmt"
 	"os"
 )
 
 func signalSelf() error {
-	return errors.New("self-restart is not supported on this platform")
+	return fmt.Errorf("restarting the hub: %w on this platform", errors.ErrUnsupported)
 }
 
 func fileOwnerUID(os.FileInfo) (int, bool) { return 0, false }
@@ -44,5 +45,5 @@ func newSymlinkInstaller(DetectOptions) *symlinkInstaller {
 }
 
 func copyExecutable(string, string) error {
-	return errors.New("installing a binary is not supported on this platform")
+	return fmt.Errorf("installing a binary: %w on this platform", errors.ErrUnsupported)
 }
