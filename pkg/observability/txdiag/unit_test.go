@@ -552,6 +552,18 @@ func TestLockWaitOutcomes(t *testing.T) {
 			if l := lines[0]; l.Str("outcome") != tc.outcome || l.Int("wait_ms") != 2000 || l.Str("req") != reqTx {
 				t.Errorf("lock_wait line: %+v", l.Attrs)
 			}
+			// The holder is named: one checkout overlapped the 2 s wait.
+			if l := lines[0]; l.Int("holders") != 1 || l.Int("top_holder_ms") != 2000 || l.Str("top_holder_op") == "" {
+				t.Errorf("holder fields: %+v", l.Attrs)
+			}
+			_, hasOpen := lines[0].Attrs["holder_open_op"]
+			if tc.fire != nil {
+				if !hasOpen || lines[0].Int("holder_open_ms") != 2000 {
+					t.Errorf("a waiter that gave up must name the open holder: %+v", lines[0].Attrs)
+				}
+			} else if hasOpen {
+				t.Errorf("an acquired waiter reports an open holder: %+v", lines[0].Attrs)
+			}
 			if got := hs.mon.pending.Load(); got != 0 {
 				t.Errorf("pending = %d after the request, want 0", got)
 			}
@@ -698,5 +710,121 @@ func TestQuietConfigDiscards(t *testing.T) {
 	}
 	if c.Logger.Enabled(context.Background(), slogLevelWarn) {
 		t.Fatal("QuietConfig logger is enabled")
+	}
+}
+
+// seedOp makes pc symbolize as a single non-infrastructure frame named fn,
+// so ring tests can give each checkout its own op.
+func seedOp(m *Monitor, pc uintptr, fn string) [stackDepth]uintptr {
+	m.sites.mu.Lock()
+	m.sites.pcs[pc] = []frameInfo{{fn: fn, file: "x.go", line: 1}}
+	m.sites.mu.Unlock()
+	var pcs [stackDepth]uintptr
+	pcs[0] = pc
+	return pcs
+}
+
+func attrMap(attrs []slog.Attr) map[string]slog.Value {
+	out := map[string]slog.Value{}
+	for _, a := range attrs {
+		out[a.Key] = a.Value
+	}
+	return out
+}
+
+// TestHolderRingConvoy: a waiter behind a convoy of five short holders is
+// told how many held the connection during its wait and which held longest.
+func TestHolderRingConvoy(t *testing.T) {
+	m := NewMonitor(Config{Dialect: DialectSQLite, Logger: newLogger(&CaptureHandler{})})
+	t.Cleanup(m.Close)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	at := func(n int) time.Time { return t0.Add(time.Duration(n) * time.Millisecond) }
+	m.holders.closed(at(-1000), at(-500), seedOp(m, 100, "hub.before"), 1) // before the wait
+	spans := []struct {
+		fn         string
+		start, end int
+	}{
+		{"hub.a", 0, 200}, {"hub.b", 200, 400}, {"hub.c", 400, 800}, {"hub.d", 800, 1000}, {"hub.e", 1000, 1200},
+	}
+	for i, s := range spans {
+		m.holders.closed(at(s.start), at(s.end), seedOp(m, uintptr(101+i), s.fn), 1)
+	}
+	got := attrMap(m.holders.attrs(m, at(0), at(2000), false))
+	if got["holders"].Int64() != 5 || got["top_holder_op"].String() != "hub.c" || got["top_holder_ms"].Int64() != 400 {
+		t.Fatalf("convoy attrs: %+v", got)
+	}
+	if _, ok := got["holder_open_op"]; ok {
+		t.Fatalf("no open checkout, yet holder_open_op is set: %+v", got)
+	}
+}
+
+// TestHolderRingDeadlineWaiterNamesOpenHolder: a waiter that gives up while
+// one checkout is still open is told who that holder is and for how long it
+// had held the connection.
+func TestHolderRingDeadlineWaiterNamesOpenHolder(t *testing.T) {
+	m := NewMonitor(Config{Dialect: DialectSQLite, Logger: newLogger(&CaptureHandler{})})
+	t.Cleanup(m.Close)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	m.holders.opened(t0, seedOp(m, 200, "hub.slow"), 1)
+	got := attrMap(m.holders.attrs(m, t0.Add(100*time.Millisecond), t0.Add(3*time.Second), true))
+	if got["holders"].Int64() != 1 || got["top_holder_op"].String() != "hub.slow" || got["top_holder_ms"].Int64() != 2900 {
+		t.Fatalf("attrs: %+v", got)
+	}
+	if got["holder_open_op"].String() != "hub.slow" || got["holder_open_ms"].Int64() != 3000 {
+		t.Fatalf("open holder: %+v", got)
+	}
+	// Once that checkout ends, it is no longer open.
+	m.holders.closed(t0, t0.Add(4*time.Second), seedOp(m, 200, "hub.slow"), 1)
+	got = attrMap(m.holders.attrs(m, t0.Add(100*time.Millisecond), t0.Add(3*time.Second), true))
+	if _, ok := got["holder_open_op"]; ok {
+		t.Fatalf("closed checkout still reported open: %+v", got)
+	}
+}
+
+func TestHolderRingWrapsAtCapacity(t *testing.T) {
+	m := NewMonitor(Config{Dialect: DialectSQLite, Logger: newLogger(&CaptureHandler{})})
+	t.Cleanup(m.Close)
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	pcs := seedOp(m, 300, "hub.short")
+	for i := 0; i < holderRingSize+44; i++ {
+		s := t0.Add(time.Duration(i) * time.Millisecond)
+		m.holders.closed(s, s.Add(time.Millisecond), pcs, 1)
+	}
+	got := attrMap(m.holders.attrs(m, t0, t0.Add(time.Hour), false))
+	if got["holders"].Int64() != holderRingSize {
+		t.Fatalf("holders = %v, want %d (ring exhausted)", got["holders"], holderRingSize)
+	}
+}
+
+func TestLockWaitHolderFieldsOmittedOnPostgres(t *testing.T) {
+	hs := newHarness(t, DialectPostgres, nil)
+	ed := WrapEntDriver(entsql.OpenDB(dialect.Postgres, hs.db), hs.mon)
+	holder, err := hs.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := make(chan error, 1)
+	go func() {
+		tx, err := ed.Tx(context.Background())
+		if err == nil {
+			err = tx.Rollback()
+		}
+		res <- err
+	}()
+	waitForWaiters(t, hs.db, 1)
+	hs.clk.Advance(2 * time.Second)
+	_ = holder.Rollback()
+	if err := <-res; err != nil {
+		t.Fatal(err)
+	}
+	hs.flush(t)
+	lines := hs.h.Lines(MsgLockWait)
+	if len(lines) != 1 {
+		t.Fatalf("got %d lock_wait lines, want 1", len(lines))
+	}
+	for _, k := range []string{"holders", "top_holder_op", "holder_open_op"} {
+		if _, ok := lines[0].Attrs[k]; ok {
+			t.Errorf("Postgres lock_wait line carries %s: %+v", k, lines[0].Attrs)
+		}
 	}
 }

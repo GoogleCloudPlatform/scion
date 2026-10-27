@@ -147,12 +147,12 @@ func (d *EntDriver) finish(p *probe, err error, req string) {
 	}
 	p.stopWaiting()
 	m := d.mon
-	var wait time.Duration
+	var end time.Time // when the wait ended: acquisition, or giving up
 	outcome := OutcomeAcquired
 	if at := p.acquired.Load(); at != 0 {
-		wait = time.Unix(0, at).Sub(p.requested)
+		end = time.Unix(0, at)
 	} else {
-		wait = m.now().Sub(p.requested)
+		end = m.now()
 		switch {
 		case err == nil:
 			// No driver call was seen (for example an ent call that ran
@@ -166,6 +166,7 @@ func (d *EntDriver) finish(p *probe, err error, req string) {
 			outcome = OutcomeError
 		}
 	}
+	wait := end.Sub(p.requested)
 	if wait < 0 {
 		wait = 0
 	}
@@ -187,6 +188,9 @@ func (d *EntDriver) finish(p *probe, err error, req string) {
 		slog.String("outcome", outcome),
 		slog.String("req", req),
 	}}
+	if m.sqlite {
+		r.attrs = append(r.attrs, m.holders.attrs(m, p.requested, end, outcome != OutcomeAcquired)...)
+	}
 	r.npcs = copy(r.pcs[:], pcs[:n])
 	m.warn(r)
 }

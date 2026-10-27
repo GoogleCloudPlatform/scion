@@ -112,9 +112,11 @@ func (c *conn) touch(ctx context.Context) {
 		c.npcs = runtime.Callers(3, c.pcs[:])
 		c.stats = holdStats{}
 		c.txWarned = false
+		pcs, n := c.pcs, c.npcs
 		c.mu.Unlock()
 		if c.mon.sqlite {
 			c.mon.checkoutStarted()
+			c.mon.holders.opened(now, pcs, n)
 		}
 		return
 	}
@@ -134,7 +136,11 @@ func (c *conn) endCheckout() {
 	pcs := c.pcs
 	n := c.npcs
 	c.mu.Unlock()
-	if !c.mon.sqlite || warned {
+	if !c.mon.sqlite {
+		return
+	}
+	c.mon.holders.closed(start, c.mon.now(), pcs, n)
+	if warned {
 		return
 	}
 	c.mon.hold(KindConn, OutcomeReleased, pcs[:n], start, 0, stats)

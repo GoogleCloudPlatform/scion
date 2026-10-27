@@ -397,7 +397,7 @@ The Hub measures how long each database transaction and connection checkout hold
 The lines are WARN records from the `hub.db` subsystem:
 
 - `db_tx_long_hold`: `kind` (`tx`, or on SQLite `conn` for a held connection with no transaction line), `op` (the calling function), `site` (the first three calling frames), `hold_ms`, `begin_ms`, `stmts`, `stmt_ms` (time in SQL), `idle_ms` (time the connection was held outside SQL, such as Go work inside a transaction), `max_stmt_ms`, `rows_affected`, `outcome`, and on SQLite `waiters_max` (requests from the ent client that waited during the hold) and `busy`.
-- `db_lock_wait`: `op`, `site`, `wait_ms`, `req` (`tx`, `exec` or `query`) and `outcome` (`acquired`, `canceled`, `deadline` or `error`).
+- `db_lock_wait`: `op`, `site`, `wait_ms`, `req` (`tx`, `exec` or `query`) and `outcome` (`acquired`, `canceled`, `deadline` or `error`). On SQLite it also names who held the connection during the wait: `holders` (how many connection checkouts overlapped the wait; many short ones mean a queue rather than one slow holder), `top_holder_op` and `top_holder_ms` (the holder with the most time in the wait), and, when the waiter gave up, `holder_open_op` and `holder_open_ms` (the checkout still holding the connection at that moment).
 
 Both carry `suppressed` and `dropped` (lines lost because the log queue was full). Per-waiter lines cover requests made through the ent client. Waits of the raw-SQL stores appear in aggregate, in the `scion.db.pool.connections.wait_duration` metric. Startup schema migrations run through the same path, so a long migration can log one or more lines at boot; they are expected and are not a stall.
 

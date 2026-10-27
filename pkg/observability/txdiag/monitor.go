@@ -161,6 +161,10 @@ type Monitor struct {
 	// began (SQLite: the number of waiters behind the holder).
 	pending   atomic.Int64
 	pendingHW atomic.Int64
+
+	// holders remembers recent connection checkouts (SQLite only), so a
+	// lock_wait line can name who held the connection during the wait.
+	holders holderRing
 }
 
 // NewMonitor returns a running Monitor. The caller must arrange for Close
@@ -433,3 +437,100 @@ func (m *Monitor) pendingInc() {
 }
 
 func (m *Monitor) pendingDec() { m.pending.Add(-1) }
+
+// holderRingSize is how many finished checkouts holderRing keeps.
+const holderRingSize = 256
+
+// checkout is one connection checkout: when it started and ended, and the
+// stack recorded at its start.
+type checkout struct {
+	start, end time.Time
+	pcs        [stackDepth]uintptr
+	npcs       int
+}
+
+// holderRing keeps the last holderRingSize finished checkouts and the one
+// still open. Writes happen once per checkout start and end; reads happen
+// only when a lock_wait line is about to be logged.
+type holderRing struct {
+	mu      sync.Mutex
+	buf     [holderRingSize]checkout
+	next    int // index of the next write
+	count   int // filled entries, at most holderRingSize
+	open    checkout
+	hasOpen bool
+}
+
+func (h *holderRing) opened(start time.Time, pcs [stackDepth]uintptr, n int) {
+	h.mu.Lock()
+	h.open = checkout{start: start, pcs: pcs, npcs: n}
+	h.hasOpen = true
+	h.mu.Unlock()
+}
+
+func (h *holderRing) closed(start, end time.Time, pcs [stackDepth]uintptr, n int) {
+	h.mu.Lock()
+	h.buf[h.next] = checkout{start: start, end: end, pcs: pcs, npcs: n}
+	h.next = (h.next + 1) % holderRingSize
+	if h.count < holderRingSize {
+		h.count++
+	}
+	if h.hasOpen && h.open.start.Equal(start) {
+		h.hasOpen = false
+	}
+	h.mu.Unlock()
+}
+
+// overlap is how long [s, e] overlaps [from, to].
+func overlap(s, e, from, to time.Time) time.Duration {
+	if s.Before(from) {
+		s = from
+	}
+	if e.After(to) {
+		e = to
+	}
+	return e.Sub(s)
+}
+
+// attrs describes who held the connection during a wait over [from, to]:
+// holders (how many checkouts overlapped it; holderRingSize or more means
+// the ring was exhausted), the one with the most time in the window, and,
+// when the waiter gave up, the checkout still open at that moment.
+func (h *holderRing) attrs(m *Monitor, from, to time.Time, gaveUp bool) []slog.Attr {
+	h.mu.Lock()
+	var (
+		n       int
+		top     checkout
+		topTime time.Duration
+	)
+	consider := func(c checkout, e time.Time) {
+		if d := overlap(c.start, e, from, to); d > 0 {
+			n++
+			if d > topTime {
+				top, topTime = c, d
+			}
+		}
+	}
+	for i := 0; i < h.count; i++ {
+		c := h.buf[i]
+		consider(c, c.end)
+	}
+	open, hasOpen := h.open, h.hasOpen
+	if hasOpen {
+		consider(open, to)
+	}
+	h.mu.Unlock()
+
+	attrs := []slog.Attr{slog.Int("holders", n)}
+	if n > 0 {
+		attrs = append(attrs,
+			slog.String("top_holder_op", m.op(top.pcs[:top.npcs])),
+			slog.Int64("top_holder_ms", topTime.Milliseconds()))
+	}
+	if gaveUp && hasOpen && open.start.Before(to) {
+		attrs = append(attrs,
+			slog.String("holder_open_op", m.op(open.pcs[:open.npcs])),
+			slog.Int64("holder_open_ms", to.Sub(open.start).Milliseconds()))
+	}
+	return attrs
+}
