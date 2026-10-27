@@ -28,6 +28,7 @@ const hostedUserGuide = {
 	items: [
 		{ label: 'Connecting to a Hub', slug: 'hosted/user/hosted-user' },
 		{ label: 'Working with Several Hubs', slug: 'hosted/user/multiple-hubs' },
+		{ label: 'Windows', slug: 'hosted/user/windows' },
 		{ label: 'User Access Tokens', slug: 'hosted/user/personal-access-tokens' },
 		{ label: 'Test Identities on Another Test Hub', slug: 'hosted/user/test-identity-target-hubs' },
 		{ label: 'CLI from a Coding Agent', slug: 'hosted/user/coding-agent-cli' },
@@ -103,6 +104,7 @@ export default defineConfig({
 							label: 'Release Notes',
 							items: [
 								{ label: 'Overview', slug: 'release-notes' },
+								{ label: 'Oct 19 -- 25', slug: 'release-notes/2026-10-19' },
 								{ label: 'Oct 12 -- 18', slug: 'release-notes/2026-10-12' },
 								{ label: 'Oct 5 -- 11', slug: 'release-notes/2026-10-05' },
 								{ label: 'Sep 28 -- Oct 4', slug: 'release-notes/2026-09-28' },

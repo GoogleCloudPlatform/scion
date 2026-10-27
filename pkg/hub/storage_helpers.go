@@ -231,6 +231,9 @@ func toResourceFiles(files []transfer.FileInfo) []store.TemplateFile {
 // with a subset of files and a content hash computed over that subset, which
 // later corrupts agent provisioning while masquerading as healthy. label
 // prefixes error messages ("template bootstrap" / "harness config bootstrap").
+// Each file is read through root (opened at the collected directory) with
+// transfer.OpenCollectedFile, so a file that is no longer a regular file of
+// the collected size and hash fails the upload.
 //
 // This is shared bootstrap mechanics for the resource-storage refactor (§7.3):
 // templates and harness-configs both route their import/sync upload loop through
@@ -241,7 +244,7 @@ func toResourceFiles(files []transfer.FileInfo) []store.TemplateFile {
 // cancels the in-flight uploads as soon as one fails, preserving the fail-fast
 // contract above. Each worker writes its result into its own slot, so the
 // returned manifest preserves input order without locking.
-func uploadResourceFiles(ctx context.Context, stor storage.Storage, storagePath string, files []transfer.FileInfo, label string) ([]store.TemplateFile, map[string]struct{}, error) {
+func uploadResourceFiles(ctx context.Context, stor storage.Storage, root *os.Root, storagePath string, files []transfer.FileInfo, label string) ([]store.TemplateFile, map[string]struct{}, error) {
 	type uploadResult struct {
 		file       store.TemplateFile
 		objectPath string
@@ -264,9 +267,9 @@ func uploadResourceFiles(ctx context.Context, stor storage.Storage, storagePath 
 
 			objectPath := storagePath + "/" + fi.Path
 
-			f, err := os.Open(fi.FullPath)
+			f, err := transfer.OpenCollectedFile(root, fi)
 			if err != nil {
-				return fmt.Errorf("%s: failed to open file %s: %w", label, fi.Path, err)
+				return fmt.Errorf("%s: %w", label, err)
 			}
 
 			uploadOpts := storage.UploadOptions{}

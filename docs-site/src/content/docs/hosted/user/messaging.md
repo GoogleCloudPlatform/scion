@@ -35,7 +35,7 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
   - **Chat → Dashboard**: Clicking the **Dashboard** icon while in a project chat space (`/chat/space/:id/...` or `/chat/:slug/...`) takes you directly back to that project's detail page (`/projects/:id`).
   - **DMs / General Chat**: If there is no active project context (such as when in Direct Messages or bare `/chat`), the toggle falls back to the top-level dashboard `/`.
 - **Direct Messaging (DMs)**: In addition to collaborative project spaces, the chat interface supports robust 1-on-1 Direct Messages (DMs). This includes both **human-to-human (H2H)** communication between team members and **human-to-agent (H2A)** chats. DMs are structured as a "global pair"—a single, consolidated thread per participant pair.
-  - **DM Promotion to Shared Threads**: When a 1-on-1 Direct Message with an agent develops context useful for the broader team, you can promote the DM conversation into a Shared Space Thread (requires `project.chat_post` on the project). This atomic operation safely re-keys the messages and streams the transition live to all clients via SSE without a page reload. Use the promotion button located in the DM header.
+  - **DM Promotion to Shared Threads**: When a 1-on-1 Direct Message with an agent develops context useful for the broader team, you can promote the DM conversation into a Shared Space Thread (requires `project.chat_post` on the project). This atomic operation safely re-keys the messages and streams the transition live to all clients via SSE without a page reload. Only the DM of an agent that still exists can be promoted (a deleted agent's DM gets `404`), and the agent becomes the new thread's default agent. Use the promotion button located in the DM header.
 - **Members Sidebar, Presence & Typing**: A right-hand members sidebar lists all participants in the active project space or DM. This includes real-time online **presence indicators** (active, away, offline) and live **typing indicators** to show when a team member or agent is actively composing a message. The thread's default agent is listed first in the AGENTS section of the sidebar, under a **Thread default** sub-heading. When a thread has a default agent, the thread header shows **terminal** and **graph** buttons for that agent, the same as a DM with an agent. Members can be sorted (Alphabetical or Recent Activity). A blue dot marks members with unread messages; to find unread DMs, use the rail's **Unread** filter.
 - **The Thread Rail & Mobile Swipe Navigation**: A left-hand navigation sidebar lists all active chat spaces, threads, and DMs. On mobile viewports, the rail supports native **swipe gestures** for fluid, app-like drawer navigation.
 - **Chat/Log Toggle**: Located on the main `scion-chat-thread` panel, this toggle lets you switch between a clean, dialogue-focused **Chat** view and a live **Execution Log** stream for that agent.
@@ -105,6 +105,7 @@ Right-clicking a message (on desktop) or tapping it (on touch devices without ho
 - **Reply / Quote**: Quote a previous message with full backend support for reply-threading, maintaining clear context in fast-moving development discussions. Choosing **Reply** moves focus to the composer so you can start typing immediately.
 - **Edit / Delete**: Edit or delete your own messages.
 - **Copy Permalink**: Generate a direct link to any message in the thread.
+- **Star message / Unstar message**: With the `web.chat_starred_messages` [experiment](/scion/reference/experiments/) on, bookmark a message in a project space thread for your personal reference (see [Starred messages](#starred-messages)).
 - **Open terminal / Open in graph**: On a message from an agent, open that agent's terminal or jump to it in the lineage graph. These act on the message's author, not the thread's default agent. **Open terminal** appears only when you can attach to that agent.
 
 #### 2. Advanced Organization
@@ -130,6 +131,12 @@ Right-clicking a message (on desktop) or tapping it (on touch devices without ho
   - **Copy to Clipboard** (HTML + plain text) for quick pasting into other tools.
   All exported content is HTML-escaped for safe rendering.
 - **Send-to-Agent Context & Slash Commands**: Fast-track your workflow with slash commands and easily forward snippets or whole discussions directly to your agents as contextual guidance. The built-in commands are `/status` (list the project's agents and their state), `/spawn <template> [name]` (create an agent), `/stop <agent>` (stop a running agent; it is not deleted), `/default <agent|clear>`, `/clear` and `/help`. In a DM with an agent, `/status`, `/spawn` and `/stop` act on that agent's project.
+
+#### Starred Messages
+With the `web.chat_starred_messages` [experiment](/scion/reference/experiments/) on (off by default), you can bookmark messages in project space threads:
+- **Starring and unstarring**: Open a message's context menu and choose **Star message** (or **Unstar message**). A star badge appears in the message header, and changes sync across your open tabs in real time.
+- **Browsing stars in the thread**: Click the star button (**Starred messages in this conversation**) in the conversation header to open a panel listing your starred messages in the current thread, most recently starred first (with **Load more** when there are more). Each entry shows when you starred it, the sender, and the current excerpt. Click an entry to jump to that message. To remove a star, use **Unstar message** in the message's context menu.
+- **Privacy and access**: Stars are private to your account — other participants cannot see what you have starred — and are checked against your live read access to the thread's project. Starred messages are available in project space threads (the header button and menu action are hidden in direct messages). While the experiment is off, stored stars are retained and the UI controls and [`/api/v1/chat/stars`](/scion/reference/api/#chat-starred-messages-apiv1chatstars) routes are hidden.
 
 ---
 
@@ -351,6 +358,8 @@ Messages are delivered in real-time to the Web Dashboard via Server-Sent Events 
 When an agent finishes a turn, its Stop hook mirrors the agent's reply to the user who created it, so it reaches you as a message from that agent. Only agents created directly by a user are mirrored; sub-agents (agents created by other agents) are not. Each user notification is stored exactly once.
 
 Messages record the sender's and recipient's projects. Human callers see these as `senderProjectId` and `recipientProjectId` on conversation messages; agent callers see them only on direct messages where both parties are named in the conversation.
+
+Messages sent by an agent with a [delegated credential](/scion/reference/agent-delegation/) keep the agent as `sender` (`agent:<slug>`) and record `authorizingUserId` and `delegationGrantId`. The CLI (`scion conversation messages`, `scion conversation catch-up`, and `scion messages`) and the Web Dashboard's agent message viewer show `authorized by <user> via delegation <grant>` (with the user's display name, email, or ID); web chat shows `authorized by <user>` with `via delegation <grant>` in the tooltip; and `scion conversation get-message` prints `AUTHORIZED BY`, `AUTHORIZING USER ID`, and `DELEGATION GRANT ID` rows.
 
 ### Delivery failures
 

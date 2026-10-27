@@ -317,16 +317,6 @@ type CreateAgentRequest struct {
 	// while preserving the agent's home directory and clone-per-agent
 	// workspace. Ignored when ProvisionOnly is false.
 	Reprovision bool `json:"reprovision,omitempty"`
-	// SharedDirBackendChanges asks a Reprovision to change the recorded
-	// shared-dir storage backend of the named shared dirs (dir name to
-	// "nfs" or "local"; `scion reincarnate --shared-dir-backend`). Only the agent's
-	// record changes; no data is copied, moved or deleted. Refused on a
-	// request that is not a Reprovision.
-	SharedDirBackendChanges map[string]string `json:"sharedDirBackendChanges,omitempty"`
-	// AllowEmptySharedDir, with SharedDirBackendChanges, skips the start
-	// check that refuses an empty directory on the new backend while the
-	// dir's directory on its previous backend is not empty.
-	AllowEmptySharedDir bool `json:"allowEmptySharedDir,omitempty"`
 	// ExpectExistingNFSWorkspace is the moved-agent workspace expectation of
 	// a ProvisionOnly request for an agent moved here from another broker
 	// (the JSON key predates the third value). For a move on the same NFS
@@ -545,11 +535,6 @@ type CreateAgentResponse struct {
 	// treats an absent echo on a reprovision dispatch as a failure, which is
 	// what keeps that failure mode closed instead of a silent no-op.
 	Reprovisioned bool `json:"reprovisioned,omitempty"`
-
-	// SharedDirBackendsChanged is set true when a Reprovision recorded the
-	// request's SharedDirBackendChanges. A broker that predates the field
-	// ignores the change, so the hub treats a missing echo as a failure.
-	SharedDirBackendsChanged bool `json:"sharedDirBackendsChanged,omitempty"`
 
 	// LaunchPending is set true instead of running Manager.Start inline when
 	// the broker accepted an async launch (design §3.2, §7 P1b-1): the Hub

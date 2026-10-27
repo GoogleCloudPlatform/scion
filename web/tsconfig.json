@@ -38,6 +38,7 @@
         "dist",
         "public",
         "src/**/*.test.ts",
-        "src/**/__fixtures__/**"
+        "src/**/__fixtures__/**",
+        "src/components/artifact-review/**"
     ]
 }

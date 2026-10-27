@@ -1342,10 +1342,51 @@ STUBERR
       "uname -m")
         echo "${GCLOUD_STUB_SSH_ARCH:-x86_64}"
         ;;
+      "readlink /opt/scion/current 2>/dev/null || true")
+        # deploy.sh's read_current_release: the target of the VM's
+        # /opt/scion/current link (e.g. "releases/nightly-20261023").
+        # Empty by default -- a VM without the versioned layout yet.
+        # GCLOUD_STUB_SSH_CURRENT_LINK_SKIP=N answers empty for the first
+        # N calls (e.g. the Phase 1 probe missing the layout).
+        n_file="${GCLOUD_STUB_STATE_DIR}/current-link-calls"
+        n=$(( $(cat "$n_file" 2>/dev/null || echo 0) + 1 ))
+        echo "$n" > "$n_file"
+        if [[ -n "${GCLOUD_STUB_SSH_CURRENT_LINK:-}" && "$n" -gt "${GCLOUD_STUB_SSH_CURRENT_LINK_SKIP:-0}" ]]; then
+          echo "${GCLOUD_STUB_SSH_CURRENT_LINK}"
+        fi
+        ;;
       *"useradd -r -M -N -g scion"*)
         # The rendered NFS squash-identity script: its own docstring says
         # it prints exactly "SQUASH_UID:SCION_GID" on success.
         echo "${GCLOUD_STUB_SSH_SQUASH_IDS:-997:1001}"
+        ;;
+      *"Image build started in background"*)
+        # Phase 3b's background image build start (it also mentions the
+        # status dir, so it must match before the poll cases below).
+        touch "${GCLOUD_STUB_STATE_DIR}/image-build-started"
+        echo "Image build started in background (PID 4242)"
+        ;;
+      "cat \"\$HOME/.scion-image-build/exit\" 2>/dev/null || echo running")
+        # The build poll: answers from GCLOUD_STUB_SSH_BUILD_EXIT_SEQ, one
+        # space-separated word per poll ("running running 0"); default 0.
+        n_file="${GCLOUD_STUB_STATE_DIR}/build-exit-polls"
+        n=$(( $(cat "$n_file" 2>/dev/null || echo 0) + 1 ))
+        echo "$n" > "$n_file"
+        read -r -a seq <<< "${GCLOUD_STUB_SSH_BUILD_EXIT_SEQ:-0}"
+        idx=$(( n <= ${#seq[@]} ? n - 1 : ${#seq[@]} - 1 ))
+        echo "${seq[$idx]}"
+        ;;
+      "tail -1 \"\$HOME/.scion-image-build/log\" 2>/dev/null || echo '(waiting...)'")
+        # The build progress line; %b so a test can inject escape bytes.
+        printf '%b\n' "${GCLOUD_STUB_SSH_BUILD_LOG_LINE:-building}"
+        ;;
+      *"sudo docker images | grep"*)
+        # The post-build image check: the point a Phase 3b test stops at.
+        touch "${GCLOUD_STUB_STATE_DIR}/images-verified"
+        ;;
+      "mktemp -d /tmp/scion-hubenv.XXXXXX")
+        # deploy.sh's private hub.env staging directory on the VM.
+        echo "${GCLOUD_STUB_SSH_HUBENV_DIR-/tmp/scion-hubenv.STUB01}"
         ;;
       *"test -f /home/scion/.scion/hub.env"*)
         # GCLOUD_STUB_HUB_ENV_EXISTS=true simulates a re-run on a VM that

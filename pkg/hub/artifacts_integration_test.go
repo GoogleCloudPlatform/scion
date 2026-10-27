@@ -766,7 +766,7 @@ func TestArtifactsRemoteImageRefusedOnRoutes(t *testing.T) {
 func TestArtifactsHTMLViewOnRoutes(t *testing.T) {
 	srv, s := testServer(t)
 	enableArtifactsForTest(t, srv)
-	require.NotEmpty(t, srv.artifactViewKey, "the hub initializes the view key")
+	require.NotEmpty(t, fixedKeyBytes(srv.artifactViewKeys), "the hub initializes the view key")
 	p1 := artifactProject(t, s, "view-p1")
 	p2 := artifactProject(t, s, "view-p2")
 	_, tok := artifactAgent(t, srv, s, p1.ID, "view-agent", AgentRoleBaseline)

@@ -54,6 +54,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hostlimits"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
@@ -63,6 +64,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/ssemetrics"
 	scionplugin "github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	cloudrunruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
@@ -202,7 +204,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	applyServerLogLevelSetting(cfg.LogLevel)
 	if enableHub {
 		warnRetiredServerSettings(slog.Default(), serverConfigPath)
-		if err := validateHubWorkspaceStorage(cfg); err != nil {
+		if err := resolveHubProjectStorage(cfg); err != nil {
 			return err
 		}
 	}
@@ -330,6 +332,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 	// 6. Check ports
 	if err := checkServerPorts(cfg); err != nil {
+		return err
+	}
+	// A standalone Hub API (web disabled) refuses dev auth on a
+	// non-loopback host; the web path does the same in webStartupPreflight.
+	if err := hubAPIStartupPreflight(cfg, enableHub, enableWeb); err != nil {
 		return err
 	}
 	// The web server's listener checks (dev auth bind, then the web base
@@ -489,13 +496,19 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	// ResolvePluginConfig strips inline secrets.
 	var secretBackend secret.SecretBackend
 	if enableHub && s != nil {
+		// The one shared encryption object (ptone/scion#1530 §5), built
+		// before the backend and plugin boot path: the local backend and
+		// the hub hold the same pointer.
+		if err := buildServerValueCipher(); err != nil {
+			return err
+		}
 		hubID := cfg.Hub.ResolveHubID()
 		var sbErr error
 		secretBackend, sbErr = secret.NewBackend(ctx, cfg.Secrets.Backend, s, secret.GCPBackendConfig{
 			ProjectID:            cfg.Secrets.GCPProjectID,
 			CredentialsJSON:      cfg.Secrets.GCPCredentials,
 			ReplicationLocations: cfg.Secrets.GCPReplicationLocations,
-		}, hubID, resolveSessionSecret())
+		}, hubID, serverValueCipher)
 		if sbErr != nil {
 			log.Printf("Warning: failed to initialize secret backend: %v", sbErr)
 		}
@@ -1389,24 +1402,43 @@ func brokerHostExplicit(cfg *config.GlobalConfig) bool {
 	return h != "" && h != config.DefaultBrokerHost
 }
 
-// validateHubWorkspaceStorage fails hub startup when server.workspace_storage
-// cannot be used: an unknown backend, nfs without shares, a volume backend
-// without volume_name, or an invalid subpath_root. Without it the hub would
-// quietly fall back to ephemeral local project paths and only readiness
-// would notice. A broker-only process never calls this: it only logs
-// startup warnings (brokerNFSConfig, brokerWorkspaceStorageWarning).
-func validateHubWorkspaceStorage(cfg *config.GlobalConfig) error {
+// resolveHubProjectStorage resolves the hub's one storage block,
+// server.project_storage (config.ResolveGlobalProjectStorage: read as
+// written, or synthesized from server.workspace_storage,
+// server.shared_dir_storage and server.home_storage with a warning), and
+// stores it in cfg.EffectiveProjectStorage. It fails hub startup when the
+// block cannot be used: an unknown backend, nfs without shares, a volume
+// backend without volume_name, an invalid subpath_root, the new block set
+// together with an old one, or a synthesis that would move data off a
+// shared export. Without it the hub would quietly fall back to ephemeral
+// local project paths and only readiness would notice. A broker-only
+// process never calls this: it only logs startup warnings
+// (brokerNFSConfig, brokerWorkspaceStorageWarning).
+func resolveHubProjectStorage(cfg *config.GlobalConfig) error {
 	if cfg == nil {
 		return nil
 	}
-	// Defaults are applied during config load; applying them again is
-	// idempotent and keeps this check independent of the load path.
-	cfg.WorkspaceStorage.ApplyWorkspaceStorageDefaults()
-	if err := cfg.WorkspaceStorage.ValidateWorkspaceStorage(); err != nil {
-		// The wrapped error already names the key (for example
-		// server.workspace_storage.nfs.uid), so do not repeat it here.
-		return fmt.Errorf("invalid workspace storage settings: %w", err)
+	if err := config.CheckGlobalStorageBlocksLoaded(cfg); err != nil {
+		return fmt.Errorf("invalid project storage settings: %w", err)
 	}
+	ps, warnings, err := config.ResolveGlobalProjectStorage(cfg)
+	if err != nil {
+		// The wrapped error already names the key (for example
+		// server.project_storage.nfs.uid), so do not repeat it here.
+		return fmt.Errorf("invalid project storage settings: %w", err)
+	}
+	// The hub serves files from its own mount of a shared backend: its
+	// Layout must build, with an absolute host base, or the hub does not
+	// start (rather than refusing every shared-dir request and shared-mode
+	// dispatch later).
+	if err := config.ValidateHubProjectStorageLayout(ps); err != nil {
+		return fmt.Errorf("invalid project storage settings: %w", err)
+	}
+	for _, w := range warnings {
+		slog.Warn(w)
+	}
+	cfg.EffectiveProjectStorage = ps
+	cfg.EffectiveProjectStorageWarnings = warnings
 	return nil
 }
 
@@ -2102,6 +2134,11 @@ func logWorkstationReadyBanner(cfg *config.GlobalConfig, globalDir string, webEn
 			displayHost = "127.0.0.1"
 		}
 		log.Printf("Web UI: http://%s:%d", displayHost, port)
+		if devAuthToken != "" {
+			// The web UI signs a browser in only from a single-use link,
+			// which is never written to this log.
+			log.Printf("To sign in to the web UI, run: scion server open")
+		}
 	}
 	if devAuthToken != "" {
 		log.Printf("Developer token: %s", devTokenStartupHint(cfg, globalDir))
@@ -2690,6 +2727,7 @@ func newJWTProxyAuthenticator(jwtCfg *config.JWTAuthConfig) (*hub.JWTProxyAuthen
 // silently ignored.
 func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, secretBackend secret.SecretBackend) hub.ServerConfig {
 	return hub.ServerConfig{
+		StartupServerSettings:        config.ConvertGlobalToV1ServerConfig(cfg),
 		HubID:                        cfg.Hub.ResolveHubID(),
 		HubIDPinned:                  hubIDPinned(cfg),
 		HubName:                      cfg.Hub.ResolveHubName(),
@@ -2810,6 +2848,9 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		WebSessionKeySource: webSessionKeySource(resolveSessionSecret()),
 		// The server keyring file, or nil (legacy single-secret mode).
 		Keyring: serverKeyringFromFile(),
+		// The shared encryption object the local secret backend holds
+		// (nil: the hub builds it from Keyring or SharedSigningSecret).
+		ValueCipher: serverValueCipher,
 		// When SCION_REQUIRE_STABLE_SIGNING_KEY is truthy, the hub refuses to
 		// start rather than silently mint a new signing key it cannot resolve
 		// (which would invalidate every live token after, e.g., a redeploy onto a
@@ -2819,7 +2860,8 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		OIDCLogin:               cfg.OIDCLogin,
 		OIDCConfig:              cfg.OIDC,
 		Federation:              cfg.Federation,
-		WorkspaceStorageConfig:  cfg.WorkspaceStorage,
+		ProjectStorageConfig:    cfg.EffectiveProjectStorage,
+		ProjectStorageWarnings:  cfg.EffectiveProjectStorageWarnings,
 		// nil (no server.native_chat section) means enabled — chat is default-on.
 		NativeChatEnabled: cfg.NativeChat.EnabledSetting(),
 		// server.hub.port_proxy.response_header_timeout (validated at startup).
@@ -2991,10 +3033,7 @@ func wireCloudLoggingHealth(hubSrv *hub.Server, cs *logging.CloudWriteStats) {
 func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, endpoints hub.HubEndpoints, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger, artifactLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
 	hubCfg := buildHubServerConfig(cfg, endpoints.Operator, devAuthToken, adminEmailList, adminMode, maintenanceMessage, secretBackend)
 	hubCfg.HubEndpoints = &endpoints
-	// server.shared_dir_storage, read once from the global settings file
-	// through the same env-free loader the brokers use, so the hub's
-	// shared-dir browser and the agents resolve shared dirs from one source.
-	hubCfg.SharedDirStorageConfig, hubCfg.SharedDirStorageError = config.LoadHubSharedDirStorage()
+	hubCfg.MaintenanceConfig.Installer = detectUpdateInstaller(ctx, hubCfg.MaintenanceConfig)
 	warnNonConformingHubName(cfg.Hub.HubName)
 
 	// In hosted mode every replica must share the same session secret for
@@ -3712,7 +3751,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 	webHost := webListenHost(cfg)
 
 	// Refuse to start when dev auth is enabled on a non-loopback interface.
-	// Dev auth auto-logs in every request as admin — exposing it on a public
+	// Dev auth signs browsers in as admin — exposing it on a public
 	// address would create an unauthenticated admin endpoint. Startup runs
 	// the same check earlier (webStartupPreflight); this one stays as
 	// defense in depth.
@@ -3845,18 +3884,35 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 }
 
 // logSharedDirStorageStartup is the pure half of the Phase 2 item 5 startup
-// summary: given a resolved server.shared_dir_storage config, it warns
-// about any set-but-ignored NFS fields and logs exactly one
-// resolved-layout line, via logf so it's testable without a real logger. A
-// nil sdCfg (server.shared_dir_storage absent) logs nothing.
-func logSharedDirStorageStartup(sdCfg *config.V1SharedDirStorageConfig, logf func(format string, args ...interface{})) {
-	if ignored := sdCfg.IgnoredNFSFields(); len(ignored) > 0 {
+// summary: given the server section of the global settings, it warns about
+// set-but-ignored fields of the deprecated server.shared_dir_storage.nfs
+// block and logs exactly one line describing the broker's shared-dir
+// Layout (config.SharedDirStorageLayout, the one every runtime places
+// shared dirs on) when it is on a shared backend, via logf so it's
+// testable without a real logger. The local backend logs nothing; a
+// storage block that cannot be resolved logs one warning.
+func logSharedDirStorageStartup(srv *config.V1ServerConfig, logf func(format string, args ...interface{})) {
+	if srv == nil {
+		return
+	}
+	if ignored := srv.SharedDirStorage.IgnoredNFSFields(); len(ignored) > 0 {
 		logf("Warning: server.shared_dir_storage.nfs sets %s, which shared_dir_storage does not use (design deploy-config-explore §3.2.1)",
 			strings.Join(ignored, ", "))
 	}
-	if summary := sdCfg.ResolvedLayoutSummary(); summary != "" {
-		logf("server.shared_dir_storage resolved layout: %s", summary)
+	layout, split, err := config.SharedDirStorageLayout(srv)
+	if err != nil {
+		logf("Warning: shared-dir storage: %v", err)
+		return
 	}
+	if !layout.Backend.Shared() {
+		return
+	}
+	source := config.ProjectStorageKey
+	if split {
+		source = "server.shared_dir_storage (legacy split: workspaces are not on this share)"
+	}
+	logf("shared-dir storage layout: backend=%s host_base=%s subpath_root=%s claim=%q (from %s)",
+		layout.Backend, layout.HostBase, layout.SubPathRoot, layout.Share.PVName, source)
 }
 
 var logSharedDirStorageStartupGuard sync.Once
@@ -3867,163 +3923,53 @@ var logSharedDirStorageStartupGuard sync.Once
 // making every call after the first a no-op. It loads global settings the
 // same env-free, global-only way the Start path does (config.LoadGlobalSettingsWithOverlay,
 // never LoadEffectiveSettings, so this can never be influenced by a
-// project's own settings.yaml) and forwards to logSharedDirStorageStartup.
+// project's own settings.yaml) and forwards to logSharedDirStorageStartup
+// and logHomeStorageStartup.
 //
 // A settings-load error here never fails startup, but if the file that
-// failed to load plausibly configured shared_dir_storage at all, that is
-// worth one warning line at startup -- the broker's Start path
-// and the hub's resolvers both fail closed on this same condition once a
-// request/agent-start actually needs it, so this is the heads-up an
-// operator sees before that happens.
+// failed to load plausibly configured shared-dir placement at all
+// (config.SharedDirPlacementKeys), that is worth one warning line at
+// startup -- the broker's Start path and the hub's resolvers both fail
+// closed on this same condition once a request/agent-start actually needs
+// it, so this is the heads-up an operator sees before that happens.
 func loadAndLogSharedDirStorageStartup(logf func(format string, args ...interface{})) {
 	globalSettings, _, gErr := config.LoadGlobalSettingsWithOverlay()
 	if gErr != nil {
-		if config.GlobalSettingsMentions("shared_dir_storage") {
-			logf("Warning: server.shared_dir_storage: global settings failed to load (%v); "+
-				"shared_dir_storage will not take effect until this is fixed", gErr)
+		if key := config.MentionedSharedDirPlacementKey(config.GlobalSettingsMentions); key != "" {
+			logf("Warning: server.%s: global settings failed to load (%v); "+
+				"shared-dir storage will not take effect until this is fixed", key, gErr)
 		}
 		return
 	}
 	if globalSettings == nil {
 		return
 	}
-	if globalSettings.Server != nil {
-		logSharedDirStorageStartup(globalSettings.Server.SharedDirStorage, logf)
-	}
-	logSharedDirStorageOverridesStartup(globalSettings, logf)
+	logSharedDirStorageStartup(globalSettings.Server, logf)
 	logHomeStorageStartup(globalSettings, logf)
 }
 
-// logHomeStorageStartup logs a warning for each invalid home storage value
-// and each home_storage_backend "nfs" on a non-Kubernetes entry, and one
-// line per profile whose resolved home storage is nfs. It checks
-// configuration only; it never fails startup and never touches the export.
-// A broker host mount needed by the broker leaf mode is checked when an
-// agent using it starts, so a missing mount never affects startup or
-// agents on other runtimes. The hub.k8s_nfs_home experiment is decided by
-// the hub at each dispatch and is not shown here.
+// logHomeStorageStartup logs a warning for an invalid server.home_storage
+// block or one whose waits do not fit the hub's start window, and one line
+// when the global home storage is nfs. It checks configuration only; it
+// never fails startup and never touches the export. A broker host mount
+// needed by the broker leaf mode is checked when an agent using it starts,
+// so a missing mount never affects startup or agents on other runtimes.
+// The hub.k8s_nfs_home experiment is decided by the hub at each dispatch
+// and is not shown here.
 func logHomeStorageStartup(gs *config.VersionedSettings, logf func(format string, args ...interface{})) {
-	if gs == nil {
+	if gs == nil || gs.Server == nil {
 		return
 	}
-	if gs.Server != nil {
-		if err := gs.Server.HomeStorage.Validate(); err != nil {
-			logf("Warning: %v", err)
-		}
-		for _, w := range config.HomeStorageWindowWarnings(gs.Server.HomeStorage) {
-			logf("Warning: %s", w)
-		}
-	}
-	for _, e := range config.ValidateHomeStorageOverrides(gs.Runtimes, gs.Profiles) {
-		logf("Warning: %s", e.Error())
-	}
-	for _, w := range config.HomeStorageIgnoredWarnings(gs.Runtimes, gs.Profiles) {
-		logf("Warning: %s", w)
-	}
-	names := make([]string, 0, len(gs.Profiles))
-	for name := range gs.Profiles {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		r := gs.ResolveHomeStorage(name)
-		if r.Backend != config.HomeStorageBackendNFS {
-			continue
-		}
-		rt := gs.Profiles[name].Runtime
-		if entry, ok := gs.Runtimes[rt]; ok && !config.IsKubernetesRuntimeEntry(rt, entry) {
-			continue
-		}
-		logf("home_storage for profile %s: backend=nfs (from %s), leaf=%s", name, r.BackendSource, r.Leaf)
-	}
-}
-
-// logSharedDirStorageOverridesStartup logs one line per profile whose
-// shared-dir storage backend comes from a profile or runtime entry
-// shared_dir_storage_backend override, one per flat Runtime Broker
-// instance whose backend comes from its runtime_target, and a warning per
-// invalid override and per instance whose backend differs from the one
-// plugins resolve (config.VersionedSettings.FlatInstanceSharedDirStorageReport).
-// An instance that selects nfs without a complete nfs block is refused when
-// the instances are loaded (config.LoadRuntimeBrokerInstances).
-// It checks configuration only and never touches the filesystem: an nfs
-// override whose export is not mounted on this host is reported when an
-// agent using it starts, not here, so a missing mount never affects startup
-// or agents that use the local backend. Overrides set through the hub's
-// settings API after startup are not in this summary; they apply to the
-// next agent start.
-func logSharedDirStorageOverridesStartup(gs *config.VersionedSettings, logf func(format string, args ...interface{})) {
-	if gs == nil {
+	if err := gs.Server.EffectiveHomeStorage().Validate(); err != nil {
+		logf("Warning: %v", err)
 		return
 	}
-	var global *config.V1SharedDirStorageConfig
-	if gs.Server != nil {
-		global = gs.Server.SharedDirStorage
-	}
-	for _, e := range config.ValidateSharedDirStorageBackends(gs.Runtimes, gs.Profiles, global) {
-		logf("Warning: %s", e.Error())
-	}
-	names := make([]string, 0, len(gs.Profiles))
-	for name := range gs.Profiles {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		cfg, source := gs.ResolveSharedDirStorage(name)
-		if cfg == nil || source == config.SharedDirStorageGlobalSource {
-			continue
-		}
-		line := fmt.Sprintf("shared_dir_storage for profile %s: backend=%s (from %s)", name, sharedDirBackendLabel(cfg), source)
-		if summary := cfg.ResolvedLayoutSummary(); summary != "" {
-			line = fmt.Sprintf("shared_dir_storage for profile %s: %s (from %s)", name, summary, source)
-		}
-		logf("%s", line)
-	}
-	// Per-dir entries: one line per profile and shared dir whose backend
-	// comes from a shared_dir_storage_backends entry.
-	for _, name := range names {
-		dirSet := map[string]bool{}
-		p := gs.Profiles[name]
-		for dir := range p.SharedDirStorageBackends {
-			dirSet[dir] = true
-		}
-		if rt, ok := gs.Runtimes[p.Runtime]; ok {
-			for dir := range rt.SharedDirStorageBackends {
-				dirSet[dir] = true
-			}
-		}
-		dirs := make([]string, 0, len(dirSet))
-		for dir := range dirSet {
-			dirs = append(dirs, dir)
-		}
-		sort.Strings(dirs)
-		for _, dir := range dirs {
-			backend, source, perDir := gs.ResolveSharedDirStorageBackend(name, dir)
-			if !perDir {
-				continue
-			}
-			logf("shared_dir_storage for profile %s, shared dir %s: backend=%s (from %s)", name, dir, backend, source)
-		}
-	}
-	// Flat Runtime Broker instances: their runtime_target overrides, and a
-	// warning for each instance whose backend differs from the one plugins
-	// resolve from the global settings.
-	lines, warnings := gs.FlatInstanceSharedDirStorageReport()
-	for _, w := range warnings {
+	for _, w := range config.HomeStorageWindowWarnings(gs.Server.EffectiveHomeStorage()) {
 		logf("Warning: %s", w)
 	}
-	for _, line := range lines {
-		logf("%s", line)
+	if r := gs.ResolveHomeStorage(); r.Backend == config.HomeStorageBackendNFS {
+		logf("home_storage: backend=nfs (from %s), leaf=%s (Kubernetes agents only)", r.BackendSource, r.Leaf)
 	}
-}
-
-// sharedDirBackendLabel is the backend a resolved config selects, with
-// nil and "" shown as local.
-func sharedDirBackendLabel(cfg *config.V1SharedDirStorageConfig) string {
-	if cfg != nil && cfg.Backend == "nfs" {
-		return "nfs"
-	}
-	return "local"
 }
 
 // logSharedDirStorageStartupOnce calls loadAndLogSharedDirStorageStartup
@@ -4316,10 +4262,16 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	// working directory does not decide what the broker mounts.
 	var brokerNFS *config.V1NFSConfig
 	var workspaceStorageBackend string
+	brokerLayout := projectfs.Layout{Backend: projectfs.BackendLocal, Homes: projectfs.BackendLocal}
 	if globalVS, _, gErr := config.LoadGlobalSettings(); gErr != nil {
 		log.Printf("WARNING: NFS mount checks disabled: loading global settings: %v", gErr)
 	} else {
 		workspaceStorageBackend = brokerWorkspaceStorageBackend(globalVS)
+		var layoutWarnings []string
+		brokerLayout, layoutWarnings = brokerStorageLayout(globalVS)
+		for _, w := range layoutWarnings {
+			log.Printf("WARNING: %s", w)
+		}
 		var nfsWarning string
 		brokerNFS, nfsWarning = brokerNFSConfig(globalVS)
 		if nfsWarning != "" {
@@ -4359,6 +4311,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		NFSConfig:                     brokerNFS,
 		StorageBucket:                 brokerStorageBucket(cfg.Storage),
 		WorkspaceStorageBackend:       workspaceStorageBackend,
+		StorageLayout:                 brokerLayout,
 		DefaultProfile:                brokerDefaultProfile,
 		Debug:                         enableDebug,
 		SlowRequestThreshold:          cfg.SlowRequestThreshold,
@@ -4800,6 +4753,7 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 	}
 
 	// Pull from versioned settings if available.
+	var maint *config.V1MaintenanceConfig
 	if vs, err := loadServerVersionedSettings(); err == nil {
 		// The maintenance build registry is resolved at build time
 		// (hub.Server.maintenanceImageRegistry), not here.
@@ -4814,6 +4768,7 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 		// Read new binary auto-update fields from server.maintenance.
 		if vs.Server != nil && vs.Server.Maintenance != nil {
 			m := vs.Server.Maintenance
+			maint = m
 			if m.DeploymentTier != "" {
 				mc.DeploymentTier = m.DeploymentTier
 			}
@@ -4864,6 +4819,9 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 	if v := os.Getenv("SCION_MAINTENANCE_SERVICE_NAME"); v != "" {
 		mc.ServiceName = v
 	}
+	// SCION_MAINTENANCE_INSTALL_ROOT > server.maintenance.install_root >
+	// /opt/scion.
+	mc.InstallRoot = config.MaintenanceInstallRoot(maint)
 
 	// Apply deployment tier defaults if not explicitly configured.
 	if mc.DeploymentTier == "" {
@@ -4874,10 +4832,11 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 		}
 	}
 
-	// Apply update policy default based on deployment tier.
+	// Apply update policy default based on deployment tier. Binary-tier
+	// hubs only notify by default; an explicit "auto" is honoured.
 	if mc.UpdatePolicy == "" {
 		if mc.DeploymentTier == "binary" {
-			mc.UpdatePolicy = "auto"
+			mc.UpdatePolicy = "notify"
 		} else {
 			mc.UpdatePolicy = "disabled"
 		}
@@ -4889,6 +4848,24 @@ func resolveMaintenanceConfig(cfg *config.GlobalConfig) hub.MaintenanceConfig {
 	}
 
 	return mc
+}
+
+// detectUpdateInstaller detects, once at startup, how this hub installs
+// release binaries and restarts itself (symlink, sudo-install or
+// unsupported), and logs the result. The update-binary operation, the
+// auto-update policy and Restart Hub all use it.
+func detectUpdateInstaller(ctx context.Context, mc hub.MaintenanceConfig) maintenance.Installer {
+	dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	inst := hub.DetectMaintenanceInstaller(dctx, mc)
+	st := inst.Status()
+	if st.Supported {
+		slog.Info("Release update installer detected", "strategy", st.Strategy, "install_root", mc.InstallRoot)
+	} else {
+		slog.Info("Release self-update is not supported on this host", "strategy", st.Strategy,
+			"install_root", mc.InstallRoot, "reason", st.Reason)
+	}
+	return inst
 }
 
 // requireImageRegistryForBroker checks that an image registry is available from

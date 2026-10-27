@@ -55,9 +55,17 @@ func LocalAgentDirExists(agentName, projectPath string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("resolve project: %w", err)
 	}
-	roots := []string{filepath.Join(projectDir, "agents")}
+	var roots []string
+	// A shared project configuration's in-project agents root is on the
+	// share and never holds agent state.
+	if !config.IsSharedProjectConfigDir(projectDir) {
+		roots = append(roots, filepath.Join(projectDir, "agents"))
+	}
 	if extDir, err := config.GetGitProjectExternalAgentsDir(projectDir); err == nil && extDir != "" {
 		roots = append(roots, extDir)
+	}
+	if legacy := config.LegacySharedProjectAgentDir(projectDir, agentName); legacy != "" {
+		roots = append(roots, filepath.Dir(legacy))
 	}
 
 	// Every root is checked, so an error on one root does not hide a

@@ -241,7 +241,10 @@ func TestMalformedReports(t *testing.T) {
 		{"wrong field type", "application/csp-report", `{"csp-report":{"line-number":"nine"}}`, http.StatusBadRequest},
 		{"plain json content type", "application/json", reportingAPIBody, http.StatusUnsupportedMediaType},
 		{"no content type", "", reportingAPIBody, http.StatusUnsupportedMediaType},
-		{"shapes swapped", "application/csp-report", reportingAPIBody, http.StatusBadRequest},
+		{"single report of another type", "application/csp-report", `{"type":"deprecation","body":{}}`, http.StatusBadRequest},
+		{"single report without body", "application/csp-report", `{"type":"csp-violation","url":"https://hub.example/"}`, http.StatusBadRequest},
+		{"string body", "application/csp-report", `"csp-report"`, http.StatusBadRequest},
+		{"empty body", "application/csp-report", ``, http.StatusBadRequest},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -473,6 +476,10 @@ func TestPackageStoresNothing(t *testing.T) {
 	allowed := map[string]bool{
 		"encoding/json": true, "errors": true, "io": true, "log/slog": true, "mime": true,
 		"net/http": true, "strconv": true, "strings": true, "unicode": true, "unicode/utf8": true,
+		// Dedupe keeps its counts in memory only.
+		"sync": true, "time": true,
+		// Summary records are logged without a request's context.
+		"context": true,
 	}
 	if len(pkg.Imports) == 0 {
 		t.Fatal("no imports read; the check would pass vacuously")

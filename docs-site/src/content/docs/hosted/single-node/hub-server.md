@@ -68,7 +68,7 @@ server:
   log_level: info
   hub:
     port: 9810       # Used in standalone mode only
-    host: 0.0.0.0
+    host: 127.0.0.1  # Loopback required when auth.dev_mode is true
   database:
     driver: sqlite
     url: hub.db
@@ -101,10 +101,12 @@ See the [Authentication Guide](/scion/hosted/single-node/auth/) for detailed set
 For local testing, the Hub can auto-generate a development token:
 ```yaml
 server:
+  hub:
+    host: 127.0.0.1
   auth:
     dev_mode: true
 ```
-The token is written to `~/.scion/dev-token` on startup. The CLI and Web Dashboard automatically detect this token when running on the same machine.
+Dev auth requires a loopback listen host (`127.0.0.1`, `::1`, or `localhost`), both when the web server is enabled and when the Hub API runs standalone without `--enable-web`. The token is written to `~/.scion/dev-token` on startup. The CLI automatically uses this token for a loopback Hub, and browser sign-in uses a single-use launch link opened or printed by `scion server start` or `scion server open` (`POST /auth/dev-launch` and `GET /auth/dev-signin`).
 
 ### User Access Tokens (Programmatic)
 
@@ -204,11 +206,11 @@ The Scion Hub provides a built-in maintenance administration panel in the Web Da
 
 Administrators can trigger critical infrastructure operations directly from the dashboard:
 
-- **Check for Updates**: Checks for available updates and allows administrators to execute an "Update Now" action. The update banner on the maintenance and server configuration pages runs the operation that matches the deployment tier: **Update Binary (`update-binary`)** on binary-tier deployments (single-node VMs installed from releases), which downloads and verifies the release binary, swaps it in, and restarts the Hub; and `rebuild-server` on source-tier deployments. See [Maintenance (`server.maintenance`)](/scion/reference/server-config/#maintenance-servermaintenance).
+- **Check for Updates**: Checks for available updates and allows administrators to execute an "Update Now" action. The update banner on the maintenance and server configuration pages runs the operation that matches the deployment tier: **Update Binary (`update-binary`)** on binary-tier deployments (single-node VMs installed from releases), which takes a `target_version`, runs an installer preflight, downloads the release from pinned GitHub release asset URLs, verifies per-asset SHA256 checksums against `SHA256SUMS` and the binary's `version` output, swaps it in, and restarts the Hub (reconciling pending updates at boot and reporting status at `GET /api/v1/admin/maintenance/update-status`); and `rebuild-server` on source-tier deployments. See [Maintenance (`server.maintenance`)](/scion/reference/server-config/#maintenance-servermaintenance).
 - **Rebuild Server (`rebuild-server`)**: Initiates a fire-and-forget server rebuild and restart sequence. It uses staging paths and sudoers implementation to ensure reliable updates even while the server is running. It replaces the binary only, never the systemd unit. On a starter hub it compares the installed unit with `scripts/starter-hub/scion-hub.service.tmpl` in the checked-out tree. If they differ, the run log and a banner on this page say "re-provision needed", with the steps: re-run `scripts/starter-hub/gce-start-hub.sh --full` from the provisioning workstation with the original flags. The banner clears after a rebuild reports a match.
 - **Rebuild Web (`rebuild-web`)**: Recompiles the web frontend assets.
 - **Pull Images (`pull-images`)**: Triggers the Docker/Podman executor to pull the latest agent container images.
-- **Restart Hub**: Initiates a fire-and-forget server restart (`POST /api/v1/admin/maintenance/restart`) via systemd, restricted to administrators. A modal confirmation dialog prevents accidental triggers of restarts.
+- **Restart Hub**: Initiates a fire-and-forget server restart (`POST /api/v1/admin/maintenance/restart`) via systemd, restricted to administrators. A modal confirmation dialog prevents accidental triggers of restarts. It is refused with `409 Conflict` while an **Update Binary** or **Rebuild Server** run is running, and once accepted it holds back new update and rebuild runs (also `409 Conflict`) until the Hub is back, for at most 2 minutes. An update that is already waiting for its own restart does not block it.
 
 ### Migrations
 
@@ -237,7 +239,7 @@ All maintenance tasks executed through the panel are tracked. The maintenance in
 
 To guarantee server stability, the Hub enforces a strict **concurrency guard** on all maintenance operations:
 - **Mutual Exclusion:** Running multiple operations (such as parallel `go build` compilations) simultaneously is rejected.
-- **Conflict Rejection:** Any new maintenance request initiated while another is active returns a `409 Conflict` HTTP status code. This prevents resource exhaustion or server outages from concurrent builds.
+- **Conflict Rejection:** Any new maintenance request initiated while another is active returns a `409 Conflict` HTTP status code. This prevents resource exhaustion or server outages from concurrent builds. **Update Binary**, **Rebuild Server** and **Restart Hub** form one group: none of them starts while another is in progress (Restart Hub only waits for a running update or rebuild), and the `409` error names the blocking operation (and its run, when the blocker is an update or rebuild run; a pending Hub restart has no run).
 - **Status Monitoring:** Operators can trace progress and view active logs on the dashboard's maintenance interface.
 
 ## Persistence
@@ -285,9 +287,9 @@ Template and harness-config files are stored by content: each file is stored onc
 
 Templates and harness-configs stored before this layout keep their old layout (one object per file path) until their next commit (a push, a file edit, or a re-import), which moves them to the new layout. That commit then removes the old copy, unless another template or harness-config of the same kind still uses the same path or a path inside it. If a file in the old copy no longer matches its recorded hash (for example, two rows once shared the path), the commit keeps the content that is actually stored and records its real hash. A Runtime Broker that is downloading the old copy at that moment can fail once; it retries and gets the new version.
 
-The Hub no longer copies Hub-managed workspaces to Runtime Brokers through its storage bucket. A Runtime Broker reaches a Hub-managed workspace through the Hub's shared workspace storage (nfs), or runs on the Hub's host. A create sent to a remote Runtime Broker that can do neither fails up front with `409`. The only exception is a linked project with no git remote (registered from an existing checkout) on a Hub with local workspace storage. It keeps its workspace on that Runtime Broker (filled by the CLI workspace upload and `scion sync to`), and the Hub's Files tab answers `409` for it.
+The Hub no longer copies Hub-managed workspaces to Runtime Brokers through its storage bucket. A Runtime Broker reaches a Hub-managed workspace through the Hub's shared project storage (`server.project_storage` with `nfs`), or runs on the Hub's host. A create sent to a remote Runtime Broker that can do neither fails up front with `409`. The only exception is a linked project with no git remote (registered from an existing checkout) on a Hub with local project storage. It keeps its workspace on that Runtime Broker (filled by the CLI workspace upload and `scion sync to`), and the Hub's Files tab answers `409` for it.
 
-- For Hub-managed projects and shared-workspace git projects, the Hub's project **Files** tab, workspace archive download and resource import resolve `projects/<uuid>/workspace` on a shared workspace storage backend (`nfs`, `cloudrun-volume`, `gke-shared-volume`) or `~/.scion/projects/<slug>` on the `local` backend. They answer `409` for `empty-per-agent` projects, and the Files tab and archive answer `503` if a shared backend's mount point is missing.
+- For Hub-managed projects and shared-workspace git projects, the Hub's project **Files** tab, workspace archive download and resource import resolve `projects/<uuid>/workspace` on a shared project storage backend (`nfs`, `cloudrun-volume`, `gke-shared-volume`) or `~/.scion/projects/<slug>` on the `local` backend. They answer `409` for `empty-per-agent` projects, and the Files tab and archive answer `503` if a shared backend's mount point is missing.
 - `POST /api/v1/projects/{id}/workspace/pull` works only for shared-workspace git projects. It answers `409` otherwise, or when the workspace is not provisioned.
 - On a shared backend, project create seeds `projects/<uuid>/.scion`. On the `nfs` backend, project delete also removes `projects/<uuid>`.
 - For a linked project in a per-agent git mode, the **Files** tab resolves only a co-located Runtime Broker's local path. It answers `409` when the project is served only by remote Runtime Brokers. The linked-project workspace cache and `POST /api/v1/projects/{id}/workspace/sync` have been removed and answer `404`.

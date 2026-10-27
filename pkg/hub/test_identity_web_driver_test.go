@@ -516,7 +516,6 @@ func TestTIWebIAP_TransportIdentityInvariant(t *testing.T) {
 		"agentPTYPath rtr",
 		"authenticateExternalBearer cfg.GoogleResolver",
 		"brokerPTYPath rtr",
-		"cleanupNFSSharedDirTree runtime.NewNFSBackend()",
 		// The experiments registry (Registry.Resolve), not a user or
 		// transport resolver.
 		"experimentEnabledIn s.experimentRegistry()",

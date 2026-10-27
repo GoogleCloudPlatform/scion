@@ -24,6 +24,7 @@ import { join } from 'path';
 import { describe, expect, it } from 'vitest';
 
 import {
+  artifactLinkTarget,
   PREVIEW_CSP,
   PREVIEW_SANDBOX,
   imageSource,
@@ -161,6 +162,82 @@ describe('rewriteImages', () => {
     expect(links[1].hasAttribute('href')).toBe(false);
     expect(links[2].getAttribute('href')).toBe('https://x.example/');
     expect(links[3].hasAttribute('href')).toBe(false);
+  });
+});
+
+describe('artifactLinkTarget (shared by the preview and the review editor)', () => {
+  const ctx = { id: ID, seq: 2, entryPath: 'docs/index.md', files: [file('docs/other.md')] };
+  const none = [
+    'javascript:alert(1)',
+    'JaVaScRiPt:alert(1)',
+    'java\tscript:alert(1)',
+    ' javascript:alert(1)',
+    'data:text/html,x',
+    'vbscript:x',
+    'blob:https://h.example/x',
+    'file:///etc/passwd',
+    '//evil.example/x',
+    '\\\\evil.example\\x',
+    'tel:+15551234',
+    'ftp://h.example/f',
+    'nope.md',
+    '../../outside.md',
+    '#',
+    '',
+  ];
+  for (const href of none) {
+    it(`gives ${JSON.stringify(href)} no target`, () => {
+      expect(artifactLinkTarget(href, ctx)).toEqual({ kind: 'none' });
+    });
+  }
+  it('keeps http, https and mailto, opens version files, and reads fragments', () => {
+    expect(artifactLinkTarget('https://x.example', ctx)).toEqual({
+      kind: 'external',
+      href: 'https://x.example/',
+    });
+    expect(artifactLinkTarget('HTTP://x.example/a', ctx)).toEqual({
+      kind: 'external',
+      href: 'http://x.example/a',
+    });
+    expect(artifactLinkTarget('mailto:a@b.example', ctx)).toEqual({
+      kind: 'external',
+      href: 'mailto:a@b.example',
+    });
+    expect(artifactLinkTarget('other.md', ctx)).toEqual({
+      kind: 'file',
+      href: `/api/v1/artifacts/${ID}/versions/2/files/docs/other.md`,
+    });
+    expect(artifactLinkTarget('#part-two', ctx)).toEqual({ kind: 'fragment', id: 'part-two' });
+  });
+  it('strips what the URL parser strips, and nothing more', () => {
+    // C0 controls and spaces around the value, tabs and line breaks inside.
+    expect(artifactLinkTarget('\u0001 \x1fhttps://x.example/a\tb\u0000 ', ctx)).toEqual({
+      kind: 'external',
+      href: 'https://x.example/ab',
+    });
+    // Other whitespace is part of the value, as for the browser: a relative
+    // link to a file the version does not have.
+    expect(artifactLinkTarget('\u00a0https://x.example/', ctx)).toEqual({ kind: 'none' });
+    expect(artifactLinkTarget('\ufeffjavascript:alert(1)', ctx)).toEqual({ kind: 'none' });
+    expect(new URL('\u00a0https://x.example/', 'https://base.example/').host).toBe('base.example');
+  });
+  it('the preview shows tel: and ftp: links and fragments as text, and keeps https', () => {
+    const tpl = document.createElement('template');
+    tpl.innerHTML = rewriteImages(
+      '<a href="tel:+15551234">t</a><a href="ftp://h.example/f">f</a><a href="#s">s</a><a href="https://x.example/">x</a>',
+      ctx
+    );
+    const links = Array.from(tpl.content.querySelectorAll('a'));
+    expect(links.map((a) => a.getAttribute('href'))).toEqual([
+      null,
+      null,
+      null,
+      'https://x.example/',
+    ]);
+  });
+  it('the preview keeps any data image (the review editor shows raster types only, on purpose)', () => {
+    const out = rewriteImages('<img src="data:image/svg+xml;base64,PHN2Zy8+" alt="s">', ctx);
+    expect(imgs(out)[0].getAttribute('src')).toBe('data:image/svg+xml;base64,PHN2Zy8+');
   });
 });
 

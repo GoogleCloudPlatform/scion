@@ -1797,7 +1797,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 
 	// Validate through the messaging choke point (AC-8).
 	// Runs after authorization so unauthorized users see 403, not 400.
-	if err := messaging.ValidateLegacyMessage(msg); err != nil {
+	if err := messaging.ValidateLegacyMessage(chatSendValidationEnvelope(msg, attachmentRefs)); err != nil {
 		return nil, chatSendValidationError(err.Error())
 	}
 
@@ -3142,12 +3142,16 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	// and generate reply previews using a single batch query.
 	var messageExtensions map[string]*WebChatMessageExt
 	var replyPreviews map[string]chatReplyPreview
+	// extsKnown records that the extension rows were read, so
+	// messageExtensions tells which messages are soft-deleted.
+	extsKnown := false
 	if wcs != nil && len(result.Items) > 0 {
 		msgIDs2 := make([]string, len(result.Items))
 		for i, msg := range result.Items {
 			msgIDs2[i] = msg.ID
 		}
 		exts, err := wcs.GetMessageExts(ctx, msgIDs2)
+		extsKnown = err == nil
 		if err == nil && len(exts) > 0 {
 			messageExtensions = exts
 
@@ -3169,7 +3173,10 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 			if len(replyToIDs) > 0 {
 				// Also fetch extensions for the referenced messages so
 				// we can detect deleted reply parents.
-				replyExts, _ := wcs.GetMessageExts(ctx, replyToIDs)
+				replyExts, replyExtsErr := wcs.GetMessageExts(ctx, replyToIDs)
+				if replyExtsErr != nil {
+					slog.Warn("chat v2 reply preview extension lookup failed", "key", key, "error", replyExtsErr)
+				}
 
 				refMsgs, err := s.store.GetMessagesByIDs(ctx, replyToIDs)
 				if err == nil && len(refMsgs) > 0 {
@@ -3188,6 +3195,13 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 							if rExt, ok := replyExts[id]; ok && rExt.DeletedAt != nil {
 								content = "[deleted]"
 							}
+						}
+						// No text: an attachment-only message. (A deleted
+						// message has no text either, but its extension
+						// row marked it above; if that lookup failed, its
+						// text is gone all the same.)
+						if content == "" {
+							content = chatAttachmentOnlyPreview
 						}
 						if content != "[deleted]" && len([]rune(content)) > 100 {
 							content = string([]rune(content)[:100]) + "..."
@@ -3213,7 +3227,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	if len(result.Items) > 0 {
 		msgIDs := make([]string, 0, len(result.Items))
 		for _, msg := range result.Items {
-			if msg.Msg != "" { // soft-deleted messages show no references
+			if !chatHistoryMessageDeleted(msg, messageExtensions, extsKnown) { // soft-deleted messages show no references
 				msgIDs = append(msgIDs, msg.ID)
 			}
 		}
@@ -5208,6 +5222,24 @@ func isDMParticipant(key, userID string) bool {
 		(parts[3] == "user" && parts[4] == userID)
 }
 
+// filterSearchDMs drops DM results the filter's participant may not see. The
+// SQL condition already enforces this; this is a defensive second check using
+// the canonical isDMParticipant, so it never trims a page for well-formed keys.
+func filterSearchDMs(results []ChatSearchResult, filter ChatSearchFilter) []ChatSearchResult {
+	if filter.ConversationKey != "" {
+		return results
+	}
+	kept := results[:0]
+	for _, r := range results {
+		if strings.HasPrefix(r.ConversationKey, "dm:") &&
+			(filter.DMParticipantUserID == "" || !isDMParticipant(r.ConversationKey, filter.DMParticipantUserID)) {
+			continue
+		}
+		kept = append(kept, r)
+	}
+	return kept
+}
+
 // dmUserParticipants returns the user IDs named in a DM key, skipping the agent
 // side of an agent DM. Keys have the form dm:<kind>:<id>:<kind>:<id>.
 func dmUserParticipants(key string) []string {
@@ -5388,56 +5420,6 @@ func (s *Server) ensureDMRegistered(ctx context.Context, key, callerID string) {
 	s.mu.RUnlock()
 
 	registerDMParticipants(ctx, wcs, key)
-}
-
-// registerDMParticipants upserts one webchat_dm row per participant of a DM
-// conversation key (dm:<kind1>:<id1>:<kind2>:<id2>). It is a no-op for a nil
-// store or a malformed key.
-//
-// Registration must happen before any TouchDMActivity call: TouchDMActivity is
-// a plain UPDATE and silently affects zero rows when the registry rows do not
-// exist yet — which is the case when an agent is the first to speak in a DM.
-func registerDMParticipants(ctx context.Context, wcs WebChatStore, key string) {
-	if wcs == nil {
-		return
-	}
-
-	parts := strings.Split(key, ":")
-	if len(parts) < 5 {
-		return
-	}
-
-	kind1, id1 := parts[1], parts[2]
-	kind2, id2 := parts[3], parts[4]
-
-	// Upsert two rows — one per participant.
-	now := time.Now().UTC()
-
-	// Participant 1 → Peer 2.
-	peerKind2 := kind2
-	if peerKind2 != "agent" {
-		peerKind2 = "user"
-	}
-	_ = wcs.UpsertDM(ctx, WebChatDM{
-		ConversationKey: key,
-		ParticipantID:   id1,
-		PeerID:          id2,
-		PeerKind:        peerKind2,
-		LastActivityAt:  now,
-	})
-
-	// Participant 2 → Peer 1.
-	peerKind1 := kind1
-	if peerKind1 != "agent" {
-		peerKind1 = "user"
-	}
-	_ = wcs.UpsertDM(ctx, WebChatDM{
-		ConversationKey: key,
-		ParticipantID:   id2,
-		PeerID:          id1,
-		PeerKind:        peerKind1,
-		LastActivityAt:  now,
-	})
 }
 
 // ---------------------------------------------------------------------------

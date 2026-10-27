@@ -122,6 +122,7 @@ import { ComposerRoomController, type RoomComposer } from './composer-room.js';
 import { PinOnResizeController } from './pin-on-resize.js';
 import { focusElement } from '../focus-moved.js';
 import { findDefaultAgent } from './default-agent.js';
+import { replyToContent } from './message-text.js';
 import { coalescedRefresh, type CoalescedRefresh } from '../../../client/coalesced-refresh.js';
 
 /** Result from server-side mention fan-out. */
@@ -5123,7 +5124,7 @@ export class ScionChatThread extends LitElement {
     this.composerReplyTo = {
       messageId: msg.id,
       senderName: this.getSenderDisplayName(msg) || msg.sender,
-      content: msg.msg.length > 100 ? msg.msg.slice(0, 100) + '...' : msg.msg,
+      content: replyToContent(msg.msg),
     };
   }
 
@@ -6363,6 +6364,8 @@ export class ScionChatThread extends LitElement {
             senderProjectSlug=${msg.senderProjectId
               ? this.resolveProjectSlug(msg.senderProjectId)
               : ''}
+            authorizingUserId=${msg.authorizingUserId || ''}
+            delegationGrantId=${msg.delegationGrantId || ''}
             @scroll-to-message=${this.handleScrollToMessage}
             @path-link-click=${(e: CustomEvent<{ path: string }>) =>
               this.handlePathLinkClick(e, msg)}

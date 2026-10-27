@@ -17,11 +17,9 @@ package hub
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/migrate"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -114,7 +112,9 @@ func (s *Server) storageMigrationLayoutKey() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%#v|%#v", ws, sd), nil
+	// Value keys: a Layout holds the SharedDirs pointer, so %#v would differ
+	// on every call for the split configurations.
+	return ws.Key() + "||" + sd.Key(), nil
 }
 
 // noticeReasonIdentity marks a project whose legacy tree failed the
@@ -179,25 +179,4 @@ func (s *Server) computeStorageMigrationPlan(key string, gen uint64) {
 		return
 	}
 	c.key, c.pending, c.failedAt = key, pending, time.Time{}
-}
-
-// planStorageMigration returns the projects the migration would move
-// something for, or that have a failed step, with the reason.
-func (s *Server) planStorageMigration(ctx context.Context) (map[string]string, error) {
-	in, err := s.projectStorageMigrateInput(ctx, false)
-	if err != nil {
-		return nil, err
-	}
-	rep, err := migrate.Run(ctx, in, migrate.Options{DryRun: true})
-	if err != nil {
-		return nil, err
-	}
-	pending := map[string]string{}
-	for _, id := range rep.PendingProjects() {
-		pending[id] = ""
-	}
-	for _, id := range rep.IdentityBlockedProjects() {
-		pending[id] = noticeReasonIdentity
-	}
-	return pending, nil
 }
