@@ -46,7 +46,7 @@
   the upkeep and deletion lock cast through a regex guard (`pgUUIDText`) so one malformed stored
   value cannot fail a whole statement.
 - **Browser coverage of promotion is a mocked-hub case** (`web/e2e/chat-mobile/star-promotion.pw.ts`),
-  by decision of the epic EM: the real-hub suite starts its hub without a broker and has no way
+  by project decision: the real-hub suite starts its hub without a broker and has no way
   to create an agent record, and a broker-less agent create would be an unverified path that
   could only fail late in a gate. The hub promotion path is covered by the Go store and handler
   tests (both dialects, both message populations, rollback, single connection, access loss and

@@ -48,7 +48,8 @@ func (f *starFixture) dmConversation(t *testing.T, key string) string {
 	return id
 }
 
-// dmMsg stores a native DM message with thread ID threadID (the DM key; ""
+// dmMsg stores a native DM message (projectID must be a UUID: production
+// stores a DM between users under uuid.Nil) with thread ID threadID (the DM key; ""
 // for a modern row matched only by its conversation) and conversation
 // convID ("" for a legacy row). It is already dispatched, as a delivered
 // DM message is: a pending one would make a promotion answer 409.
@@ -98,8 +99,11 @@ func TestChatStars_AgentAndHumanDMs(t *testing.T) {
 			now := time.Now()
 			agentMsg := f.dmMsg(t, d.agentKey, d.agentConv, f.projA, "agent:"+f.agentA.Slug, f.agentA.ID, "from the  agent", "web", now.Add(-time.Hour))
 			// A human DM message stored with a project: its project is never
-			// a human DM star's project.
-			humanMsg := f.dmMsg(t, d.humanKey, d.humanConv, f.projB, "user:"+f.owner+"@test.com", f.owner, "", "web", now.Add(-time.Minute))
+			// a human DM star's project. Its body is blanked after the insert
+			// (the message store refuses an empty text): an empty stored body
+			// is what the star excerpt shows as "Attachment".
+			humanMsg := f.dmMsg(t, d.humanKey, d.humanConv, f.projB, "user:"+f.owner+"@test.com", f.owner, "to be blanked", "web", now.Add(-time.Minute))
+			require.NoError(t, f.wcs.UpdateMessageContent(context.Background(), humanMsg, ""))
 			thread := f.threadMsg(t, f.topicA, f.projA, "thread", now)
 
 			ch, unsub := f.ep.Subscribe("user.*.chat.stars")
@@ -175,7 +179,7 @@ func TestChatStars_DMWrongConversationOrChannel(t *testing.T) {
 			f := newStarFixture(t, readSwitch)
 			d := f.memberDMs(t)
 			now := time.Now()
-			human := f.dmMsg(t, d.humanKey, d.humanConv, "", "user:"+f.member, f.member, "human", "web", now)
+			human := f.dmMsg(t, d.humanKey, d.humanConv, uuid.Nil.String(), "user:"+f.member, f.member, "human", "web", now)
 			agent := f.dmMsg(t, d.agentKey, d.agentConv, f.projA, "user:"+f.member, f.member, "agent dm", "web", now)
 			telegram := f.dmMsg(t, d.agentKey, d.agentConv, f.projA, "user:"+f.member, f.member, "other channel", "telegram", now)
 			thread := f.threadMsg(t, f.topicA, f.projA, "thread", now)
@@ -202,7 +206,7 @@ func TestChatStars_DMTokenBoundaries(t *testing.T) {
 	ctx := context.Background()
 	d := f.memberDMs(t)
 	agentMsg := f.dmMsg(t, d.agentKey, d.agentConv, f.projA, "user:"+f.member, f.member, "a", "web", time.Now())
-	humanMsg := f.dmMsg(t, d.humanKey, d.humanConv, "", "user:"+f.member, f.member, "h", "web", time.Now())
+	humanMsg := f.dmMsg(t, d.humanKey, d.humanConv, uuid.Nil.String(), "user:"+f.member, f.member, "h", "web", time.Now())
 	agentBody := map[string]string{"conversationKey": d.agentKey}
 	humanBody := map[string]string{"conversationKey": d.humanKey}
 
@@ -533,4 +537,26 @@ func TestChatStars_MessageDeleteNonCanonicalID(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, exts[msg], "the extension row is keyed by the canonical ID")
 	assert.NotNil(t, exts[msg].DeletedAt)
+}
+
+// TestChatStars_MessageEditNonCanonicalID: an edit whose path spells the
+// message UUID in upper case keys the edited marker by the canonical ID, so
+// the star detail shows the message as edited, with its new text.
+func TestChatStars_MessageEditNonCanonicalID(t *testing.T) {
+	f := newStarFixture(t, true)
+	msg := f.threadMsg(t, f.topicA, f.projA, "before the edit", time.Now().Add(-time.Minute))
+	decodeStarPut(t, f.put(t, f.admin, msg, f.topicA))
+
+	rec := f.session(t, f.admin, http.MethodPut, chatConversationPath(f.topicA, "messages/"+strings.ToUpper(msg)),
+		map[string]string{"content": "after the edit"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp struct {
+		MessageID string `json:"messageId"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, msg, resp.MessageID, "the canonical ID")
+
+	item := decodeStarItem(t, f.session(t, f.admin, http.MethodGet, starPath(msg), nil))
+	assert.True(t, item.Edited, "the edited marker is keyed by the canonical ID")
+	assert.Equal(t, "after the edit", item.Excerpt)
 }
