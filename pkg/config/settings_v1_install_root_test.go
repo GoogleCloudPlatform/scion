@@ -17,6 +17,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -55,21 +56,35 @@ func TestMaintenanceInstallRoot_SaveRoundTrip(t *testing.T) {
 	assert.Contains(t, string(data2), "install_root: /srv/scion-install")
 }
 
+// testInstallRoot returns an absolute install root for name. On unix it is
+// "/srv/<name>", the literal these tests always used. On Windows "/srv/..."
+// is not absolute (filepath.IsAbs), so MaintenanceInstallRoot would ignore
+// it; a drive-rooted path keeps the same coverage there (ptone/scion#6332).
+func testInstallRoot(name string) string {
+	if runtime.GOOS == "windows" {
+		return `C:\srv\` + name
+	}
+	return "/srv/" + name
+}
+
 func TestMaintenanceInstallRoot_Resolution(t *testing.T) {
+	srvA, srvB, srvEnv := testInstallRoot("a"), testInstallRoot("b"), testInstallRoot("env")
+
 	t.Setenv(EnvMaintenanceInstallRoot, "")
 	assert.Equal(t, DefaultMaintenanceInstallRoot, MaintenanceInstallRoot(nil))
 	assert.Equal(t, DefaultMaintenanceInstallRoot, MaintenanceInstallRoot(&V1MaintenanceConfig{}))
-	assert.Equal(t, "/srv/a", MaintenanceInstallRoot(&V1MaintenanceConfig{InstallRoot: "/srv/a"}))
+	assert.Equal(t, srvA, MaintenanceInstallRoot(&V1MaintenanceConfig{InstallRoot: srvA}))
 
-	t.Setenv(EnvMaintenanceInstallRoot, "/srv/env")
-	assert.Equal(t, "/srv/env", MaintenanceInstallRoot(&V1MaintenanceConfig{InstallRoot: "/srv/a"}))
-	assert.Equal(t, "/srv/env", MaintenanceInstallRoot(nil))
+	t.Setenv(EnvMaintenanceInstallRoot, srvEnv)
+	assert.Equal(t, srvEnv, MaintenanceInstallRoot(&V1MaintenanceConfig{InstallRoot: srvA}))
+	assert.Equal(t, srvEnv, MaintenanceInstallRoot(nil))
 
 	// Relative values are ignored and the next source applies.
 	t.Setenv(EnvMaintenanceInstallRoot, "opt/scion")
-	assert.Equal(t, "/srv/a", MaintenanceInstallRoot(&V1MaintenanceConfig{InstallRoot: "/srv/a"}))
+	assert.Equal(t, srvA, MaintenanceInstallRoot(&V1MaintenanceConfig{InstallRoot: srvA}))
 	assert.Equal(t, DefaultMaintenanceInstallRoot, MaintenanceInstallRoot(&V1MaintenanceConfig{InstallRoot: "./scion"}))
 	t.Setenv(EnvMaintenanceInstallRoot, "")
 	assert.Equal(t, DefaultMaintenanceInstallRoot, MaintenanceInstallRoot(&V1MaintenanceConfig{InstallRoot: "relative"}))
-	assert.Equal(t, "/srv/b", MaintenanceInstallRoot(&V1MaintenanceConfig{InstallRoot: "/srv/b/"}))
+	// A trailing separator is cleaned away.
+	assert.Equal(t, srvB, MaintenanceInstallRoot(&V1MaintenanceConfig{InstallRoot: srvB + string(filepath.Separator)}))
 }
