@@ -259,6 +259,32 @@ describe('scion-chat-thread popup menu while the thread scrolls', () => {
     expect(internals.contextMenuPosition).toEqual({ x: 50, y: 290 });
   });
 
+  it('keys inside the menu do not cancel the jump settle re-check; the same key outside does', async () => {
+    type Watch = {
+      watchJumpScrollSettle(el: HTMLElement, id: string, align: ScrollLogicalPosition): void;
+      _jumpScrollCleanup: (() => void) | null;
+    };
+    const el = await mount();
+    const scroller = await openMenuOn(el, 'm2');
+    const w = el as unknown as Watch;
+    w.watchJumpScrollSettle(scroller, 'm2', 'center');
+    expect(w._jumpScrollCleanup).not.toBeNull();
+    const item = el.shadowRoot!.querySelector<HTMLElement>('[role="menu"] [role^="menuitem"]')!;
+    item.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'ArrowDown',
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      })
+    );
+    expect(w._jumpScrollCleanup).not.toBeNull();
+    document.body.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true })
+    );
+    expect(w._jumpScrollCleanup).toBeNull();
+  });
+
   it('stops following once the menu closes', async () => {
     const el = await mount();
     const scroller = await openMenuOn(el, 'm2');

@@ -437,6 +437,16 @@ function isJumpScrollClamped(
  * its native `<textarea>` in shadow DOM, so `e.target` there is the
  * `<sl-textarea>` host, not the editable element itself (review N3).
  */
+/**
+ * Whether a key event comes from inside an open popup menu (its
+ * `.context-menu` container): the menu's own keys, never a scroll gesture.
+ */
+function isInOpenMenu(e: Event): boolean {
+  return e
+    .composedPath()
+    .some((n) => n instanceof HTMLElement && n.classList.contains('context-menu'));
+}
+
 function isEditableKeydownTarget(node: EventTarget | null): boolean {
   if (!(node instanceof Element)) return false;
   if (node.tagName === 'INPUT' || node.tagName === 'TEXTAREA' || node.tagName === 'SELECT') {
@@ -4701,6 +4711,8 @@ export class ScionChatThread extends LitElement {
       // they're in JUMP_SCROLL_CANCEL_KEYS for the document-wide case (review
       // N3).
       if (isEditableKeydownTarget(e.composedPath()[0])) return;
+      // Keys inside the open message menu move between its items.
+      if (isInOpenMenu(e)) return;
       cleanup();
     };
     // Not a cancel signal — Chromium fires `scroll` every frame of the
@@ -5901,10 +5913,7 @@ export class ScionChatThread extends LitElement {
     if (isEditableKeydownTarget(e.composedPath()[0])) return;
     // Arrow keys, Home/End and Space inside the open menu move between its
     // items; they scroll nothing.
-    const inMenu = e
-      .composedPath()
-      .some((n) => n instanceof HTMLElement && n.classList.contains('context-menu'));
-    if (inMenu) return;
+    if (isInOpenMenu(e)) return;
     this._menuUserScrolled = true;
   };
 
