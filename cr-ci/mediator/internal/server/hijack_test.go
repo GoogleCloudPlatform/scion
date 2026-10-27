@@ -222,6 +222,8 @@ func TestHijackKill(t *testing.T) {
 		{"fork PR, busy registration", &fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: "contributor/example-repo", Event: "pull_request", Status: "in_progress"}, testRepo, true, "cr-job-120"},
 		{"pull_request_target", &fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: testRepo, Event: "pull_request_target", Status: "in_progress"}, testRepo, false, "cr-job-120"},
 		{"workflow_run", &fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: testRepo, Event: "workflow_run", Status: "in_progress"}, testRepo, false, "cr-job-120"},
+		{"schedule (not allowlisted)", &fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: testRepo, Event: "schedule", Status: "in_progress"}, testRepo, false, "cr-job-120"},
+		{"unknown event (fail closed)", &fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: testRepo, Event: "some_future_event", Status: "in_progress"}, testRepo, false, "cr-job-120"},
 		{"run lookup fails (fail closed)", nil, testRepo, false, "cr-job-120"},
 		{"repo not served", nil, "other-owner/other-repo", false, "cr-job-120"},
 	}
