@@ -477,8 +477,13 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
     void this.loadReleases(false);
   }
 
-  /** GET releases; refresh asks the hub to bypass its cache (it throttles). */
+  /**
+   * GET releases; refresh asks the hub to bypass its cache (it throttles).
+   * Does nothing while a load is in flight, so Retry and Refresh cannot
+   * start a second request.
+   */
   async loadReleases(refresh: boolean): Promise<void> {
+    if (this.releasesLoading) return;
     const version = this.status?.current.version ?? null;
     this.releasesLoading = true;
     try {
@@ -738,6 +743,7 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
                   size="small"
                   class="retry-releases"
                   ?loading=${this.releasesLoading}
+                  ?disabled=${this.releasesLoading}
                   @click=${() => this.loadReleases(false)}
                 >
                   <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>

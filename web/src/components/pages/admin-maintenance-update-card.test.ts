@@ -163,7 +163,7 @@ async function settle(e: Card): Promise<void> {
 
 /** Each GET releases answers the next body (the last one repeats). */
 async function mount(
-  bodies: Array<Json | number | 'down'> = [catalog()],
+  bodies: Array<Json | number | 'down' | Promise<Json>> = [catalog()],
   st: UpdateStatus | null = status()
 ): Promise<Card> {
   releaseRequests = [];
@@ -173,6 +173,7 @@ async function mount(
     releaseRequests.push(url);
     const body = bodies[Math.min(n++, bodies.length - 1)];
     if (body === 'down') return Promise.reject(new TypeError('Failed to fetch'));
+    if (body instanceof Promise) return body.then((b) => json(b));
     if (typeof body === 'number') {
       return json({ error: { code: 'internal_error', message: 'catalog unavailable' } }, body);
     }
@@ -614,6 +615,28 @@ describe('Refresh and staleness', () => {
     el = await mount(['down']);
     expect(root(el).querySelector('sl-alert.releases-error')).not.toBeNull();
     expect(root(el).querySelector('sl-select.release-select')).toBeNull();
+  });
+
+  it('does not start a second load while a retry is in flight', async () => {
+    let release: (b: Json) => void = () => {};
+    const pending = new Promise<Json>((resolve) => {
+      release = resolve;
+    });
+    el = await mount(['down', pending, catalog()]);
+    const retry = root(el).querySelector<HTMLElement>('sl-button.retry-releases')!;
+    retry.click();
+    await settle(el);
+    expect(releaseRequests).toHaveLength(2);
+    const busy = root(el).querySelector<HTMLElement>('sl-button.retry-releases')!;
+    expect(busy.hasAttribute('disabled')).toBe(true);
+    expect(busy.hasAttribute('loading')).toBe(true);
+    busy.click();
+    await settle(el);
+    expect(releaseRequests).toHaveLength(2);
+    release(catalog());
+    await settle(el);
+    expect(releaseRequests).toHaveLength(2);
+    expect(option(el, 'latest').textContent?.trim()).toBe('Latest (nightly-20261023)');
   });
 
   it('retries a failed first load from the error state', async () => {
