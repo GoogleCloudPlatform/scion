@@ -142,12 +142,18 @@ func (c *client) UploadAttachments(ctx context.Context, paths []string) (*Attach
 	// A refusal of every file carries the per-file failures.
 	raw, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	_ = resp.Body.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("read attachment upload response (status %d): %w", resp.StatusCode, readErr)
+	}
 	var result AttachmentUploadResult
-	if readErr == nil && json.Unmarshal(raw, &result) == nil && len(result.Failures) > 0 {
+	if json.Unmarshal(raw, &result) == nil && len(result.Failures) > 0 {
 		return &result, nil
 	}
 	resp.Body = io.NopCloser(bytes.NewReader(raw))
-	return nil, apiclient.CheckResponse(resp)
+	if err := apiclient.CheckResponse(resp); err != nil {
+		return nil, err
+	}
+	return nil, fmt.Errorf("unexpected attachment upload response status: %d", resp.StatusCode)
 }
 
 // appendAttachmentPart adds the file at path to writer as a "files" part.

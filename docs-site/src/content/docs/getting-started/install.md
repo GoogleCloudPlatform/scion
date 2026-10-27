@@ -18,8 +18,7 @@ through the whole setup in your browser — no config files to edit. Install Sci
 :::
 
 :::note[On Windows?]
-The Windows build is a Hub client only: it cannot run `scion server start`. See
-[Windows](/scion/hosted/user/windows/) for how to install it and which commands it supports.
+The Windows build (`scion-windows-amd64.zip` and `scion-windows-arm64.zip` on GitHub Releases, verified against `SHA256SUMS`) is a Hub client only: it supports connecting to a remote Hub (`hub`, `project`, `config`, `message`, `secret`, `skills`) and reaching agents over Conduit (`ssh`, `ssh-config`, `tunnel`, `vscode`), while server, Runtime Broker, and local container lifecycle commands exit with a `"not supported on Windows"` error. See [Windows](/scion/hosted/user/windows/) for how to install it and which commands it supports.
 :::
 
 ## Install with Homebrew (recommended)

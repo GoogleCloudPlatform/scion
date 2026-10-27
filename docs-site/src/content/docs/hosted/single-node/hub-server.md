@@ -68,7 +68,7 @@ server:
   log_level: info
   hub:
     port: 9810       # Used in standalone mode only
-    host: 0.0.0.0
+    host: 127.0.0.1  # Loopback required when auth.dev_mode is true
   database:
     driver: sqlite
     url: hub.db
@@ -101,10 +101,12 @@ See the [Authentication Guide](/scion/hosted/single-node/auth/) for detailed set
 For local testing, the Hub can auto-generate a development token:
 ```yaml
 server:
+  hub:
+    host: 127.0.0.1
   auth:
     dev_mode: true
 ```
-The token is written to `~/.scion/dev-token` on startup. The CLI and Web Dashboard automatically detect this token when running on the same machine.
+Dev auth requires a loopback listen host (`127.0.0.1`, `::1`, or `localhost`), both when the web server is enabled and when the Hub API runs standalone without `--enable-web`. The token is written to `~/.scion/dev-token` on startup. The CLI automatically uses this token for a loopback Hub, and browser sign-in uses a single-use launch link opened or printed by `scion server start` or `scion server open` (`POST /auth/dev-launch` and `GET /auth/dev-signin`).
 
 ### User Access Tokens (Programmatic)
 
@@ -204,7 +206,7 @@ The Scion Hub provides a built-in maintenance administration panel in the Web Da
 
 Administrators can trigger critical infrastructure operations directly from the dashboard:
 
-- **Check for Updates**: Checks for available updates and allows administrators to execute an "Update Now" action. The update banner on the maintenance and server configuration pages runs the operation that matches the deployment tier: **Update Binary (`update-binary`)** on binary-tier deployments (single-node VMs installed from releases), which downloads and verifies the release binary, swaps it in, and restarts the Hub; and `rebuild-server` on source-tier deployments. See [Maintenance (`server.maintenance`)](/scion/reference/server-config/#maintenance-servermaintenance).
+- **Check for Updates**: Checks for available updates and allows administrators to execute an "Update Now" action. The update banner on the maintenance and server configuration pages runs the operation that matches the deployment tier: **Update Binary (`update-binary`)** on binary-tier deployments (single-node VMs installed from releases), which takes a `target_version`, runs an installer preflight, downloads the release from pinned GitHub release asset URLs, verifies per-asset SHA256 checksums against `SHA256SUMS` and the binary's `version` output, swaps it in, and restarts the Hub (reconciling pending updates at boot and reporting status at `GET /api/v1/admin/maintenance/update-status`); and `rebuild-server` on source-tier deployments. See [Maintenance (`server.maintenance`)](/scion/reference/server-config/#maintenance-servermaintenance).
 - **Rebuild Server (`rebuild-server`)**: Initiates a fire-and-forget server rebuild and restart sequence. It uses staging paths and sudoers implementation to ensure reliable updates even while the server is running. It replaces the binary only, never the systemd unit. On a starter hub it compares the installed unit with `scripts/starter-hub/scion-hub.service.tmpl` in the checked-out tree. If they differ, the run log and a banner on this page say "re-provision needed", with the steps: re-run `scripts/starter-hub/gce-start-hub.sh --full` from the provisioning workstation with the original flags. The banner clears after a rebuild reports a match.
 - **Rebuild Web (`rebuild-web`)**: Recompiles the web frontend assets.
 - **Pull Images (`pull-images`)**: Triggers the Docker/Podman executor to pull the latest agent container images.

@@ -251,17 +251,40 @@ func TestProjectWorkspaceFiles_RemoteLinkedProject_ConflictNoCache(t *testing.T)
 // project with a co-located (embedded) broker keeps serving the broker's
 // local path.
 func TestProjectWorkspaceFiles_EmbeddedLinkedProject_ProviderPath(t *testing.T) {
+	for _, scionDir := range []bool{false, true} {
+		t.Run(fmt.Sprintf("scionDir=%t", scionDir), func(t *testing.T) {
+			f := newWorkspaceLayoutFixture(t)
+			project := createTestGitProject(t, f.srv, "Embedded Linked WS", "github.com/test/embedded-linked-ws")
+			b := addProviderBroker(t, f.s, project.ID, "embedded")
+			f.srv.SetEmbeddedBrokerID(b.ID)
+			checkout := t.TempDir()
+			localPath := checkout
+			if scionDir {
+				localPath = filepath.Join(checkout, config.DotScion) + string(os.PathSeparator)
+			}
+			require.NoError(t, f.s.AddProjectProvider(context.Background(), &store.ProjectProvider{
+				ProjectID: project.ID, BrokerID: b.ID, BrokerName: b.Name, Status: b.Status, LocalPath: localPath,
+			}))
+			require.NoError(t, os.WriteFile(filepath.Join(checkout, "main.go"), []byte("package main"), 0o644))
+
+			assert.Equal(t, []string{"main.go"}, listWorkspaceFiles(t, f.srv, project.ID))
+		})
+	}
+}
+
+func TestProjectWorkspaceFiles_GlobalProject_ProviderPath(t *testing.T) {
 	f := newWorkspaceLayoutFixture(t)
-	project := createTestGitProject(t, f.srv, "Embedded Linked WS", "github.com/test/embedded-linked-ws")
+	project := createTestGitProject(t, f.srv, "Global WS", "github.com/test/global-ws")
+	project.Slug = config.GlobalProjectSlug
 	b := addProviderBroker(t, f.s, project.ID, "embedded")
 	f.srv.SetEmbeddedBrokerID(b.ID)
-	checkout := t.TempDir()
+	globalDir := filepath.Join(f.home, config.DotScion)
 	require.NoError(t, f.s.AddProjectProvider(context.Background(), &store.ProjectProvider{
-		ProjectID: project.ID, BrokerID: b.ID, BrokerName: b.Name, Status: b.Status, LocalPath: checkout,
+		ProjectID: project.ID, BrokerID: b.ID, BrokerName: b.Name, Status: b.Status, LocalPath: globalDir,
 	}))
-	require.NoError(t, os.WriteFile(filepath.Join(checkout, "main.go"), []byte("package main"), 0o644))
-
-	assert.Equal(t, []string{"main.go"}, listWorkspaceFiles(t, f.srv, project.ID))
+	resolved, err := f.srv.resolveProjectWorkspace(context.Background(), project)
+	require.NoError(t, err)
+	assert.Equal(t, globalDir, resolved.HostPath)
 }
 
 // TestInitHubManagedProject_SharedBackend_SeedsProjectRoot pins the hub

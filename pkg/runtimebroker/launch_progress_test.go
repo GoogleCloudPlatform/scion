@@ -657,8 +657,14 @@ func TestClassifyStartError_LaunchFailure(t *testing.T) {
 		{api.LaunchCodeCrashLoop, api.LaunchStepContainerStart, "CrashLoopBackOff", "the agent container keeps crashing on start (CrashLoopBackOff)"},
 		{api.LaunchCodeInitContainerFailed, api.LaunchStepInitContainers, "Error", "an init container of the agent pod failed (Error)"},
 		{api.LaunchCodeUnschedulable, api.LaunchStepScheduling, "Unschedulable", "the agent pod cannot be scheduled (Unschedulable)"},
-		{api.LaunchCodePodDisrupted, api.LaunchStepScheduling, "PreemptionByScheduler", "the agent pod was preempted, evicted or deleted while starting (PreemptionByScheduler)"},
+		{api.LaunchCodePodDisrupted, api.LaunchStepScheduling, "PreemptionByScheduler", "the agent pod was preempted, evicted or deleted while starting: it was preempted (PreemptionByScheduler)"},
+		{api.LaunchCodePodDisrupted, api.LaunchStepContainerCreate, "Evicted", "the agent pod was preempted, evicted or deleted while starting: it was evicted (Evicted)"},
+		{api.LaunchCodePodDisrupted, api.LaunchStepContainerCreate, "TerminationByKubelet", "the agent pod was preempted, evicted or deleted while starting: it was evicted (TerminationByKubelet)"},
+		{api.LaunchCodePodDisrupted, api.LaunchStepContainerCreate, "EvictionByEvictionAPI", "the agent pod was preempted, evicted or deleted while starting: it was evicted (EvictionByEvictionAPI)"},
+		// A pod deleted without a disruption reason keeps the plain text.
 		{api.LaunchCodePodDisrupted, api.LaunchStepContainerCreate, "", "the agent pod was preempted, evicted or deleted while starting"},
+		// A non-enum reason is dropped whole, so no preempted/evicted suffix.
+		{api.LaunchCodePodDisrupted, api.LaunchStepContainerCreate, "preempted by ns-secret/agent-secret-pod", "the agent pod was preempted, evicted or deleted while starting"},
 		{api.LaunchCodeLaunchTimeout, api.LaunchStepAwaitingCapacity, "", "launch timed out waiting for the agent pod to be ready"},
 		// A reason that is not an enum (free text) is never reported.
 		{api.LaunchCodeCrashLoop, api.LaunchStepContainerStart, "back-off restarting ns-secret/agent-secret-pod", "the agent container keeps crashing on start"},
