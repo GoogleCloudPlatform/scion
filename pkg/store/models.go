@@ -4492,6 +4492,9 @@ const (
 	SAAssignmentOriginScheduledProjectDefault        SAAssignmentOrigin = "scheduled_project_default"
 	SAAssignmentOriginScheduledHubDefault            SAAssignmentOrigin = "scheduled_hub_default"
 	SAAssignmentOriginHostPassthroughTranslation     SAAssignmentOrigin = "host_passthrough_translation"
+	// SAAssignmentOriginLegacyBackfill marks a row written by the boot
+	// backfill for an agent created before assignment rows were recorded.
+	SAAssignmentOriginLegacyBackfill SAAssignmentOrigin = "legacy_backfill"
 )
 
 // AgentServiceAccountAssignment records who authorized an agent's
