@@ -713,6 +713,29 @@ export class ScionChatMessage extends LitElement {
   starred = false;
 
   /**
+   * Show the message's More actions button (web.chat_starred_messages):
+   * the keyboard entry to the message menu. The thread makes one message's
+   * button the list's single tab stop (`actionsTabIndex` 0, the others
+   * -1) and moves it with the arrow keys; it shows on hover and while
+   * focus is in the message.
+   */
+  @property({ type: Boolean })
+  actionsEnabled = false;
+
+  /** The tab index of the More actions button (set by the thread). */
+  @property({ type: Number })
+  actionsTabIndex = -1;
+
+  /** The message menu is open for this message (the button's aria-expanded). */
+  @property({ type: Boolean })
+  actionsExpanded = false;
+
+  /** The More actions button, when rendered. */
+  get actionsButton(): HTMLButtonElement | null {
+    return this.renderRoot?.querySelector<HTMLButtonElement>('button.msg-actions') ?? null;
+  }
+
+  /**
    * Whether the message's actual sender is an agent, independent of
    * `fromAgent`. v2 chat-thread computes `fromAgent` as "not me" (any
    * sender other than the current viewer, including another *user*) for
@@ -1697,6 +1720,69 @@ export class ScionChatMessage extends LitElement {
       color: var(--scion-neutral-400, #94a3b8);
     }
 
+    /* ---- More actions button: the keyboard entry to the message menu ---- */
+    .msg-actions {
+      position: absolute;
+      bottom: 0;
+      right: calc(100% + 0.25rem);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.75rem;
+      height: 1.75rem;
+      padding: 0;
+      border: 1px solid var(--scion-border, #e2e8f0);
+      border-radius: 0.375rem;
+      background: var(--scion-surface, #ffffff);
+      color: var(--scion-text-muted, #64748b);
+      font-size: 0.875rem;
+      cursor: pointer;
+      /* Hidden until hovered or focused, but still focusable. */
+      opacity: 0;
+    }
+
+    .from-agent .msg-actions {
+      right: auto;
+      left: calc(100% + 0.25rem);
+    }
+
+    .message-wrapper:hover .msg-actions,
+    .message-wrapper:focus-within .msg-actions,
+    .msg-actions[aria-expanded='true'] {
+      opacity: 1;
+    }
+
+    .msg-actions:focus {
+      outline: none;
+    }
+
+    .msg-actions:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: 1px;
+    }
+
+    /* The message whose action button has keyboard focus. */
+    .message-wrapper.actions-focused .bubble-content {
+      box-shadow: 0 0 0 2px var(--scion-primary, #3b82f6);
+    }
+
+    .actions-help {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
+    }
+
+    @media (hover: none) {
+      /* Touch opens the action sheet with a tap; no floating button. */
+      .msg-actions {
+        display: none;
+      }
+    }
+
     /* ---- Starred indicator (shape plus accent, never colour alone) ---- */
     .star-indicator {
       display: inline-flex;
@@ -2404,7 +2490,11 @@ export class ScionChatMessage extends LitElement {
       ((this.attachmentRefs?.length ?? 0) > 0 || (this.attachments?.length ?? 0) > 0);
 
     return html`
-      <div class="message-wrapper ${dirClass}${groupClass}">
+      <div
+        class="message-wrapper ${dirClass}${groupClass}${this.actionsFocused
+          ? ' actions-focused'
+          : ''}"
+      >
         ${this.showHeader && this.fromAgent
           ? html`<div class="avatar" style="background: ${this.getAvatarColor()}">
               ${this.getInitials()}
@@ -2456,10 +2546,84 @@ export class ScionChatMessage extends LitElement {
           ${isDeleted ? nothing : this.renderBadges()}
           ${isDeleted ? nothing : this.renderDeliveryState()}
           ${isDeleted || this.hasHeaderMeta() ? nothing : this.renderStarMeta()}
+          ${this.renderActionsButton()}
         </div>
       </div>
       ${this.renderFullPreview()}
     `;
+  }
+
+  /** The keys that move the message-list tab stop between messages. */
+  private static readonly NAV_KEYS = new Set(['ArrowUp', 'ArrowDown', 'Home', 'End']);
+
+  @state() private actionsFocused = false;
+
+  /**
+   * The More actions button: a native button (Enter and Space open the
+   * menu) carrying the message context in its name. Up/Down/Home/End ask
+   * the thread to move the tab stop (`message-actions-nav`); activation,
+   * Shift+F10 and the ContextMenu key ask it to open the menu here
+   * (`message-actions-open`). Nothing else is intercepted.
+   */
+  private renderActionsButton(): TemplateResult | typeof nothing {
+    if (!this.actionsEnabled) return nothing;
+    const who = this.senderName || this.sender;
+    const label = `More actions, message from ${who}, ${this.formatTime()}`;
+    const active = this.actionsTabIndex === 0;
+    return html`<button
+        type="button"
+        class="msg-actions"
+        tabindex=${this.actionsTabIndex}
+        aria-label=${label}
+        aria-haspopup="menu"
+        aria-expanded=${this.actionsExpanded ? 'true' : 'false'}
+        aria-describedby=${active ? 'actions-help' : nothing}
+        @click=${this.handleActionsClick}
+        @keydown=${this.handleActionsKeydown}
+        @focus=${(): void => {
+          this.actionsFocused = true;
+        }}
+        @blur=${(): void => {
+          this.actionsFocused = false;
+        }}
+      >
+        <sl-icon name="three-dots-vertical" aria-hidden="true"></sl-icon></button
+      >${active
+        ? html`<span class="actions-help" id="actions-help"
+            >Up and Down arrows move between messages. Shift+F10 also opens the menu. Tab leaves the
+            messages.</span
+          >`
+        : nothing}`;
+  }
+
+  private handleActionsClick = (e: MouseEvent): void => {
+    e.stopPropagation();
+    this.dispatchActions('message-actions-open', {});
+  };
+
+  private handleActionsKeydown = (e: KeyboardEvent): void => {
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    if (ScionChatMessage.NAV_KEYS.has(e.key) && !e.shiftKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.dispatchActions('message-actions-nav', { key: e.key });
+      return;
+    }
+    if (e.key === 'ContextMenu' || (e.key === 'F10' && e.shiftKey)) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.dispatchActions('message-actions-open', {});
+    }
+  };
+
+  private dispatchActions(type: string, extra: Record<string, unknown>): void {
+    this.dispatchEvent(
+      new CustomEvent(type, {
+        detail: { messageId: this.messageId, ...extra },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   /** Whether this rendering shows a header carrying the time (and the star). */

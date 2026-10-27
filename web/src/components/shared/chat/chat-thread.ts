@@ -104,6 +104,7 @@ import type { PreviewTarget } from './chat-file-preview.js';
 import './chat-action-sheet.js';
 import type { ActionSheetSelectDetail } from './chat-action-sheet.js';
 import {
+  deepActiveElement,
   MenuFocus,
   placeMenuInViewport,
   renderMenu,
@@ -1785,6 +1786,7 @@ export class ScionChatThread extends LitElement {
    */
   override updated(changedProperties: Map<string, unknown>): void {
     this.syncStarReconcilers();
+    this.syncActionsTabStop();
     this.measureSendErrorTruncation();
     this.observeSendError();
     // The typing indicator is in the list on a phone or tablet: when it
@@ -4586,7 +4588,10 @@ export class ScionChatThread extends LitElement {
       !isJumpScrollClamped(scrollEl, containerRect, targetRect);
 
     msgEl.scrollIntoView({ behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: align });
-    if (focus) focusArrivedMessage(msgEl);
+    if (focus) {
+      focusArrivedMessage(msgEl);
+      if (this.starsActive) this.setActiveActions(messageId);
+    }
     if (willScroll) {
       // A large layout shift mid-scroll (image load, late markdown,
       // attachment height) can leave the target off screen because the
@@ -5681,15 +5686,182 @@ export class ScionChatThread extends LitElement {
   /** Handle right-click on a message to show context menu. */
   private handleMessageContextMenu(e: MouseEvent, msg: Message): void {
     e.preventDefault();
+    // A context menu the keyboard raised (the ContextMenu key on a focused
+    // message) carries no pointer position: anchor it to the message.
+    let at = { x: e.clientX, y: e.clientY };
+    if (e.clientX === 0 && e.clientY === 0) {
+      const el = this.shadowRoot?.getElementById(`msg-${msg.id}`);
+      if (el) {
+        const r = el.getBoundingClientRect();
+        at = { x: r.left + 16, y: r.top + 16 };
+      }
+    }
+    this.openMessageMenu(msg, at);
+  }
+
+  /**
+   * Open the message menu at `at`. The message becomes the list's tab stop
+   * (pointer or keyboard alike), and its More actions button is where
+   * Escape returns focus.
+   */
+  private openMessageMenu(msg: Message, at: { x: number; y: number }): void {
     // Star states whose request failed are retried when a menu opens.
     if (this.starsActive) void this.stars.retryFailed();
     this.contextMenuMessage = msg;
-    this.contextMenuPosition = { x: e.clientX, y: e.clientY };
+    this.contextMenuPosition = at;
     this.contextMenuAsSheet = shouldUseMenuSheet();
     document.addEventListener('keydown', this.handleContextMenuKeydown);
-    if (!this.contextMenuAsSheet) this._menuFocus.opened();
+    if (this.starsActive) this.setActiveActions(msg.id);
+    if (!this.contextMenuAsSheet) {
+      const el = this.messageElement(msg.id);
+      this._menuFocus.opened(el?.actionsButton ?? undefined);
+    }
     this.trackMenuAnchor(msg.id);
   }
+
+  // ---- Message list tab stop (the roving More actions button) ----
+
+  /** The message whose More actions button is the list's one tab stop. */
+  private _activeActionsId = '';
+
+  /** That message's index the last time the stop was synced. */
+  private _activeActionsIndex = -1;
+
+  /** The message whose More actions button holds focus, if any. */
+  private _actionsFocusId = '';
+
+  private messageElement(
+    messageId: string
+  ): (HTMLElement & import('./chat-message.js').ScionChatMessage) | null {
+    return (this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null) as
+      | (HTMLElement & import('./chat-message.js').ScionChatMessage)
+      | null;
+  }
+
+  private messageElements(): Array<import('./chat-message.js').ScionChatMessage> {
+    return [...(this.shadowRoot?.querySelectorAll('scion-chat-message') ?? [])];
+  }
+
+  /** Make `messageId`'s More actions button the list's tab stop. */
+  private setActiveActions(messageId: string): void {
+    this._activeActionsId = messageId;
+    this.syncActionsTabStop();
+  }
+
+  /**
+   * Keep exactly one rendered message's More actions button in the tab
+   * order, and its aria-expanded in step with the menu. An active message
+   * that is still rendered keeps the stop (live messages, edits and
+   * refreshes do not move it). When it left: the closest surviving
+   * message takes the stop, and takes focus only if focus was on the
+   * removed button (an empty starred-only center gives it to Show all).
+   * With no stop yet, the last message in view takes it, without focus.
+   */
+  private syncActionsTabStop(): void {
+    if (!this.starsActive) return;
+    const els = this.messageElements();
+    let index = this._activeActionsId
+      ? els.findIndex((m) => m.messageId === this._activeActionsId)
+      : -1;
+    let repairFocus = false;
+    if (index < 0) {
+      if (this._activeActionsId && this._activeActionsIndex >= 0) {
+        // The active message left.
+        repairFocus =
+          this._actionsFocusId === this._activeActionsId && deepActiveElement() === null;
+        index = els.length > 0 ? Math.min(this._activeActionsIndex, els.length - 1) : -1;
+      } else {
+        index = this.lastVisibleMessageIndex(els);
+      }
+      this._activeActionsId = index >= 0 ? els[index].messageId : '';
+    }
+    this._activeActionsIndex = index;
+    const open = this.contextMenuAsSheet ? '' : (this.contextMenuMessage?.id ?? '');
+    for (let i = 0; i < els.length; i++) {
+      const tab = i === index ? 0 : -1;
+      if (els[i].actionsTabIndex !== tab) els[i].actionsTabIndex = tab;
+      const expanded = els[i].messageId === open;
+      if (els[i].actionsExpanded !== expanded) els[i].actionsExpanded = expanded;
+    }
+    if (!repairFocus) return;
+    this._actionsFocusId = '';
+    if (index >= 0) {
+      const target = els[index];
+      void target.updateComplete.then(() => target.actionsButton?.focus());
+    } else if (this.filtered) {
+      void this.updateComplete.then(() =>
+        this.shadowRoot?.querySelector<HTMLElement>('.star-filter-empty sl-button')?.focus()
+      );
+    }
+  }
+
+  /** The last rendered message whose box is inside the scroller, else the last. */
+  private lastVisibleMessageIndex(
+    els: Array<import('./chat-message.js').ScionChatMessage>
+  ): number {
+    if (els.length === 0) return -1;
+    const scroller = this.shadowRoot?.querySelector<HTMLElement>('.messages-scroll');
+    if (scroller) {
+      const view = scroller.getBoundingClientRect();
+      for (let i = els.length - 1; i >= 0; i--) {
+        const r = els[i].getBoundingClientRect();
+        if (r.height > 0 && r.top >= view.top && r.bottom <= view.bottom) return i;
+      }
+    }
+    return els.length - 1;
+  }
+
+  /** Up/Down/Home/End on a More actions button: move the tab stop and focus. */
+  private handleActionsNav = (e: Event): void => {
+    const { messageId, key } = (e as CustomEvent<{ messageId: string; key: string }>).detail;
+    const els = this.messageElements();
+    const from = els.findIndex((m) => m.messageId === messageId);
+    if (from < 0) return;
+    let to = from;
+    if (key === 'ArrowUp') to = Math.max(0, from - 1);
+    else if (key === 'ArrowDown') to = Math.min(els.length - 1, from + 1);
+    else if (key === 'Home') to = 0;
+    else if (key === 'End') to = els.length - 1;
+    const target = els[to];
+    this.setActiveActions(target.messageId);
+    void target.updateComplete.then(() => target.actionsButton?.focus());
+  };
+
+  /** A More actions button was activated (or Shift+F10 / ContextMenu on it). */
+  private handleActionsOpen = (e: Event): void => {
+    const { messageId } = (e as CustomEvent<{ messageId: string }>).detail;
+    const msg = this.messageMap.get(messageId);
+    const el = this.messageElement(messageId);
+    if (!msg || !el) return;
+    const r = (el.actionsButton ?? el).getBoundingClientRect();
+    this.openMessageMenu(msg, { x: r.left, y: r.bottom });
+  };
+
+  /** Shift+F10 / ContextMenu on a message focused by a jump opens its menu. */
+  private handleMessageHostKeydown(e: KeyboardEvent, msg: Message): void {
+    if (e.composedPath()[0] !== e.currentTarget) return;
+    if (e.key !== 'ContextMenu' && !(e.key === 'F10' && e.shiftKey)) return;
+    e.preventDefault();
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    this.openMessageMenu(msg, { x: r.left + 16, y: r.top + 16 });
+  }
+
+  private handleActionsFocusIn = (e: FocusEvent): void => {
+    const target = e.composedPath()[0];
+    if (!(target instanceof HTMLElement) || !target.classList.contains('msg-actions')) return;
+    const host = (target.getRootNode() as ShadowRoot).host as
+      | import('./chat-message.js').ScionChatMessage
+      | undefined;
+    if (host?.messageId) {
+      this._actionsFocusId = host.messageId;
+      if (this._activeActionsId !== host.messageId) this.setActiveActions(host.messageId);
+    }
+  };
+
+  /** Focus moved somewhere else on purpose: no repair is owed. */
+  private handleActionsFocusOut = (e: FocusEvent): void => {
+    if (e.relatedTarget) this._actionsFocusId = '';
+  };
 
   /**
    * Follow the message a popup menu was opened on. A scroll the user makes
@@ -6873,6 +7045,10 @@ export class ScionChatThread extends LitElement {
         aria-busy=${this.filtered && this.loading ? 'true' : nothing}
         @scroll=${this.handleScroll}
         @click=${this.handleMessageAreaClick}
+        @message-actions-nav=${this.handleActionsNav}
+        @message-actions-open=${this.handleActionsOpen}
+        @focusin=${this.handleActionsFocusIn}
+        @focusout=${this.handleActionsFocusOut}
       >
         <div class="messages-list">
           ${this.loadingOlder
@@ -7083,6 +7259,7 @@ export class ScionChatThread extends LitElement {
         tpl: html`
           <scion-chat-message
             @contextmenu=${(e: MouseEvent) => this.handleMessageContextMenu(e, msg)}
+            @keydown=${(e: KeyboardEvent) => this.handleMessageHostKeydown(e, msg)}
             @click=${(e: MouseEvent) => this.handleMessageTap(e, msg)}
             id="msg-${msg.id}"
             messageId=${msg.id}
@@ -7113,6 +7290,7 @@ export class ScionChatThread extends LitElement {
             editedAt=${ext?.editedAt || ''}
             deletedAt=${ext?.deletedAt || ''}
             ?starred=${this.starsActive && this.stars.state(msg.id) === 'starred'}
+            ?actionsEnabled=${this.starsActive}
             senderProjectSlug=${msg.senderProjectId
               ? this.resolveProjectSlug(msg.senderProjectId)
               : ''}

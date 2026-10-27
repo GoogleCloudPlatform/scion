@@ -684,3 +684,42 @@ describe('scion-chat-thread starred-only center: reconcile and semantics', () =>
     expect(scroller.hasAttribute('aria-label')).toBe(false);
   });
 });
+
+describe('scion-chat-thread starred-only center: focus repair', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    showToastMock.mockReset();
+    setFlag(true);
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    delete (window as unknown as { __SCION_FEATURES__?: unknown }).__SCION_FEATURES__;
+  });
+
+  type Msg = import('./chat-message.js').ScionChatMessage;
+
+  it('when the focused starred row goes, focus moves to the closest row, then to Show all', async () => {
+    let starred = [message(S1, 1), message(S2, 2)];
+    routeHub({ starred: () => starred });
+    const el = await mount();
+    await vi.waitFor(() => expect(renderedIds(el)).toEqual([S1, S2]));
+    const row = (id: string): Msg =>
+      el.shadowRoot!.querySelector<Msg>(`#msg-${id}`)! as unknown as Msg;
+    await row(S2).updateComplete;
+    row(S2).actionsButton!.focus();
+
+    starred = [message(S1, 1)];
+    fakeStateManager.dispatchEvent(new CustomEvent('chat-stars-updated'));
+    await vi.waitFor(() => expect(renderedIds(el)).toEqual([S1]));
+    await vi.waitFor(() => expect(row(S1).shadowRoot!.activeElement).toBe(row(S1).actionsButton));
+
+    starred = [];
+    fakeStateManager.dispatchEvent(new CustomEvent('chat-stars-updated'));
+    await vi.waitFor(() =>
+      expect(el.shadowRoot!.querySelector('.star-filter-empty')).not.toBeNull()
+    );
+    const showAll = el.shadowRoot!.querySelector('.star-filter-empty sl-button');
+    await vi.waitFor(() => expect(el.shadowRoot!.activeElement).toBe(showAll));
+  });
+});

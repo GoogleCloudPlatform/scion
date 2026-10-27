@@ -291,3 +291,241 @@ describe('scion-chat-thread message menu keyboard contract', () => {
     expect(document.activeElement).not.toBe(opener);
   });
 });
+
+describe('scion-chat-thread message list tab stop (More actions)', () => {
+  type Msg = import('./chat-message.js').ScionChatMessage;
+
+  function setFlag(on: boolean): void {
+    (window as unknown as { __SCION_FEATURES__?: Record<string, boolean> }).__SCION_FEATURES__ = {
+      'web.chat_starred_messages': on,
+    };
+  }
+
+  afterEach(() => {
+    delete (window as unknown as { __SCION_FEATURES__?: unknown }).__SCION_FEATURES__;
+  });
+
+  function rows(el: ScionChatThread): Msg[] {
+    return [...el.shadowRoot!.querySelectorAll<Msg>('scion-chat-message')];
+  }
+
+  async function settled(el: ScionChatThread): Promise<void> {
+    await el.updateComplete;
+    await Promise.all(rows(el).map((m) => m.updateComplete));
+  }
+
+  function tabStops(el: ScionChatThread): string[] {
+    return rows(el)
+      .filter((m) => m.actionsButton?.getAttribute('tabindex') === '0')
+      .map((m) => m.messageId);
+  }
+
+  function focusedRow(el: ScionChatThread): string {
+    // happy-dom's ShadowRoot.activeElement throws while focus is on a
+    // detached node (a closed menu's row): treat that as no row focused.
+    const has = (m: Msg): boolean => {
+      try {
+        return !!m.actionsButton && m.shadowRoot!.activeElement === m.actionsButton;
+      } catch {
+        return false;
+      }
+    };
+    return rows(el).find(has)?.messageId ?? '';
+  }
+
+  function press(m: Msg, key: string, shiftKey = false): void {
+    m.actionsButton!.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key,
+        shiftKey,
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      })
+    );
+  }
+
+  it('is off while the experiment is off', async () => {
+    setFlag(false);
+    const el = await mount();
+    await settled(el);
+    expect(rows(el).every((m) => m.actionsButton === null)).toBe(true);
+  });
+
+  it('puts exactly one More actions button in the tab order, named for its message', async () => {
+    setFlag(true);
+    const el = await mount();
+    await settled(el);
+    expect(tabStops(el)).toEqual(['m3']);
+    const b = rows(el)[2].actionsButton!;
+    expect(b.getAttribute('aria-label')).toMatch(/^More actions, message from /);
+    expect(b.getAttribute('aria-haspopup')).toBe('menu');
+    expect(b.getAttribute('aria-expanded')).toBe('false');
+    // Only the active button carries the key help.
+    expect(b.getAttribute('aria-describedby')).toBe('actions-help');
+    expect(rows(el)[2].shadowRoot!.getElementById('actions-help')?.textContent).toContain(
+      'Tab leaves'
+    );
+    expect(rows(el)[0].actionsButton!.hasAttribute('aria-describedby')).toBe(false);
+  });
+
+  it('Up/Down/Home/End move the stop and focus through the rendered messages', async () => {
+    setFlag(true);
+    const el = await mount();
+    await settled(el);
+    rows(el)[2].actionsButton!.focus();
+    press(rows(el)[2], 'ArrowUp');
+    await settled(el);
+    await vi.waitFor(() => expect(focusedRow(el)).toBe('m2'));
+    expect(tabStops(el)).toEqual(['m2']);
+    press(rows(el)[1], 'Home');
+    await vi.waitFor(() => expect(focusedRow(el)).toBe('m1'));
+    press(rows(el)[0], 'ArrowUp');
+    await settled(el);
+    expect(focusedRow(el)).toBe('m1');
+    press(rows(el)[0], 'End');
+    await vi.waitFor(() => expect(focusedRow(el)).toBe('m3'));
+    expect(tabStops(el)).toEqual(['m3']);
+  });
+
+  it('activating the button opens the menu there; Escape returns focus to it', async () => {
+    setFlag(true);
+    const el = await mount();
+    await settled(el);
+    const row = rows(el)[1];
+    row.actionsButton!.focus();
+    row.actionsButton!.click();
+    await settled(el);
+    expect((el as unknown as Internals).contextMenuMessage?.id).toBe('m2');
+    expect(row.actionsButton!.getAttribute('aria-expanded')).toBe('true');
+    expect(tabStops(el)).toEqual(['m2']);
+    const menu = el.shadowRoot!.querySelector<HTMLElement>('[role="menu"]')!;
+    expect(el.shadowRoot!.activeElement).toBe(menu.querySelector('[role^="menuitem"]'));
+    menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await settled(el);
+    expect((el as unknown as Internals).contextMenuMessage).toBeNull();
+    expect(row.actionsButton!.getAttribute('aria-expanded')).toBe('false');
+    expect(focusedRow(el)).toBe('m2');
+  });
+
+  it('Shift+F10 and the ContextMenu key open the menu from the button', async () => {
+    setFlag(true);
+    for (const [k, shift] of [
+      ['F10', true],
+      ['ContextMenu', false],
+    ] as const) {
+      const el = await mount();
+      await settled(el);
+      press(rows(el)[0], k, shift);
+      await settled(el);
+      expect((el as unknown as Internals).contextMenuMessage?.id, k).toBe('m1');
+      document.body.innerHTML = '';
+    }
+  });
+
+  it('a right-click makes that message the tab stop and its button the menu opener', async () => {
+    setFlag(true);
+    const el = await mount();
+    await settled(el);
+    rows(el)[0].dispatchEvent(
+      new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 5, clientY: 5 })
+    );
+    await settled(el);
+    expect(tabStops(el)).toEqual(['m1']);
+    const menu = el.shadowRoot!.querySelector<HTMLElement>('[role="menu"]')!;
+    menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await settled(el);
+    expect(focusedRow(el)).toBe('m1');
+  });
+
+  it('a live message does not move the stop or focus', async () => {
+    setFlag(true);
+    const el = await mount();
+    await settled(el);
+    rows(el)[0].actionsButton!.focus();
+    press(rows(el)[0], 'ArrowDown');
+    await vi.waitFor(() => expect(focusedRow(el)).toBe('m2'));
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-message-received', {
+        detail: {
+          state: {},
+          data: {
+            id: 'm4',
+            conversationKey: KEY,
+            threadId: KEY,
+            sender: 'them@example.com',
+            msg: 'live',
+            createdAt: '2026-01-01T00:09:00Z',
+          },
+        },
+      })
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    await settled(el);
+    expect(tabStops(el)).toEqual(['m2']);
+    expect(focusedRow(el)).toBe('m2');
+  });
+
+  it('removing the focused message hands the stop and focus to the closest one; an unrelated removal moves nothing', async () => {
+    setFlag(true);
+    const el = await mount();
+    await settled(el);
+    const internals = el as unknown as { messages: Array<{ id: string }> };
+    rows(el)[1].actionsButton!.focus();
+    await settled(el);
+    // An unrelated row goes.
+    internals.messages = internals.messages.filter((m) => m.id !== 'm1');
+    await settled(el);
+    expect(focusedRow(el)).toBe('m2');
+    expect(tabStops(el)).toEqual(['m2']);
+    // The focused row goes.
+    internals.messages = internals.messages.filter((m) => m.id !== 'm2');
+    await settled(el);
+    await vi.waitFor(() => expect(focusedRow(el)).toBe('m3'));
+    expect(tabStops(el)).toEqual(['m3']);
+  });
+
+  it('a jump makes its message the stop, and Shift+F10 on the focused message opens its menu', async () => {
+    setFlag(true);
+    const el = await mount();
+    await settled(el);
+    await el.scrollToMessageById('m1', true, true);
+    await settled(el);
+    expect(tabStops(el)).toEqual(['m1']);
+    const host = rows(el)[0];
+    expect(el.shadowRoot!.activeElement).toBe(host);
+    host.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'F10', shiftKey: true, bubbles: true, cancelable: true })
+    );
+    await settled(el);
+    expect((el as unknown as Internals).contextMenuMessage?.id).toBe('m1');
+  });
+
+  it('keys from inside message content are left alone', async () => {
+    setFlag(true);
+    const el = await mount();
+    await settled(el);
+    const host = rows(el)[1];
+    const inner = document.createElement('a');
+    host.shadowRoot!.appendChild(inner);
+    const e = new KeyboardEvent('keydown', {
+      key: 'F10',
+      shiftKey: true,
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+    });
+    inner.dispatchEvent(e);
+    await settled(el);
+    expect(e.defaultPrevented).toBe(false);
+    expect((el as unknown as Internals).contextMenuMessage).toBeNull();
+    const arrow = new KeyboardEvent('keydown', {
+      key: 'ArrowUp',
+      bubbles: true,
+      composed: true,
+      cancelable: true,
+    });
+    inner.dispatchEvent(arrow);
+    expect(arrow.defaultPrevented).toBe(false);
+  });
+});
