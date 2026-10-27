@@ -181,7 +181,7 @@ func Redact(d Deletion, bases ...string) Deletion {
 			if b == "" {
 				continue
 			}
-			if r, err := filepath.Rel(b, d.Path); err == nil && r != ".." && !strings.HasPrefix(r, "../") {
+			if r, err := filepath.Rel(b, d.Path); err == nil && r != ".." && !strings.HasPrefix(r, "../") { //winsec:not-containment display only: picks a log-safe relative path for an audit line
 				rel = r
 				break
 			}
