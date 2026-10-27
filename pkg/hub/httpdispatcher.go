@@ -4774,11 +4774,11 @@ func (d *HTTPAgentDispatcher) deferredLifecycleResult(
 }
 
 // startSecretResolveOpts builds the resolve options for a start-time
-// secret resolution. resolveSecrets (Dispatch, Restart and Probe) and
-// resolveAsNeededForKeys both use it, so the two authorize a user-scope
-// secret the same way. It returns nil when no authorization service is
-// configured; nothing is then resolved through the progeny path and the
-// owner path is unchecked.
+// secret resolution. resolveSecrets, resolveAsNeededForKeys and the start
+// and restart launch selection (selectDeliverySecrets) all use it, so they
+// authorize a user-scope secret the same way. It returns nil when no
+// authorization service is configured; nothing is then resolved through
+// the progeny path and the owner path is unchecked.
 //
 // Two user-scope paths are checked, both for one synthetic identity built
 // from the agent's stored role, scopes and ancestry:
@@ -5010,54 +5010,6 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 			"asNeededKeys", asNeededKeys)
 	}
 	return result, asNeededKeys, nil
-}
-
-// progenySecretCheck is the per-secret progeny decision resolveSecrets and
-// selectDeliverySecrets apply to a progeny secret before its value is read:
-// Decide(project.secret_read) for a synthetic identity carrying the agent's
-// stored role scopes. The caller checks that the agent has more than one
-// ancestry entry and that the authorization service is set.
-func (d *HTTPAgentDispatcher) progenySecretCheck(ctx context.Context, agent *store.Agent) func(secret.SecretMeta) bool {
-	agentID := agent.ID
-	ancestry := agent.Ancestry
-	// The synthetic identity must carry the agent's real scopes.
-	// Agent authority is derived from JWT scopes (buildAgentSyntheticBindings),
-	// and agentScopeRestriction denies everything when the scope list is
-	// empty, so an identity built without them can never be allowed.
-	role, additionalScopes := agentRoleAndScopes(agent)
-	scopes := append(ScopesForRole(role), additionalScopes...)
-	if d.debug {
-		d.log.Debug("resolveSecrets: progeny resolution enabled",
-			"agent_id", agentID, "ancestry_len", len(ancestry),
-			"role", string(role), "scopes", len(scopes))
-	}
-	return func(s secret.SecretMeta) bool {
-		ident := &agentIdentityWrapper{
-			AgentTokenClaims: &AgentTokenClaims{
-				Claims:    jwt.Claims{Subject: agentID},
-				ProjectID: agent.ProjectID,
-				Ancestry:  ancestry,
-				Scopes:    scopes,
-			},
-		}
-		// Name the permission explicitly. (resource="secret",
-		// action="read") has no registry entry - agent secret access is
-		// registered as project.secret_read on ResourceProject - so
-		// resolveResourcePermission cannot resolve the pair on its own.
-		decision := d.authzService.Decide(ctx, AuthzRequest{
-			Principal:  principalContextForIdentity(ident),
-			Credential: credentialContextForIdentity(ident),
-			Resource:   Resource{Type: "secret", ID: s.ID},
-			Action:     ActionRead,
-			Permission: permissionProjectSecretRead,
-		})
-		if !decision.Allowed && d.debug {
-			d.log.Debug("progeny secret denied by authz",
-				"agent_id", agentID, "secret", s.Name, "secret_id", s.ID,
-				"reason", decision.Reason, "scopes", len(scopes))
-		}
-		return decision.Allowed
-	}
 }
 
 // applyHubGCPMetadataModeEnv writes the hub's authoritative GCP identity

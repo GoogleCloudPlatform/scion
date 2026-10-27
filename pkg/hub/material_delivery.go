@@ -36,9 +36,10 @@ package hub
 //     and the item admitted;
 //  5. precedence: runtime_broker < hub < project < user, as before.
 //
-// User-scope rows and progeny rows keep their existing selection here
-// (owner-scope rows, and progeny rows through the agent's own progeny
-// decision), unchanged by this file.
+// User-scope rows and progeny rows are not authorized under the delivery
+// credential. They get the start-time checks resolveSecrets applies
+// (startSecretResolveOpts): the owner path's user-scope check and the
+// agent's own progeny decision.
 
 import (
 	"context"
@@ -224,8 +225,10 @@ type secretDeliveryCandidate struct {
 //
 //   - broker, hub and project secrets are listed by metadata and each one
 //     is authorized under the delivery credential;
-//   - owner user-scope secrets are listed by metadata and kept, and progeny
-//     secrets keep the agent's own progeny decision, as resolveSecrets;
+//   - owner user-scope secrets are listed by metadata and held to the
+//     start-time owner-path check, and progeny secrets to the agent's own
+//     progeny decision, both from startSecretResolveOpts, as resolveSecrets
+//     applies them;
 //   - values are fetched only for the kept secrets, by recorded metadata,
 //     after every authorization, and not for a scope the test-admin
 //     restriction withholds; an item whose fetch fails is skipped, as
@@ -258,6 +261,10 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 		scopes = append(scopes, scopeEntry{store.ScopeUser, agent.OwnerID})
 	}
 
+	// The start-time owner-path and progeny checks resolveSecrets applies
+	// through the backend's Resolve. Nil without an authorization service.
+	startOpts := d.startSecretResolveOpts(ctx, agent)
+
 	var kept []secretDeliveryCandidate
 	for _, sc := range scopes {
 		metas, err := d.secretBackend.List(ctx, secret.Filter{Scope: sc.scope, ScopeID: sc.scopeID})
@@ -276,18 +283,24 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 				if !allowed {
 					continue
 				}
+			} else if startOpts != nil && startOpts.UserScopeCheck != nil && !startOpts.UserScopeCheck(m) {
+				// Skipped before any value is read, so a lower-scope
+				// row with the same name stays in effect.
+				continue
 			}
 			kept = append(kept, secretDeliveryCandidate{meta: m})
 		}
 	}
 
 	// Progeny secrets: the agent's own progeny decision, as resolveSecrets.
-	if len(agent.Ancestry) > 1 && d.authzService != nil {
+	// startSecretResolveOpts sets AuthzCheck only for an agent with more
+	// than one ancestry entry.
+	if startOpts != nil && startOpts.AuthzCheck != nil {
 		progeny, err := d.store.ListProgenySecrets(ctx, agent.Ancestry)
 		if err != nil {
 			return nil, err
 		}
-		check := d.progenySecretCheck(ctx, agent)
+		check := startOpts.AuthzCheck
 		for i := range progeny {
 			m := *secretMetaFromStore(&progeny[i])
 			if m.SecretType == store.SecretTypeInternal {
