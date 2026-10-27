@@ -55,7 +55,7 @@ async function setup(page: Page): Promise<{
     const request = route.request();
     let body: unknown = {};
     if (request.url().endsWith('/shared-dirs')) {
-      body = { sharedDirs: [{ name: 'scratchpad' }] };
+      body = { sharedDirs: [{ name: 'scratchpad', target: '/scion-volumes/scratchpad' }] };
     } else if (request.url().endsWith(`/agents/${agentId}`)) {
       body = {
         id: agentId,

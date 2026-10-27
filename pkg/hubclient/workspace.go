@@ -16,6 +16,7 @@ package hubclient
 
 import (
 	"context"
+	"os"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -181,11 +182,13 @@ func (s *workspaceService) getTransferClient() *transfer.Client {
 	return s.transferClient
 }
 
-// UploadFiles uploads files to their respective signed URLs.
+// UploadFiles uploads collected files to their respective signed URLs,
+// reading each through root, which must be opened at the collected
+// directory (see transfer.Client.UploadFiles).
 // This is a convenience method that uses the transfer client.
-func (s *workspaceService) UploadFiles(ctx context.Context, files []transfer.FileInfo, urls []transfer.UploadURLInfo, progress transfer.ProgressCallback) error {
+func (s *workspaceService) UploadFiles(ctx context.Context, root *os.Root, files []transfer.FileInfo, urls []transfer.UploadURLInfo, progress transfer.ProgressCallback) error {
 	client := s.getTransferClient()
-	return client.UploadFiles(ctx, files, urls, progress)
+	return client.UploadFiles(ctx, root, files, urls, progress)
 }
 
 // DownloadFiles downloads files from signed URLs to a destination directory.

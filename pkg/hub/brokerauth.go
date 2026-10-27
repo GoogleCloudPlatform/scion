@@ -835,7 +835,10 @@ func (s *BrokerAuthService) classifyUnconsumedJoinToken(ctx context.Context, tok
 // applyBrokerJoinRequest records the connection details a joining broker
 // reports on its broker record.
 func applyBrokerJoinRequest(broker *store.RuntimeBroker, req BrokerJoinRequest, now time.Time) {
-	broker.Version = req.Version
+	// Always stored, even when empty: an older broker sends "" on an
+	// untagged build, which must show as unknown rather than keep a stale
+	// token from an earlier join (ptone/scion#5972).
+	broker.Version = brokerVersionToken(req.Version)
 	broker.Status = store.BrokerStatusOnline
 	broker.ConnectionState = "connected"
 	broker.LastHeartbeat = now

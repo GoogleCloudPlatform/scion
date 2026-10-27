@@ -302,8 +302,10 @@ func TestHandleProvisionUser(t *testing.T) {
 			return rec
 		}
 
-		// Row 5: user identities presented with a non-session credential
-		// are refused by the session-only gate with its reason.
+		// A user identity presented with a credential kind other than a
+		// session, or with the user access token kind but no token
+		// identity, is refused by the credential gate with the
+		// session-only reason.
 		for _, kind := range []CredentialKind{CredentialKindUAT, CredentialKindAgentJWT, CredentialKindBroker, CredentialKindFederation, CredentialKindHubDelivery, ""} {
 			rec := call(user, kind)
 			requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "credential kind "+string(kind))
@@ -326,7 +328,7 @@ func TestHandleProvisionUser(t *testing.T) {
 	t.Run("row04a_dev_auth_mode_refused", func(t *testing.T) {
 		// Dev auth is single-user local mode: on a hub running with dev
 		// auth, provisioning is refused for every caller, before any body
-		// check: the dev credential, the session the web dev auto-login
+		// check: the dev credential, the session a web dev sign-in link
 		// mints for the dev user, and any other admin's session.
 		srv, s := testServer(t)
 		require.True(t, srv.authConfig.DevAuthEnabled)
@@ -360,8 +362,8 @@ func TestHandleProvisionUser(t *testing.T) {
 		assert.Empty(t, provisionAudits(t, s, ""))
 
 		// Row 4a is evaluated before row 8: on a dev-auth hub, a caller
-		// without user.invite also gets dev_auth_not_supported. (Tokens get
-		// the session-only refusal first, row 5.)
+		// without user.invite also gets dev_auth_not_supported, and so does
+		// a user access token (row04a_hub_token_with_user_invite_refused_on_dev_auth_hub).
 		rec := provisionAs(t, srv, f.member, map[string]interface{}{"email": "x@example.com"})
 		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 		_, details := provisionErr(t, rec)
@@ -391,13 +393,21 @@ func TestHandleProvisionUser(t *testing.T) {
 		assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	})
 
-	t.Run("row05_real_hub_token_with_user_invite_refused", func(t *testing.T) {
+	t.Run("row04a_hub_token_with_user_invite_refused_on_dev_auth_hub", func(t *testing.T) {
+		// Dev authentication refuses provisioning for a user access token
+		// too: a real hub token with user:invite, whose holder holds
+		// user.invite, gets dev_auth_not_supported and creates nothing.
 		m := newBearerMatrixFixture(t)
+		require.True(t, m.srv.authConfig.DevAuthEnabled)
 		key := m.mint(t, hubBoundary(), []string{"user:invite"})
 		rec := doRequestWithUAT(t, m.srv, key, http.MethodPost, provisionPath, map[string]interface{}{"email": "via-token@example.com"})
-		requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "hub token with user:invite")
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		code, details := provisionErr(t, rec)
+		assert.Equal(t, ErrCodeForbidden, code)
+		assert.Equal(t, provisionReasonDevAuthNotSupported, details["reason"])
 		_, err := m.store.GetUserByEmail(ctx, "via-token@example.com")
 		assert.ErrorIs(t, err, store.ErrNotFound)
+		assert.Empty(t, provisionAudits(t, m.store, ""))
 	})
 
 	t.Run("row08_callers_without_user_invite", func(t *testing.T) {

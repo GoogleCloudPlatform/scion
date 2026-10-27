@@ -225,7 +225,7 @@ switch to a two-phase apply (NEG Service first, then everything else).
 ## Workspace storage
 
 - `hub-gke` sets the chart's `workspaceStorage.nfs` value. From that one value
-  the chart renders settings.yaml `server.workspace_storage` (backend `nfs`)
+  the chart renders settings.yaml `server.project_storage` (backend `nfs`)
   and mounts the export in the hub pod at `<mount_root>/<hub_name>`
   (`/mnt/scion-nfs/<hub>` by default), so the settings and the mount cannot
   drift apart.
@@ -248,7 +248,7 @@ switch to a two-phase apply (NEG Service first, then everything else).
   the share's uid/gid. They come from one place because the hub writes
   workspaces that agents later read. The hub-gke image assumes 1000:1000.
 - If agent create times out and a `scion-shared-*` claim in `<hub>` shows
-  `ProvisioningFailed`, the hub isn't getting `workspace_storage`: check
+  `ProvisioningFailed`, the hub isn't getting `project_storage`: check
   `chart_values.workspaceStorage.nfs` and the rendered settings.yaml.
 
 ## Rotating the DB password

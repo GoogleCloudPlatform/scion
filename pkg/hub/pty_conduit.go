@@ -72,6 +72,10 @@ const (
 	ptyReasonRegistryUnavailable = "registry_unavailable"
 	ptyReasonAgentPTYUnavailable = "agent_pty_unavailable"
 	ptyReasonManagedRuntime      = wsprotocol.PTYReasonManagedRuntime
+	// ptyReasonDelegatedBrokerOnly: an agent delegated credential attaches
+	// only on the broker terminal path, and this attach would take the
+	// agent's conduit path. Not temporary: retrying does not change it.
+	ptyReasonDelegatedBrokerOnly = "delegated_credential_broker_path_only"
 )
 
 // Close reasons of an agent-path PTY stream that the hub chooses itself.
@@ -142,6 +146,21 @@ func writePTYPreflightOK(w http.ResponseWriter, d ptyPathDecision) {
 // A managed runtime (isManagedAgentRuntime) never takes the broker path:
 // see managedPTYPath.
 func (s *Server) resolvePTYPath(ctx context.Context, identity Identity, agent *store.Agent) ptyPathDecision {
+	d := s.resolvePTYPathFor(ctx, identity, agent)
+	if d.Path == ptyPathAgent && isDelegatedAgentIdentity(identity) {
+		// An agent delegated credential is authorized at the handshake and
+		// attaches only on the broker terminal path; conduit streams admit
+		// only user and agent identities (mintConduitGrant, the backstop).
+		// Refused before any upgrade, on the preflight and the WebSocket
+		// open alike (.design/agent-delegation.md §16.6).
+		return ptyRefusal(http.StatusServiceUnavailable, wsprotocol.ErrCodeRuntimeAttachUnsupported,
+			"Attach with a delegated credential is available only on the runtime broker's terminal path", ptyReasonDelegatedBrokerOnly)
+	}
+	return d
+}
+
+// resolvePTYPathFor is resolvePTYPath's path decision for any identity.
+func (s *Server) resolvePTYPathFor(ctx context.Context, identity Identity, agent *store.Agent) ptyPathDecision {
 	if isManagedAgentRuntime(agent.Runtime) {
 		return s.managedPTYPath(ctx, identity, agent)
 	}

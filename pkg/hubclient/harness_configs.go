@@ -68,7 +68,10 @@ type HarnessConfigService interface {
 	DownloadFile(ctx context.Context, url string) ([]byte, error)
 
 	// UploadFilesMultipart uploads harness config files through the Hub API.
-	UploadFilesMultipart(ctx context.Context, id string, files []FileInfo) error
+	// files are entries collected from the directory root is opened at; the
+	// content sent for each is read with transfer.ReadCollectedFile, so only
+	// bytes matching the collected size and hash are uploaded.
+	UploadFilesMultipart(ctx context.Context, id string, root *os.Root, files []FileInfo) error
 
 	// ReadFile reads a harness config file through the Hub API.
 	ReadFile(ctx context.Context, id, filePath string) ([]byte, error)
@@ -304,26 +307,20 @@ func (s *harnessConfigService) DownloadFile(ctx context.Context, signedURL strin
 }
 
 // UploadFilesMultipart uploads harness config files through the Hub API.
-func (s *harnessConfigService) UploadFilesMultipart(ctx context.Context, id string, files []FileInfo) error {
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-
-	for _, file := range files {
-		if err := appendMultipartFile(writer, file); err != nil {
-			return err
-		}
-	}
-
-	if err := writer.Close(); err != nil {
-		return fmt.Errorf("finalize multipart body: %w", err)
+// Every file is read and verified before the request is sent, so a file
+// that changed after collection fails the upload with nothing sent.
+func (s *harnessConfigService) UploadFilesMultipart(ctx context.Context, id string, root *os.Root, files []FileInfo) error {
+	body, contentType, err := buildMultipartBody(root, files)
+	if err != nil {
+		return err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		s.c.transport.BaseURL+"/api/v1/harness-configs/"+id+"/files", &body)
+		s.c.transport.BaseURL+"/api/v1/harness-configs/"+id+"/files", body)
 	if err != nil {
 		return fmt.Errorf("create multipart upload request: %w", err)
 	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Content-Type", contentType)
 
 	resp, err := s.c.transport.Do(ctx, req)
 	if err != nil {
@@ -373,23 +370,34 @@ func (s *harnessConfigService) getTransferClient() *transfer.Client {
 	return s.transferClient
 }
 
-func appendMultipartFile(writer *multipart.Writer, file FileInfo) (err error) {
-	src, err := os.Open(file.FullPath)
-	if err != nil {
-		return fmt.Errorf("open file for multipart upload: %w", err)
-	}
-	defer func() {
-		if closeErr := src.Close(); err == nil && closeErr != nil {
-			err = fmt.Errorf("close file for multipart upload: %w", closeErr)
+// buildMultipartBody returns a multipart body holding the verified content
+// of each collected file, read through root, and its content type.
+func buildMultipartBody(root *os.Root, files []FileInfo) (*bytes.Buffer, string, error) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for _, file := range files {
+		if err := appendMultipartFile(writer, root, file); err != nil {
+			return nil, "", err
 		}
-	}()
+	}
+	if err := writer.Close(); err != nil {
+		return nil, "", fmt.Errorf("finalize multipart body: %w", err)
+	}
+	return &body, writer.FormDataContentType(), nil
+}
+
+func appendMultipartFile(writer *multipart.Writer, root *os.Root, file FileInfo) error {
+	data, err := transfer.ReadCollectedFile(root, file)
+	if err != nil {
+		return fmt.Errorf("read file for multipart upload: %w", err)
+	}
 
 	part, err := writer.CreateFormFile(file.Path, path.Base(file.Path))
 	if err != nil {
 		return fmt.Errorf("create multipart form file: %w", err)
 	}
 
-	if _, err := io.Copy(part, src); err != nil {
+	if _, err := part.Write(data); err != nil {
 		return fmt.Errorf("copy file into multipart body: %w", err)
 	}
 

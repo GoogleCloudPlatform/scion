@@ -175,6 +175,41 @@ func TestAgentDeleteEngine_BrokerConflictIs409(t *testing.T) {
 	assert.Equal(t, string(state.PhaseRunning), got.Phase)
 }
 
+// brokerAgentIDMismatchBody is the broker's 409 for a delete whose agentId
+// is not the runtime entry's agent_id label (ptone/scion#3405): the entry
+// is another agent's, and nothing was deleted.
+const brokerAgentIDMismatchBody = `{"error":{"code":"conflict","message":"Agent delete: the runtime entry with this name belongs to another agent; nothing was deleted"}}`
+
+// The broker's agent ID mismatch 409 is neither a stale dispatch nor a
+// success: without force the delete fails as a conflict and the row keeps
+// its prior phase; with force the row is finalized (the other agent's
+// runtime entry on the broker is left alone).
+func TestAgentDeleteEngine_BrokerAgentIDMismatch(t *testing.T) {
+	mismatch := &brokerStatusError{StatusCode: http.StatusConflict, Body: brokerAgentIDMismatchBody}
+	require.False(t, isStaleDeleteDispatch(mismatch))
+	require.False(t, errors.Is(deleteAgentError(mismatch, "run-a"), ErrDeleteRunMismatch))
+	require.Error(t, deleteAgentError(mismatch, "run-a"), "the 409 is not an idempotent success")
+
+	srv, s, _, disp := engineTestServer(t)
+	disp.setFn(func(context.Context, *store.Agent) error {
+		return &brokerStatusError{StatusCode: http.StatusConflict, Body: brokerAgentIDMismatchBody}
+	})
+	agent := setupBrokerAgentInPhase(t, s, "idmismatch", state.PhaseRunning)
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "belongs to another agent")
+	got := mustGetAgent(t, s, agent.ID)
+	assert.True(t, got.DeletedAt.IsZero(), "the row is not soft-deleted")
+	assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
+	assert.Equal(t, store.DeletionCodeConflict, got.DeletionCode)
+	assert.Equal(t, string(state.PhaseRunning), got.Phase)
+
+	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID+"?force=true", nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	assert.True(t, agentGone(t, s, agent.ID))
+}
+
 // Acceptance (p): with the noop publisher, a fast stub delete answers 204
 // within the stub's latency.
 func TestAgentDeleteEngine_FastDeleteAnswersPromptlyWithNoopPublisher(t *testing.T) {

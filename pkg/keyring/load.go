@@ -494,7 +494,7 @@ func (k *Keyring) CheckSessionPilot() error {
 	}
 	legacy, ok := k.signing.LegacySecret()
 	if !ok {
-		return fmt.Errorf("keyring file: this release requires a signing key with id %q holding the legacy server secret: every purpose except web session cookies still uses it", LegacyID)
+		return fmt.Errorf("keyring file: this release requires a signing key with id %q holding the legacy server secret: every purpose not yet on the signing ring still uses it", LegacyID)
 	}
 	want := DeriveLegacyEncryptionKey(legacy)
 	if subtle.ConstantTimeCompare(k.encryption.Active().Bytes(), want) != 1 {

@@ -131,12 +131,8 @@ func (s *Server) handleProjectSharedDirs(w http.ResponseWriter, r *http.Request,
 		// Isolation and read access are both enforced by
 		// handleProjectSharedDirRoutes before this leaf is ever reached; this
 		// case has no check of its own left to duplicate that gate.
-		dirs := project.SharedDirs
-		if dirs == nil {
-			dirs = []api.SharedDir{}
-		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"sharedDirs": dirs,
+			"sharedDirs": sharedDirListEntries(project.SharedDirs),
 		})
 
 	case http.MethodPost:
@@ -191,6 +187,26 @@ func (s *Server) handleProjectSharedDirs(w http.ResponseWriter, r *http.Request,
 	default:
 		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
+}
+
+// sharedDirListEntry is one shared dir in the GET /shared-dirs response: the
+// declaration plus Target, the container path agents mount it at, computed by
+// the layout authority (projectfs.SharedDirMount; ptone/scion#5827), so
+// clients (terminal drag-drop) never build that path themselves. Target is
+// response-only: it is never stored and never read from a request.
+type sharedDirListEntry struct {
+	api.SharedDir
+	Target string `json:"target"`
+}
+
+// sharedDirListEntries returns the GET /shared-dirs entries of dirs, never
+// nil.
+func sharedDirListEntries(dirs []api.SharedDir) []sharedDirListEntry {
+	out := make([]sharedDirListEntry, 0, len(dirs))
+	for _, d := range dirs {
+		out = append(out, sharedDirListEntry{SharedDir: d, Target: projectfs.SharedDirMount(d, "").Target})
+	}
+	return out
 }
 
 // handleProjectSharedDirByName handles DELETE on /api/v1/projects/{projectId}/shared-dirs/{name}.
@@ -254,6 +270,13 @@ func (s *Server) handleProjectSharedDirByName(w http.ResponseWriter, r *http.Req
 		NotFound(w, "Shared directory")
 		return
 	}
+	// The scratchpad is a Required Mount while the hub's default makes
+	// every project have one (design OQ4): it cannot be undeclared.
+	if name == attachmentSharedDirName && s.defaultScratchpadEnabled() {
+		writeError(w, http.StatusConflict, ErrCodeConflict,
+			"the scratchpad shared directory is required while the hub's project default scratchpad is on; it cannot be removed", nil)
+		return
+	}
 
 	project.SharedDirs = updated
 	if err := s.store.UpdateProject(ctx, project); err != nil {
@@ -278,16 +301,9 @@ func (s *Server) handleProjectSharedDirByName(w http.ResponseWriter, r *http.Req
 	case resolution.Path == "" || resolution.Path == "/":
 		slog.WarnContext(ctx, "resolved shared directory path is empty or root, skipping removal",
 			"project_id", projectID, "name", name, "path", resolution.Path)
-	case resolution.onSharedBackend() && resolution.Source == sharedDirLayoutFromWorkspaceStorage:
-		// The shared dir is on the workspace export (the tree every agent
-		// mounts) only because server.workspace_storage is nfs. Removing a
-		// declaration does not delete that agent data in phase 1: the
-		// lifecycle phase (ptone/scion#5835) owns deletion of this leaf.
-		slog.InfoContext(ctx, "shared directory declaration removed; leaving its data on the workspace export",
-			"project_id", projectID, "name", name)
 	case resolution.onSharedBackend():
-		// NFS (server.shared_dir_storage): remove the leaf via
-		// DeleteSharedDir, an fd-based walk
+		// Shared backend (server.project_storage): remove the leaf, as
+		// on the local backend below, via DeleteSharedDir, an fd-based walk
 		// (subPathRoot/projectID/shared-dirs/<name>) that refuses a
 		// symlinked structural component and touches only this one
 		// named leaf.

@@ -47,6 +47,12 @@ type UserService interface {
 	// entry. A 403 batch_projects_not_grantable response is returned as an
 	// *InviteBatchError; nothing was created then.
 	InviteBatch(ctx context.Context, req *InviteBatchRequest) (*InviteBatchResponse, error)
+
+	// DeleteBlockers lists what blocks deleting a user, without deleting,
+	// through GET /api/v1/users/{id}/delete-blockers. A plain user delete
+	// is refused with 409 user_delete_blocked while either list is not
+	// empty.
+	DeleteBlockers(ctx context.Context, userID string) (*UserDeleteBlockers, error)
 }
 
 // userService is the implementation of UserService.
@@ -126,6 +132,44 @@ func (s *userService) Update(ctx context.Context, userID string, req *UpdateUser
 		return nil, err
 	}
 	return apiclient.DecodeRequired[User](resp)
+}
+
+// UserDeleteBlockers is the response of DeleteBlockers, and the same shape
+// as the details of a 409 user_delete_blocked refusal. Each list holds at
+// most 50 entries; Truncated reports that either has more.
+type UserDeleteBlockers struct {
+	Agents    []UserDeleteBlockingAgent `json:"agents"`
+	Edges     []UserDeleteBlockingEdge  `json:"edges"`
+	Truncated bool                      `json:"truncated"`
+}
+
+// UserDeleteBlockingAgent is an agent of the user that blocks the delete.
+// DeletionState is "" when no delete was asked for the agent, otherwise
+// deleting, finalizing or failed.
+type UserDeleteBlockingAgent struct {
+	ID            string `json:"id"`
+	Slug          string `json:"slug"`
+	ProjectID     string `json:"projectId"`
+	DeletionState string `json:"deletionState"`
+}
+
+// UserDeleteBlockingEdge is an active delegation from the user that blocks
+// the delete.
+type UserDeleteBlockingEdge struct {
+	ID           string `json:"id"`
+	DelegateType string `json:"delegateType"`
+	DelegateID   string `json:"delegateId"`
+	ScopeType    string `json:"scopeType"`
+	ScopeID      string `json:"scopeId"`
+}
+
+// DeleteBlockers lists what blocks deleting a user.
+func (s *userService) DeleteBlockers(ctx context.Context, userID string) (*UserDeleteBlockers, error) {
+	resp, err := s.c.get(ctx, "/api/v1/users/"+url.PathEscape(userID)+"/delete-blockers", nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[UserDeleteBlockers](resp)
 }
 
 // ProvisionUserRequest is the request for POST /api/v1/users. There is no

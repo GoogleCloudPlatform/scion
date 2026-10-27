@@ -206,6 +206,10 @@ a runner's execution by its `RUNNER_NAME` env, never by job ID.
    - backfills queued, servable jobs of runs that pass the fork guard, oldest
      first, through the same dispatch path as a webhook, listing runners and
      executions once for the whole pass, and stopping when capacity is full.
+     This is the only path that serves a job left queued for capacity, so
+     with cr-ci as the primary runner `RECONCILE_SCHEDULE` should be every
+     minute. (No in-process timer: request-based CPU throttles work done after
+     a response.)
 
    It answers 200 with a JSON summary (500 if a step failed; a GitHub 5xx for
    one repo, run or job only skips that item, `reconcile_skip`, unless every
@@ -290,6 +294,26 @@ and mint each runner with only that label. A job of another run, including a
 fork run, could then never match a cr-ci runner, closing the window
 entirely. It costs a dynamic label in workflows, logs and reconcile matching,
 so it is deferred.
+
+### Residual risk: job code can read the runner's credentials
+
+The entrypoint, `run.sh`, the runner listener and worker, and the job's steps all run as
+one uid (`runner`, 1001) in the execution, as on any non-containerized self-hosted
+runner. Job code can therefore read:
+- the JIT config on `run.sh`'s argv: this ephemeral runner's registration, usable to act
+  as that runner until GitHub removes the registration after the job;
+- the claim token in `/proc/1/environ`: already spent (single use).
+
+sec-review-3 rates it LOW (record `crci-img-651578be-v3.md`), on these conditions:
+- cr-ci runs only trusted same-repo code, because both fork guards hold: the routing
+  expression's guard and the mediator's fork guard (step 2);
+- one job runs per runner;
+- the hijack guard (step 4) and the reaper bound what a leaked registration could do.
+
+If untrusted code were ever routed to cr-ci, the risk would be Medium/High. The fork
+guards are therefore load-bearing for this, not only defense in depth. The structural
+fix is tracked in ptone/scion#5978: a runner-only uid with job steps dropped to another
+uid, or passing the JIT config by file and deleting it once the listener has started.
 
 ## Security model
 

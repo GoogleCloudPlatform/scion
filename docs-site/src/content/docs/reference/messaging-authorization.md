@@ -674,6 +674,28 @@ This permission is intentionally restricted:
 - **Distinct from `agent.update`** because project admins hold `agent.update`;
   if mode changes were folded into update, admins could unseal agents.
 
+### project.chat_post
+
+| Field | Value |
+|-------|-------|
+| Permission ID | `project.chat_post` |
+| Resource | `project` |
+| Action | `chat_post` |
+| Capability Kind | Resource (per-project) |
+| Description | Post messages into the project's chat threads |
+| UAT Scope | `project:chat_post` |
+| Default Role | Project member, project admin, project owner, hub admin, super-admin |
+
+Posting in a project space's thread (`POST /api/v1/chat/conversations/{id}/messages` on a `space` conversation) and promoting an agent DM into a project space (`POST /api/v1/chat/conversations/{id}/promote`) require `project.chat_post` on the project, while reading project threads uses `project.read`:
+
+- **Default project roles** (`member`, `admin`, `owner`) and hub administrators hold `project.chat_post`. Custom project roles are not backfilled on upgrade, so a read-only custom role keeps read access (`canPost: false` on `GET /api/v1/chat/conversations/{id}/messages`) until an administrator adds `project.chat_post` to that role.
+- **Refused posts and promotions** return `403 chat_post_denied`.
+- `project.chat_post` is checked on thread posts, scheduled thread sends and DM promotion only. Thread create; thread rename, default-agent change and delete; project attachment upload; message edit and delete; and thread posts sent through the agent message endpoint (`POST /api/v1/agents/{id}/message` with a thread key) keep their own checks and do not require `project.chat_post`.
+- **User access tokens (UATs):** posting in a project thread with a UAT requires the `inbox:write` token scope, and the Hub checks `project.chat_post` on the token holder's account. The `project:chat_post` UAT scope keeps `project.chat_post` in the token's effective project permissions so a token with `project:manage` can grant roles that include it.
+- **Scheduled chat sends:** a scheduled send in a project thread (`/api/v1/chat/conversations/{id}/scheduled`) needs `project.chat_post` when it is created and is checked again when it fires: if its sender can no longer post, it is marked `failed` with `no_access`.
+
+See [Chat posting](/scion/hosted/ha/permissions/#chat-posting).
+
 ---
 
 ## Design Decisions Reference

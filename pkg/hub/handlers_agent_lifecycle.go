@@ -586,6 +586,10 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	}
 
 	s.revokeSuspendedCredentials(ctx, agent.ID)
+	// The agent's delegation grants end with the suspension, best effort:
+	// exchange and use already deny a suspended agent
+	// (.design/agent-delegation.md §16.3).
+	s.revokeAgentDelegationGrantsBestEffort(ctx, store.AgentDelegationGrantFilter{AgentID: agent.ID}, revokeReasonAgentSuspended)
 
 	agent.Phase = newPhase
 	agent.ContainerStatus = "stopped"

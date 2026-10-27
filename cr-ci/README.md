@@ -90,8 +90,8 @@ each step needs are in [docs/permissions-matrix.md](docs/permissions-matrix.md).
     ([step 7](docs/github-setup.md#7-poc-run-before-any-routing); P6, needs
     ptone's go-ahead).
 13. **Route.** `scripts/set-routing-variable.sh --repo <owner/repo> --apply`
-    sets `SCION_LARGE_RUNNER`. It has no effect on CI until P7 puts the routing
-    expression into `ci.yml`. Fallback: `--clear --apply`
+    sets `SCION_LARGE_RUNNER`. It has no effect on CI until the routing expression
+    is in the workflows (P7: the primary-runner workflow PRs). Fallback: `--clear --apply`
     ([step 8](docs/github-setup.md#8-route-jobs-the-actions-variable-scion_large_runner-g10)).
 
 Two orderings matter. The App comes before the mediator, because the mediator
@@ -108,7 +108,7 @@ proven on a manually dispatched job before any CI job depends on it.
 | [`runner/`](runner/) | Runner image (`Dockerfile`, `entrypoint.sh`, offline harness); see [`runner/README.md`](runner/README.md) |
 | [`runner/golangci-lint/`](runner/golangci-lint/) | The patched golangci-lint build (dominikh/go-tools#1839): pins, patch, `build.sh`. **Upstream `.github/workflows/ci.yml` and the root `Makefile` use it too**, so they depend on this cr-ci path; see below |
 | [`scripts/`](scripts/) | Deploy, secret and teardown scripts (dry-run by default, `--apply` to execute), their test harness and golden transcripts; see [`scripts/README.md`](scripts/README.md) |
-| [`workflows/`](workflows/) | Workflow templates, not active: the PoC workflow and the `ci.yml` lint routing snippet, with static checks; see [`workflows/README.md`](workflows/README.md) |
+| [`workflows/`](workflows/) | Workflow templates, not active: the PoC workflow, with static checks (the live routing is in `.github/workflows`); see [`workflows/README.md`](workflows/README.md) |
 | [`docs/architecture.md`](docs/architecture.md) | Flow, security model, failure modes, fallback |
 | [`docs/permissions-matrix.md`](docs/permissions-matrix.md) | **Who needs which GitHub or GCP role for every step, fork vs upstream (future)**; the PAT alternative (not implemented) |
 | [`docs/github-setup.md`](docs/github-setup.md) | GitHub App (manifest at [`scripts/github-app-manifest.json`](scripts/github-app-manifest.json)), installation on the fork (upstream: future), webhook check, fork-PR precondition, routing variable and fallback |
@@ -147,7 +147,7 @@ go build -o /dev/null ./... && go vet ./... && go test ./... && gofmt -l .
 | P4 | Idempotent deploy and teardown scripts with `--dry-run` | implemented (in review) |
 | P5 | GitHub setup guide, App manifest, workflow templates | implemented (in review) |
 | P6 | Live PoC on the chosen target (needs ptone's go-ahead); [checklist](docs/poc-checklist.md) | gated |
-| P7 | `ci.yml` `runs-on` change (separate PR, outside `cr-ci/`) | gated |
+| P7 | Routing in `.github/workflows` (primary-runner PR-wf1 phase A, PR-wf2 phase B; separate PRs, outside `cr-ci/`) | in review |
 
 Nothing in this directory touches live GitHub or GCP resources. Running the
 scripts against real resources is a separate step that needs explicit approval

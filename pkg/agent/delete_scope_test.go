@@ -161,7 +161,7 @@ func TestDeleteAgentFiles_GlobalProjectTargetStillDeletes(t *testing.T) {
 func TestDeleteTarget_MissingProjectIsNotAnError(t *testing.T) {
 	f := newScopeFixture(t)
 	m := &AgentManager{}
-	if _, err := m.deleteResolved(context.Background(), "worker", runtime.RunRef{}, true, filepath.Join(t.TempDir(), "gone", ".scion"), true); err != nil {
+	if _, err := m.deleteResolved(context.Background(), "worker", "", runtime.RunRef{}, true, filepath.Join(t.TempDir(), "gone", ".scion"), true); err != nil {
 		t.Fatalf("delete with a missing project: %v", err)
 	}
 	f.assertGlobalAgentIntact(t)

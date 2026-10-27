@@ -27,20 +27,22 @@ import (
 	"testing"
 )
 
-// TestNoUnscopedHostGitCredentials is a static guard: host-side git must
-// authenticate only through a host-scoped credential helper
-// (ScopedCredentialHelperEnv), never an unscoped credential.helper or a token
-// embedded in a URL. It parses the host git packages (comments are ignored)
-// and fails if a string literal reintroduces either pattern, or if the retired
-// TokenCredentialHelperEnv is declared again.
+// TestNoUnscopedHostGitCredentials is a static guard: host-side git
+// authenticates only through a host-scoped credential helper
+// (ScopedCredentialHelperEnv). It parses the host git packages, pkg/config (the
+// template cache) included, with comments ignored, and reports an unscoped
+// credential.helper literal, a credential userinfo literal, a url.UserPassword
+// call, or a redeclared TokenCredentialHelperEnv. Exemptions are by (file,
+// pattern) in hostGitScanExemptions, never a whole file, and an exemption that
+// matches nothing fails the test.
 //
-// Out of scope by design (not scanned): pkg/config/remote_templates.go (the
-// template cache; its host fetch/checkout carry the pins and skip-smudge), the
-// in-container agent credential helper written to the agent's own .gitconfig,
-// and the in-container sciontool init path.
+// Out of scope by design (not scanned): the in-container agent credential
+// helper written to the agent's own .gitconfig, and the in-container sciontool
+// init path.
 func TestNoUnscopedHostGitCredentials(t *testing.T) {
 	root := repoRootForGuard(t)
-	pkgs := []string{"pkg/util", "pkg/provision", "pkg/agent", "pkg/runtimebroker"}
+	pkgs := []string{"pkg/util", "pkg/provision", "pkg/agent", "pkg/runtimebroker", "pkg/config"}
+	used := exemptionUse{}
 	for _, pkg := range pkgs {
 		dir := filepath.Join(root, pkg)
 		entries, err := os.ReadDir(dir)
@@ -52,23 +54,63 @@ func TestNoUnscopedHostGitCredentials(t *testing.T) {
 			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 				continue
 			}
-			scanGoFileForTokenPatterns(t, filepath.Join(dir, name))
+			rel := pkg + "/" + name
+			src, err := os.ReadFile(filepath.Join(dir, name))
+			if err != nil {
+				t.Fatalf("read %s: %v", rel, err)
+			}
+			findings, err := hostGitTokenFindings(src, name)
+			if err != nil {
+				t.Fatalf("parse %s: %v", rel, err)
+			}
+			allowed := hostGitScanExemptions[rel]
+			for _, v := range findings {
+				if _, ok := allowed[v.kind]; ok {
+					used.mark(rel, v.kind)
+				}
+			}
+			for _, v := range filterCredentialFindings(findings, allowed) {
+				t.Errorf("%s:%d: %s", rel, v.line, v.msg)
+			}
 		}
+	}
+	if dead := deadExemptions(hostGitScanExemptions, used); len(dead) > 0 {
+		t.Errorf("dead host-git scan exemption(s) that match nothing; drop them:\n%s", strings.Join(dead, "\n"))
 	}
 }
 
-func scanGoFileForTokenPatterns(t *testing.T, path string) {
-	t.Helper()
+// Finding kinds reported only by hostGitTokenFindings; it also reports
+// findingTokenURLLiteral and findingURLUserPassword.
+const (
+	findingRetiredTokenHelper = "retired-token-helper"
+	findingUnscopedHelper     = "unscoped-credential-helper"
+)
+
+// hostGitScanExemptions lists the (file, pattern) pairs that
+// TestNoUnscopedHostGitCredentials does not report, each with a one-line reason.
+// Every other pattern is still reported in that file.
+var hostGitScanExemptions = map[string]map[string]string{
+	"pkg/config/dsn_redact.go": {findingURLUserPassword: "substitutes a redaction marker for a database password; not git code"},
+}
+
+// hostGitTokenFindings parses Go source (comments dropped) and returns each
+// host-git credential pattern it contains. base is the file's base name: the
+// empty credential.helper reset is allowed in git_host.go only.
+func hostGitTokenFindings(src []byte, base string) ([]credentialFinding, error) {
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, path, nil, 0) // no comments
+	f, err := parser.ParseFile(fset, base, src, 0) // no comments
 	if err != nil {
-		t.Fatalf("parse %s: %v", path, err)
+		return nil, err
+	}
+	var out []credentialFinding
+	add := func(pos token.Pos, kind, msg string) {
+		out = append(out, credentialFinding{line: fset.Position(pos).Line, kind: kind, msg: msg})
 	}
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.FuncDecl:
 			if x.Name.Name == "TokenCredentialHelperEnv" {
-				t.Errorf("%s: TokenCredentialHelperEnv is retired; use ScopedCredentialHelperEnv", path)
+				add(x.Pos(), findingRetiredTokenHelper, "TokenCredentialHelperEnv is retired; use ScopedCredentialHelperEnv")
 			}
 		case *ast.BasicLit:
 			if x.Kind != token.STRING {
@@ -77,26 +119,74 @@ func scanGoFileForTokenPatterns(t *testing.T, path string) {
 			v := x.Value // includes quotes/backticks; fine for substring checks
 			// An unscoped credential.helper key (the scoped form is
 			// "credential.%s://%s.helper", which does not contain this).
-			// git_host.go's ScopedCredentialHelperEnv legitimately emits an
-			// empty `credential.helper` reset before the scoped helper; that is
-			// the one sanctioned use.
-			if strings.Contains(v, "credential.helper") && filepath.Base(path) != "git_host.go" {
-				t.Errorf("%s:%d: unscoped 'credential.helper' literal; host git must use ScopedCredentialHelperEnv", path, fset.Position(x.Pos()).Line)
+			// git_host.go's ScopedCredentialHelperEnv emits an empty
+			// `credential.helper` reset before the scoped helper; that is the
+			// one sanctioned use.
+			if strings.Contains(v, "credential.helper") && base != "git_host.go" {
+				add(x.Pos(), findingUnscopedHelper, "unscoped 'credential.helper' literal; host git must use ScopedCredentialHelperEnv")
 			}
-			// A token embedded in a URL (userinfo), for host git.
+			// A credential userinfo literal, for host git.
 			if strings.Contains(v, "oauth2:") || strings.Contains(v, "x-access-token:") {
-				t.Errorf("%s:%d: token-in-URL construction; host git must not embed credentials in the URL", path, fset.Position(x.Pos()).Line)
+				add(x.Pos(), findingTokenURLLiteral, "credential userinfo literal; host git authenticates through ScopedCredentialHelperEnv")
 			}
 		case *ast.SelectorExpr:
-			// url.UserPassword(...) embeds credentials in a URL.
+			// url.UserPassword(...) sets URL userinfo credentials.
 			if x.Sel.Name == "UserPassword" {
 				if id, ok := x.X.(*ast.Ident); ok && id.Name == "url" {
-					t.Errorf("%s:%d: url.UserPassword builds a credential-bearing URL; host git must not embed credentials in the URL", path, fset.Position(x.Pos()).Line)
+					add(x.Pos(), findingURLUserPassword, "url.UserPassword call; host git authenticates through ScopedCredentialHelperEnv")
 				}
 			}
 		}
 		return true
 	})
+	return out, nil
+}
+
+// TestHostGitTokenFindings_PkgConfigSelfTest checks the pkg/config scan and its
+// (file, pattern) exemption with the same filter the guard runs: a url.UserPassword
+// call with a token in any other pkg/config file is reported, and dsn_redact.go
+// is exempt from url.UserPassword only, so its other patterns are still reported.
+func TestHostGitTokenFindings_PkgConfigSelfTest(t *testing.T) {
+	const tokenUserPassword = `package config
+
+import "net/url"
+
+func authURL(token string) string {
+	u := &url.URL{Scheme: "https", Host: "github.com", Path: "/o/r.git"}
+	u.User = url.UserPassword("oauth2", token)
+	return u.String()
+}
+`
+	findings, err := hostGitTokenFindings([]byte(tokenUserPassword), "some_new_git.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := filterCredentialFindings(findings, hostGitScanExemptions["pkg/config/some_new_git.go"])
+	if len(got) != 1 || got[0].kind != findingURLUserPassword || got[0].line != 7 {
+		t.Errorf("url.UserPassword in another pkg/config file: got %+v, want one %q finding at line 7", got, findingURLUserPassword)
+	}
+
+	if got := filterCredentialFindings(findings, hostGitScanExemptions["pkg/config/dsn_redact.go"]); len(got) != 0 {
+		t.Errorf("dsn_redact.go is exempt from url.UserPassword: got %+v, want none", got)
+	}
+
+	const otherPatterns = `package config
+
+const helperKey = "credential.helper"
+const remote = "https://oauth2:abc@github.com/o/r.git"
+`
+	findings, err = hostGitTokenFindings([]byte(otherPatterns), "dsn_redact.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = filterCredentialFindings(findings, hostGitScanExemptions["pkg/config/dsn_redact.go"])
+	kinds := map[string]bool{}
+	for _, v := range got {
+		kinds[v.kind] = true
+	}
+	if len(got) != 2 || !kinds[findingUnscopedHelper] || !kinds[findingTokenURLLiteral] {
+		t.Errorf("dsn_redact.go other patterns: got %+v, want the %q and %q findings", got, findingUnscopedHelper, findingTokenURLLiteral)
+	}
 }
 
 // partialCredentialExemptions names the non-test Go files allowed to contain a
@@ -112,13 +202,6 @@ var partialCredentialExemptions = map[string]map[string]string{
 	"cmd/sciontool/commands/credential_helper.go": {findingPasswordHelper: "prints the credential-helper protocol (password=<token>) to git over stdout, not an argv or config value"},
 	// Redaction rewrites the URL with a fixed mask, never a real credential.
 	"pkg/config/dsn_redact.go": {findingURLUserPassword: "redaction rewrites the URL with a fixed mask, not a credential"},
-	// The template cache's own clone still embeds a token in the URL; moving it to
-	// a scoped credential helper is a separate, tracked follow-up, after which this
-	// exemption is removed and the guard must pass without it.
-	"pkg/config/remote_templates.go": {
-		findingTokenURLLiteral: "template-cache clone; tracked follow-up to move to a scoped credential helper",
-		findingUserinfoFormat:  "template-cache clone; tracked follow-up to move to a scoped credential helper",
-	},
 	// url.User here carries no credential: only the existing username.
 	"pkg/hub/project_clone.go": {findingURLUser: "url.User carries only the existing username, no credential"},
 	// urlredact is the URL-redaction package; its non-test source carries

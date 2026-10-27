@@ -189,9 +189,9 @@ type homeStorageInput struct {
 //   - An agent with no record was created before home storage was recorded
 //     and keeps a local home; the record is written as local.
 //   - A pending record (a newly created agent) resolves from the current
-//     settings through config.VersionedSettings.ResolveHomeStorage. An nfs
-//     result needs the experiment on, the hub agent ID, and the profile's
-//     shared_dir_storage resolving to nfs with a claim; the share comes from
+//     settings through config.VersionedSettings.ResolveHomeStorage (the
+//     global block). An nfs result needs the experiment on, the hub agent
+//     ID, and shared_dir_storage nfs with a claim; the share comes from
 //     there. With the experiment off the agent gets, and records, a local
 //     home.
 func resolveHomeStorage(in homeStorageInput) (*homeStoragePlan, error) {
@@ -229,7 +229,7 @@ func resolveHomeStorage(in homeStorageInput) (*homeStoragePlan, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading global settings for home storage: %w", err)
 	}
-	resolved := gs.ResolveHomeStorage(in.Profile)
+	resolved := gs.ResolveHomeStorage()
 	// Values are checked where they are used: an unknown value (a typo or
 	// the wrong case) fails the start and is never recorded.
 	if err := checkResolvedHomeStorage(resolved); err != nil {
@@ -323,13 +323,13 @@ func homeStorageGlobal(gs *config.VersionedSettings) *config.V1HomeStorageConfig
 	if gs == nil || gs.Server == nil {
 		return nil
 	}
-	return gs.Server.HomeStorage
+	return gs.Server.EffectiveHomeStorage()
 }
 
 // newNFSHomeStoragePlan builds the plan for an agent's first start with an
-// NFS home. The share is the first share of the profile's resolved
-// shared_dir_storage nfs block, the same share and claim the agent's shared
-// dirs use.
+// NFS home. The share is the first share of the global shared_dir_storage
+// nfs block (EffectiveSharedDirStorage), the same share and claim the
+// agent's shared dirs use.
 func newNFSHomeStoragePlan(in homeStorageInput, gs *config.VersionedSettings, leaf string) (*homeStoragePlan, error) {
 	hs := homeStorageGlobal(gs)
 	if err := hs.Validate(); err != nil {
@@ -338,7 +338,10 @@ func newNFSHomeStoragePlan(in homeStorageInput, gs *config.VersionedSettings, le
 	if err := checkNFSHomeStart(in, hs); err != nil {
 		return nil, err
 	}
-	sd, _ := gs.ResolveSharedDirStorage(in.Profile)
+	var sd *config.V1SharedDirStorageConfig
+	if gs.Server != nil {
+		sd = gs.Server.EffectiveSharedDirStorage()
+	}
 	if sd == nil || sd.Backend != config.HomeStorageBackendNFS {
 		return nil, homeStorageUnavailable("home_storage nfs needs shared_dir_storage nfs for profile %q", in.Profile)
 	}
@@ -380,8 +383,8 @@ func recordedNFSHomeStorage(in homeStorageInput, rec *homeStorageRecord) (*homeS
 		return nil, err
 	}
 	var nfs *config.V1NFSConfig
-	if gs.Server != nil && gs.Server.SharedDirStorage != nil {
-		nfs = gs.Server.SharedDirStorage.NFS
+	if gs.Server != nil && gs.Server.EffectiveSharedDirStorage() != nil {
+		nfs = gs.Server.EffectiveSharedDirStorage().NFS
 	}
 	if nfs != nil {
 		// The host mount root and shares come from the current block, so
@@ -438,7 +441,7 @@ func loadHomeStorageSettings(ctx context.Context) (*config.VersionedSettings, er
 // block). It applies to every source of global settings a start uses,
 // including the snapshot shared with the shared-dir backend.
 func checkHomeStorageLoaded(gs *config.VersionedSettings) (*config.VersionedSettings, error) {
-	if gs != nil && (gs.Server == nil || gs.Server.HomeStorage == nil) &&
+	if gs != nil && (gs.Server == nil || gs.Server.EffectiveHomeStorage() == nil) &&
 		config.GlobalSettingsIsLegacyFormat() && config.GlobalSettingsMentions("home_storage") {
 		return nil, fmt.Errorf("global settings mention home_storage but it was not loaded (missing schema_version: \"1\"?)")
 	}

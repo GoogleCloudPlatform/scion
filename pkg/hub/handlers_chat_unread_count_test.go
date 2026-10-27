@@ -557,6 +557,43 @@ func TestChatUnreadCount_ExplicitMemberProjectsOnly(t *testing.T) {
 	assert.Equal(t, spacesUnreadTotal(t, srv), 3)
 }
 
+// topicProjectsRecorder records the project IDs of each
+// ListTopicsByProjects call.
+type topicProjectsRecorder struct {
+	WebChatStore
+	projectIDs []string
+}
+
+func (r *topicProjectsRecorder) ListTopicsByProjects(ctx context.Context, ids []string) ([]WebChatTopic, error) {
+	r.projectIDs = append(r.projectIDs, ids...)
+	return r.WebChatStore.ListTopicsByProjects(ctx, ids)
+}
+
+// The count reads topics only for the spaces the caller is a member of; a
+// readable non-member space is not read, and the count is unchanged.
+func TestChatUnreadCount_ReadsMemberSpaceTopicsOnly(t *testing.T) {
+	srv, s, wcs, mine := setupSharedChatTest(t)
+	ctx := context.Background()
+	me := DevUserID
+	bindProjectMember(t, s, mine.ID, me)
+	f := &unreadFixture{t: t, s: s, wcs: wcs, proj: mine}
+	f.thread("mine", me, false, true)
+
+	foreign := &store.Project{ID: api.NewUUID(), Name: "foreign", Slug: "foreign", Created: time.Now(), Updated: time.Now()}
+	require.NoError(t, s.CreateProject(ctx, foreign))
+	ff := &unreadFixture{t: t, s: s, wcs: wcs, proj: foreign}
+	ff.thread("plain", me, true, true)
+
+	rec := &topicProjectsRecorder{WebChatStore: wcs}
+	srv.SetWebChatStore(rec)
+
+	resp := doRequest(t, srv, http.MethodGet, "/api/v1/chat/unread-count", nil)
+	assert.Equal(t, chatUnreadCountResponse{Conversations: 1, Threads: 1}, getUnreadCount(t, resp))
+	assert.Contains(t, rec.projectIDs, mine.ID)
+	assert.NotContains(t, rec.projectIDs, foreign.ID,
+		"topics of a non-member space must not be read for the count")
+}
+
 // An agent DM row with no peer ID is never looked up, so it is not taken
 // for a deleted agent: the list does not flag it and both the badge and
 // the rail's Unread DMs list count it.

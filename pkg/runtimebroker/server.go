@@ -45,6 +45,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -54,6 +55,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -213,6 +215,14 @@ type ServerConfig struct {
 	// NFSConfig's first share, as the broker's workspace storage descriptor
 	// (see BuildWorkspaceStorageDescriptor).
 	WorkspaceStorageBackend string
+
+	// StorageLayout is the broker's projectfs Layout, built at startup from
+	// the same server.project_storage struct the hub builds its own from
+	// (config.ResolveProjectStorage, config.ProjectStorageLayout). Its
+	// Homes is reported in the workspace storage descriptor, so the hub
+	// can refuse shared-mode dispatch to a broker whose layout disagrees
+	// with its own (projectfs.Layout.DescriptorDiff).
+	StorageLayout projectfs.Layout
 
 	// DefaultProfile is the broker's default (active) profile name from its
 	// settings (active_profile), reported to the hub on every heartbeat. A
@@ -602,7 +612,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime, rec config.Run
 		runtimeRecord:     rec,
 		mux:               http.NewServeMux(),
 		startTime:         time.Now(),
-		version:           "0.1.0", // TODO: Get from build info
+		version:           version.Short(),
 		hubConnections:    make(map[string]*HubConnection),
 		dispatchAttempts:  make(map[string]*dispatchAttempt),
 		auxiliaryRuntimes: make(map[string]auxiliaryRuntime),

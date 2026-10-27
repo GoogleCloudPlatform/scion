@@ -120,6 +120,7 @@ type ResolvedSkillResponse struct {
 	Name               string            `json:"name"`
 	ResolvedVersion    string            `json:"resolvedVersion"`
 	ContentHash        string            `json:"contentHash"`
+	ContentHashV2      string            `json:"contentHashV2,omitempty"` // skill content hash v2 (ptone/scion#5935), set only while hub.skill_content_hash_v2 is on
 	Files              []DownloadURLInfo `json:"files"`
 	Deprecated         bool              `json:"deprecated,omitempty"`
 	DeprecationMessage string            `json:"deprecationMessage,omitempty"`
@@ -904,6 +905,9 @@ func (s *Server) listSkillVersions(w http.ResponseWriter, r *http.Request, skill
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	for i := range result.Items {
+		s.withSkillContentHashV2(&result.Items[i])
+	}
 
 	writeJSON(w, http.StatusOK, result)
 }
@@ -940,7 +944,7 @@ func (s *Server) getSkillVersion(w http.ResponseWriter, r *http.Request, skillID
 		return
 	}
 
-	writeJSON(w, http.StatusOK, sv)
+	writeJSON(w, http.StatusOK, s.withSkillContentHashV2(sv))
 }
 
 // deprecateSkillVersion marks a published skill version as deprecated.
@@ -1006,7 +1010,7 @@ func (s *Server) deprecateSkillVersion(w http.ResponseWriter, r *http.Request, s
 		return
 	}
 
-	writeJSON(w, http.StatusOK, sv)
+	writeJSON(w, http.StatusOK, s.withSkillContentHashV2(sv))
 }
 
 // publishSkillVersion creates a new draft version and returns upload URLs.
@@ -1331,7 +1335,7 @@ func (s *Server) publishSkillVersionMultipart(w http.ResponseWriter, r *http.Req
 	}
 
 	// k) Return response.
-	writeJSON(w, http.StatusCreated, PublishVersionResponse{Version: sv})
+	writeJSON(w, http.StatusCreated, PublishVersionResponse{Version: s.withSkillContentHashV2(sv)})
 }
 
 // handleSkillUpload handles requests for upload URLs for a skill.
@@ -1535,7 +1539,7 @@ func (s *Server) handleSkillFinalize(w http.ResponseWriter, r *http.Request, ski
 		return
 	}
 
-	writeJSON(w, http.StatusOK, sv)
+	writeJSON(w, http.StatusOK, s.withSkillContentHashV2(sv))
 }
 
 // handleSkillDownload returns signed URLs for downloading skill version files.
@@ -1576,7 +1580,7 @@ func (s *Server) handleSkillDownload(w http.ResponseWriter, r *http.Request, ski
 	}
 
 	// Resolve version
-	sv, err := s.store.ResolveSkillVersion(ctx, skillID, version)
+	sv, err := s.resolveSkillVersion(ctx, skillID, version)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -1638,13 +1642,13 @@ func (s *Server) handleSkillResolveSingle(w http.ResponseWriter, r *http.Request
 		version = "latest"
 	}
 
-	sv, err := s.store.ResolveSkillVersion(ctx, skillID, version)
+	sv, err := s.resolveSkillVersion(ctx, skillID, version)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, sv)
+	writeJSON(w, http.StatusOK, s.withSkillContentHashV2(sv))
 }
 
 // handleSkillsResolve handles batch skill resolution: POST /api/v1/skills/resolve.
@@ -1719,10 +1723,19 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 					code = agent.GitHubRateLimitedCode
 				} else if isGHNotFound(err) {
 					code = agent.SkillErrCodeNotFound
+				} else if agent.IsGitHubSkillTreeError(err) {
+					code = agent.SkillErrCodeUnsupportedContent
 				}
 				resolveErrors = append(resolveErrors, *newSkillResolveError(ctx, skillResolveSourceGitHub,
 					skillRef.URI, code, ghErrorStatus(err), err.Error()))
 			} else {
+				if s.skillContentHashV2Enabled() {
+					// v2 over the git blob IDs and the git tree modes, the
+					// metadata the broker installs and verifies from.
+					if _, v2, ok := resolvedSkillContentHashes(ghResolved.Files); ok {
+						ghResolved.ContentHashV2 = v2
+					}
+				}
 				resolved = append(resolved, *ghResolved)
 			}
 			continue
@@ -1806,7 +1819,7 @@ func (s *Server) resolveSkill(ctx context.Context, identity Identity, uri *api.S
 			continue
 		}
 
-		sv, err := s.store.ResolveSkillVersion(ctx, skill.ID, uri.Version)
+		sv, err := s.resolveSkillVersion(ctx, skill.ID, uri.Version)
 		if err != nil {
 			versionErr = err
 			continue
@@ -2265,18 +2278,36 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 		}
 	}
 
+	// A row written before file modes were recorded is a miss above, so
+	// the ref is resolved again with its modes. If that re-resolve fails
+	// (a rate-limit cooldown, a network error), the row is served as it
+	// was before rather than failing the agent start over it, though its
+	// files may then lack exec bits (ptone/scion#5781).
+	modelessFallback := func(err error) (*ResolvedSkillResponse, error) {
+		if s.ghResolutionStore == nil || ctx.Err() != nil {
+			return nil, err
+		}
+		legacy, ok, lerr := s.ghResolutionStore.GetModeless(ctx, cacheKey, isBranchRef, agent.DefaultResolutionCacheTTL, agent.MaxResolutionStaleAge)
+		if lerr != nil || !ok {
+			return nil, err
+		}
+		slog.WarnContext(ctx, "github_resolution_cache: re-resolve failed; serving an entry from before file modes were recorded, so its files may lack executable bits",
+			"uri", rawURI, "commit_sha", safeShortSHA(legacy.CommitSHA), "error", err)
+		return buildResolvedSkillResponse(ghRef, legacy), nil
+	}
+
 	// A ref GitHub reported as not found for this cache key within the last
 	// agent.FailureMemoTTL fails again now, without asking GitHub. A fresh or
 	// stale entry above still wins.
 	if ferr := s.ghFailures.Recent(cacheKey); ferr != nil {
 		slog.DebugContext(ctx, "github_resolution_cache: returning remembered not found", "uri", rawURI)
-		return nil, ferr
+		return modelessFallback(ferr)
 	}
 
 	// A miss during a rate-limit cooldown fails now, without starting a
 	// flight: no request could be sent for this identity anyway.
 	if retryAt, cooling := s.githubCooldown().Active(cooldownID); cooling {
-		return nil, &agent.GitHubRateLimitError{Ref: rawURI, RetryAt: retryAt, Unauthenticated: agent.GitHubCooldownIdentityIsAnonymous(cooldownID)}
+		return modelessFallback(&agent.GitHubRateLimitError{Ref: rawURI, RetryAt: retryAt, Unauthenticated: agent.GitHubCooldownIdentityIsAnonymous(cooldownID)})
 	}
 
 	// 5. Cache miss, with no usable stale entry: coalesce concurrent misses
@@ -2345,9 +2376,9 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 		if res.Err != nil {
 			var rl *agent.GitHubRateLimitError
 			if errors.As(res.Err, &rl) {
-				return nil, rl.WithRef(rawURI)
+				return modelessFallback(rl.WithRef(rawURI))
 			}
-			return nil, res.Err
+			return modelessFallback(res.Err)
 		}
 		// Build the response from this caller's own ghRef, not whichever
 		// caller happened to lead or already have the result cached: the
@@ -2407,7 +2438,7 @@ func (s *Server) refreshGitHubSkillInBackground(cacheKey, rawURI string, ghRef *
 }
 
 // fetchAndCacheGitHubSkill resolves ghRef against the GitHub API (commit SHA,
-// then directory contents), stores the result in the resolution cache under
+// then the skill directory tree), stores the result in the resolution cache under
 // cacheKey, and returns the stored entry. installID is recorded on the cache
 // entry's TokenScope and must be the same value the triggering request
 // resolved via resolveGitHubToken — both the synchronous path and a
@@ -2467,7 +2498,7 @@ func (s *Server) fetchAndCacheGitHubSkill(
 		refSHAMemo.set(memoKey, commitSHA)
 	}
 
-	fileEntries, err := ghListContents(ctx, cooldown, cooldownID, apiBase, rawBase, ghRef.Owner, ghRef.Repo, ghRef.SkillPath, commitSHA, token)
+	fileEntries, err := ghListTree(ctx, cooldown, cooldownID, apiBase, rawBase, ghRef.Owner, ghRef.Repo, ghRef.SkillPath, commitSHA, token)
 	if err != nil {
 		err = fmt.Errorf("failed to list contents: %w", err)
 		s.rememberGHNotFound(cacheKey, err)
@@ -2534,6 +2565,10 @@ func buildResolvedSkillResponse(ghRef *agent.GitHubSkillRef, entry *GitHubCacheE
 			URL:  f.URL,
 			Size: f.Size,
 			Hash: f.Hash,
+			// Empty only on a row written before modes were recorded,
+			// which is served only when a re-resolve failed; the client
+			// writes such a file 0644, as before (ptone/scion#5781).
+			Mode: f.Mode,
 		}
 	}
 

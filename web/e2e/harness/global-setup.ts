@@ -19,7 +19,7 @@
  * 2. Starts the hub on an ephemeral port with dev-auth + test-login enabled.
  * 3. Waits for the health endpoint.
  * 4. Seeds test data using the dev-auth token (super-admin).
- * 5. Creates an admin browser session by navigating (dev-auth auto-login).
+ * 5. Creates an admin browser session from a dev sign-in link.
  * 6. Writes env state for test specs.
  */
 
@@ -27,6 +27,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { chromium } from '@playwright/test';
+import { devSignInURL } from './auth.js';
 import { startHub } from './hub.js';
 import { seedSmokeData } from './seed.js';
 
@@ -58,8 +59,9 @@ async function globalSetup(): Promise<void> {
   const seedData = await seedSmokeData(baseURL, devToken);
   console.log('[setup] Seed data ready.');
 
-  // 3. Create admin browser session via dev-auth auto-login
-  //    In dev-auth mode, navigating to any page auto-creates a session cookie.
+  // 3. Create admin browser session from a dev sign-in link
+  //    In dev-auth mode, only a sign-in link (minted with the dev token)
+  //    creates a session cookie.
   console.log('\n[setup] Creating admin browser session...');
   const storageDir = path.join(os.tmpdir(), 'scion-e2e-auth');
   fs.mkdirSync(storageDir, { recursive: true });
@@ -69,8 +71,9 @@ async function globalSetup(): Promise<void> {
   const context = await browser.newContext();
   const page = await context.newPage();
 
-  // Navigate to any page — dev-auth middleware sets the session cookie
-  await page.goto(`${baseURL}/admin/groups`, {
+  // Open the sign-in link — it sets the session cookie and redirects
+  const signInURL = await devSignInURL(baseURL, devToken);
+  await page.goto(`${signInURL}&next=${encodeURIComponent('/admin/groups')}`, {
     waitUntil: 'domcontentloaded',
     timeout: 15_000,
   });

@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -27,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -36,9 +38,10 @@ import (
 // point PATH at a fake git binary.
 
 func TestResolveGitHubRef_UsesLsRemoteSeam(t *testing.T) {
-	var gotURLs []string
-	restore := SetGitLsRemoteForTest(func(_ context.Context, repoURL string) ([]byte, error) {
+	var gotURLs, gotTokens []string
+	restore := SetGitLsRemoteForTest(func(_ context.Context, repoURL, token string) ([]byte, error) {
 		gotURLs = append(gotURLs, repoURL)
+		gotTokens = append(gotTokens, token)
 		// A remote that can exist in real git: "feature-x" shares a prefix
 		// with "feature/x" as a string but is not a path prefix of
 		// "feature/x/templates/one", so only "feature/x" may match. (Real git
@@ -52,18 +55,21 @@ func TestResolveGitHubRef_UsesLsRemoteSeam(t *testing.T) {
 
 	assert.Equal(t, "feature/x", parts.Branch)
 	assert.Equal(t, "templates/one", parts.Path)
-	assert.Equal(t, []string{"https://x-access-token:tok@github.com/org/repo.git"}, gotURLs)
+	// The seam receives the plain repository URL and the token as separate arguments.
+	assert.Equal(t, []string{"https://github.com/org/repo.git"}, gotURLs)
+	assert.Equal(t, []string{"tok"}, gotTokens)
 
-	gotURLs = nil
+	gotURLs, gotTokens = nil, nil
 	parts = &GitHubURLParts{Owner: "org", Repo: "repo", Branch: "main", Path: "templates"}
 	resolveGitHubRef(context.Background(), parts, "")
 	assert.Equal(t, "main", parts.Branch)
 	assert.Equal(t, "templates", parts.Path)
 	assert.Equal(t, []string{"https://github.com/org/repo.git"}, gotURLs)
+	assert.Equal(t, []string{""}, gotTokens)
 }
 
 func TestResolveGitHubRef_NoSlashSkipsLsRemote(t *testing.T) {
-	t.Cleanup(SetGitLsRemoteForTest(func(context.Context, string) ([]byte, error) {
+	t.Cleanup(SetGitLsRemoteForTest(func(context.Context, string, string) ([]byte, error) {
 		t.Errorf("ls-remote must not run when the ref has no slash")
 		return nil, errors.New("unexpected")
 	}))
@@ -74,7 +80,7 @@ func TestResolveGitHubRef_NoSlashSkipsLsRemote(t *testing.T) {
 }
 
 func TestResolveGitHubRef_LsRemoteErrorKeepsNaiveParse(t *testing.T) {
-	t.Cleanup(SetGitLsRemoteForTest(func(context.Context, string) ([]byte, error) {
+	t.Cleanup(SetGitLsRemoteForTest(func(context.Context, string, string) ([]byte, error) {
 		return nil, errors.New("git unavailable")
 	}))
 	parts := &GitHubURLParts{Owner: "org", Repo: "repo", Branch: "feature", Path: "x/templates"}
@@ -85,7 +91,7 @@ func TestResolveGitHubRef_LsRemoteErrorKeepsNaiveParse(t *testing.T) {
 
 func TestSetGitLsRemoteForTest_Restores(t *testing.T) {
 	before := gitLsRemote
-	stub := GitLsRemoteFunc(func(context.Context, string) ([]byte, error) { return nil, nil })
+	stub := GitLsRemoteFunc(func(context.Context, string, string) ([]byte, error) { return nil, nil })
 	restore := SetGitLsRemoteForTest(stub)
 	// The stub must be the runner actually installed.
 	assert.Equal(t, reflect.ValueOf(stub).Pointer(), reflect.ValueOf(gitLsRemote).Pointer())
@@ -95,20 +101,114 @@ func TestSetGitLsRemoteForTest_Restores(t *testing.T) {
 	assert.Equal(t, reflect.ValueOf(execGitLsRemote).Pointer(), reflect.ValueOf(gitLsRemote).Pointer())
 }
 
-// TestExecGitLsRemote_Invocation pins the production runner's argv and the
-// prompt-suppressing env vars, using a fake git on PATH (no network).
+// TestExecGitLsRemote_Invocation pins the production runner's argv (the
+// host-side pins, then ls-remote) and the prompt-suppressing env vars, using a
+// fake git on PATH (no network). Without a token no credential helper is set.
 func TestExecGitLsRemote_Invocation(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake git script requires a POSIX shell")
 	}
 	dir := t.TempDir()
-	script := "#!/bin/sh\nprintf '%s|' \"$@\"\nprintf 'TP=%s|AP=%s' \"$GIT_TERMINAL_PROMPT\" \"$GIT_ASKPASS\"\n"
+	script := "#!/bin/sh\nprintf '%s|' \"$@\"\nprintf 'TP=%s|AP=%s|CC=%s' \"$GIT_TERMINAL_PROMPT\" \"$GIT_ASKPASS\" \"${GIT_CONFIG_COUNT-}\"\n"
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755))
 	t.Setenv("PATH", dir)
 
-	out, err := execGitLsRemote(context.Background(), "https://github.com/org/repo.git")
+	out, err := execGitLsRemote(context.Background(), "https://github.com/org/repo.git", "")
 	require.NoError(t, err)
-	assert.Equal(t, "ls-remote|--heads|https://github.com/org/repo.git|TP=0|AP=echo", strings.TrimSpace(string(out)))
+	pins := strings.Join(util.HostGitArgs(), "|")
+	assert.Equal(t, pins+"|ls-remote|--heads|https://github.com/org/repo.git|TP=0|AP=echo|CC=", strings.TrimSpace(string(out)))
+}
+
+// lsRemoteFakeGit puts a fake `git` on PATH that logs each argument on its
+// own line to argvLog and the GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n entries of
+// its environment ("key=value", one per line) plus a CRED= entry (the value of
+// scopedCredentialVar, or "<unset>") to configLog, and prints no refs. It uses
+// shell builtins only (PATH holds nothing else).
+func lsRemoteFakeGit(t *testing.T) (argv, config func() []string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake git script requires a POSIX shell")
+	}
+	dir := t.TempDir()
+	logDir := t.TempDir()
+	argvLog := filepath.Join(logDir, "argv.log")
+	configLog := filepath.Join(logDir, "config.log")
+	script := `#!/bin/sh
+for a in "$@"; do printf '%s\n' "$a" >> "$FAKE_GIT_ARGV_LOG"; done
+: >> "$FAKE_GIT_CONFIG_LOG"
+n=${GIT_CONFIG_COUNT:-0}
+i=0
+while [ "$i" -lt "$n" ]; do
+  eval "k=\${GIT_CONFIG_KEY_$i-}; v=\${GIT_CONFIG_VALUE_$i-}"
+  printf '%s=%s\n' "$k" "$v" >> "$FAKE_GIT_CONFIG_LOG"
+  i=$((i+1))
+done
+printf 'CRED=%s\n' "${SCION_SCOPED_GIT_CREDENTIAL-<unset>}" >> "$FAKE_GIT_CONFIG_LOG"
+exit 0
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755))
+	t.Setenv("PATH", dir)
+	t.Setenv("FAKE_GIT_ARGV_LOG", argvLog)
+	t.Setenv("FAKE_GIT_CONFIG_LOG", configLog)
+	read := func(p string) []string {
+		data, err := os.ReadFile(p)
+		require.NoError(t, err, "fake git must have run")
+		trimmed := strings.TrimRight(string(data), "\n")
+		if trimmed == "" {
+			return nil
+		}
+		return strings.Split(trimmed, "\n")
+	}
+	return func() []string { return read(argvLog) }, func() []string { return read(configLog) }
+}
+
+// TestResolveGitHubRef_TokenFromScopedCredentialHelper runs branch resolution
+// end to end through the production ls-remote runner (fake git, no network):
+// git's arguments are the host-side pins, ls-remote and the plain repository
+// URL, and the token reaches git through the credential helper scoped to
+// https://github.com, which reads it from the git command's environment.
+func TestResolveGitHubRef_TokenFromScopedCredentialHelper(t *testing.T) {
+	const token = "ghs_lsremote_test_token"
+	argv, config := lsRemoteFakeGit(t)
+
+	parts := &GitHubURLParts{Owner: "org", Repo: "repo", Branch: "feature", Path: "x/templates"}
+	resolveGitHubRef(context.Background(), parts, token)
+
+	args := argv()
+	want := append(append([]string{}, util.HostGitArgs()...), "ls-remote", "--heads", "https://github.com/org/repo.git")
+	assert.Equal(t, want, args)
+	for _, a := range args {
+		assert.NotContains(t, a, token, "git arguments contain no secret values")
+		if strings.Contains(a, "://") {
+			u, err := url.Parse(a)
+			require.NoError(t, err)
+			assert.Nil(t, u.User, "repository URL is the plain URL: %s", a)
+		}
+	}
+
+	entries := config()
+	creds := credentialEntries(entries)
+	require.Len(t, creds, 2, "%v", creds)
+	assert.Equal(t, "credential.helper=", creds[0], "configured credential helpers are reset")
+	assert.True(t, strings.HasPrefix(creds[1], "credential.https://github.com.helper="), creds[1])
+	assert.Contains(t, creds[1], "${"+scopedCredentialVar+"}", "the helper reads the credential variable at run time")
+	assert.NotContains(t, creds[1], token, "git config values contain no secret values")
+	assert.Equal(t, "CRED="+token, credentialVarEntry(entries), "the token is in the git command's environment")
+}
+
+// TestResolveGitHubRef_NoTokenNoCredentialHelper: without a token, ls-remote
+// runs anonymously with no credential helper configured.
+func TestResolveGitHubRef_NoTokenNoCredentialHelper(t *testing.T) {
+	argv, config := lsRemoteFakeGit(t)
+
+	parts := &GitHubURLParts{Owner: "org", Repo: "repo", Branch: "feature", Path: "x/templates"}
+	resolveGitHubRef(context.Background(), parts, "")
+
+	want := append(append([]string{}, util.HostGitArgs()...), "ls-remote", "--heads", "https://github.com/org/repo.git")
+	assert.Equal(t, want, argv())
+	entries := config()
+	assert.Empty(t, credentialEntries(entries), "no credential helper without a token")
+	assert.Equal(t, "CRED=<unset>", credentialVarEntry(entries), "no credential variable without a token")
 }
 
 // writeSleepingFakeGit puts a fake `git` on PATH that blocks far longer than
@@ -138,8 +238,7 @@ func TestExecGitLsRemote_Timeout(t *testing.T) {
 
 	const token = "ghs_SECRETTOKEN123"
 	start := time.Now()
-	_, err := execGitLsRemote(context.Background(),
-		"https://x-access-token:"+token+"@github.com/org/repo.git")
+	_, err := execGitLsRemote(context.Background(), "https://github.com/org/repo.git", token)
 	elapsed := time.Since(start)
 
 	require.Error(t, err)
@@ -157,7 +256,7 @@ func TestExecGitLsRemote_CallerDeadlineWins(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	_, err := execGitLsRemote(ctx, "https://github.com/org/repo.git")
+	_, err := execGitLsRemote(ctx, "https://github.com/org/repo.git", "")
 	require.Error(t, err)
 	assert.Less(t, time.Since(start), 5*time.Second)
 	// The caller's own deadline fired, so this is not reported as our bound.

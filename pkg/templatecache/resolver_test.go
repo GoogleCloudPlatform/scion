@@ -88,7 +88,7 @@ func (m *mockHarnessConfigService) DownloadFile(ctx context.Context, url string)
 	return nil, nil
 }
 
-func (m *mockHarnessConfigService) UploadFilesMultipart(ctx context.Context, id string, files []hubclient.FileInfo) error {
+func (m *mockHarnessConfigService) UploadFilesMultipart(ctx context.Context, id string, root *os.Root, files []hubclient.FileInfo) error {
 	return nil
 }
 

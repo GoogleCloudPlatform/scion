@@ -719,10 +719,16 @@ func hopByHopHeader(k string) bool {
 // hub itself (or intentionally omitted) so the response is sandboxed and
 // cannot set or clear cookies, storage, or cache on the hub origin. CORS
 // response headers are owned by the hub's corsMiddleware; relaying the
-// agent's copies would duplicate them, which browsers reject.
+// agent's copies would duplicate them, which browsers reject. The page
+// headers the web server sets on every response (X-Frame-Options,
+// X-XSS-Protection, Referrer-Policy, Permissions-Policy; see
+// securityHeadersMiddleware) are the hub's too, so the hub's own page
+// headers are not combined with the proxied app's.
 func stripFromProxyResponse(k string) bool {
 	switch strings.ToLower(k) {
 	case "set-cookie", "set-cookie2", "content-security-policy", "x-content-type-options", "clear-site-data":
+		return true
+	case "x-frame-options", "x-xss-protection", "referrer-policy", "permissions-policy":
 		return true
 	case "access-control-allow-origin", "access-control-allow-credentials", "access-control-allow-methods",
 		"access-control-allow-headers", "access-control-allow-private-network", "access-control-expose-headers",

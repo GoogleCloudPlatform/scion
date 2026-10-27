@@ -542,6 +542,9 @@ server:
 	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settingsYAML), 0644))
 
 	srv, s := testServer(t)
+	// The hub resolves shared dirs from its in-memory server.project_storage
+	// (synthesized from the settings above at startup), never per request.
+	useNFSSharedDirStorage(srv, hostBase)
 	project := createTestGitProject(t, srv, "NFS Delete Test", "github.com/test/nfs-delete-repo")
 
 	// Pre-populate the project's shared-dir tree on the "export" exactly as

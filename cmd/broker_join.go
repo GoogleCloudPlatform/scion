@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/spf13/cobra"
 )
@@ -106,9 +107,9 @@ func init() {
 // resolveBrokerJoinToken returns the join token, trimmed of surrounding
 // whitespace. It is read from tokenFile when set ('-' reads stdin), and
 // otherwise from SCION_BROKER_JOIN_TOKEN. A value without the scion_join_
-// prefix is rejected here, before any request is sent. A token file with
-// any group or other permission bits is used, with a warning written to
-// stderr.
+// prefix is rejected here, before any request is sent. A token file that
+// is not private (privatefs.CheckPrivate) is used, with a warning written
+// to stderr.
 func resolveBrokerJoinToken(tokenFile string, stdin io.Reader, stderr io.Writer) (string, error) {
 	var token, source string
 	switch tokenFile {
@@ -131,8 +132,12 @@ func resolveBrokerJoinToken(tokenFile string, stdin io.Reader, stderr io.Writer)
 		if err != nil {
 			return "", fmt.Errorf("failed to read the join token file: %w", err)
 		}
-		if info, statErr := f.Stat(); statErr == nil && info.Mode().Perm()&0o077 != 0 {
-			_, _ = fmt.Fprintf(stderr, "Warning: %s has group or other permissions (mode %04o); consider chmod 600\n", tokenFile, info.Mode().Perm())
+		// Checked on the open handle by privatefs: the
+		// mode bits and owner on unix, the real DACL and owner on Windows
+		// (where the command is gated; this keeps the warning honest if it
+		// is ever reached).
+		if perr := privatefs.CheckPrivate(f); perr != nil {
+			_, _ = fmt.Fprintf(stderr, "Warning: %s has group or other permissions or another owner (%v); consider restricting it to %s\n", tokenFile, perr, privatefs.Describe(privatefs.Private))
 		}
 		data, err := readBrokerJoinTokenInput(f)
 		_ = f.Close()
@@ -351,7 +356,7 @@ func completeJoinAndPersist(ctx context.Context, client hubclient.Client, p brok
 		BrokerID:         p.BrokerID,
 		JoinToken:        p.JoinToken,
 		Hostname:         p.Hostname,
-		Version:          version.Version,
+		Version:          version.Short(),
 		Capabilities:     brokerRegistrationCapabilities(),
 		Profiles:         buildBrokerProfiles(p.Settings),
 		WorkspaceStorage: loadBrokerRegistrationWorkspaceStorage(),

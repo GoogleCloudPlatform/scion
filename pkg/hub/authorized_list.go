@@ -522,6 +522,15 @@ const listCursorSealDomain = "scion-list-cursor-v1:"
 // trial-decrypting under every version's key and AAD.
 const listCursorPrefix = "c1."
 
+// listCursorSealDomainV2 and listCursorPrefixV2 are the versioned
+// (key-ID-carrying) cursor's AAD domain and wire marker: the AAD is
+// listCursorSealDomainV2 + kid + ":" + binding and the cursor is
+// listCursorPrefixV2 + kid + "." + base64url(nonce+ciphertext).
+const (
+	listCursorSealDomainV2 = "scion-list-cursor-v2:"
+	listCursorPrefixV2     = "c2."
+)
+
 // errInvalidCursor is returned for every cursor failure a caller can hit --
 // malformed input, truncation, a tampered byte, a cursor sealed under a key
 // this sealer does not currently hold, or a binding (endpoint, filter or
@@ -556,16 +565,30 @@ var errListCursorSealerUnavailable = errors.New("list cursor sealer unavailable"
 // given the exact binding it was sealed under, so a cursor opened under a
 // different query or caller fails the same way a tampered one does.
 //
+// The sealing keys are one purpose of a signing ring (capability_keys.go;
+// ptone/scion#1530 Phase 4). The active generation seals; the ring's emit
+// setting picks the wire form:
+//
+//	c1.<base64url(nonce+ciphertext)>        AAD "scion-list-cursor-v1:" + binding
+//	c2.<kid>.<base64url(nonce+ciphertext)>  AAD "scion-list-cursor-v2:" + kid + ":" + binding
+//
+// Open reads both: a c2 cursor with generation kid only (never another
+// key), a c1 cursor with the ring's legacy readers. A cursor has no
+// lifetime of its own, so it opens only while its generation is before
+// verify_until: once a generation is retired its outstanding cursors fail
+// as invalid_cursor and the client restarts from the first page. No cursor
+// is promised to survive retirement.
+//
 // A sealed cursor never confers access by itself: it only carries a
 // position. Every page authorizedList returns -- including the first page
 // of a resumed walk -- still runs live per-item authorization; see
 // authorizedList's own doc comment.
 type listCursorSealer struct {
-	aead cipher.AEAD
+	keys capabilityKeys
 }
 
-// newListCursorSealer builds a sealer from a 32-byte AES-256 key.
-func newListCursorSealer(key []byte) (*listCursorSealer, error) {
+// listCursorAEAD builds the AES-256-GCM AEAD of one 32-byte sealing key.
+func listCursorAEAD(key []byte) (cipher.AEAD, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, fmt.Errorf("list cursor sealer: %w", err)
@@ -574,28 +597,58 @@ func newListCursorSealer(key []byte) (*listCursorSealer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list cursor sealer: %w", err)
 	}
-	return &listCursorSealer{aead: aead}, nil
+	return aead, nil
+}
+
+// newListCursorSealer builds a sealer from one fixed 32-byte AES-256 key,
+// sealing and opening the c1 form only (legacy mode).
+func newListCursorSealer(key []byte) (*listCursorSealer, error) {
+	if _, err := listCursorAEAD(key); err != nil {
+		return nil, err
+	}
+	return &listCursorSealer{keys: fixedCapabilityKeys(key)}, nil
+}
+
+// newRingListCursorSealer builds a sealer over ring-mode keys. Every
+// generation's purpose key is a 32-byte SHA-256 derivation, so each builds
+// an AES-256 AEAD.
+func newRingListCursorSealer(keys capabilityKeys) *listCursorSealer {
+	return &listCursorSealer{keys: keys}
 }
 
 // Seal encodes inner -- the existing plaintext authorizedListCursor
 // encoding -- into an opaque, authenticated cursor bound to binding
 // (scopedCursorBinding's output: the endpoint, normalized filter and
-// caller identity context), prefixed with listCursorPrefix. It never logs
-// inner or the key. Called on a nil sealer, it fails closed with
-// errListCursorSealerUnavailable instead of panicking; see that error's
-// doc comment.
+// caller identity context), in the form the ring selects (see
+// listCursorSealer). It never logs inner or the key. Called on a nil
+// sealer, it fails closed with errListCursorSealerUnavailable instead of
+// panicking; see that error's doc comment. When no key may seal now (the
+// active generation reached its sign_until) it returns
+// errCapabilityIssuanceClosed and no cursor.
 func (l *listCursorSealer) Seal(inner, binding string) (string, error) {
 	if l == nil {
 		return "", errListCursorSealerUnavailable
 	}
-	nonce := make([]byte, l.aead.NonceSize())
+	key, versioned, err := l.keys.issue()
+	if err != nil {
+		return "", err
+	}
+	aead, err := listCursorAEAD(key.Bytes())
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, aead.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		// crypto/rand failing is unrecoverable for this process: there is no
 		// safe cursor left to hand back, sealed or otherwise.
 		panic("list cursor sealer: generating nonce: " + err.Error())
 	}
-	ciphertext := l.aead.Seal(nil, nonce, []byte(inner), []byte(listCursorSealDomain+binding))
-	return listCursorPrefix + base64.RawURLEncoding.EncodeToString(append(nonce, ciphertext...)), nil
+	prefix, aad := listCursorPrefix, listCursorSealDomain+binding
+	if versioned {
+		prefix, aad = listCursorPrefixV2+key.ID+".", listCursorSealDomainV2+key.ID+":"+binding
+	}
+	ciphertext := aead.Seal(nil, nonce, []byte(inner), []byte(aad))
+	return prefix + base64.RawURLEncoding.EncodeToString(append(nonce, ciphertext...)), nil
 }
 
 // Open recovers the plaintext inner cursor Seal produced under binding, and
@@ -603,39 +656,58 @@ func (l *listCursorSealer) Seal(inner, binding string) (string, error) {
 // structural sanity check on the decrypted plaintext. It returns
 // errInvalidCursor -- never a partially authenticated value, and never a
 // logged one -- for anything else: a missing or unrecognized version
-// prefix, malformed base64, truncation, a flipped byte, a binding that does
-// not match the query or caller the cursor was sealed under, a legacy
-// (pre-sealing) plaintext cursor, or a cursor sealed under a key this
-// sealer does not currently hold (for example after key rotation). Called
-// on a nil sealer, it also returns errInvalidCursor rather than panicking,
-// matching Seal's fail-closed behavior; openAndValidateListCursor also
-// rejects a non-empty cursor when the sealer is nil.
+// prefix, a malformed or unknown key ID, malformed base64, truncation, a
+// flipped byte, a binding that does not match the query or caller the
+// cursor was sealed under, a legacy (pre-sealing) plaintext cursor, or a
+// cursor sealed under a key this sealer does not currently hold or that
+// has been retired (for example after key rotation). Called on a nil
+// sealer, it also returns errInvalidCursor rather than panicking, matching
+// Seal's fail-closed behavior; openAndValidateListCursor also rejects a
+// non-empty cursor when the sealer is nil.
 func (l *listCursorSealer) Open(sealed, binding string) (string, error) {
 	if l == nil {
 		return "", errInvalidCursor
 	}
-	body, ok := strings.CutPrefix(sealed, listCursorPrefix)
-	if !ok {
+	kid, body := "", ""
+	if rest, ok := strings.CutPrefix(sealed, listCursorPrefixV2); ok {
+		var found bool
+		kid, body, found = strings.Cut(rest, ".")
+		if !found || !capabilityKeyIDPattern.MatchString(kid) {
+			return "", errInvalidCursor
+		}
+	} else if rest, ok := strings.CutPrefix(sealed, listCursorPrefix); ok {
+		body = rest
+	} else {
 		return "", errInvalidCursor
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(body)
 	if err != nil {
 		return "", errInvalidCursor
 	}
-	nonceSize := l.aead.NonceSize()
-	if len(raw) < nonceSize {
-		return "", errInvalidCursor
+	aad := listCursorSealDomain + binding
+	if kid != "" {
+		aad = listCursorSealDomainV2 + kid + ":" + binding
 	}
-	nonce, ciphertext := raw[:nonceSize], raw[nonceSize:]
-	plaintext, err := l.aead.Open(nil, nonce, ciphertext, []byte(listCursorSealDomain+binding))
-	if err != nil {
-		return "", errInvalidCursor
+	for _, k := range l.keys.candidates(kid) {
+		aead, err := listCursorAEAD(k.Bytes())
+		if err != nil {
+			continue
+		}
+		nonceSize := aead.NonceSize()
+		if len(raw) < nonceSize {
+			return "", errInvalidCursor
+		}
+		plaintext, err := aead.Open(nil, raw[:nonceSize], raw[nonceSize:], []byte(aad))
+		if err != nil {
+			continue
+		}
+		inner := string(plaintext)
+		if err := validateAuthorizedListCursor(inner, binding); err != nil {
+			return "", errInvalidCursor
+		}
+		return inner, nil
 	}
-	inner := string(plaintext)
-	if err := validateAuthorizedListCursor(inner, binding); err != nil {
-		return "", errInvalidCursor
-	}
-	return inner, nil
+	return "", errInvalidCursor
 }
 
 // openAndValidateListCursor turns a raw, client-supplied query-string cursor
@@ -669,7 +741,18 @@ func openAndValidateListCursor(sealer *listCursorSealer, sealed, binding string)
 // Otherwise (local development, single-node hubs) it falls back to an
 // ephemeral in-memory key: a restart just invalidates outstanding cursors,
 // the same fallback the download-signing key uses.
+//
+// In keyring mode the keys come from the signing ring instead (see
+// capability_keys.go) and nothing is read from the secret backend.
 func (s *Server) initListCursorSealer(ctx context.Context) error {
+	if s.keyringManaged() {
+		keys, err := s.managedCapabilityKeys(SecretKeyListCursorKey)
+		if err != nil {
+			return err
+		}
+		s.listCursorSealer = newRingListCursorSealer(keys)
+		return nil
+	}
 	key, err := s.ensureSigningKey(ctx, SecretKeyListCursorKey, nil)
 	if err == nil && len(key) != 32 {
 		err = fmt.Errorf("list cursor key must be 32 bytes for AES-256, got %d", len(key))

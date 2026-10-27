@@ -79,21 +79,22 @@ func TestReadCollectedFile_ParentReplacedBySymlink(t *testing.T) {
 	const content = "hello\n"
 	cases := map[string]struct {
 		setup   func(t *testing.T, dir, outside string) string // returns the link target for sub
-		wantErr string                                         // "" means the read succeeds
+		wantErr []string                                       // nil means the read succeeds
 	}{
 		"outside directory, same content": {
 			setup: func(t *testing.T, dir, outside string) string {
 				writeReadTestFile(t, outside, "a.txt", content)
 				return outside
 			},
-			wantErr: "failed to read sub/a.txt",
+			// os.Root refuses the link that leaves the root.
+			wantErr: []string{"failed to read sub/a.txt", "path escapes from parent"},
 		},
 		"inside directory, different content": {
 			setup: func(t *testing.T, dir, outside string) string {
 				writeReadTestFile(t, dir, "other/a.txt", "HELLO\n")
 				return "other"
 			},
-			wantErr: "changed since it was collected",
+			wantErr: []string{"changed since it was collected"},
 		},
 		"inside directory, same content": {
 			setup: func(t *testing.T, dir, outside string) string {
@@ -123,14 +124,19 @@ func TestReadCollectedFile_ParentReplacedBySymlink(t *testing.T) {
 			}
 
 			data, err := ReadCollectedFile(root, fi)
-			if tc.wantErr == "" {
+			if tc.wantErr == nil {
 				if err != nil || string(data) != content {
 					t.Fatalf("got %q, %v; want %q", data, err, content)
 				}
 				return
 			}
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Fatalf("err = %v (data %q), want %q", err, data, tc.wantErr)
+			if err == nil {
+				t.Fatalf("read succeeded with %q, want an error containing %q", data, tc.wantErr)
+			}
+			for _, want := range tc.wantErr {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("err = %v (data %q), want it to contain %q", err, data, want)
+				}
 			}
 		})
 	}

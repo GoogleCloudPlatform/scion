@@ -119,7 +119,7 @@ func (m *protocolMockManager) Delete(ctx context.Context, agentID string, delete
 	return true, nil
 }
 
-func (m *protocolMockManager) DeleteTarget(ctx context.Context, agentName string, ref scionrt.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *protocolMockManager) DeleteTarget(ctx context.Context, agentName, sharerKey string, ref scionrt.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	return true, nil
 }
 func (m *protocolMockManager) List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error) {

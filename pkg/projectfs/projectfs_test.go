@@ -267,3 +267,32 @@ func TestLocalConfigDirName(t *testing.T) {
 		t.Errorf("LocalConfigDirName short = %q", got)
 	}
 }
+
+// TestLayoutKey: the key is a value identity, equal for equal Layouts
+// including the SharedDirs split (a pointer), and different when any field
+// or the split differs.
+func TestLayoutKey(t *testing.T) {
+	mk := func() Layout {
+		sd := Layout{Backend: BackendLocal}
+		return Layout{Backend: BackendGKESharedVolume, HostBase: "/mnt/v", SubPathRoot: "projects", Share: Share{ID: "v", PVName: "c"}, SharedDirs: &sd}
+	}
+	a, b := mk(), mk()
+	if a.Key() != b.Key() {
+		t.Errorf("equal Layouts with distinct SharedDirs pointers must share a key: %q vs %q", a.Key(), b.Key())
+	}
+	c := mk()
+	c.SharedDirs = nil
+	if c.Key() == a.Key() {
+		t.Error("the split must be part of the key")
+	}
+	d := mk()
+	d.SharedDirs.Backend = BackendNFS
+	if d.Key() == a.Key() {
+		t.Error("the split's fields must be part of the key")
+	}
+	e := mk()
+	e.Share.Export = "/other"
+	if e.Key() == a.Key() {
+		t.Error("every field must be part of the key")
+	}
+}

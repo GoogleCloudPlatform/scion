@@ -36,8 +36,8 @@
  * - R1-06/07: the owner grants the grantee Can edit in the Share dialog;
  *   the grantee publishes v2 from the Edit view; the owner stays the owner.
  * - R1-08: Grant review access is hidden on a user-owned artifact.
- * - R1-B1..B5 (agent-owned artifact): NOT RUN here, skipped with the reason
- *   (they need a broker and a publishing agent).
+ * - The agent-owned artifact rows (R1-B) are a separate suite:
+ *   web/e2e/artifacts-agent-owned/.
  * - R1-09/10 (afterAll): cleanup verified by absence, then the evidence.
  *
  * Each row records its UI observation and the API statuses. The UI
@@ -118,10 +118,6 @@ const ENTRY_TEXT = [
   '',
 ].join('\n');
 const APPENDED_LINE = 'Appended by the grantee.';
-const R1B_REASON =
-  'NOT RUN: needs an agent-owned artifact fixture (a broker and an agent that publishes, ' +
-  "created from a member session, ptone/scion#4569); main's e2e harness has no runtime " +
-  'broker option. Rows frozen; run them with that fixture.';
 
 /** One identity of the journey. */
 interface Identity {
@@ -355,7 +351,7 @@ interface RowSpec {
   title: string;
   graded?: boolean;
   /** Where the row runs (for the oracle row map); default the R1-A test. */
-  where?: 'a' | 'b' | 'cleanup';
+  where?: 'a' | 'cleanup';
 }
 
 /** Every row, declared once: it seeds the evidence and the oracle row map. */
@@ -410,31 +406,6 @@ const ROWS: Record<string, RowSpec> = {
   'R1-08': {
     role: 'owner, member, padmin, grantee',
     title: 'Grant review access hidden on a user-owned artifact',
-  },
-  'R1-B1': {
-    role: 'owner (delegating user)',
-    title: 'agent-owned: Grant review access visible; Share, Edit, Review hidden',
-    where: 'b',
-  },
-  'R1-B2': {
-    role: 'padmin',
-    title: 'agent-owned: Grant review access visible; Share hidden',
-    where: 'b',
-  },
-  'R1-B3': {
-    role: 'member',
-    title: 'agent-owned: Grant review access and Share hidden',
-    where: 'b',
-  },
-  'R1-B4': {
-    role: 'owner -> member',
-    title: 'Grant review access dialog gives Can review',
-    where: 'b',
-  },
-  'R1-B5': {
-    role: 'member',
-    title: 'review grantee sees Review only and saves a review; owner unchanged',
-    where: 'b',
   },
   'R1-09': {
     role: '-',
@@ -810,14 +781,11 @@ async function addMember(
 }
 
 const TITLE_A = 'R1-A: artifact access per role, graded at the UI';
-const R1B_IDS = Object.keys(ROWS).filter((id) => ROWS[id].where === 'b');
-const r1bTitle = (id: string): string => `${id}: agent-owned artifact`;
 const TITLE_CLEANUP = 'R1-09/R1-10: cleanup by absence, then the evidence';
 
 /** Every row mapped to the test that carries it. */
 const ORACLE_ROW_MAP: Record<string, { test: string; note: string }> = Object.fromEntries(
   Object.entries(ROWS).map(([id, spec]) => {
-    if (spec.where === 'b') return [id, { test: r1bTitle(id), note: R1B_REASON }];
     if (spec.where === 'cleanup') {
       return [id, { test: TITLE_CLEANUP, note: `the afterAll hook: evidence.rows["${id}"]` }];
     }
@@ -825,29 +793,6 @@ const ORACLE_ROW_MAP: Record<string, { test: string; note: string }> = Object.fr
     return [id, { test: TITLE_A, note: `evidence.rows["${id}"] (${kind})` }];
   })
 );
-
-// ---- R1-B: agent-owned artifact (frozen rows, NOT RUN here) ------------
-// Declared before the serial R1-A group and outside it, so each body always
-// runs and records its reason, whatever happens to R1-A.
-test.describe('agent-owned artifact rows (R1-B, not run)', () => {
-  for (const id of R1B_IDS) {
-    test(r1bTitle(id), () => {
-      const spec = ROWS[id];
-      notRun([id], R1B_REASON);
-      test.info().annotations.push({
-        type: 'NOT RUN',
-        description: `${id} (${spec.role}): ${spec.title}`,
-      });
-      const results = (journey.evidence.results ??= {}) as Record<string, unknown>;
-      results[r1bTitle(id)] = {
-        status: 'not run',
-        skipReason: R1B_REASON,
-        annotations: annotationsOf(test.info().annotations),
-      };
-      test.skip(true, R1B_REASON);
-    });
-  }
-});
 
 test.describe.serial('artifact access per role (R1)', () => {
   // eslint-disable-next-line no-empty-pattern -- Playwright needs the fixtures argument
@@ -1849,10 +1794,6 @@ test.describe.serial('artifact access per role (R1)', () => {
         r.reason = `${NOT_REACHED}: ${cause}`;
       }
     }
-    notRun(
-      R1B_IDS.filter((id) => journey.rows[id]?.reason?.startsWith(NOT_REACHED)),
-      R1B_REASON
-    );
 
     // R1-09: cleanup verified by absence.
     const r09 = rowRecord('R1-09');
@@ -1873,9 +1814,6 @@ test.describe.serial('artifact access per role (R1)', () => {
     journey.evidence.cleanup = { ...cleanup, residue };
     const results = (journey.evidence.results ??= {}) as Record<string, unknown>;
     results[TITLE_A] ??= { status: 'not run', skipReason: cause ?? null };
-    for (const id of R1B_IDS) {
-      results[r1bTitle(id)] ??= { status: 'not run', skipReason: R1B_REASON };
-    }
     results[TITLE_CLEANUP] = {
       status: residue.length === 0 ? 'passed' : 'failed',
       residue: residue.length,

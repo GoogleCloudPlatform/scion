@@ -256,6 +256,11 @@ run "fresh_gke_hub_plans_clean" {
   }
 
   assert {
+    condition     = try(output.chart_values.config.extra.server.project_storage, null) == null
+    error_message = "config.extra must not carry server.project_storage; the chart renders it from workspaceStorage.nfs."
+  }
+
+  assert {
     condition = output.nfs_workspace == {
       share_id   = "tfha-gke-h3"
       export     = "/scion/tfha-gke-h3"
