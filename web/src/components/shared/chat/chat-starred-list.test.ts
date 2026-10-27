@@ -134,6 +134,46 @@ describe('scion-chat-starred-list', () => {
     ).toBe(false);
   });
 
+  it('drops a deleted message at once, from any conversation, without a request', async () => {
+    apiFetch.mockResolvedValueOnce(json({ items: [item(2), item(1)] }));
+    const el = await mount();
+    await openPanel(el);
+    await vi.waitFor(() => expect(entries(el)).toHaveLength(2));
+    // The state manager wraps SSE payloads as { state, data }.
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-message-deleted', {
+        detail: { data: { conversationKey: 'other', messageId: item(2).messageId } },
+      })
+    );
+    await el.updateComplete;
+    expect(entries(el)).toHaveLength(1);
+    expect(entries(el)[0].textContent).toContain('Mock excerpt 1');
+    expect(el.shadowRoot!.textContent).not.toContain('Mock excerpt 2');
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('lists a DM conversation with its DM permalink', async () => {
+    const dm = {
+      ...item(3),
+      conversationKey: 'dm:user:a:user:b',
+      conversationKind: 'dm' as const,
+      projectId: undefined,
+      projectName: undefined,
+      permalink: `/chat/dm/dm%3Auser%3Aa%3Auser%3Ab#msg-${item(3).messageId}`,
+    };
+    apiFetch.mockResolvedValueOnce(json({ items: [dm] }));
+    const el = document.createElement('scion-chat-starred-list') as ScionChatStarredList;
+    el.conversationKey = 'dm:user:a:user:b';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await openPanel(el);
+    expect(String(apiFetch.mock.calls[0][0])).toBe(
+      '/api/v1/chat/stars?conversationKey=dm%3Auser%3Aa%3Auser%3Ab&limit=20'
+    );
+    await vi.waitFor(() => expect(entries(el)).toHaveLength(1));
+    expect(entries(el)[0].getAttribute('href')).toBe(dm.permalink);
+  });
+
   it('shows the empty state with the action hint', async () => {
     apiFetch.mockResolvedValueOnce(json({ items: [] }));
     const el = await mount();

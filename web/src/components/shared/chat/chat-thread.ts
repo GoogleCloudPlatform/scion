@@ -3767,6 +3767,8 @@ export class ScionChatThread extends LitElement {
     // A deleted message shows no artifact refs, so it no longer keeps the
     // could-not-load notice up.
     this._artifactRefsUnavailable.delete(messageId);
+    // Its stars are gone too: drop the indicator without a request.
+    this.stars.evict(messageId);
     // Force re-render.
     this.messages = [...this.messages];
   }

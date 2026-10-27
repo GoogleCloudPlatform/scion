@@ -222,6 +222,7 @@ export class ScionChatStarredList extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     stateManager.addEventListener('chat-stars-updated', this.handleInvalidate);
+    stateManager.addEventListener('chat-message-deleted', this.handleMessageDeleted);
     stateManager.addEventListener('connected', this.handleInvalidate);
     chatStarsLocalChanges.addEventListener('changed', this.handleLocalChange);
   }
@@ -229,6 +230,7 @@ export class ScionChatStarredList extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     stateManager.removeEventListener('chat-stars-updated', this.handleInvalidate);
+    stateManager.removeEventListener('chat-message-deleted', this.handleMessageDeleted);
     stateManager.removeEventListener('connected', this.handleInvalidate);
     chatStarsLocalChanges.removeEventListener('changed', this.handleLocalChange);
     document.removeEventListener('pointerdown', this.handleOutsidePointer, true);
@@ -343,6 +345,20 @@ export class ScionChatStarredList extends LitElement {
       return;
     }
     void this.loadFirst();
+  };
+
+  /**
+   * A message was deleted: drop its row (and excerpt) at once, whatever
+   * conversation it was in; the hub already removed its stars, so a later
+   * refetch cannot bring it back.
+   */
+  private handleMessageDeleted = (e: Event): void => {
+    const detail = (e as CustomEvent<{ data?: { messageId?: string }; messageId?: string }>).detail;
+    const messageId = detail?.data?.messageId ?? detail?.messageId;
+    if (!messageId) return;
+    if (this.items.some((i) => i.messageId === messageId)) {
+      this.items = this.items.filter((i) => i.messageId !== messageId);
+    }
   };
 
   private handleLocalChange = (e: Event): void => {

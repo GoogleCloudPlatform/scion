@@ -6686,7 +6686,7 @@ export class ScionPageChat extends LitElement {
 
   /**
    * Whether the header shows the starred-messages button: the experiment is
-   * on and the conversation supports stars (phase 1: project threads). It
+   * on and the conversation supports stars (threads and both DM kinds). It
    * sits in the always-visible action area, not the secondary span.
    */
   private headerShowsStars(conv: V2ConversationState): boolean {
