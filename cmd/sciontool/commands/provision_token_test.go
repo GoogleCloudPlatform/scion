@@ -50,7 +50,9 @@ func runProvisionCaptureRemote(t *testing.T, cloneURL, token, tokenRemote string
 	t.Setenv(provision.GitTokenEnv, token)
 	t.Setenv(api.EnvGitTokenRemote, tokenRemote)
 	if tokenRemote == "" {
-		os.Unsetenv(api.EnvGitTokenRemote)
+		if err := os.Unsetenv(api.EnvGitTokenRemote); err != nil {
+			t.Fatal(err)
+		}
 	}
 	t.Setenv("GIT_CONFIG_COUNT", "")
 

@@ -133,7 +133,9 @@ func initCloneWithTokenRemote(t *testing.T, cloneURL, tokenRemote string) (agent
 	t.Setenv("GITHUB_TOKEN", tokenRemoteTestToken)
 	t.Setenv(api.EnvGitTokenRemote, tokenRemote)
 	if tokenRemote == "" {
-		os.Unsetenv(api.EnvGitTokenRemote)
+		if err := os.Unsetenv(api.EnvGitTokenRemote); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return agentHome, gitCloneWorkspace(os.Getuid(), os.Getgid(), agentHome, false)
 }
@@ -267,7 +269,9 @@ func provisionCloneWithTokenRemote(t *testing.T, cloneURL, tokenRemote string) e
 	t.Setenv(provision.GitTokenEnv, tokenRemoteTestToken)
 	t.Setenv(api.EnvGitTokenRemote, tokenRemote)
 	if tokenRemote == "" {
-		os.Unsetenv(api.EnvGitTokenRemote)
+		if err := os.Unsetenv(api.EnvGitTokenRemote); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return runProvision(context.Background())
 }
