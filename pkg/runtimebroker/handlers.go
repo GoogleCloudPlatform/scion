@@ -128,6 +128,11 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		}
 	}
 
+	if s.storageOverridesError() != nil {
+		checks[storageOverridesCheck] = storageOverridesCheckDegraded
+		status = degradeHealthStatus(status)
+	}
+
 	return &HealthResponse{
 		Status:  status,
 		Version: s.version,
@@ -880,6 +885,19 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// attempt, the registration and any file work (design wave 3 §1 C-e).
 	if s.refuseIfDraining(w, "create", req.ID) {
 		return
+	}
+
+	// A profile (or its runtime entry) that still carries a removed storage
+	// override is refused here, before the dispatch attempt and any
+	// preparation of the start: no workspace bootstrap, download or
+	// provisioning, and no cluster object (ptone/scion#6371). Manager.Start
+	// repeats the check as a backstop.
+	if err := agent.CheckProfileStorageRefusal(ctx, createRequestProfile(req)); err != nil {
+		if se, ok := storageMigrationRequiredFrom(err); ok {
+			span.SetStatus(codes.Error, ErrCodeStorageMigrationRequired)
+			s.writeStorageMigrationRequired(w, se, "create agent", req.ID, nil)
+			return
+		}
 	}
 
 	attemptKey := req.ID
@@ -1926,11 +1944,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		isSkillErr := errors.As(err, &skillErr)
 		policyDecision, isPolicyErr := harnessPolicyRefusalFrom(err)
 		unusableErr, isUnusable := unusableProvisionerFrom(err)
+		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
 		switch {
 		case isPolicyErr:
 			markAttemptFailed(policyDecision.HTTPStatus, policyDecision.detail())
 		case isUnusable:
 			markAttemptFailed(http.StatusUnprocessableEntity, unusableErr.PublicMessage())
+		case isStorageRefusal:
+			markAttemptFailed(http.StatusUnprocessableEntity, storageErr.PublicMessage())
 		case notFoundErr:
 			markAttemptFailed(http.StatusNotFound, "failed to create agent")
 		case isSkillErr:
@@ -2012,6 +2033,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			s.writeHarnessPolicyRefusal(w, policyDecision, "create agent", req.ID, nil)
 		case isUnusable:
 			s.writeUnusableProvisioner(w, unusableErr, "create agent", req.ID, nil)
+		case isStorageRefusal:
+			s.writeStorageMigrationRequired(w, storageErr, "create agent", req.ID, nil)
 		case errors.Is(err, agent.ErrContainerNameInUse):
 			// Fixed text, as restart and the async launch give: a wrapped
 			// error can carry runtime detail. The full error is logged above.
@@ -3901,9 +3924,12 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
 		var skillErr *agent.SkillResolutionError
 		ue, unusable := unusableProvisionerFrom(err)
+		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
 		switch {
 		case unusable:
 			s.writeUnusableProvisioner(w, ue, "start agent", id, details)
+		case isStorageRefusal:
+			s.writeStorageMigrationRequired(w, storageErr, "start agent", id, details)
 		case errors.Is(err, agent.ErrContainerNameInUse):
 			// Fixed text, as restart and the async launch give: a wrapped
 			// error can carry runtime detail. The full error is logged above.
@@ -5081,6 +5107,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
 		if ue, ok := unusableProvisionerFrom(err); ok {
 			s.writeUnusableProvisioner(w, ue, "restart agent", id, details)
+			return
+		}
+		if se, ok := storageMigrationRequiredFrom(err); ok {
+			s.writeStorageMigrationRequired(w, se, "restart agent", id, details)
 			return
 		}
 		// Start can re-provision the agent: a required skill reference that

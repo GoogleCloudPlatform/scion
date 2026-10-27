@@ -1439,6 +1439,10 @@ func resolveHubProjectStorage(cfg *config.GlobalConfig) error {
 	}
 	cfg.EffectiveProjectStorage = ps
 	cfg.EffectiveProjectStorageWarnings = warnings
+	// Removed per-runtime/per-profile storage overrides in the settings
+	// file are reported (ERROR, degraded health, admin settings), never a
+	// refused start (ptone/scion#6371).
+	cfg.RemovedStorageOverridesFileError = hubRemovedStorageOverridesFileError(log.Printf)
 	return nil
 }
 
@@ -2856,12 +2860,13 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		// (which would invalidate every live token after, e.g., a redeploy onto a
 		// new host that changed the HubID). Operators enabling this must supply a
 		// session secret or pre-provision the signing keys.
-		RequireStableSigningKey: parseBoolEnv("SCION_REQUIRE_STABLE_SIGNING_KEY"),
-		OIDCLogin:               cfg.OIDCLogin,
-		OIDCConfig:              cfg.OIDC,
-		Federation:              cfg.Federation,
-		ProjectStorageConfig:    cfg.EffectiveProjectStorage,
-		ProjectStorageWarnings:  cfg.EffectiveProjectStorageWarnings,
+		RequireStableSigningKey:          parseBoolEnv("SCION_REQUIRE_STABLE_SIGNING_KEY"),
+		OIDCLogin:                        cfg.OIDCLogin,
+		OIDCConfig:                       cfg.OIDC,
+		Federation:                       cfg.Federation,
+		ProjectStorageConfig:             cfg.EffectiveProjectStorage,
+		ProjectStorageWarnings:           cfg.EffectiveProjectStorageWarnings,
+		RemovedStorageOverridesFileError: cfg.RemovedStorageOverridesFileError,
 		// nil (no server.native_chat section) means enabled — chat is default-on.
 		NativeChatEnabled: cfg.NativeChat.EnabledSetting(),
 		// server.hub.port_proxy.response_header_timeout (validated at startup).
@@ -4280,6 +4285,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		if warning := brokerWorkspaceStorageWarning(globalVS); warning != "" {
 			log.Printf("WARNING: %s", warning)
 		}
+		_ = reportRemovedStorageOverridesIn(log.Printf, config.GlobalSettingsSource, globalVS)
 	}
 	if warning := brokerInotifyWarning(hostedMode, rt != nil && brokerAgentsShareHostUser(nil, rt.Name()), hostlimits.DefaultReader()); warning != "" {
 		log.Printf("WARNING: %s", warning)
@@ -4309,6 +4315,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		AllowContainerScriptHarnesses: cfg.RuntimeBroker.AllowContainerScriptHarnesses,
 		StateDir:                      rhStateDir,
 		NFSConfig:                     brokerNFS,
+		StorageOverridesCheck:         brokerStorageOverridesCheck,
 		StorageBucket:                 brokerStorageBucket(cfg.Storage),
 		WorkspaceStorageBackend:       workspaceStorageBackend,
 		StorageLayout:                 brokerLayout,

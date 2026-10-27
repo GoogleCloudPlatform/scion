@@ -325,7 +325,7 @@ The runtime target of one flat Runtime Broker instance, and the instance's own i
 | `priority_class_name` | string | kubernetes | Default PriorityClass of agent pods (DNS-1123 subdomain). The PriorityClass must already exist on the cluster. An agent's own `kubernetes.priorityClassName` wins. |
 | `gke` | bool | kubernetes | `true` turns on GKE mode for the instance. `false` or unset detects a GKE cluster automatically. |
 
-A runtime target does not choose where its agents' storage lives: [`server.project_storage`](#project-storage-serverproject_storage) does, for every instance of the process. The former `shared_dir_storage_backend`, `shared_dir_storage_backends`, `home_storage_backend` and `home_storage_leaf` fields are removed and refuse startup with an error that names the field, `server.project_storage` and `volumes:`. For a node-local directory, use a `volumes:` entry.
+A runtime target does not choose where its agents' storage lives: [`server.project_storage`](#project-storage-serverproject_storage) does, for every instance of the process. The former `shared_dir_storage_backend`, `shared_dir_storage_backends`, `home_storage_backend` and `home_storage_leaf` fields are removed. A flat instance that sets them refuses startup with an error that names the field, `server.project_storage` and `volumes:`. On runtimes and profiles, startup reports them and agent start refuses them; see [Removed storage overrides](#removed-storage-overrides). For a node-local directory, use a `volumes:` entry.
 
 #### Flat instance agent defaults (`server.broker.instances[].agent_defaults`)
 
@@ -602,7 +602,7 @@ The operational content of the deprecated sections still applies to the same fie
 | `nfs` | `<mount_root>/<share id>/<subpath_root>/<project id>/...` on the export | `<subpath_root>/<project id>/shared-dirs/<name>` on the same export, on every runtime, including Docker and Podman |
 | `cloudrun-volume`, `gke-shared-volume` | `<subpath_root>/<project id>/...` on the volume | `<subpath_root>/<project id>/shared-dirs/<name>` on the same volume |
 
-- **Docker and Podman follow the backend.** With `backend: nfs`, shared directories are bind-mounted from the export on Docker and Podman too. Before this block existed, a broker with `server.workspace_storage.backend: nfs` and no `server.shared_dir_storage` kept Docker shared directories node-local; that is no longer the case. Shared directories already on node-local disk are moved by the project-storage migration.
+- **Docker and Podman follow the backend.** With `backend: nfs`, shared directories are bind-mounted from the export on Docker and Podman too. Before this block existed, a broker with `server.workspace_storage.backend: nfs` and no `server.shared_dir_storage` kept Docker shared directories node-local; that is no longer the case. For shared directories already on node-local disk: the Hub's `project-storage-migrate` maintenance migration (Admin → Maintenance, or `POST /api/v1/admin/maintenance/migrations/project-storage-migrate/run`; run it with `dryRun` first) moves the Hub's own trees; each Runtime Broker moves its own node-local shared dirs into `<ProjectRoot>/shared-dirs/<name>` on the share on its first start after upgrade with its shared-dir layout on the share (copy-only, never overwriting; the source is kept as `<name>.migrated-<ts>`).
 - **Volume backends open the shared-directory write gate.** Because `cloudrun-volume` and `gke-shared-volume` put shared directories on the volume, a Cloud Run Hub accepts shared-directory writes on those backends. A Cloud Run Hub without a shared backend refuses them with `503` and error code `shared_dir_writes_unavailable`, whose message names `server.project_storage`.
 - **Removing a shared directory deletes it.** Removing a shared directory declaration deletes its directory on the shared backends, as it does on local disk.
 - **Node-local directories are volumes.** A directory that must stay on the node, such as a build cache, is an ordinary `volumes:` entry on a profile, harness config or template, not a storage backend.
@@ -632,7 +632,7 @@ Without `server.project_storage`, the Hub and the Runtime Brokers synthesize it 
   - `nfs` on the same tree as the workspace (same NFS server, export and `subpath_root`): nothing changes.
   - `nfs` while the workspace is not on `nfs`: shared directories (and `nfs` homes) stay on the `shared_dir_storage` export and workspaces stay where they are. This transitional split exists only for synthesized configurations; it cannot be written as a `server.project_storage` block.
   - `local` while the workspace is on `nfs`: shared directories are now placed on the export with the workspace, and a warning says so.
-  - unset while the workspace is on `nfs`: shared directories follow the workspace onto the export on every runtime (Docker, Podman and Apple agents kept them node-local before), and a warning says so. The project-storage migration copies node-local shared-directory trees.
+  - unset while the workspace is on `nfs`: shared directories follow the workspace onto the export on every runtime (Docker, Podman and Apple agents kept them node-local before), and a warning says so. For existing data: the Hub's `project-storage-migrate` maintenance migration (Admin → Maintenance, or `POST /api/v1/admin/maintenance/migrations/project-storage-migrate/run`; run it with `dryRun` first) moves the Hub's own trees; each Runtime Broker moves its own node-local shared dirs into `<ProjectRoot>/shared-dirs/<name>` on the share on its first start after upgrade with its shared-dir layout on the share (copy-only, never overwriting; the source is kept as `<name>.migrated-<ts>`).
   - unset, or `local`, while the workspace is on `cloudrun-volume` or `gke-shared-volume`: shared directories stay where they are today (their own claims on Kubernetes) until `server.project_storage` is written. The Hub then treats them as non-durable, so a Cloud Run Hub refuses shared-directory writes with `503`. Writing the block moves shared directories onto the volume, and **the contents of the existing per-directory claims are not moved automatically**. While such a claim still exists, every agent start that now places that directory on the volume returns a warning naming the claim. Scion never deletes those claims.
 
 Every synthesis logs a startup warning that names the deprecated blocks in use and prints the exact `server.project_storage` block to write, with defaults filled in. The Hub's `project_storage_config` health check reports `degraded` until the block is written. For the transitional split, the printed block is `backend: nfs` on the shared-directory export: writing it moves workspaces onto the export too, because one backend places both.
@@ -685,7 +685,7 @@ server:
       leaf: broker
 ```
 
-Remove all three deprecated blocks in the same edit, on the Hub and on every Runtime Broker, and restart. After writing the block, run the project-storage migration to move data that the new block places elsewhere, for example hub-local workspaces or node-local shared directories that now belong on the export.
+Remove all three deprecated blocks in the same edit, on the Hub and on every Runtime Broker, and restart. Check the edited file with `scion config validate`. For data that the new block places elsewhere, such as hub-local workspaces and node-local shared directories: the Hub's `project-storage-migrate` maintenance migration (Admin → Maintenance, or `POST /api/v1/admin/maintenance/migrations/project-storage-migrate/run`; run it with `dryRun` first) moves the Hub's own trees; each Runtime Broker moves its own node-local shared dirs into `<ProjectRoot>/shared-dirs/<name>` on the share on its first start after upgrade with its shared-dir layout on the share (copy-only, never overwriting; the source is kept as `<name>.migrated-<ts>`). No `scion` CLI command runs this migration; see [Maintenance Panel Operations](/scion/hosted/single-node/hub-server/).
 
 #### Removing a shared directory deletes its data
 
@@ -698,7 +698,21 @@ Storage placement is no longer chosen per runtime, per profile, per instance, pe
 - `shared_dir_storage_backend` and `shared_dir_storage_backends` on `runtimes.<name>`, `profiles.<name>` and `server.broker.instances[].runtime_target`;
 - `home_storage_backend` and `home_storage_leaf` on the same three places.
 
-Settings validation, the Hub admin settings API (`PUT /api/v1/admin/server-config`) and flat Runtime Broker instance loading reject them with an error that names the key, `server.project_storage` and `volumes:`. Agents no longer record their own shared-directory backend, and the operation that changed an agent's recorded shared-directory backend is removed. For a node-local directory, use a `volumes:` entry instead.
+Settings validation (`scion config validate`), the Hub admin settings API (`PUT /api/v1/admin/server-config`) and flat Runtime Broker instance loading reject them with an error that names the key, `server.project_storage` and `volumes:`.
+
+Startup reports them and agent start refuses them:
+
+- **Startup reports.** When the settings file, or the runtimes and profiles stored in the Hub, still carry one of these keys on `runtimes.<name>` or `profiles.<name>`, the Hub, the Runtime Broker and a flat host log an error at startup that names each key, where it was found and the migration below. The process keeps running. The Hub's `storage_overrides` health check reports `degraded`, a Runtime Broker's `/healthz` reports `storage_overrides`, and `GET /api/v1/admin/server-config` lists the messages in `storage_override_errors`.
+- **Agent start refuses.** The Runtime Broker refuses to start an agent whose profile, or that profile's runtime entry, carries one of these keys. The refusal comes before anything is created, with `422` and error code `storage_migration_required`. Agents of other profiles start normally. An agent whose shared-directory backend record from an earlier version (`shared-dir-storage.json`, or the `.retired` copy of it) pins shared directories to `nfs` is refused the same way while the shared-directory layout is not shared. The record is kept.
+
+To migrate a `shared_dir_storage_backend: nfs` override, edit the settings and remove the key:
+
+- set `server.shared_dir_storage.backend: nfs` (transitional: shared directories of every runtime then use that export, and workspaces stay where they are), or
+- write `server.project_storage` with `backend: nfs` (this also moves workspaces onto the export).
+
+Check `shares[0].pv_name` and `subpath_root` against the live export. Kubernetes agents mounted that claim at `<subpath_root>/<project id>/shared-dirs/<name>`, so these two decide where the existing shared-directory data is. Keep `shares[0].server` and `export` accurate as well. For a `home_storage_backend: nfs` override, set `server.home_storage.backend: nfs` (or `homes: nfs` in `server.project_storage`). Then run `scion config validate`. Stored runtimes and profiles are edited in the Hub admin settings; a save drops the removed keys.
+
+Agents no longer record their own shared-directory backend, and the operation that changed an agent's recorded shared-directory backend is removed. For a node-local directory, use a `volumes:` entry instead.
 
 #### Layout identity check
 

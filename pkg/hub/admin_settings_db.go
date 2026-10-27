@@ -147,6 +147,7 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read settings", nil)
 		return
 	}
+	resp.StorageOverrideErrors = s.removedStorageOverrideErrors()
 	writeJSON(w, http.StatusOK, resp)
 }
 
