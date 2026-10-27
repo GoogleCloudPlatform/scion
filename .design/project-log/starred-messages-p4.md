@@ -80,12 +80,3 @@
 2. `decideStarState` leaves a conversation whose stored key is not canonical out of a state batch (like the drift
    case) instead of answering 400; a test with a directly inserted legacy row.
 3. `TestChatStars_DMKeyMustBeCanonical`'s doc comment states exactly what it covers.
-
-## Follow-ups for the Phase 4 gate-set script (from the dev script's STEP round 8, declined for the dev series)
-
-4. The signal trap records its reason through `stop "signal received"`.
-5. on_exit raises rc only (`-gt` form), so a recorded verdict can never lower it.
-6. The self-test leftover sweep is gated on the self-test mode and the run root, not on the self-test variable.
-7. The runner's header and the README match the final line format (five passing self-tests, not six).
-
-Operator rule for every real window: `P4_SELFTEST` must be unset (self-tests run only in mode T).
