@@ -141,7 +141,7 @@ The `@version` suffix accepts:
 - `latest` (the default when omitted) — the highest published, non-deprecated stable version.
 - An exact version, e.g. `1.4.0` (a leading `v` is stripped).
 - A semver range, e.g. `^1.0`, `~1.2`, `>=1.0.0` — resolves to the highest matching version.
-- A content hash, e.g. `sha256:abc123…` — resolves to the exact bytes with that hash.
+- A content hash, e.g. `sha256:abc123…` — resolves to the exact version with that hash (matching `contentHash`, or `contentHashV2` while the `hub.skill_content_hash_v2` [experiment](/scion/reference/experiments/) is enabled; see [Content hash forms](/scion/hosted/single-node/skill-registry/#content-hash-forms)).
 
 ### GitHub skill URIs (`gh://`)
 
@@ -257,7 +257,7 @@ Published deploy-checklist v1.0.0 (hash: sha256:9f2b…)
 
 ## Versioning and immutability
 
-Each publish creates a new `SkillVersion`. Versions are content-addressed by a `sha256:` hash computed over their files, so a given `name@version` always resolves to the same bytes. This makes resolution reproducible and enables the [content-hash cache](#content-hash-caching).
+Each publish creates a new `SkillVersion`. Versions are content-addressed by a `sha256:` hash computed over their files (`contentHash`, plus `contentHashV2` covering file paths and normalized modes when the `hub.skill_content_hash_v2` [experiment](/scion/reference/experiments/) is enabled; see [Content hash forms](/scion/hosted/single-node/skill-registry/#content-hash-forms)), so a given `name@version` always resolves to the same bytes. This makes resolution reproducible and enables the [content-hash cache](#content-hash-caching).
 
 To retire a version without deleting it, deprecate it. Deprecated versions remain resolvable by exact reference but are skipped by `latest` and range resolution.
 

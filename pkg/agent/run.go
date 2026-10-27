@@ -1547,13 +1547,16 @@ authDone:
 		}
 	}
 
-	// The co-located hub's dev token is the agent's hub token only when the
-	// hub issued none and the endpoint the agent will use is still the
-	// broker's trusted one. Checked here, after every endpoint override
-	// above: an endpoint from the agent config or the config env section
-	// that differs from trustedHubEndpoint drops it.
-	if token := colocatedHubDevTokenForAgent(opts, trustedHubEndpoint); token != "" && opts.Env["SCION_AUTH_TOKEN"] == "" {
-		opts.Env["SCION_AUTH_TOKEN"] = token
+	// The only hub credential an agent ever gets is the token the hub issued
+	// for it, written to the token file below. No other token is substituted,
+	// this process's own included: a hub-dispatched agent without one starts
+	// with no hub credential, and the start says so, in the log and in the
+	// hub's response.
+	noHubTokenWarning := noHubCredentialWarning(opts)
+	if noHubTokenWarning != "" {
+		slog.Warn("agent start: the hub issued no agent token; the agent starts without a hub credential",
+			"agent_id", agentID, "name", opts.Name)
+		warnings = append(warnings, noHubTokenWarning)
 	}
 
 	// Write the agent token to the canonical token file in the agent home
@@ -1589,6 +1592,12 @@ authDone:
 		if err := writeAgentTokenFile(agentHome, token); err != nil {
 			return nil, fmt.Errorf("cannot start agent %q without a hub credential: %w", opts.Name, err)
 		}
+	} else if err := writeAgentHome(ctx, func() error { return removeAgentTokenFile(agentHome) }); err != nil {
+		// No hub-issued token for this start: a token file left in a
+		// persisted agent home by an earlier start must not outlive it, since
+		// the container reads that file first. Refusing to start when it
+		// cannot be removed is the same choice as for a failed write above.
+		return nil, fmt.Errorf("cannot start agent %q: remove the previous hub credential: %w", opts.Name, err)
 	}
 
 	// Resolve host networking: when the hub endpoint is localhost or was
@@ -1719,6 +1728,10 @@ authDone:
 	// Host networking and the GCP metadata mode: refuse assign, warn the
 	// user for block. Decided on the merged env, before any container work.
 	var relayedWarnings []string
+	if noHubTokenWarning != "" {
+		// Relayed to the hub too: the user sees it in the start response.
+		relayedWarnings = append(relayedWarnings, noHubTokenWarning)
+	}
 	hostNetWarning, hostNetErr := checkHostNetworkMetadata(opts.Name, m.Runtime.Name(), networkMode, agentEnv)
 	if hostNetErr != nil {
 		slog.Warn("Start: refusing agent start: GCP metadata mode under host networking",
@@ -1829,6 +1842,9 @@ authDone:
 		roots, rootsErr = workspaceSourceRoots(explicitWorkspace, effectiveWorkspace, settings, projectDir)
 		if rootsErr != nil {
 			return nil, rootsErr
+		}
+		if legacy := legacyAgentWorkspaceRoot(projectDir, opts.Name, agentDir, explicitWorkspace || opts.SharedWorkspace); legacy != "" {
+			roots = append(roots, legacy)
 		}
 	}
 	resolvedWorkspace, err := runtime.ValidateWorkspaceSource(effectiveWorkspace, roots...)
@@ -2226,17 +2242,20 @@ authDone:
 	//
 	// The root was composed against the PRE-backend workspace. The derivation
 	// depends on the workspace, so when the backend actually changed it,
-	// recompose against the value RunConfig will use, exactly as the upstream
-	// broker-known-path derivation does on main: validatedWorktreeRepoRoot(
-	// candidate, ws) falling back to detectRepoRoot, with the record
-	// intersection re-applied (failing closed).
+	// recompose against the value RunConfig will use: validatedWorktreeRepoRoot(
+	// candidate, ws) falling back to the shared layout's workspace
+	// (composeSharedRepoRoot), with the record intersection re-applied
+	// (failing closed).
 	// On Kubernetes the runtime builds its workspace mounts from
 	// containerWorkspace and the NFS* fields above, not from repoRoot, and reads
 	// RepoRoot only to decide whether the shared workspace's in-project agents
 	// dir is kept out of the pod (see k8sWorkspaceAgentsExcluded).
 	if effectiveWorkspace != preBackendWorkspace && !emptyPerAgent {
+		// The backend placed the workspace on the shared tree: the candidate
+		// root is the shared layout's workspace, and the backend's path must
+		// be that one (ptone/scion#5826; composeSharedRepoRoot).
 		var reErr error
-		repoRoot, reErr = composeRepoRoot(opts.Name, candidateRepoRoot, repoRootRec, effectiveWorkspace, projectDir, explicitWorkspace, settings)
+		repoRoot, reErr = composeSharedRepoRoot(opts.Name, candidateRepoRoot, repoRootRec, effectiveWorkspace, projectDir, projectID, explicitWorkspace, settings)
 		if reErr != nil {
 			return nil, reErr
 		}
@@ -2943,6 +2962,27 @@ func resolvedClean(p string) string {
 	return filepath.Clean(p)
 }
 
+// removeAgentTokenFile removes the agent token file (and its temp file) from
+// the agent home, confined to the home (pkg/agenthome): a link there is
+// removed itself, never followed, and a linked directory component is
+// refused. A missing home or file is not an error.
+func removeAgentTokenFile(agentHome string) error {
+	home, err := agenthome.Open(agentHome)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { _ = home.Close() }()
+	for _, rel := range []string{".scion/scion-token.tmp", ".scion/scion-token"} {
+		if err := home.Remove(rel); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // removeStaleAuthCandidates removes the staged auth-candidates.json from the
 // agent home, confined to the home (pkg/agenthome): a link there is removed
 // itself and a linked directory component is refused. A missing home or file
@@ -2995,7 +3035,15 @@ func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string, settin
 	if explicit {
 		return "", nil
 	}
-	projectRoot := brokerProjectRoot(settings, projectDir)
+	return detectRepoRootFrom(effectiveWorkspace, projectDir, brokerProjectRoot(settings, projectDir))
+}
+
+// detectRepoRootFrom is detectRepoRoot for a non-explicit workspace with the
+// candidate project root already taken from the layout authority: the local
+// layout's (brokerProjectRoot), or, for a workspace a shared backend placed
+// on this host, the shared layout's (sharedLayoutWorkspaceRoot). Git only
+// verifies the candidate.
+func detectRepoRootFrom(effectiveWorkspace, projectDir, projectRoot string) (string, error) {
 	if effectiveWorkspace != "" {
 		ownGitDir := filepath.Join(effectiveWorkspace, ".git")
 		ownGitInfo, ownGitErr := os.Lstat(ownGitDir)
@@ -3150,21 +3198,30 @@ func boundedCommonGitDir(dir, ceiling string) (string, error) {
 	return filepath.Clean(commonDir), nil
 }
 
-// brokerProjectRoot is the project's own root directory as the broker knows
-// it, from paths only: the recorded workspace path of a project whose
-// configuration lives in the broker's project-configs tree, otherwise the
-// directory holding the project's .scion directory, otherwise the project
-// directory itself. A workspace_path setting is used only from the
-// project-configs tree: merged settings can include a settings file inside
-// the project, which a shared workspace mount exposes.
+// brokerProjectRoot is the project's workspace root on the local layout, as
+// the layout authority places it (localLayoutWorkspaceRoot) for the
+// project's own root directory as the broker knows it, from paths only: the
+// recorded workspace path of a project whose configuration lives in the
+// broker's project-configs tree, otherwise the directory holding the
+// project's .scion directory, otherwise the project directory itself. A
+// workspace_path setting is used only from the project-configs tree: merged
+// settings can include a settings file inside the project, which a shared
+// workspace mount exposes.
 func brokerProjectRoot(settings *config.VersionedSettings, projectDir string) string {
-	if settings != nil && settings.WorkspacePath != "" && isProjectConfigsPath(projectDir) {
-		return settings.WorkspacePath
+	// A shared project configuration (<ProjectRoot>/.scion): the candidate
+	// is the shared layout's project-level workspace, <ProjectRoot>/workspace,
+	// whatever the backend places on this host.
+	if config.IsSharedProjectConfigDir(projectDir) {
+		return filepath.Join(filepath.Dir(filepath.Clean(projectDir)), projectfs.ProjectWorkspaceDirName)
 	}
-	if filepath.Base(projectDir) == config.DotScion {
-		return filepath.Dir(projectDir)
+	own := projectDir
+	switch {
+	case settings != nil && settings.WorkspacePath != "" && isProjectConfigsPath(projectDir):
+		own = settings.WorkspacePath
+	case filepath.Base(projectDir) == config.DotScion:
+		own = filepath.Dir(projectDir)
 	}
-	return projectDir
+	return localLayoutWorkspaceRoot(own)
 }
 
 // projectRepoRoot returns the project's repository root: the nearest of
@@ -3610,23 +3667,17 @@ func refuseHostEnvForAgent(name string) bool {
 	return util.IsAgentRefusedHostEnvName(name)
 }
 
-// colocatedHubDevTokenForAgent returns opts.ColocatedHubDevToken when it may
-// become the agent's hub token: a broker-mode start, a non-empty
-// trustedHubEndpoint, and an agent hub endpoint (SCION_HUB_ENDPOINT and
-// SCION_HUB_URL in opts.Env, after all overrides) equal to it. Otherwise it
-// returns "", so a dev token is never sent to an endpoint other than the
-// co-located hub's.
-func colocatedHubDevTokenForAgent(opts api.StartOptions, trustedHubEndpoint string) string {
-	if !opts.BrokerMode || opts.ColocatedHubDevToken == "" || trustedHubEndpoint == "" {
+// noHubCredentialWarning returns the start warning for a hub-dispatched
+// agent (broker mode, with SCION_HUB_ENDPOINT or SCION_HUB_URL set) that has
+// no hub-issued token in opts.Env, or "" otherwise. It names no credential
+// value. The hub issues every agent a token unless its agent token service
+// is unavailable, so the warning points the operator at the hub log.
+func noHubCredentialWarning(opts api.StartOptions) string {
+	if !opts.BrokerMode || (opts.Env["SCION_HUB_ENDPOINT"] == "" && opts.Env["SCION_HUB_URL"] == "") || opts.Env["SCION_AUTH_TOKEN"] != "" {
 		return ""
 	}
-	if opts.Env["SCION_HUB_ENDPOINT"] != trustedHubEndpoint {
-		return ""
-	}
-	if hubURL, ok := opts.Env["SCION_HUB_URL"]; ok && hubURL != trustedHubEndpoint {
-		return ""
-	}
-	return opts.ColocatedHubDevToken
+	return fmt.Sprintf("Warning: the hub issued no agent token, so agent %s starts without a hub credential "+
+		"and cannot report its status to the hub or call it. Check the hub log: its agent token service may have failed to start.", opts.Name)
 }
 
 // expandConfigHubEndpoint returns the SCION_HUB_ENDPOINT value from a scion
