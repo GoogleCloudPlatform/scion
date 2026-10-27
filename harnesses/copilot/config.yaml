@@ -31,10 +31,13 @@ config_dir: .copilot
 skills_dir: .copilot/skills
 interrupt_key: C-c
 # Readiness and message delivery; see the authoring guide.
+# Copilot fires sessionStart only when the first prompt is submitted, not at
+# startup, so an agent started without a task never writes the ready marker
+# until a message is pasted: hook mode held its first message for the whole
+# timeout. delay keys readiness on the tmux session instead.
 ready:
-  strategy: hook
-  settle: 1.5s
-  timeout: 90s
+  strategy: delay
+  settle: 8s
 delivery:
   submit_keys: [Enter]
   extra_submits: 2
