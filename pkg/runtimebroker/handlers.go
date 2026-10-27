@@ -2007,7 +2007,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		case config.IsAgentStateConflict(err):
 			markAttemptFailed(http.StatusConflict, "failed to create agent")
 		case errors.Is(err, agent.ErrProjectShareNotMounted):
-			markAttemptFailed(http.StatusServiceUnavailable, projectShareNotMountedText())
+			markAttemptFailed(http.StatusServiceUnavailable, projectShareNotMountedText(err))
 		default:
 			markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
 		}
@@ -2106,7 +2106,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			// The start found no project storage share on this broker
 			// (the Kubernetes workspace leaves). err names the mount
 			// point and is logged above; the body names the fields.
-			writeError(w, http.StatusServiceUnavailable, ErrCodeProjectStorageUnavailable, projectShareNotMountedText(), nil)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeProjectStorageUnavailable, projectShareNotMountedText(err), nil)
 		default:
 			writeCreateRuntimeError(w, err)
 		}
@@ -4002,7 +4002,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to start agent: "+err.Error(), details)
 		case errors.Is(err, agent.ErrProjectShareNotMounted):
 			// As on create: err names the mount point and is logged above.
-			writeError(w, http.StatusServiceUnavailable, ErrCodeProjectStorageUnavailable, projectShareNotMountedText(), details)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeProjectStorageUnavailable, projectShareNotMountedText(err), details)
 		default:
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, runtimeOpError("start agent", err).Error(), details)
 		}
@@ -5200,7 +5200,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		}
 		if errors.Is(err, agent.ErrProjectShareNotMounted) {
 			// As on create: err names the mount point and is logged above.
-			writeError(w, http.StatusServiceUnavailable, ErrCodeProjectStorageUnavailable, projectShareNotMountedText(), details)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeProjectStorageUnavailable, projectShareNotMountedText(err), details)
 			return
 		}
 		if errors.Is(err, agent.ErrContainerNameInUse) {

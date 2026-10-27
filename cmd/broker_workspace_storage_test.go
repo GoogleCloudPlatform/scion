@@ -133,7 +133,12 @@ func TestBrokerSharedDirLayoutWarnings(t *testing.T) {
 	present := func(string) (os.FileInfo, error) { return nil, nil }
 	assert.Empty(t, brokerSharedDirLayoutWarnings(projectfs.Layout{Backend: projectfs.BackendLocal}, missing))
 	assert.Empty(t, brokerSharedDirLayoutWarnings(projectfs.Layout{Backend: projectfs.BackendNFS, Share: projectfs.Share{PVName: "pv"}}, missing))
-	got := brokerSharedDirLayoutWarnings(projectfs.Layout{Backend: projectfs.BackendNFS}, missing)
+	// No pv_name on the Layout's own nfs share: pods mount it inline, so
+	// no warning (the startup INFO line says so); the legacy split still
+	// needs its claim.
+	assert.Empty(t, brokerSharedDirLayoutWarnings(projectfs.Layout{Backend: projectfs.BackendNFS}, missing))
+	split := projectfs.Layout{Backend: projectfs.BackendLocal, SharedDirs: &projectfs.Layout{Backend: projectfs.BackendNFS}}
+	got := brokerSharedDirLayoutWarnings(split, missing)
 	require.Len(t, got, 1)
 	assert.Contains(t, got[0], "pv_name")
 	got = brokerSharedDirLayoutWarnings(projectfs.Layout{Backend: projectfs.BackendGKESharedVolume, HostBase: "/mnt/v"}, missing)

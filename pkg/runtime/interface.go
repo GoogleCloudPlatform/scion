@@ -466,9 +466,18 @@ type SharedDirRealization struct {
 	Backend string
 	// PVClaimName is the claim holding the share (the nfs share's pv_name,
 	// or the gke-shared-volume pv_claim_name). Empty means the share has no
-	// claim; buildPod must then fail closed rather than fall back to
-	// per-dir claims or an EmptyDir (design G5).
+	// claim; buildPod must then mount the dirs inline (Server, Export) or
+	// fail closed rather than fall back to per-dir claims or an EmptyDir
+	// (design G5).
 	PVClaimName string
+	// Server, Export and SubPathRoot are the nfs share's, set only when the
+	// shared dirs are on the Layout's own nfs share (not the transitional
+	// split). With no PVClaimName, buildPod then mounts each shared dir as
+	// an inline NFS volume of its server path; without them it fails
+	// closed.
+	Server      string
+	Export      string
+	SubPathRoot string
 	// ProjectID is the hub project ID the subPaths were resolved for;
 	// buildPod checks every subPath's project component against it.
 	ProjectID string
