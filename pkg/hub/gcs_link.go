@@ -70,9 +70,10 @@ const (
 
 	// gcsLinksExperiment is the registered experiment (pkg/experiments) that
 	// gates both the web linkifier (LayerWeb) and this endpoint (LayerServer;
-	// ptone/scion#2545). The hub decides hub behaviour (AGENTS.md "Experimental
-	// features"): this constant is what handleGCSObject's step 1 actually
-	// checks, and the web gate only mirrors it.
+	// ptone/scion#2545). The hub decides hub behaviour
+	// (docs-site/src/content/docs/reference/experiments.md): this constant
+	// is what handleGCSObject's step 1 actually checks, and the web gate
+	// only mirrors it.
 	gcsLinksExperiment = "web.gcs_links"
 )
 
