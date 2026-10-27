@@ -21,10 +21,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
@@ -35,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -57,6 +60,7 @@ type policyInstance struct {
 	// instances share no project directory.
 	projectRoot string
 	projectID   string
+	clientset   *k8sfake.Clientset
 	mu          sync.Mutex
 	pvcs        []*corev1.PersistentVolumeClaim
 	pods        []*corev1.Pod
@@ -92,11 +96,20 @@ func newPolicyInstance(t *testing.T, inst *config.V1RuntimeBrokerInstanceConfig)
 		t.Fatal(err)
 	}
 	clientset := k8sfake.NewClientset()
+	p.clientset = clientset
 	clientset.PrependReactor("create", "persistentvolumeclaims", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+		pvc := a.(k8stesting.CreateAction).GetObject().(*corev1.PersistentVolumeClaim).DeepCopy()
 		p.mu.Lock()
-		p.pvcs = append(p.pvcs, a.(k8stesting.CreateAction).GetObject().(*corev1.PersistentVolumeClaim).DeepCopy())
+		p.pvcs = append(p.pvcs, pvc.DeepCopy())
 		p.mu.Unlock()
-		return false, nil, nil
+		// Act as a provisioner that binds at once: the claim is stored
+		// Bound, so the runtime's claim check before the pod passes
+		// without waiting for it.
+		pvc.Status.Phase = corev1.ClaimBound
+		if err := clientset.Tracker().Create(a.GetResource(), pvc, a.GetNamespace()); err != nil {
+			return true, nil, err
+		}
+		return true, pvc, nil
 	})
 	clientset.PrependReactor("create", "pods", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
 		p.mu.Lock()
@@ -195,6 +208,37 @@ func pvcClass(pvc *corev1.PersistentVolumeClaim) string {
 	return *pvc.Spec.StorageClassName
 }
 
+// policySharedDirClaim is the claim of the shared dir every start carries
+// ("scratch"), named after the project directory ("project").
+const policySharedDirClaim = "scion-shared-project-scratch"
+
+// seedSharedDirClaim adds the project's shared-dir claim, Bound, to the
+// instance's fake API, as an existing claim. A start then reuses it and
+// creates none, so tests about the pod need no storage class. It writes
+// through the fake's tracker, so it is not recorded as a PVC create.
+func (p *policyInstance) seedSharedDirClaim(t *testing.T) {
+	t.Helper()
+	err := p.clientset.Tracker().Add(&corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Name: policySharedDirClaim, Namespace: "agents",
+			Labels: projectkeys.ProjectIDLabels(p.projectID)},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	})
+	if err != nil {
+		t.Fatalf("seeding claim agents/%s: %v", policySharedDirClaim, err)
+	}
+}
+
+// insertAfterLine returns s with extra inserted after its first line equal
+// to line (both without the trailing newline). It fails the test when s has
+// no such line.
+func insertAfterLine(t *testing.T, s, line, extra string) string {
+	t.Helper()
+	if !strings.Contains(s, line+"\n") {
+		t.Fatalf("settings have no line %q", line)
+	}
+	return strings.Replace(s, line+"\n", line+"\n"+extra+"\n", 1)
+}
+
 func readPolicyFixture(t *testing.T, name string) string {
 	t.Helper()
 	b, err := os.ReadFile(filepath.Join("..", "config", "testdata", "profile_conversion", "flat_40gi", name))
@@ -210,8 +254,15 @@ func readPolicyFixture(t *testing.T, name string) string {
 // 40Gi. Loaded strictly and served by the flat instance, the agent's
 // shared-dir PVC is 40Gi, as the legacy profile's is (the runtime default
 // would be 10Gi).
+//
+// A new shared-dir PVC needs a storage class, which the example does not
+// set, so both the runtime entry and the instance get one here.
 func TestFlatPolicy_Flat40Gi(t *testing.T) {
-	writePolicyHome(t, readPolicyFixture(t, "input.yaml")+readPolicyFixture(t, "want_instances.yaml"))
+	legacySettings := insertAfterLine(t, readPolicyFixture(t, "input.yaml"),
+		"    shared_dir_size: 20Gi", "    shared_dir_storage_class: legacy-rwx")
+	flatSettings := insertAfterLine(t, readPolicyFixture(t, "want_instances.yaml"),
+		"          shared_dir_size: 40Gi", "          shared_dir_storage_class: flat-rwx")
+	writePolicyHome(t, legacySettings+flatSettings)
 	instances, err := config.LoadRuntimeBrokerInstances("")
 	if err != nil {
 		t.Fatal(err)
@@ -270,6 +321,7 @@ server:
         runtime_target:
           type: kubernetes
           namespace: agents
+          shared_dir_storage_class: b-rwx
           shared_dir_size: 20Gi
 `)
 	instances, err := config.LoadRuntimeBrokerInstances("")
@@ -310,8 +362,8 @@ server:
 	if pvc := a.onlyPVC(t); pvcSize(pvc) != "40Gi" || pvcClass(pvc) != "a-rwx" {
 		t.Errorf("instance k8s-a PVC: size %s class %q, want 40Gi a-rwx", pvcSize(pvc), pvcClass(pvc))
 	}
-	if pvc := b.onlyPVC(t); pvcSize(pvc) != "20Gi" || pvcClass(pvc) != "" {
-		t.Errorf("instance k8s-b PVC: size %s class %q, want 20Gi and no class", pvcSize(pvc), pvcClass(pvc))
+	if pvc := b.onlyPVC(t); pvcSize(pvc) != "20Gi" || pvcClass(pvc) != "b-rwx" {
+		t.Errorf("instance k8s-b PVC: size %s class %q, want 20Gi b-rwx", pvcSize(pvc), pvcClass(pvc))
 	}
 
 	// Each server's own decisions read its own policy too.
