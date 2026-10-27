@@ -130,23 +130,34 @@ package cmd
 
 func h(c *ent.Client) { _ = c.Driver().(*entsql.Driver).DB() }
 EOF
-  out="$(cd "$tmp" && scan pkg cmd)"; rc=$?
+  out="$(cd "$tmp" && scan pkg cmd)"
+  rc=$?
   local fail=0
-  expect() { # <desc> <cond>
-    if eval "$2"; then echo "  ok: $1"; else echo "  FAIL: $1"; fail=1; fi
+  # expect <desc> <command...>: the check passes when the command succeeds.
+  # expect_not <desc> <command...>: it passes when the command fails.
+  expect() {
+    local desc="$1"
+    shift
+    if "$@"; then echo "  ok: ${desc}"; else echo "  FAIL: ${desc}"; fail=1; fi
   }
-  expect "scan returns 0 (violations are printed, not returned)" '[[ $rc -eq 0 ]]'
-  expect "allowed SQLDriver body is not flagged" '! grep -q "client.go:4:" <<<"$out"'
-  expect "another func in the allowed file is flagged" 'grep -q "client.go:11:" <<<"$out"'
-  expect "comment line is not flagged" '! grep -q "clean.go" <<<"$out"'
-  expect "non-test violation is flagged" 'grep -q "pkg/store/bad.go:3:" <<<"$out"'
-  expect "_test.go violation is flagged" 'grep -q "cmd/bad_test.go:3:" <<<"$out"'
-  expect "exactly 3 violations" '[[ $(grep -c . <<<"$out") -eq 3 ]]'
+  expect_not() {
+    local desc="$1"
+    shift
+    if "$@"; then echo "  FAIL: ${desc}"; fail=1; else echo "  ok: ${desc}"; fi
+  }
+  expect "scan returns 0 (violations are printed, not returned)" test "$rc" -eq 0
+  expect_not "allowed SQLDriver body is not flagged" grep -q "client.go:4:" <<<"$out"
+  expect "another func in the allowed file is flagged" grep -q "client.go:11:" <<<"$out"
+  expect_not "comment line is not flagged" grep -q "clean.go" <<<"$out"
+  expect "non-test violation is flagged" grep -q "pkg/store/bad.go:3:" <<<"$out"
+  expect "_test.go violation is flagged" grep -q "cmd/bad_test.go:3:" <<<"$out"
+  expect "exactly 3 violations" test "$(grep -c . <<<"$out")" -eq 3
   rm -rf "$tmp/cmd"
   set +e
-  (cd "$tmp" && scan pkg cmd >/dev/null 2>&1); rc=$?
+  (cd "$tmp" && scan pkg cmd >/dev/null 2>&1)
+  rc=$?
   set -e
-  expect "missing scan root exits 4" '[[ $rc -eq 4 ]]'
+  expect "missing scan root exits 4" test "$rc" -eq 4
   if [[ $fail -ne 0 ]]; then
     echo "${name}: self-test FAILED"
     return 1
