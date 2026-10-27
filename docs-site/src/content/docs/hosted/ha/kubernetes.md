@@ -791,7 +791,7 @@ Inline volumes carry **no NFS mount options**: there is no `nconnect`, and the N
 - The Runtime Broker's writes must not be mapped to an anonymous user that cannot write in `<subpath_root>/<project-id>` (check the export's `root_squash`/`all_squash` settings against the user the Runtime Broker runs as).
 - Directory modes are as described above: missing parents get `2755`, and new directories get `2775` (setgid) with a default ACL that gives the group write access.
 
-If the export is not mounted on the Runtime Broker, or the Runtime Broker is not allowed to create a directory, the agent start is refused before the Pod is created. The error names the directory and says to mount the export writably. With a `pv_name`, the kubelet still creates the directory in that case, as described above. `scion doctor` reports a missing export mount as a failure when the default runtime is Kubernetes and the share has no `pv_name`.
+If the export is not mounted on the Runtime Broker, or the Runtime Broker is not allowed to create a directory, the agent start is refused before the Pod is created. The error names the directory and says to mount the export writably. With a `pv_name`, a directory the Runtime Broker is not allowed to create is still left to the kubelet, as described above. `scion doctor` reports a missing export mount as a failure when the default runtime is Kubernetes and the share has no `pv_name`.
 
 Also refused in inline mode, with a message that says what to change:
 
