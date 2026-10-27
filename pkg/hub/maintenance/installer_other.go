@@ -27,3 +27,22 @@ func signalSelf() error {
 func fileOwnerUID(os.FileInfo) (int, bool) { return 0, false }
 
 func isWritableDir(string) bool { return false }
+
+// The symlink installer (installer_symlink.go) is unix-only. Detect returns
+// the unsupported installer before it would construct one off Linux, and
+// the sudo-install strategy is never selected here either; these stubs
+// only keep the cross-platform callers compiling.
+
+// symlinkInstaller off unix is an unsupported installer.
+type symlinkInstaller struct{ unsupportedInstaller }
+
+func newSymlinkInstaller(DetectOptions) *symlinkInstaller {
+	return &symlinkInstaller{unsupportedInstaller{status: InstallerStatus{
+		Strategy: StrategyUnsupported,
+		Reason:   "the symlink installer is only available on unix",
+	}}}
+}
+
+func copyExecutable(string, string) error {
+	return errors.New("installing a binary is not supported on this platform")
+}
