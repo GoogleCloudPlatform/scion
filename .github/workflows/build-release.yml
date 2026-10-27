@@ -84,14 +84,13 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6
         with:
           go-version-file: 'go.mod'
-          cache: true
+          cache: false  # release artifacts never restore a cache (zizmor cache-poisoning)
 
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6
         with:
           node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: 'web/package-lock.json'
+          package-manager-cache: false  # release artifacts never restore a cache (zizmor cache-poisoning)
 
       - name: Build Web UI
         working-directory: ./web
@@ -224,7 +223,7 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6
         with:
           go-version-file: '${{ matrix.module_dir }}/go.mod'
-          cache: true
+          cache: false  # release artifacts never restore a cache (zizmor cache-poisoning)
 
       - name: Build plugin binary
         env:
