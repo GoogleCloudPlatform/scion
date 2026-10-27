@@ -710,6 +710,61 @@ func (l *listCursorSealer) Open(sealed, binding string) (string, error) {
 	return "", errInvalidCursor
 }
 
+// listPositionSealDomain and listPositionPrefix are SealPosition's AAD
+// domain and wire marker. Both differ from the list-cursor scheme's, so a
+// position cursor never opens as a list cursor and a list cursor never
+// opens as a position cursor, although both use the same key.
+const (
+	listPositionSealDomain = "scion-list-position-v1:"
+	listPositionPrefix     = "p1."
+)
+
+// SealPosition seals an opaque resume position for a list whose position
+// does not fit authorizedList's "created,id" form (for example a sort
+// value and a conversation key). It authenticates position and binds it to
+// binding exactly as Seal does, under its own AAD domain and prefix. The
+// caller validates the position OpenPosition returns: unlike Open, it does
+// not check the plaintext's shape. On a nil sealer it fails closed with
+// errListCursorSealerUnavailable.
+func (l *listCursorSealer) SealPosition(position, binding string) (string, error) {
+	if l == nil {
+		return "", errListCursorSealerUnavailable
+	}
+	nonce := make([]byte, l.aead.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		panic("list cursor sealer: generating nonce: " + err.Error())
+	}
+	ciphertext := l.aead.Seal(nil, nonce, []byte(position), []byte(listPositionSealDomain+binding))
+	return listPositionPrefix + base64.RawURLEncoding.EncodeToString(append(nonce, ciphertext...)), nil
+}
+
+// OpenPosition recovers the position SealPosition sealed under binding. Any
+// failure (an empty or unrecognized cursor, malformed base64, truncation, a
+// flipped byte, another binding, a list cursor from Seal, another key, or a
+// nil sealer) is errInvalidCursor.
+func (l *listCursorSealer) OpenPosition(sealed, binding string) (string, error) {
+	if l == nil {
+		return "", errInvalidCursor
+	}
+	body, ok := strings.CutPrefix(sealed, listPositionPrefix)
+	if !ok {
+		return "", errInvalidCursor
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(body)
+	if err != nil {
+		return "", errInvalidCursor
+	}
+	nonceSize := l.aead.NonceSize()
+	if len(raw) < nonceSize {
+		return "", errInvalidCursor
+	}
+	plaintext, err := l.aead.Open(nil, raw[:nonceSize], raw[nonceSize:], []byte(listPositionSealDomain+binding))
+	if err != nil {
+		return "", errInvalidCursor
+	}
+	return string(plaintext), nil
+}
+
 // openAndValidateListCursor turns a raw, client-supplied query-string cursor
 // into the plaintext cursor the existing store/authorizedList plumbing
 // expects. An empty cursor (a first-page request) is always valid and
