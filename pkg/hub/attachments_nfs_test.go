@@ -299,8 +299,8 @@ func saveLegacyAttachment(t *testing.T, srv *Server, projectID, name, content st
 // TestStageChatAttachments_LegacyOnNFS_OnlyWholeProjectAudience: on a shared
 // (NFS) scratchpad every agent of the project reads the copy, so a legacy
 // attachment is staged only for a project topic thread. In a direct
-// conversation it is not copied there; the send carries the hub-local path,
-// as before shared backends were staged.
+// conversation it is not copied there and no path is listed; the agent is
+// told it was not delivered.
 func TestStageChatAttachments_LegacyOnNFS_OnlyWholeProjectAudience(t *testing.T) {
 	srv, project, hostBase := nfsAttachmentServer(t)
 	ctx := context.Background()
@@ -312,14 +312,16 @@ func TestStageChatAttachments_LegacyOnNFS_OnlyWholeProjectAudience(t *testing.T)
 	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{ID: topicID, ProjectID: project.ID, Name: "t", CreatedBy: "u1", CreatedAt: time.Now().UTC()}))
 
 	dmRef := saveLegacyAttachment(t, srv, project.ID, "dm.txt", "dm bytes")
-	paths, mounts := srv.stageChatAttachments(ctx, "dm:user:u1:agent:a1", project.ID, api.NewUUID(), []AttachmentRef{dmRef})
-	require.Len(t, paths, 1)
-	assert.NotContains(t, paths[0], "/scion-volumes/", "a DM legacy attachment gets the hub-local path, not a scratchpad copy")
+	paths, mounts, notDelivered := srv.stageChatAttachments(ctx, "dm:user:u1:agent:a1", project.ID, api.NewUUID(), []AttachmentRef{dmRef})
+	assert.Empty(t, paths, "a DM legacy attachment lists no path")
 	assert.Empty(t, mounts)
+	require.Len(t, notDelivered, 1)
+	assert.Contains(t, notDelivered[0], "Attachment not delivered: dm.txt")
 	assert.NoDirExists(t, filepath.Join(leaf, ".attachments", "_webchat", dmRef.ID))
 
 	topicRef := saveLegacyAttachment(t, srv, project.ID, "topic.txt", "topic bytes")
-	paths, mounts = srv.stageChatAttachments(ctx, topicID, project.ID, api.NewUUID(), []AttachmentRef{topicRef})
+	paths, mounts, notDelivered = srv.stageChatAttachments(ctx, topicID, project.ID, api.NewUUID(), []AttachmentRef{topicRef})
+	assert.Empty(t, notDelivered)
 	require.Len(t, paths, 1)
 	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat/"+topicRef.ID+"/topic.txt", paths[0])
 	assert.Equal(t, attachmentSharedDirName, mounts[paths[0]])

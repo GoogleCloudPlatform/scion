@@ -25,9 +25,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -347,18 +349,33 @@ func TestResolveAttachmentStaging_UnknownProject(t *testing.T) {
 	assert.Nil(t, srv.resolveAttachmentStaging(context.Background(), ""))
 }
 
-// TestStageChatAttachments_LegacyOnLocal_DMStillStaged: on the local backend
-// (the workstation) the scratchpad copy is the recipient's only way to read
-// a legacy attachment, so it is staged for a direct conversation too (the
-// documented workstation limitation, unchanged).
-func TestStageChatAttachments_LegacyOnLocal_DMStillStaged(t *testing.T) {
+// TestStageChatAttachments_LegacyOnLocal_DMNotStaged: on the local backend
+// a legacy attachment in a direct conversation is not copied into the
+// scratchpad either, and no path is listed: the agent is told it was not
+// delivered. A project topic thread still gets the copy.
+func TestStageChatAttachments_LegacyOnLocal_DMNotStaged(t *testing.T) {
 	srv, _, project, sharedDir := agentAttachmentServer(t)
+	ctx := context.Background()
 	ref := saveLegacyAttachment(t, srv, project.ID, "dm.txt", "dm bytes")
-	paths, mounts := srv.stageChatAttachments(context.Background(), "dm:user:u1:agent:a1", project.ID, api.NewUUID(), []AttachmentRef{ref})
+	paths, mounts, notDelivered := srv.stageChatAttachments(ctx, "dm:user:u1:agent:a1", project.ID, api.NewUUID(), []AttachmentRef{ref})
+	assert.Empty(t, paths)
+	assert.Empty(t, mounts)
+	require.Len(t, notDelivered, 1)
+	assert.Equal(t, messaging.AttachmentNotDeliveredLine("dm.txt", int64(len("dm bytes")), attachmentReasonNeedsArtifacts), notDelivered[0])
+	assert.NoDirExists(t, filepath.Join(sharedDir, ".attachments", "_webchat", ref.ID))
+
+	srv.mu.RLock()
+	wcs := srv.webChatStore
+	srv.mu.RUnlock()
+	topicID := api.NewUUID()
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{ID: topicID, ProjectID: project.ID, Name: "t", CreatedBy: "u1", CreatedAt: time.Now().UTC()}))
+	topicRef := saveLegacyAttachment(t, srv, project.ID, "topic.txt", "topic bytes")
+	paths, mounts, notDelivered = srv.stageChatAttachments(ctx, topicID, project.ID, api.NewUUID(), []AttachmentRef{topicRef})
+	assert.Empty(t, notDelivered)
 	require.Len(t, paths, 1)
-	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat/"+ref.ID+"/dm.txt", paths[0])
+	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat/"+topicRef.ID+"/topic.txt", paths[0])
 	assert.Equal(t, attachmentSharedDirName, mounts[paths[0]])
-	got, err := os.ReadFile(filepath.Join(sharedDir, ".attachments", "_webchat", ref.ID, "dm.txt"))
+	got, err := os.ReadFile(filepath.Join(sharedDir, ".attachments", "_webchat", topicRef.ID, "topic.txt"))
 	require.NoError(t, err)
-	assert.Equal(t, "dm bytes", string(got))
+	assert.Equal(t, "topic bytes", string(got))
 }

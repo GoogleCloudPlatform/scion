@@ -65,7 +65,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/google/uuid"
@@ -1259,51 +1258,44 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 // stageChatAttachments makes a message's attachments visible to agents,
 // after the message is authorized and stored, and returns the entries for
 // the message's legacy attachment list with, for each entry that is a path
-// in a shared dir, that dir's name (StructuredMessage.AttachmentMounts).
+// in a shared dir, that dir's name (StructuredMessage.AttachmentMounts),
+// and one line per attachment that is not delivered to agents
+// (notDelivered), for the caller to add to the text agents receive.
 //
 // The hub's attachment stores (the artifact service, the hub-private
-// AttachmentStore) are not mounted into agent containers, so each file is
-// projected into the project's scratchpad shared dir, resolved through the
-// layout authority (resolveAttachmentStaging, ptone/scion#5827):
+// AttachmentStore) are not mounted into agent containers. A copy in the
+// project's scratchpad shared dir, resolved through the layout authority
+// (resolveAttachmentStaging, ptone/scion#5827), is readable by every agent
+// that mounts it, so a copy is made only when the message's read audience
+// is the whole project (a project topic thread, key), on every backend:
 //   - an attachment stored as an artifact while hub.attachment_artifacts is
 //     on (read now, at send time) reaches the recipient by delivery into its
-//     home and adds no legacy entry. It is projected only when the message's
-//     read audience is the whole project (a project topic thread, key):
-//     a projection is readable by every agent that mounts the scratchpad,
-//     so a direct or group conversation, whose readers are its
-//     participants, gets inbox delivery only. The projection is recorded on
+//     home and adds no legacy entry. For a whole-project audience it is
+//     also projected for sibling agents; the projection is recorded on
 //     refs[i] (projectedPath, projectedMount) and listed after the inbox
 //     path;
 //   - an attachment stored as an artifact (uploaded while the experiment
 //     was on) and sent while it is off is still delivered into the home;
-//     for a project topic thread it is also staged from its stored bytes
-//     and listed as a legacy entry, and otherwise it gets no scratchpad
-//     copy;
-//   - an AttachmentStore attachment is staged from the hub-private store.
-//     On a shared backend it is staged only when the whole project reads
-//     the message; on the local backend for every send. When it is not
-//     staged the hub-local path is sent, which host-process agents can
-//     still read.
-//
-// Without artifact delivery (the last case) staging is the only way a
-// containerised agent reads the file. On the local backend it therefore
-// happens for every send, so on a workstation hub a DM's attachment is
-// readable by the project's other agents: a known limitation that ends
-// when the hub stores attachments as artifacts.
+//     for a whole-project audience it is also staged from its stored bytes
+//     and listed as a legacy entry;
+//   - an AttachmentStore attachment has no delivery into the home. For a
+//     whole-project audience it is staged from the hub-private store (or,
+//     when no scratchpad is reachable, its hub-local path is listed, which
+//     host-process agents read). For any other audience (a direct or group
+//     conversation) it is not delivered to agents: no copy is made and no
+//     path is listed, and notDelivered gets a line for it.
 //
 // key is the message's thread key and messageID the stored message the
 // attachments are bound to.
-func (s *Server) stageChatAttachments(ctx context.Context, key, projectID, messageID string, attachmentRefs []AttachmentRef) ([]string, map[string]string) {
+func (s *Server) stageChatAttachments(ctx context.Context, key, projectID, messageID string, attachmentRefs []AttachmentRef) (paths []string, mounts map[string]string, notDelivered []string) {
 	if len(attachmentRefs) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	s.mu.RLock()
 	as := s.attachmentStore
 	wcs := s.webChatStore
 	s.mu.RUnlock()
 	localAS, _ := as.(*LocalDiskAttachmentStore)
-	var paths []string
-	var mounts map[string]string
 	addStaged := func(p string, staging *attachmentStaging) {
 		paths = append(paths, p)
 		if mounts == nil {
@@ -1355,6 +1347,15 @@ func (s *Server) stageChatAttachments(ctx context.Context, key, projectID, messa
 		if localAS == nil {
 			continue
 		}
+		// Without delivery into the home, a copy in the scratchpad would be
+		// the recipient's only way to read the file, and every agent that
+		// mounts the scratchpad would read it too. It is made only for a
+		// whole-project audience; any other audience is told the file was
+		// not delivered.
+		if !wholeProject() {
+			notDelivered = append(notDelivered, messaging.AttachmentNotDeliveredLine(ref.Name, ref.Size, attachmentReasonNeedsArtifacts))
+			continue
+		}
 		// A file lives under the project it was uploaded to, which is not
 		// this message's project when it was uploaded from a DM — those
 		// uploads carry no project at all.
@@ -1365,17 +1366,6 @@ func (s *Server) stageChatAttachments(ctx context.Context, key, projectID, messa
 			}
 		}
 		hostPath := localAS.FilePath(storedIn, ref.ID, ref.Name)
-		// On a shared backend (NFS) every agent of the project reads the
-		// scratchpad, so a legacy attachment is copied there only when the
-		// whole project reads the message, as for artifact attachments;
-		// otherwise it is left out as it was before shared backends were
-		// staged at all. On the local backend (the workstation) the copy is
-		// the recipient's only way to read the file, so it is staged for
-		// every send: the documented workstation limitation.
-		if staging != nil && staging.resolved.Backend != projectfs.BackendLocal && !wholeProject() {
-			paths = append(paths, hostPath)
-			continue
-		}
 		if staging != nil {
 			staged, err := staging.stageFrom(func() (io.ReadCloser, error) {
 				rc, _, err := localAS.Get(ctx, storedIn, ref.ID)
@@ -1390,7 +1380,23 @@ func (s *Server) stageChatAttachments(ctx context.Context, key, projectID, messa
 		}
 		paths = append(paths, hostPath)
 	}
-	return paths, mounts
+	return paths, mounts, notDelivered
+}
+
+// attachmentReasonNeedsArtifacts is the reason in the not-delivered line of
+// an attachment in a direct or group conversation that is not stored as an
+// artifact: such attachments reach agents only through delivery into their
+// home.
+const attachmentReasonNeedsArtifacts = "attachments in direct and group conversations are delivered to agents only when attachment artifacts are on"
+
+// appendNotDeliveredLines appends lines to text after a blank line, as the
+// delivery plan's lines are (messaging.ApplyAttachmentPlanLegacy). text is
+// returned unchanged when there are no lines.
+func appendNotDeliveredLines(text string, lines []string) string {
+	if len(lines) == 0 {
+		return text
+	}
+	return text + "\n\n" + strings.Join(lines, "\n")
 }
 
 // resolveReplyTarget resolves the reply-to agent override (nc-reply-recipient)
@@ -1967,9 +1973,14 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 	// Attachment files are projected into the project's scratchpad only
 	// now: every check that can refuse the send (authorization, validation,
 	// wake, conversation resolution, persistence) has passed.
-	stagedPaths, stagedMounts := s.stageChatAttachments(ctx, key, projectID, storeMsg.ID, attachmentRefs)
+	stagedPaths, stagedMounts, notDelivered := s.stageChatAttachments(ctx, key, projectID, storeMsg.ID, attachmentRefs)
 	msg.Attachments = append(msg.Attachments, stagedPaths...)
 	msg.AttachmentMounts = stagedMounts
+	// Attachments not delivered to agents are named in the text every
+	// recipient agent receives (the primary and each @mention), never in
+	// the stored message.
+	agentContent = appendNotDeliveredLines(agentContent, notDelivered)
+	msg.Msg = agentContent
 	// The bound ones are delivered into the agent's home (ptone/scion#4596),
 	// with their scratchpad projection listed after the inbox path.
 	msg.AttachmentDeliveries = attachmentDeliveries(storeMsg.ID, attachmentRefs)
