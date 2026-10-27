@@ -182,3 +182,45 @@ func TestSharedDirStorageStartupLogWanted(t *testing.T) {
 		})
 	}
 }
+
+// TestLogK8sNFSVolumeStartup: with a Kubernetes default runtime and nfs
+// project storage whose share has no pv_name, startup logs that pods
+// mount the share inline (and, with nfs homes, that their starts are
+// refused); with a pv_name, another runtime, or another backend it logs
+// nothing.
+func TestLogK8sNFSVolumeStartup(t *testing.T) {
+	logLines := func(gs *config.VersionedSettings) []string {
+		var lines []string
+		logK8sNFSVolumeStartup(gs, func(format string, args ...interface{}) {
+			lines = append(lines, fmt.Sprintf(format, args...))
+		})
+		return lines
+	}
+	settings := func(rtType, pvName, homes string) *config.VersionedSettings {
+		return &config.VersionedSettings{
+			ActiveProfile: "default",
+			Profiles:      map[string]config.V1ProfileConfig{"default": {Runtime: "rt"}},
+			Runtimes:      map[string]config.V1RuntimeConfig{"rt": {Type: rtType}},
+			Server: &config.V1ServerConfig{ProjectStorage: &config.V1ProjectStorageConfig{
+				Backend: "nfs",
+				Homes:   homes,
+				NFS: &config.V1NFSConfig{
+					MountRoot: "/srv",
+					Shares:    []config.V1NFSShare{{ID: "s1", Server: "192.0.2.1", Export: "/e", PVName: pvName}},
+				},
+			}},
+		}
+	}
+	inline := logLines(settings("kubernetes", "", ""))
+	if assert.Len(t, inline, 1, "%v", inline) {
+		assert.Contains(t, inline[0], "k8s NFS volumes: inline, by server path; no mount options; set shares[0].pv_name to use an operator PV")
+	}
+	homes := logLines(settings("kubernetes", "", "nfs"))
+	if assert.Len(t, homes, 2, "%v", homes) {
+		assert.Contains(t, homes[1], "home_storage nfs")
+		assert.Contains(t, homes[1], "refused")
+	}
+	assert.Empty(t, logLines(settings("kubernetes", "pv", "")), "a pv_name share uses the operator PV")
+	assert.Empty(t, logLines(settings("docker", "", "")), "other runtimes do not mount pods")
+	assert.Empty(t, logLines(nil))
+}

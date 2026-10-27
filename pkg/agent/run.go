@@ -2036,6 +2036,7 @@ authDone:
 	nfsUID := 0
 	nfsGID := 0
 	nfsPVClaimName := ""
+	var nfsPodShare runtime.NFSPodShare
 	nfsSubPath := ""
 	nfsSubPathRoot := ""
 	nfsShareServer := ""
@@ -2125,12 +2126,15 @@ authDone:
 			if err != nil {
 				return nil, fmt.Errorf("realize workspace backend %q: %w", backend.Name(), err)
 			}
+			// The share the pod mounts the workspace from: its claim, or
+			// inline by server and export when it has no pv_name.
+			podShare := runtime.NFSPodShare{ClaimName: mount.PVClaimName, Server: mount.NFSServer, Export: mount.NFSExportPath}
 			// Create the workspace subPath directory before the pod exists,
 			// so the kubelet does not have to (ptone/scion#2530). Shared
 			// dirs are created by resolveSharedDirs above, on the shared-dir
 			// Layout, never here, so no shared-dir names are passed to the
 			// workspace leaf helpers.
-			if agentDirName != "" && mount.PVClaimName != "" {
+			if agentDirName != "" && podShare.Mountable() {
 				if keep, reason := nfsKeepSharedCheckout(opts.FreshProvision, agentDir, resolvedWorkspace, agentDirName); keep {
 					// The agent keeps the layout and mode it had before
 					// ptone/scion#3998, so its work stays where it is.
@@ -2148,22 +2152,23 @@ authDone:
 			if emptyAgentDirName != "" {
 				// Empty-per-agent: only the agent's own directory is ever
 				// mounted, never the project's workspace path resolved
-				// above. Without a PV claim the pod could not mount it, so
-				// stop instead of falling back to the project's path.
-				if mount.PVClaimName == "" {
+				// above. When the pod cannot mount the share (no claim and
+				// no inline server and export), stop instead of falling
+				// back to the project's path.
+				if !podShare.Mountable() {
 					return nil, errEmptyPerAgentNFSNoClaim
 				}
-				nfsWorkspacePreCreated, ownDirCreated, err = ensureNFSAgentWorkspaceLeafClaim(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, nil, emptyAgentDirName)
+				nfsWorkspacePreCreated, ownDirCreated, err = ensureNFSAgentWorkspaceLeafClaim(m.Runtime.Name(), projectID, resolvedWorkspace, podShare, nil, emptyAgentDirName)
 				ownDirName = emptyAgentDirName
 				nfsAgentDirName = emptyAgentDirName
 				nfsAgentDirEmpty = true
-			} else if agentDirName != "" && mount.PVClaimName != "" {
-				nfsWorkspacePreCreated, ownDirCreated, err = ensureNFSAgentWorkspaceLeafClaim(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, nil, agentDirName)
+			} else if agentDirName != "" && podShare.Mountable() {
+				nfsWorkspacePreCreated, ownDirCreated, err = ensureNFSAgentWorkspaceLeafClaim(m.Runtime.Name(), projectID, resolvedWorkspace, podShare, nil, agentDirName)
 				ownDirName = agentDirName
 				nfsAgentDirName = agentDirName
 				nfsAgentBranch = agentBranch
 			} else {
-				nfsWorkspacePreCreated, err = ensureNFSWorkspaceLeaf(m.Runtime.Name(), projectID, resolvedWorkspace, mount.PVClaimName, nil)
+				nfsWorkspacePreCreated, err = ensureNFSWorkspaceLeaf(m.Runtime.Name(), projectID, resolvedWorkspace, podShare, nil)
 			}
 			// A directory this start created is marked even when the leaf
 			// helper then failed on a later directory, before that failure
@@ -2183,8 +2188,8 @@ authDone:
 			if nfsAgentDirName != "" && !nfsAgentDirEmpty {
 				recordNFSAgentDir(agentDir, opts.Name)
 			}
-			if worktreeName != "" && mount.PVClaimName != "" {
-				worktreePreCreated, err := ensureNFSWorktreeLeaf(m.Runtime.Name(), resolvedWorkspace, mount.PVClaimName, worktreeName)
+			if worktreeName != "" && podShare.Mountable() {
+				worktreePreCreated, err := ensureNFSWorktreeLeaf(m.Runtime.Name(), resolvedWorkspace, podShare, worktreeName)
 				if err != nil {
 					return nil, err
 				}
@@ -2210,6 +2215,7 @@ authDone:
 				containerWorkspace = runtime.NFSWorktreeContainerPath(nfsWorktreeName)
 			}
 			nfsPVClaimName = mount.PVClaimName
+			nfsPodShare = podShare
 			nfsSubPath = mount.SubPath
 			if settings.Server.EffectiveWorkspaceStorage().NFS != nil {
 				nfsSubPathRoot = settings.Server.EffectiveWorkspaceStorage().NFS.SubPathRoot
@@ -2284,7 +2290,7 @@ authDone:
 	workspacePlacement := workspacePlacementFor(workspacePlacementInput{
 		Backend:       workspaceBackendName,
 		Runtime:       m.Runtime.Name(),
-		PVClaimName:   nfsPVClaimName,
+		Share:         nfsPodShare,
 		ClonePerAgent: opts.GitClone != nil && store.ResolveWorkspaceSharingMode(opts.Env["SCION_WORKSPACE_MODE"]) == store.SharingModeClonePerAgent,
 		AgentDirName:  nfsAgentDirName,
 	})
@@ -2459,7 +2465,7 @@ authDone:
 		// F-111 (design §9): drives the k8s runtime's NFS init container's
 		// clone-vs-plain-provision choice (nfsProvisionCommand), not whether
 		// provisioning happens at all — the init container is now gated
-		// solely on WorkspaceBackendName=="nfs" && NFSPVClaimName != ""
+		// solely on WorkspaceBackendName=="nfs" && the share being mountable (a claim or an inline share)
 		// (k8s_runtime.go's nfsInitContainerInjected), so a nil GitClone here
 		// (a non-git, shared-plain project) still gets mkdir+chown, just no
 		// clone. Mirrors the existing GitClone field above/below, which this
@@ -2824,9 +2830,9 @@ type workspacePlacementInput struct {
 	Backend string
 	// Runtime is the runtime's name (runtime.Runtime.Name()).
 	Runtime string
-	// PVClaimName is the NFS PV claim the pod mounts the workspace from;
-	// "" when the share has no pv_name.
-	PVClaimName string
+	// Share is the NFS share the pod mounts the workspace from: by claim,
+	// or inline by server and export when the share has no pv_name.
+	Share runtime.NFSPodShare
 	// ClonePerAgent is true when the agent was dispatched as a git
 	// clone-per-agent workspace.
 	ClonePerAgent bool
@@ -2857,16 +2863,16 @@ var exportMountingRuntimes = map[string]bool{
 // workspacePlacementFor returns the placement reported to the hub. It fails
 // closed: export only when the workspace is known to be mounted from the
 // shared NFS export, local otherwise. On Kubernetes the pod mounts the export
-// only through a PV claim (without one it gets an EmptyDir), and a
-// clone-per-agent workspace is on the export only in its own agent
-// directory, which also needs the claim. Other runtimes count only when
+// only through a PV claim or inline volumes of the share (without either it
+// gets an EmptyDir), and a clone-per-agent workspace is on the export only
+// in its own agent directory, which also needs the share. Other runtimes count only when
 // listed in exportMountingRuntimes.
 func workspacePlacementFor(in workspacePlacementInput) string {
 	if in.Backend != "nfs" {
 		return api.WorkspacePlacementLocal
 	}
 	if isKubernetesRuntime(in.Runtime) {
-		if in.PVClaimName == "" {
+		if !in.Share.Mountable() {
 			return api.WorkspacePlacementLocal
 		}
 		if in.ClonePerAgent && in.AgentDirName == "" {

@@ -130,8 +130,8 @@ func brokerStorageLayout(vs *config.VersionedSettings) (projectfs.Layout, []stri
 
 // brokerSharedDirLayoutWarnings returns startup warnings for a shared-dir
 // Layout that would fail Kubernetes agent starts with shared dirs (every
-// project has the default scratchpad): a share without a claim (nfs
-// shares[0].pv_name, gke_shared_volume.pv_claim_name) or a gke-shared-volume
+// project has the default scratchpad): a share without a claim (the legacy
+// split's nfs shares[0].pv_name, gke_shared_volume.pv_claim_name) or a gke-shared-volume
 // this broker has not mounted. Agent starts still refuse; this says so once,
 // at startup, instead of only per start.
 func brokerSharedDirLayoutWarnings(layout projectfs.Layout, stat func(string) (os.FileInfo, error)) []string {
@@ -139,7 +139,10 @@ func brokerSharedDirLayoutWarnings(layout projectfs.Layout, stat func(string) (o
 	var out []string
 	switch sd.Backend {
 	case projectfs.BackendNFS:
-		if sd.Share.PVName == "" {
+		// Without a pv_name, Kubernetes pods mount the Layout's own share
+		// inline (logged once at startup); only the legacy split still
+		// needs its claim.
+		if sd.Share.PVName == "" && layout.SharedDirs != nil {
 			out = append(out, "project storage: the nfs share has no pv_name; Kubernetes agent starts with shared dirs will fail until nfs.shares[0].pv_name is set")
 		}
 	case projectfs.BackendGKESharedVolume:
@@ -269,7 +272,8 @@ func checkDoctorNFSMounts(vs *config.VersionedSettings, probe nfsDoctorProbe) sc
 
 	// A missing mount is a failure only where the broker is expected to
 	// mount it: with auto_mount on, no pv_name, and a local-container
-	// default runtime. With auto_mount off the operator may mount it
+	// default runtime; and, with no pv_name on a Kubernetes default
+	// runtime, where agent starts need it (inline pod volumes). With auto_mount off the operator may mount it
 	// elsewhere; a pv_name share is mounted into pods by the kubelet; and
 	// on a Kubernetes or Cloud Run default runtime the broker does not
 	// mount. Those are warnings, as in the broker's health. A wrong source,
@@ -288,6 +292,11 @@ func checkDoctorNFSMounts(vs *config.VersionedSettings, probe nfsDoctorProbe) sc
 			failed = true
 		case !mounted && share.PVName != "":
 			issues = append(issues, fmt.Sprintf("not mounted at %s (pv_name is set, so the export is mounted into pods and this host need not mount it)", target))
+		case !mounted && verifyOnlyRuntime != "" && kubernetesRuntimeType(verifyOnlyRuntime):
+			// No pv_name on Kubernetes: pods mount each directory inline,
+			// and the broker must create it first through this mount.
+			issues = append(issues, fmt.Sprintf("not mounted at %s (no pv_name: Kubernetes pods mount the share inline, and this broker must mount the export, writable, to create each directory first)", target))
+			failed = true
 		case !mounted && !nfsCfg.AutoMount:
 			issues = append(issues, fmt.Sprintf("not mounted at %s (auto_mount is off, so the broker does not mount it)", target))
 		case !mounted && verifyOnlyRuntime != "":
@@ -329,4 +338,10 @@ func checkDoctorNFSMounts(vs *config.VersionedSettings, probe nfsDoctorProbe) sc
 		Message:     fmt.Sprintf("%s (%s)", strings.Join(problems, "; "), mode),
 		Remediation: remediation,
 	}
+}
+
+// kubernetesRuntimeType reports whether a resolved runtime type is the
+// Kubernetes runtime.
+func kubernetesRuntimeType(rtType string) bool {
+	return rtType == "kubernetes" || rtType == "k8s"
 }
