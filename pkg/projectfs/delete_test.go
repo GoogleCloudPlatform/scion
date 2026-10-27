@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -107,4 +108,23 @@ func TestAuditLines(t *testing.T) {
 	assert.Contains(t, lines[1], `reason="no identity marker"`)
 	assert.Contains(t, lines[2], "level=ERROR")
 	assert.Contains(t, lines[2], "error=denied")
+}
+
+// Redact makes a deletion fit for a log without host paths: paths become
+// relative to a storage root, bases leave the reason, errors become their
+// class; object prefixes are kept.
+func TestRedact(t *testing.T) {
+	d := Redact(Deletion{
+		Tree: TreeProjectRoot, Path: "/home/u/mnt/share1/projects/pid", Outcome: OutcomeFailed,
+		Reason: "checked /home/u/.scion/hub-workspaces/demo",
+		Err:    fmt.Errorf("%w: %w: lstat /home/u/mnt: no such file", ErrRefused, ErrNoProjectTree),
+	}, "/home/u/mnt/share1", "/home/u/.scion")
+	assert.Equal(t, "projects/pid", d.Path)
+	assert.Equal(t, "checked hub-workspaces/demo", d.Reason)
+	assert.NotContains(t, d.Err.Error(), "/home/u")
+	assert.Contains(t, d.Err.Error(), "share not mounted")
+
+	assert.Equal(t, "pid", Redact(Deletion{Path: "/elsewhere/pid"}, "/home/u").Path, "outside every base: last element only")
+	assert.Equal(t, "hubs/h/workspaces/p/", Redact(Deletion{Path: "hubs/h/workspaces/p/"}, "/home/u").Path)
+	assert.Equal(t, "removal failed", Redact(Deletion{Err: errors.New("x /home/u/y")}).Err.Error())
 }
