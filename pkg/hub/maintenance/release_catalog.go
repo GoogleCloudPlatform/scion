@@ -52,9 +52,10 @@ const (
 	catalogFetchTimeout = 2 * time.Minute
 
 	// DefaultCatalogChecksumsBudget bounds the SHA256SUMS downloads of one
-	// refresh, measured from the first download. When it runs out, the releases still unclassified are marked
-	// ReasonChecksumsUnavailable (not cached) instead of failing the refresh,
-	// so a blackholed download host cannot keep a hub without a catalog.
+	// refresh, measured from the first download. When it runs out, the
+	// releases still unclassified are marked ReasonChecksumsUnavailable (not
+	// cached) instead of failing the refresh, so a blackholed download host
+	// cannot keep a hub without a catalog.
 	DefaultCatalogChecksumsBudget = 60 * time.Second
 
 	// catalogLoadTimeout bounds one read of the persisted copy.
@@ -170,6 +171,10 @@ func (s Snapshot) Lookup(tag string) (CatalogRelease, bool) {
 // CatalogStore persists the catalog across restarts (the hub stores it in
 // the hub_settings row system.release_catalog). Load returns nil, nil when
 // nothing is stored. The data is opaque JSON owned by the catalog.
+//
+// Both methods must return promptly once ctx is done. The catalog bounds
+// its calls through ctx; a load that ignores ctx is abandoned after its
+// timeout, but it holds a goroutine until it returns.
 type CatalogStore interface {
 	LoadReleaseCatalog(ctx context.Context) ([]byte, error)
 	SaveReleaseCatalog(ctx context.Context, data []byte) error
@@ -222,6 +227,7 @@ type Catalog struct {
 	loaded      bool
 	inflight    bool
 	loading     bool
+	abandoned   bool      // a waiter gave up on the current load
 	lastLoad    time.Time // last store read attempt
 	state       catalogState
 	lastAttempt time.Time
@@ -387,9 +393,18 @@ func (c *Catalog) needsFetchLocked(refresh bool) bool {
 // when its ctx ends. After a store error the read is retried at most once
 // per RefreshInterval, so a failing or stalled store is neither hit nor
 // logged on every request.
+//
+// The wait is also bounded by loadTimeout, for a store that ignores ctx:
+// the waiter then carries on as after a store error, and later callers do
+// not join that read (nor start another) until it returns.
 func (c *Catalog) ensureLoaded(ctx context.Context) {
 	c.mu.Lock()
-	need := c.loading || c.needsLoadLocked()
+	var need bool
+	if c.loading {
+		need = !c.abandoned
+	} else {
+		need = c.needsLoadLocked()
+	}
 	c.mu.Unlock()
 	if !need {
 		return
@@ -398,9 +413,20 @@ func (c *Catalog) ensureLoaded(ctx context.Context) {
 		c.load(ctx)
 		return nil, nil
 	})
+	timer := time.NewTimer(c.loadTimeout)
+	defer timer.Stop()
 	select {
 	case <-done:
 	case <-ctx.Done():
+	case <-timer.C:
+		c.mu.Lock()
+		if c.loading {
+			c.abandoned = true
+			logging.Subsystem("hub.maintenance.release-catalog").Warn(
+				"Persisted release catalog read did not return within its timeout; continuing without it",
+				"timeout", c.loadTimeout)
+		}
+		c.mu.Unlock()
 	}
 }
 
@@ -433,6 +459,7 @@ func (c *Catalog) load(ctx context.Context) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.loading = false
+	c.abandoned = false
 	log := logging.Subsystem("hub.maintenance.release-catalog")
 	if err != nil {
 		log.Warn("Failed to load the persisted release catalog; retrying later", "error", err,

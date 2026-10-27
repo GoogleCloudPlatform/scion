@@ -261,13 +261,19 @@ type catalogMemStore struct {
 	loads    int
 	loadErrs int  // the next loadErrs loads fail
 	block    bool // loads hang until their ctx ends (a stalled database)
+	// hang, when set, makes loads wait for it to close, ignoring ctx (a
+	// store that breaks the CatalogStore contract).
+	hang chan struct{}
 }
 
 func (s *catalogMemStore) LoadReleaseCatalog(ctx context.Context) ([]byte, error) {
 	s.mu.Lock()
 	s.loads++
-	block := s.block
+	block, hang := s.block, s.hang
 	s.mu.Unlock()
+	if hang != nil {
+		<-hang
+	}
 	if block {
 		<-ctx.Done()
 	}
@@ -1105,6 +1111,43 @@ func TestCatalog_StalledStoreIsBounded(t *testing.T) {
 			t.Errorf("store loads = %d, want 2", n)
 		}
 	})
+}
+
+func TestCatalog_CtxIgnoringStoreIsAbandoned(t *testing.T) {
+	const bound = 10 * time.Second // far above loadTimeout; only catches a hang
+	f := newCatalogFake(t, catalogGood("nightly-20261024", catalogDay(24)))
+	clock := newCatalogClock()
+	store := &catalogMemStore{hang: make(chan struct{})}
+	c := newTestCatalog(f, clock, func(o *CatalogOptions) { o.Store = store })
+	c.loadTimeout = 50 * time.Millisecond
+
+	// The first caller gives up on the stuck read and fetches from GitHub.
+	snap, err := getWithin(t, c, bound)
+	if err != nil || snap.Channel("nightly").Latest != "nightly-20261024" {
+		t.Fatalf("Get with a ctx-ignoring store = %+v, %v", snap, err)
+	}
+	// Later callers neither join the stuck read nor start another, even
+	// after the backoff and the TTL (refetching from GitHub as usual).
+	clock.Advance(DefaultCatalogTTL)
+	for range 3 {
+		if _, err := getWithin(t, c, bound); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := store.loadCount(); n != 1 {
+		t.Errorf("store loads = %d, want 1", n)
+	}
+	if n := f.listCalls(); n != 2 {
+		t.Errorf("list calls = %d, want 2 (initial fetch and one after the TTL)", n)
+	}
+
+	// The stuck read finally returns: the fetched catalog is kept.
+	close(store.hang)
+	clock.Advance(DefaultCatalogRefreshInterval)
+	snap, err = getWithin(t, c, bound)
+	if err != nil || snap.FetchedAt.IsZero() {
+		t.Errorf("after the stuck read returned: %+v, %v", snap, err)
+	}
 }
 
 func TestGitHubReleases_ListReleases(t *testing.T) {
