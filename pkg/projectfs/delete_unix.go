@@ -58,6 +58,12 @@ func (l Layout) checkShareHostBase() error {
 	return nil
 }
 
+// ErrNoProjectTree marks the refusal of a shared Layout whose host base
+// exists but has no subpath root: the share is not mounted, or the hub has
+// no project yet (callers that can tell, from their own records, treat the
+// latter as expected).
+var ErrNoProjectTree = errors.New("projectfs: no project tree below the host base")
+
 // CheckTreeMounted refuses a shared Layout whose subpath root does not
 // exist below its host base (the hub's health reports it too): every project on a shared backend has its
 // tree there from create on, so a missing subpath root means the share is
@@ -76,7 +82,7 @@ func (l Layout) CheckTreeMounted() error {
 	if ok, err := shareddirs.DirExistsInTree(base, root); err != nil {
 		return fmt.Errorf("%w: %w", ErrRefused, err)
 	} else if !ok {
-		return fmt.Errorf("%w: share not mounted: %s has no %s directory", ErrRefused, l.HostBase, root)
+		return fmt.Errorf("%w: %w: share not mounted: %s has no %s directory", ErrRefused, ErrNoProjectTree, l.HostBase, root)
 	}
 	return nil
 }
@@ -170,6 +176,9 @@ func (l Layout) DeleteAgent(projectID, agent, agentID string) ([]Deletion, error
 	if err := validAgentSlug(agent); err != nil {
 		return nil, err
 	}
+	// An agent ID equal to the slug is refused: home-<id> and the slug
+	// would then name the same incarnation-independent leaf (agentLeaf
+	// refuses it too), which only an agent named exactly as its UUID hits.
 	if !ValidAgentID(agentID) || agentID == agent {
 		return nil, fmt.Errorf("projectfs: invalid agent ID %q", agentID)
 	}
@@ -205,6 +214,10 @@ func (l Layout) DeleteAgent(projectID, agent, agentID string) ([]Deletion, error
 
 // removeEmptyShared removes r (a directory on a shared Layout) only when it
 // is empty (shareddirs.RemoveDirIfEmpty); a directory with entries is kept.
+// Known benign race: a broker provisioning a re-created agent of the same
+// slug may have just created the (still empty) directory; removing it
+// loses nothing (the removal is not recursive, and homes and secrets are
+// keyed by agent ID), and at worst that start fails and is retried.
 func removeEmptyShared(tree TreeKind, r Resolved) Deletion {
 	base, err := r.resolvedHostBase()
 	if err != nil {
@@ -328,7 +341,7 @@ func (l Layout) DeferredDeletions() ([]DeferredDeletion, error) {
 			continue
 		}
 		if !ok {
-			errs = append(errs, fmt.Errorf("%w: %s has no %s directory; the share may not be mounted", ErrRefused, sl.HostBase, root))
+			errs = append(errs, fmt.Errorf("%w: %w: %s has no %s directory; the share may not be mounted", ErrRefused, ErrNoProjectTree, sl.HostBase, root))
 			continue
 		}
 		for _, name := range names {

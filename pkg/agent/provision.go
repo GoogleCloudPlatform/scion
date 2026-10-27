@@ -1313,11 +1313,14 @@ func reprovisionEmptyPerAgentPreflight(projectDir, agentName string, rt runtime.
 
 func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
 	// A create over a legacy agent directory no agent owns is refused
-	// before anything runs.
-	if projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath); err == nil {
-		if err := refuseRetiredLegacyAgent(projectDir, opts); err != nil {
-			return nil, err
-		}
+	// before anything runs. A project dir that does not resolve fails here
+	// too (fail closed), as GetAgent would.
+	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := refuseRetiredLegacyAgent(projectDir, opts); err != nil {
+		return nil, err
 	}
 	// A forced move's provision never touches an agent directory it did not
 	// create: an existing one (even an empty leftover that GetAgent would

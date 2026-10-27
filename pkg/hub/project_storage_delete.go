@@ -136,9 +136,23 @@ func (s *Server) startProjectStorageCleanup(project *store.Project, deferUntil t
 			projectfs.AuditAll(ctx, log, projectfs.DeleterHub, projectID, "", ds)
 			return
 		}
-		s.deleteProjectStorage(ctx, layout, projectID, slug, "", true)
+		reason := ""
+		if !deferUntil.IsZero() {
+			// A forced delete with agent records on a non-shared backend:
+			// there is no project tree on a share to defer, and the object
+			// prefix holds only transfer staging (an in-flight transfer
+			// fails cleanly), so it is deleted now; no broker workspace is
+			// touched (forced-delete ruling, AC-F1b).
+			reason = forcedNonSharedPrefixReason
+		}
+		s.deleteProjectStorage(ctx, layout, projectID, slug, reason, true)
 	}()
 }
+
+// forcedNonSharedPrefixReason is the reason on the audit line of the object
+// prefix a forced delete with agent records removes at once on a non-shared
+// backend.
+const forcedNonSharedPrefixReason = "forced delete on a non-shared backend: transfer staging removed now; no broker workspace touched"
 
 // projectStillDeleted reports whether projectID is absent from the store
 // (a project that exists again keeps its storage). attempt numbers the
@@ -199,15 +213,20 @@ func (s *Server) deleteProjectStorage(ctx context.Context, layout projectfs.Layo
 			if attempt == 2 {
 				audit(ds)
 				if retryLater {
+					// The tombstone (written anew: a part-way removal may
+					// have taken it) hands the tree to the maintenance
+					// pass, which retries it.
 					marks, err := layout.MarkDeleteAfter(projectID, time.Now())
-					if err == nil {
-						for i := range marks {
-							if marks[i].Outcome == projectfs.OutcomeKept {
-								marks[i].Reason = "removal failed; the maintenance pass retries it"
-							}
-						}
-						audit(marks)
+					if err != nil {
+						marks = append(marks, projectfs.Deletion{Tree: projectfs.TreeProjectRoot, Outcome: projectfs.OutcomeFailed,
+							Err: err, Reason: "the retry by the maintenance pass could not be recorded"})
 					}
+					for i := range marks {
+						if marks[i].Outcome == projectfs.OutcomeKept {
+							marks[i].Reason = "removal failed; the maintenance pass retries it"
+						}
+					}
+					audit(marks)
 				}
 				break
 			}
@@ -264,7 +283,7 @@ func (s *Server) sweepDeferredProjectDeletions(ctx context.Context) {
 	}
 	log := s.projectsLogger()
 	due, err := layout.DeferredDeletions()
-	if err != nil {
+	if err != nil && !(errors.Is(err, projectfs.ErrNoProjectTree) && !s.hubHasProjects(ctx)) {
 		projectfs.Audit(ctx, log, projectfs.DeleterHub, "", "", projectfs.Deletion{
 			Tree: projectfs.TreeProjectRoot, Path: layout.HostBase, Outcome: projectfs.OutcomeFailed,
 			Err: err, Reason: "deferred project deletions could not be listed"})
@@ -296,8 +315,14 @@ func (s *Server) sweepDeferredProjectDeletions(ctx context.Context) {
 		if !d.After.IsZero() && now.Before(d.After) {
 			continue
 		}
+		// The slug only selects legacy slug trees, each of which is removed
+		// only when its identity markers name the project, so a slug read
+		// through a symlink cannot widen what is removed; .scion is in no
+		// agent Mount.
 		slug, _ := config.ReadProjectSlug(filepath.Join(d.Path, config.DotScion))
-		s.deleteProjectStorage(ctx, layout, d.ProjectID, slug, deferredDeletionReason, false)
+		// retryLater: a removal that fails part-way again keeps (re-marks)
+		// the tombstone, so a later pass retries it.
+		s.deleteProjectStorage(ctx, layout, d.ProjectID, slug, deferredDeletionReason, true)
 	}
 }
 
@@ -392,4 +417,14 @@ func (s *Server) startAgentStorageCleanup(agent *store.Agent, teardownConfirmed 
 			audit([]projectfs.Deletion{projectfs.DeleteObjectPrefix(ctx, stor, prefix)})
 		}
 	}()
+}
+
+// hubHasProjects reports whether the store has at least one project. A
+// shared backend's project tree appears with the first project, so a mount
+// point without it is expected (not a missing mount) on a hub with no
+// projects. A store error counts as having projects (the check is not
+// silenced).
+func (s *Server) hubHasProjects(ctx context.Context) bool {
+	res, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1})
+	return err != nil || len(res.Items) > 0
 }

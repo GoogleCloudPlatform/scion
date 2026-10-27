@@ -155,8 +155,12 @@ func refuseRetiredLegacyAgent(projectDir string, opts api.StartOptions) error {
 	if legacy == "" {
 		return nil
 	}
+	// The same predicate as the look-up (config.HasExternalAgentState), so
+	// a create is admitted exactly when every look-up resolves the agent to
+	// the external root, never to the legacy directory. An agents root that
+	// cannot be resolved refuses (fail closed).
 	if root, err := config.AgentsRootForProject(projectDir, false, opts.HubProjectID); err == nil &&
-		config.ScionAgentConfigExists(filepath.Join(root, opts.Name)) {
+		config.HasExternalAgentState(filepath.Join(root, opts.Name)) {
 		return nil
 	}
 	slog.Warn("create refused: the agent name resolves to a legacy agent directory no agent owns",

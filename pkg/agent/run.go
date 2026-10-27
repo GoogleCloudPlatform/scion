@@ -153,16 +153,16 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		hubDispatchedAgentID = opts.Env["SCION_AGENT_ID"]
 	}
 
-	// Fail on an unusable image provenance record before any side effect
-	// (the container cleanup below, prompt.md), reading the same agent dir
-	// GetAgent will use (AgentStateDir, including its effective
-	// shared-workspace detection). The record is read again, from that same
-	// dir, where image selection uses it.
 	// A create over a legacy agent directory no agent owns is refused
 	// before any side effect.
 	if err := refuseRetiredLegacyAgent(projectDir, opts); err != nil {
 		return nil, err
 	}
+	// Fail on an unusable image provenance record before any side effect
+	// (the container cleanup below, prompt.md), reading the same agent dir
+	// GetAgent will use (AgentStateDir, including its effective
+	// shared-workspace detection). The record is read again, from that same
+	// dir, where image selection uses it.
 	if preDir, _, dirErr := AgentStateDir(projectDir, opts.Name, opts.SharedWorkspace, opts.HubProjectID, opts.BrokerMode || opts.HubProjectID != ""); dirErr == nil {
 		if _, provErr := readImageProvenance(preDir); provErr != nil {
 			logImageProvenanceError(opts.Name, provErr)

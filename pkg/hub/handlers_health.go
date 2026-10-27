@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"sync"
@@ -240,6 +241,11 @@ func (s *Server) checkProjectStorageTree(checks map[string]string) {
 	defer timer.Stop()
 	select {
 	case err := <-done:
+		// The tree appears with the first project: a hub with no projects
+		// yet has a mount point without it, which is not a missing mount.
+		if errors.Is(err, projectfs.ErrNoProjectTree) && !s.hubHasProjects(context.Background()) {
+			err = nil
+		}
 		if err != nil {
 			checks[projectStorageTreeCheck] = "degraded: the shared project storage has no project tree; the share may not be mounted"
 			return

@@ -589,6 +589,10 @@ func TestDeferredProjectDeletion_ShareNotMounted(t *testing.T) {
 	require.NoError(t, os.RemoveAll(e.subRoot)) // the mount point stays, its tree is gone
 
 	e.srv.sweepDeferredProjectDeletions(context.Background())
+	assert.Empty(t, e.auditLines(), "no project yet: a mount point without the tree is expected")
+
+	require.NoError(t, e.s.CreateProject(context.Background(), &store.Project{ID: tid("dpd-unmounted"), Slug: "dpd-unmounted", Name: "dpd-unmounted"}))
+	e.srv.sweepDeferredProjectDeletions(context.Background())
 
 	lines := e.auditLines()
 	require.Len(t, lines, 1)
@@ -635,6 +639,11 @@ func TestHealth_ProjectStorageTree(t *testing.T) {
 	require.NoError(t, os.RemoveAll(e.subRoot))
 	checks = map[string]string{}
 	e.srv.checkProjectStorageTree(checks)
+	assert.Equal(t, "healthy", checks[projectStorageTreeCheck], "no project yet: a mount point without the tree is expected")
+
+	require.NoError(t, e.s.CreateProject(context.Background(), &store.Project{ID: tid("health-p"), Slug: "health-p", Name: "health-p"}))
+	checks = map[string]string{}
+	e.srv.checkProjectStorageTree(checks)
 	assert.Contains(t, checks[projectStorageTreeCheck], "the share may not be mounted")
 	assert.False(t, criticalHealthChecks[projectStorageTreeCheck], "degraded, never unhealthy")
 	assert.Equal(t, HealthStatusDegraded, deriveHealthStatus(map[string]string{"database": "healthy", projectStorageTreeCheck: checks[projectStorageTreeCheck]}))
@@ -653,4 +662,52 @@ func TestHealth_ProjectStorageTree(t *testing.T) {
 	e.srv.checkProjectStorageTree(checks)
 	_, has := checks[projectStorageTreeCheck]
 	assert.False(t, has, "no check on the local backend")
+}
+
+// A sweep removal that fails part-way keeps the tombstone (writing it anew
+// if the removal took it), so the next pass retries; that pass removes the
+// tree.
+func TestDeferredProjectDeletion_PartialFailureKeepsTombstone(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	e := newStorageCleanupEnv(t)
+	prev := projectStorageCleanupRetryDelay
+	projectStorageCleanupRetryDelay = time.Millisecond
+	t.Cleanup(func() { projectStorageCleanupRetryDelay = prev })
+	layout, err := e.srv.projectStorageLayout()
+	require.NoError(t, err)
+	id := tid("dpd-partial")
+	tree := e.seedTree(t, e.subRoot, id)
+	_, err = layout.MarkDeleteAfter(id, time.Now().Add(-time.Minute))
+	require.NoError(t, err)
+	ws := filepath.Join(tree, "workspace")
+	require.NoError(t, os.Chmod(ws, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(ws, 0o755) })
+
+	e.srv.sweepDeferredProjectDeletions(context.Background())
+	assert.FileExists(t, filepath.Join(tree, "provision", projectfs.DeleteAfterFile), "the tombstone stays for the next pass")
+	assert.Contains(t, e.auditLine(t, "project-root", "outcome=kept"), "maintenance pass retries it")
+
+	require.NoError(t, os.Chmod(ws, 0o755))
+	e.srv.sweepDeferredProjectDeletions(context.Background())
+	assertAbsent(t, tree, "the next pass removes it")
+}
+
+// AC-F1b: on a non-shared backend a forced delete with agent records has no
+// project tree on a share to defer; the object prefix (transfer staging) is
+// deleted at once, audited with that outcome.
+func TestForcedProjectDelete_NonSharedDeletesPrefixNow(t *testing.T) {
+	e := newStorageCleanupEnv(t)
+	e.srv.config.ProjectStorageConfig = nil // local backend
+	p := &store.Project{ID: tid("fpd-local"), Slug: "fpd-local", Name: "fpd-local", GitRemote: "github.com/test/fpd-local"}
+	nfsTree := e.seedTree(t, e.subRoot, p.ID)
+
+	e.forcedDeleteProject(t, p, true)
+
+	assert.Equal(t, []string{"hubs/hub-1/workspaces/" + p.ID + "/"}, e.objects.got())
+	l := e.auditLine(t, "object-prefix")
+	assert.Contains(t, l, "outcome=deleted")
+	assert.Contains(t, l, "no broker workspace touched")
+	assert.DirExists(t, filepath.Join(nfsTree, "workspace", ".git"), "no tree is touched on a non-shared backend")
 }

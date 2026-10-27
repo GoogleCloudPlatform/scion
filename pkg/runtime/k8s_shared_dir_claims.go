@@ -130,7 +130,9 @@ func (r *KubernetesRuntime) ReleaseProjectSharedDirClaims(ctx context.Context, p
 // claimsReferencedByPods returns the claims that an existing pod in ns
 // references in a volume, whatever the pod's phase: a claim a pod still
 // mounts is never released (pvc-protection would only defer its deletion
-// until the pod ends, and then destroy the data).
+// until the pod ends, and then destroy the data). Known narrow window: a
+// pod created between this listing and the claim deletes is not seen; the
+// hub refuses new starts once the project row is gone.
 func (r *KubernetesRuntime) claimsReferencedByPods(ctx context.Context, ns string) (map[string]bool, error) {
 	pods, err := r.Client.Clientset.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
 	if err != nil {

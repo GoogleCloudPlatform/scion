@@ -552,3 +552,34 @@ func TestErrLegacyAgentStateRetiredIsStateConflict(t *testing.T) {
 		t.Errorf("the message must say what to do: %q", err.Error())
 	}
 }
+
+// The create refusal runs in Provision too, before anything runs: nothing
+// is provisioned in the external root and the legacy dir is left alone.
+func TestProvision_CreateOverOrphanLegacyDirRefused(t *testing.T) {
+	root, home := sharedConfigProject(t)
+	scionDir := filepath.Join(root, config.DotScion)
+	legacyScion := filepath.Join(home, config.GlobalDir, config.ProjectsDir, "web", config.DotScion)
+	mustMkdirAll(t, legacyScion)
+	if err := config.WriteProjectID(legacyScion, sharedCfgProjectID); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(legacyScion, "agents", "old")
+	mustMkdirAll(t, legacy)
+	if err := os.WriteFile(filepath.Join(legacy, "scion-agent.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewManager(&runtime.MockRuntime{NameFunc: func() string { return "docker" }})
+	_, err := mgr.Provision(context.Background(), api.StartOptions{
+		Name: "old", ProjectPath: root, FreshProvision: true, HubProjectID: sharedCfgProjectID,
+	})
+	if !errors.Is(err, ErrLegacyAgentStateRetired) {
+		t.Fatalf("Provision over an orphan legacy dir = %v, want ErrLegacyAgentStateRetired", err)
+	}
+	ext, _ := config.AgentDirForProject(scionDir, "zzz", false, sharedCfgProjectID)
+	if _, err := os.Stat(filepath.Join(filepath.Dir(ext), "old")); !os.IsNotExist(err) {
+		t.Errorf("nothing may be provisioned in the external root (err %v)", err)
+	}
+	if _, err := os.Stat(filepath.Join(legacy, "scion-agent.json")); err != nil {
+		t.Errorf("the legacy dir must be left alone: %v", err)
+	}
+}
