@@ -243,8 +243,13 @@ func (s *Server) checkProjectStorageTree(checks map[string]string) {
 	case err := <-done:
 		// The tree appears with the first project: a hub with no projects
 		// yet has a mount point without it, which is not a missing mount.
-		if errors.Is(err, projectfs.ErrNoProjectTree) && !s.hubHasProjects(context.Background()) {
-			err = nil
+		if errors.Is(err, projectfs.ErrNoProjectTree) {
+			// The store read is bounded by the health timeout too.
+			ctx, cancel := context.WithTimeout(context.Background(), workspaceHealthTimeout)
+			if !s.hubHasProjects(ctx) {
+				err = nil
+			}
+			cancel()
 		}
 		if err != nil {
 			checks[projectStorageTreeCheck] = "degraded: the shared project storage has no project tree; the share may not be mounted"

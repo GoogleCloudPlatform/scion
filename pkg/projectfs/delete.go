@@ -20,8 +20,10 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // Deletion of project storage (ptone/scion#5835).
@@ -195,14 +197,25 @@ func Redact(d Deletion, bases ...string) Deletion {
 		}
 	}
 	if d.Err != nil {
-		d.Err = errors.New(errorClass(d.Err))
+		class := errorClass(d.Err)
+		if d.Tree == TreeObjectPrefix && class == "removal failed" {
+			class = "object storage delete failed"
+		}
+		d.Err = errors.New(class)
 	}
 	return d
 }
 
-// errorClass names the class of a deletion error without its text.
+// errorClass names the class of a deletion error without its text (which
+// can name host paths): refusals, timeouts, the errno of a failed system
+// call, not-exist, permission, else a generic failure.
 func errorClass(err error) string {
+	var errno syscall.Errno
 	switch {
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, os.ErrDeadlineExceeded):
+		return "timed out"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
 	case errors.Is(err, ErrNoProjectTree):
 		return "refused: no project tree below the host base (share not mounted)"
 	case errors.Is(err, ErrRefused):
@@ -211,6 +224,8 @@ func errorClass(err error) string {
 		return "not exist"
 	case errors.Is(err, fs.ErrPermission):
 		return "permission denied"
+	case errors.As(err, &errno):
+		return "removal failed: " + errno.Error()
 	default:
 		return "removal failed"
 	}

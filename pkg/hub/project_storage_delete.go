@@ -303,8 +303,11 @@ func (s *Server) sweepDeferredProjectDeletions(ctx context.Context) {
 		switch {
 		case gerr == nil:
 			if cerr := layout.ClearDeleteAfter(d.ProjectID); cerr != nil {
-				log.Warn("deferred project deletion: could not clear the tombstone of a project that exists again",
-					"project_id", d.ProjectID, "error", cerr)
+				// Audited (redacted: the hub's logs carry no host path); the
+				// next pass tries again.
+				s.auditStorage(ctx, log, d.ProjectID, "", []projectfs.Deletion{{
+					Tree: projectfs.TreeProjectRoot, Path: d.Path, Outcome: projectfs.OutcomeFailed, Err: cerr,
+					Reason: "the project exists again, but its deferred-deletion tombstone could not be cleared"}})
 				continue
 			}
 			s.auditStorage(ctx, log, d.ProjectID, "", []projectfs.Deletion{{

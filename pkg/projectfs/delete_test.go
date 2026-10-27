@@ -20,7 +20,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -127,4 +129,8 @@ func TestRedact(t *testing.T) {
 	assert.Equal(t, "pid", Redact(Deletion{Path: "/elsewhere/pid"}, "/home/u").Path, "outside every base: last element only")
 	assert.Equal(t, "hubs/h/workspaces/p/", Redact(Deletion{Path: "hubs/h/workspaces/p/"}, "/home/u").Path)
 	assert.Equal(t, "removal failed", Redact(Deletion{Err: errors.New("x /home/u/y")}).Err.Error())
+	assert.Equal(t, "timed out", Redact(Deletion{Err: fmt.Errorf("x: %w", context.DeadlineExceeded)}).Err.Error())
+	assert.Equal(t, "removal failed: "+syscall.ENOTEMPTY.Error(),
+		Redact(Deletion{Err: &os.PathError{Op: "unlinkat", Path: "/home/u/x", Err: syscall.ENOTEMPTY}}).Err.Error())
+	assert.Equal(t, "object storage delete failed", Redact(Deletion{Tree: TreeObjectPrefix, Err: errors.New("gs://b/x denied")}).Err.Error())
 }
