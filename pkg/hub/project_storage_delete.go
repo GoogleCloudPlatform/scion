@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"time"
 
@@ -75,7 +76,7 @@ const deferredDeletionReason = "deleted after the deferred-deletion time"
 // deleted project's storage:
 //
 //   - its project root on every shared Layout of the hub
-//     (projectfs.Layout.DeleteProject; nothing on the local backend, whose
+//     (projectfs.Layout.RemoveProjectTree; nothing on the local backend, whose
 //     slug-keyed trees keep their own deleters);
 //   - on a shared backend, the legacy slug-keyed trees (the share's
 //     hub-projects/<slug> and the hub's ~/.scion/projects/<slug>, with
@@ -120,9 +121,9 @@ func (s *Server) startProjectStorageCleanup(project *store.Project, deferUntil t
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		if layoutErr != nil {
-			projectfs.Audit(ctx, log, projectfs.DeleterHub, projectID, "", projectfs.Deletion{
+			s.auditStorage(ctx, log, projectID, "", []projectfs.Deletion{{
 				Tree: projectfs.TreeProjectRoot, Outcome: projectfs.OutcomeFailed,
-				Err: layoutErr, Reason: "the hub's project storage layout is unavailable"})
+				Err: layoutErr, Reason: "the hub's project storage layout is unavailable"}})
 			return
 		}
 		if shared && !deferUntil.IsZero() {
@@ -133,7 +134,7 @@ func (s *Server) startProjectStorageCleanup(project *store.Project, deferUntil t
 			if err != nil {
 				ds = append(ds, projectfs.Deletion{Tree: projectfs.TreeProjectRoot, Outcome: projectfs.OutcomeFailed, Err: err})
 			}
-			projectfs.AuditAll(ctx, log, projectfs.DeleterHub, projectID, "", ds)
+			s.auditStorage(ctx, log, projectID, "", ds)
 			return
 		}
 		reason := ""
@@ -189,7 +190,7 @@ func (s *Server) deleteProjectStorage(ctx context.Context, layout projectfs.Layo
 				ds[i].Reason = reason
 			}
 		}
-		projectfs.AuditAll(ctx, log, projectfs.DeleterHub, projectID, "", ds)
+		s.auditStorage(ctx, log, projectID, "", ds)
 	}
 	shared := layout.Backend.Shared() || layout.SharedDirLayout().Backend.Shared()
 	if shared {
@@ -197,7 +198,7 @@ func (s *Server) deleteProjectStorage(ctx context.Context, layout projectfs.Layo
 			if !s.projectStillDeleted(ctx, projectID, attempt) {
 				return
 			}
-			ds, err := layout.DeleteProject(projectID)
+			ds, err := layout.RemoveProjectTree(projectID)
 			if err != nil {
 				audit([]projectfs.Deletion{{Tree: projectfs.TreeProjectRoot, Outcome: projectfs.OutcomeFailed, Err: err}})
 				break
@@ -278,15 +279,18 @@ func (s *Server) deleteProjectStorage(ctx context.Context, layout projectfs.Layo
 // run it, and it is idempotent.
 func (s *Server) sweepDeferredProjectDeletions(ctx context.Context) {
 	layout, err := s.projectStorageLayout()
-	if err != nil || !(layout.Backend.Shared() || layout.SharedDirLayout().Backend.Shared()) {
+	if err != nil || (!layout.Backend.Shared() && !layout.SharedDirLayout().Backend.Shared()) {
 		return
 	}
 	log := s.projectsLogger()
 	due, err := layout.DeferredDeletions()
-	if err != nil && !(errors.Is(err, projectfs.ErrNoProjectTree) && !s.hubHasProjects(ctx)) {
-		projectfs.Audit(ctx, log, projectfs.DeleterHub, "", "", projectfs.Deletion{
+	// A missing tree on a hub with no project yet is expected, not a
+	// missing mount: nothing to report then.
+	expectedEmpty := err != nil && errors.Is(err, projectfs.ErrNoProjectTree) && !s.hubHasProjects(ctx)
+	if err != nil && !expectedEmpty {
+		s.auditStorage(ctx, log, "", "", []projectfs.Deletion{{
 			Tree: projectfs.TreeProjectRoot, Path: layout.HostBase, Outcome: projectfs.OutcomeFailed,
-			Err: err, Reason: "deferred project deletions could not be listed"})
+			Err: err, Reason: "deferred project deletions could not be listed"}})
 	}
 	now := time.Now()
 	seen := map[string]bool{}
@@ -303,9 +307,9 @@ func (s *Server) sweepDeferredProjectDeletions(ctx context.Context) {
 					"project_id", d.ProjectID, "error", cerr)
 				continue
 			}
-			projectfs.Audit(ctx, log, projectfs.DeleterHub, d.ProjectID, "", projectfs.Deletion{
+			s.auditStorage(ctx, log, d.ProjectID, "", []projectfs.Deletion{{
 				Tree: projectfs.TreeProjectRoot, Path: d.Path, Outcome: projectfs.OutcomeKept,
-				Reason: "the project exists again: deferred deletion cancelled"})
+				Reason: "the project exists again: deferred deletion cancelled"}})
 			continue
 		case !errors.Is(gerr, store.ErrNotFound):
 			log.Info("deferred project deletion: could not confirm the project is still deleted; keeping its tree",
@@ -350,7 +354,7 @@ const agentRootOtherFilesReason = "the agent directory still has entries the hub
 //
 //   - on every shared Layout of the hub, its home-<agent ID> and
 //     secrets-<agent ID> below agents/<slug>, and then agents/<slug>
-//     itself only when it is empty (projectfs.Layout.DeleteAgent). The
+//     itself only when it is empty (projectfs.Layout.RemoveAgentStorage). The
 //     agent's own workspace or worktree is never removed here: the broker
 //     removes it under the provisioning lock with its git bookkeeping.
 //     A directory that is not empty is kept, audited as workspace pending
@@ -388,7 +392,7 @@ func (s *Server) startAgentStorageCleanup(agent *store.Agent, teardownConfirmed 
 		ctx, cancel := context.WithTimeout(context.Background(), agentStorageCleanupTimeout)
 		defer cancel()
 		audit := func(ds []projectfs.Deletion) {
-			projectfs.AuditAll(ctx, log, projectfs.DeleterHub, a.ProjectID, a.Slug, ds)
+			s.auditStorage(ctx, log, a.ProjectID, a.Slug, ds)
 		}
 
 		switch {
@@ -396,7 +400,7 @@ func (s *Server) startAgentStorageCleanup(agent *store.Agent, teardownConfirmed 
 			audit([]projectfs.Deletion{{Tree: projectfs.TreeAgentRoot, Outcome: projectfs.OutcomeFailed,
 				Err: layoutErr, Reason: "the hub's project storage layout is unavailable"}})
 		case shared:
-			ds, err := layout.DeleteAgent(a.ProjectID, a.Slug, a.ID)
+			ds, err := layout.RemoveAgentStorage(a.ProjectID, a.Slug, a.ID)
 			if err != nil {
 				ds = append(ds, projectfs.Deletion{Tree: projectfs.TreeAgentRoot, Outcome: projectfs.OutcomeFailed, Err: err})
 			}
@@ -427,4 +431,20 @@ func (s *Server) startAgentStorageCleanup(agent *store.Agent, teardownConfirmed 
 func (s *Server) hubHasProjects(ctx context.Context) bool {
 	res, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1})
 	return err != nil || len(res.Items) > 0
+}
+
+// auditStorage writes the hub's audit lines of storage deletions, redacted
+// for the hub's logs, which carry no host filesystem path
+// (projectfs.Redact): paths relative to the storage roots, errors by class.
+func (s *Server) auditStorage(ctx context.Context, log *slog.Logger, projectID, agent string, ds []projectfs.Deletion) {
+	var bases []string
+	if layout, err := s.projectStorageLayout(); err == nil {
+		bases = append(bases, layout.HostBase, layout.SharedDirLayout().HostBase)
+	}
+	if globalDir, err := config.GetGlobalDir(); err == nil {
+		bases = append(bases, globalDir)
+	}
+	for _, d := range ds {
+		projectfs.Audit(ctx, log, projectfs.DeleterHub, projectID, agent, projectfs.Redact(d, bases...))
+	}
 }

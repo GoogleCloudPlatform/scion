@@ -561,6 +561,8 @@ server:
 
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
 	assert.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+	// The project's storage is removed in the background after the commit.
+	srv.storageCleanupWG.Wait()
 
 	_, err := os.Stat(filepath.Join(hostBase, "projects", project.ID))
 	assert.True(t, os.IsNotExist(err), "the deleted project's NFS shared-dir tree must be removed")

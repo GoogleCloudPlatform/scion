@@ -75,9 +75,9 @@ mounted. In that case:
 - `shareddirs.DeleteProjectTree` (the old shared-dirs-only project
   cleanup) is removed.
 - `projectfs.Layout` deletion methods:
-  - `DeleteProject` covers every shared Layout and refuses a missing
+  - `RemoveProjectTree` covers every shared Layout and refuses a missing
     mount;
-  - `DeleteAgent(projectID, slug, agentID)` removes the agent's own leaves,
+  - `RemoveAgentStorage(projectID, slug, agentID)` removes the agent's own leaves,
     then the agent directory only when it is empty;
   - `MarkDeleteAfter`, `DeferredDeletions` and `ClearDeleteAfter` handle
     the tombstone;

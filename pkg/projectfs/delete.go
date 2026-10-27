@@ -18,7 +18,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"path/filepath"
 	"strings"
 )
 
@@ -28,10 +30,11 @@ import (
 // deletion is reported by one audit line (Audit) that names it:
 //
 //   - the hub deletes what lives on the shared storage and in object
-//     storage: the project root <SubPathRoot>/<projectID> (DeleteProject),
-//     an agent's agents/<slug> directory (DeleteAgent), the project's and
-//     an agent's object-storage prefixes, and the legacy slug-keyed trees
-//     whose identity markers name the project;
+//     storage: the project root <SubPathRoot>/<projectID>
+//     (RemoveProjectTree), an agent's home and secrets and its
+//     agents/<slug> directory once empty (RemoveAgentStorage), the
+//     project's and an agent's object-storage prefixes, and the legacy
+//     slug-keyed trees whose identity markers name the project;
 //   - a broker deletes what lives on its own host: its project
 //     directory and project-configs entry, its agents' state directories,
 //     and the per-dir shared-dir claims of its Kubernetes runtimes; and,
@@ -40,7 +43,7 @@ import (
 //     (TreeAgentWorkspace).
 //
 // The local backend keeps its slug-keyed trees and their existing deleters
-// unchanged; DeleteProject and DeleteAgent remove nothing there.
+// unchanged; RemoveProjectTree and RemoveAgentStorage remove nothing there.
 
 // Deleter names who deleted a tree, in the audit line.
 type Deleter string
@@ -162,6 +165,57 @@ func Audit(ctx context.Context, logger *slog.Logger, deleter Deleter, projectID,
 	logger.Log(ctx, level, AuditMessage, attrs...)
 }
 
+// Redact returns d fit for a log that must carry no host filesystem path:
+// Path is made relative to the first of bases it lies below (only its last
+// element when it lies below none; object prefixes and claim names are kept),
+// every base is removed from Reason, and Err is replaced by its class
+// (refused / no project tree, not exist, permission, other), never its
+// text, which can name host paths.
+func Redact(d Deletion, bases ...string) Deletion {
+	if filepath.IsAbs(d.Path) {
+		rel := ""
+		for _, b := range bases {
+			if b == "" {
+				continue
+			}
+			if r, err := filepath.Rel(b, d.Path); err == nil && r != ".." && !strings.HasPrefix(r, "../") {
+				rel = r
+				break
+			}
+		}
+		if rel == "" {
+			rel = filepath.Base(d.Path)
+		}
+		d.Path = rel
+	}
+	for _, b := range bases {
+		if b != "" {
+			d.Reason = strings.ReplaceAll(d.Reason, strings.TrimSuffix(b, "/")+"/", "")
+			d.Reason = strings.ReplaceAll(d.Reason, b, "")
+		}
+	}
+	if d.Err != nil {
+		d.Err = errors.New(errorClass(d.Err))
+	}
+	return d
+}
+
+// errorClass names the class of a deletion error without its text.
+func errorClass(err error) string {
+	switch {
+	case errors.Is(err, ErrNoProjectTree):
+		return "refused: no project tree below the host base (share not mounted)"
+	case errors.Is(err, ErrRefused):
+		return "refused (unusable host base, or a symlink or non-directory in the path)"
+	case errors.Is(err, fs.ErrNotExist):
+		return "not exist"
+	case errors.Is(err, fs.ErrPermission):
+		return "permission denied"
+	default:
+		return "removal failed"
+	}
+}
+
 // AuditAll writes one audit line per deletion.
 func AuditAll(ctx context.Context, logger *slog.Logger, deleter Deleter, projectID, agent string, ds []Deletion) {
 	for _, d := range ds {
@@ -173,6 +227,12 @@ func AuditAll(ctx context.Context, logger *slog.Logger, deleter Deleter, project
 // removed (an unusable host base, a symlinked or non-directory component,
 // a share outside the mount root). Retrying cannot help with it.
 var ErrRefused = errors.New("projectfs: deletion refused")
+
+// ErrNoProjectTree marks the refusal of a shared Layout whose host base
+// exists but has no subpath root: the share is not mounted, or the hub has
+// no project yet (callers that can tell, from their own records, treat the
+// latter as expected).
+var ErrNoProjectTree = errors.New("projectfs: no project tree below the host base")
 
 // Retryable reports whether d failed in a way a later attempt may clear: a
 // removal that failed part-way (for example while a terminating process was

@@ -3810,7 +3810,7 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 			case os.IsNotExist(statErr):
 				d.Outcome = projectfs.OutcomeAbsent
 			}
-			projectfs.Audit(ctx, s.projectsLogger(), projectfs.DeleterHub, projectID, "", d)
+			s.auditStorage(ctx, s.projectsLogger(), projectID, "", []projectfs.Deletion{d})
 		}
 	}
 

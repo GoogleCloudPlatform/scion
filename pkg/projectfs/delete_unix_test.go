@@ -65,7 +65,7 @@ func TestDeleteProject_RemovesProjectRootOnly(t *testing.T) {
 	require.NoError(t, os.Symlink(outside, filepath.Join(root, "workspace", "escape")))
 	require.NoError(t, os.Symlink(outside, filepath.Join(root, "shared-dirs", "scratchpad", "escape")))
 
-	ds, err := delNFSLayout(hostBase).DeleteProject(testPID)
+	ds, err := delNFSLayout(hostBase).RemoveProjectTree(testPID)
 	require.NoError(t, err)
 	require.Len(t, ds, 1)
 	assert.Equal(t, TreeProjectRoot, ds[0].Tree)
@@ -76,7 +76,7 @@ func TestDeleteProject_RemovesProjectRootOnly(t *testing.T) {
 	assert.DirExists(t, filepath.Join(hostBase, "projects"))
 	assert.FileExists(t, filepath.Join(outside, "secret.txt"))
 
-	ds, err = delNFSLayout(hostBase).DeleteProject(testPID)
+	ds, err = delNFSLayout(hostBase).RemoveProjectTree(testPID)
 	require.NoError(t, err)
 	require.Len(t, ds, 1)
 	assert.Equal(t, OutcomeAbsent, ds[0].Outcome, "a repeated delete finds nothing")
@@ -95,7 +95,7 @@ func TestDeleteProject_SymlinkedComponentsRefused(t *testing.T) {
 			require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o755))
 			require.NoError(t, os.Symlink(outside, link))
 
-			ds, err := delNFSLayout(hostBase).DeleteProject(testPID)
+			ds, err := delNFSLayout(hostBase).RemoveProjectTree(testPID)
 			require.NoError(t, err)
 			require.Len(t, ds, 1)
 			assert.Equal(t, OutcomeFailed, ds[0].Outcome)
@@ -118,7 +118,7 @@ func TestDeleteProject_HostBaseBehindSymlink(t *testing.T) {
 	link := filepath.Join(t.TempDir(), "mnt")
 	require.NoError(t, os.Symlink(real, link))
 
-	ds, err := delNFSLayout(link).DeleteProject(testPID)
+	ds, err := delNFSLayout(link).RemoveProjectTree(testPID)
 	require.NoError(t, err)
 	require.Len(t, ds, 1)
 	assert.Equal(t, OutcomeDeleted, ds[0].Outcome)
@@ -130,7 +130,7 @@ func TestDeleteProject_InvalidIDRefused(t *testing.T) {
 	hostBase := t.TempDir()
 	sibling := seedProjectTree(t, hostBase, testOtherPID)
 	for _, id := range []string{"", ".", "..", "../" + testOtherPID, "a/b", "/abs"} {
-		ds, err := delNFSLayout(hostBase).DeleteProject(id)
+		ds, err := delNFSLayout(hostBase).RemoveProjectTree(id)
 		assert.Error(t, err, "id %q", id)
 		assert.Empty(t, ds)
 	}
@@ -141,7 +141,7 @@ func TestDeleteProject_InvalidIDRefused(t *testing.T) {
 // the mount path is not created.
 func TestDeleteProject_MissingHostBaseFails(t *testing.T) {
 	hostBase := filepath.Join(t.TempDir(), "not-mounted")
-	ds, err := delNFSLayout(hostBase).DeleteProject(testPID)
+	ds, err := delNFSLayout(hostBase).RemoveProjectTree(testPID)
 	require.NoError(t, err)
 	require.Len(t, ds, 1)
 	assert.Equal(t, OutcomeFailed, ds[0].Outcome)
@@ -159,7 +159,7 @@ func TestDeleteProject_SharedDirSplitRemovesBothRoots(t *testing.T) {
 	l := delNFSLayout(ws)
 	l.SharedDirs = &sdl
 
-	ds, err := l.DeleteProject(testPID)
+	ds, err := l.RemoveProjectTree(testPID)
 	require.NoError(t, err)
 	require.Len(t, ds, 2)
 	assert.NoDirExists(t, wsRoot)
@@ -167,7 +167,7 @@ func TestDeleteProject_SharedDirSplitRemovesBothRoots(t *testing.T) {
 
 	same := delNFSLayout(ws)
 	same.SharedDirs = &Layout{Backend: BackendNFS, HostBase: ws, SubPathRoot: "projects"}
-	ds, err = same.DeleteProject(testPID)
+	ds, err = same.RemoveProjectTree(testPID)
 	require.NoError(t, err)
 	assert.Len(t, ds, 1, "one share, one deletion")
 }
@@ -180,14 +180,14 @@ func TestDeleteProject_LocalBackendRemovesNothing(t *testing.T) {
 	require.NoError(t, os.MkdirAll(keep, 0o755))
 	l := Layout{Backend: BackendLocal, HostBase: globalDir}
 
-	ds, err := l.DeleteProject(testPID)
+	ds, err := l.RemoveProjectTree(testPID)
 	require.NoError(t, err)
 	assert.Empty(t, ds)
 	assert.DirExists(t, keep)
-	_, err = l.DeleteProject("../x")
+	_, err = l.RemoveProjectTree("../x")
 	assert.Error(t, err)
 
-	ds, err = l.DeleteAgent(testPID, "dev", testAgentID)
+	ds, err = l.RemoveAgentStorage(testPID, "dev", testAgentID)
 	require.NoError(t, err)
 	assert.Empty(t, ds)
 }
@@ -205,7 +205,7 @@ func TestDeleteAgent_RemovesOwnLeavesAndEmptyAgentRoot(t *testing.T) {
 	require.NoError(t, os.Symlink(outside, filepath.Join(agentDir, "home-"+testAgentID, "escape")))
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "agents", "other", "workspace"), 0o755))
 
-	ds, err := delNFSLayout(hostBase).DeleteAgent(testPID, "dev", testAgentID)
+	ds, err := delNFSLayout(hostBase).RemoveAgentStorage(testPID, "dev", testAgentID)
 	require.NoError(t, err)
 	require.Len(t, ds, 3)
 	for i, tree := range []TreeKind{TreeAgentHome, TreeAgentSecrets, TreeAgentRoot} {
@@ -218,7 +218,7 @@ func TestDeleteAgent_RemovesOwnLeavesAndEmptyAgentRoot(t *testing.T) {
 	assert.DirExists(t, filepath.Join(root, "shared-dirs", "scratchpad"))
 	assert.FileExists(t, filepath.Join(outside, "secret.txt"))
 
-	ds, err = delNFSLayout(hostBase).DeleteAgent(testPID, "dev", testAgentID)
+	ds, err = delNFSLayout(hostBase).RemoveAgentStorage(testPID, "dev", testAgentID)
 	require.NoError(t, err)
 	for _, d := range ds {
 		assert.Equal(t, OutcomeAbsent, d.Outcome, string(d.Tree))
@@ -235,7 +235,7 @@ func TestDeleteAgent_KeepsWorkspaceAndOtherLeaves(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "workspace", "unpushed.txt"), []byte("work"), 0o644))
 	require.NoError(t, os.MkdirAll(filepath.Join(agentDir, "home-"+testAgentID2), 0o755))
 
-	ds, err := delNFSLayout(hostBase).DeleteAgent(testPID, "dev", testAgentID)
+	ds, err := delNFSLayout(hostBase).RemoveAgentStorage(testPID, "dev", testAgentID)
 	require.NoError(t, err)
 	require.Len(t, ds, 3)
 	assert.Equal(t, OutcomeDeleted, ds[0].Outcome)
@@ -261,7 +261,7 @@ func TestDeleteAgent_ConfinementAndValidation(t *testing.T) {
 			require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o755))
 			require.NoError(t, os.Symlink(outside, link))
 
-			ds, err := delNFSLayout(hostBase).DeleteAgent(testPID, "dev", testAgentID)
+			ds, err := delNFSLayout(hostBase).RemoveAgentStorage(testPID, "dev", testAgentID)
 			require.NoError(t, err)
 			require.Len(t, ds, 3)
 			for _, d := range ds {
@@ -276,14 +276,14 @@ func TestDeleteAgent_ConfinementAndValidation(t *testing.T) {
 	hostBase := t.TempDir()
 	root := seedProjectTree(t, hostBase, testPID)
 	for _, agent := range []string{"", "..", "../dev", "Dev", "a/b"} {
-		_, err := delNFSLayout(hostBase).DeleteAgent(testPID, agent, testAgentID)
+		_, err := delNFSLayout(hostBase).RemoveAgentStorage(testPID, agent, testAgentID)
 		assert.Error(t, err, "agent %q", agent)
 	}
 	for _, id := range []string{"", "not-a-uuid", "../" + testAgentID} {
-		_, err := delNFSLayout(hostBase).DeleteAgent(testPID, "dev", id)
+		_, err := delNFSLayout(hostBase).RemoveAgentStorage(testPID, "dev", id)
 		assert.Error(t, err, "agent ID %q", id)
 	}
-	_, err := delNFSLayout(hostBase).DeleteAgent("../"+testPID, "dev", testAgentID)
+	_, err := delNFSLayout(hostBase).RemoveAgentStorage("../"+testPID, "dev", testAgentID)
 	assert.Error(t, err)
 	assert.DirExists(t, filepath.Join(root, "agents", "dev", "home-"+testAgentID))
 }
@@ -298,11 +298,11 @@ func TestDeleteProject_ShareIDOutsideMountRootRefused(t *testing.T) {
 	victim := seedProjectTree(t, parent, testPID)
 	l := Layout{Backend: BackendNFS, HostBase: filepath.Join(mountRoot, ".."), SubPathRoot: "projects", Share: Share{ID: ".."}}
 
-	ds, err := l.DeleteProject(testPID)
+	ds, err := l.RemoveProjectTree(testPID)
 	require.NoError(t, err)
 	require.Len(t, ds, 1)
 	assert.Equal(t, OutcomeFailed, ds[0].Outcome)
-	ds, err = l.DeleteAgent(testPID, "dev", testAgentID)
+	ds, err = l.RemoveAgentStorage(testPID, "dev", testAgentID)
 	require.NoError(t, err)
 	for _, d := range ds {
 		assert.Equal(t, OutcomeFailed, d.Outcome, string(d.Tree))
@@ -325,14 +325,14 @@ func TestDeleteProject_PartialFailureIsRetryable(t *testing.T) {
 	require.NoError(t, os.Chmod(ws, 0o555))
 	t.Cleanup(func() { _ = os.Chmod(ws, 0o755) })
 
-	ds, err := delNFSLayout(hostBase).DeleteProject(testPID)
+	ds, err := delNFSLayout(hostBase).RemoveProjectTree(testPID)
 	require.NoError(t, err)
 	require.Len(t, ds, 1)
 	assert.Equal(t, OutcomeFailed, ds[0].Outcome)
 	assert.True(t, Retryable(ds[0]))
 
 	require.NoError(t, os.Chmod(ws, 0o755))
-	ds, err = delNFSLayout(hostBase).DeleteProject(testPID)
+	ds, err = delNFSLayout(hostBase).RemoveProjectTree(testPID)
 	require.NoError(t, err)
 	assert.Equal(t, OutcomeDeleted, ds[0].Outcome)
 	assert.NoDirExists(t, root)
@@ -342,7 +342,7 @@ func TestDeleteProject_PartialFailureIsRetryable(t *testing.T) {
 // not mounted) fails the deletion; it never reads as absent.
 func TestDeleteProject_ShareNotMountedFails(t *testing.T) {
 	hostBase := t.TempDir() // the mount point, with nothing mounted on it
-	ds, err := delNFSLayout(hostBase).DeleteProject(testPID)
+	ds, err := delNFSLayout(hostBase).RemoveProjectTree(testPID)
 	require.NoError(t, err)
 	require.Len(t, ds, 1)
 	assert.Equal(t, OutcomeFailed, ds[0].Outcome)

@@ -58,12 +58,6 @@ func (l Layout) checkShareHostBase() error {
 	return nil
 }
 
-// ErrNoProjectTree marks the refusal of a shared Layout whose host base
-// exists but has no subpath root: the share is not mounted, or the hub has
-// no project yet (callers that can tell, from their own records, treat the
-// latter as expected).
-var ErrNoProjectTree = errors.New("projectfs: no project tree below the host base")
-
 // CheckTreeMounted refuses a shared Layout whose subpath root does not
 // exist below its host base (the hub's health reports it too): every project on a shared backend has its
 // tree there from create on, so a missing subpath root means the share is
@@ -115,7 +109,7 @@ func deleteShared(tree TreeKind, r Resolved) Deletion {
 	return deletion(tree, r.HostPath, existed, err)
 }
 
-// DeleteProject removes projectID's project root <SubPathRoot>/<projectID>
+// RemoveProjectTree removes projectID's project root <SubPathRoot>/<projectID>
 // (workspace, project configuration, shared dirs, provisioning state,
 // worktrees and agent directories) from every shared Layout of l (l and
 // its transitional shared-dir split), and reports one Deletion per root.
@@ -129,7 +123,7 @@ func deleteShared(tree TreeKind, r Resolved) Deletion {
 //
 // On the local backend it removes nothing and returns no Deletion: the
 // local slug-keyed trees keep their existing deleters.
-func (l Layout) DeleteProject(projectID string) ([]Deletion, error) {
+func (l Layout) RemoveProjectTree(projectID string) ([]Deletion, error) {
 	if err := validProjectID(projectID); err != nil {
 		return nil, err
 	}
@@ -157,7 +151,7 @@ func (l Layout) DeleteProject(projectID string) ([]Deletion, error) {
 // workspace, which only the broker removes.
 const AgentWorkspacePendingReason = "the agent directory is not empty: workspace pending broker removal"
 
-// DeleteAgent removes what the hub owns of agent agentID (the hub agent ID,
+// RemoveAgentStorage removes what the hub owns of agent agentID (the hub agent ID,
 // ValidAgentID) with slug agent: its home-<agentID> and secrets-<agentID>
 // below agents/<slug> on the Layout homes resolve on, then the directory
 // agents/<slug> itself on every shared Layout of l, but only when it is
@@ -165,11 +159,11 @@ const AgentWorkspacePendingReason = "the agent directory is not empty: workspace
 // own workspace (and its worktree under workspace/worktrees/) is the
 // broker's to remove, under the provisioning lock and with its git
 // bookkeeping. A directory that still has entries is kept
-// (OutcomeKept, AgentWorkspacePendingReason). Confinement is DeleteProject's.
+// (OutcomeKept, AgentWorkspacePendingReason). Confinement is RemoveProjectTree's.
 // An invalid project ID, slug or agent ID is refused before anything is
 // touched; what is missing is OutcomeAbsent. On the local backend it
 // removes nothing.
-func (l Layout) DeleteAgent(projectID, agent, agentID string) ([]Deletion, error) {
+func (l Layout) RemoveAgentStorage(projectID, agent, agentID string) ([]Deletion, error) {
 	if err := validProjectID(projectID); err != nil {
 		return nil, err
 	}

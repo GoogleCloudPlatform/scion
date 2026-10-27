@@ -232,7 +232,7 @@ var projectStorageTreeProbe = func(l projectfs.Layout) error { return l.CheckTre
 // workspaceHealthTimeout, so a hung mount cannot block the health endpoint.
 func (s *Server) checkProjectStorageTree(checks map[string]string) {
 	layout, err := s.projectStorageLayout()
-	if err != nil || !(layout.Backend.Shared() || layout.SharedDirLayout().Backend.Shared()) {
+	if err != nil || (!layout.Backend.Shared() && !layout.SharedDirLayout().Backend.Shared()) {
 		return
 	}
 	done := make(chan error, 1)
