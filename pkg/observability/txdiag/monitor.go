@@ -313,7 +313,7 @@ const (
 // cap, it queues the one-time cap line; if the queue is full then, a later
 // call retries, so the line is not lost.
 func (m *Monitor) op(pcs []uintptr) string {
-	op, _ := m.sites.op(pcs)
+	op := m.sites.op(pcs)
 	if op == OpOther && !m.capLogged.Load() && m.capLogged.CompareAndSwap(false, true) {
 		if !m.offer(record{msg: msgOpCap, attrs: []slog.Attr{slog.Int("max_ops", maxOps)}}) {
 			m.capLogged.Store(false)
@@ -379,7 +379,8 @@ type holdStats struct {
 	maxStmt      time.Duration
 	rowsAffected int64
 	busy         int64
-	commitTime   time.Duration // the driver Commit call (tx holds only)
+	beginTime    time.Duration // BEGIN calls (a conn hold sums its inner transactions')
+	commitTime   time.Duration // the driver Commit call(s)
 	committed    bool
 }
 
@@ -416,7 +417,7 @@ func (m *Monitor) hold(kind, outcome string, pcs []uintptr, start time.Time, beg
 	}
 	// idle is time the connection was held outside BEGIN, SQL and COMMIT:
 	// Go-side work inside the transaction or checkout.
-	idle := d - begin - st.stmtTime - st.commitTime
+	idle := d - begin - st.beginTime - st.stmtTime - st.commitTime
 	if idle < 0 {
 		idle = 0
 	}
@@ -424,7 +425,7 @@ func (m *Monitor) hold(kind, outcome string, pcs []uintptr, start time.Time, beg
 		slog.String("kind", kind),
 		slog.String("op", op),
 		slog.Int64("hold_ms", d.Milliseconds()),
-		slog.Int64("begin_ms", begin.Milliseconds()),
+		slog.Int64("begin_ms", (begin + st.beginTime).Milliseconds()),
 		slog.Int64("stmts", st.stmts),
 		slog.Int64("stmt_ms", st.stmtTime.Milliseconds()),
 		slog.Int64("commit_ms", st.commitTime.Milliseconds()),

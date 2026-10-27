@@ -32,6 +32,8 @@ type fakeDriver struct {
 	onExec func()
 	// onOpen runs when a new connection is opened.
 	onOpen func()
+	// onBegin runs inside BeginTx (a slow BEGIN).
+	onBegin func()
 	// onCommit runs inside a transaction's Commit (a slow fsync).
 	onCommit func()
 	// execErr, when set, is returned by every Exec.
@@ -107,6 +109,9 @@ type fullConn struct{ minimalConn }
 
 func (c *fullConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
 	c.d.calls.add("BeginTx")
+	if c.d.onBegin != nil {
+		c.d.onBegin()
+	}
 	return fakeTx{d: c.d}, nil
 }
 

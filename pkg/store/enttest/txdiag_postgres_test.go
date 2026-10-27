@@ -143,9 +143,8 @@ func TestTxDiag_PostgresLongTxWarns(t *testing.T) {
 }
 
 // TestTxDiag_PostgresUUIDRoundTrip: uuid parameters still bind through the
-// wrapper, both through ent and as a raw $1 parameter on the wrapped
-// *sql.DB (which depends on the pgx uuid type registration and on the
-// wrapper forwarding NamedValueChecker).
+// wrapper: through ent, as a raw $1 parameter, and as a []uuid.UUID for
+// ANY($1), which proves the wrapper forwards pgx's NamedValueChecker.
 func TestTxDiag_PostgresUUIDRoundTrip(t *testing.T) {
 	client, _, _, _ := openPostgresDiag(t)
 	ctx := context.Background()
@@ -167,6 +166,16 @@ func TestTxDiag_PostgresUUIDRoundTrip(t *testing.T) {
 	}
 	if section != "pg-uuid" {
 		t.Fatalf("section = %q", section)
+	}
+	// A []uuid.UUID argument is not a driver.Value, so database/sql's default
+	// converter rejects it; it binds only if the wrapper forwards pgx's
+	// NamedValueChecker (and pgx has the _uuid type registered).
+	var n int
+	if err := db.QueryRowContext(ctx, "SELECT count(*) FROM hub_settings WHERE id = ANY($1)", []uuid.UUID{s.ID, uuid.New()}).Scan(&n); err != nil {
+		t.Fatalf("[]uuid.UUID bind through the wrapper: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("ANY($1) matched %d rows, want 1", n)
 	}
 	var back uuid.UUID
 	if err := db.QueryRowContext(ctx, "SELECT id FROM hub_settings WHERE section = $1", "pg-uuid").Scan(&back); err != nil || back != s.ID {

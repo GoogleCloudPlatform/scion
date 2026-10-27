@@ -318,8 +318,11 @@ type tx struct {
 func (t *tx) Commit() error {
 	start := t.c.mon.now()
 	err := t.base.Commit()
-	t.stats.commitTime = t.c.mon.now().Sub(start)
+	d := t.c.mon.now().Sub(start)
+	t.c.mu.Lock()
+	t.stats.commitTime = d
 	t.stats.committed = true
+	t.c.mu.Unlock()
 	t.finish(OutcomeCommit, err)
 	return err
 }
@@ -342,6 +345,10 @@ func (t *tx) finish(outcome string, err error) {
 		c.cur = nil
 	}
 	stats := t.stats
+	// The enclosing checkout's conn line counts this transaction's BEGIN and
+	// COMMIT as such, not as idle time.
+	c.stats.beginTime += t.begin
+	c.stats.commitTime += stats.commitTime
 	c.mu.Unlock()
 	if err != nil {
 		outcome = OutcomeError

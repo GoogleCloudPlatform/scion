@@ -169,16 +169,18 @@ func (d *EntDriver) finish(p *probe, err error, req string) {
 	if wait < 0 {
 		wait = 0
 	}
-	if m.cfg.LockWaitWarnThreshold <= 0 && m.recorder() == nil {
-		return
+	rec := m.recorder()
+	over := m.cfg.LockWaitWarnThreshold > 0 && wait >= m.cfg.LockWaitWarnThreshold
+	if rec == nil && !over {
+		return // nothing to record: skip the stack capture and op resolution
 	}
 	var pcs [stackDepth]uintptr
 	n := runtime.Callers(3, pcs[:])
 	op := m.op(pcs[:n])
-	if rec := m.recorder(); rec != nil {
+	if rec != nil {
 		rec.RecordLockWait(context.Background(), ms(wait), op, outcome)
 	}
-	if m.cfg.LockWaitWarnThreshold <= 0 || wait < m.cfg.LockWaitWarnThreshold {
+	if !over {
 		return
 	}
 	r := record{msg: msgLockWait, kind: "lock_wait", op: op, attrs: []slog.Attr{

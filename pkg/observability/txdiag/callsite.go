@@ -163,9 +163,8 @@ func (c *callsites) frames(pc uintptr) []frameInfo {
 }
 
 // op returns the capped op for a recorded stack: the first
-// non-infrastructure frame's short function name. capped reports whether the
-// op cap was reached by this call (so the caller can log it once).
-func (c *callsites) op(pcs []uintptr) (op string, capped bool) {
+// non-infrastructure frame's short function name, or OpOther past the cap.
+func (c *callsites) op(pcs []uintptr) string {
 	// Fast path: walk the cached frames under one read lock.
 	c.mu.RLock()
 	name, miss := "", false
@@ -186,22 +185,30 @@ walk:
 	if name != "" {
 		if v, ok := c.ops[name]; ok {
 			c.mu.RUnlock()
-			return v, false
+			return v
+		}
+		if c.full {
+			// Past the cap the op can never be added: no exclusive lock.
+			c.mu.RUnlock()
+			return OpOther
 		}
 	}
 	c.mu.RUnlock()
 	if name != "" && !miss {
-		return c.intern(name)
+		op, _ := c.intern(name)
+		return op
 	}
 	// Slow path: symbolize the PCs not yet cached.
 	for _, pc := range pcs {
 		for _, f := range c.frames(pc) {
 			if !f.infra {
-				return c.intern(f.fn)
+				op, _ := c.intern(f.fn)
+				return op
 			}
 		}
 	}
-	return c.intern(opUnknown)
+	op, _ := c.intern(opUnknown)
+	return op
 }
 
 // intern returns name if it is (or can become) one of the first maxOps ops,

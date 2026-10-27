@@ -935,3 +935,131 @@ func TestOpCapLineRetriedWhenQueueFull(t *testing.T) {
 		t.Fatalf("got %d op-cap lines, want 1", got)
 	}
 }
+
+// TestBeginTimeIsSeparateFromIdle: a slow BEGIN is reported as begin_ms and
+// is not counted as idle time.
+func TestBeginTimeIsSeparateFromIdle(t *testing.T) {
+	hs := newHarness(t, DialectSQLite, nil)
+	hs.drv.onBegin = func() { hs.clk.Advance(time.Second) }
+	hs.drv.onCommit = func() { hs.clk.Advance(2 * time.Second) }
+	hs.holdTx(t, 0)
+	hs.flush(t)
+	lines := hs.h.Lines(MsgHold)
+	if len(lines) != 1 {
+		t.Fatalf("got %d hold lines, want 1", len(lines))
+	}
+	if l := lines[0]; l.Int("hold_ms") != 3000 || l.Int("begin_ms") != 1000 || l.Int("commit_ms") != 2000 || l.Int("idle_ms") != 0 {
+		t.Errorf("hold line: %+v", l.Attrs)
+	}
+}
+
+// TestConnLineCountsInnerTxBeginAndCommit: on a conn hold line, an inner
+// transaction's BEGIN and COMMIT are reported as begin_ms and commit_ms, not
+// as idle time.
+func TestConnLineCountsInnerTxBeginAndCommit(t *testing.T) {
+	hs := newHarness(t, DialectSQLite, nil)
+	hs.drv.onBegin = func() { hs.clk.Advance(500 * time.Millisecond) }
+	hs.drv.onCommit = func() { hs.clk.Advance(500 * time.Millisecond) }
+	ctx := context.Background()
+	conn, err := hs.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil { // a 1 s transaction: under the threshold
+		t.Fatal(err)
+	}
+	hs.clk.Advance(1500 * time.Millisecond) // Go work while still holding the conn
+	_ = conn.Close()
+	hs.flush(t)
+	lines := hs.h.Lines(MsgHold)
+	if len(lines) != 1 || lines[0].Str("kind") != KindConn {
+		t.Fatalf("got %+v, want one conn line", lines)
+	}
+	if l := lines[0]; l.Int("hold_ms") != 2500 || l.Int("begin_ms") != 500 || l.Int("commit_ms") != 500 || l.Int("idle_ms") != 1500 {
+		t.Errorf("conn line: %+v", l.Attrs)
+	}
+}
+
+// TestNoRecorderBelowThresholdSkipsStackResolution: in the default
+// metrics-off configuration, a fast ent request resolves no stack at all
+// (neither the hold nor the lock-wait path symbolizes a frame).
+func TestNoRecorderBelowThresholdSkipsStackResolution(t *testing.T) {
+	hs := newHarness(t, DialectSQLite, nil)
+	hs.mon.SetRecorder(nil)
+	ed := WrapEntDriver(entsql.OpenDB(dialect.SQLite, hs.db), hs.mon)
+	if err := ed.Exec(context.Background(), "UPDATE", []any{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := ed.Tx(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	hs.mon.sites.mu.RLock()
+	n := len(hs.mon.sites.pcs)
+	hs.mon.sites.mu.RUnlock()
+	if n != 0 {
+		t.Fatalf("%d PCs symbolized with no recorder and no slow request, want 0", n)
+	}
+}
+
+// TestNoRecorderSlowWaiterStillLogs: the metrics-off early return in finish
+// does not drop a waiter over the threshold.
+func TestNoRecorderSlowWaiterStillLogs(t *testing.T) {
+	hs := newHarness(t, DialectSQLite, nil)
+	hs.mon.SetRecorder(nil)
+	ed := WrapEntDriver(entsql.OpenDB(dialect.SQLite, hs.db), hs.mon)
+	holder, err := hs.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := make(chan error, 1)
+	go func() {
+		tx, err := ed.Tx(context.Background())
+		if err == nil {
+			err = tx.Rollback()
+		}
+		res <- err
+	}()
+	waitForWaiters(t, hs.db, 1)
+	hs.clk.Advance(2 * time.Second)
+	_ = holder.Rollback()
+	if err := <-res; err != nil {
+		t.Fatal(err)
+	}
+	hs.flush(t)
+	lines := hs.h.Lines(MsgLockWait)
+	if len(lines) != 1 || lines[0].Int("wait_ms") != 2000 || lines[0].Str("op") == "" {
+		t.Fatalf("got %+v, want one lock_wait line with wait_ms=2000", lines)
+	}
+}
+
+// TestPastCapOpsDoNotGrowTheRegistry: once the cap is reached, further call
+// sites resolve to OpOther (through the read-locked fast path once their
+// frames are cached) and are never added, so the cap stays at maxOps real
+// ops.
+func TestPastCapOpsDoNotGrowTheRegistry(t *testing.T) {
+	m := NewMonitor(Config{Logger: newLogger(&CaptureHandler{})})
+	t.Cleanup(m.Close)
+	for i := 0; i < maxOps; i++ {
+		_, _ = m.sites.intern(fmt.Sprintf("op%d", i))
+	}
+	pcs := seedOp(m, 500, "hub.pastcap")
+	for i := 0; i < 3; i++ {
+		if got := m.sites.op(pcs[:1]); got != OpOther {
+			t.Fatalf("op = %q, want %q", got, OpOther)
+		}
+	}
+	m.sites.mu.RLock()
+	n := len(m.sites.ops)
+	m.sites.mu.RUnlock()
+	if n != maxOps {
+		t.Fatalf("registry holds %d ops, want %d", n, maxOps)
+	}
+}
