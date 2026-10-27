@@ -572,3 +572,35 @@ func TestChatStars_MessageEditNonCanonicalID(t *testing.T) {
 	require.NoError(t, json.Unmarshal(got[0].Data, &evt))
 	assert.Equal(t, msg, evt["messageId"], "the edited event names the canonical message ID")
 }
+
+// TestChatStars_DMKeyMustBeCanonical pins that the star routes accept a DM
+// only under its canonical key (messages.DMConversationKey: sorted slots,
+// canonical IDs), so a stored DM key is always the external ref of the DM's
+// native conversation (the form the read switch and the Starred rail look
+// up). The same DM under its slots swapped is a 400 on add, list, the
+// starred-only history and a single-conversation state batch; DELETE takes
+// no conversation key and is unaffected.
+func TestChatStars_DMKeyMustBeCanonical(t *testing.T) {
+	f := newStarFixture(t, true)
+	d := f.memberDMs(t)
+	msg := f.dmMsg(t, d.humanKey, d.humanConv, uuid.Nil.String(), "user:"+f.member, f.member, "h", "web", time.Now())
+	parts := strings.Split(d.humanKey, ":")
+	require.Len(t, parts, 5)
+	swapped := strings.Join([]string{"dm", parts[3], parts[4], parts[1], parts[2]}, ":")
+	require.NotEqual(t, d.humanKey, swapped)
+	require.True(t, validDMKey(swapped), "the swapped key is well formed, only not canonical")
+
+	assert.Equal(t, http.StatusBadRequest, f.put(t, f.member, msg, swapped).Code, "PUT under the swapped key")
+	assert.Equal(t, http.StatusBadRequest, f.session(t, f.member, http.MethodGet, starListPath(swapped), nil).Code, "list")
+	assert.Equal(t, http.StatusBadRequest,
+		f.session(t, f.member, http.MethodGet, chatConversationPath(swapped, "messages")+"?starred=true", nil).Code, "starred-only history")
+	got, err := f.stars.GetMessageStar(context.Background(), f.member, msg)
+	require.NoError(t, err)
+	assert.Nil(t, got, "nothing stored under the swapped key")
+
+	// The canonical key works.
+	decodeStarPut(t, f.put(t, f.member, msg, d.humanKey))
+	assert.Len(t, decodeStarPage(t, f.session(t, f.member, http.MethodGet, starListPath(d.humanKey), nil)).Items, 1)
+	assert.Equal(t, []string{msg}, decodeStarState(t, f.session(t, f.member, http.MethodGet, starStatePath(msg), nil)))
+	assert.Equal(t, http.StatusNoContent, f.session(t, f.member, http.MethodDelete, starPath(msg), nil).Code)
+}

@@ -381,9 +381,11 @@ func TestStarredConversations_SQLiteActivityKey(t *testing.T) {
 }
 
 // TestStarredConversations_SQLiteUsesUserIndex checks that the store's
-// rail statement, in both orders and with a cursor and a project scope,
-// reaches the caller's stars through an index on user_id rather than a
-// scan of every user's stars.
+// rail statement, in both orders, with a cursor and a project scope, and
+// with the read switch on, reaches the caller's stars through an index on
+// user_id rather than a scan of every user's stars, and (switch on) finds a
+// DM's conversation through the partial unique index on (surface,
+// external_ref) of the real ent schema, never by scanning conversations.
 func TestStarredConversations_SQLiteUsesUserIndex(t *testing.T) {
 	_, s := testServer(t)
 	dbp, ok := s.(interface{ DB() *sql.DB })
@@ -394,6 +396,7 @@ func TestStarredConversations_SQLiteUsesUserIndex(t *testing.T) {
 		{UserID: "u", Channel: "web", Sort: StarredConversationsByActivity, Limit: 30},
 		{UserID: "u", Channel: "web", Sort: StarredConversationsByName, Limit: 30, ProjectID: "p",
 			After: &StarredConversationPosition{Value: "m", Key: "k"}},
+		{UserID: "u", Channel: "web", Sort: StarredConversationsByActivity, Limit: 30, ByConversationID: true},
 	} {
 		query, args := sqliteStarredConversationsQuery(f)
 		rows, err := db.Query("EXPLAIN QUERY PLAN "+query, args...)
@@ -410,5 +413,11 @@ func TestStarredConversations_SQLiteUsesUserIndex(t *testing.T) {
 		joined := strings.Join(plan, "\n")
 		assert.Regexp(t, `SEARCH st USING (COVERING )?INDEX \S+ \(user_id=\?`, joined, "sort %s plan:\n%s", f.Sort, joined)
 		assert.NotContains(t, joined, "SCAN st", "sort %s plan:\n%s", f.Sort, joined)
+		if f.ByConversationID {
+			// The DM branch states the partial unique index's predicate, so it
+			// is a lookup on that index, never a scan of every conversation.
+			assert.NotContains(t, joined, "SCAN c", "switch-on plan:\n%s", joined)
+			assert.Regexp(t, `SEARCH c USING (COVERING )?INDEX \S+ \(surface=\? AND external_ref=\?\)`, joined, "switch-on plan:\n%s", joined)
+		}
 	}
 }

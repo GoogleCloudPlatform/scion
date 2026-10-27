@@ -92,7 +92,9 @@ func (s *pgWebChatStore) ListStarredConversationCandidates(ctx context.Context, 
                      UNION ALL
                      SELECT c.id FROM ` + conversationsTable + ` c
                       WHERE left(st.conversation_key, 3) = 'dm:' AND c.surface = 'native'
-                        AND c.external_ref = st.conversation_key AND c.deleted_at IS NULL)`
+                        AND c.external_ref = st.conversation_key
+                        -- These two terms mirror the predicate of the partial unique index on (surface, external_ref).
+                        AND c.external_ref <> '' AND c.deleted_at IS NULL)`
 	}
 	limit := a.add(f.Limit + 1)
 	rows, err := s.db.QueryContext(ctx, `

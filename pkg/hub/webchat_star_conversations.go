@@ -209,7 +209,9 @@ func sqliteStarredConversationsQuery(f StarredConversationFilter) (string, []any
                      UNION ALL
                      SELECT c.id FROM conversations c
                       WHERE substr(st.conversation_key, 1, 3) = 'dm:' AND c.surface = 'native'
-                        AND c.external_ref = st.conversation_key AND c.deleted_at IS NULL)`
+                        AND c.external_ref = st.conversation_key
+                        -- These two terms mirror the predicate of the partial unique index on (surface, external_ref).
+                        AND c.external_ref <> '' AND c.deleted_at IS NULL)`
 	}
 	args = append(args, f.UserID, f.Channel, f.Channel, f.UserID)
 	var conds []string

@@ -29,6 +29,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -324,6 +325,13 @@ func (s *Server) resolveStarDM(r *http.Request, call starCall, permissionID, key
 		return starConversation{}, "", &chatReadError{kind: chatReadFailure, status: http.StatusBadRequest,
 			code: ErrCodeInvalidRequest, message: "invalid DM key format"}
 	}
+	// Only the canonical key (sorted slots, canonical IDs) is accepted, so a
+	// stored DM key is always the external ref of the DM's native
+	// conversation, the form the read switch and the Starred rail look up.
+	if canonical, err := canonicalStarDMKey(key); err != nil || canonical != key {
+		return starConversation{}, "", &chatReadError{kind: chatReadFailure, status: http.StatusBadRequest,
+			code: ErrCodeInvalidRequest, message: "DM key is not in canonical form"}
+	}
 	userID := call.user.ID()
 	if !isDMParticipant(key, userID) {
 		return starConversation{}, "caller is not a participant of this DM", nil
@@ -375,6 +383,15 @@ func (s *Server) resolveStarDM(r *http.Request, call starCall, permissionID, key
 		}
 	}
 	return sc, "", nil
+}
+
+// canonicalStarDMKey is messages.DMConversationKey of a DM key's slots.
+func canonicalStarDMKey(key string) (string, error) {
+	parts := strings.Split(key, ":")
+	if len(parts) != 5 {
+		return "", errors.New("chat stars: DM key must have five parts")
+	}
+	return messages.DMConversationKey(parts[1], parts[2], parts[3], parts[4])
 }
 
 // resolveStarConversation resolves a conversation for a star route or

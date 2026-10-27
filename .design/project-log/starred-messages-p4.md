@@ -50,6 +50,12 @@
   it (the topic's `conversation_id`; `GetConversationByExternalRef("native", key)`, live rows only). A star counts in
   the rail exactly when it counts in the star list, the state route and the center; a thread with no conversation
   under the switch (the resolver's 409) has no stars there and no rail row.
+- **The star routes accept a DM only under its canonical key** (`messages.DMConversationKey`: sorted slots,
+  canonical IDs); the same DM with its slots swapped is a 400. A stored DM key is therefore always the external ref
+  of the DM's native conversation, which the read switch and the rail's switch-on branch look up. The web client
+  already sent canonical keys.
+- **The switch-on DM branch repeats the partial unique index's predicate** (`external_ref <> '' AND deleted_at IS
+  NULL`) so both dialects look the conversation up on that index; a SQLite plan test pins "no SCAN c".
 - **Only a pick in the filter control is persisted.** A change the page drives (a full-context permalink, a jump,
   Show all) or the experiment drives (the browser flag off, or the hub answering 404) moves the rail to All and
   stops the reconcile poll without touching the stored preference.
