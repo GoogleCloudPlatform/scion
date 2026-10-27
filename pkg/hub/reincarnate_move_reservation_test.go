@@ -227,3 +227,45 @@ func TestReconcileFailedMove_LimitReadErrorFallsBack(t *testing.T) {
 	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "want the reservation moved to the source despite the read error")
 	assert.EqualValues(t, 0, brokerReservationCount(t, f.s, f.dst.ID), "want no reservation left on the target")
 }
+
+// A forward move refused at the target's quota leaves the source
+// reservation untouched (moveBrokerQuota is one store transaction,
+// ptone/scion#5951), and the failed move's reconcile then finds it already on
+// the source (ensureBrokerReservationOn writes nothing). Together they keep
+// the very same reservation row through the move's failure, the failed
+// move's reconcile, a second reconcile (as the stale sweep would run it) and
+// a direct ensureBrokerReservationOn call: no release, no new row, and the
+// source and target counts unchanged.
+func TestMoveBrokerQuota_TargetFullThenReconcileKeepsSourceReservation(t *testing.T) {
+	ctx := context.Background()
+	f := setupMoveFixture(t, true, nil)
+	prepareMoveWorkerFixture(t, f)
+	setBrokerAgentCeiling(t, f.s, 1)
+	reserveBrokerSlot(t, f.s, f.dst, tid("occupant"))
+	before := agentBrokerReservation(t, f.s, f.agent.ID)
+	require.Equal(t, f.src.ID, before.ScopeID, "setup: the reservation is on the source")
+
+	err := f.srv.moveBrokerQuota(ctx, f.agent, &reincarnationMove{SourceBrokerID: f.src.ID, TargetBrokerID: f.dst.ID})
+	var exceeded *QuotaExceededError
+	require.ErrorAs(t, err, &exceeded, "the full target refuses the forward move")
+	afterMove := agentBrokerReservation(t, f.s, f.agent.ID)
+	assert.Equal(t, before.ID, afterMove.ID, "the refused forward move keeps the same source reservation")
+
+	rec := failedMoveRecord(t, f)
+	f.srv.reconcileFailedMove(ctx, rec.ID)
+	afterReconcile := agentBrokerReservation(t, f.s, f.agent.ID)
+	assert.Equal(t, before.ID, afterReconcile.ID, "the failed move's reconcile writes nothing: the reservation is already on the source")
+	got, err := f.s.GetAgentReincarnation(ctx, rec.ID)
+	require.NoError(t, err)
+	assert.Equal(t, sourceCleanupSkippedInterrupted, got.SourceCleanup, "the reconcile ran")
+
+	f.srv.reconcileFailedMove(ctx, rec.ID)
+	cur, err := f.s.GetAgent(ctx, f.agent.ID)
+	require.NoError(t, err)
+	f.srv.ensureBrokerReservationOn(ctx, cur, f.src.ID)
+	final := agentBrokerReservation(t, f.s, f.agent.ID)
+	assert.Equal(t, before.ID, final.ID, "a repeated reconcile and a direct ensureBrokerReservationOn write nothing")
+	assert.Equal(t, f.src.ID, final.ScopeID)
+	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.src.ID), "the source keeps exactly the agent's reservation")
+	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.dst.ID), "the target keeps only its occupant")
+}

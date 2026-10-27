@@ -591,13 +591,23 @@ test-store-postgres-tail: test-store-postgres-env-check
 test-launch-store-postgres: test-store-postgres
 	@./hack/hubshard/shard.sh postgres all integration $(HUB_INTEGRATION_POSTGRES_TESTS)
 
+# BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS are the Postgres variants of
+# the atomic broker reservation transfer (ptone/scion#5951): the forward
+# move at the source cap, the cap on the target, the target lock held across
+# the transaction (two replicas) and the concurrent soak.
+BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS := TestMoveBrokerQuota_SourceAtCapTargetFull_Postgres \
+	TestTransferBroker_TargetAtCapRefused_Postgres \
+	TestTransferBroker_TargetLockHeldAcrossTransaction_Postgres \
+	TestTransferBroker_ConcurrentReserveSoak_Postgres
+
 # HUB_INTEGRATION_POSTGRES_TESTS are the pkg/hub Postgres tests that need
 # -tags integration (the integration TestMain sets up the ent test
 # database): the project-delete lock-order test, the two-replica scheduled
 # send test, the membership loss and test identity concurrency tests, and
 # the broker presence registry test (its conduit registry runs on the ent
-# test database), and the agent delegation issuance vs reincarnation claim
-# race.
+# test database), the agent delegation issuance vs reincarnation claim
+# race, and the broker reservation transfer tests
+# (BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS).
 # Each must print a PASS line, and any skip fails (shard.sh postgres).
 HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock \
 	TestScheduledSend_TwoHubReplicasPostgres_OneDelivery \
@@ -605,6 +615,7 @@ HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock
 	TestAgentDelegationIssuanceVsReincarnateClaim_Postgres \
 	$(MEMBERSHIP_LOSS_POSTGRES_TESTS) \
 	$(TEST_IDENTITY_POSTGRES_TESTS) \
+	$(BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS) \
 	TestHubInternal_ReplayAcrossHubReplicas
 
 ## test-hub-postgres: Run the pkg/hub Postgres tests of shard SHARD=K (SHARD=all: every shard holding one)

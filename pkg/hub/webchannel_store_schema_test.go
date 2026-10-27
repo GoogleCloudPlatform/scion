@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/assert"
@@ -82,7 +83,7 @@ func TestPgWebChatStore_ExternalTablesQualified(t *testing.T) {
 // SCION_TEST_POSTGRES_DSN. Each run uses its own throwaway schemas, and each
 // subtest has its own current schema so the subtests can run on their own.
 func TestWebChatStore_Postgres_MessagesInOtherSchema(t *testing.T) {
-	dsn := requirePostgresDSN(t)
+	dsn := hubtestutil.RequirePostgresDSN(t)
 	ctx := context.Background()
 	suffix := time.Now().UnixNano()
 	other := fmt.Sprintf("wc_schema_other_%d", suffix)
@@ -247,7 +248,7 @@ func TestWebChatStore_Postgres_MessagesInOtherSchema(t *testing.T) {
 // holds one connection for the migration advisory lock.
 func openPGThreadMigrationSchema(t *testing.T, prefix string) (*sql.DB, string) {
 	t.Helper()
-	dsn := requirePostgresDSN(t)
+	dsn := hubtestutil.RequirePostgresDSN(t)
 	schema := fmt.Sprintf("%s_%d", prefix, time.Now().UnixNano())
 	cfg, err := pgx.ParseConfig(dsn)
 	require.NoError(t, err)
@@ -386,7 +387,7 @@ func sqliteMigrationRecords(t *testing.T, db *sql.DB, name string) int {
 // thread_id backfill and thread_id index migrations are not recorded as
 // completed, and that they run on the next Init once the table exists.
 func TestSQLiteWebChatStore_ThreadMigrationsWaitForMessagesTable(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 	const legacyID = "msg-legacy-1"
 
 	require.NoError(t, NewWebChatStore(db, "sqlite").Init())
@@ -415,7 +416,7 @@ func TestSQLiteWebChatStore_ThreadMigrationsWaitForMessagesTable(t *testing.T) {
 // present the thread_id migrations run on the first Init and are recorded,
 // and that a later Init does not run them again.
 func TestSQLiteWebChatStore_ThreadMigrationsRunOnce(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 	const firstID = "msg-first"
 	const laterID = "msg-later"
 
@@ -532,7 +533,7 @@ func openSchemaFaultSQLite(t *testing.T) *sql.DB {
 		_ = probe.Close()
 		sql.Register(schemaFaultDriverName, schemaFaultDriver{inner: inner})
 	})
-	return openTestMemorySQLite(t, schemaFaultDriverName)
+	return hubtestutil.OpenTestMemorySQLite(t, schemaFaultDriverName)
 }
 
 // setSQLiteSchemaReadDenied turns the schema-read fault on (deny=true) or off

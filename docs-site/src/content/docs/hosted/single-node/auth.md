@@ -91,7 +91,7 @@ To pre-register a person before their first sign-in (for example, under `invite_
 
 You can also set it from **Admin > Server Config**, or seed it with `SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE=viewer`. Changing it does not affect existing users; change an individual user's role on **Admin > Users**. See [Hub roles](/scion/hosted/ha/permissions/#hub-roles) for what each role allows and how demotion from `admin_emails` works, and the [server configuration reference](/scion/reference/server-config/#authentication-serverauth) for the setting.
 
-`server.auth.default_user_role` is a different setting from the federation `default_role` described under [OIDC-Based Federation](#oidc-based-federation) below, which only applies to users who authenticate with federated OIDC tokens.
+`server.auth.default_user_role` is a different setting from the deprecated federation `default_role` described under [OIDC-Based Federation](#oidc-based-federation) below, which is accepted for compatibility and has no effect.
 
 ### Deleting users
 
@@ -294,6 +294,8 @@ When running in database mode, administrators can manage OIDC federation configu
 * **Issuer CRUD**: Create, read, update, and delete trusted OIDC issuers dynamically. The interface provides conditional input fields based on the selected identity/issuer type.
 * **Hot-Reloading**: Changes saved in the UI are immediately applied cluster-wide. The backend utilizes an `atomic.Pointer` to hot-reload the `FederationAuthenticator`, ensuring a zero-downtime, lock-free path for inbound federated requests.
 * **Semantic Validation**: The Admin API performs strict semantic validation on save, preventing malformed issuer rules or invalid URLs from reaching the live runtime.
+* **Project visitors**: When the `federation.project_visitors` experiment is on, the dialog for a `hub` or `user` issuer has the switch **Allow project owners to grant visitor access to users from this issuer**, bound to the issuer's `allow_visitor_grants` setting (off by default). While it is on, project owners and admins can add users of that issuer as visitors on the project's **Visitors** tab (see [the Web Dashboard](/scion/workstation/dashboard/#projects)). Turning it off refuses that issuer's visitors on their next request and keeps their grants, so turning it back on restores access.
+* **Default Role (deprecated)**: The **Default Role** field is no longer shown for `user` issuers. The `default_role` key is still accepted in the configuration and ignored, and editing an issuer keeps a stored value unchanged.
 
 #### Static Bootstrap Configuration (`settings.yaml`)
 Alternatively, or for initial bootstrapping, you can configure federation statically in your configuration file.
@@ -317,6 +319,9 @@ server:
         # Default scopes/roles for identities from this issuer
         default_scopes: ["project:read", "agent:status:update"]
         issuer_type: "hub" # hub, service_account, or user
+        # Optional (hub and user issuers): let project owners grant visitor
+        # access to users of this issuer (federation.project_visitors)
+        allow_visitor_grants: false
 ```
 
 ### How It Works
@@ -326,7 +331,7 @@ server:
 - **Identity Types**:
   - `hub`: Identifies requests originating from federated partner Hubs. A partner Hub marks each credential it signs with `scion_token_kind`: `agent` for agent identity tokens, `user` for user access credentials. Agent identity tokens, and credentials without the claim from Hubs that predate it, are read as agents, as before. A user access credential is accepted only when the issuer has `accept_user_tokens: true` and the `federation.project_visitors` experiment is on; it must carry a verified email and no agent claims, and must pass `allowed_emails` and `allowed_domains`. Any other `scion_token_kind` value is refused. A refused credential gets the same `401` as any other credential that fails verification.
   - `service_account`: Authenticates automated workloads via GCP Service Accounts.
-  - `user`: Maps OIDC tokens to standard user identities, with configurable `default_role` (defaults to `viewer`; this is separate from `server.auth.default_user_role`, which applies to users who sign in through OAuth, OIDC login or an auth proxy) and domain restrictions using wildcards (e.g. `allowed_emails: ["*@example.com"]`).
+  - `user`: Maps OIDC tokens to standard user identities, with domain restrictions using wildcards (e.g. `allowed_emails: ["*@example.com"]`). The `default_role` key is deprecated: it is accepted and has no effect on what a federated user can do (it is also separate from `server.auth.default_user_role`, which applies to users who sign in through OAuth, OIDC login or an auth proxy).
 - **Write limits for federated callers**: A federated caller keeps visitor rights on the resources it has been granted, but the Hub refuses its writes to profile and other non-agent resources: user-scope templates, skills and harness configs, imports, env vars and secrets, chat preferences, presence, and attachments outside a project. Federated callers also cannot redeem invites.
 
 ### External Bearer Tokens (Google credential pass-through)
@@ -471,6 +476,19 @@ GCP identity passthrough mode does not work inside Cloud Run Sandbox (gVisor) ru
 
 While the Hub automatically translates passthrough to assign mode at agent creation and PATCH time (using the broker's host service account), explicitly configuring assign mode is recommended for clarity and consistency.
 :::
+
+#### Host networking on Docker and Podman
+
+On the Docker runtime, an agent container runs with `--network=host` when its Hub endpoint is on loopback (`localhost`, `127.0.0.1`, `::1`, or `host.docker.internal`). On Docker and Podman, it also runs with `--network=host` whenever `SCION_FORCE_HOST_NETWORK` is set on the Runtime Broker. Because the container shares the host network namespace, `sciontool` cannot install its `iptables` rule for `169.254.169.254` without altering the host's own networking:
+
+- **`assign`** is always refused under host networking.
+- **`block`** is governed by the Runtime Broker's [`SCION_HOST_NETWORK_BLOCK_POLICY`](/scion/reference/server-config/#runtime-broker-environment-variables) environment variable:
+  - `auto` (default when unset): refuses agent start when the Runtime Broker runs on a detected Linux cloud host (GCE, AWS EC2, Azure, Oracle Cloud, Alibaba Cloud, OpenStack, DigitalOcean, or Hetzner, identified from local DMI files under `/sys/class/dmi/id/`, `/run/cloud-init/instance-data.json`, or GCE guest-agent files with no network calls). On other hosts (such as a local workstation), the agent starts and the Runtime Broker logs and returns a warning that `169.254.169.254` is not blocked.
+  - `strict`: always refuses agent start when `block` combines with host networking, even off-cloud.
+  - `allow`: allows agent start under host networking even on a detected cloud host, logging a warning and appending an acknowledgement to the start warning.
+  - Any unrecognized value is logged at `ERROR` and treated as `strict`.
+
+To run agents with `block` or `assign` on a cloud VM, configure a non-loopback, bridge-reachable Hub URL (`SCION_SERVER_BASE_URL` or `server.hub.public_url`) so containers run on bridge networking, and leave `SCION_FORCE_HOST_NETWORK` unset on the Runtime Broker.
 
 ### Management UI & Hub-Minted Service Accounts
 

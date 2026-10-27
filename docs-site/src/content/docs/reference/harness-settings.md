@@ -78,7 +78,7 @@ scion harness-config install file:///path/to/my-harness
 When a Hub is available, `install` registers the config **on the Hub** (project scope by default,
 or global with `--global`); otherwise it installs it locally. The output shows the Hub scope the
 config was created or updated in. A project-scoped config and a global config with the same name
-are separate configs, so check the printed scope to see which one you changed.
+are separate configs, so check the printed scope to see which one you changed. When the Hub bootstraps or imports a harness-config directory, it opens the collected directory as a root, reads only the regular files recorded during collection without following symlinks or replaced directories, verifies each file's size and SHA-256 digest on every read (`config.yaml` and uploaded files), and requires any config whose name was taken from `config.yaml` during discovery to carry that same `name` in the collected `config.yaml`.
 
 ### Source-URL tracking and "Refresh from Source"
 

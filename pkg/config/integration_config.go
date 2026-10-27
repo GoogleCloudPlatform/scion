@@ -25,6 +25,8 @@ import (
 	"sync"
 
 	yamlv3 "gopkg.in/yaml.v3"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 )
 
 // Well-known secret keys for chat integration credentials stored via the secrets system.
@@ -131,17 +133,28 @@ func (p *YAMLConfigProvider) Load(_ context.Context) (map[string]string, error) 
 // The context parameter is accepted for interface compliance but unused by
 // the file-based provider.
 func (p *YAMLConfigProvider) Save(_ context.Context, config map[string]string) error {
-	dir := filepath.Dir(p.path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("create config dir %s: %w", dir, err)
-	}
-
 	data, err := yamlv3.Marshal(config)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
 
-	return os.WriteFile(p.path, data, 0600)
+	return writePrivateConfigFile(p.path, data)
+}
+
+// writePrivateConfigFile writes data to path as a private file in a
+// privatefs Tree anchored at path's directory, whose missing components
+// are created private (mode 0700; on Windows an owner-only ACL). On unix
+// the file is written in place with mode 0600, as before; on Windows it is
+// replaced atomically with the owner-only ACL, so a too-open file is
+// repaired.
+func writePrivateConfigFile(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tree, err := privatefs.OpenTree(dir, privatefs.TreeOptions{CreateAnchor: true})
+	if err != nil {
+		return fmt.Errorf("create config dir %s: %w", dir, err)
+	}
+	defer func() { _ = tree.Close() }()
+	return tree.WriteFile(filepath.Base(path), data, privatefs.Private)
 }
 
 // IntegrationSecretMapping maps a secret backend key to the config key that a
@@ -613,11 +626,6 @@ func CreatePluginConfigFile(pluginName, configFilePath string) error {
 		resolved = filepath.Join(home, resolved[2:])
 	}
 
-	dir := filepath.Dir(resolved)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return fmt.Errorf("create config dir: %w", err)
-	}
-
 	// Write a minimal config file with only non-secret settings.
 	// Secret keys (bot_token, public_key, etc.) are managed via the
 	// secrets backend and should not appear in the config file.
@@ -638,7 +646,7 @@ func CreatePluginConfigFile(pluginName, configFilePath string) error {
 		content += "db_path: \"~/.scion/scion-teams.db\"\n"
 	}
 
-	return os.WriteFile(resolved, []byte(content), 0600)
+	return writePrivateConfigFile(resolved, []byte(content))
 }
 
 // LoadPluginConfigFile reads a standalone YAML config file for a plugin and

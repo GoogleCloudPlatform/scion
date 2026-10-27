@@ -156,3 +156,52 @@ runs:
           find "$GOCACHE_DIR" -mindepth 2 -type f -exec touch -d '2 hours ago' {} +
         fi
         touch "$RUNNER_TEMP/go-cache-restored.stamp"
+
+    # cr-ci runner only: it is self-hosted and its runners are named
+    # cr-job-<job id> (the mediator registers them so). runner.environment is
+    # 'github-hosted' everywhere else, so this step never runs upstream, and
+    # other self-hosted runners skip it.
+    # actions/cache stores paths relative to GITHUB_WORKSPACE, so entries
+    # restore to the same place on ubuntu-latest and on the cr-ci runner
+    # only if the work folder and HOME match: the runner entrypoint links
+    # /home/runner/work to /scratch/_work and ~/.cache, ~/go to /scratch.
+    # If that ever breaks, the two runner types would silently keep separate
+    # caches (twice the Actions cache quota), so fail the job instead
+    # (cr-ci/workflows/README.md, "Cache sharing").
+    - name: Check cr-ci cache parity (cr-ci runner only)
+      if: runner.environment == 'self-hosted' && startsWith(runner.name, 'cr-job-')
+      shell: bash
+      run: |
+        set -uo pipefail
+        fail=0
+        # An empty value (a path that does not exist or cannot be resolved) fails even
+        # when the expected side is empty too.
+        check() {
+          if [ -z "$2" ]; then
+            echo "::error title=cr-ci cache parity::$1 is empty (missing or unresolvable), want '$3'"
+            fail=1
+          elif [ "$2" = "$3" ]; then
+            echo "ok   $1: $2"
+          else
+            echo "::error title=cr-ci cache parity::$1 is '$2', want '$3'"
+            fail=1
+          fi
+        }
+        check HOME "$HOME" /home/runner
+        # Compare resolved paths (readlink -f) on both sides: a relative or chained link
+        # still has to land where /scratch's directory does. /scratch/.cache may itself
+        # be a link (the RAM build cache), so resolve the expected side too. A real
+        # directory in place of a link resolves to itself and fails.
+        check "work folder /home/runner/work" "$(readlink -f /home/runner/work)" "$(readlink -f /scratch/_work)"
+        check "HOME/.cache" "$(readlink -f "$HOME/.cache")" "$(readlink -f /scratch/.cache)"
+        check "HOME/go" "$(readlink -f "$HOME/go")" "$(readlink -f /scratch/go)"
+        check "go env GOCACHE" "$(go env GOCACHE)" /home/runner/.cache/go-build
+        check "go env GOMODCACHE" "$(go env GOMODCACHE)" /home/runner/go/pkg/mod
+        check "GITHUB_WORKSPACE parent" "${GITHUB_WORKSPACE%/*/*}" /home/runner/work
+        if command -v zstd >/dev/null; then
+          echo "ok   zstd: $(zstd --version)"
+        else
+          echo "::error title=cr-ci cache parity::zstd is not installed"
+          fail=1
+        fi
+        exit "$fail"

@@ -22,7 +22,6 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
@@ -149,27 +148,29 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sub-resource actions
-	if action == "revoke-sessions" {
+	// Sub-resource actions. Only the bare ID and the sub-routes named here
+	// are resources; any other sub-path, including a further segment below
+	// a known sub-route, answers 404 and never reaches the user handlers
+	// below.
+	switch action {
+	case "":
+		// The user itself: handled by the method switch below.
+	case "revoke-sessions":
 		if r.Method != http.MethodPost {
 			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		s.revokeUserSessions(w, r, id)
 		return
-	}
-	// delete-blockers takes no further path segment: anything below it is
-	// not a resource, and must not fall through to the user handlers below.
-	if strings.HasPrefix(action, "delete-blockers/") {
-		NotFound(w, "User resource")
-		return
-	}
-	if action == "delete-blockers" {
+	case "delete-blockers":
 		if r.Method != http.MethodGet {
 			MethodNotAllowed(w, http.MethodGet)
 			return
 		}
 		s.getUserDeleteBlockers(w, r, id)
+		return
+	default:
+		NotFound(w, "User resource")
 		return
 	}
 

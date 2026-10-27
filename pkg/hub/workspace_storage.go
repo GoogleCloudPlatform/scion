@@ -17,7 +17,6 @@ package hub
 import (
 	"os"
 	"path/filepath"
-	"syscall"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -89,9 +88,8 @@ func workspaceMountRoot(wsCfg *config.V1WorkspaceStorageConfig) string {
 // since that state silently reinstates the bug this function exists to catch.
 // It happens when a FileInfo does not carry a unix stat (a fake FileInfo or a
 // filesystem implementation outside package os) or when the container root
-// cannot be stat'ed. Note this file needs syscall.Stat_t at compile time and
-// so builds only on unix targets, which is everything build-release.yml ships;
-// on a platform without that type it would not compile rather than fail open.
+// cannot be stat'ed, and on every non-unix platform, where deviceID
+// (device_id_other.go) reports no device number.
 func isMountedVolume(fi os.FileInfo, rootPath string) (mounted, determinable bool) {
 	dev, ok := deviceID(fi)
 	if !ok {
@@ -108,14 +106,4 @@ func isMountedVolume(fi os.FileInfo, rootPath string) (mounted, determinable boo
 	}
 
 	return dev != rootDev, true
-}
-
-// deviceID returns the filesystem device ID for fi, and whether it could be
-// determined.
-func deviceID(fi os.FileInfo) (uint64, bool) {
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0, false
-	}
-	return uint64(st.Dev), true
 }

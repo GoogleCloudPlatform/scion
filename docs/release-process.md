@@ -279,8 +279,11 @@ The main `scion` binary is published for:
 | `linux/arm64` | `scion-linux-arm64` |
 | `darwin/amd64` | `scion-darwin-amd64` |
 | `darwin/arm64` | `scion-darwin-arm64` |
+| `windows/amd64` | `scion-windows-amd64` |
+| `windows/arm64` | `scion-windows-arm64` |
 
-Release artifacts are gzip-compressed tar archives. The Telegram, Discord, Slack, and Teams
+Linux and macOS artifacts are gzip-compressed tar archives (`.tar.gz`) containing `scion`. Windows
+artifacts are zip archives (`.zip`) containing `scion.exe`. The Telegram, Discord, Slack, and Teams
 plugins are built for Linux on both amd64 and arm64; plugin builds are not published for macOS.
 
 ## Checksums

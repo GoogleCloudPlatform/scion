@@ -76,6 +76,26 @@ func TestCompositeStore_ReservationRelease(t *testing.T) {
 	storetest.ReservationReleaseConformance(t, compositeFactory)
 }
 
+// TestCompositeStore_TransferBrokerReservation runs the reservation
+// transfer conformance check on whichever backend compositeFactory selects.
+func TestCompositeStore_TransferBrokerReservation(t *testing.T) {
+	storetest.TransferBrokerReservationConformance(t, compositeFactory)
+}
+
+// TestCompositeStore_TransferBrokerReservationHook runs the hook-based
+// reservation transfer checks (atomicity at each step, the zero-row
+// release). They set the process-global test hook, so they do not run in
+// parallel.
+func TestCompositeStore_TransferBrokerReservationHook(t *testing.T) {
+	storetest.TransferBrokerReservationHookConformance(t, compositeFactory, setTransferHook)
+}
+
+// setTransferHook adapts entadapter.SetTransferBrokerReservationTestHook to
+// the storetest hook type.
+func setTransferHook(fn storetest.TransferHook) (restore func()) {
+	return entadapter.SetTransferBrokerReservationTestHook(entadapter.TransferHookFunc(fn))
+}
+
 // TestReleaseIfScopeBrokerAbsent_UnparseableScopeID_Released runs on both
 // dialects: a scope ID that cannot be a broker ID is released, with no
 // error.

@@ -114,17 +114,15 @@ func revokeAgentCredentials(ctx context.Context, credStore store.AgentCredential
 // code via heartbeat) or a broker-confirmed launch failure (a "failed"
 // launch report) — means the broker itself told the Hub the container is
 // gone, so revoking on a subsequent start failure is safe. New LaunchError
-// values must be added here only if they are likewise declared by the Hub
+// values must be added to store.IsUnconfirmedLaunchError only if they are likewise declared by the Hub
 // on silence rather than confirmed by the broker: ptone/scion#2485's planned
 // container_missing, for example, comes from the broker's own inventory
 // reconciliation and should keep revoking, not be added to this list.
+//
+// The list itself is store.IsUnconfirmedLaunchError, which the start claim
+// also reads, so the two cannot drift.
 func isUnconfirmedLaunchError(launchError string) bool {
-	switch launchError {
-	case store.LaunchErrorLaunchTimeout, store.LaunchErrorBrokerLost:
-		return true
-	default:
-		return false
-	}
+	return store.IsUnconfirmedLaunchError(launchError)
 }
 
 // isConfirmedNonRunningPhase reports whether phase is one of the agent

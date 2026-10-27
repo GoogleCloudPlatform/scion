@@ -76,7 +76,7 @@ func TestWebAuthMe_IncludesPreferencesTimezone(t *testing.T) {
 	require.True(t, ok, "newDevAuthWebServer installs a *proxyAuthStore")
 	devStore.users[DevUserID].Preferences = &store.UserPreferences{Timezone: "Asia/Kathmandu"}
 
-	handler := ws.Handler()
+	handler := devSignedIn(t, ws)
 	req := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
