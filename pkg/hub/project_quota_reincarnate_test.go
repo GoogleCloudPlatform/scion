@@ -470,3 +470,71 @@ func TestProjectQuota_MoveToFullTargetRefusedHoldsNoSlot(t *testing.T) {
 	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.dst.ID), "only the target's occupant")
 	assert.False(t, hasProjectRow(t, f.s, a.ID), "no project row is left behind")
 }
+
+// A refused move of an agent that holds a source broker slot. The atomic
+// transfer (moveBrokerQuota) leaves that slot in place, as the same row,
+// and the reincarnation did not create it, so the owned release alone would
+// keep it. The worker's refused-move release frees the stopped agent's idle
+// slots once the failure is recorded: afterwards it holds no broker row
+// (neither source nor target) and no project row.
+func TestProjectQuota_MoveToFullTargetRefusedReleasesHeldSourceSlot(t *testing.T) {
+	f := setupMoveFixture(t, true, nil)
+	ctx := context.Background()
+	setBrokerAgentCeiling(t, f.s, 1)
+	occ := newCreatorAgent(t, f.s, f.dst, f.project, "pq-move-occ-held", state.PhaseRunning, tid("user-occupant-held"))
+	reserveBrokerSlot(t, f.s, f.dst, occ.ID)
+
+	a, err := f.s.GetAgent(ctx, f.agent.ID)
+	require.NoError(t, err)
+	a.Phase = string(state.PhaseStopped)
+	a.ReincarnationState = store.ReincarnationStatePending
+	require.NoError(t, f.s.UpdateAgent(ctx, a))
+	_, err = f.s.SetAgentRunID(ctx, a.ID, "run-src", nil)
+	require.NoError(t, err)
+	reserveBrokerSlot(t, f.s, f.src, a.ID)
+	held := agentBrokerReservation(t, f.s, a.ID)
+	require.Equal(t, f.src.ID, held.ScopeID, "setup: the agent holds a source slot")
+	created := seedProjectRow(t, f.s, a)
+	rec := &store.AgentReincarnation{
+		AgentID: a.ID, FromGeneration: 1, ToGeneration: 2, State: store.AgentReincarnationStatePending,
+		PreviousAppliedConfig: a.AppliedConfig, SourceBrokerID: f.src.ID, TargetBrokerID: f.dst.ID,
+	}
+	require.NoError(t, f.s.CreateAgentReincarnation(ctx, rec))
+	fresh := *a.AppliedConfig
+	mv := &reincarnationMove{SourceBrokerID: f.src.ID, TargetBrokerID: f.dst.ID, ProjectID: f.project.ID, SelfMove: true, AgentDirWorkspace: true}
+	a, err = f.s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+
+	// Read the agent's broker row right after the refused transfer returns.
+	var afterTransferID, afterTransferScope string
+	var afterTransferErr error
+	restore := setMoveBrokerQuotaTestHook(func(hctx context.Context) {
+		def, err := f.s.GetLimitDefinitionByName(hctx, store.LimitMaxAgentsPerBroker)
+		if err != nil {
+			afterTransferErr = err
+			return
+		}
+		res, err := f.s.GetActiveReservation(hctx, def.ID, a.ID)
+		if err != nil {
+			afterTransferErr = err
+			return
+		}
+		afterTransferID, afterTransferScope = res.ID, res.ScopeID
+	})
+	defer restore()
+
+	f.srv.runReincarnationWorker(ctx, a.ID, rec.ID, a.AppliedConfig, &fresh, "h", time.Now(), "", &ReincarnationPlan{}, 2, a.DeletionClaim, mv,
+		&reincarnationCapacity{projectReservationID: created.ID})
+
+	got, err := f.s.GetAgentReincarnation(ctx, rec.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.AgentReincarnationStateFailed, got.State)
+	assert.Contains(t, got.Error, "target broker quota")
+	require.NoError(t, afterTransferErr, "the hook read the agent's broker row")
+	assert.Equal(t, held.ID, afterTransferID, "the refused transfer keeps the same source row")
+	assert.Equal(t, f.src.ID, afterTransferScope)
+	assert.False(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "the stopped agent's held source slot is released")
+	assert.EqualValues(t, 0, brokerReservationCount(t, f.s, f.src.ID), "no source row is left behind")
+	assert.EqualValues(t, 1, brokerReservationCount(t, f.s, f.dst.ID), "only the target's occupant")
+	assert.False(t, hasProjectRow(t, f.s, a.ID), "no project row is left behind")
+}
