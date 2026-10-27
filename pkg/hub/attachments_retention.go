@@ -56,6 +56,9 @@ const attachmentRetentionLinkProbe = 100
 type attachmentRetention struct {
 	mu   sync.Mutex
 	last time.Time
+	// copyCleanupDone records that the one-shot web chat copy cleanup
+	// (webChatCopyCleanupOnce) completed.
+	copyCleanupDone bool
 }
 
 // due reports whether a sweep should run at now, and records it as run.
@@ -92,6 +95,7 @@ func (s *Server) sweepAttachmentRetention(ctx context.Context, now time.Time) {
 	if !s.attachmentRetention.due(now) {
 		return
 	}
+	s.webChatCopyCleanupOnce(ctx)
 	if n := s.sweepAttachmentProjections(ctx, s.projectionRetentionCutoff(now)); n > 0 {
 		slog.InfoContext(ctx, "attachments: swept scratchpad projections older than the inbox retention", "count", n)
 	}
@@ -136,6 +140,12 @@ func (s *Server) sweepLegacyAttachmentBlobs(ctx context.Context, cutoff time.Tim
 // (logged on the send path) leaves the blob unlinked; history lists
 // attachments through the same links, so such a blob is already not shown
 // with its message.
+//
+// The object-storage condition is deliberately not widened to hubs whose
+// attachment artifacts use local blob storage: there, blobs that sent
+// messages reference are what history downloads of attachments sent
+// before artifacts were on still read, so they are kept until they can be
+// moved or their messages are deleted.
 func (s *Server) legacyBlobSweepable(ctx context.Context, wcs WebChatStore, projectID, id string, objectStorage bool) bool {
 	meta, err := wcs.GetAttachment(ctx, id)
 	if err != nil || meta == nil || meta.ID != id || meta.ProjectID != projectID {
