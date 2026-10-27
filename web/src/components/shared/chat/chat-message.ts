@@ -1746,6 +1746,17 @@ export class ScionChatMessage extends LitElement {
       left: calc(100% + 0.25rem);
     }
 
+    /* A headerless starred row keeps its gutter star next to the bubble:
+       the button moves one step further out, so neither covers the other. */
+    .bubble.has-star-meta .msg-actions {
+      right: calc(100% + 1.25rem);
+    }
+
+    .from-agent .bubble.has-star-meta .msg-actions {
+      right: auto;
+      left: calc(100% + 1.25rem);
+    }
+
     .message-wrapper:hover .msg-actions,
     .message-wrapper:focus-within .msg-actions,
     .msg-actions[aria-expanded='true'] {
@@ -2502,7 +2513,7 @@ export class ScionChatMessage extends LitElement {
           : this.fromAgent
             ? html`<div class="avatar-spacer"></div>`
             : nothing}
-        <div class="bubble">
+        <div class="bubble${this.showsStarMeta() ? ' has-star-meta' : ''}">
           ${this.showHeader && this.fromAgent
             ? html`
                 <div class="bubble-header">
@@ -2545,8 +2556,7 @@ export class ScionChatMessage extends LitElement {
           ${isDeleted ? nothing : this.renderArtifactChips()}
           ${isDeleted ? nothing : this.renderBadges()}
           ${isDeleted ? nothing : this.renderDeliveryState()}
-          ${isDeleted || this.hasHeaderMeta() ? nothing : this.renderStarMeta()}
-          ${this.renderActionsButton()}
+          ${this.showsStarMeta() ? this.renderStarMeta() : nothing} ${this.renderActionsButton()}
         </div>
       </div>
       ${this.renderFullPreview()}
@@ -2624,6 +2634,11 @@ export class ScionChatMessage extends LitElement {
         composed: true,
       })
     );
+  }
+
+  /** Whether the star shows in the gutter (a starred row without a header). */
+  private showsStarMeta(): boolean {
+    return this.starred && !this.deletedAt && !this.hasHeaderMeta();
   }
 
   /** Whether this rendering shows a header carrying the time (and the star). */

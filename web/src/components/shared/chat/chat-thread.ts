@@ -104,7 +104,7 @@ import type { PreviewTarget } from './chat-file-preview.js';
 import './chat-action-sheet.js';
 import type { ActionSheetSelectDetail } from './chat-action-sheet.js';
 import {
-  deepActiveElement,
+  focusedElement,
   MenuFocus,
   placeMenuInViewport,
   renderMenu,
@@ -5767,8 +5767,7 @@ export class ScionChatThread extends LitElement {
     if (index < 0) {
       if (this._activeActionsId && this._activeActionsIndex >= 0) {
         // The active message left.
-        repairFocus =
-          this._actionsFocusId === this._activeActionsId && deepActiveElement() === null;
+        repairFocus = this._actionsFocusId === this._activeActionsId && focusedElement() === null;
         index = els.length > 0 ? Math.min(this._activeActionsIndex, els.length - 1) : -1;
       } else {
         index = this.lastVisibleMessageIndex(els);
@@ -5900,6 +5899,12 @@ export class ScionChatThread extends LitElement {
   private handleMenuUserScrollKey = (e: KeyboardEvent): void => {
     if (!JUMP_SCROLL_CANCEL_KEYS.has(e.key)) return;
     if (isEditableKeydownTarget(e.composedPath()[0])) return;
+    // Arrow keys, Home/End and Space inside the open menu move between its
+    // items; they scroll nothing.
+    const inMenu = e
+      .composedPath()
+      .some((n) => n instanceof HTMLElement && n.classList.contains('context-menu'));
+    if (inMenu) return;
     this._menuUserScrolled = true;
   };
 

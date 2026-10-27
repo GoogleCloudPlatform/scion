@@ -31,6 +31,7 @@ import type { TemplateResult } from 'lit';
 
 import type { ActionSheetItem } from './chat-action-sheet.js';
 import { clampMenuToViewport, type Point } from './menu-position.js';
+import { deepActiveElement } from '../deep-active-element.js';
 
 /** The width at or under which the chat switches to its one-panel mobile layout. */
 export const MENU_SHEET_MAX_WIDTH_PX = 768;
@@ -61,9 +62,8 @@ export function runMenuAction(actions: MenuAction[], id: string): void {
  * The deepest focused element, through open shadow roots, or null when
  * nothing (or only the document body) has focus.
  */
-export function deepActiveElement(): HTMLElement | null {
-  let active: Element | null = document.activeElement;
-  while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+export function focusedElement(): HTMLElement | null {
+  const active = deepActiveElement();
   return active instanceof HTMLElement && active !== document.body ? active : null;
 }
 
@@ -93,7 +93,7 @@ export class MenuFocus {
   private focusFirstPending = false;
 
   /** A popup menu opened from `opener` (default: the focused element). */
-  opened(opener: HTMLElement | null = deepActiveElement()): void {
+  opened(opener: HTMLElement | null = focusedElement()): void {
     this.opener = opener;
     this.focusFirstPending = true;
   }
@@ -124,7 +124,7 @@ export class MenuFocus {
     this.closed();
     if (!opener) return;
     setTimeout(() => {
-      if (deepActiveElement() === null && opener.isConnected) opener.focus({ preventScroll: true });
+      if (focusedElement() === null && opener.isConnected) opener.focus({ preventScroll: true });
     }, 0);
   }
 }

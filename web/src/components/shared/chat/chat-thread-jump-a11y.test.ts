@@ -237,6 +237,28 @@ describe('scion-chat-thread popup menu while the thread scrolls', () => {
     expect((el as unknown as Internals).contextMenuMessage?.id).toBe('m2');
   });
 
+  it('arrow keys inside the menu are not a user scroll: a settling scroll still moves it', async () => {
+    const el = await mount();
+    const scroller = await openMenuOn(el, 'm2');
+    await el.updateComplete;
+    const menu = el.shadowRoot!.querySelector<HTMLElement>('[role="menu"]')!;
+    const item = menu.querySelector<HTMLElement>('[role^="menuitem"]')!;
+    item.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'ArrowDown',
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      })
+    );
+    placeAt(msgEl(el, 'm2'), 280);
+    scroller.dispatchEvent(new Event('scroll'));
+    await el.updateComplete;
+    const internals = el as unknown as Internals;
+    expect(internals.contextMenuMessage?.id).toBe('m2');
+    expect(internals.contextMenuPosition).toEqual({ x: 50, y: 290 });
+  });
+
   it('stops following once the menu closes', async () => {
     const el = await mount();
     const scroller = await openMenuOn(el, 'm2');
@@ -527,5 +549,21 @@ describe('scion-chat-thread message list tab stop (More actions)', () => {
     });
     inner.dispatchEvent(arrow);
     expect(arrow.defaultPrevented).toBe(false);
+  });
+
+  it('a headerless starred row marks its bubble so the button sits past the gutter star', async () => {
+    setFlag(true);
+    const el = await mount();
+    await settled(el);
+    const row = rows(el)[1];
+    row.starred = true;
+    await row.updateComplete;
+    const bubble = row.shadowRoot!.querySelector('.bubble')!;
+    expect(bubble.classList.contains('has-star-meta')).toBe(true);
+    expect(bubble.querySelector('.star-meta .star-indicator')).not.toBeNull();
+    expect(bubble.querySelector('.msg-actions')).not.toBeNull();
+    row.starred = false;
+    await row.updateComplete;
+    expect(bubble.classList.contains('has-star-meta')).toBe(false);
   });
 });
