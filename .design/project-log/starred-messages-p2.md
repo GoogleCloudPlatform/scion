@@ -46,13 +46,13 @@
   the upkeep and deletion lock cast through a regex guard (`pgUUIDText`) so one malformed stored
   value cannot fail a whole statement.
 - **Browser coverage of promotion is a mocked-hub case** (`web/e2e/chat-mobile/star-promotion.pw.ts`),
-  by project decision: the real-hub suite starts its hub without a broker and has no way
-  to create an agent record, and a broker-less agent create would be an unverified path that
-  could only fail late in a gate. The hub promotion path is covered by the Go store and handler
-  tests (both dialects, both message populations, rollback, single connection, access loss and
-  regain). Human DM retrieval runs on the real hub (`web/e2e/chat-stars.spec.ts`).
-- **Dev-time compiles and browser runs follow the project's build-lane process**, with a memory
-  limit on every heavy process.
+  by project decision: the real-hub suite cannot create an agent record, which promotion needs. The
+  hub promotion path is covered by the Go store and handler tests (both dialects, both message
+  populations, rollback, single connection, access loss and regain). Human DM retrieval runs on the
+  real hub (`web/e2e/chat-stars.spec.ts`).
+- **Attachment-only messages.** A native send with attachments and no text cannot be persisted
+  today: the message store refuses an empty body (tracked separately). The star excerpt shows
+  "Attachment" for an empty stored body.
 
 ## Follow-ups (from the phase 1 list)
 
@@ -63,4 +63,4 @@
 5. Done: at phone width the menu helper asserts exactly one open action sheet.
 6. Done: the history regression test asserts byte-identical 404 bodies for missing and unreadable
    threads and no `canPost` on any refused read.
-7. and 8. belong to later work (the next non-pin e2e gate revision; phase 5).
+7. and 8. belong to later work (8 is the phase 5 menu fix).

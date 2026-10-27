@@ -214,6 +214,9 @@ func TestChatStars_DMTokenBoundaries(t *testing.T) {
 	hubReader := f.mint(t, f.member, hubBoundary(), "inbox:read", "agent:read")
 	projAWriter := f.mint(t, f.member, projectBoundary(f.projA), "inbox:write", "agent:read")
 	projAReader := f.mint(t, f.member, projectBoundary(f.projA), "inbox:read", "agent:read")
+	// A project-boundary token can be minted only for a project its holder belongs to: give the member a role
+	// in project B, whose boundary does not hold agent A's project.
+	createTestUserWithProjectRole(t, f.s, f.member, f.member+"@test.com", f.projB, store.ProjectRoleMember)
 	projBWriter := f.mint(t, f.member, projectBoundary(f.projB), "inbox:write", "agent:read")
 
 	assert.Equal(t, http.StatusForbidden, f.call(t, hubReader, http.MethodPut, starPath(agentMsg), agentBody).Code, "PUT needs inbox:write")
@@ -546,6 +549,8 @@ func TestChatStars_MessageEditNonCanonicalID(t *testing.T) {
 	f := newStarFixture(t, true)
 	msg := f.threadMsg(t, f.topicA, f.projA, "before the edit", time.Now().Add(-time.Minute))
 	decodeStarPut(t, f.put(t, f.admin, msg, f.topicA))
+	edits, unsub := f.ep.Subscribe("project." + f.projA + ".chat.message.edited")
+	defer unsub()
 
 	rec := f.session(t, f.admin, http.MethodPut, chatConversationPath(f.topicA, "messages/"+strings.ToUpper(msg)),
 		map[string]string{"content": "after the edit"})
@@ -559,4 +564,11 @@ func TestChatStars_MessageEditNonCanonicalID(t *testing.T) {
 	item := decodeStarItem(t, f.session(t, f.admin, http.MethodGet, starPath(msg), nil))
 	assert.True(t, item.Edited, "the edited marker is keyed by the canonical ID")
 	assert.Equal(t, "after the edit", item.Excerpt)
+
+	// The edited event carries the canonical ID too.
+	got := collectEvents(edits)
+	require.Len(t, got, 1)
+	var evt map[string]any
+	require.NoError(t, json.Unmarshal(got[0].Data, &evt))
+	assert.Equal(t, msg, evt["messageId"], "the edited event names the canonical message ID")
 }
