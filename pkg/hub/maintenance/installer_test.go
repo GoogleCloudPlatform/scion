@@ -356,7 +356,9 @@ func TestDetect(t *testing.T) {
 	})
 
 	t.Run("non-linux", func(t *testing.T) {
-		opts := symlinkOpts(installLayout(t, "nightly-20261022"))
+		// Detect returns unsupported for a non-linux GOOS before looking at
+		// the layout, so no install tree (or symlink) is needed.
+		opts := symlinkOpts(t.TempDir())
 		opts.GOOS = "darwin"
 		if inst := Detect(ctx, opts); inst.Name() != StrategyUnsupported {
 			t.Fatalf("Detect on darwin = %s", inst.Name())
