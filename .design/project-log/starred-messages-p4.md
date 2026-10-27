@@ -29,6 +29,12 @@
 - **Scan:** batches of 100 candidates, at most 1,000 per response; the sealed cursor (`chat.starred_conversations.v1`,
   bound to the project scope, the sort and the identity) resumes after the last scanned candidate, so a page can be
   short, or empty with a cursor.
+- **Shared hub file, `pkg/hub/authorized_list.go`:** `listCursorSealer` gains `SealPosition`/`OpenPosition`, an
+  append-only addition (`Seal`/`Open` are unchanged). They seal an opaque position with the same key under their own
+  AAD domain (`scion-list-position-v1:`) and prefix (`p1.`), and do not check the plaintext's shape (the caller
+  does). The rail needs them: its position (a sort value and a conversation key) does not fit `Open`'s
+  `created,id,binding` check, so every rail cursor sealed with `Seal` failed to open. A position cursor never opens
+  as a list cursor, and the reverse (`list_position_seal_test.go`).
 - **Catalog:** operation `chat.star.conversations`, route tables, bearer matrix exclusion (a filtered list, like
   `chat.star.state`).
 - **Web:** Starred is the third option of the rail's filter control (a labelled group with pressed state). Rows come
@@ -50,6 +56,13 @@
   it (the topic's `conversation_id`; `GetConversationByExternalRef("native", key)`, live rows only). A star counts in
   the rail exactly when it counts in the star list, the state route and the center; a thread with no conversation
   under the switch (the resolver's 409) has no stars there and no rail row.
+- **The rail's first dev run caught what review and the mocked browser harness could not:** the cursor above (every
+  "Load more conversations" answered 400), and two test-setup bugs. A project-boundary token can be minted only for
+  a project its holder belongs to (the token tests now give the holder a role in project B, so the boundary alone
+  refuses project A's rows), and topic names are unique per project regardless of case (the name-tie test puts the
+  tied names in two projects).
+- **A stored DM key that is not canonical** (a legacy star under swapped slots) yields no rail row (`starDMPeer`
+  refuses it as `resolveStarDM` does), and the state route leaves it out of a batch instead of answering 400.
 - **The star routes accept a DM only under its canonical key** (`messages.DMConversationKey`: sorted slots,
   canonical IDs); the same DM with its slots swapped is a 400. A stored DM key is therefore always the external ref
   of the DM's native conversation, which the read switch and the rail's switch-on branch look up. The web client
@@ -71,12 +84,7 @@
 - Mocked browser cases: `web/e2e/chat-mobile/star-rail.pw.ts` (hub mock in `star-rail-mock.ts`). Chromium ran under
   a 1 s session RSS watcher with a kill limit (peak about 600 MB).
 
-## Follow-ups (accepted in code review round 4d for the post-dev-run fix batch)
+## Follow-ups
 
-1. The rail's batched DM check (`starDMPeer`) also refuses a DM key that is not canonical
-   (`canonicalStarDMKey(key) != key`, a failed canonicalisation counting as not canonical), so a legacy star stored
-   under a swapped key can no longer produce a rail row that opens to a 400; the session parity test gains such a
-   row, inserted directly with the read switch off.
-2. `decideStarState` leaves a conversation whose stored key is not canonical out of a state batch (like the drift
-   case) instead of answering 400; a test with a directly inserted legacy row.
-3. `TestChatStars_DMKeyMustBeCanonical`'s doc comment states exactly what it covers.
+None. Code review round 4d's three follow-ups (the rail's canonical DM check, the state route's leave-out of a
+non-canonical stored key, and the canonical-key test's doc comment) are done in this batch.
