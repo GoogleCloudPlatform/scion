@@ -24,9 +24,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	entsql "entgo.io/ent/dialect/sql"
-
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 )
 
 // TestConduitRegistry_ListRelaysAndEligibleRelays (design §3.9 "Relay
@@ -185,7 +184,7 @@ func TestConduitRegistry_RelayFeatures(t *testing.T) {
 // startup error names the fix.
 func TestConduitRegistry_FeaturesColumnMissing(t *testing.T) {
 	f := newConduitFixture(t)
-	drv, ok := f.store.client.Driver().(*entsql.Driver)
+	drv, ok := entc.SQLDriver(f.store.client.Driver())
 	require.True(t, ok)
 	_, err := drv.DB().ExecContext(f.ctx, "ALTER TABLE relay_instances DROP COLUMN features")
 	require.NoError(t, err)

@@ -467,6 +467,26 @@ jobs:
           fi
           exit "$rc"
 
+      - name: Check ent driver assertions
+        run: |
+          set +e
+          ./hack/check-entsql-driver-assert.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=Ent driver assertions NOT checked::check-entsql-driver-assert --self-test failed (exit $rc) — the guard itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-entsql-driver-assert.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 1 ]; then
+            echo "::error title=Ent driver assertions::A type assertion to *entsql.Driver fails when the store's driver is wrapped by the transaction diagnostics. Use entc.SQLDriver or entc.SQLDB, which unwrap. Details are in the step log."
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error title=Ent driver assertions NOT checked::check-entsql-driver-assert could not run (exit $rc) — nothing was analysed."
+          fi
+          exit "$rc"
+
       - name: Check pkg/hub Scan Coverage
         run: |
           set +e
