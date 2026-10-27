@@ -46,6 +46,7 @@ func assertProjectStorageFieldRefusal(t *testing.T, rr *httptest.ResponseRecorde
 				FieldErrors []struct {
 					Field string `json:"field"`
 					Rule  string `json:"rule"`
+					Value string `json:"value"`
 				} `json:"fieldErrors"`
 			} `json:"details"`
 		} `json:"error"`
@@ -55,7 +56,8 @@ func assertProjectStorageFieldRefusal(t *testing.T, rr *httptest.ResponseRecorde
 	}
 	found := false
 	for _, fe := range resp.Error.Details.FieldErrors {
-		if fe.Field == want && fe.Rule != "" {
+		// This route is admin-only, so the field error carries the value.
+		if fe.Field == want && fe.Rule != "" && fe.Value != "" {
 			found = true
 		}
 	}
