@@ -145,14 +145,9 @@ func CheckForUpdate(ctx context.Context, currentVersion string, opts ...Option) 
 		return result, nil
 	}
 
-	if channel == "nightly" {
-		result.UpdateAvailable = currentVersion < latest.Version
-	} else {
-		result.UpdateAvailable = semver.Compare(
-			withVersionPrefix(currentVersion),
-			withVersionPrefix(latest.Version),
-		) < 0
-	}
+	// Compare orders nightlies by their date (not string order, which breaks
+	// on a ".N" suffix) and preview/stable as semantic versions.
+	result.UpdateAvailable = Compare(currentVersion, latest.Version) == ClassUpgrade
 	return result, nil
 }
 
