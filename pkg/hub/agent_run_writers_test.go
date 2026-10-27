@@ -449,20 +449,34 @@ func TestChainFromAgentCreate(t *testing.T) {
 // only production caller generates the run ID for its own dispatch. The
 // callers of SetAgentRunID are exactly HTTPAgentDispatcher.beginRun, and
 // beginRun passes the result of uuid.NewString(), assigned exactly once.
-// The scan covers the whole module except pkg/ent (generated code); the
-// one allowed exception is the shared store conformance helper
-// pkg/store/storetest/domains_usage_reservation_release.go (not
-// production), which supplies run IDs of its own (implementation review
-// r1 OP-3).
+// The scan covers the whole module except pkg/ent (generated code). The
+// allowed exceptions are the shared store conformance fixtures listed in
+// storetestExceptions (not production), which supply run IDs of their own
+// (implementation review r1 OP-3). They are listed file by file, so a new
+// caller anywhere else, a new storetest file included, fails here.
 func TestSetAgentRunIDHasOneFreshMintCaller(t *testing.T) {
-	const storetestException = "pkg/store/storetest/domains_usage_reservation_release.go "
-	var callers []string
-	for _, ref := range moduleReferences(t, map[string]bool{"SetAgentRunID": true}, filepath.Join("pkg", "ent")) {
-		if !strings.HasPrefix(ref, storetestException) {
-			callers = append(callers, ref)
-		}
+	storetestExceptions := map[string]bool{
+		"pkg/store/storetest/domains_usage_reservation_release.go":  true,
+		"pkg/store/storetest/domains_usage_reservation_transfer.go": true, // ptone/scion#4181
 	}
+	var callers, exempt []string
+	for _, ref := range moduleReferences(t, map[string]bool{"SetAgentRunID": true}, filepath.Join("pkg", "ent")) {
+		file, _, _ := strings.Cut(ref, " ")
+		if storetestExceptions[file] {
+			exempt = append(exempt, ref)
+			continue
+		}
+		callers = append(callers, ref)
+	}
+	// The production caller set is exactly beginRun: the exemption above
+	// cannot hide a production caller, because only the listed storetest
+	// files are skipped.
 	assert.Equal(t, []string{"pkg/hub/httpdispatcher.go HTTPAgentDispatcher.beginRun"}, callers)
+	// Each exemption is still in use, by its one fixture.
+	assert.ElementsMatch(t, []string{
+		"pkg/store/storetest/domains_usage_reservation_release.go newReleaseFixture",
+		"pkg/store/storetest/domains_usage_reservation_transfer.go createTransferAgent",
+	}, exempt)
 
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "httpdispatcher.go", nil, parser.SkipObjectResolution)
