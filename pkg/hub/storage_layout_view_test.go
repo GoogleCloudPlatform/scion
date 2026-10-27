@@ -23,7 +23,6 @@ import (
 	"go/token"
 	"net/http"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -119,12 +118,18 @@ func TestMoveRefusals_NameStorageFieldsOnly(t *testing.T) {
 var layoutValueField = regexp.MustCompile(`(NFS|Volume|Share|Shares\[[^]]*\]|share)\.(Server|Export|SubPathRoot|ExportID|ClaimName|PVName|MountRoot|ID)$`)
 
 // TestLayoutValuesFormattedOnlyInRenderer: no pkg/hub production code
-// formats a storage layout value into text with fmt; values become text
-// only in pkg/projectfs's renderer (RenderLayoutIssues).
+// (pkg/hub and the areas moved out of it) formats a storage layout value
+// into text with fmt; values become text only in pkg/projectfs's renderer
+// (RenderLayoutIssues).
 func TestLayoutValuesFormattedOnlyInRenderer(t *testing.T) {
-	files, err := filepath.Glob("*.go")
+	// pkgmove:scan-covers guardScanSubdirs
+	// scanned through guardScanSubdirs: pkg/hub and every area moved out of it.
+	files, err := globGuardScanDirs(".", "*.go")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(files) == 0 {
+		t.Fatal("no pkg/hub source files found")
 	}
 	fset := token.NewFileSet()
 	for _, path := range files {
