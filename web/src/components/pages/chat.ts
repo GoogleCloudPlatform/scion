@@ -6904,14 +6904,20 @@ export class ScionPageChat extends LitElement {
   /**
    * Take the center message filter from the URL. A filter on a route that
    * is not one conversation, or while the experiment is off, is dropped
-   * from the URL in place (after the view shows the full history), so it
-   * is never carried on to another route.
+   * from the URL in place, so it is never carried on to another route;
+   * while the experiment is off a notice says the full history is shown.
    */
   private syncMessageFilterFromUrl(): void {
     const filter = this.urlMessageFilter();
     if (this.centerMessageFilter !== filter) this.centerMessageFilter = filter;
     if (filter || !messageFilterFromSearch(window.location.search)) return;
     const path = stripBasePath(window.location.pathname);
+    // On a conversation route the filter was dropped because the
+    // experiment is off: say so, so the full history is not taken for the
+    // starred messages, before the URL changes.
+    if (isChatConversationPath(path)) {
+      showToast('Starred messages are not available. Showing all messages.', 'warning');
+    }
     const search = searchWithMessageFilter(window.location.search, '');
     window.history.replaceState(
       window.history.state,

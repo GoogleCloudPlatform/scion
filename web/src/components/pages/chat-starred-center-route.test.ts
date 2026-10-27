@@ -27,6 +27,11 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 const pushRoute = vi.fn((..._args: unknown[]) => Promise.resolve());
 const replaceRoute = vi.fn((..._args: unknown[]) => Promise.resolve());
 const navigateTo = vi.fn();
+const showToastMock = vi.fn();
+
+vi.mock('../../utils/toast.js', () => ({
+  showToast: (...args: unknown[]): unknown => showToastMock(...args) as unknown,
+}));
 
 vi.mock('../../client/main.js', async () => {
   const state = await import('../../client/state.js');
@@ -99,6 +104,7 @@ beforeEach(() => {
   pushRoute.mockClear();
   replaceRoute.mockClear();
   navigateTo.mockClear();
+  showToastMock.mockClear();
   setFlag(true);
 });
 
@@ -139,6 +145,8 @@ describe('the starred-only center URL', () => {
       );
       expect(replaceRoute).toHaveBeenLastCalledWith(path);
     }
+    // A stray filter on a non-conversation route is dropped silently.
+    expect(showToastMock).not.toHaveBeenCalled();
   });
 
   it('shows ordinary history and drops the filter while the experiment is off', () => {
@@ -149,6 +157,11 @@ describe('the starred-only center URL', () => {
     expect(p.centerMessageFilter).toBe('');
     expect(window.location.search).toBe('');
     expect(window.location.hash).toBe('#msg-' + M1);
+    // The change is made visible: the full history is not the starred one.
+    expect(showToastMock).toHaveBeenCalledWith(
+      'Starred messages are not available. Showing all messages.',
+      'warning'
+    );
   });
 
   it('a jump out of the filter is a new entry naming the message; Show all names none', () => {

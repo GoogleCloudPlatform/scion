@@ -148,6 +148,9 @@ const HISTORY_PAGE_SIZE = 50;
 /** The largest page the history endpoint serves (a starred-only refresh). */
 const HISTORY_MAX_PAGE_SIZE = 200;
 
+/** How many around targets a deep starred-only refresh tries before the newest window. */
+const FILTER_AROUND_TRIES = 5;
+
 /**
  * Detail of `chat-message-filter-change`: the thread asks the page to show
  * the conversation under `filter`. `messageId`, when set, is the message a
@@ -180,6 +183,8 @@ interface HistoryWindow {
 
 /** Where the full conversation opens when the starred-only center is left. */
 interface FilterExitTarget {
+  /** The conversation the target belongs to; used only there. */
+  conversationKey: string;
   messageId: string;
   highlight: boolean;
   /** Seed the composer with a reply to, or an edit of, the message. */
@@ -1719,6 +1724,8 @@ export class ScionChatThread extends LitElement {
     ) {
       const oldKey = changedProperties.get('conversationKey') as string;
       if (oldKey !== this.conversationKey && this.isV2) {
+        // A target left for the conversation we are leaving is never used.
+        this._filterExitTarget = null;
         this.resetV2State();
         this.loadHistory();
       }
@@ -2346,8 +2353,10 @@ export class ScionChatThread extends LitElement {
         const jumped = this._jumpSeq !== this._jumpSeqAtOpen;
         // Leaving the starred-only center (a jump, Show all, Reply or Edit)
         // names the message to open the full conversation at.
-        const exit = jumped ? null : this._filterExitTarget;
+        const pendingExit = this._filterExitTarget;
         this._filterExitTarget = null;
+        const exit =
+          !jumped && pendingExit?.conversationKey === this.conversationKey ? pendingExit : null;
         const hashMsgId = jumped || exit ? '' : this.parseMessageHash();
         const restore = jumped || exit ? null : this.takeRestoreScrollAnchor();
         if (jumped) {
@@ -2879,6 +2888,9 @@ export class ScionChatThread extends LitElement {
    */
   private async backfillV2(): Promise<void> {
     if (!this.conversationKey || this.viewingAroundMessage) return;
+    // The starred-only center never takes the ordinary latest page; its
+    // catch-up is refreshFilteredWindow.
+    if (this.filtered) return;
     if (this._backfillInFlight) {
       this._backfillPending = true;
       return;
@@ -2906,7 +2918,7 @@ export class ScionChatThread extends LitElement {
       `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages?${params.toString()}`
     );
 
-    if (currentId !== this.fetchId) return;
+    if (currentId !== this.fetchId || this.filtered) return;
     if (!res.ok) return;
 
     const data = (await res.json()) as {
@@ -3595,8 +3607,9 @@ export class ScionChatThread extends LitElement {
         onSuccess();
         // Backfill to get the full server-enriched message. The optimistic
         // message (now keyed by the real ID) stays visible until the backfill
-        // overwrites it, so there is no gap.
-        void this.backfillV2();
+        // overwrites it, so there is no gap. Not once the thread moved on (a
+        // filter change keeps the key): the page belongs to the view left.
+        if (!threadMovedOn()) void this.backfillV2();
       }
     } catch (err) {
       // Remove optimistic message on failure.
@@ -5158,12 +5171,15 @@ export class ScionChatThread extends LitElement {
    * is kept for Back, and `target` is where the full conversation opens.
    * `jump` puts the target in the URL (a permalink-like entry).
    */
-  private exitFilter(target: FilterExitTarget | null, jump: boolean): void {
+  private exitFilter(
+    target: Omit<FilterExitTarget, 'conversationKey'> | null,
+    jump: boolean
+  ): void {
     if (!this.filtered) return;
     this.captureScrollAnchor();
     const anchor = this.scrollAnchor;
     if (anchor) rememberFilteredScrollAnchor(anchor);
-    this._filterExitTarget = target;
+    this._filterExitTarget = target ? { ...target, conversationKey: this.conversationKey } : null;
     const detail: MessageFilterChangeDetail = { filter: '' };
     if (target && jump) detail.messageId = target.messageId;
     this.dispatchEvent(
@@ -5291,21 +5307,52 @@ export class ScionChatThread extends LitElement {
     const wasPinned = this.pinnedToBottom;
     const before = this.messages.map((m) => m.id);
     const limit = Math.min(HISTORY_MAX_PAGE_SIZE, Math.max(HISTORY_PAGE_SIZE, before.length));
-    let data: HistoryWindow;
-    try {
-      const res = await apiFetch(this.historyUrl(new URLSearchParams({ limit: String(limit) })));
-      if (fetchId !== this.fetchId || !this.filtered) return;
-      if (!res.ok) {
-        console.warn('[chat-thread] starred-only refresh failed:', res.status);
+    // A reader further up than the largest page can hold: refetch around
+    // the anchor (or, if it left, its nearest loaded neighbours) instead of
+    // the newest window, which would not contain it.
+    const anchorAt = anchor ? before.indexOf(anchor.messageId) : -1;
+    const deep = !wasPinned && anchorAt >= 0 && before.length - anchorAt > HISTORY_MAX_PAGE_SIZE;
+    const requests: URLSearchParams[] = [];
+    if (deep) {
+      for (let d = 0; d <= FILTER_AROUND_TRIES && requests.length < FILTER_AROUND_TRIES; d++) {
+        for (const i of d === 0 ? [anchorAt] : [anchorAt + d, anchorAt - d]) {
+          const id = before[i];
+          if (id && requests.length < FILTER_AROUND_TRIES) {
+            requests.push(new URLSearchParams({ around: id, limit: String(HISTORY_PAGE_SIZE) }));
+          }
+        }
+      }
+    }
+    requests.push(new URLSearchParams({ limit: String(limit) }));
+    let data: HistoryWindow | null = null;
+    let around = false;
+    for (const params of requests) {
+      try {
+        const res = await apiFetch(this.historyUrl(params));
+        if (fetchId !== this.fetchId || !this.filtered) return;
+        // An around target no longer starred is a 404: try the next one.
+        if (res.status === 404 && params.has('around')) continue;
+        if (!res.ok) {
+          console.warn('[chat-thread] starred-only refresh failed:', res.status);
+          return;
+        }
+        data = (await res.json()) as HistoryWindow;
+        around = params.has('around');
+        break;
+      } catch (err) {
+        console.warn('[chat-thread] starred-only refresh failed:', err);
         return;
       }
-      data = (await res.json()) as HistoryWindow;
-    } catch (err) {
-      console.warn('[chat-thread] starred-only refresh failed:', err);
-      return;
     }
+    if (!data) return;
     if (fetchId !== this.fetchId || !this.filtered) return;
     this.replaceHistoryWindow(data, recentFilesGeneration);
+    // A window around an older message is not the tail: Jump to latest and
+    // the bottom pin treat it as such.
+    if (around) {
+      this.viewingAroundMessage = true;
+      this.pinnedToBottom = false;
+    }
     if (wasPinned || !anchor) {
       this.scrollToBottomAfterRender();
       return;
@@ -6601,7 +6648,7 @@ export class ScionChatThread extends LitElement {
     if (this.filtered && this.messages.length === 0) {
       return html`
         <div class="state-msg star-filter-empty">
-          <sl-icon name="star"></sl-icon>
+          <sl-icon name="star" aria-hidden="true"></sl-icon>
           <span>No starred messages in this conversation</span>
           <sl-button size="small" @click=${this.handleShowAllMessages}>Show all messages</sl-button>
         </div>

@@ -71,6 +71,8 @@ interface MenuActionLike {
 }
 
 interface Internals {
+  handleChatSendV2(e: CustomEvent<Record<string, unknown>>): Promise<void>;
+  exitFilter(target: { messageId: string; highlight: boolean } | null, jump: boolean): void;
   messageMenuActions(msg: Message): MenuActionLike[];
   composerReplyTo: { messageId: string } | null;
   messages: Message[];
@@ -349,6 +351,136 @@ describe('scion-chat-thread starred-only center', () => {
       .map((a) => a.id);
     expect(ids).toContain('edit');
     expect(ids).not.toContain('delete');
+  });
+
+  it('a send completing after the switch to the starred center does not backfill unfiltered history', async () => {
+    let releasePost!: () => void;
+    const post = new Promise<void>((r) => (releasePost = r));
+    apiFetch.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'POST' && url.endsWith('/messages')) {
+        await post;
+        return json({ id: '00000000-0000-4000-8000-0000000000aa' });
+      }
+      if (url.includes('/messages?')) {
+        return url.includes('starred=true')
+          ? json({ messages: [message(S1, 1)] })
+          : json({ messages: [message(U1, 2), message(S1, 1)] });
+      }
+      return json({ starredMessageIds: [] });
+    });
+    const el = await mount('');
+    await vi.waitFor(() => expect(renderedIds(el)).toEqual([S1, U1]));
+    void (el as unknown as Internals).handleChatSendV2(
+      new CustomEvent('chat-send', {
+        detail: {
+          text: 'Mock new message',
+          plain: false,
+          interrupt: false,
+          onSuccess: () => {},
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+    await vi.waitFor(() =>
+      expect(calls((u, i) => i?.method === 'POST' && u.endsWith('/messages'))).toHaveLength(1)
+    );
+    el.messageFilter = 'starred';
+    await vi.waitFor(() => expect(renderedIds(el)).toEqual([S1]));
+    const before = historyCalls().length;
+    releasePost();
+    await new Promise((r) => setTimeout(r, 50));
+    await el.updateComplete;
+    const after = historyCalls().slice(before);
+    expect(after.filter((u) => !u.includes('starred=true'))).toEqual([]);
+    expect(renderedIds(el)).toEqual([S1]);
+  });
+
+  it('a filter exit target is used only in its own conversation', async () => {
+    // The other conversation's history does not hold the target, so a
+    // misapplied target would show as an around request there.
+    apiFetch.mockImplementation((url: string) => {
+      if (url.includes('/messages?')) {
+        if (url.includes('topic-2')) return Promise.resolve(json({ messages: [message(U1, 2)] }));
+        return Promise.resolve(json({ messages: [message(S1, 1)] }));
+      }
+      return Promise.resolve(json({ starredMessageIds: [] }));
+    });
+    const el = await mount();
+    // The page ignores the event (no listener): the target stays pending.
+    (el as unknown as Internals).exitFilter({ messageId: S1, highlight: true }, true);
+    el.conversationKey = 'topic-2';
+    el.messageFilter = '';
+    await el.updateComplete;
+    await vi.waitFor(() => expect(historyCalls().some((u) => u.includes('topic-2'))).toBe(true));
+    await new Promise((r) => setTimeout(r, 50));
+    // No around request for the other conversation's message.
+    expect(calls((u) => u.includes('topic-2') && u.includes('around='))).toEqual([]);
+  });
+
+  it('a refresh far up the starred list refetches around the reader instead of the newest page', async () => {
+    const many = Array.from({ length: 260 }, (_, i) =>
+      message(`00000000-0000-4000-8000-${(1000 + i).toString(16).padStart(12, '0')}`, 0)
+    );
+    many.forEach((m, i) => {
+      m.createdAt = new Date(Date.parse('2026-10-20T00:00:00Z') + i * 60_000).toISOString();
+    });
+    apiFetch.mockImplementation((url: string) => {
+      if (url.includes('/messages?')) {
+        const params = new URL(url, 'http://x').searchParams;
+        const around = params.get('around');
+        const cursor = params.get('cursor');
+        if (around) {
+          const at = many.findIndex((m) => m.id === around);
+          return Promise.resolve(
+            json({ messages: many.slice(Math.max(0, at - 25), at + 25).reverse() })
+          );
+        }
+        const end = cursor ? Number(cursor.slice(2)) : many.length;
+        const page = many.slice(Math.max(0, end - 50), end);
+        return Promise.resolve(
+          json({
+            messages: [...page].reverse(),
+            ...(end - 50 > 0 ? { nextCursor: `c-${end - 50}` } : {}),
+          })
+        );
+      }
+      return Promise.resolve(json({ starredMessageIds: [] }));
+    });
+    const el = await mount();
+    // Load older pages until 260 are loaded, as a reader scrolling up would.
+    const internals = el as unknown as {
+      loadOlderMessagesV2(scroller: HTMLElement): Promise<void>;
+      _scrollAnchor: {
+        conversationKey: string;
+        messageId: string;
+        offset: number;
+        pinnedToBottom: boolean;
+      } | null;
+      pinnedToBottom: boolean;
+      captureScrollAnchor(): void;
+    };
+    const scroller = el.shadowRoot?.querySelector('.messages-scroll') as HTMLElement;
+    for (let i = 0; i < 5; i++) await internals.loadOlderMessagesV2(scroller);
+    await vi.waitFor(() => expect(renderedIds(el).length).toBe(260));
+    // The reader sits at the 10th oldest starred message.
+    const target = many[10].id;
+    internals.captureScrollAnchor = (): void => {
+      internals._scrollAnchor = {
+        conversationKey: TOPIC,
+        messageId: target,
+        offset: 0,
+        pinnedToBottom: false,
+      };
+    };
+    internals.pinnedToBottom = false;
+    const before = historyCalls().length;
+    fakeStateManager.dispatchEvent(new CustomEvent('chat-stars-updated', { detail: {} }));
+    await vi.waitFor(() => expect(historyCalls().length).toBeGreaterThan(before));
+    const refetch = historyCalls().slice(before);
+    expect(refetch[0]).toContain(`around=${target}`);
+    expect(refetch[0]).toContain('starred=true');
+    await vi.waitFor(() => expect(renderedIds(el)).toContain(target));
   });
 
   it('a filtered page arriving after the filter changed is dropped', async () => {
