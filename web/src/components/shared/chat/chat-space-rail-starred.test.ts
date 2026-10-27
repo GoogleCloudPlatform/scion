@@ -253,7 +253,7 @@ describe('space rail — Starred rows', () => {
     el.prefs = { ...el.prefs, spaceSortMode: 'custom' };
     await settle(el);
     expect(starredCalls[1].get('sort')).toBe('activity');
-    expect(el.prefs.spaceSortMode).toBe('custom', 'the custom setting is kept');
+    expect(el.prefs.spaceSortMode, 'the custom setting is kept').toBe('custom');
   });
 
   it('shows No starred conversations yet with the message action for an empty collection', async () => {

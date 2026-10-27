@@ -158,10 +158,10 @@ describe('groupStarredRows', () => {
       'dm:user:me:user:y',
       'dm:agent:x:user:me',
     ]);
-    expect(g.projects.map((p) => p.projectId)).toEqual(
-      ['p2', 'p1'],
+    expect(
+      g.projects.map((p) => p.projectId),
       'headings by their newest row'
-    );
+    ).toEqual(['p2', 'p1']);
     expect(g.projects[1].rows.map((r) => r.conversationKey)).toEqual(['t-b', 't-a']);
   });
 
