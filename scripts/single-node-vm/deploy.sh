@@ -2497,6 +2497,18 @@ fi
 # server.auth.dev_mode, and the server refuses dev auth on a non-loopback
 # bind). Until Phase 5, only the unauthenticated /healthz check is used.
 # Phase 5 will overwrite this with proxy auth config once IAP is ready.
+#
+# server.hub.host: 127.0.0.1 binds the bootstrap start to loopback. The
+# server refuses a non-loopback listener whose web base URL is not https
+# (checkWebBaseURLListener in cmd/server_web_base_url.go), and on a fresh
+# VM nothing sets a base URL yet: the https URL is derived from the IAP
+# audience that only Phase 5 writes, so a 0.0.0.0 bind would exit before
+# the health check below. The health check and the hub_id read curl
+# localhost over SSH, and nothing reaches the hub over the network before
+# the Cloud Run proxy is wired up in Phase 4/5. The Phase 5 rewrite omits
+# the key, so the hub goes back to the default 0.0.0.0 bind with the
+# IAP-derived https base URL; an operator-set SCION_SERVER_BASE_URL in
+# hub.env (preserved across runs) is never touched (ptone/scion#6150).
 info "Writing settings.yaml (bootstrap config)..."
 gcloud compute ssh "${INSTANCE_NAME}" \
   --zone="${ZONE}" --project="${PROJECT_ID}" \
@@ -2520,6 +2532,8 @@ default_gcp_identity_mode: passthrough
 "}server:
   hub:
     hub_name: \"${HUB_NAME}\"
+    # Bootstrap only (see above): Phase 5 rewrites this file without it.
+    host: \"127.0.0.1\"
 ${ADMIN_EMAIL:+    admin_emails:
       - \"${ADMIN_EMAIL}\"}
   maintenance:

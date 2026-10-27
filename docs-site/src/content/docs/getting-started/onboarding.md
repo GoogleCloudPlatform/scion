@@ -37,7 +37,7 @@ http://127.0.0.1:8080/onboarding
 
 Once onboarding is complete, it opens the Web Dashboard instead. If the Hub's onboarding status cannot be read, Scion opens the wizard only when no global settings file existed before this start.
 
-If the browser does not open (for example over SSH, in a headless environment, or when `SCION_NO_BROWSER` is set), open that URL manually. The port is `8080` by default.
+Scion opens it through a single-use sign-in link, which it also prints on a terminal as `Sign in: http://127.0.0.1:8080/auth/dev-signin?code=...`; the link signs your browser in to the local server. If the browser does not open (for example over SSH, in a headless environment, or when `SCION_NO_BROWSER` is set), open that link manually within two minutes, or run `scion server open --print` for a new one. The port is `8080` by default.
 
 If no image registry is configured yet, the server starts the Hub and the web UI without the Runtime Broker and prints a warning, so you can set the registry in the wizard. Run `scion server restart` afterwards to start the Runtime Broker.
 

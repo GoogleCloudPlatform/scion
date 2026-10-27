@@ -582,6 +582,8 @@ func TestAgentDelegationRoutes_ResolveToTheirOperations(t *testing.T) {
 			assert.Equal(t, "/api/v1/agents/{id}/delegations/{grantId}", row.catalogPattern(false))
 		case AgentRouteDelegationCredential:
 			assert.Equal(t, "/api/v1/agents/{id}/delegations/{grantId}/credentials/{credentialId}", row.catalogPattern(false))
+		case AgentRouteDelegationRevokeAll:
+			assert.Equal(t, "/api/v1/agents/{id}/delegations/revoke-all", row.catalogPattern(false))
 		case AgentRoutePortItem:
 			assert.Equal(t, "/api/v1/agents/{id}/ports/{port}", row.catalogPattern(false))
 		}

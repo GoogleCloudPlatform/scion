@@ -160,9 +160,10 @@ func TestStaticAsset_DirectoryListing404(t *testing.T) {
 func TestStaticFile_DotPath404(t *testing.T) {
 	for mode, servers := range listingServers(t) {
 		t.Run(mode, func(t *testing.T) {
-			ws, wsAuth := servers[0], servers[1]
+			ws := servers[0]
 			// Root paths go through the SPA catch-all, which needs a
-			// session (dev auth); /assets/ and /shoelace/ are public.
+			// session (a dev sign-in); /assets/ and /shoelace/ are public.
+			signedIn := devSignedIn(t, servers[1])
 			check := func(h http.Handler, targets []string) {
 				for _, target := range targets {
 					rec := getListing(t, h, target)
@@ -172,7 +173,7 @@ func TestStaticFile_DotPath404(t *testing.T) {
 					assert.Empty(t, rec.Header().Get("Content-Encoding"), target)
 				}
 			}
-			check(wsAuth.Handler(), []string{
+			check(signedIn, []string{
 				"/.vite/manifest.json",
 				"/.vite/",
 				"/.vite",
@@ -181,7 +182,7 @@ func TestStaticFile_DotPath404(t *testing.T) {
 				"/.env",
 				"/%2evite/manifest.json",
 			})
-			for _, h := range []http.Handler{ws.Handler(), wsAuth.Handler()} {
+			for _, h := range []http.Handler{ws.Handler(), signedIn} {
 				check(h, []string{
 					"/assets/.hidden",
 					"/assets/.missing",
@@ -192,14 +193,14 @@ func TestStaticFile_DotPath404(t *testing.T) {
 			// A deeper dot segment can be part of a client-side route: it
 			// still gets the shell, and never a file.
 			for _, target := range []string{"/projects/x/artifacts/.env", "/projects/x/files/.vite/manifest.json"} {
-				rec := getListing(t, wsAuth.Handler(), target)
+				rec := getListing(t, signedIn, target)
 				assert.Equal(t, http.StatusOK, rec.Code, target)
 				assert.Contains(t, rec.Header().Get("Content-Type"), "text/html", target)
 				assert.Contains(t, rec.Body.String(), "scion-app", target)
 				assert.NotContains(t, rec.Body.String(), listingMarker, target)
 			}
 			// Root files without a dot segment are still served.
-			rec := getListing(t, wsAuth.Handler(), "/favicon.svg")
+			rec := getListing(t, signedIn, "/favicon.svg")
 			assert.Equal(t, http.StatusOK, rec.Code)
 			assert.Contains(t, rec.Header().Get("Content-Type"), "image/svg+xml")
 		})
@@ -221,9 +222,9 @@ func TestStaticFile_DotPath404(t *testing.T) {
 				assert.Contains(t, rec.Body.String(), marker, mode)
 				assert.Contains(t, rec.Body.String(), "/.well-known/openid-configuration", mode)
 				// Other first-segment dot paths are still a 404 (the
-				// catch-all needs a session, so only with dev auth).
+				// catch-all needs a session, so only signed in with dev auth).
 				if ws.config.DevAuthToken != "" {
-					rec = getListing(t, ws.Handler(), "/.vite/manifest.json")
+					rec = getListing(t, devSignedIn(t, ws), "/.vite/manifest.json")
 					assert.Equal(t, http.StatusNotFound, rec.Code, mode)
 				}
 			}
@@ -246,8 +247,8 @@ func TestFingerprintedAssets_StillLoadedFromManifest(t *testing.T) {
 				assert.Equal(t, ws.staticCacheControl("/assets/view-QwErTyUi.js"), rec.Header().Get("Cache-Control"))
 				assert.NotEqual(t, "no-cache", rec.Header().Get("Cache-Control"), "a manifest-listed chunk gets the long lifetime")
 
-				if i == 1 { // the SPA catch-all needs a session
-					rec = getListing(t, ws.Handler(), "/.vite/manifest.json")
+				if i == 1 { // the SPA catch-all needs a session (a dev sign-in)
+					rec = getListing(t, devSignedIn(t, ws), "/.vite/manifest.json")
 					assert.Equal(t, http.StatusNotFound, rec.Code)
 				}
 			}

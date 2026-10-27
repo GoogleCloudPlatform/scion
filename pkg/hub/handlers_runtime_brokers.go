@@ -1099,6 +1099,15 @@ type brokerAgentHeartbeat struct {
 	Profile         string `json:"profile,omitempty"`     // Settings profile used
 	ExitCode        *int   `json:"exitCode,omitempty"`    // Structured exit code from runtime (nil = unknown)
 	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed", "limits_exceeded", "preempted", "evicted", or "oom_killed" (see state.ExitReason)
+	// Template, HarnessConfig, HarnessConfigSource, Image and Runtime are
+	// the agent config the runtime resolved for the listed entry
+	// (hubclient.AgentHeartbeat). Read only for a create kept after an
+	// unknown dispatch outcome (heartbeatAppliesResolvedConfig).
+	Template            string `json:"template,omitempty"`
+	HarnessConfig       string `json:"harnessConfig,omitempty"`
+	HarnessConfigSource string `json:"harnessConfigSource,omitempty"`
+	Image               string `json:"image,omitempty"`
+	Runtime             string `json:"runtime,omitempty"`
 	// RunID is the entry's scion.run_id label (hubclient.AgentHeartbeat.RunID);
 	// empty for an unlabelled entry or an older broker. OtherEntries are
 	// the agent's entries on the broker's other targets
@@ -1113,6 +1122,48 @@ type brokerAgentHeartbeat struct {
 type brokerAgentRuntimeEntry struct {
 	RuntimeTarget string `json:"runtimeTarget,omitempty"`
 	RunID         string `json:"runId,omitempty"`
+}
+
+// heartbeatAppliesResolvedConfig reports whether a heartbeat entry's
+// resolved agent config is recorded on agent: agent is a create the Hub kept
+// after an unknown dispatch outcome (keepUnknownOutcomeStart; its create
+// claim is unconfirmed), and the entry is of the create's own run. Such a
+// create never got the dispatch answer that records the config, so
+// otherwise its applied config would stay empty (ptone/scion#4987).
+func heartbeatAppliesResolvedConfig(agent *store.Agent, hb brokerAgentHeartbeat) bool {
+	return agent.StartClaimKind == store.StartClaimCreate &&
+		agent.StartClaimState == store.StartClaimUnconfirmed &&
+		hb.RunID != "" && hb.RunID == agent.RunID
+}
+
+// heartbeatResolvedConfig is the resolved agent config a heartbeat entry
+// carries, in the form a dispatch answer converts to (brokerAgentConfigOf).
+func heartbeatResolvedConfig(hb brokerAgentHeartbeat) store.BrokerAgentConfig {
+	return store.BrokerAgentConfig{
+		Template:            hb.Template,
+		HarnessConfig:       hb.HarnessConfig,
+		HarnessAuth:         hb.HarnessAuth,
+		HarnessConfigSource: hb.HarnessConfigSource,
+		Image:               hb.Image,
+		Profile:             hb.Profile,
+		Runtime:             hb.Runtime,
+	}
+}
+
+// resolvedConfigSnapshot holds the agent fields store.ApplyBrokerAgentConfig
+// writes, so a caller can tell whether applying changed anything.
+type resolvedConfigSnapshot struct {
+	template, runtime                                               string
+	harnessConfig, harnessAuth, harnessConfigSource, image, profile string
+}
+
+func agentResolvedConfigSnapshot(a *store.Agent) resolvedConfigSnapshot {
+	snap := resolvedConfigSnapshot{template: a.Template, runtime: a.Runtime}
+	if c := a.AppliedConfig; c != nil {
+		snap.harnessConfig, snap.harnessAuth, snap.harnessConfigSource = c.HarnessConfig, c.HarnessAuth, c.HarnessConfigSource
+		snap.image, snap.profile = c.Image, c.Profile
+	}
+	return snap
 }
 
 // heartbeatBrokerIsFlat reports whether the Runtime Broker sending a
@@ -1379,6 +1430,10 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				ReportSource:    store.StatusReportSourceRuntime,
 				ReportRunID:     agentHB.RunID,
 				Result:          &statusResult,
+				// A reincarnation claimed after the read above must still
+				// win: the store re-checks Guard 0b on the row it locks, as
+				// for the agent's own status report (ptone/scion#5385).
+				GuardReincarnation: true,
 			}
 			// A stop queued while the broker was offline keeps its
 			// stop_queued status and notice while it is still the agent's
@@ -1775,6 +1830,24 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 			// reports write it (the dispatch response, the launch report,
 			// a reincarnation move); a guess resolved from the profile is
 			// display-only (enrichAgentRuntime) (ptone/scion#4853).
+			//
+			// The one exception is a create kept after an unknown dispatch
+			// outcome (heartbeatAppliesResolvedConfig: an unconfirmed create
+			// claim AND the entry's non-empty run ID equal to the agent's).
+			// The dispatch answer that would have carried the resolved config
+			// was lost, and the synchronous answer is itself the runtime's
+			// listing of the started entry, so the listing of the create's
+			// own run is the same broker report from the same source. An
+			// empty value never clears a field (ApplyBrokerAgentConfig). For
+			// every other agent and run, the heartbeat never writes the
+			// runtime (ptone/scion#4987).
+			if heartbeatAppliesResolvedConfig(agent, agentHB) {
+				before := agentResolvedConfigSnapshot(agent)
+				store.ApplyBrokerAgentConfig(agent, heartbeatResolvedConfig(agentHB))
+				if agentResolvedConfigSnapshot(agent) != before {
+					needsUpdate = true
+				}
+			}
 			if needsUpdate {
 				if err := s.store.UpdateAgent(ctx, agent); err != nil {
 					slog.Warn("Failed to backfill agent config from heartbeat",

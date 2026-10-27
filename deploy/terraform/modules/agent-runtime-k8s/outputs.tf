@@ -4,7 +4,7 @@ output "namespace" {
 }
 
 output "pv_name" {
-  description = "PersistentVolume name (\"<hub_name>-nfs\"). This is the value settings.yaml's workspace_storage.nfs.shares[0].pv_name must equal — the hub code uses it as the literal PVC claim name."
+  description = "PersistentVolume name (\"<hub_name>-nfs\"). This is the value settings.yaml's project_storage.nfs.shares[0].pv_name must equal — the hub code uses it as the literal PVC claim name."
   value       = kubernetes_persistent_volume.this.metadata[0].name
 }
 

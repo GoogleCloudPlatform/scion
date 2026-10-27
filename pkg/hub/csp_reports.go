@@ -18,6 +18,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/cspreport"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -28,7 +29,12 @@ import (
 //
 // The route needs no sign-in: browsers send reports on their own. The
 // handler (pkg/cspreport) only logs: each report becomes one csp_violation
-// record on the hub.csp-reports logger, and nothing is stored.
+// record on the hub.csp-reports logger, and nothing is persisted in
+// application storage. The report's sample is logged only with
+// server.hub.csp_report_raw_samples (off by default). Repeats of one
+// violation are collapsed into one record per cspReportDedupeInterval and
+// answered with 204; a csp_violation_repeats record then counts them and
+// shows the latest (cspreport.Dedupe).
 //
 // Two token buckets bound the log volume, reusing geExchangeRateLimiter and
 // geExchangeClientIP (ge_exchange_ratelimit.go) as externalBearerRateLimiter
@@ -38,10 +44,11 @@ import (
 
 const (
 	// cspReportRatePerSecond and cspReportBurst are the per-client-IP
-	// budget. A browser batches reports, so a page with a few problems
-	// sends a request every few seconds at most.
+	// budget. Some browsers send each report as its own request, so one
+	// page load can send dozens at once; the burst lets one page load's
+	// reports fit.
 	cspReportRatePerSecond = 0.5
-	cspReportBurst         = 20
+	cspReportBurst         = 60
 
 	// cspReportGlobalRatePerSecond and cspReportGlobalBurst cap the
 	// records the hub as a whole writes (every record, the dropped-count
@@ -51,6 +58,12 @@ const (
 
 	// cspReportGlobalKey is the single bucket key of the hub-wide limiter.
 	cspReportGlobalKey = "*"
+
+	// cspReportDedupeInterval and cspReportDedupeMaxKeys are the
+	// cspreport.Dedupe settings: each distinct violation is logged at most
+	// once per interval, and at most this many are tracked.
+	cspReportDedupeInterval = 10 * time.Minute
+	cspReportDedupeMaxKeys  = 512
 )
 
 // cspReportLimiter is the per-client-IP and hub-wide limit of the report
@@ -108,11 +121,15 @@ func (l *cspReportLimiter) StartCleanup(ctx context.Context) {
 }
 
 // newCSPReportHandler returns the report endpoint with its limiter.
-func newCSPReportHandler(limiter *cspReportLimiter) *cspreport.Handler {
+// rawSamples (server.hub.csp_report_raw_samples, off by default) adds each
+// report's sample to its record.
+func newCSPReportHandler(limiter *cspReportLimiter, rawSamples bool) *cspreport.Handler {
 	return &cspreport.Handler{
 		Allow:       limiter.Allow,
 		AllowRecord: limiter.AllowRecord,
+		Dedupe:      cspreport.NewDedupe(cspReportDedupeInterval, cspReportDedupeMaxKeys),
 		Log:         logging.Subsystem("hub.csp-reports"),
+		RawSamples:  rawSamples,
 	}
 }
 

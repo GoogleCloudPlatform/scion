@@ -55,7 +55,8 @@ func writeCmdKeyring(t *testing.T, mutate func(doc map[string]any)) string {
 				map[string]any{"id": "legacy", "secret": cmdKRLegacySecret, "sign_until": nil, "verify_until": nil},
 				map[string]any{"id": "gen1", "secret": cmdKRGen1Secret, "sign_until": nil, "verify_until": nil},
 			},
-			"legacy_read_ids": []any{"legacy"},
+			// The active gen1 must read ID-less values too (phase 4).
+			"legacy_read_ids": []any{"legacy", "gen1"},
 		},
 		"encryption": map[string]any{
 			"active": "legacy", "write_format": "v1",
@@ -114,7 +115,7 @@ func TestLoadServerKeyring_RingMode(t *testing.T) {
 	assert.Equal(t, cmdKRLegacySecret, resolveSessionSecret())
 	assert.Equal(t, cmdKRLegacySecret, sessionSecretValue())
 	assert.Equal(t, hub.SigningKeySourceKeyring, webSessionKeySource(resolveSessionSecret()))
-	assert.Contains(t, logs.String(), "session cookies only")
+	assert.Contains(t, logs.String(), "session cookies and those capabilities only")
 	assertNoCmdKRSecret(t, logs.String())
 }
 

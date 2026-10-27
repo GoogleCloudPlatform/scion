@@ -22,9 +22,10 @@ import (
 )
 
 // webContentSecurityPolicy returns the CSP sent with every web response.
-// Web pages run only the app's own scripts: the bundled files from 'self',
-// and the one inline script of the SPA shell (theme detection), which
-// carries the per-response nonce. No other inline script runs.
+// Inline scripts run only with the per-response nonce, which the one
+// inline script of the SPA shell (theme detection) carries; no other
+// inline script runs. Script files are allowed from 'self': the bundled
+// files, and any other script file served from the hub's own address.
 //
 // The client bundles its scripts, styles and Shoelace assets, so the only
 // named external hosts are Google Fonts (stylesheet and font files) and

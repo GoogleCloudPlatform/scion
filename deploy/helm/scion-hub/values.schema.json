@@ -579,7 +579,7 @@
     "workspaceStorage": {
       "type": "object",
       "additionalProperties": false,
-      "description": "The shared workspace share agent pods mount, rendered as server.workspace_storage. Not the hub's blob store (storage).",
+      "description": "The shared workspace share agent pods mount, rendered as server.project_storage. Not the hub's blob store (storage).",
       "properties": {
         "nfs": {
           "type": "object",
@@ -589,7 +589,7 @@
           "properties": {
             "enabled": {
               "type": "boolean",
-              "description": "Renders server.workspace_storage (backend nfs) and the hub pod's inline nfs volume. Refused with config.existingSecret and with config.extra.server.workspace_storage."
+              "description": "Renders server.project_storage (backend nfs, homes local) and the hub pod's inline nfs volume. Refused with config.existingSecret and with config.extra.server.project_storage (or a deprecated workspace_storage, shared_dir_storage or home_storage block)."
             },
             "server": {
               "type": "string",

@@ -333,7 +333,7 @@ func (s *Server) remoteBrokerWorkspaceRefusal(ctx context.Context, project *stor
 		// A hub-managed project, whose workspace the hub holds, is refused.
 		return "this project's shared workspace lives on the hub's local disk, which a remote runtime broker cannot reach" + tail, true
 	}
-	hubBackend := s.config.WorkspaceStorageConfig.Backend
+	hubBackend := s.config.ProjectStorageConfig.EffectiveBackend()
 	broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
 	if err != nil || broker == nil || broker.WorkspaceStorage == nil || broker.WorkspaceStorage.Backend != hubBackend {
 		return fmt.Sprintf("the runtime broker does not report the hub's shared workspace storage (%s)", hubBackend) + tail, true

@@ -20,7 +20,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 )
 
 // TestMain isolates $HOME for the whole (non-integration) pkg/hub test
@@ -43,17 +43,9 @@ import (
 // After the tests, the leak guard (internal/hubtestutil/leak_guard.go) fails the
 // package if unclosed test stores or never-shut-down servers are still
 // running (ptone/scion#3641).
+//
+// The steps live in hubtestutil.RunTestMain (internal/hubtestutil/runtestmain.go),
+// which the pkg/hub area packages' generated TestMains also call.
 func TestMain(m *testing.M) {
-	stopMemGuard := startMemGuard()
-	teardown := testutil.IsolateHome("scion-hub-test-home-*")
-	clearAmbientGCPProjectEnv()
-	restoreLsRemote := installHermeticGitLsRemote()
-	restoreSparseCheckout := installHermeticGitSparseCheckout()
-	code := m.Run()
-	code = runLeakGuard(code)
-	restoreSparseCheckout()
-	restoreLsRemote()
-	teardown()
-	stopMemGuard()
-	os.Exit(code)
+	os.Exit(hubtestutil.RunTestMain(m))
 }

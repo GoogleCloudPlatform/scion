@@ -1373,13 +1373,6 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// already refuses worktree-per-agent before dispatching (A2/A4); this is
 	// the broker's own independent defense, and it also keeps
 	// tryProvisionWorktree off the reprovision path entirely.
-	// A shared dir backend change is part of a reincarnation only.
-	if !req.Reprovision && (len(req.SharedDirBackendChanges) > 0 || req.AllowEmptySharedDir) {
-		markAttemptFailed(http.StatusBadRequest, "shared dir backend change without reprovision")
-		BadRequest(w, "a shared dir backend change is only supported on a reprovision request")
-		return
-	}
-
 	if req.Reprovision && req.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
 		const msg = "reprovision refused: worktree-per-agent workspaces are not supported by reincarnate"
 		// O-a (review p1b-r2): use the same dispatch-attempt message as the
@@ -1532,8 +1525,6 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// buildStartContext computed for opCreate.
 	if req.Reprovision {
 		opts.FreshProvision = false
-		opts.SharedDirBackendChanges = req.SharedDirBackendChanges
-		opts.AllowEmptySharedDir = req.AllowEmptySharedDir
 	}
 	s.agentLifecycleLog.Info("Agent dispatch: buildStartContext complete",
 		"agent_id", req.ID, "name", req.Name, "elapsed", time.Since(buildCtxStart).String())
@@ -1864,8 +1855,6 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			// asked for it — the hub's dispatch fails closed when it asked
 			// for a reprovision and did not get this echo back.
 			Reprovisioned: req.Reprovision,
-			// Reprovision returned without error, so it recorded the change.
-			SharedDirBackendsChanged: req.Reprovision && len(req.SharedDirBackendChanges) > 0,
 		}
 		if attempt != nil {
 			s.dispatchAttemptsMu.Lock()
@@ -2680,10 +2669,10 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// nothing unless every agent directory that exists carries that move's
 	// marker (see the check after the target is resolved).
 	moveReincarnationID := query.Get(api.MoveReincarnationIDQueryParam)
-	if moveReincarnationID != "" && (!deleteFiles || localOnly || softDelete || projectID == "" ||
+	if moveReincarnationID != "" && (!deleteFiles || localOnly || softDelete || removeBranch || projectID == "" ||
 		query.Get(api.PurgeRetainedQueryParam) == "true") {
 		span.SetStatus(codes.Error, "invalid forced move rollback delete")
-		ValidationError(w, "moveReincarnationId needs deleteFiles and projectId, without localOnly, softDelete or purgeRetained", nil)
+		ValidationError(w, "moveReincarnationId needs deleteFiles and projectId, without localOnly, softDelete, removeBranch or purgeRetained", nil)
 		return
 	}
 	// purgeRetained removes the retained files of a soft-deleted agent once
@@ -2909,17 +2898,24 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		return
 	}
 
+	// deleteHubProjectID is the Hub project ID the delete resolves the
+	// agent's hub-project state directory with; the forced move's rollback
+	// check below uses the same one.
+	deleteHubProjectID := projectID
+
 	// A forced move's rollback delete removes nothing unless every agent
 	// directory it would remove that exists carries that move's marker,
 	// checked under the files lock taken above. Anything else was not
 	// created by the move: 409, with a fixed message (the paths are
-	// logged here only).
+	// logged here only). The check looks up the agent's worktree and sharer
+	// registry entry by the same sharer key the delete below uses, so a
+	// worktree provisioned under the hub agent ID is seen too.
 	if moveReincarnationID != "" {
 		checker, ok := target.mgr.(moveMarkerChecker)
 		var paths []string
 		chkErr := errors.New("this broker cannot check move markers")
 		if ok && projectPath != "" {
-			paths, chkErr = checker.CheckMoveMarkers(ctx, projectPath, agentProjectID, target.name, moveReincarnationID)
+			paths, chkErr = checker.CheckMoveMarkers(ctx, projectPath, agentProjectID, deleteHubProjectID, target.name, sharerKey, moveReincarnationID)
 		} else if ok {
 			chkErr = errors.New("no project path to check the move markers in")
 		}
@@ -3091,7 +3087,7 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// The request's project ID is the Hub project ID the agent was started
 	// with (opts.HubProjectID); file deletion resolves the agent's state
 	// directory with it, as lookup does. Without one, nothing changes.
-	_, err = target.mgr.DeleteTarget(api.ContextWithHubProjectID(ctx, projectID), target.name, sharerKey, deleteRunRef(target, runID), filesToDelete, projectPath, removeBranch)
+	_, err = target.mgr.DeleteTarget(api.ContextWithHubProjectID(ctx, deleteHubProjectID), target.name, sharerKey, deleteRunRef(target, runID), filesToDelete, projectPath, removeBranch)
 	// A soft delete marks agent-info.json deleted only once the runtime
 	// entry is gone (ptone/scion#4766): some runtimes do not let the host
 	// write files in the container, so the host never writes the file while
@@ -8267,7 +8263,7 @@ var _ moveWorkspaceAbsenceChecker = (*agent.AgentManager)(nil)
 // move's marker on the agent's directories before its rollback delete
 // (agent.AgentManager).
 type moveMarkerChecker interface {
-	CheckMoveMarkers(ctx context.Context, projectPath, projectID, agentName, moveID string) ([]string, error)
+	CheckMoveMarkers(ctx context.Context, projectPath, projectID, hubProjectID, agentName, sharerKey, moveID string) ([]string, error)
 }
 
 var _ moveMarkerChecker = (*agent.AgentManager)(nil)
@@ -9095,8 +9091,8 @@ func dispatchUsesNFSWorkspace(projectDir string) bool {
 	if err != nil || vs == nil {
 		return true
 	}
-	return vs.Server != nil && vs.Server.WorkspaceStorage != nil &&
-		vs.Server.WorkspaceStorage.Backend == "nfs"
+	return vs.Server != nil && vs.Server.EffectiveWorkspaceStorage() != nil &&
+		vs.Server.EffectiveWorkspaceStorage().Backend == "nfs"
 }
 
 // preResolvedHubEndpoint picks the Hub base URL used to absolutize the

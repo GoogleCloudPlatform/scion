@@ -66,3 +66,27 @@ describe('scion-login-page sign-in denial messages', () => {
     expect(errorText(el)).toBe('Your email domain is not authorized to access this application.');
   });
 });
+
+describe('scion-login-page on a dev sign-in server', () => {
+  it('tells the user to open a sign-in link when there are no providers', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ providers: null, devSignIn: true }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )
+      )
+    );
+    const el = document.createElement('scion-login-page');
+    document.body.appendChild(el);
+    await vi.waitFor(() => {
+      expect(el.shadowRoot!.querySelector('.dev-sign-in')).not.toBeNull();
+    });
+    const text = el.shadowRoot!.querySelector('.dev-sign-in')!.textContent!;
+    expect(text).toContain('scion server open');
+    expect(el.shadowRoot!.textContent).not.toContain('No authentication providers configured');
+  });
+});

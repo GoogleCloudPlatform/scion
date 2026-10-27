@@ -22,22 +22,14 @@ import (
 )
 
 // The runtime_target infrastructure fields of a flat instance entry: gke,
-// priority_class_name, safe_to_evict, the shared-dir and home storage
-// backends (.design/flat-runtime-brokers/contract-appendix-p3.md FC1, FC2,
-// FC5, FC7).
-
-const nfsBlockYAML = `  shared_dir_storage:
-    backend: local
-    nfs:
-      mount_root: /mnt/scion-nfs
-      shares:
-        - id: share-1
-          pv_name: pv-1
-`
+// priority_class_name, safe_to_evict
+// (.design/flat-runtime-brokers/contract-appendix-p3.md FC1, FC2, FC5,
+// FC7). The shared-dir and home storage overrides are refused:
+// server.project_storage decides placement.
 
 const targetInfraInstancesYAML = `schema_version: "1"
 server:
-` + nfsBlockYAML + `  broker:
+  broker:
     instances:
       - key: k8s-nfs-1
         name: k8s-nfs-1
@@ -47,18 +39,12 @@ server:
           gke: true
           priority_class_name: agents-high
           safe_to_evict: false
-          shared_dir_storage_backend: nfs
-          shared_dir_storage_backends:
-            scratch: local
-          home_storage_backend: nfs
-          home_storage_leaf: broker
+          kubernetes_service_account_mappings:
+            agent@proj.iam.gserviceaccount.com: ksa-agent
       - key: docker-1
         name: docker-1
         runtime_target:
           type: docker
-          shared_dir_storage_backend: local
-          shared_dir_storage_backends:
-            cache: nfs
 `
 
 // Every field loads strictly, mirrors into the server config, converts back
@@ -71,11 +57,10 @@ func TestRuntimeBrokerInstances_TargetInfraFieldsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	mappings := map[string]string{"agent@proj.iam.gserviceaccount.com": "ksa-agent"}
 	wantK8s := &V1RuntimeTargetConfig{Type: "kubernetes", Namespace: "agents", GKE: true, PriorityClassName: "agents-high",
-		SafeToEvict: boolPtr(false), SharedDirStorageBackend: "nfs", SharedDirStorageBackends: map[string]string{"scratch": "local"},
-		HomeStorageBackend: "nfs", HomeStorageLeaf: "broker"}
-	wantDocker := &V1RuntimeTargetConfig{Type: "docker", SharedDirStorageBackend: "local",
-		SharedDirStorageBackends: map[string]string{"cache": "nfs"}}
+		SafeToEvict: boolPtr(false), KubernetesServiceAccountMappings: mappings}
+	wantDocker := &V1RuntimeTargetConfig{Type: "docker"}
 	if len(strict) != 2 || !reflect.DeepEqual(strict[0].RuntimeTarget, wantK8s) || !reflect.DeepEqual(strict[1].RuntimeTarget, wantDocker) {
 		t.Fatalf("strict load: got %+v / %+v", strict[0].RuntimeTarget, strict[1].RuntimeTarget)
 	}
@@ -84,8 +69,7 @@ func TestRuntimeBrokerInstances_TargetInfraFieldsRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantGlobal := &RuntimeTargetConfig{Type: "kubernetes", Namespace: "agents", GKE: true, PriorityClassName: "agents-high",
-		SafeToEvict: boolPtr(false), SharedDirStorageBackend: "nfs", SharedDirStorageBackends: map[string]string{"scratch": "local"},
-		HomeStorageBackend: "nfs", HomeStorageLeaf: "broker"}
+		SafeToEvict: boolPtr(false), KubernetesServiceAccountMappings: mappings}
 	if len(gc.RuntimeBroker.Instances) != 2 || !reflect.DeepEqual(gc.RuntimeBroker.Instances[0].RuntimeTarget, wantGlobal) {
 		t.Fatalf("server config mirror: got %+v", gc.RuntimeBroker.Instances)
 	}
@@ -98,8 +82,9 @@ func TestRuntimeBrokerInstances_TargetInfraFieldsRoundTrip(t *testing.T) {
 	}
 	// The conversions copy the reference fields.
 	*gc.RuntimeBroker.Instances[0].RuntimeTarget.SafeToEvict = true
-	gc.RuntimeBroker.Instances[0].RuntimeTarget.SharedDirStorageBackends["scratch"] = "nfs"
-	if *back.Broker.Instances[0].RuntimeTarget.SafeToEvict || back.Broker.Instances[0].RuntimeTarget.SharedDirStorageBackends["scratch"] != "local" {
+	gc.RuntimeBroker.Instances[0].RuntimeTarget.KubernetesServiceAccountMappings["agent@proj.iam.gserviceaccount.com"] = "other"
+	if *back.Broker.Instances[0].RuntimeTarget.SafeToEvict ||
+		back.Broker.Instances[0].RuntimeTarget.KubernetesServiceAccountMappings["agent@proj.iam.gserviceaccount.com"] != "ksa-agent" {
 		t.Fatal("the settings and server-config forms share a pointer or map")
 	}
 }
@@ -123,17 +108,13 @@ func TestRuntimeBrokerInstances_SafeToEvictTriState(t *testing.T) {
 }
 
 // Docker refuses the Kubernetes-only fields, including an explicit false
-// safe_to_evict, and accepts the shared-dir backends. Kubernetes validates
-// each value, naming its path.
+// safe_to_evict. Kubernetes validates each value, naming its path. Both
+// refuse the removed storage overrides, pointing at a volumes: entry.
 func TestValidateRuntimeBrokerInstances_TargetInfraFields(t *testing.T) {
 	docker := dockerInstance("d", "d")
 	docker.RuntimeTarget.GKE = true
 	docker.RuntimeTarget.PriorityClassName = "high"
 	docker.RuntimeTarget.SafeToEvict = boolPtr(false)
-	docker.RuntimeTarget.HomeStorageBackend = "local"
-	docker.RuntimeTarget.HomeStorageLeaf = "pod"
-	docker.RuntimeTarget.SharedDirStorageBackend = "nfs"
-	docker.RuntimeTarget.SharedDirStorageBackends = map[string]string{"cache": "local"}
 	errs := ValidateRuntimeBrokerInstances([]V1RuntimeBrokerInstanceConfig{docker})
 	var paths []string
 	for _, e := range errs {
@@ -142,8 +123,27 @@ func TestValidateRuntimeBrokerInstances_TargetInfraFields(t *testing.T) {
 		}
 		paths = append(paths, strings.TrimPrefix(e.Path, "server.broker.instances[0].runtime_target."))
 	}
-	if want := []string{"gke", "home_storage_backend", "home_storage_leaf", "priority_class_name", "safe_to_evict"}; !reflect.DeepEqual(paths, want) {
+	if want := []string{"gke", "priority_class_name", "safe_to_evict"}; !reflect.DeepEqual(paths, want) {
 		t.Fatalf("docker refusals: got %v, want %v", paths, want)
+	}
+
+	for _, typ := range []string{RuntimeTargetTypeDocker, RuntimeTargetTypeKubernetes} {
+		t.Run("removed overrides "+typ, func(t *testing.T) {
+			target := &V1RuntimeTargetConfig{Type: typ, SharedDirStorageBackend: "local",
+				SharedDirStorageBackends: map[string]string{"cache": "local"}, HomeStorageBackend: "local", HomeStorageLeaf: "pod"}
+			errs := ValidateRuntimeBrokerInstances([]V1RuntimeBrokerInstanceConfig{{Key: "k", Name: "k", RuntimeTarget: target}})
+			var paths []string
+			for _, e := range errs {
+				if !strings.Contains(e.Message, "is no longer supported") || !strings.Contains(e.Message, "volumes:") {
+					t.Fatalf("unexpected error %v", e)
+				}
+				paths = append(paths, strings.TrimPrefix(e.Path, "server.broker.instances[0].runtime_target."))
+			}
+			want := []string{"home_storage_backend", "home_storage_leaf", "shared_dir_storage_backend", "shared_dir_storage_backends"}
+			if !reflect.DeepEqual(paths, want) {
+				t.Fatalf("removed override refusals: got %v, want %v", paths, want)
+			}
+		})
 	}
 
 	k8s := func(mut func(*V1RuntimeTargetConfig)) []ValidationError {
@@ -151,75 +151,15 @@ func TestValidateRuntimeBrokerInstances_TargetInfraFields(t *testing.T) {
 		mut(t)
 		return ValidateRuntimeBrokerInstances([]V1RuntimeBrokerInstanceConfig{{Key: "k", Name: "k", RuntimeTarget: t}})
 	}
-	for name, tc := range map[string]struct {
-		mut  func(*V1RuntimeTargetConfig)
-		path string
-	}{
-		"priority class": {func(t *V1RuntimeTargetConfig) { t.PriorityClassName = "High_Priority" }, "priority_class_name"},
-		"single backend": {func(t *V1RuntimeTargetConfig) { t.SharedDirStorageBackend = "NFS" }, "shared_dir_storage_backend"},
-		"per-dir value":  {func(t *V1RuntimeTargetConfig) { t.SharedDirStorageBackends = map[string]string{"data": "gcs"} }, "shared_dir_storage_backends.data"},
-		"per-dir name":   {func(t *V1RuntimeTargetConfig) { t.SharedDirStorageBackends = map[string]string{"Bad_Dir": "nfs"} }, "shared_dir_storage_backends.Bad_Dir"},
-		"home backend":   {func(t *V1RuntimeTargetConfig) { t.HomeStorageBackend = "gcs" }, "home_storage_backend"},
-		"home leaf":      {func(t *V1RuntimeTargetConfig) { t.HomeStorageLeaf = "node" }, "home_storage_leaf"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			errs := k8s(tc.mut)
-			if len(errs) != 1 || errs[0].Path != "server.broker.instances[0].runtime_target."+tc.path {
-				t.Fatalf("got %v, want one error at %s", errs, tc.path)
-			}
-		})
+	if errs := k8s(func(t *V1RuntimeTargetConfig) { t.PriorityClassName = "High_Priority" }); len(errs) != 1 ||
+		errs[0].Path != "server.broker.instances[0].runtime_target.priority_class_name" {
+		t.Fatalf("got %v, want one error at priority_class_name", errs)
 	}
 	if errs := k8s(func(t *V1RuntimeTargetConfig) {
 		t.GKE, t.PriorityClassName, t.SafeToEvict = true, "agents.high", boolPtr(true)
-		t.SharedDirStorageBackend, t.SharedDirStorageBackends = "local", map[string]string{"data": "nfs"}
-		t.HomeStorageBackend, t.HomeStorageLeaf = "nfs", "pod"
 	}); len(errs) != 0 {
 		t.Fatalf("valid entry refused: %v", errs)
 	}
-}
-
-// An instance that selects nfs for shared dirs or home is refused when the
-// instances are loaded unless server.shared_dir_storage has a complete nfs
-// block; the error names the instance field.
-func TestRuntimeBrokerInstances_IncompleteNFSRefusedAtLoad(t *testing.T) {
-	entry := func(fields string) string {
-		return "  broker:\n    instances:\n      - key: k\n        name: k\n        runtime_target:\n          type: kubernetes\n" + fields
-	}
-	for name, tc := range map[string]struct {
-		yaml, want string
-	}{
-		"no block": {"schema_version: \"1\"\nserver:\n" + entry("          shared_dir_storage_backend: nfs\n"),
-			"server.broker.instances[0].runtime_target.shared_dir_storage_backend: selects \"nfs\", which needs a complete server.shared_dir_storage.nfs block"},
-		"no shares": {"schema_version: \"1\"\nserver:\n  shared_dir_storage:\n    nfs:\n      mount_root: /mnt/x\n" + entry("          shared_dir_storage_backends:\n            data: nfs\n"),
-			"server.broker.instances[0].runtime_target.shared_dir_storage_backends.data: selects \"nfs\""},
-		"home": {"schema_version: \"1\"\nserver:\n" + entry("          home_storage_backend: nfs\n"),
-			"server.broker.instances[0].runtime_target.home_storage_backend: selects \"nfs\""},
-	} {
-		t.Run(name, func(t *testing.T) {
-			global := flatTestHome(t)
-			writeFlatTestFile(t, filepath.Join(global, "settings.yaml"), tc.yaml)
-			_, err := LoadRuntimeBrokerInstances("")
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("got %v, want an error containing %q", err, tc.want)
-			}
-		})
-	}
-	t.Run("complete block", func(t *testing.T) {
-		global := flatTestHome(t)
-		writeFlatTestFile(t, filepath.Join(global, "settings.yaml"), "schema_version: \"1\"\nserver:\n"+nfsBlockYAML+
-			entry("          shared_dir_storage_backend: nfs\n          home_storage_backend: nfs\n"))
-		if _, err := LoadRuntimeBrokerInstances(""); err != nil {
-			t.Fatalf("a complete nfs block must be accepted: %v", err)
-		}
-	})
-	t.Run("local needs no block", func(t *testing.T) {
-		global := flatTestHome(t)
-		writeFlatTestFile(t, filepath.Join(global, "settings.yaml"), "schema_version: \"1\"\nserver:\n"+
-			entry("          shared_dir_storage_backend: local\n          home_storage_backend: local\n"))
-		if _, err := LoadRuntimeBrokerInstances(""); err != nil {
-			t.Fatalf("local backends need no nfs block: %v", err)
-		}
-	})
 }
 
 func TestRuntimeBrokerTarget_KubernetesRuntimeConfig(t *testing.T) {
@@ -278,141 +218,5 @@ func TestResolveSafeToEvict_FlatBranch(t *testing.T) {
 	}
 	if v, src := vs.ResolveSafeToEvictWithSource(""); v == nil || !*v || src != "profiles.batch.safe_to_evict" {
 		t.Fatalf("legacy resolution changed: %v %q", v, src)
-	}
-}
-
-func TestResolveSharedDirStorage_FlatBranchAndFallThrough(t *testing.T) {
-	vs := targetLegacySettings()
-	global := &V1SharedDirStorageConfig{Backend: "local", NFS: &V1NFSConfig{MountRoot: "/mnt/x"}}
-	vs.Server = &V1ServerConfig{SharedDirStorage: global}
-
-	cfg, src := vs.ForFlatInstance(targetPolicy(V1RuntimeTargetConfig{SharedDirStorageBackend: "nfs"})).ResolveSharedDirStorage("batch")
-	if cfg == nil || cfg.Backend != "nfs" || cfg.NFS != global.NFS || src != instPath+"shared_dir_storage_backend" {
-		t.Fatalf("instance value: got %+v %q", cfg, src)
-	}
-	// Unset falls through to server.shared_dir_storage, not the profile's nfs.
-	cfg, src = vs.ForFlatInstance(targetPolicy(V1RuntimeTargetConfig{})).ResolveSharedDirStorage("")
-	if cfg != global || src != SharedDirStorageGlobalSource {
-		t.Fatalf("fall-through: got %+v %q, want the global block", cfg, src)
-	}
-	vs.Server = nil
-	if cfg, src := vs.ForFlatInstance(targetPolicy(V1RuntimeTargetConfig{})).ResolveSharedDirStorage(""); cfg != nil || src != "" {
-		t.Fatalf("nothing configured: got %+v %q", cfg, src)
-	}
-	if cfg, src := vs.ResolveSharedDirStorage(""); cfg == nil || cfg.Backend != "nfs" || src != "profiles.batch.shared_dir_storage_backend" {
-		t.Fatalf("legacy resolution changed: %+v %q", cfg, src)
-	}
-}
-
-func TestResolveSharedDirStorageBackend_FlatBranchAndFallThrough(t *testing.T) {
-	vs := targetLegacySettings()
-	vs.Server = &V1ServerConfig{SharedDirStorage: &V1SharedDirStorageConfig{Backend: "local"}}
-	view := vs.ForFlatInstance(targetPolicy(V1RuntimeTargetConfig{SharedDirStorageBackend: "nfs",
-		SharedDirStorageBackends: map[string]string{"cache": "local"}}))
-	for dir, want := range map[string]struct {
-		backend, source string
-		perDir          bool
-	}{
-		"cache": {"local", instPath + "shared_dir_storage_backends.cache", true},
-		"data":  {"nfs", instPath + "shared_dir_storage_backend", false},
-	} {
-		backend, source, perDir := view.ResolveSharedDirStorageBackend("batch", dir)
-		if backend != want.backend || source != want.source || perDir != want.perDir {
-			t.Fatalf("dir %s: got (%q, %q, %v), want %+v", dir, backend, source, perDir, want)
-		}
-	}
-	// Unset falls through to the global backend, not the profile's per-dir
-	// or single nfs.
-	backend, source, perDir := vs.ForFlatInstance(targetPolicy(V1RuntimeTargetConfig{})).ResolveSharedDirStorageBackend("", "data")
-	if backend != "local" || source != SharedDirStorageGlobalSource || perDir {
-		t.Fatalf("fall-through: got (%q, %q, %v)", backend, source, perDir)
-	}
-	vs.Server = nil
-	if backend, source, _ := vs.ForFlatInstance(targetPolicy(V1RuntimeTargetConfig{})).ResolveSharedDirStorageBackend("", "data"); backend != "" || source != "" {
-		t.Fatalf("nothing configured: got (%q, %q)", backend, source)
-	}
-	if backend, source, _ := vs.ResolveSharedDirStorageBackend("", "data"); backend != "nfs" || source != "profiles.batch.shared_dir_storage_backends.data" {
-		t.Fatalf("legacy resolution changed: %q %q", backend, source)
-	}
-}
-
-func TestResolveHomeStorage_FlatBranchAndFallThrough(t *testing.T) {
-	vs := targetLegacySettings()
-	vs.Server = &V1ServerConfig{HomeStorage: &V1HomeStorageConfig{Backend: "local", Leaf: "pod"}}
-
-	got := vs.ForFlatInstance(targetPolicy(V1RuntimeTargetConfig{HomeStorageBackend: "nfs", HomeStorageLeaf: "broker"})).ResolveHomeStorage("batch")
-	if want := (ResolvedHomeStorage{Backend: "nfs", BackendSource: instPath + "home_storage_backend", Leaf: "broker", LeafSource: instPath + "home_storage_leaf"}); got != want {
-		t.Fatalf("instance values: got %+v", got)
-	}
-	// Unset falls through to server.home_storage, not the profile's nfs.
-	got = vs.ForFlatInstance(targetPolicy(V1RuntimeTargetConfig{})).ResolveHomeStorage("")
-	if want := (ResolvedHomeStorage{Backend: "local", BackendSource: HomeStorageBackendGlobalSource, Leaf: "pod", LeafSource: HomeStorageLeafGlobalSource}); got != want {
-		t.Fatalf("fall-through: got %+v", got)
-	}
-	// One field set, the other falls through on its own.
-	got = vs.ForFlatInstance(targetPolicy(V1RuntimeTargetConfig{HomeStorageBackend: "nfs"})).ResolveHomeStorage("")
-	if got.Backend != "nfs" || got.Leaf != "pod" || got.LeafSource != HomeStorageLeafGlobalSource {
-		t.Fatalf("backend only: got %+v", got)
-	}
-	vs.Server = nil
-	if got := vs.ForFlatInstance(targetPolicy(V1RuntimeTargetConfig{})).ResolveHomeStorage(""); got != (ResolvedHomeStorage{Backend: "local", Leaf: "pod"}) {
-		t.Fatalf("defaults: got %+v", got)
-	}
-	if got := vs.ResolveHomeStorage(""); got.Backend != "nfs" || got.BackendSource != "profiles.batch.home_storage_backend" {
-		t.Fatalf("legacy resolution changed: %+v", got)
-	}
-}
-
-// Project cleanup finds NFS-backed shared dirs selected only by an
-// instance.
-func TestSharedDirStorageNFSAnywhere_Instance(t *testing.T) {
-	nfs := &V1NFSConfig{MountRoot: "/mnt/x"}
-	for name, target := range map[string]*V1RuntimeTargetConfig{
-		"single":  {Type: "docker", SharedDirStorageBackend: "nfs"},
-		"per dir": {Type: "kubernetes", SharedDirStorageBackends: map[string]string{"data": "nfs"}},
-	} {
-		vs := &VersionedSettings{Server: &V1ServerConfig{SharedDirStorage: &V1SharedDirStorageConfig{Backend: "local", NFS: nfs},
-			Broker: &V1BrokerConfig{Instances: []V1RuntimeBrokerInstanceConfig{{Key: "i", Name: "i", RuntimeTarget: target}}}}}
-		cfg, onlyOverrides := vs.SharedDirStorageNFSAnywhere()
-		if cfg == nil || cfg.Backend != "nfs" || cfg.NFS != nfs || !onlyOverrides {
-			t.Fatalf("%s: got %+v %v", name, cfg, onlyOverrides)
-		}
-	}
-	vs := &VersionedSettings{Server: &V1ServerConfig{Broker: &V1BrokerConfig{Instances: []V1RuntimeBrokerInstanceConfig{
-		{Key: "i", Name: "i", RuntimeTarget: &V1RuntimeTargetConfig{Type: "docker", SharedDirStorageBackend: "local"}}}}}}
-	if cfg, _ := vs.SharedDirStorageNFSAnywhere(); cfg != nil {
-		t.Fatalf("a local instance selects no nfs: %+v", cfg)
-	}
-}
-
-// The startup report lists each instance's own backend and warns when an
-// instance and the plugins' resolution (the global settings, no profile)
-// would use different backends for a dir.
-func TestFlatInstanceSharedDirStorageReport(t *testing.T) {
-	vs := &VersionedSettings{Server: &V1ServerConfig{
-		SharedDirStorage: &V1SharedDirStorageConfig{Backend: "local"},
-		Broker: &V1BrokerConfig{Instances: []V1RuntimeBrokerInstanceConfig{
-			{Key: "same", Name: "same", RuntimeTarget: &V1RuntimeTargetConfig{Type: "docker", SharedDirStorageBackend: "local"}},
-			{Key: "plain", Name: "plain", RuntimeTarget: &V1RuntimeTargetConfig{Type: "docker"}},
-			{Key: "nfs", Name: "nfs", RuntimeTarget: &V1RuntimeTargetConfig{Type: "kubernetes", SharedDirStorageBackend: "nfs",
-				SharedDirStorageBackends: map[string]string{"cache": "local"}}},
-		}},
-	}}
-	lines, warnings := vs.FlatInstanceSharedDirStorageReport()
-	wantLines := []string{
-		"shared_dir_storage for instance same: backend=local (from server.broker.instances[same].runtime_target.shared_dir_storage_backend)",
-		"shared_dir_storage for instance nfs: backend=nfs (from server.broker.instances[nfs].runtime_target.shared_dir_storage_backend)",
-		"shared_dir_storage for instance nfs, shared dir cache: backend=local (from server.broker.instances[nfs].runtime_target.shared_dir_storage_backends.cache)",
-	}
-	if !reflect.DeepEqual(lines, wantLines) {
-		t.Fatalf("lines:\n got %q\nwant %q", lines, wantLines)
-	}
-	if len(warnings) != 1 || !strings.HasPrefix(warnings[0], "server.broker.instances[nfs]: ") ||
-		!strings.Contains(warnings[0], "shared dirs without a per-dir entry: nfs here, local for plugins") ||
-		strings.Contains(warnings[0], "shared dir cache") {
-		t.Fatalf("warnings: %q", warnings)
-	}
-	if lines, warnings := (&VersionedSettings{}).FlatInstanceSharedDirStorageReport(); lines != nil || warnings != nil {
-		t.Fatalf("no instances: got %q %q", lines, warnings)
 	}
 }

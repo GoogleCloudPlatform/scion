@@ -105,7 +105,7 @@ func TestCreateAgent_RemoteBroker_SharedWorkspaceGit_LocalHub_Refused409(t *test
 
 func TestCreateAgent_RemoteBroker_NoSharedStorageDescriptor_Refused409(t *testing.T) {
 	srv, s, project, disp := setupRemoteBrokerWorkspaceServer(t)
-	srv.config.WorkspaceStorageConfig = nfsConfig(t.TempDir())
+	srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(t.TempDir()))
 	for _, ws := range []*api.BrokerWorkspaceStorage{nil, {Backend: api.WorkspaceStorageBackendLocal}} {
 		setBrokerWorkspaceStorage(t, s, project.DefaultRuntimeBrokerID, ws)
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
@@ -119,7 +119,7 @@ func TestCreateAgent_RemoteBroker_NoSharedStorageDescriptor_Refused409(t *testin
 func TestCreateAgent_RemoteBroker_SharedStorage_DispatchesUUIDWorkspace(t *testing.T) {
 	srv, s, project, disp := setupRemoteBrokerWorkspaceServer(t)
 	mountRoot := t.TempDir()
-	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+	srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(mountRoot))
 	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share1"), 0o755))
 	setBrokerWorkspaceStorage(t, s, project.DefaultRuntimeBrokerID, &api.BrokerWorkspaceStorage{Backend: api.WorkspaceStorageBackendNFS})
 
@@ -146,7 +146,7 @@ func TestCreateAgent_EmbeddedBroker_SharedStorage_SendsExistingUUIDWorkspace(t *
 	clearCreateAgentProviderPath(t, s, project)
 	srv.SetEmbeddedBrokerID(project.DefaultRuntimeBrokerID)
 	mountRoot := t.TempDir()
-	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+	srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(mountRoot))
 	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share1"), 0o755))
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
@@ -342,7 +342,7 @@ func TestProjectWorkspaceFiles_LinkedNonGitRemoteOnly_SharedBackendServesUUIDTre
 	mountRoot := t.TempDir()
 	shareBase := filepath.Join(mountRoot, "share1")
 	require.NoError(t, os.MkdirAll(shareBase, 0o755))
-	srv.config.WorkspaceStorageConfig = nfsConfig(mountRoot)
+	srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(mountRoot))
 	stored, err := s.GetProject(context.Background(), project.ID)
 	require.NoError(t, err)
 	require.True(t, stored.IsLinkedOrigin(), "fixture check")

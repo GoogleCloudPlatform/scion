@@ -21,6 +21,8 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -166,6 +168,19 @@ type materialFailingStore struct {
 	getDelegationEdgesForDelegateHook func(call int)
 	delegationEdgesOverride           []*store.DelegationEdge
 	listProgenySecretsErr             error
+	// getAgentErr, if set, fails every GetAgent call, or only the call for
+	// getAgentErrID when that is set.
+	getAgentErr   error
+	getAgentErrID string
+	// getAgentNotFoundID, if set, makes GetAgent for that ID answer
+	// store.ErrNotFound, as for a row that is absent.
+	getAgentNotFoundID string
+	// getUserErrCaller, if set, makes getUserErr apply only to GetUser calls
+	// made (directly or not) from the function of that name; every other
+	// GetUser call reads the store. getUserErrCallerFired counts the
+	// failures it injected.
+	getUserErrCaller      string
+	getUserErrCallerFired int
 	// createAgentCalls counts CreateAgent calls, including those made on
 	// the transaction store inside WithTx.
 	createAgentCalls int
@@ -202,8 +217,42 @@ func (f *materialFailingStore) ListProgenySecrets(ctx context.Context, ancestorI
 	return f.Store.ListProgenySecrets(ctx, ancestorIDs)
 }
 
+func (f *materialFailingStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if f.getAgentNotFoundID != "" && id == f.getAgentNotFoundID {
+		return nil, store.ErrNotFound
+	}
+	if f.getAgentErr != nil && (f.getAgentErrID == "" || id == f.getAgentErrID) {
+		return nil, f.getAgentErr
+	}
+	return f.Store.GetAgent(ctx, id)
+}
+
+// materialCallerOnStack reports whether a function named name (a plain
+// function or a method, matched on its final name element) is on the
+// calling goroutine's stack.
+func materialCallerOnStack(name string) bool {
+	pcs := make([]uintptr, 128)
+	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
+	for {
+		fr, more := frames.Next()
+		if strings.HasSuffix(fr.Function, "."+name) {
+			return true
+		}
+		if !more {
+			return false
+		}
+	}
+}
+
 func (f *materialFailingStore) GetUser(ctx context.Context, id string) (*store.User, error) {
 	f.getUserCalls++
+	if f.getUserErrCaller != "" && f.getUserErr != nil {
+		if materialCallerOnStack(f.getUserErrCaller) {
+			f.getUserErrCallerFired++
+			return nil, f.getUserErr
+		}
+		return f.Store.GetUser(ctx, id)
+	}
 	if f.getUserErr != nil && (f.getUserErrAfterCalls == 0 || f.getUserCalls > f.getUserErrAfterCalls) {
 		return nil, f.getUserErr
 	}

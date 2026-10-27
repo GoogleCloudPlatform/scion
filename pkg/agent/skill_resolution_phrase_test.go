@@ -18,10 +18,11 @@ import "testing"
 
 func TestSkillResolutionPhrase(t *testing.T) {
 	cases := map[string]string{
-		SkillErrCodeNotFound:   "skill not found",
-		SkillErrCodeInvalidURI: "invalid skill URI",
-		"some_unlisted_code":   SkillResolutionDefaultPhrase,
-		"":                     SkillResolutionDefaultPhrase,
+		SkillErrCodeNotFound:           "skill not found",
+		SkillErrCodeInvalidURI:         "invalid skill URI",
+		SkillErrCodeUnsupportedContent: "unsupported skill content",
+		"some_unlisted_code":           SkillResolutionDefaultPhrase,
+		"":                             SkillResolutionDefaultPhrase,
 	}
 	for code, want := range cases {
 		if got := SkillResolutionPhrase(code); got != want {

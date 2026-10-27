@@ -117,3 +117,16 @@ func TestCSPReportLimiterGroupsIPv6By64(t *testing.T) {
 		t.Errorf("tracked %d buckets, want 2 (one per /64)", got)
 	}
 }
+
+// TestCSPReportHandlerRawSamplesFollowsSetting checks that the report
+// handler logs raw samples only when server.hub.csp_report_raw_samples is
+// on: off by default, on when the setting is.
+func TestCSPReportHandlerRawSamplesFollowsSetting(t *testing.T) {
+	l := newCSPReportLimiter(nil)
+	if newCSPReportHandler(l, false).RawSamples {
+		t.Fatal("RawSamples is on with the setting off")
+	}
+	if !newCSPReportHandler(l, true).RawSamples {
+		t.Fatal("RawSamples is off with the setting on")
+	}
+}

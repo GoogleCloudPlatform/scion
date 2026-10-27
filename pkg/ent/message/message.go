@@ -54,6 +54,10 @@ const (
 	FieldSenderProjectID = "sender_project_id"
 	// FieldRecipientProjectID holds the string denoting the recipient_project_id field in the database.
 	FieldRecipientProjectID = "recipient_project_id"
+	// FieldAuthorizingUserID holds the string denoting the authorizing_user_id field in the database.
+	FieldAuthorizingUserID = "authorizing_user_id"
+	// FieldDelegationGrantID holds the string denoting the delegation_grant_id field in the database.
+	FieldDelegationGrantID = "delegation_grant_id"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// Table holds the table name of the message in the database.
@@ -83,6 +87,8 @@ var Columns = []string{
 	FieldConversationID,
 	FieldSenderProjectID,
 	FieldRecipientProjectID,
+	FieldAuthorizingUserID,
+	FieldDelegationGrantID,
 	FieldCreated,
 }
 
@@ -229,6 +235,16 @@ func BySenderProjectID(opts ...sql.OrderTermOption) OrderOption {
 // ByRecipientProjectID orders the results by the recipient_project_id field.
 func ByRecipientProjectID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldRecipientProjectID, opts...).ToFunc()
+}
+
+// ByAuthorizingUserID orders the results by the authorizing_user_id field.
+func ByAuthorizingUserID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAuthorizingUserID, opts...).ToFunc()
+}
+
+// ByDelegationGrantID orders the results by the delegation_grant_id field.
+func ByDelegationGrantID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDelegationGrantID, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

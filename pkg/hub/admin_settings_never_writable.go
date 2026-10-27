@@ -33,12 +33,15 @@ import (
 // must not grow through the API), the proxy driver principals and driver
 // token audience (phase WS2, which decide who may carry test identity web
 // sessions behind the proxy), the relay-peer secret (design §3.9:
-// never stored in the database or returned by the API), and the server
-// keyring file path (ptone/scion#1530: the keyring is a deploy-time secret
-// input read once at startup) and its operator-only world-readable override.
-// A key matches itself and every key nested under it.
+// never stored in the database or returned by the API), the hub's GCP
+// project, which selects the service-account minting project
+// (ptone/scion#4942), and the server keyring file path (ptone/scion#1530:
+// the keyring is a deploy-time secret input read once at startup) and its
+// operator-only world-readable override. A key matches itself and every key
+// nested under it.
 var neverAPIWritableSettingsKeys = []string{
 	config.HubClassKey,
+	config.HubGCPProjectIDKey,
 	config.TestIdentitiesKey,
 	config.ProxyDriverPrincipalsKey,
 	config.ProxyDriverTokenAudienceKey,

@@ -73,7 +73,43 @@ func startFakeAgent(t *testing.T, h *fakeHub, mod func(*Options)) *fakeAgent {
 			mod(o)
 		}
 	})
+	// Registered after startAgent's cleanup, so it runs first, while the
+	// agent still runs (ptone/scion#5037).
+	t.Cleanup(func() {
+		if t.Failed() {
+			fa.logSessionState(t)
+		}
+	})
 	return fa
+}
+
+// logSessionState logs, for a failed test, the agent's side of its live
+// session and how often the agent dialed the hub, so a session that ended
+// under the test names its own error and shows whether the agent redialed.
+func (fa *fakeAgent) logSessionState(t *testing.T) {
+	t.Helper()
+	fa.a.mu.Lock()
+	live := fa.a.live
+	fa.a.mu.Unlock()
+	dials := fa.h.conduitHits.Load()
+	if live == nil {
+		t.Logf("agent session state: no live session (hub saw %d dials)", dials)
+		return
+	}
+	ended := "open"
+	select {
+	case <-live.Done():
+		ended = "ended"
+	default:
+	}
+	goAway := false
+	select {
+	case <-live.GoAwayReceived():
+		goAway = true
+	default:
+	}
+	t.Logf("agent session state: session %s %s, err %v, GoAway received %v (hub saw %d dials)",
+		live.Info().SessionID, ended, live.Err(), goAway, dials)
 }
 
 // keysFetched waits for the outcome of the agent's first key fetch: on
