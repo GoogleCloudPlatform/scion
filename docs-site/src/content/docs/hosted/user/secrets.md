@@ -129,7 +129,7 @@ scion hub env set --broker=my-gpu-node CUDA_VISIBLE_DEVICES=0
 
 ## Managing Secrets
 
-Secrets are write-only from host-level CLI commands and the Web Dashboard. Once set, their values cannot be read back by users. However, authorized agents running inside their containers can securely retrieve project-scoped secrets at runtime via the Hub API or the `sciontool` utility.
+Secrets are write-only from host-level CLI commands and the Web Dashboard. Once set, their values cannot be read back by users. However, authorized agents running inside their containers can securely retrieve project-scoped secrets at runtime via the Hub API or the `scion secret` CLI commands (and write secrets via `sciontool secret set`).
 
 ### Setting Secrets
 Secrets can be set manually via the CLI or Web Dashboard, or gathered interactively during agent creation.
@@ -246,7 +246,7 @@ From inside an agent container, read secrets with `scion secret`. The calls are 
     ```bash
     export API_KEY=$(scion secret get --value MY_API_KEY)
     ```
-    Without `--value`, `scion secret get MY_API_KEY` prints the secret's metadata.
+    Without `--value` (or with `--metadata`), `scion secret get MY_API_KEY` prints the secret's metadata. `--format json` returns metadata only and cannot be combined with `--value`.
 
 `sciontool secret get` has moved to `scion secret get --value`, and `sciontool secret list` to `scion secret list`; the old commands now print a message naming the `scion` command and exit `1`.
 
@@ -269,7 +269,7 @@ From inside an agent container, read secrets with `scion secret`. The calls are 
     the web UI or `scion hub secret set --project`.*
 
 #### Using the Hub API Directly
-Under the hood, `sciontool` interacts with the Hub's agent-specific secrets API:
+Under the hood, `scion secret` and `sciontool` interact with the Hub's agent-specific secrets API:
 
 *   **`GET /api/v1/agents/{agentID}/secrets`**: Lists available secret metadata in the agent's project.
 *   **`GET /api/v1/agents/{agentID}/secrets/{key}`**: Retrieves a single secret's metadata and its base64-encoded value.
@@ -402,10 +402,12 @@ To use secrets in production, the Hub must be configured with a production-grade
 
 ### Secrets Backend
 
-Scion uses a secrets backend to store secret values securely. The recommended backend for production is **GCP Secret Manager**, while the default `local` backend stores values directly in the Hub database using AES-256-GCM encryption at rest (derived from the hub signing secret).
+Scion uses a secrets backend to store secret values securely. The recommended backend for production is **GCP Secret Manager**, while the default `local` backend stores values directly in the Hub database using AES-256-GCM encryption at rest.
 
-:::note[Encryption at Rest]
-Secret values are never stored in plaintext. If using the default `local` backend, values are encrypted using AES-256-GCM (derived from the hub signing secret) before being written to the database. Legacy plaintext values migrate transparently on next read.
+:::note[Encryption at Rest & Startup Audit]
+Secret values stored in the `local` backend and Hub-stored infrastructure backups in the database (signing keys for agent/user tokens, skill downloads, artifact views, attachment delivery, and list cursors; the OIDC signing key and `oidc_signing_keyset`; and the Conduit grant key ring) are encrypted with the Hub's versioned value cipher (`enc:v1:` or `enc:v2:<kid>:`). Legacy `enc:v1:` values remain readable while their key is in the legacy v1 read set; in legacy mode without a keyring file, legacy plaintext rows can still be read and are rewritten as `enc:v1:` on the next write, whereas managed keyring mode (`server.keyring_file`) rejects unencrypted rows on runtime reads and admits them only during an explicit encryption migration.
+
+When a database encryption policy row is present, the Hub checks at startup that its local cipher satisfies the policy (running with `server.keyring_file`, writing `enc:v2:` under an allowed writer key ID, and holding every required reader key ID) and refuses to start on any mismatch. Before synchronizing or writing any backup keys, a startup encryption audit verifies all locally stored secret payloads and the decrypted structure of Hub-scoped infrastructure backups. Unreadable records are preserved and never overwritten: in keyring mode, an unreadable infrastructure backup keeps the Hub not ready (`/readyz` returns `503` with `reason: "backup_unreadable"`), while in legacy mode the Hub logs an `UNHEALTHY` error naming the affected record IDs and continues serving.
 :::
 
 #### Configuring GCP Secret Manager
@@ -490,6 +492,7 @@ For external messaging integrations (such as Discord, Telegram, or Google Chat) 
 - **Automatic One-Shot Migration**: When starting up or activating a plugin (e.g., via the runtime activation path in `activateInstalledIntegration`), the Hub automatically scans the integration's configuration—including per-plugin external configuration files and inline config blocks. Any discovered secret keys are automatically migrated into the configured secure **Secrets Backend** (such as GCP Secret Manager).
 - **Copy-Before-Strip Safety**: After migrating the secrets, Scion strips the raw values in-place from the integration's file-based and inline configurations (`stripSecretKeysInPlace`) using a secure copy-before-strip helper to avoid any risk of partial writes or configuration corruption, while deduplicating warning logs.
 - **Boot and Activation Consistency**: This migration-and-strip sequence runs consistently during both the Hub's boot-up routine and dynamic runtime integration activation, ensuring that secrets are never stored or exposed in plaintext configs.
+- **Redacted Wiring & Database Settings**: Integration detail responses (`GET /api/v1/admin/integrations/{name}`) omit secret keys, internal runtime keys (`bot_id`, `config_file`), and Hub wiring and database keys (`hub_url`, `broker_id`, `hmac_key`, `plugin_name`, `project_slug_map`, `database_driver`, `database_url`) from `settings`. When configuring or restarting a plugin, live Hub wiring and database values always override any cached values for those keys.
 
 ### Resolution Hierarchy
 When an agent starts, the Runtime Broker requests a "Resolved Environment" from the Hub and combines it with the template `env` block. For the same key, a later entry in this list wins over an earlier one:
