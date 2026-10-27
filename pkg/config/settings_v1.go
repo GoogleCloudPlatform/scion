@@ -1317,6 +1317,41 @@ type V1MaintenanceConfig struct {
 	UpdatePolicy       string `json:"update_policy,omitempty" yaml:"update_policy,omitempty" koanf:"update_policy"`
 	CheckIntervalHours int    `json:"check_interval_hours,omitempty" yaml:"check_interval_hours,omitempty" koanf:"check_interval_hours"`
 	GitHubRepo         string `json:"github_repo,omitempty" yaml:"github_repo,omitempty" koanf:"github_repo"`
+	// InstallRoot is the hub's versioned install root (releases/, current,
+	// previous) used by release self-update; see MaintenanceInstallRoot.
+	InstallRoot string `json:"install_root,omitempty" yaml:"install_root,omitempty" koanf:"install_root"`
+}
+
+// EnvMaintenanceInstallRoot overrides server.maintenance.install_root.
+const EnvMaintenanceInstallRoot = "SCION_MAINTENANCE_INSTALL_ROOT"
+
+// DefaultMaintenanceInstallRoot is the install root when neither the env
+// override nor server.maintenance.install_root is set.
+const DefaultMaintenanceInstallRoot = "/opt/scion"
+
+// MaintenanceInstallRoot resolves the install root: $SCION_MAINTENANCE_INSTALL_ROOT,
+// else m.InstallRoot, else DefaultMaintenanceInstallRoot. m may be nil. A
+// relative value is ignored with a warning (it would resolve against the
+// hub's working directory) and the next source is used.
+func MaintenanceInstallRoot(m *V1MaintenanceConfig) string {
+	candidates := []struct{ source, value string }{
+		{EnvMaintenanceInstallRoot, os.Getenv(EnvMaintenanceInstallRoot)},
+	}
+	if m != nil {
+		candidates = append(candidates, struct{ source, value string }{"server.maintenance.install_root", m.InstallRoot})
+	}
+	for _, c := range candidates {
+		v := strings.TrimSpace(c.value)
+		if v == "" {
+			continue
+		}
+		if !filepath.IsAbs(v) {
+			slog.Warn("Ignoring relative maintenance install root; it must be an absolute path", "source", c.source, "value", v)
+			continue
+		}
+		return filepath.Clean(v)
+	}
+	return DefaultMaintenanceInstallRoot
 }
 
 // V1ServerConfig holds server-side configuration in the versioned settings format.
@@ -1590,6 +1625,13 @@ type V1ServerHubConfig struct {
 	// HubServerConfig.TestIdentities). It is file/env only: the
 	// server-config API refuses it in every mode.
 	TestIdentities *V1TestIdentitiesConfig `json:"test_identities,omitempty" yaml:"test_identities,omitempty" koanf:"test_identities"`
+	// GCPProjectID is server.hub.gcp_project_id (see
+	// HubServerConfig.GCPProjectID): the hub's own GCP project, used for
+	// service-account minting, the Policy Troubleshooter quota project and
+	// the hub's metrics and trace export. Read once at startup. It is
+	// file/env only: the server-config API refuses it in every mode and GET
+	// leaves it out (HubGCPProjectIDKey).
+	GCPProjectID string `json:"gcp_project_id,omitempty" yaml:"gcp_project_id,omitempty" koanf:"gcp_project_id"`
 	// AgentEndpoint optionally overrides the Hub URL injected into agents as
 	// SCION_HUB_ENDPOINT, without changing PublicURL's other uses (invite
 	// links, chat-bridge links, the OIDC issuer default, the cloudrun_invoker
@@ -4118,6 +4160,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.HubClass != "" {
 			gc.Hub.HubClass = v1.Hub.HubClass
 		}
+		if v1.Hub.GCPProjectID != "" {
+			gc.Hub.GCPProjectID = v1.Hub.GCPProjectID
+		}
 		if v1.Hub.TestIdentities != nil {
 			ti := &TestIdentitiesConfig{AdminWebSessions: v1.Hub.TestIdentities.AdminWebSessions}
 			for _, e := range v1.Hub.TestIdentities.WorkloadIssuers {
@@ -4580,6 +4625,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		AgentEndpoint:          gc.Hub.AgentEndpoint,
 		MonitoringDashboardURL: gc.Hub.MonitoringDashboardURL,
 		HubClass:               gc.Hub.HubClass,
+		GCPProjectID:           gc.Hub.GCPProjectID,
 		ReadTimeout:            gc.Hub.ReadTimeout.String(),
 		WriteTimeout:           gc.Hub.WriteTimeout.String(),
 		AdminEmails:            gc.Hub.AdminEmails,
@@ -4848,22 +4894,32 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 
 	// Federation
 	if gc.Federation.Enabled || len(gc.Federation.TrustedIssuers) > 0 {
-		v1.Federation = &V1FederationConfig{
-			Enabled:    &gc.Federation.Enabled,
-			Algorithms: gc.Federation.Algorithms,
-		}
-		if gc.Federation.Cache.RefreshInterval > 0 {
-			v1.Federation.RefreshInterval = gc.Federation.Cache.RefreshInterval.String()
-		}
-		if gc.Federation.Cache.DebounceInterval > 0 {
-			v1.Federation.DebounceInterval = gc.Federation.Cache.DebounceInterval.String()
-		}
-		for _, ti := range gc.Federation.TrustedIssuers {
-			v1.Federation.TrustedIssuers = append(v1.Federation.TrustedIssuers, V1TrustedIssuerConfig(ti))
-		}
+		v1.Federation = ConvertFederationToV1(&gc.Federation)
 	}
 
 	return v1
+}
+
+// ConvertFederationToV1 converts a federation configuration to the admin
+// API wire format, whatever its content. ConvertGlobalToV1ServerConfig
+// emits federation only when it is enabled or has trusted issuers; a
+// caller that knows a federation section is stored (the database-mode
+// server-config GET) uses this to report it in full.
+func ConvertFederationToV1(fc *FederationConfig) *V1FederationConfig {
+	out := &V1FederationConfig{
+		Enabled:    &fc.Enabled,
+		Algorithms: fc.Algorithms,
+	}
+	if fc.Cache.RefreshInterval > 0 {
+		out.RefreshInterval = fc.Cache.RefreshInterval.String()
+	}
+	if fc.Cache.DebounceInterval > 0 {
+		out.DebounceInterval = fc.Cache.DebounceInterval.String()
+	}
+	for _, ti := range fc.TrustedIssuers {
+		out.TrustedIssuers = append(out.TrustedIssuers, V1TrustedIssuerConfig(ti))
+	}
+	return out
 }
 
 // AdaptLegacySettings converts a legacy Settings struct to VersionedSettings.
@@ -6754,7 +6810,9 @@ func replaceSettingsFileByName(lock *SettingsLock, path string, data []byte) err
 // backupSettingsFile makes backupPath a backup of the settings file at path
 // without moving path: a symlink is copied as a new symlink with the same
 // target (as renaming it would have kept it), and a regular file is hard
-// linked, or copied with its mode where hard links are not supported.
+// linked, or copied where hard links are not supported: with its mode on
+// unix, privately on Windows when the original is private (see
+// copySettingsBackup).
 func backupSettingsFile(path, backupPath string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -6770,25 +6828,7 @@ func backupSettingsFile(path, backupPath string) error {
 	if err := os.Link(path, backupPath); err == nil {
 		return nil
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	f, err := os.OpenFile(backupPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		_ = os.Remove(backupPath)
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(backupPath)
-		return err
-	}
-	return f.Close()
+	return copySettingsBackup(path, backupPath, info)
 }
 
 // loadServerConfigOnly loads a GlobalConfig from a single server.yaml file

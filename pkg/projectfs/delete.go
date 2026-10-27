@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Deletion of project storage (ptone/scion#5835).
@@ -236,6 +237,22 @@ func AuditAll(ctx context.Context, logger *slog.Logger, deleter Deleter, project
 	for _, d := range ds {
 		Audit(ctx, logger, deleter, projectID, agent, d)
 	}
+}
+
+// DeleteAfterFile is the deferred-deletion tombstone in a project's
+// provision/ directory: an RFC 3339 UTC time.
+const DeleteAfterFile = ".scion-delete-after"
+
+// DeferredDeletion is a project root that carries a tombstone.
+type DeferredDeletion struct {
+	ProjectID string
+	// After is the tombstone's time; zero when it cannot be parsed (the
+	// tree is then treated as due).
+	After time.Time
+	// Layout is the shared Layout the root is on.
+	Layout Layout
+	// Path is the project root's host path.
+	Path string
 }
 
 // ErrRefused marks a failed Deletion that was refused before anything was

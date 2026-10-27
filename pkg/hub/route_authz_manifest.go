@@ -151,7 +151,8 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/users/me/templates/":       "authenticated", // User-scoped template by ID
 
 	// ── Agent delegation grants the caller issued ──────────────────────
-	"/api/v1/users/me/delegations": "authenticated", // GET: caller's issued grants; session/dev credential only (requireSessionCredentialFor)
+	"/api/v1/users/me/delegations":            "authenticated", // GET: caller's issued grants; session/dev credential only (requireSessionCredentialFor)
+	"/api/v1/users/me/delegations/revoke-all": "authenticated", // POST: revoke every grant the caller issued; session/dev credential only (requireSessionCredentialFor)
 
 	// ── User-scoped terminal workspace ─────────────────────────────────
 	"/api/v1/users/me/terminal-workspace": "authenticated", // GET/PUT: caller's own list; session/dev credential only (requireSessionCredentialFor)
@@ -178,6 +179,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/admin/maintenance/check-updates":    "admin", // Check for updates
 	"/api/v1/admin/maintenance/update-available": "admin", // Update availability status
 	"/api/v1/admin/maintenance/restart":          "admin", // Restart hub
+	"/api/v1/admin/maintenance/update-status":    "admin", // Update status (version, installer, last update)
 	"/api/v1/admin/scheduler":                    "admin", // Scheduler status
 	"/api/v1/admin/allow-list":                   "admin", // Allow list management
 	"/api/v1/admin/allow-list/":                  "admin", // Allow list by email

@@ -347,7 +347,7 @@ the claim transaction.
 | --- | --- | --- | --- |
 | `agent.delegation.revoke` | `DELETE /api/v1/agents/{agentId}/delegations/{grantId}` | session; the bound agent's own agent JWT | the issuer; the bound agent (relinquish its own grant); the agent's current owner; hub admins (any grant); project admins of P, for project(P)-bounded grants only |
 | `agent.delegation.credential.revoke` | `DELETE /api/v1/agents/{agentId}/delegations/{grantId}/credentials/{credentialId}` | as above | as above |
-| `agent.delegation.revoke_all` | `POST /api/v1/users/me/delegations/revoke-all` (the caller's own grants); `POST /api/v1/agents/{agentId}/delegations/revoke-all` | session | the issuer, for their own grants; per agent, the same rule per grant. Grants the caller may not revoke are skipped and reported, not revoked |
+| `agent.delegation.revokeall` (permission `agent.delegation.revoke_all`; operation IDs take no underscore) | `POST /api/v1/users/me/delegations/revoke-all` (the caller's own grants); `POST /api/v1/agents/{agentId}/delegations/revoke-all` | session | the issuer, for their own grants; per agent, the same rule per grant. Grants the caller may not revoke are skipped and reported, not revoked |
 | `agent.delegation.list` | `GET /api/v1/agents/{agentId}/delegations`; `GET /api/v1/users/me/delegations` | session; the bound agent's own agent JWT (its own grants, metadata only) | as revoke, per grant. Grants outside the caller's authority are left out, not counted |
 | `agent.delegation.read` | `GET /api/v1/agents/{agentId}/delegations/{grantId}` | as list | as list, per grant. A grant outside the caller's authority returns 404 `grant_not_found` |
 
@@ -1349,7 +1349,7 @@ New catalog specs in a G-owned `pkg/hub/authzop/catalog_agent_delegation.go`:
 | `agent.delegation.create` | `session_jwt` | `SessionOnly(ReasonCredentialManagement)` | issue credential | governance and atomic audit |
 | `agent.delegation.exchange` | `agent_jwt` | `NonUser()` with a `Pin` naming G's UAT and session refusal test | mint credential | the bearer matrix skips non-user operations, so G pins its own test |
 | `agent.delegation.revoke`, `.credential.revoke`, `.list`, `.read` | `session_jwt`, `agent_jwt` | `SessionOnly(ReasonCredentialManagement)` | revoke authority (revokes); read (list, read) | the handler takes the bound-agent branch first and then requires a session, so a UAT gets 403 with `details.reason = CREDENTIAL_MANAGEMENT` and `details.credential = session_required` |
-| `agent.delegation.revoke_all` | `session_jwt` | `SessionOnly(ReasonCredentialManagement)` | revoke authority | |
+| `agent.delegation.revokeall` (permission `agent.delegation.revoke_all`; operation IDs take no underscore) | `session_jwt` | `SessionOnly(ReasonCredentialManagement)` | revoke authority | |
 
 No G operation lists `scoped_uat`. Operations admitted for delegated use (§13) add
 `PrincipalAgentDelegated` and `CredentialDelegatedAgent` as they are admitted.

@@ -53,6 +53,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -294,8 +295,8 @@ const webSessionKeyName = "web_session_key"
 // key ring. It uses the same predicate as conduitGrantKeySet: the ring is
 // persisted (under the fixed, not hub-id scoped "conduit" scope) exactly
 // when an encryption key exists, otherwise it is memory-only.
-func conduitGrantKeySource(encryptionKey []byte) string {
-	if _, err := newDBConduitGrantKeyStore(nil, encryptionKey); err == nil {
+func conduitGrantKeySource(c *secret.ValueCipher) string {
+	if _, err := newDBConduitGrantKeyStore(nil, c); err == nil {
 		return signingKeySourceSharedScope
 	}
 	return signingKeySourceEphemeral

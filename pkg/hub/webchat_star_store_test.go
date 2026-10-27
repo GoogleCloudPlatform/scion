@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -245,7 +246,8 @@ func testMessageStarStoreContract(t *testing.T, env starStoreEnv) {
 }
 
 func TestMessageStarStore_SQLite(t *testing.T) {
-	_, s := testServer(t)
+	s, err := hubtestutil.OpenMigratedTestStore(t)
+	require.NoError(t, err)
 	dbp, ok := s.(interface{ DB() *sql.DB })
 	require.True(t, ok)
 	db := dbp.DB()
@@ -309,7 +311,7 @@ func TestMessageStarStore_SQLite_FixedWidthTime(t *testing.T) {
 // TestMessageStarStore_Postgres runs the same contract against Postgres
 // when SCION_TEST_POSTGRES_DSN is set, in a throwaway schema.
 func TestMessageStarStore_Postgres(t *testing.T) {
-	dsn := requirePostgresDSN(t)
+	dsn := hubtestutil.RequirePostgresDSN(t)
 	ctx := context.Background()
 	schema := fmt.Sprintf("star_store_test_%d", time.Now().UnixNano())
 	cfg, err := pgx.ParseConfig(dsn)

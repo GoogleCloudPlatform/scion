@@ -23,7 +23,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/migrate"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -244,7 +243,7 @@ func (s *Server) deleteProjectStorage(ctx context.Context, layout projectfs.Layo
 		}
 		if layout.Backend.Shared() && slug != "" && ctx.Err() == nil {
 			globalDir, _ := config.GetGlobalDir()
-			ds, err := migrate.DeleteLegacyProjectTrees(layout, globalDir, slug, projectID)
+			ds, err := deleteLegacyProjectTrees(layout, globalDir, slug, projectID)
 			if err != nil {
 				ds = append(ds, projectfs.Deletion{Tree: projectfs.TreeLegacyHubProjects, Outcome: projectfs.OutcomeFailed, Err: err})
 			}

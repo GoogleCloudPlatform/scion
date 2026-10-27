@@ -20,6 +20,7 @@ import (
 	"database/sql"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/require"
 )
@@ -186,7 +187,7 @@ func sqliteMigrationRecorded(db *sql.DB, name string) bool {
 // TestC4Fix_SQLite_FreshDB verifies that on a brand-new database, Init
 // succeeds and the conversation_id column and unique index both exist.
 func TestC4Fix_SQLite_FreshDB(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 
 	store := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store.Init(), "Init on fresh DB must succeed")
@@ -205,7 +206,7 @@ func TestC4Fix_SQLite_FreshDB(t *testing.T) {
 // three prior migrations recorded). Init must succeed, add the column, create
 // the index, and record the migration.
 func TestC4Fix_SQLite_PreExistingDB(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 
 	// Seed the DB with the pre-existing schema (no conversation_id column).
 	_, err := db.Exec(preExistingSQLiteSchemaSQL)
@@ -230,7 +231,7 @@ func TestC4Fix_SQLite_PreExistingDB(t *testing.T) {
 
 // TestC4Fix_SQLite_Idempotent verifies Init can be called twice without error.
 func TestC4Fix_SQLite_Idempotent(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 
 	store := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store.Init(), "first Init must succeed")
@@ -245,7 +246,7 @@ func TestC4Fix_SQLite_Idempotent(t *testing.T) {
 // TestC4Fix_SQLite_PreExistingDB_Idempotent verifies that Init on a
 // pre-existing DB is idempotent: the second call succeeds cleanly.
 func TestC4Fix_SQLite_PreExistingDB_Idempotent(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 
 	_, err := db.Exec(preExistingSQLiteSchemaSQL)
 	require.NoError(t, err)
@@ -398,7 +399,7 @@ INSERT INTO webchat_migrations (name, completed_at) VALUES ('thread_id_index', '
 `
 
 func TestC4Fix_Postgres_FreshDB(t *testing.T) {
-	dsn := requirePostgresDSN(t)
+	dsn := hubtestutil.RequirePostgresDSN(t)
 	db, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
@@ -418,7 +419,7 @@ func TestC4Fix_Postgres_FreshDB(t *testing.T) {
 }
 
 func TestC4Fix_Postgres_PreExistingDB(t *testing.T) {
-	dsn := requirePostgresDSN(t)
+	dsn := hubtestutil.RequirePostgresDSN(t)
 	db, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
@@ -444,7 +445,7 @@ func TestC4Fix_Postgres_PreExistingDB(t *testing.T) {
 }
 
 func TestC4Fix_Postgres_Idempotent(t *testing.T) {
-	dsn := requirePostgresDSN(t)
+	dsn := hubtestutil.RequirePostgresDSN(t)
 	db, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
@@ -458,7 +459,7 @@ func TestC4Fix_Postgres_Idempotent(t *testing.T) {
 }
 
 func TestC4Fix_Postgres_PreExistingDB_Idempotent(t *testing.T) {
-	dsn := requirePostgresDSN(t)
+	dsn := hubtestutil.RequirePostgresDSN(t)
 	db, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()

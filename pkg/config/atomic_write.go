@@ -16,10 +16,7 @@ package config
 
 import (
 	"errors"
-	"fmt"
 	"os"
-	"path/filepath"
-	"syscall"
 )
 
 // createTempFile is os.CreateTemp. It is a variable so tests can simulate a
@@ -42,7 +39,12 @@ var errAtomicNotDurable = errors.New("file replaced but the change may not be du
 
 // writeFileAtomic writes data to targetPath through a temporary file in the
 // same directory followed by a rename, so readers never see a partial file.
-// It preserves the mode of an existing regular file and uses 0644 otherwise.
+// On unix it preserves the mode of an existing regular file and uses 0644
+// otherwise. On Windows mode bits mean nothing (an existing file's Perm
+// reads 0666), so the new file gets the directory's inherited ACL (the
+// protection of mode 0644) unless the existing file passes the owner-only
+// check on its real ACL, when it stays private (see atomicProtection in
+// atomic_write_windows.go).
 // The rename does not keep the owner: the new file belongs to the writing
 // user (for example root, under sudo).
 //
@@ -55,65 +57,5 @@ var errAtomicNotDurable = errors.New("file replaced but the change may not be du
 // settings writers hold the settings lock (LockSettingsDir) from their read
 // to this write.
 func writeFileAtomic(targetPath string, data []byte) error {
-	mode := os.FileMode(0644)
-	if info, err := os.Lstat(targetPath); err == nil && info.Mode().IsRegular() {
-		mode = info.Mode().Perm()
-	}
-	return writeFileAtomicMode(targetPath, data, mode)
-}
-
-// writeFileAtomicMode is writeFileAtomic with the mode of the new file given
-// by the caller instead of taken from the existing file.
-func writeFileAtomicMode(targetPath string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(targetPath)
-	tmp, err := createTempFile(dir, "."+filepath.Base(targetPath)+".tmp-*")
-	if err != nil {
-		return fmt.Errorf("create temp file for %s: %w: %w", targetPath, errAtomicTempCreate, err)
-	}
-	tmpName := tmp.Name()
-	renamed := false
-	defer func() {
-		// Close is idempotent here; the error from a second Close is ignored.
-		_ = tmp.Close()
-		if !renamed {
-			_ = os.Remove(tmpName)
-		}
-	}()
-	if _, err := tmp.Write(data); err != nil {
-		return fmt.Errorf("write temp file for %s: %w", targetPath, err)
-	}
-	if err := tmp.Sync(); err != nil {
-		return fmt.Errorf("sync temp file for %s: %w", targetPath, err)
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		return fmt.Errorf("chmod temp file for %s: %w", targetPath, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp file for %s: %w", targetPath, err)
-	}
-	if beforeAtomicRename != nil {
-		if err := beforeAtomicRename(tmpName, targetPath); err != nil {
-			return fmt.Errorf("replace %s: %w", targetPath, err)
-		}
-	}
-	if err := os.Rename(tmpName, targetPath); err != nil {
-		return fmt.Errorf("replace %s: %w", targetPath, err)
-	}
-	renamed = true
-	return syncDir(dir)
-}
-
-// syncDir fsyncs dir so a completed rename survives a crash. Directories
-// that cannot be opened or do not support fsync are skipped: the new
-// content is already in place.
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return nil
-	}
-	defer func() { _ = d.Close() }()
-	if err := d.Sync(); err != nil && !errors.Is(err, syscall.EINVAL) && !errors.Is(err, syscall.ENOTSUP) && !errors.Is(err, errors.ErrUnsupported) {
-		return fmt.Errorf("%w: sync directory %s: %w", errAtomicNotDurable, dir, err)
-	}
-	return nil
+	return writeFileAtomicMode(targetPath, data, preservedAtomicMode(targetPath))
 }

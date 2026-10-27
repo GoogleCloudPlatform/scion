@@ -234,10 +234,6 @@ func removeEmptyShared(tree TreeKind, r Resolved) Deletion {
 // directory (provision/, inside no agent Mount), and its maintenance pass
 // removes the tree once that time has passed.
 
-// DeleteAfterFile is the deferred-deletion tombstone in a project's
-// provision/ directory: an RFC 3339 UTC time.
-const DeleteAfterFile = ".scion-delete-after"
-
 // provisionDir is a project's state directory below its project root.
 const provisionDir = "provision"
 
@@ -292,18 +288,6 @@ func (l Layout) MarkDeleteAfter(projectID string, after time.Time) ([]Deletion, 
 		out = append(out, Deletion{Tree: TreeProjectRoot, Path: pr.HostPath, Outcome: OutcomeKept, Reason: reason})
 	}
 	return out, nil
-}
-
-// DeferredDeletion is a project root that carries a tombstone.
-type DeferredDeletion struct {
-	ProjectID string
-	// After is the tombstone's time; zero when it cannot be parsed (the
-	// tree is then treated as due).
-	After time.Time
-	// Layout is the shared Layout the root is on.
-	Layout Layout
-	// Path is the project root's host path.
-	Path string
 }
 
 // DeferredDeletions lists the project roots on every shared Layout of l

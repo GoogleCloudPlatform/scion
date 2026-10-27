@@ -162,3 +162,14 @@ func createRealWorktree(t *testing.T, root, name string) string {
 	}
 	return worktree
 }
+
+// mustDetectRepoRoot calls detectRepoRoot with no settings and fails the test
+// on an error.
+func mustDetectRepoRoot(t *testing.T, explicit bool, effectiveWorkspace, projectDir string) string {
+	t.Helper()
+	got, err := detectRepoRoot(explicit, effectiveWorkspace, projectDir, nil)
+	if err != nil {
+		t.Fatalf("detectRepoRoot(%v, %q, %q): %v", explicit, effectiveWorkspace, projectDir, err)
+	}
+	return got
+}
