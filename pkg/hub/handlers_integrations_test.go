@@ -1226,6 +1226,43 @@ func TestFilterSensitiveConfig_Slack(t *testing.T) {
 	}
 }
 
+func TestFilterSensitiveConfig_DatabaseSettings(t *testing.T) {
+	cfg := map[string]string{
+		"webhook_listen":   ":9094",
+		"database_driver":  "postgres",
+		"database_url":     "host=db.example.internal dbname=hub",
+		"plugin_name":      "telegram",
+		"project_slug_map": "p1:s1",
+	}
+	for key := range hubKeys {
+		if _, ok := cfg[key]; !ok {
+			cfg[key] = "value-" + key
+		}
+	}
+	if len(cfg) != len(hubKeys)+1 {
+		t.Fatalf("test input must hold every hub key plus webhook_listen, got %v", cfg)
+	}
+
+	filtered := filterSensitiveConfig("telegram", cfg)
+
+	for _, key := range []string{"database_driver", "database_url", "plugin_name", "project_slug_map"} {
+		if _, ok := filtered[key]; ok {
+			t.Errorf("%s should be filtered", key)
+		}
+	}
+	for key := range hubKeys {
+		if _, ok := filtered[key]; ok {
+			t.Errorf("hub key %s should be filtered", key)
+		}
+	}
+	if filtered["webhook_listen"] != ":9094" {
+		t.Errorf("expected webhook_listen :9094, got %s", filtered["webhook_listen"])
+	}
+	if len(filtered) != 1 {
+		t.Errorf("expected only webhook_listen to remain, got %v", filtered)
+	}
+}
+
 func TestPluginNameFromKey(t *testing.T) {
 	tests := []struct {
 		key      string

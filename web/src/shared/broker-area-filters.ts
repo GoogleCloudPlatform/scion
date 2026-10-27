@@ -64,14 +64,17 @@ export function healthProblem(health: BrokerHealthInfo | null | undefined): bool
 }
 
 /**
- * Whether a broker needs attention: it is offline or degraded, or (when its
- * health is known) its self-reported health is a problem.
+ * Whether a broker needs attention: it is offline or degraded, it is online
+ * and its version differs from the hub's (the health dashboard's
+ * broker_version_mismatch item; unknown does not count), or (when its health
+ * is known) its self-reported health is a problem.
  */
 export function needsAttention(
-  broker: Pick<RuntimeBroker, 'status'>,
+  broker: Pick<RuntimeBroker, 'status' | 'versionStatus'>,
   health?: BrokerHealthInfo | null
 ): boolean {
   if (broker.status === 'offline' || broker.status === 'degraded') return true;
+  if (broker.status === 'online' && broker.versionStatus === 'mismatch') return true;
   return healthProblem(health);
 }
 

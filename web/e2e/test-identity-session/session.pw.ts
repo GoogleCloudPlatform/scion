@@ -221,8 +221,8 @@ test('redeem and assert failures report the status and hub error code only', asy
     await expect(
       assertTestIdentity(contextA.request, { email: 'someone-else@scion-fixture.invalid' })
     ).rejects.toThrow(/session email is/);
-    // contextB holds no session: with dev-auth on, the hub signs it in as
-    // the dev admin, which is not a test identity session.
+    // contextB holds no session (dev auth signs no browser in without a
+    // sign-in link), so it has no test identity session.
     await expect(
       assertTestIdentity(contextB.request, { email: issued.identity.email })
     ).rejects.toThrow(/assertTestIdentity: /);

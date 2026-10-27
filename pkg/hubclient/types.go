@@ -378,6 +378,9 @@ type RuntimeBroker struct {
 	// last saw it ("as reported at").
 	RuntimeTargetPresentation           *api.RuntimeTargetPresentation `json:"runtimeTargetPresentation,omitempty"`
 	RuntimeTargetPresentationObservedAt *time.Time                     `json:"runtimeTargetPresentationObservedAt,omitempty"`
+	// VersionStatus compares Version with the fleet hub version: match,
+	// mismatch or unknown. Empty for a plugin record, or from an older Hub.
+	VersionStatus string `json:"versionStatus,omitempty"`
 }
 
 // BrokerCapabilities describes runtime broker capabilities.

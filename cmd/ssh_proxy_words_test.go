@@ -239,7 +239,9 @@ func stubVSCodePreflight(t *testing.T) {
 
 // checkVSCodeBatchArgs is off on other OSes and for a CLI that is not a
 // .cmd or .bat; on the Windows form it accepts paths with backslashes,
-// spaces, '~' and non-ASCII letters, and refuses modifier letters.
+// spaces, '~', non-ASCII letters and other combining marks, and refuses
+// cmd.exe metacharacters, modifier letters, and the letters and combining
+// marks (runes) that best-fit to ASCII punctuation.
 func TestCheckVSCodeBatchArgs(t *testing.T) {
 	orig := vscodeOnWindows
 	t.Cleanup(func() { vscodeOnWindows = orig })

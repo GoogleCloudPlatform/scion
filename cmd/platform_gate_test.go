@@ -15,7 +15,9 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"sort"
 	"strings"
@@ -324,4 +326,338 @@ func TestWindowsGate_NoopOnUnix(t *testing.T) {
 			assert.Equal(t, []string{"server.start"}, *ran)
 		})
 	}
+}
+
+// TestWindowsGate_ClearsPersistentHooksOnGatedCommands: cobra runs only
+// the nearest persistent pre-run hook, so a gated command (or a gated
+// parent, such as project above project use) that kept one would replace
+// root's hook, which returns the refusal. Every command gets all four
+// persistent hooks here; after gating, no gated command has any, and every
+// allowed command keeps all four (control).
+func TestWindowsGate_ClearsPersistentHooksOnGatedCommands(t *testing.T) {
+	root, _ := gateTestTree(t)
+	var set func(cmd *cobra.Command)
+	set = func(cmd *cobra.Command) {
+		for _, child := range cmd.Commands() {
+			child.PersistentPreRun = func(*cobra.Command, []string) {}
+			child.PersistentPreRunE = func(*cobra.Command, []string) error { return nil }
+			child.PersistentPostRun = func(*cobra.Command, []string) {}
+			child.PersistentPostRunE = func(*cobra.Command, []string) error { return nil }
+			set(child)
+		}
+	}
+	set(root)
+
+	applyPlatformRestrictions(root, "windows")
+
+	project := resolveCommandPath(root, "project")
+	require.NotNil(t, project)
+	require.False(t, windowsAllowed["project"], "control: project is a gated parent")
+	require.True(t, windowsAllowed["project.use"], "control: project use is an allowed child")
+	gated := 0
+	var walk func(cmd *cobra.Command, prefix string)
+	walk = func(cmd *cobra.Command, prefix string) {
+		for _, child := range cmd.Commands() {
+			path := child.Name()
+			if prefix != "" {
+				path = prefix + "." + path
+			}
+			hooks := []bool{child.PersistentPreRun != nil, child.PersistentPreRunE != nil, child.PersistentPostRun != nil, child.PersistentPostRunE != nil}
+			if windowsAllowed[path] {
+				assert.Equal(t, []bool{true, true, true, true}, hooks, "%s is allowed and must keep its persistent hooks", path)
+			} else {
+				gated++
+				assert.Equal(t, []bool{false, false, false, false}, hooks, "%s is gated and must have no persistent hooks", path)
+			}
+			walk(child, path)
+		}
+	}
+	walk(root, "")
+	assert.NotZero(t, gated, "control: the tree has gated commands")
+}
+
+// TestWindowsGate_RefusesDespitePersistentHook: a gated command given its
+// own persistent hooks still gets the refusal from root's hook, and none of
+// its hooks run. Controls: an allowed command keeps and runs its hooks, and
+// project use, an allowed child of the gated project, runs with root's hook
+// while project's own hooks (cleared) do not run.
+func TestWindowsGate_RefusesDespitePersistentHook(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		args      []string
+		wantRan   []string
+		wantHooks []string
+		refused   string
+	}{
+		{"gated command", []string{"server", "start"}, nil, nil, "server start"},
+		{"gated parent", []string{"project"}, nil, nil, "project"},
+		{"allowed command", []string{"version"}, []string{"version"}, []string{"version pre", "version post"}, ""},
+		{"allowed child of a gated parent", []string{"project", "use", "foo"}, []string{"project.use"}, nil, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, ran := gateTestTree(t)
+			rootHook := 0
+			// As the real root's PersistentPreRunE does.
+			root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+				rootHook++
+				return windowsRefusal(cmd)
+			}
+			var hooks []string
+			for _, path := range []string{"server.start", "project", "version"} {
+				c := resolveCommandPath(root, path)
+				require.NotNil(t, c, path)
+				name := strings.ReplaceAll(path, ".", " ")
+				c.PersistentPreRunE = func(*cobra.Command, []string) error {
+					hooks = append(hooks, name+" pre")
+					return nil
+				}
+				c.PersistentPostRunE = func(*cobra.Command, []string) error {
+					hooks = append(hooks, name+" post")
+					return nil
+				}
+			}
+
+			applyPlatformRestrictions(root, "windows")
+			root.SetArgs(tc.args)
+			err := root.Execute()
+
+			if tc.refused != "" {
+				require.Error(t, err)
+				assert.True(t, errors.Is(err, errUnsupportedOnWindows), "got %v", err)
+				assert.Contains(t, err.Error(), "scion "+tc.refused+" is not supported on Windows")
+				assert.Equal(t, 1, rootHook, "root's hook must run and refuse")
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tc.wantRan, emptyToNil(*ran))
+			assert.Equal(t, tc.wantHooks, hooks)
+		})
+	}
+}
+
+// emptyToNil returns nil for an empty slice, so a recorder that was never
+// appended to compares equal to a nil expectation.
+func emptyToNil(s []string) []string {
+	if len(s) == 0 {
+		return nil
+	}
+	return s
+}
+
+// completionProbes gives each named command a ValidArgsFunction and a
+// --probe flag with a registered completion function, each recording its
+// call in *called and returning one candidate.
+func completionProbes(t *testing.T, root *cobra.Command, called *[]string, paths ...string) {
+	t.Helper()
+	for _, path := range paths {
+		c := resolveCommandPath(root, path)
+		require.NotNil(t, c, path)
+		name := strings.ReplaceAll(path, ".", " ")
+		c.ValidArgsFunction = func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+			*called = append(*called, name+" args")
+			return []string{"arg-candidate"}, cobra.ShellCompDirectiveNoFileComp
+		}
+		if c.Flags().Lookup("probe") == nil {
+			c.Flags().String("probe", "", "")
+		}
+		require.NoError(t, c.RegisterFlagCompletionFunc("probe", func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+			*called = append(*called, name+" flag")
+			return []string{"flag-candidate"}, cobra.ShellCompDirectiveNoFileComp
+		}))
+	}
+}
+
+// TestWindowsGate_CompletionSkipsGatedCommands: on the Windows form, a
+// shell completion request (cobra's __complete / __completeNoDesc) for a
+// gated command, or under a gated parent, is answered with only the
+// NoFileComp directive, and neither the command's ValidArgsFunction nor
+// its flag completion function runs. The probes are installed after
+// gating, so the answer does not rest on the gate having cleared
+// ValidArgsFunction. Controls: allowed commands, including project use
+// under the gated project, and the same request off Windows, go through
+// cobra and call their completion functions.
+func TestWindowsGate_CompletionSkipsGatedCommands(t *testing.T) {
+	probed := []string{"server.start", "project", "hub.status", "project.use"}
+	for _, args := range [][]string{
+		{cobra.ShellCompRequestCmd, "server", "start", ""},
+		{cobra.ShellCompRequestCmd, "server", "start", "--probe", ""},
+		{cobra.ShellCompRequestCmd, "server", "start", "--probe="},
+		{cobra.ShellCompNoDescRequestCmd, "server", "start", "x", ""},
+		// Intended: under the gated project nothing is completed, so
+		// "scion project <TAB>" does not offer the allowed "use" on Windows.
+		{cobra.ShellCompRequestCmd, "project", ""},
+		{cobra.ShellCompRequestCmd, "project", "--probe", ""},
+		// Global flags before __complete: cobra still treats the request
+		// as a completion request, so the gate must too.
+		{"--debug", cobra.ShellCompRequestCmd, "server", "start", "--probe", ""},
+		{"--project", "x", cobra.ShellCompRequestCmd, "server", "start", ""},
+		{"-g", "x", cobra.ShellCompRequestCmd, "server", "start", ""},
+		{"--project=x", cobra.ShellCompRequestCmd, "server", "start", ""},
+		{"--debug", cobra.ShellCompNoDescRequestCmd, "server", "start", "--probe", ""},
+	} {
+		t.Run("gated "+strings.Join(args, " "), func(t *testing.T) {
+			root, _ := gateTestTree(t)
+			applyPlatformRestrictions(root, "windows")
+			var called []string
+			completionProbes(t, root, &called, probed...)
+			var out bytes.Buffer
+
+			require.True(t, completeGated(root, args, &out), "a request for a gated command must be answered by the gate")
+			assert.Equal(t, fmt.Sprintf(":%d\n", cobra.ShellCompDirectiveNoFileComp), out.String(), "only the NoFileComp directive")
+			assert.Empty(t, called, "no completion function of a gated command may run")
+			assertNoCompletionPlaceholder(t, root)
+
+			// Control: the same request handed to cobra directly does call
+			// the gated command's completion function.
+			root.SetArgs(args)
+			require.NoError(t, root.Execute())
+			assert.NotEmpty(t, called, "control: cobra alone runs the gated command's completion function")
+		})
+	}
+
+	for _, tc := range []struct {
+		goos string
+		args []string
+		want string
+	}{
+		{"windows", []string{cobra.ShellCompRequestCmd, "hub", "status", ""}, "hub status args"},
+		{"windows", []string{cobra.ShellCompRequestCmd, "hub", "status", "--probe", ""}, "hub status flag"},
+		{"windows", []string{cobra.ShellCompRequestCmd, "project", "use", ""}, "project use args"},
+		{"windows", []string{cobra.ShellCompRequestCmd, "project", "use", "--probe", ""}, "project use flag"},
+		{"windows", []string{"--debug", cobra.ShellCompRequestCmd, "hub", "status", "--probe", ""}, "hub status flag"},
+		{"linux", []string{cobra.ShellCompRequestCmd, "server", "start", ""}, "server start args"},
+		{"linux", []string{cobra.ShellCompRequestCmd, "server", "start", "--probe", ""}, "server start flag"},
+	} {
+		t.Run("control "+tc.goos+" "+strings.Join(tc.args, " "), func(t *testing.T) {
+			root, _ := gateTestTree(t)
+			applyPlatformRestrictions(root, tc.goos)
+			var called []string
+			completionProbes(t, root, &called, probed...)
+			var gateOut bytes.Buffer
+			require.False(t, completeGated(root, tc.args, &gateOut), "the gate must leave this request to cobra")
+			assert.Empty(t, gateOut.String())
+			assertNoCompletionPlaceholder(t, root)
+
+			var out bytes.Buffer
+			root.SetOut(&out)
+			root.SetArgs(tc.args)
+			require.NoError(t, root.Execute())
+			assert.Equal(t, []string{tc.want}, called)
+			assert.Contains(t, out.String(), "-candidate")
+		})
+	}
+
+	// A command named __complete already on root (cobra adds its own while
+	// it executes): the request is still recognised by name, so a gated
+	// target is still answered by the gate and its probe does not run.
+	t.Run("gated with a __complete command already on root", func(t *testing.T) {
+		root, _ := gateTestTree(t)
+		applyPlatformRestrictions(root, "windows")
+		var called []string
+		completionProbes(t, root, &called, probed...)
+		existing := &cobra.Command{Use: cobra.ShellCompRequestCmd, Hidden: true, DisableFlagParsing: true, Run: func(*cobra.Command, []string) {}}
+		root.AddCommand(existing)
+		var out bytes.Buffer
+		require.True(t, completeGated(root, []string{cobra.ShellCompRequestCmd, "server", "start", "--probe", ""}, &out),
+			"a completion request must be recognised by name, whichever __complete command Find returns")
+		assert.Equal(t, fmt.Sprintf(":%d\n", cobra.ShellCompDirectiveNoFileComp), out.String())
+		assert.Empty(t, called, "no completion function of a gated command may run")
+		root.RemoveCommand(existing)
+		assertNoCompletionPlaceholder(t, root)
+	})
+
+	// Not a completion request: never answered by the gate.
+	root, _ := gateTestTree(t)
+	applyPlatformRestrictions(root, "windows")
+	var out bytes.Buffer
+	assert.False(t, completeGated(root, []string{"server", "start"}, &out))
+	assert.False(t, completeGated(root, []string{cobra.ShellCompRequestCmd}, &out))
+	assert.Empty(t, out.String())
+}
+
+// assertNoCompletionPlaceholder checks that completeGated left no command
+// named like cobra's completion request in the tree: cobra adds its own
+// when it executes.
+func assertNoCompletionPlaceholder(t *testing.T, root *cobra.Command) {
+	t.Helper()
+	for _, c := range root.Commands() {
+		assert.NotEqual(t, cobra.ShellCompRequestCmd, c.Name(), "completeGated must remove its placeholder")
+	}
+}
+
+// allowedAncestorHooks walks the tree under root and, for every command the
+// Windows gate refuses (its path is not in windowsAllowed, as gateCommands
+// decides), checks each ancestor below root that is allowed on Windows: an
+// allowed ancestor keeps its persistent hooks, and cobra runs the nearest
+// persistent pre-run hook only, so a hook there would run instead of root's
+// refusing hook for the gated descendant. It returns the number of (gated
+// command, allowed ancestor) pairs checked and one message per hook found.
+func allowedAncestorHooks(root *cobra.Command) (pairs int, found []string) {
+	var walk func(cmd *cobra.Command, prefix string, allowedAncestors []*cobra.Command, ancestorPaths []string)
+	walk = func(cmd *cobra.Command, prefix string, allowedAncestors []*cobra.Command, ancestorPaths []string) {
+		for _, child := range cmd.Commands() {
+			path := child.Name()
+			if prefix != "" {
+				path = prefix + "." + path
+			}
+			if !windowsAllowed[path] {
+				for i, a := range allowedAncestors {
+					pairs++
+					for _, h := range []struct {
+						name string
+						set  bool
+					}{
+						{"PersistentPreRun", a.PersistentPreRun != nil},
+						{"PersistentPreRunE", a.PersistentPreRunE != nil},
+						{"PersistentPostRun", a.PersistentPostRun != nil},
+						{"PersistentPostRunE", a.PersistentPostRunE != nil},
+					} {
+						if h.set {
+							found = append(found, fmt.Sprintf("%s (allowed on Windows) has %s, which would run instead of root's hook for the gated %s",
+								strings.ReplaceAll(ancestorPaths[i], ".", " "), h.name, strings.ReplaceAll(path, ".", " ")))
+						}
+					}
+				}
+			}
+			nextAllowed, nextPaths := allowedAncestors, ancestorPaths
+			if windowsAllowed[path] {
+				nextAllowed = append(append([]*cobra.Command(nil), allowedAncestors...), child)
+				nextPaths = append(append([]string(nil), ancestorPaths...), path)
+			}
+			walk(child, path, nextAllowed, nextPaths)
+		}
+	}
+	walk(root, "", nil, nil)
+	return pairs, found
+}
+
+// TestWindowsGate_NoPersistentHooksOnAllowedAncestorsOfGatedCommands: on the
+// real command tree, no command allowed on Windows that has a gated
+// descendant defines a persistent hook (root excluded: its hook is the one
+// that refuses). The gate clears hooks only on gated commands, so such a
+// hook would replace root's refusal for the gated descendant. The control
+// plants a PersistentPreRunE on hub (allowed, with gated descendants such
+// as hub secret migrate) in a copied tree and shows the check reports it.
+func TestWindowsGate_NoPersistentHooksOnAllowedAncestorsOfGatedCommands(t *testing.T) {
+	pairs, found := allowedAncestorHooks(rootCmd)
+	t.Logf("checked %d (gated command, allowed ancestor) pairs", pairs)
+	assert.NotZero(t, pairs, "the real tree must have gated commands below allowed ancestors (otherwise the check is vacuous)")
+	assert.Empty(t, found, "allowed ancestors of gated commands must have no persistent hooks")
+
+	root, _ := gateTestTree(t)
+	require.True(t, windowsAllowed["hub"], "control: hub is allowed")
+	require.False(t, windowsAllowed["hub.secret.migrate"], "control: hub secret migrate is gated")
+	hub := resolveCommandPath(root, "hub")
+	require.NotNil(t, hub)
+	require.NotNil(t, resolveCommandPath(root, "hub.secret.migrate"))
+	_, before := allowedAncestorHooks(root)
+	require.Empty(t, before, "control: the copied tree carries no hooks before the plant")
+	hub.PersistentPreRunE = func(*cobra.Command, []string) error { return nil }
+
+	cpairs, after := allowedAncestorHooks(root)
+	assert.NotZero(t, cpairs)
+	require.NotEmpty(t, after, "control: a hook planted on hub must be reported")
+	joined := strings.Join(after, "\n")
+	assert.Contains(t, joined, "hub (allowed on Windows) has PersistentPreRunE")
+	assert.Contains(t, joined, "the gated hub secret migrate")
 }
