@@ -192,15 +192,21 @@ func TestOAuthCallback_RedirectsToLocalReturnToOnly(t *testing.T) {
 	const email = "github-returnto@example.com"
 
 	for returnTo, want := range map[string]string{
-		"":                        "/",
-		"/projects/p1/agents/a1":  "/projects/p1/agents/a1",
-		"/projects/p1?tab=agents": "/projects/p1?tab=agents",
-		"https://evil.example/x":  "/",
-		"//evil.example/x":        "/",
-		"/\\evil.example/x":       "/",
-		"\\\\evil.example/x":      "/",
-		"/\t/evil.example/x":      "/",
-		"evil.example/x":          "/",
+		"":                           "/",
+		"/projects/p1/agents/a1":     "/projects/p1/agents/a1",
+		"/projects/p1?tab=agents":    "/projects/p1?tab=agents",
+		"https://evil.example/x":     "/",
+		"//evil.example/x":           "/",
+		"/\\evil.example/x":          "/",
+		"\\\\evil.example/x":         "/",
+		"/\t/evil.example/x":         "/",
+		"evil.example/x":             "/",
+		"/%2F%2Fevil.example/x":      "/%2F%2Fevil.example/x",
+		"%2F%2Fevil.example/x":       "/",
+		"/%5Cevil.example":           "/%5Cevil.example",
+		"/ok%0d%0aSet-Cookie:%20x=1": "/ok%0d%0aSet-Cookie:%20x=1",
+		"/ok\r\nSet-Cookie: x=1":     "/",
+		"/a/..//evil.example":        "/evil.example",
 	} {
 		ws := newTestWebServer(t, WebServerConfig{
 			SessionSecret: secret,
