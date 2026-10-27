@@ -105,7 +105,7 @@ var agentWriterClasses = map[string]writerEntry{
 	"run_intent_store.go:AgentStore.SwapRunIntent":                                                  {classExempt, "run_intent is desired state"},
 	"run_intent_store.go:AgentStore.RevertRunIntent":                                                {classExempt, "run_intent is desired state"},
 	"run_intent_store.go:AgentStore.BackfillRunIntent":                                              {classExempt, "run_intent is desired state"},
-	"start_claim_store.go:claimUpdate via start_claim_store.go:AgentStore.ClaimAgentStart":          {classExempt, "claim and intent columns only"},
+	"start_claim_store.go:claimUpdate via start_claim_store.go:AgentStore.ClaimAgentStart":          {classExempt, "claim and intent columns, and an ended start launch's launch_error/launch_cause (ptone/scion#4191); none is a fingerprint or snapshot input"},
 	"start_claim_store.go:claimUpdate via start_claim_store.go:AgentStore.ClaimAgentStop":           {classExempt, "claim and intent columns only"},
 	"start_claim_store.go:claimUpdate via start_claim_store.go:AgentStore.RenewAgentStart":          {classExempt, "claim and intent columns only"},
 	"start_claim_store.go:claimUpdate via start_claim_store.go:AgentStore.MarkStartUnconfirmed":     {classExempt, "claim and intent columns only"},
