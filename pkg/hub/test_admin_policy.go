@@ -97,6 +97,7 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"agent.delegation.credential.revoke": testAdminPolicyDeny,
 	"agent.delegation.list":              testAdminPolicyDeny,
 	"agent.delegation.read":              testAdminPolicyDeny,
+	"agent.delegation.revoke_all":        testAdminPolicyDeny,
 	// Agent-principal permissions: only agent credentials use them.
 	"agent.status_update":  testAdminPolicyAllow,
 	"agent.log_append":     testAdminPolicyAllow,
@@ -571,6 +572,8 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.SecretRotation:               testAdminPolicyDeny,
 	experiments.ContentHashV2:                testAdminPolicyDeny,
 	experiments.LifecycleEvents:              testAdminPolicyDeny,
+	experiments.ArtifactReviewEditor:         testAdminPolicyDeny,
+	experiments.SkillContentHashV2:           testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.

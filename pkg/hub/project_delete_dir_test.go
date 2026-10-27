@@ -51,7 +51,7 @@ func projectDirStorageCases() []projectDirStorageCase {
 			name:   "nfs",
 			shared: true,
 			configure: func(t *testing.T, srv *Server, base string) {
-				srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+				srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 					Backend: "nfs",
 					NFS: &config.V1NFSConfig{
 						MountRoot: filepath.Join(base, "nfs"),
@@ -65,7 +65,7 @@ func projectDirStorageCases() []projectDirStorageCase {
 			shared: true,
 			configure: func(t *testing.T, srv *Server, base string) {
 				setVolumeMountBase(t, filepath.Join(base, "mnt"))
-				srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+				srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 					Backend:        "cloudrun-volume",
 					CloudRunVolume: &config.V1CloudRunVolumeConfig{VolumeName: "workspace-vol"},
 				}
@@ -76,7 +76,7 @@ func projectDirStorageCases() []projectDirStorageCase {
 			shared: true,
 			configure: func(t *testing.T, srv *Server, base string) {
 				setVolumeMountBase(t, filepath.Join(base, "mnt"))
-				srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+				srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 					Backend: "gke-shared-volume",
 					GKESharedVolume: &config.V1GKESharedVolumeConfig{
 						VolumeName:  "workspace-vol",
@@ -252,7 +252,7 @@ func TestRemoveHubManagedProjectDir_ReturnsResolvedPathOrEmpty(t *testing.T) {
 	assert.Equal(t, "", srv.removeHubManagedProjectDir("p", "."), "a slug failing the slug rule returns no path")
 	assert.Equal(t, "", srv.removeHubManagedProjectDir("p", ""), "an empty slug returns no path")
 
-	srv.config.WorkspaceStorageConfig = nfsConfig(filepath.Join(tmpHome, "nfs"))
+	srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(filepath.Join(tmpHome, "nfs")))
 	writeProjectDirFile(t, own)
 	assert.Equal(t, "", srv.removeHubManagedProjectDir("p", "own-project"), "a shared backend resolves no slug-keyed path")
 	assert.DirExists(t, own, "nothing slug-keyed is removed on a shared backend")

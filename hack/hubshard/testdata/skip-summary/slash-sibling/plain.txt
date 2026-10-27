@@ -1,0 +1,5 @@
+--- FAIL: TestSlashSibling (0.00s)
+    --- FAIL: TestSlashSibling/a/b (0.00s)
+        toy_test.go:166: a/b fails
+    toy_test.go:167: parent after
+FAIL

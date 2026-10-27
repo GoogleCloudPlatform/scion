@@ -191,6 +191,9 @@ type HealthBrokerRuntime struct {
 type HealthBrokerStorage struct {
 	Backend    string `json:"backend"`
 	NFSHealthy *bool  `json:"nfs_healthy,omitempty"`
+	// LayoutMismatch lists how the broker's storage layout disagrees with
+	// the hub's; the hub refuses shared-mode dispatches to such a broker.
+	LayoutMismatch []string `json:"layout_mismatch,omitempty"`
 }
 
 // HealthSummaryAgents is the agents section of the health summary.

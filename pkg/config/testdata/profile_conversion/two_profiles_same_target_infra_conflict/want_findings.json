@@ -16,17 +16,29 @@
       ]
     },
     {
-      "code": "profile_conflict",
-      "severity": "blocking",
-      "path": "profiles.*.shared_dir_storage_backend",
+      "code": "legacy_field_removed",
+      "severity": "notice",
+      "path": "profiles.scratch.shared_dir_storage_backend",
       "profiles": [
-        "scratch",
+        "scratch"
+      ],
+      "message_contains": [
+        "profiles.scratch.shared_dir_storage_backend is no longer supported",
+        "server.project_storage",
+        "volumes:"
+      ]
+    },
+    {
+      "code": "legacy_field_removed",
+      "severity": "notice",
+      "path": "profiles.shared.shared_dir_storage_backend",
+      "profiles": [
         "shared"
       ],
       "message_contains": [
-        "scratch: local from profiles.scratch.shared_dir_storage_backend",
-        "shared: nfs from profiles.shared.shared_dir_storage_backend",
-        "declare a second instance with its own key on the same target scope"
+        "profiles.shared.shared_dir_storage_backend is no longer supported",
+        "server.project_storage",
+        "volumes:"
       ]
     }
   ]

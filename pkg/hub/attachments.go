@@ -32,17 +32,6 @@ import (
 // AttachmentStore interface
 // ---------------------------------------------------------------------------
 
-// AttachmentMeta holds metadata about a stored attachment.
-type AttachmentMeta struct {
-	ID         string    `json:"id"`
-	ProjectID  string    `json:"projectId"`
-	Filename   string    `json:"name"`
-	MimeType   string    `json:"mime"`
-	Size       int64     `json:"size"`
-	UploadedBy string    `json:"uploadedBy"`
-	CreatedAt  time.Time `json:"createdAt"`
-}
-
 // AttachmentRef is the compact form embedded in message metadata (JSON).
 type AttachmentRef struct {
 	ID       string `json:"id"`

@@ -545,7 +545,7 @@ func TestDevAuthFixture_DefaultStore_ReachesHandler(t *testing.T) {
 	// authoritative store with an active DevUserID record so that the
 	// suspended-user middleware passes through to the handler.
 	ws := newDevAuthWebServer(t)
-	handler := ws.Handler()
+	handler := devSignedIn(t, ws)
 
 	req := httptest.NewRequest("GET", "/projects", nil)
 	req.Header.Set("Accept", "text/html")
@@ -562,11 +562,10 @@ func TestDevAuthFixture_SuspendedDevUser_ShortCircuits(t *testing.T) {
 	// When the dev user is marked suspended in the authoritative store,
 	// the middleware must short-circuit with the suspended page.
 	ws := newDevAuthWebServer(t)
+	handler := devSignedIn(t, ws)
 	// Suspend the dev user in the fixture store.
 	devStore := ws.store.(*proxyAuthStore)
 	devStore.users[DevUserID].Status = store.UserStatusSuspended
-
-	handler := ws.Handler()
 
 	req := httptest.NewRequest("GET", "/projects", nil)
 	req.Header.Set("Accept", "text/html")
@@ -582,8 +581,8 @@ func TestDevAuthFixture_StoreError_FailsClosed(t *testing.T) {
 	// When the authoritative store returns a transient error, the
 	// middleware must fail closed (500) — never pass through.
 	ws := newDevAuthWebServer(t)
+	handler := devSignedIn(t, ws)
 	ws.store = &transientErrorStore{userID: DevUserID}
-	handler := ws.Handler()
 
 	req := httptest.NewRequest("GET", "/projects", nil)
 	req.Header.Set("Accept", "text/html")
@@ -600,12 +599,12 @@ func TestDevAuthFixture_StoreError_FailsClosed(t *testing.T) {
 
 func TestSuspendedUserMiddleware_NilStore_FailsClosed_Browser(t *testing.T) {
 	// Need a session but no store — the middleware must fail closed.
-	// Use dev auth which auto-creates a session without needing a store
-	// for the auth step, but the suspended-user middleware will see nil store.
+	// Sign in with dev auth first; then the suspended-user middleware
+	// sees a nil store.
 	wsWithDevAuth := newDevAuthWebServer(t, func(cfg *WebServerConfig) {})
+	handlerNoStore := devSignedIn(t, wsWithDevAuth)
 	// Explicitly clear the default dev-auth store to exercise the nil-store path.
 	wsWithDevAuth.store = nil
-	handlerNoStore := wsWithDevAuth.Handler()
 
 	req := httptest.NewRequest("GET", "/projects", nil)
 	req.Header.Set("Accept", "text/html")
@@ -620,9 +619,9 @@ func TestSuspendedUserMiddleware_NilStore_FailsClosed_Browser(t *testing.T) {
 
 func TestSuspendedUserMiddleware_NilStore_FailsClosed_JSON(t *testing.T) {
 	wsWithDevAuth := newDevAuthWebServer(t, func(cfg *WebServerConfig) {})
+	handlerNoStore := devSignedIn(t, wsWithDevAuth)
 	// Explicitly clear the default dev-auth store to exercise the nil-store path.
 	wsWithDevAuth.store = nil
-	handlerNoStore := wsWithDevAuth.Handler()
 
 	req := httptest.NewRequest("GET", "/events?sub=project.123.>", nil)
 	req.Header.Set("Accept", "text/event-stream")

@@ -178,6 +178,6 @@ func TestVSCode_BlockPassesPinFlags(t *testing.T) {
 	p := vscodePaths{home: env.home}
 	host := "scion." + hub.label(t) + ".a.b-c"
 	block := parseSSHHostBlocks(readTestFile(t, p.sshConfig()))[host]
-	want := " --project a --known-hosts " + sshShellQuote(p.knownHosts()) + " --host-key-alias " + host + " b-c\n"
+	want := " --project a --known-hosts " + mustSSHShellQuote(t, p.knownHosts()) + " --host-key-alias " + host + " b-c\n"
 	assert.True(t, strings.Contains(block, want), "block %q lacks %q", block, want)
 }

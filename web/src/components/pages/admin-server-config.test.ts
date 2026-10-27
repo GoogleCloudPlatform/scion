@@ -2955,45 +2955,44 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
-  describe('shared_dir_storage_backend on runtimes and profiles', () => {
-    function sdsConfig() {
-      // File mode (settings.yaml is authoritative), where every section
-      // without an env override is editable.
+  describe('removed storage overrides on runtimes and profiles', () => {
+    function overridesConfig() {
       return makeBaseConfig({
-        runtimes: { k8s: { type: 'kubernetes', shared_dir_storage_backend: 'nfs' } },
+        runtimes: {
+          k8s: {
+            type: 'kubernetes',
+            shared_dir_storage_backend: 'nfs',
+            home_storage_backend: 'nfs',
+            home_storage_leaf: 'broker',
+          },
+        },
         profiles: {
-          gke: { runtime: 'k8s', shared_dir_storage_backend: 'nfs', timezone: 'UTC' },
+          gke: {
+            runtime: 'k8s',
+            shared_dir_storage_backend: 'nfs',
+            shared_dir_storage_backends: { cache: 'local' },
+            home_storage_backend: 'nfs',
+            home_storage_leaf: 'pod',
+            timezone: 'UTC',
+          },
         },
       });
     }
 
-    async function saveAndCapture(el: HTMLElement): Promise<void> {
-      await (el as any).updateComplete;
-      const buttons = queryAll(el, 'sl-button[variant="primary"]');
-      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
-      (saveBtn as HTMLElement).click();
-      await new Promise((resolve) => setTimeout(resolve, 300));
-    }
-
-    it('shows the current value on the runtime and profile cards', async () => {
-      element = await createComponent(createFetchHandler(sdsConfig()));
-      const selects = queryAll(element, 'sl-select.shared-dir-storage-backend');
-      expect(selects.length).toBe(2);
-      for (const sel of selects) {
-        expect(sel.getAttribute('value')).toBe('nfs');
-      }
-    });
-
-    it('editing another profile field keeps the key in the PUT payload', async () => {
+    it('shows no editor for them and never sends them back', async () => {
       let capturedPayload: Record<string, any> | null = null;
       element = await createComponent(
-        createFetchHandler(sdsConfig(), {
+        createFetchHandler(overridesConfig(), {
           putHandler: (body) => {
             if ('profiles' in body) capturedPayload = body;
             return { status: 200, body: { reload: { applied: [] } } };
           },
         })
       );
+      await (element as any).updateComplete;
+      expect(queryAll(element, 'sl-select.shared-dir-storage-backend').length).toBe(0);
+      expect(queryAll(element, 'sl-select.home-storage-backend').length).toBe(0);
+      expect(queryAll(element, 'sl-select.home-storage-leaf').length).toBe(0);
 
       const registry = query(element, 'sl-input[placeholder="Override image registry"]') as
         | (HTMLElement & { value: string })
@@ -3001,40 +3000,25 @@ describe('scion-page-admin-server-config', () => {
       expect(registry).not.toBeNull();
       registry!.value = 'registry.example.com/team';
       registry!.dispatchEvent(new Event('sl-input'));
-      await saveAndCapture(element);
+      await (element as any).updateComplete;
+      const buttons = queryAll(element, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
 
       expect(capturedPayload).not.toBeNull();
       const gke = capturedPayload!.profiles.gke;
       expect(gke.image_registry).toBe('registry.example.com/team');
-      expect(gke.shared_dir_storage_backend).toBe('nfs');
       expect(gke.timezone).toBe('UTC');
-      expect(capturedPayload!.runtimes.k8s.shared_dir_storage_backend).toBe('nfs');
-    });
-
-    it('changing and clearing the select updates the payload', async () => {
-      let capturedPayload: Record<string, any> | null = null;
-      element = await createComponent(
-        createFetchHandler(sdsConfig(), {
-          putHandler: (body) => {
-            if ('profiles' in body) capturedPayload = body;
-            return { status: 200, body: { reload: { applied: [] } } };
-          },
-        })
-      );
-
-      const [runtimeSel, profileSel] = queryAll(
-        element,
-        'sl-select.shared-dir-storage-backend'
-      ) as (HTMLElement & { value: string })[];
-      runtimeSel.value = '';
-      runtimeSel.dispatchEvent(new Event('sl-change'));
-      profileSel.value = 'local';
-      profileSel.dispatchEvent(new Event('sl-change'));
-      await saveAndCapture(element);
-
-      expect(capturedPayload).not.toBeNull();
-      expect(capturedPayload!.profiles.gke.shared_dir_storage_backend).toBe('local');
-      expect('shared_dir_storage_backend' in capturedPayload!.runtimes.k8s).toBe(false);
+      for (const key of [
+        'shared_dir_storage_backend',
+        'shared_dir_storage_backends',
+        'home_storage_backend',
+        'home_storage_leaf',
+      ]) {
+        expect(key in gke).toBe(false);
+        expect(key in capturedPayload!.runtimes.k8s).toBe(false);
+      }
     });
   });
 
@@ -3297,87 +3281,6 @@ describe('scion-page-admin-server-config', () => {
     }
   });
 
-  describe('home storage on runtimes and profiles', () => {
-    function homeConfig() {
-      return makeBaseConfig({
-        runtimes: {
-          k8s: { type: 'kubernetes', home_storage_backend: 'nfs', home_storage_leaf: 'broker' },
-        },
-        profiles: {
-          gke: { runtime: 'k8s', home_storage_backend: 'nfs', home_storage_leaf: 'pod' },
-        },
-      });
-    }
-
-    async function saveAndCapture(el: HTMLElement): Promise<void> {
-      await (el as any).updateComplete;
-      const buttons = queryAll(el, 'sl-button[variant="primary"]');
-      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
-      (saveBtn as HTMLElement).click();
-      await new Promise((resolve) => setTimeout(resolve, 300));
-    }
-
-    it('shows the current values on the runtime and profile cards', async () => {
-      element = await createComponent(createFetchHandler(homeConfig()));
-      const backends = queryAll(element, 'sl-select.home-storage-backend');
-      expect(backends.map((s) => s.getAttribute('value'))).toEqual(['nfs', 'nfs']);
-      const leaves = queryAll(element, 'sl-select.home-storage-leaf');
-      expect(leaves.map((s) => s.getAttribute('value'))).toEqual(['broker', 'pod']);
-    });
-
-    it('editing another profile field keeps both keys in the PUT payload', async () => {
-      let capturedPayload: Record<string, any> | null = null;
-      element = await createComponent(
-        createFetchHandler(homeConfig(), {
-          putHandler: (body) => {
-            if ('profiles' in body) capturedPayload = body;
-            return { status: 200, body: { reload: { applied: [] } } };
-          },
-        })
-      );
-      const registry = query(element, 'sl-input[placeholder="Override image registry"]') as
-        | (HTMLElement & { value: string })
-        | null;
-      expect(registry).not.toBeNull();
-      registry!.value = 'registry.example.com/team';
-      registry!.dispatchEvent(new Event('sl-input'));
-      await saveAndCapture(element);
-
-      expect(capturedPayload).not.toBeNull();
-      expect(capturedPayload!.profiles.gke.home_storage_backend).toBe('nfs');
-      expect(capturedPayload!.profiles.gke.home_storage_leaf).toBe('pod');
-      expect(capturedPayload!.runtimes.k8s.home_storage_backend).toBe('nfs');
-      expect(capturedPayload!.runtimes.k8s.home_storage_leaf).toBe('broker');
-    });
-
-    it('changing and clearing the selects updates the payload', async () => {
-      let capturedPayload: Record<string, any> | null = null;
-      element = await createComponent(
-        createFetchHandler(homeConfig(), {
-          putHandler: (body) => {
-            if ('profiles' in body) capturedPayload = body;
-            return { status: 200, body: { reload: { applied: [] } } };
-          },
-        })
-      );
-      const [runtimeLeaf, profileLeaf] = queryAll(
-        element,
-        'sl-select.home-storage-leaf'
-      ) as (HTMLElement & {
-        value: string;
-      })[];
-      runtimeLeaf.value = '';
-      runtimeLeaf.dispatchEvent(new Event('sl-change'));
-      profileLeaf.value = 'broker';
-      profileLeaf.dispatchEvent(new Event('sl-change'));
-      await saveAndCapture(element);
-
-      expect(capturedPayload).not.toBeNull();
-      expect(capturedPayload!.profiles.gke.home_storage_leaf).toBe('broker');
-      expect('home_storage_leaf' in capturedPayload!.runtimes.k8s).toBe(false);
-      expect(capturedPayload!.runtimes.k8s.home_storage_backend).toBe('nfs');
-    });
-  });
   describe('Regression ptone/scion#1871 — masked secrets are not sent back', () => {
     const maskedServer = {
       notification_channels: [{ type: 'slack', params: { webhook_url: '********' } }],
@@ -5545,6 +5448,41 @@ describe('settings the page must not write unless changed (ptone/scion#3913)', (
     expect(bodies).toHaveLength(1);
     expect(bodies[0]!.telemetry.cloud).toEqual({ enabled: null });
     expect(bodies[0]!.telemetry.hub).toEqual({ enabled: false });
+  });
+
+  it.each([
+    ['db', false],
+    ['db', true],
+  ] as const)(
+    'cloud_logging is read-only and never sent on a database-backed hub (settings_tier=%s, layer0_editable=%s)',
+    async (tier, layer0Editable) => {
+      const bodies: Array<Record<string, any>> = [];
+      const cfg = unsetConfig(tier, { layer0_editable: layer0Editable });
+      cfg.telemetry = { cloud: { enabled: true, cloud_logging: true } };
+      element = await render(cfg, bodies);
+      const el = element as any;
+      expect(el.telemetryCloudCloudLogging).toBe(true);
+      expect(el.readOnlyReason('telemetry.cloud.cloud_logging')).toBe('startup');
+      // Even a changed value is left out of the save (ptone/scion#5664).
+      el.telemetryCloudCloudLogging = false;
+      el.telemetryCloudEnabled = false;
+      await save(element);
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0]!.telemetry.cloud.enabled).toBe(false);
+      expect(bodies[0]!.telemetry.cloud).not.toHaveProperty('cloud_logging');
+    }
+  );
+
+  it('cloud_logging stays editable and is sent when changed in settings.yaml mode', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    const cfg = unsetConfig('file');
+    cfg.telemetry = { cloud: { enabled: true, cloud_logging: true } };
+    element = await render(cfg, bodies);
+    const el = element as any;
+    expect(el.readOnlyReason('telemetry.cloud.cloud_logging')).toBeNull();
+    el.telemetryCloudCloudLogging = false;
+    await save(element);
+    expect(bodies[0]!.telemetry.cloud.cloud_logging).toBe(false);
   });
 
   it('an unset switch says it is not set; toggling it twice leaves it unset', async () => {

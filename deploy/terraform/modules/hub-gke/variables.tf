@@ -119,7 +119,7 @@ variable "runtime_namespace" {
 # --- Workspace storage (NFS) ---
 #
 # Rendered through the chart's workspaceStorage.nfs value, which writes
-# settings.yaml server.workspace_storage and mounts the export in the hub pod.
+# settings.yaml server.project_storage and mounts the export in the hub pod.
 # Single-source these with the agent-runtime-k8s module in the calling
 # configuration.
 

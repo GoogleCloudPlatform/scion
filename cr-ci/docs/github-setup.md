@@ -387,8 +387,8 @@ list, with every open runtime checkpoint and the PoC criteria, is
 
 ## 8. Route jobs: the Actions variable `SCION_LARGE_RUNNER` (G10)
 
-`ci.yml` chooses the runner with this expression (applied to the `lint` job
-by P7; see [workflows/README.md](../workflows/README.md)):
+Each routed job chooses its runner with this expression (in the workflows since
+the primary-runner PRs; see [workflows/README.md](../workflows/README.md#routing-in-githubworkflows)):
 
 ```yaml
 runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}

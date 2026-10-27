@@ -882,6 +882,8 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		// Grant revoke and grant read share their pattern; revoke takes
 		// the disposable twin grant.
 		{"agent.delegation.revoke", "/api/v1/agents/{id}/delegations/{grantId}"}: {"id": f.agent, "grantId": f.delegation.grantRevoke},
+		// Per-agent revoke-all takes the disposable agent and its grant.
+		{"agent.delegation.revokeall", "/api/v1/agents/{id}/delegations/revoke-all"}: {"id": f.delegation.revokeAllAgent},
 
 		// Group and direct conversation reads share their patterns.
 		{"project.conversation.read", "/api/v1/conversations/{id}"}:                           {"id": f.inbox.groupConversation},
@@ -1433,11 +1435,15 @@ func seedLiveInventoryArtifact(t *testing.T, ctx context.Context, st artifacts.S
 
 // liveInventoryDelegation is the agent delegation fixture of the live
 // method inventory: a grant bound to the fixture agent, a disposable twin
-// grant for the revoke entry, and an active credential of the first grant.
+// grant for the revoke entry, an active credential of the first grant, and
+// for the per-agent revoke-all entry a disposable agent ID (no agent row:
+// grants outlive their agent) with one grant of its own, so revoke-all
+// leaves the fixture agent's grants alone.
 type liveInventoryDelegation struct {
-	grant       string
-	grantRevoke string
-	credential  string
+	grant          string
+	grantRevoke    string
+	credential     string
+	revokeAllAgent string
 }
 
 // seedLiveInventoryDelegation writes the live inventory's grants and
@@ -1445,9 +1451,9 @@ type liveInventoryDelegation struct {
 // token reaches them as hub authority.
 func seedLiveInventoryDelegation(t *testing.T, ctx context.Context, s store.Store, agentID, projectID string) liveInventoryDelegation {
 	t.Helper()
-	grant := func(name string) string {
+	grantOn := func(boundAgentID, name string) string {
 		g := &store.AgentDelegationGrant{
-			AgentID: agentID, AgentProjectID: projectID, IssuerUserID: DevUserID,
+			AgentID: boundAgentID, AgentProjectID: projectID, IssuerUserID: DevUserID,
 			BoundaryKind: "hub", CeilingVersion: 1, CeilingPermissionIDs: []string{"agent.read"},
 			Name: name, MaxCredentialTTLSeconds: agentDelegationCredentialDefaultTTL,
 			ExpiresAt: time.Now().Add(time.Hour), IssuanceAuditID: uuid.New().String(),
@@ -1455,7 +1461,9 @@ func seedLiveInventoryDelegation(t *testing.T, ctx context.Context, s store.Stor
 		require.NoError(t, s.CreateAgentDelegationGrant(ctx, g))
 		return g.ID
 	}
-	out := liveInventoryDelegation{grant: grant("li-grant"), grantRevoke: grant("li-grant-revoke")}
+	grant := func(name string) string { return grantOn(agentID, name) }
+	out := liveInventoryDelegation{grant: grant("li-grant"), grantRevoke: grant("li-grant-revoke"), revokeAllAgent: uuid.New().String()}
+	grantOn(out.revokeAllAgent, "li-grant-revoke-all")
 	_, hash, err := newDelegatedCredentialToken()
 	require.NoError(t, err)
 	cred := &store.AgentDelegatedCredential{

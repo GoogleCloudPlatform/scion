@@ -14,7 +14,11 @@
 
 package entadapter
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/jackc/pgx/v5/pgconn"
+)
 
 // SQLite extended result codes for unique-key violations
 // (https://www.sqlite.org/rescode.html). The modernc.org/sqlite driver
@@ -54,4 +58,31 @@ func isUniqueViolation(err error) bool {
 		}
 	}
 	return false
+}
+
+// hubSettingSectionConstraints names the Postgres unique constraints on
+// hub_settings.section: the field's unique constraint and the schema's
+// unique index (pkg/ent/schema/hubsetting.go). Either one rejects a second
+// row for a section.
+var hubSettingSectionConstraints = map[string]bool{
+	"hub_settings_section_key": true,
+	"hubsetting_section":       true,
+}
+
+// isHubSettingSectionConflict reports whether err is a unique violation on
+// the hub_settings section key, the only error that means another writer
+// created the same section first. On Postgres the violated constraint must
+// be one of hubSettingSectionConstraints. On SQLite a unique or primary-key
+// violation qualifies: the table's only other unique key is the random
+// UUID primary key. Any other constraint error (check, foreign key, not
+// null, or a unique key added later) is not a create race.
+func isHubSettingSectionConflict(err error) bool {
+	if !isUniqueViolation(err) {
+		return false
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return hubSettingSectionConstraints[pgErr.ConstraintName]
+	}
+	return true
 }

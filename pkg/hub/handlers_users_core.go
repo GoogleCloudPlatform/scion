@@ -22,7 +22,6 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
@@ -149,27 +148,29 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sub-resource actions
-	if action == "revoke-sessions" {
+	// Sub-resource actions. Only the bare ID and the sub-routes named here
+	// are resources; any other sub-path, including a further segment below
+	// a known sub-route, answers 404 and never reaches the user handlers
+	// below.
+	switch action {
+	case "":
+		// The user itself: handled by the method switch below.
+	case "revoke-sessions":
 		if r.Method != http.MethodPost {
 			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		s.revokeUserSessions(w, r, id)
 		return
-	}
-	// delete-blockers takes no further path segment: anything below it is
-	// not a resource, and must not fall through to the user handlers below.
-	if strings.HasPrefix(action, "delete-blockers/") {
-		NotFound(w, "User resource")
-		return
-	}
-	if action == "delete-blockers" {
+	case "delete-blockers":
 		if r.Method != http.MethodGet {
 			MethodNotAllowed(w, http.MethodGet)
 			return
 		}
 		s.getUserDeleteBlockers(w, r, id)
+		return
+	default:
+		NotFound(w, "User resource")
 		return
 	}
 
@@ -277,18 +278,26 @@ func updateUserSessionOnlyReason(ctx context.Context, id string) authzop.Session
 }
 
 // updateUserCredential checks the credential of PATCH /api/v1/users/{id}
-// and returns the acting user. A user access token (a token identity whose
-// request carries the user access token credential kind) is returned as
-// token too; its fields are checked by updateUserTokenFields, and its
-// permissions on the hub-level user record. A token identity with any
-// other credential kind is refused with the path's session-only reason.
-// Every other request must carry an interactive session or a dev
-// credential (requireSessionCredentialFor).
+// and returns the acting user (sessionOrUserTokenCredential, with the
+// path's session-only reason). A user access token is returned as token
+// too; updateUserTokenFields checks its fields, and the caller checks its
+// permissions on the hub-level user record.
 func (s *Server) updateUserCredential(w http.ResponseWriter, ctx context.Context, id string) (actor UserIdentity, token *ScopedUserIdentity, ok bool) {
+	return s.sessionOrUserTokenCredential(w, ctx, updateUserSessionOnlyReason(ctx, id))
+}
+
+// sessionOrUserTokenCredential admits an interactive session or dev
+// credential of a user (requireSessionCredentialFor), or a user access
+// token: a token identity whose request carries the user access token
+// credential kind. It returns the acting user, and for a token the token
+// identity too, so the caller can check the token's selectors and
+// boundary. A token identity with any other credential kind, and every
+// other credential kind, is refused with the session-only reason.
+func (s *Server) sessionOrUserTokenCredential(w http.ResponseWriter, ctx context.Context, reason authzop.SessionOnlyReason) (actor UserIdentity, token *ScopedUserIdentity, ok bool) {
 	identity := GetIdentityFromContext(ctx)
 	scoped, isToken := identity.(*ScopedUserIdentity)
 	if !isToken || isNilIdentity(identity) {
-		actor, ok = s.requireSessionCredentialFor(w, ctx, updateUserSessionOnlyReason(ctx, id))
+		actor, ok = s.requireSessionCredentialFor(w, ctx, reason)
 		return actor, nil, ok
 	}
 	if s.authzService == nil {
@@ -299,7 +308,7 @@ func (s *Server) updateUserCredential(w http.ResponseWriter, ctx context.Context
 	if kind := requestCredentialKind(ctx, identity); kind != CredentialKindUAT {
 		writeSessionOnlyDenial(w, ErrCodeForbidden,
 			fmt.Sprintf("this operation requires an interactive session; credential kind %q is not allowed", kind),
-			updateUserSessionOnlyReason(ctx, id))
+			reason)
 		return nil, nil, false
 	}
 	return scoped, scoped, true

@@ -930,6 +930,115 @@ describe('scion-chat-message cross-project label', () => {
   });
 });
 
+// A message sent with an agent delegated credential names the agent as the
+// sender and the issuer as "authorized by" (.design/agent-delegation.md
+// §14.5). Ordinary messages show no such line.
+describe('scion-chat-message authorized-by line', () => {
+  const alice = { id: 'u-alice', displayName: 'Alice Example', email: 'alice@example.com' };
+  const bob = { id: 'u-bob', displayName: '', email: 'bob@example.com' };
+  const found = (user: object) => ({ ok: true, status: 200, json: () => Promise.resolve(user) });
+  const notFound = { ok: false, status: 404, json: () => Promise.resolve({}) };
+  const forbidden = { ok: false, status: 403, json: () => Promise.resolve({}) };
+  const serverError = { ok: false, status: 500, json: () => Promise.resolve({}) };
+
+  beforeEach(async () => {
+    document.body.innerHTML = '';
+    apiFetchMock.mockReset();
+    const { resetUserDirectory } = await import('../../../client/user-directory.js');
+    resetUserDirectory();
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  async function mountFromAgent(
+    authorizingUserId: string,
+    grant: string,
+    showHeader = true
+  ): Promise<ScionChatMessage> {
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    el.body = 'build is green';
+    el.sender = 'agent:builder';
+    el.senderName = 'builder';
+    el.fromAgent = true;
+    el.showHeader = showHeader;
+    el.authorizingUserId = authorizingUserId;
+    el.delegationGrantId = grant;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await Promise.resolve();
+    await el.updateComplete;
+    return el;
+  }
+
+  function lineText(el: ScionChatMessage): string | undefined {
+    return el.shadowRoot?.querySelector('.authorized-by')?.textContent?.trim();
+  }
+
+  it('shows the agent as sender and the issuer by display name', async () => {
+    apiFetchMock.mockResolvedValue(found(alice));
+    const el = await mountFromAgent('u-alice', 'grant-1');
+
+    expect(el.shadowRoot?.querySelector('.sender-name')?.textContent).toContain('builder');
+    await vi.waitFor(() => expect(lineText(el)).toBe('authorized by Alice Example'));
+    const line = el.shadowRoot?.querySelector('.authorized-by');
+    expect(line?.getAttribute('title')).toBe('via delegation grant-1');
+    expect(apiFetchMock).toHaveBeenCalledTimes(1);
+    expect(apiFetchMock.mock.calls[0]?.[0]).toBe('/api/v1/users/u-alice');
+  });
+
+  it('falls back to the email, then the ID', async () => {
+    apiFetchMock.mockImplementation((path: string) =>
+      Promise.resolve(path === '/api/v1/users/u-bob' ? found(bob) : notFound)
+    );
+    const bobMsg = await mountFromAgent('u-bob', 'grant-2');
+    await vi.waitFor(() => expect(lineText(bobMsg)).toBe('authorized by bob@example.com'));
+
+    const goneMsg = await mountFromAgent('u-gone', 'grant-3');
+    await vi.waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(2));
+    await Promise.resolve();
+    await goneMsg.updateComplete;
+    expect(lineText(goneMsg)).toBe('authorized by u-gone');
+  });
+
+  it('shows the ID when the lookup is forbidden or fails', async () => {
+    apiFetchMock.mockImplementation((path: string) =>
+      Promise.resolve(path === '/api/v1/users/u-denied' ? forbidden : serverError)
+    );
+    const denied = await mountFromAgent('u-denied', 'grant-4');
+    const broken = await mountFromAgent('u-broken', 'grant-5');
+    await vi.waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(2));
+    await Promise.resolve();
+    await denied.updateComplete;
+    await broken.updateComplete;
+
+    expect(lineText(denied)).toBe('authorized by u-denied');
+    expect(lineText(broken)).toBe('authorized by u-broken');
+    expect(apiFetchMock.mock.calls.map((c) => c[0])).toEqual([
+      '/api/v1/users/u-denied',
+      '/api/v1/users/u-broken',
+    ]);
+  });
+
+  it('shows the line on a grouped message with no header', async () => {
+    apiFetchMock.mockResolvedValue(notFound);
+    const el = await mountFromAgent('u-alice', '', false);
+
+    expect(el.shadowRoot?.querySelector('.bubble-header')).toBeNull();
+    expect(lineText(el)).toBe('authorized by u-alice');
+    expect(el.shadowRoot?.querySelector('.authorized-by')?.hasAttribute('title')).toBe(false);
+  });
+
+  it('shows nothing and looks up no user on an ordinary message', async () => {
+    const el = await mountFromAgent('', '');
+
+    expect(el.shadowRoot?.querySelector('.sender-name')?.textContent).toContain('builder');
+    expect(el.shadowRoot?.querySelector('.authorized-by')).toBeNull();
+    expect(apiFetchMock).not.toHaveBeenCalled();
+  });
+});
+
 // nc-delivery-unreachable: "Agent unreachable" replaces the generic "Failed"
 // label when the primary agent could not receive the message at all, either
 // via the machine-readable code (new sends) or the reason prefix (history

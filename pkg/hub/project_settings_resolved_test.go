@@ -324,6 +324,30 @@ func TestResolvedSettings_ProjectAnnotationReporting(t *testing.T) {
 	assert.Nil(t, unset.ProjectValue, "an unset annotation must be null, not \"\"")
 }
 
+// A stored thinking level outside 1-100 (a stale "0") is not a project
+// value: projectSet is false and projectValue null, as GET /settings omits
+// it, so the page shows the hub default. A valid level is reported as set
+// (ptone/scion#5692).
+func TestResolvedSettings_InvalidStoredThinkingLevelIsUnset(t *testing.T) {
+	for _, val := range []string{"0", "101", "-1", "high", ""} {
+		project := &store.Project{ID: "p-1", Annotations: map[string]string{projectSettingDefaultThinkingLevel: val}}
+		resp := (&Server{}).resolvedProjectSettings(project)
+		entry := resp.Settings[projectSettingDefaultThinkingLevel]
+		assert.False(t, entry.ProjectSet, "stored %q must read as unset", val)
+		assert.Nil(t, entry.ProjectValue, "stored %q must be null", val)
+		assert.Nil(t, resp.Project.DefaultThinkingLevel, "the project member agrees for %q", val)
+	}
+
+	project := &store.Project{ID: "p-1", Annotations: map[string]string{projectSettingDefaultThinkingLevel: "60"}}
+	resp := (&Server{}).resolvedProjectSettings(project)
+	entry := resp.Settings[projectSettingDefaultThinkingLevel]
+	assert.True(t, entry.ProjectSet)
+	require.NotNil(t, entry.ProjectValue)
+	assert.Equal(t, "60", *entry.ProjectValue)
+	require.NotNil(t, resp.Project.DefaultThinkingLevel)
+	assert.Equal(t, 60, *resp.Project.DefaultThinkingLevel)
+}
+
 // TestResolvedSettings_EndpointReturnsNoEffectiveValue asserts on the actual
 // serialized wire payload, not on the Go structs. The shape guard reflects over
 // types; this checks what a client really receives, so that a marshalling

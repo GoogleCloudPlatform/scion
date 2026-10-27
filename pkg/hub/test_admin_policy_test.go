@@ -1242,7 +1242,7 @@ func TestTestAdminPolicy_DelegationGrantManagementDenied(t *testing.T) {
 	superKind := tsaIdentity(t, s, tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin).Identity.ID)
 	hubKind := tsaIdentity(t, s, tsaIssue(t, srv, issuer2, testAdminRoleHubAdmin).Identity.ID)
 	human := tsaIdentity(t, s, taUser(t, s, "tsa-dg-human", store.SystemRoleSuperAdmin).ID)
-	ids := []string{agentDelegationRevokePermission, agentDelegationCredentialRevokePermission, agentDelegationListPermission, agentDelegationReadPermission}
+	ids := []string{agentDelegationRevokePermission, agentDelegationCredentialRevokePermission, agentDelegationListPermission, agentDelegationReadPermission, agentDelegationRevokeAllPermission}
 	for _, id := range ids {
 		assert.True(t, testAdminPermissionDenied(id), id)
 		for _, res := range []Resource{{Type: "hub", ID: "hub"}, {Type: "project", ID: "tsa-dg-project"}} {

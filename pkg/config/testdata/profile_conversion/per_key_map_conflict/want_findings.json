@@ -14,19 +14,6 @@
         "b: ksa-b from",
         "declare a second instance"
       ]
-    },
-    {
-      "code": "profile_conflict",
-      "severity": "blocking",
-      "path": "profiles.*.shared_dir_storage_backends.data",
-      "profiles": [
-        "a",
-        "b"
-      ],
-      "message_contains": [
-        "a: nfs from profiles.a.shared_dir_storage_backends.data",
-        "b: local from profiles.b.shared_dir_storage_backends.data"
-      ]
     }
   ]
 }

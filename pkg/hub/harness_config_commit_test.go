@@ -649,7 +649,7 @@ func TestHarnessConfigBootstrap_RetriesOnceOnConflict(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, deriveHCName, "config.yaml"), []byte(deriveFullYAML), 0o644))
 	rec.Files = []store.TemplateFile{{Path: "config.yaml", Size: int64(len(deriveFullYAML)), Hash: commitFileHash(deriveFullYAML)}}
 	rec.Status = store.HarnessConfigStatusActive
-	require.NoError(t, p.Update(ctx, rec, filepath.Join(dir, deriveHCName)))
+	require.NoError(t, p.Update(ctx, rec, collectTestDir(t, filepath.Join(dir, deriveHCName))))
 
 	got := globalHC(t, s, deriveHCName)
 	assert.Equal(t, defaultContentHash(rec.Files), got.ContentHash)

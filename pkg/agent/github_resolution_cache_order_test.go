@@ -111,7 +111,10 @@ func TestGitHubResolutionCache_StaleEntryWinsOverRememberedFailure(t *testing.T)
 	cache.recordFailure(key, notFound)
 	t.Cleanup(func() {
 		// Let any background refresh finish before the temp dir goes away.
-		_, _, _ = cache.flight.Do(flightKey, func() (interface{}, error) { return nil, nil })
+		// Wait on refreshWG, not on a flight.Do barrier: the refresh may not
+		// have joined its flight yet, and would then join the barrier's
+		// result-less flight instead (ptone/scion#6181).
+		cache.refreshWG.Wait()
 	})
 
 	skill, err := cache.ResolveWithFetch(context.Background(), key, flightKey, "cred", "ref", true, nil,

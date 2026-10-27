@@ -1353,13 +1353,6 @@ type ReincarnateAgentRequest struct {
 	// target and the agent's local state is given up. A hub that predates
 	// it ignores it; MoveVerdict.TransferMode tells a client the hub knows it.
 	ForceMove bool `json:"forceMove,omitempty"`
-	// SharedDirBackends changes the recorded shared-dir storage backend of
-	// the named shared dirs (dir name to "nfs" or "local"). Only the
-	// agent's record changes; the data is copied by the operator.
-	SharedDirBackends map[string]string `json:"sharedDirBackends,omitempty"`
-	// AllowEmptySharedDir skips the start check that refuses an empty
-	// directory on the new backend while the previous one is not empty.
-	AllowEmptySharedDir bool `json:"allowEmptySharedDir,omitempty"`
 
 	// Patch fields: each changes the next generation's setting, and later
 	// reincarnations keep it. Empty (nil for ThinkingLevel) is unchanged.
@@ -1473,8 +1466,4 @@ type ReincarnationPlan struct {
 	ServiceAccount *FieldChange `json:"serviceAccount,omitempty"`
 	ThinkingLevel  *FieldChange `json:"thinkingLevel,omitempty"`
 	HarnessAuth    *FieldChange `json:"harnessAuth,omitempty"`
-	// SharedDirBackends and AllowEmptySharedDir echo the request's shared
-	// dir backend change.
-	SharedDirBackends   map[string]string `json:"sharedDirBackends,omitempty"`
-	AllowEmptySharedDir bool              `json:"allowEmptySharedDir,omitempty"`
 }

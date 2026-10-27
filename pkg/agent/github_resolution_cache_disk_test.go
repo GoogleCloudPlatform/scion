@@ -289,8 +289,8 @@ func TestGitHubResolutionCache_StaleBranchServedAfterReload(t *testing.T) {
 		t.Fatalf("got %q, want the stale value %q", skill.Name, "old")
 	}
 	<-refreshed
-	// Join the background refresh so it has finished before the test ends.
-	_, _, _ = cache.flight.Do("flight-reload", func() (interface{}, error) { return nil, nil })
+	// Wait for the background refresh to finish before the test ends.
+	cache.refreshWG.Wait()
 }
 
 // TestGitHubResolutionCache_BurstCoalescesWrites checks that many Puts

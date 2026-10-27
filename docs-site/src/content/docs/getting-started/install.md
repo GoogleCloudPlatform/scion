@@ -48,8 +48,9 @@ Start the Workstation combo server:
 scion server start
 ```
 
-Your browser opens to the [Onboarding Wizard](/scion/getting-started/onboarding/) at
-`http://127.0.0.1:8080/onboarding`, which handles the rest of setup for you — runtime detection
+Your browser opens, signed in through a single-use link, to the
+[Onboarding Wizard](/scion/getting-started/onboarding/) at
+`http://127.0.0.1:8080/onboarding` (run `scion server open` later for a new sign-in link), which handles the rest of setup for you — runtime detection
 (Docker, Podman, or Apple Container), identity configuration, container image setup (pulling from
 `ghcr.io/homebrew-scion`), and creating your first workspace.
 

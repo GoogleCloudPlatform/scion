@@ -34,7 +34,7 @@ global-teardown.ts       ← Kills the hub, cleans up temp files
    - `--foreground` (no daemonization)
    - `--host 127.0.0.1` (loopback only — required for dev-auth)
    - `--web-port <ephemeral>` (random free port)
-   - `--dev-auth` (auto-login as admin on first page load)
+   - `--dev-auth` (the admin session comes from a dev sign-in link, `devSignInURL`)
    - `--enable-test-login` (programmatic session creation endpoint)
    - `--session-secret e2e-test-secret` (deterministic signing key)
    - `--db sqlite://<tmpdir>/e2e.db` (ephemeral database)

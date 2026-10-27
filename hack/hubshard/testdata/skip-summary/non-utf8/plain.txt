@@ -1,0 +1,4 @@
+direct ÿþ bytes
+--- FAIL: TestNonUTF8 (0.00s)
+    toy_test.go:113: bad ÿÃ bytes
+FAIL
