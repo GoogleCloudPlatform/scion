@@ -2930,6 +2930,48 @@ describe('scion-page-admin-server-config', () => {
       expect(text).toContain('stable');
     });
 
+    // ptone/scion#6134: release_url comes from the release manifest; only an
+    // https URL becomes a link, anything else is shown as plain text.
+    it.each([
+      ['https', 'https://github.com/GoogleCloudPlatform/scion/releases/tag/v1.1.0', true],
+      ['javascript:', 'javascript:alert(document.cookie)', false],
+      ['data:', 'data:text/html,<script>alert(1)</script>', false],
+      ['http:', 'http://example.com/releases/1.1.0', false],
+      ['relative', '/releases/1.1.0', false],
+      ['malformed', 'https://', false],
+    ])('renders a %s release_url safely', async (_name, url, linked) => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          checkUpdatesResponse: {
+            tier: 'binary',
+            update_available: true,
+            current_version: '1.0.0',
+            latest_version: '1.1.0',
+            channel: 'stable',
+            release_url: url,
+          },
+        })
+      );
+
+      await (element as any).checkForUpdates();
+      await (element as any).updateComplete;
+
+      const root = element.shadowRoot!;
+      const link = root.querySelector<HTMLAnchorElement>('a.release-notes-link');
+      const text = root.querySelector<HTMLElement>('.release-notes-text');
+      if (linked) {
+        expect(link?.getAttribute('href')).toBe(url);
+        expect(text).toBeNull();
+      } else {
+        expect(link).toBeNull();
+        expect(text?.textContent).toBe(url);
+      }
+      // No anchor anywhere carries the unsafe value.
+      for (const a of Array.from(root.querySelectorAll('a'))) {
+        if (!linked) expect(a.getAttribute('href')).not.toBe(url);
+      }
+    });
+
     it('omits the commit count in the source-tier banner when commits_behind is missing', async () => {
       element = await createComponent(
         createFetchHandler(makeBaseConfig(), {
