@@ -294,6 +294,35 @@ describe('StarredRailController', () => {
     expect(c.rows.map((r) => r.conversationKey)).toEqual(['b']);
   });
 
+  it('a sort restart reports loading, not the empty collection, until its first page', async () => {
+    const next = deferred<StarredConversationPage>();
+    const fetchPage = vi
+      .fn()
+      .mockResolvedValueOnce(page(['a']))
+      .mockReturnValueOnce(next.promise);
+    const c = new StarredRailController(fetchPage);
+    await c.start('activity');
+    expect(c.status).toBe('ready');
+    const restarted = c.start('alpha');
+    expect(c.status).toBe('loading');
+    expect(c.rows).toEqual([]);
+    next.resolve(page(['b']));
+    await restarted;
+    expect(c.status).toBe('ready');
+    expect(c.rows.map((r) => r.conversationKey)).toEqual(['b']);
+  });
+
+  it('marks the rail unavailable when the hub answers 404 (experiment off there)', async () => {
+    const { StarredRailError } = await import('./chat-starred-rail.js');
+    const fetchPage = vi.fn().mockRejectedValueOnce(new StarredRailError('gone', 404));
+    const c = new StarredRailController(fetchPage);
+    await c.start('activity');
+    expect(c.unavailable).toBe(true);
+    fetchPage.mockRejectedValueOnce(new StarredRailError('boom', 500));
+    await c.start('alpha');
+    expect(c.unavailable).toBe(false);
+  });
+
   it('drops answers for a stopped rail or an older sort', async () => {
     const old = deferred<StarredConversationPage>();
     const fetchPage = vi

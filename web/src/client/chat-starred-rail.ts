@@ -214,6 +214,11 @@ export class StarredRailController extends EventTarget {
   moreStatus: 'idle' | 'loading' | 'error' = 'idle';
   error = '';
   sort: StarredRailSort = 'activity';
+  /**
+   * The hub answered 404: the starred-messages experiment is off there. The
+   * rail leaves the Starred filter (and stops polling) when it sees this.
+   */
+  unavailable = false;
 
   private generation = 0;
   private abort: AbortController | null = null;
@@ -236,6 +241,11 @@ export class StarredRailController extends EventTarget {
     this.active = true;
     this.sort = sort;
     this.resetRows();
+    // A restart (a new sort) shows loading, never the empty collection,
+    // until its first page arrives.
+    this.status = 'loading';
+    this.unavailable = false;
+    this.emit();
     await this.reload();
   }
 
@@ -337,6 +347,7 @@ export class StarredRailController extends EventTarget {
     } catch (err) {
       if (generation !== this.generation || abort.signal.aborted) return;
       // Rows already shown stay; the error is reported next to them.
+      if (err instanceof StarredRailError && err.status === 404) this.unavailable = true;
       this.error = err instanceof Error ? err.message : 'Could not load starred conversations';
       this.status = this.rows.length > 0 ? 'ready' : 'error';
     }

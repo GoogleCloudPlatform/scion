@@ -378,6 +378,146 @@ describe('space rail — selecting a Starred row', () => {
   });
 });
 
+describe('space rail — Starred refetch triggers and the reconcile poll', () => {
+  function setVisibility(state: 'visible' | 'hidden'): void {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state });
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+    setVisibility('visible');
+  });
+
+  it('polls once per 60 s while visible, never while hidden, and stops after All and on disconnect', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    setVisibility('visible');
+    const el = await mount();
+    starredPages = [{ items: ROWS }];
+    button(el, 'Starred').click();
+    await settle(el);
+    const base = starredCalls.length;
+
+    starredPages = [{ items: ROWS }];
+    vi.advanceTimersByTime(60_000);
+    await settle(el);
+    expect(starredCalls.length).toBe(base + 1);
+
+    setVisibility('hidden');
+    vi.advanceTimersByTime(120_000);
+    await settle(el);
+    expect(starredCalls.length).toBe(base + 1);
+
+    setVisibility('visible');
+    button(el, 'All').click();
+    await settle(el);
+    vi.advanceTimersByTime(180_000);
+    await settle(el);
+    expect(starredCalls.length).toBe(base + 1);
+
+    starredPages = [{ items: ROWS }];
+    button(el, 'Starred').click();
+    await settle(el);
+    const restarted = starredCalls.length;
+    el.remove();
+    vi.advanceTimersByTime(180_000);
+    await settle(el);
+    expect(starredCalls.length).toBe(restarted);
+  });
+
+  it('reconnect and a return to the tab each refetch once; focus alone does not', async () => {
+    setVisibility('visible');
+    const el = await mount();
+    starredPages = [{ items: ROWS }];
+    button(el, 'Starred').click();
+    await settle(el);
+    const base = starredCalls.length;
+
+    starredPages = [{ items: ROWS }];
+    stateManager.dispatchEvent(new Event('connected'));
+    await settle(el);
+    expect(starredCalls.length).toBe(base + 1);
+
+    starredPages = [{ items: ROWS }];
+    document.dispatchEvent(new Event('visibilitychange'));
+    window.dispatchEvent(new Event('focus'));
+    await settle(el);
+    expect(starredCalls.length).toBe(base + 2);
+  });
+
+  it('no trigger fetches under All or Unread', async () => {
+    const el = await mount();
+    stateManager.dispatchEvent(new Event('chat-stars-updated'));
+    stateManager.dispatchEvent(new Event('connected'));
+    document.dispatchEvent(new Event('visibilitychange'));
+    await settle(el);
+    expect(starredCalls).toHaveLength(0);
+  });
+});
+
+describe('space rail — Starred and the experiment', () => {
+  it('a sort change shows loading, not the empty collection, until the new page arrives', async () => {
+    const el = await mount();
+    starredPages = [{ items: ROWS }];
+    button(el, 'Starred').click();
+    await settle(el);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    apiFetchMock.mockImplementation(((input: RequestInfo | URL) =>
+      String(input).startsWith('/api/v1/chat/starred-conversations')
+        ? gate.then(() => respond(input))
+        : respond(input)) as typeof apiFetch);
+    starredPages = [{ items: ROWS }];
+    el.prefs = { ...el.prefs, spaceSortMode: 'alpha', threadSortMode: 'alpha' };
+    await settle(el);
+    expect(text(el)).not.toContain('No starred conversations yet');
+    expect(el.shadowRoot.querySelector('.rail-body sl-spinner')).not.toBeNull();
+    release();
+    await settle(el);
+    expect(rowNames(el)).toEqual(['Mia', 'Zed agent', 'Alpha', 'beta']);
+  });
+
+  it('leaves Starred and stops polling when the hub answers 404, keeping the stored filter', async () => {
+    localStorage.setItem('scion-chat-space-filter', 'starred');
+    starredPages = [{ items: ROWS }];
+    const el = await mount();
+    expect(el.spaceFilter).toBe('starred');
+    apiFetchMock.mockImplementation(((input: RequestInfo | URL) =>
+      String(input).startsWith('/api/v1/chat/starred-conversations')
+        ? Promise.resolve(new Response('{}', { status: 404 }))
+        : respond(input)) as typeof apiFetch);
+    await el.refresh({ quiet: true });
+    await settle(el);
+    expect(el.spaceFilter).toBe('all');
+    expect(el._starredPoll).toBeNull();
+    expect(localStorage.getItem('scion-chat-space-filter')).toBe('starred');
+  });
+
+  it('leaves Starred when the experiment is turned off in the browser', async () => {
+    starredPages = [{ items: ROWS }];
+    const el = await mount();
+    button(el, 'Starred').click();
+    await settle(el);
+    setFlag(false);
+    el.requestUpdate();
+    await settle(el);
+    expect(el.spaceFilter).toBe('all');
+    expect(el._starredPoll).toBeNull();
+  });
+
+  it('a page-driven change to All keeps the stored Starred preference', async () => {
+    const el = await mount();
+    starredPages = [{ items: ROWS }];
+    button(el, 'Starred').click();
+    await settle(el);
+    expect(localStorage.getItem('scion-chat-space-filter')).toBe('starred');
+    el.selectedKey = 'topic-a';
+    el.centerFilter = '';
+    await settle(el);
+    expect(el.spaceFilter).toBe('all');
+    expect(localStorage.getItem('scion-chat-space-filter')).toBe('starred');
+  });
+});
+
 describe('space rail — the filter follows the open center', () => {
   it('an open starred-only center shows Starred; full context returns to All', async () => {
     const el = await mount();

@@ -1421,8 +1421,9 @@ export class ScionChatSpaceRail extends LitElement {
     stateManager.addEventListener('chat-stars-updated', this.handleStarredInvalidate);
     stateManager.addEventListener('connected', this.handleStarredInvalidate);
     chatStarsLocalChanges.addEventListener('changed', this.handleStarredInvalidate);
+    // Returning to the tab refetches once (visibilitychange covers it; a
+    // window focus listener as well would refetch twice).
     document.addEventListener('visibilitychange', this.handleStarredVisibility);
-    window.addEventListener('focus', this.handleStarredInvalidate);
     if (this.spaceFilter === 'starred') this.startStarred();
     // Collapsed thread-groups are restored in willUpdate, not here — see its
     // doc comment (round-4 review, N7).
@@ -1623,7 +1624,6 @@ export class ScionChatSpaceRail extends LitElement {
     stateManager.removeEventListener('connected', this.handleStarredInvalidate);
     chatStarsLocalChanges.removeEventListener('changed', this.handleStarredInvalidate);
     document.removeEventListener('visibilitychange', this.handleStarredVisibility);
-    window.removeEventListener('focus', this.handleStarredInvalidate);
     this.stopStarred();
     if (this._pullAnnounceTimer) {
       clearTimeout(this._pullAnnounceTimer);
@@ -4424,19 +4424,23 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   /**
-   * Set the space filter and persist it to localStorage (the only thing the
-   * rail persists). `fromUser` is a pick in the filter control: the page is
-   * told (`rail-filter-change`) so it can apply or clear the starred-only
-   * center of an open conversation.
+   * Set the space filter. `fromUser` is a pick in the filter control: only
+   * that is persisted to localStorage (the only thing the rail persists),
+   * and the page is told (`rail-filter-change`) so it can apply or clear
+   * the starred-only center of an open conversation. A change the page or
+   * the experiment drives (a full-context permalink, a jump, the
+   * experiment turning off) leaves the stored preference alone.
    */
   private setSpaceFilter(filter: RailFilter, fromUser = false): void {
     if (filter === 'starred' && !starredMessagesEnabled()) filter = 'all';
     if (this.spaceFilter === filter) return;
     this.spaceFilter = filter;
-    if (filter === 'all') {
-      localStorage.removeItem(RAIL_FILTER_STORAGE_KEY);
-    } else {
-      localStorage.setItem(RAIL_FILTER_STORAGE_KEY, filter);
+    if (fromUser) {
+      if (filter === 'all') {
+        localStorage.removeItem(RAIL_FILTER_STORAGE_KEY);
+      } else {
+        localStorage.setItem(RAIL_FILTER_STORAGE_KEY, filter);
+      }
     }
     if (filter === 'starred') this.startStarred();
     else this.stopStarred();
@@ -4490,6 +4494,11 @@ export class ScionChatSpaceRail extends LitElement {
    * changed after it started applies to it.
    */
   private syncStarredFilter(changed: Map<string, unknown>): void {
+    // The experiment turned off in this browser: Starred is no longer offered.
+    if (this.spaceFilter === 'starred' && !starredMessagesEnabled()) {
+      this.setSpaceFilter('all');
+      return;
+    }
     if (changed.has('centerFilter') || changed.has('selectedKey')) {
       if (this.selectedKey && this.centerFilter === 'starred' && this.spaceFilter !== 'starred') {
         this.setSpaceFilter('starred');
@@ -4518,6 +4527,11 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   private handleStarredChange = (): void => {
+    // The hub turned the experiment off: leave Starred and stop polling.
+    if (this.starred.unavailable && this.spaceFilter === 'starred') {
+      this.setSpaceFilter('all');
+      return;
+    }
     this.starredVersion++;
   };
 
