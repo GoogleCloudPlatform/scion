@@ -29,6 +29,7 @@
  */
 
 import { test, expect, type Locator, type Page } from '@playwright/test';
+import { touchScroll } from './helpers.js';
 import { PROJECT_A } from './mock-api.js';
 import { isPhone, mockThread, msgId, setupStarRail, type StarRailHub } from './star-rail-mock.js';
 
@@ -291,21 +292,12 @@ test.describe('starred messages: header list on a phone', () => {
     expect(ebox.height).toBeGreaterThanOrEqual(44);
 
     const scroller = sheet.locator('.scroll');
+    // The region must really overflow, or a drag has nothing to scroll.
+    const room = await scroller.evaluate((el) => el.scrollHeight - el.clientHeight);
+    expect(room).toBeGreaterThan(100);
     const sbox = (await scroller.boundingBox())!;
     const frameBefore = await page.evaluate(() => document.scrollingElement?.scrollTop ?? 0);
-    const cdp = await page.context().newCDPSession(page);
-    const x = sbox.x + sbox.width / 2;
-    const y0 = sbox.y + sbox.height - 30;
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y: y0 }] });
-    for (let i = 1; i <= 8; i++) {
-      await cdp.send('Input.dispatchTouchEvent', {
-        type: 'touchMove',
-        touchPoints: [{ x: x - i * 4, y: y0 - i * 25 }],
-      });
-      await page.waitForTimeout(30);
-    }
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    await cdp.detach();
+    await touchScroll(page, sbox.x + sbox.width / 2, sbox.y + sbox.height - 30, 0, -200);
     await expect.poll(() => scroller.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
     // Still open, the page behind did not move and no panel swipe happened.
     await expect(sheet).toBeVisible();
