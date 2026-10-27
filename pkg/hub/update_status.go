@@ -309,6 +309,9 @@ func (s *Server) reconcilePendingUpdate(ctx context.Context, running string) err
 				if err := s.writeHubSettingJSON(ctx, HubSettingSectionReleaseSelection, sel); err != nil {
 					return err
 				}
+			} else {
+				log.Debug("Pending update has no channel (written before release selections); no release selection recorded",
+					"run_id", p.RunID, "to", p.To)
 			}
 		}
 		// The update is confirmed only now; the update-binary hook leaves
