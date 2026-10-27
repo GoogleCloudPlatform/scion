@@ -255,6 +255,8 @@ func TestStorageValues_ProjectScopedTokenGetsNoValues(t *testing.T) {
 	projectID := tid("storage-ptoken-proj")
 	createDelegateTestProject(t, s, projectID, "storage-ptoken-proj", "test")
 	admin := newSuperAdminUser(t, s, "storage-ptoken-admin")
+	// The token's issuer must hold the scope in the project it is bound to.
+	createTestUserWithProjectRole(t, s, admin.ID, admin.Email, projectID, store.ProjectRoleOwner)
 	broker := createReregistrationTestBroker(t, s, "storage-ptoken-broker", admin.ID)
 	storageFixtureBroker(t, s, broker.ID)
 	key, _, err := srv.uatService.CreateTokenWithParams(rs4MintContext(admin.ID), CreateTokenParams{
