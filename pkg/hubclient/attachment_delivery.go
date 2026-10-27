@@ -42,6 +42,10 @@ const attachmentDeliveriesPath = "/api/v1/attachment-deliveries/"
 // errDeliveryRefused is returned for any refusal of a delivery capability.
 var errDeliveryRefused = errors.New("attachment delivery refused")
 
+// errDeliveryUnexpectedStatus is returned when the delivery endpoint returns
+// an unexpected non-error status (e.g. 204 No Content).
+var errDeliveryUnexpectedStatus = errors.New("attachment delivery: unexpected response status")
+
 // FetchAttachmentDelivery implements AttachmentDeliveryFetcher. Its errors
 // never carry a URL: the hub path holds the delivery capability and the
 // object-store URL is signed, so a caller may log any error it returns
@@ -63,7 +67,8 @@ func deliveryError(err error) error {
 	var ue *url.Error
 	var apiErr *apiclient.APIError
 	switch {
-	case errors.Is(err, errDeliveryRefused), errors.Is(err, errDeliveryObjectStore), errors.Is(err, errDeliveryPath),
+	case errors.Is(err, errDeliveryRefused), errors.Is(err, errDeliveryUnexpectedStatus),
+		errors.Is(err, errDeliveryObjectStore), errors.Is(err, errDeliveryPath),
 		errors.Is(err, errDeliveryRedirect), errors.As(err, &apiErr):
 		return err
 	case errors.As(err, &ue):
@@ -108,7 +113,7 @@ func (c *client) fetchAttachmentDelivery(ctx context.Context, path string) (io.R
 		if err := apiclient.CheckResponse(resp); err != nil {
 			return nil, err
 		}
-		return nil, fmt.Errorf("%w (status %d)", errDeliveryRefused, resp.StatusCode)
+		return nil, fmt.Errorf("%w (status %d)", errDeliveryUnexpectedStatus, resp.StatusCode)
 	}
 }
 
