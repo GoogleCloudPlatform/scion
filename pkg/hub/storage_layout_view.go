@@ -34,7 +34,7 @@ import (
 // missing authorization service, yields false: the public view.
 func (s *Server) storageValuesAllowed(ctx context.Context) bool {
 	user, ok := GetIdentityFromContext(ctx).(UserIdentity)
-	if !ok || IsNilIdentity(user) || s.authzService == nil {
+	if !ok || isNilIdentity(user) || s.authzService == nil {
 		return false
 	}
 	return s.authzService.Decide(ctx, AuthzRequest{
