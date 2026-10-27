@@ -86,8 +86,12 @@ const ROWS: StarredConversationRow[] = [
 let starredPages: Array<{ items: StarredConversationRow[]; nextCursor?: string } | Error> = [];
 const starredCalls: URLSearchParams[] = [];
 
+function urlOf(input: RequestInfo | URL): string {
+  return typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+}
+
 function respond(input: RequestInfo | URL): Promise<Response> {
-  const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+  const url = urlOf(input);
   if (url.startsWith('/api/v1/chat/starred-conversations')) {
     starredCalls.push(new URL(url, 'http://x').searchParams);
     const next = starredPages.shift() ?? { items: [] };
@@ -463,7 +467,7 @@ describe('space rail — Starred and the experiment', () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     apiFetchMock.mockImplementation(((input: RequestInfo | URL) =>
-      String(input).startsWith('/api/v1/chat/starred-conversations')
+      urlOf(input).startsWith('/api/v1/chat/starred-conversations')
         ? gate.then(() => respond(input))
         : respond(input)) as typeof apiFetch);
     starredPages = [{ items: ROWS }];
@@ -482,7 +486,7 @@ describe('space rail — Starred and the experiment', () => {
     const el = await mount();
     expect(el.spaceFilter).toBe('starred');
     apiFetchMock.mockImplementation(((input: RequestInfo | URL) =>
-      String(input).startsWith('/api/v1/chat/starred-conversations')
+      urlOf(input).startsWith('/api/v1/chat/starred-conversations')
         ? Promise.resolve(new Response('{}', { status: 404 }))
         : respond(input)) as typeof apiFetch);
     await el.refresh({ quiet: true });
