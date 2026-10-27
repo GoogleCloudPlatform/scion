@@ -439,6 +439,16 @@ export class ScionChatStarredList extends LitElement {
     if (this.pendingFocus) this.applyPendingFocus();
   }
 
+  /**
+   * Put focus back on the star button: the page calls this when an entry
+   * chosen from the list could not be opened, since the list closed
+   * before the jump began.
+   */
+  focusTrigger(): void {
+    const trigger = this.renderRoot.querySelector<HTMLElement>('.trigger');
+    if (trigger) withFocusMove(() => trigger.focus());
+  }
+
   /** Whether the list is open (for the page and tests). */
   get isOpen(): boolean {
     return this.open;
@@ -749,8 +759,9 @@ export class ScionChatStarredList extends LitElement {
     this.closePanel(false);
   };
 
+  /** Escape closes an open list from the trigger or from inside it. */
   private handleKeydown = (e: KeyboardEvent): void => {
-    if (e.key === 'Escape') {
+    if (e.key === 'Escape' && this.open) {
       e.stopPropagation();
       e.preventDefault();
       this.closePanel(true);
@@ -879,7 +890,7 @@ export class ScionChatStarredList extends LitElement {
             <sl-button
               size="small"
               ?loading=${this.loadingMore}
-              ?disabled=${this.loading}
+              aria-disabled=${this.loading ? 'true' : 'false'}
               @click=${(): void => void this.loadMore()}
               >${this.moreError ? 'Retry loading more' : 'Load more'}</sl-button
             >
@@ -931,7 +942,6 @@ export class ScionChatStarredList extends LitElement {
       aria-modal="false"
       aria-labelledby=${this.headingId}
       tabindex="-1"
-      @keydown=${this.handleKeydown}
       @touchstart=${this.stopTouch}
       @touchmove=${this.stopTouch}
       @touchend=${this.stopTouch}
@@ -944,7 +954,12 @@ export class ScionChatStarredList extends LitElement {
 
   override render(): TemplateResult {
     return html`
-      <div class="host-wrap" @focusout=${this.handleFocusOut} style="display: contents">
+      <div
+        class="host-wrap"
+        @focusout=${this.handleFocusOut}
+        @keydown=${this.handleKeydown}
+        style="display: contents"
+      >
         <sl-tooltip content="Starred messages in this conversation" ?disabled=${this.open}>
           <button
             type="button"
@@ -952,7 +967,7 @@ export class ScionChatStarredList extends LitElement {
             aria-label="Starred messages in this conversation"
             aria-haspopup="dialog"
             aria-expanded=${this.open ? 'true' : 'false'}
-            aria-controls=${this.panelId}
+            aria-controls=${this.open ? this.panelId : nothing}
             @click=${(): void => this.toggle()}
           >
             <sl-icon name="star" aria-hidden="true"></sl-icon>

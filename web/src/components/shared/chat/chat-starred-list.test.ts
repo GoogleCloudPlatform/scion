@@ -343,7 +343,9 @@ describe('scion-chat-starred-list: final presentation', () => {
     // Still showing the rows while the reload runs, marked busy.
     expect(entries(el)).toHaveLength(40);
     expect(el.shadowRoot!.querySelector('ul')?.getAttribute('aria-busy')).toBe('true');
-    expect(slButton(el, 'Load more')?.hasAttribute('disabled')).toBe(true);
+    // Busy, but not disabled: a keyboard user on Load more keeps focus.
+    expect(slButton(el, 'Load more')?.getAttribute('aria-disabled')).toBe('true');
+    expect(slButton(el, 'Load more')?.hasAttribute('disabled')).toBe(false);
 
     release(json({ items: [item(99), ...first, ...second].slice(0, 40), nextCursor: 'c3' }));
     await vi.waitFor(() => expect(entries(el)[0].textContent).toContain('Mock excerpt 99'));
@@ -541,5 +543,53 @@ describe('scion-chat-starred-list: final presentation', () => {
     window.dispatchEvent(new PopStateEvent('popstate'));
     await el.updateComplete;
     expect(el.isOpen).toBe(false);
+  });
+
+  it('names its panel in aria-controls only while open', async () => {
+    apiFetch.mockResolvedValueOnce(json({ items: [] }));
+    const el = await mount();
+    expect(button(el).hasAttribute('aria-controls')).toBe(false);
+    await openPanel(el);
+    const panel = el.shadowRoot!.querySelector('.panel')!;
+    expect(button(el).getAttribute('aria-controls')).toBe(panel.id);
+  });
+
+  it('Escape with focus on the star closes the open list', async () => {
+    apiFetch.mockResolvedValueOnce(json({ items: [] }));
+    const el = await mount();
+    await openPanel(el);
+    button(el).focus();
+    button(el).dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Escape',
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      })
+    );
+    await el.updateComplete;
+    expect(el.isOpen).toBe(false);
+    await vi.waitFor(() => expect(el.shadowRoot!.activeElement).toBe(button(el)));
+  });
+
+  it('focusTrigger puts focus back on the star', async () => {
+    const el = await mount();
+    el.focusTrigger();
+    expect(el.shadowRoot!.activeElement).toBe(button(el));
+  });
+
+  it('a background reconcile keeps keyboard focus on Load more', async () => {
+    apiFetch
+      .mockResolvedValueOnce(json({ items: [item(2)], nextCursor: 'c1' }))
+      .mockImplementationOnce(() => new Promise<Response>(() => {}));
+    const el = await mount();
+    await openPanel(el);
+    await vi.waitFor(() => expect(slButton(el, 'Load more')).toBeDefined());
+    const more = slButton(el, 'Load more')!;
+    more.focus();
+    fakeStateManager.dispatchEvent(new CustomEvent('chat-stars-updated'));
+    await el.updateComplete;
+    expect(el.shadowRoot!.activeElement).toBe(more);
+    expect(more.hasAttribute('disabled')).toBe(false);
   });
 });

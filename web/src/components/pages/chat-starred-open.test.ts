@@ -197,4 +197,26 @@ describe('opening a starred message from the header', () => {
     expect(apiFetch.mock.calls.length).toBe(before);
     expect(navigateTo).not.toHaveBeenCalled();
   });
+
+  it('gives focus back to the star button when the star is no longer available or the request fails', async () => {
+    const page = document.createElement('scion-page-chat') as ChatInternals;
+    page.v2Conversation = conversation('topic-a');
+    withThread(page);
+    const refocus = vi.fn();
+    (page as unknown as { refocusStarredTrigger: () => void }).refocusStarredTrigger = refocus;
+    open(page, M1);
+    held.get(M1)?.(new Response('{}', { status: 404 }));
+    await settle();
+    expect(refocus).toHaveBeenCalledTimes(1);
+    expect(showToastMock).toHaveBeenCalledWith(
+      'This starred message is no longer available',
+      'warning'
+    );
+
+    open(page, M2);
+    held.get(M2)?.(new Response('{}', { status: 500 }));
+    await settle();
+    expect(refocus).toHaveBeenCalledTimes(2);
+    expect(navigateTo).not.toHaveBeenCalled();
+  });
 });
