@@ -735,9 +735,9 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 	// releases would keep everything anyway.
 	releaseCapacityOnExit := true
 	// releaseIdleOnExit widens the release to the agent's idle slots: set
-	// for a refused move, where the agent may still hold a source broker
-	// slot this reincarnation did not create (the transfer leaves it in
-	// place).
+	// for a refused move, where the agent holds a source broker slot this
+	// reincarnation did not create (the transfer leaves a held one in
+	// place, and the failed move's reconcile restores one unchecked).
 	releaseIdleOnExit := false
 	defer func() {
 		if releaseCapacityOnExit {
@@ -765,11 +765,14 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		// the source.
 		if err := s.moveBrokerQuota(ctx, agent, move); err != nil {
 			// The refused transfer left the agent's source broker
-			// slot, if it held one, in place; this reincarnation did
-			// not create it, so the owned release would keep it. No
-			// container can exist (the stop succeeded and nothing
-			// started), so once the failure is recorded the agent's idle
-			// slots are released (ptone/scion#6033).
+			// slot, if it held one, in place, and failReincarnation's
+			// failed-move reconcile (reconcileFailedMove, through
+			// ensureBrokerReservationOn) restores a source slot without
+			// the cap check, also for an agent that held none. This
+			// reincarnation created neither, so the owned release would
+			// keep it. No container can exist (the stop succeeded and
+			// nothing started), so once the failure is recorded the
+			// agent's idle slots are released (ptone/scion#6033).
 			releaseIdleOnExit = true
 			s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateProvisioning, "target broker quota: "+err.Error(), recovery(store.AgentReincarnationStateProvisioning))
 			return

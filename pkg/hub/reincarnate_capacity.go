@@ -122,11 +122,14 @@ func (s *Server) releaseReservationIfIdleAt(ctx context.Context, limitName, agen
 // its stop step succeeded and no container can exist (any failure other than
 // an ambiguous start), once the failure is recorded (phase error). It
 // releases the rows the reincarnation created (owned). With idle set (a
-// refused move: the atomic broker transfer leaves a source slot the agent
-// held in place, and this reincarnation did not create it) it releases the
-// agent's idle broker and project slots instead. Every release is conditional on the agent, as read at
-// release time, holding no capacity and no start-kind claim, so a start
-// that claimed it since keeps them.
+// refused move) it releases the agent's idle broker and project slots
+// instead: the atomic broker transfer leaves a source slot the agent held in
+// place, and the failed move's reconcile (reconcileFailedMove, through
+// ensureBrokerReservationOn) restores a source slot without the cap check,
+// also for an agent that held none; this reincarnation created neither.
+// Every release is conditional on the agent, as read at release time,
+// holding no capacity and no start-kind claim, so a start that claimed it
+// since keeps them.
 func (s *Server) releaseFailedReincarnationCapacity(ctx context.Context, agentID string, idle bool, owned reincarnationCapacity) {
 	ctx, cancel := detachedCleanupContext(ctx, quotaReleaseTimeout)
 	defer cancel()
