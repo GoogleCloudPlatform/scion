@@ -16,7 +16,6 @@ package hub
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -234,13 +233,16 @@ func (s *Server) scanStarredConversations(ctx context.Context, call starCall, au
 	}
 }
 
-// sealStarredConversationsCursor seals a position under binding.
+// sealStarredConversationsCursor seals a position under binding. The
+// position (a sort value and a conversation key) does not fit
+// authorizedList's "created,id" cursor, so it is sealed with
+// SealPosition, whose cursors never open as list cursors (or the reverse).
 func (s *Server) sealStarredConversationsCursor(pos StarredConversationPosition, binding string) (string, error) {
 	raw, err := json.Marshal(starredConversationsCursor{Value: pos.Value, Key: pos.Key})
 	if err != nil {
 		return "", err
 	}
-	return s.listCursorSealer.Seal(base64.URLEncoding.EncodeToString(raw), binding)
+	return s.listCursorSealer.SealPosition(string(raw), binding)
 }
 
 // openStarredConversationsCursor opens a sealed position and validates it
@@ -249,15 +251,11 @@ func (s *Server) sealStarredConversationsCursor(pos StarredConversationPosition,
 // the hub sealed it from a stored name, and the sealer's authentication
 // already rejects any other value.
 func (s *Server) openStarredConversationsCursor(sealed, binding, sortMode string) (StarredConversationPosition, error) {
-	inner, err := openAndValidateListCursor(s.listCursorSealer, sealed, binding)
-	if err != nil {
-		return StarredConversationPosition{}, err
-	}
-	raw, err := base64.URLEncoding.DecodeString(inner)
+	raw, err := s.listCursorSealer.OpenPosition(sealed, binding)
 	if err != nil {
 		return StarredConversationPosition{}, errInvalidCursor
 	}
-	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec := json.NewDecoder(strings.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var c starredConversationsCursor
 	if err := dec.Decode(&c); err != nil || dec.More() {
@@ -332,10 +330,16 @@ type starDMPeerRef struct {
 	kind, id string
 }
 
-// starDMPeer returns the peer of a well-formed DM key in which userID is
-// a user participant (as resolveStarDM derives it), or false.
+// starDMPeer returns the peer of a well-formed, canonical DM key in which
+// userID is a user participant (as resolveStarDM derives it), or false. A
+// key that is not canonical (a legacy star stored under swapped slots, or
+// one that does not canonicalise) is refused here as resolveStarDM refuses
+// it, so it never yields a row whose conversation then answers 400.
 func starDMPeer(key, userID string) (starDMPeerRef, bool) {
 	if !validDMKey(key) || !isDMParticipant(key, userID) {
+		return starDMPeerRef{}, false
+	}
+	if canonical, err := canonicalStarDMKey(key); err != nil || canonical != key {
 		return starDMPeerRef{}, false
 	}
 	parts := strings.Split(key, ":")

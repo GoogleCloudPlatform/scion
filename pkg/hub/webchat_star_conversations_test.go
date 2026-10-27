@@ -204,10 +204,12 @@ func testStarredConversationsContract(t *testing.T, env starStoreEnv) {
 
 	t.Run("name ties break by key", func(t *testing.T) {
 		u := uuid.NewString()
+		// Topic names are unique per project regardless of case, so the
+		// tied names live in two projects.
 		k1 := topic(projA, "Same", at(time.Minute))
-		k2 := topic(projA, "same", at(2*time.Minute))
+		k2 := topic(projB, "same", at(2*time.Minute))
 		add(u, msg(k1, base), k1, projA)
-		add(u, msg(k2, base), k2, projA)
+		add(u, msg(k2, base), k2, projB)
 		want := []string{k1, k2}
 		sort.Strings(want)
 		f := StarredConversationFilter{UserID: u, Channel: "web", Sort: StarredConversationsByName}

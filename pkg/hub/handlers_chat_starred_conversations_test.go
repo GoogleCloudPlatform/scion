@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -231,6 +232,18 @@ func TestChatStarredConversations_GroupsAndPaginates(t *testing.T) {
 			})
 			assert.Equal(t, full.Items, walked, "sort %s limit %d", sortMode, limit)
 		}
+		// The walk above really resumed: page 2 opens the first page's
+		// cursor and continues after its row, in both sorts (the DM rows'
+		// keys and the name order do not fit authorizedList's cursor).
+		first := f.rail(t, f.member, "sort", sortMode, "limit", "1")
+		require.Len(t, first.Items, 1)
+		require.NotEmpty(t, first.NextCursor)
+		second := f.session(t, f.member, http.MethodGet,
+			starredConversationsURL("sort", sortMode, "limit", "1", "cursor", first.NextCursor), nil)
+		require.Equal(t, http.StatusOK, second.Code, "sort %s page 2: %s", sortMode, second.Body.String())
+		page2 := decodeStarredConversations(t, second)
+		require.Len(t, page2.Items, 1)
+		assert.Equal(t, full.Items[1], page2.Items[0], "sort %s page 2 continues after page 1", sortMode)
 	}
 
 	// A rename shows at once; muting and reading do not hide a row.
@@ -296,8 +309,14 @@ func TestChatStarredConversations_TokenSelectors(t *testing.T) {
 		starredConversationRowKeys(decodeStarredConversations(t, get(noAgentRead)).Items),
 		"an agent DM needs agent:read on the agent")
 
+	// A project-boundary token can be minted only for a project its holder
+	// belongs to: give the member a role in project B, so the boundary is
+	// the only thing that keeps project A's rows out. The member's retained
+	// star in project B's thread is then readable, inside that boundary.
+	createTestUserWithProjectRole(t, f.s, f.member, f.member+"@test.com", f.projB, store.ProjectRoleMember)
 	projB := f.mint(t, f.member, projectBoundary(f.projB), "inbox:read", "project:read", "agent:read")
-	assert.Empty(t, decodeStarredConversations(t, get(projB)).Items, "another project's token sees no rows, and no refusal")
+	assert.Equal(t, []string{f.topicB}, starredConversationRowKeys(decodeStarredConversations(t, get(projB)).Items),
+		"another project's token sees only that project's rows, and no refusal")
 	assert.Equal(t, http.StatusNotFound, get(projB, "projectId", f.projA).Code, "a project scope outside the boundary")
 
 	writeOnly := f.mint(t, f.member, hubBoundary(), "inbox:write", "project:read")
@@ -306,6 +325,7 @@ func TestChatStarredConversations_TokenSelectors(t *testing.T) {
 	// A cursor minted for one credential does not resume under another.
 	page := decodeStarredConversations(t, get(hub, "limit", "1"))
 	require.NotEmpty(t, page.NextCursor)
+	assert.Equal(t, http.StatusOK, get(hub, "limit", "1", "cursor", page.NextCursor).Code, "it resumes under its own credential")
 	assert.Equal(t, http.StatusBadRequest, get(projA, "limit", "1", "cursor", page.NextCursor).Code)
 	assert.Equal(t, http.StatusBadRequest,
 		f.session(t, f.member, http.MethodGet, starredConversationsURL("cursor", page.NextCursor), nil).Code)
@@ -335,7 +355,18 @@ func TestChatStarredConversations_MatchesStarScope(t *testing.T) {
 			require.NoError(t, err)
 		}
 	}
-	keys := []string{f.topicA, f.topicA2, f.topicB, f.dms.agentKey, f.dms.humanKey}
+	// A legacy star of the member under the human DM's key with its slots
+	// swapped (not canonical; stored directly, as the star routes refuse
+	// it): resolveStarScope refuses the key, so the rail must not list it.
+	p := strings.Split(f.dms.humanKey, ":")
+	swapped := strings.Join([]string{p[0], p[3], p[4], p[1], p[2]}, ":")
+	require.NotEqual(t, f.dms.humanKey, swapped)
+	legacy := f.dmMsg(t, swapped, f.dms.humanConv, uuid.Nil.String(), "user:"+f.member, f.member, "legacy", "web", time.Now().Add(-time.Minute))
+	_, _, err := f.stars.AddMessageStar(ctx, f.member, StarTarget{MessageID: legacy,
+		Selector: StarSelector{ConversationKey: swapped, Channel: "web", ThreadID: swapped}})
+	require.NoError(t, err)
+
+	keys := []string{f.topicA, f.topicA2, f.topicB, f.dms.agentKey, f.dms.humanKey, swapped}
 	for _, u := range []string{f.member, f.owner, f.admin, plain} {
 		rows := map[string]bool{}
 		for _, it := range f.rail(t, u).Items {
@@ -383,6 +414,20 @@ func TestChatStarredConversations_MatchesStarScopeForTokens(t *testing.T) {
 			Selector: StarSelector{ConversationKey: c.key, Channel: "web", ThreadID: c.key}})
 		require.NoError(t, err)
 	}
+	// A member of both projects, starring in a project A thread and project
+	// B's thread: its project B token is refused project A's row by the
+	// boundary alone (a project-boundary token can be minted only for a
+	// project its holder belongs to).
+	both := uuid.NewString()
+	createTestUserWithProjectRole(t, f.s, both, both+"@test.com", f.projA, store.ProjectRoleMember)
+	createTestUserWithProjectRole(t, f.s, both, both+"@test.com", f.projB, store.ProjectRoleMember)
+	ensureHubMembership(ctx, f.s, both)
+	for _, c := range []struct{ key, projectID string }{{f.topicA, f.projA}, {f.topicB, f.projB}} {
+		m := f.threadMsg(t, c.key, c.projectID, "both", time.Now().Add(-time.Minute))
+		_, _, err := f.stars.AddMessageStar(ctx, both, StarTarget{MessageID: m, ProjectID: c.projectID,
+			Selector: StarSelector{ConversationKey: c.key, Channel: "web", ThreadID: c.key}})
+		require.NoError(t, err)
+	}
 	type caller struct {
 		name, user, token string
 	}
@@ -390,7 +435,7 @@ func TestChatStarredConversations_MatchesStarScopeForTokens(t *testing.T) {
 		{"member hub token", f.member, f.mint(t, f.member, hubBoundary(), "inbox:read", "project:read", "agent:read")},
 		{"member project A token", f.member, f.mint(t, f.member, projectBoundary(f.projA), "inbox:read", "project:read", "agent:read")},
 		{"member project A token without agent:read", f.member, f.mint(t, f.member, projectBoundary(f.projA), "inbox:read", "project:read")},
-		{"member project B token", f.member, f.mint(t, f.member, projectBoundary(f.projB), "inbox:read", "project:read", "agent:read")},
+		{"member of A and B, project B token", both, f.mint(t, both, projectBoundary(f.projB), "inbox:read", "project:read", "agent:read")},
 		{"owner project A token, owner's project A binding removed", f.owner, f.mint(t, f.owner, projectBoundary(f.projA), "inbox:read", "project:read", "agent:read")},
 	}
 	// Remove only the owner's project A binding (the owner keeps hub
@@ -425,6 +470,9 @@ func TestChatStarredConversations_MatchesStarScopeForTokens(t *testing.T) {
 			// Positive control: a refusal everywhere would make every
 			// comparison trivially equal.
 			assert.Len(t, rows, 4, "the member's hub token lists its four readable starred conversations")
+		}
+		if c.user == both {
+			assert.Equal(t, map[string]bool{f.topicB: true}, rows, "the project B token lists project B's thread, not project A's")
 		}
 		for _, key := range keys {
 			page, err := f.stars.ListMessageStarCandidates(ctx, StarFilter{UserID: c.user,
