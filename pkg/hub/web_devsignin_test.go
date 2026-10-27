@@ -695,8 +695,9 @@ func TestLoginRedirect_OAuthWithoutDevAuthUsesSessionReturnPath(t *testing.T) {
 	}
 }
 
-// /auth/login?returnTo= stores the return path only when it is a path on
-// this server, and / otherwise.
+// /auth/login?returnTo= reaches the handler at /auth/login/ with its query,
+// which stores the return path only when it is a path on this server, and
+// / otherwise.
 func TestOAuthLogin_ProviderlessStoresLocalReturnTo(t *testing.T) {
 	ws := newTestWebServer(t, WebServerConfig{})
 	h := ws.Handler()
@@ -710,9 +711,14 @@ func TestOAuthLogin_ProviderlessStoresLocalReturnTo(t *testing.T) {
 		"/\t/evil.example/x":      "/",
 		"evil.example/x":          "/",
 	} {
-		req := httptest.NewRequest(http.MethodGet, "/auth/login?returnTo="+url.QueryEscape(returnTo), nil)
+		query := "?returnTo=" + url.QueryEscape(returnTo)
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/auth/login"+query, nil))
+		require.Equal(t, http.StatusTemporaryRedirect, rec.Code, returnTo)
+		assert.Equal(t, "/auth/login/"+query, rec.Header().Get("Location"), returnTo)
+
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/auth/login/"+query, nil))
 		require.Equal(t, http.StatusFound, rec.Code, returnTo)
 		assert.Equal(t, "/login", rec.Header().Get("Location"), returnTo)
 
