@@ -75,6 +75,30 @@ describe('ChatStarsController', () => {
   const M1 = mid(1);
   const M2 = mid(2);
 
+  it('marks a starred-only page starred without a request, leaving pending and deleted IDs', async () => {
+    const fetchState = vi.fn(() => Promise.resolve([]));
+    let releasePut!: () => void;
+    const put = vi.fn(() => new Promise<void>((r) => (releasePut = r)));
+    const c = new ChatStarsController(fakeApi({ fetchStarState: fetchState, deleteStar: put }));
+    c.setConversation('topic-1');
+    const events: string[] = [];
+    c.addEventListener('change', () => events.push('change'));
+    c.evict(M2);
+    const pending = c.setStarred(mid(3), 'topic-1', false);
+    events.length = 0;
+    c.markStarred([M1, M2, mid(3), 'local-row']);
+    expect(c.state(M1)).toBe('starred');
+    expect(c.state(M2)).toBe('unstarred');
+    expect(c.state(mid(3))).toBe('unstarred');
+    expect(events).toEqual(['change']);
+    // Already known as starred: no change event.
+    c.markStarred([M1]);
+    expect(events).toEqual(['change']);
+    expect(fetchState).not.toHaveBeenCalled();
+    releasePut();
+    await pending;
+  });
+
   it('evicts a deleted message: unstarred at once, lists refetch, no request', async () => {
     const fetchState = vi.fn((ids: readonly string[]) => Promise.resolve([...ids]));
     const c = new ChatStarsController(fakeApi({ fetchStarState: fetchState }));
