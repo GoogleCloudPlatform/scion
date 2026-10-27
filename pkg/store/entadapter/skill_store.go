@@ -486,7 +486,8 @@ func (s *SkillStore) DeleteSkillVersion(ctx context.Context, id string) error {
 	return nil
 }
 
-// ResolveSkillVersion resolves a version constraint to a specific published version.
+// ResolveSkillVersion resolves a version constraint to a specific published or
+// deprecated version.
 //
 // Every constraint form considers only published and deprecated versions;
 // draft and archived versions never resolve.
@@ -566,7 +567,8 @@ func (s *SkillStore) ResolveSkillVersion(ctx context.Context, skillID, constrain
 		return nil, store.ErrNotFound
 	}
 
-	// Exact match — return regardless of status (pinned consumers get what they asked for)
+	// Exact match among published and deprecated versions; a deprecated version
+	// is returned too (pinned consumers get what they asked for).
 	exactVer, err := semver.NewVersion(constraint)
 	if err == nil {
 		for _, v := range versions {
