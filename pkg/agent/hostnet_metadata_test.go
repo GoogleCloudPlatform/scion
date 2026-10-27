@@ -187,7 +187,18 @@ func TestStart_BridgeBlockGrantsInterception(t *testing.T) {
 	if !cfg.MetadataInterception {
 		t.Error("MetadataInterception = false for block on bridge, want true")
 	}
-	if len(info.RelayedWarnings) != 0 {
-		t.Errorf("RelayedWarnings = %v, want none on bridge", info.RelayedWarnings)
+	// The fixture is a hub dispatch with no hub-issued token, so the start
+	// relays exactly the missing-hub-token warning, and on bridge no host
+	// networking warning.
+	want := noHubCredentialWarning(api.StartOptions{Name: "tz-agent", BrokerMode: true,
+		Env: map[string]string{"SCION_HUB_ENDPOINT": "https://hub.example.com"}})
+	if want == "" {
+		t.Fatal("noHubCredentialWarning returned no warning for a tokenless hub dispatch (fixture precondition)")
+	}
+	if !slices.Equal(info.RelayedWarnings, []string{want}) {
+		t.Errorf("RelayedWarnings = %v, want exactly the missing-hub-token warning %q", info.RelayedWarnings, want)
+	}
+	if slices.Contains(info.RelayedWarnings, hostNetworkMetadataWarning) {
+		t.Errorf("RelayedWarnings = %v, want no host networking warning on bridge", info.RelayedWarnings)
 	}
 }
