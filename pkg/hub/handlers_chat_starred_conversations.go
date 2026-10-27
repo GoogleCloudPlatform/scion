@@ -238,7 +238,7 @@ func (s *Server) scanStarredConversations(ctx context.Context, call starCall, au
 // authorizedList's "created,id" cursor, so it is sealed with
 // SealPosition, whose cursors never open as list cursors (or the reverse).
 func (s *Server) sealStarredConversationsCursor(pos StarredConversationPosition, binding string) (string, error) {
-	raw, err := json.Marshal(starredConversationsCursor{Value: pos.Value, Key: pos.Key})
+	raw, err := json.Marshal(starredConversationsCursor(pos))
 	if err != nil {
 		return "", err
 	}
@@ -269,7 +269,7 @@ func (s *Server) openStarredConversationsCursor(sealed, binding, sortMode string
 			return StarredConversationPosition{}, errInvalidCursor
 		}
 	}
-	return StarredConversationPosition{Value: c.Value, Key: c.Key}, nil
+	return StarredConversationPosition(c), nil
 }
 
 // starredConversationAuthorizer decides read access for Starred rail

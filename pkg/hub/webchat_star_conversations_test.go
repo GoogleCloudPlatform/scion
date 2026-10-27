@@ -29,6 +29,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -361,9 +362,7 @@ func TestStarredConversations_LabelSpaceIsTrimSpace(t *testing.T) {
 // value: RFC3339 text padded to nine fractional digits, so a whole second
 // sorts before its fractions; another layout is "" (no activity).
 func TestStarredConversations_SQLiteActivityKey(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 	for in, want := range map[string]string{
 		"2026-10-22T10:00:00Z":              "2026-10-22T10:00:00.000000000Z",
 		"2026-10-22T10:00:00.5Z":            "2026-10-22T10:00:00.500000000Z",
