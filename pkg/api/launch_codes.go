@@ -88,11 +88,8 @@ const (
 	LaunchCodeAgentError            = "agent_error"
 	LaunchCodeHarnessConfigPolicy   = "harness_config_policy"
 	LaunchCodeHarnessConfigUnusable = BrokerErrCodeHarnessConfigUnusable
-	// LaunchCodeStorageMigrationRequired: the broker refused the start
-	// before any side effect (BrokerErrCodeStorageMigrationRequired).
-	LaunchCodeStorageMigrationRequired = BrokerErrCodeStorageMigrationRequired
-	LaunchCodeAgentStateUnavailable    = "agent_state_unavailable"
-	LaunchCodeAgentStateConflict       = "agent_state_conflict"
+	LaunchCodeAgentStateUnavailable = "agent_state_unavailable"
+	LaunchCodeAgentStateConflict    = "agent_state_conflict"
 
 	// LaunchCodeImagePullFailed: the agent image could not be pulled
 	// (Kubernetes ImagePullBackOff or ErrImagePull).
