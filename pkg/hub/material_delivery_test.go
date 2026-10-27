@@ -24,6 +24,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -1260,13 +1261,15 @@ func (s *ldListFaultStore) GetAgent(ctx context.Context, id string) (*store.Agen
 }
 
 // ldFaultSecretBackend injects single secret backend faults: a list error,
-// a whole-call fetch error, one item's fetch error, or one item missing
-// from the fetch result. It records the metadata it was asked to fetch.
+// a whole-call fetch error, one item's fetch error (itemErr, or a generic
+// error when itemErr is nil), or one item missing from the fetch result.
+// It records the metadata it was asked to fetch.
 type ldFaultSecretBackend struct {
 	secret.SecretBackend
 	listErr   error
 	fetchErr  error
 	itemErrID string
+	itemErr   error
 	dropID    string
 	fetched   []secret.SecretMeta
 }
@@ -1288,7 +1291,11 @@ func (b *ldFaultSecretBackend) FetchValues(ctx context.Context, metas []secret.S
 		return nil, err
 	}
 	if b.itemErrID != "" {
-		out[b.itemErrID] = secret.FetchResult{Err: errors.New("injected item fetch failure")}
+		itemErr := b.itemErr
+		if itemErr == nil {
+			itemErr = errors.New("injected item fetch failure")
+		}
+		out[b.itemErrID] = secret.FetchResult{Err: itemErr}
 	}
 	if b.dropID != "" {
 		delete(out, b.dropID)
@@ -1298,7 +1305,9 @@ func (b *ldFaultSecretBackend) FetchValues(ctx context.Context, metas []secret.S
 
 // TestDeliverySelection_DefensiveBranches: each row injects exactly one
 // fault into launch selection and checks it fails closed: a read error is
-// the selection's error, a failed or missing item is not delivered, an
+// the selection's error, a missing item, one gone since listing or one
+// Secret Manager cannot return is not delivered, any other failed item is
+// the selection's error, an
 // internal secret is neither delivered nor fetched, and the credential is
 // not minted for a missing target, a changed project or a user-scope item.
 func TestDeliverySelection_DefensiveBranches(t *testing.T) {
@@ -1370,17 +1379,35 @@ func TestDeliverySelection_DefensiveBranches(t *testing.T) {
 		}
 		assert.Contains(t, ids, sm.ID, "control: the admitted item reached the fetch")
 	})
-	t.Run("failed_or_missing_item_not_delivered", func(t *testing.T) {
-		m := newLDFixture(t, "df-item", ldOptions{})
+	for _, tc := range []struct {
+		name    string
+		itemErr error
+	}{
+		{"gone_item_not_delivered", store.ErrNotFound},
+		{"secret_manager_access_item_not_delivered", fmt.Errorf("%w: %w", secret.ErrValueAccess, injected)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newLDFixture(t, "df-"+tc.name[:8], ldOptions{})
+			failed := m.secret(t, "MD_DF_ITEM_FAILED", "f", store.SecretTypeEnvironment, store.ScopeProject, m.agent.ProjectID)
+			missing := m.secret(t, "MD_DF_ITEM_MISSING", "m", store.SecretTypeEnvironment, store.ScopeHub, m.hubID)
+			m.secret(t, "MD_DF_ITEM_OK", "ok", store.SecretTypeEnvironment, store.ScopeRuntimeBroker, m.broker.ID)
+			m.d.SetSecretBackend(&ldFaultSecretBackend{SecretBackend: m.backend, itemErrID: failed.ID, itemErr: tc.itemErr, dropID: missing.ID})
+			secrets, err := m.d.selectDeliverySecrets(ctx, restartSel(m, m.agent), m.agent)
+			require.NoError(t, err)
+			require.Len(t, secrets, 1)
+			assert.Equal(t, "MD_DF_ITEM_OK", secrets[0].Name)
+			assert.Equal(t, "ok", secrets[0].Value)
+		})
+	}
+	t.Run("failed_item_fails_selection", func(t *testing.T) {
+		m := newLDFixture(t, "df-itemfail", ldOptions{})
 		failed := m.secret(t, "MD_DF_ITEM_FAILED", "f", store.SecretTypeEnvironment, store.ScopeProject, m.agent.ProjectID)
-		missing := m.secret(t, "MD_DF_ITEM_MISSING", "m", store.SecretTypeEnvironment, store.ScopeHub, m.hubID)
 		m.secret(t, "MD_DF_ITEM_OK", "ok", store.SecretTypeEnvironment, store.ScopeRuntimeBroker, m.broker.ID)
-		m.d.SetSecretBackend(&ldFaultSecretBackend{SecretBackend: m.backend, itemErrID: failed.ID, dropID: missing.ID})
+		m.d.SetSecretBackend(&ldFaultSecretBackend{SecretBackend: m.backend, itemErrID: failed.ID, itemErr: injected})
 		secrets, err := m.d.selectDeliverySecrets(ctx, restartSel(m, m.agent), m.agent)
-		require.NoError(t, err)
-		require.Len(t, secrets, 1)
-		assert.Equal(t, "MD_DF_ITEM_OK", secrets[0].Name)
-		assert.Equal(t, "ok", secrets[0].Value)
+		assert.ErrorIs(t, err, injected)
+		assert.NotErrorIs(t, err, secret.ErrResolveDecrypt)
+		assert.Nil(t, secrets)
 	})
 	t.Run("internal_secret_neither_delivered_nor_fetched", func(t *testing.T) {
 		m := newLDFixture(t, "df-internal", ldOptions{})
@@ -1647,4 +1674,62 @@ func TestDispatchDelivery_TestAdminPlaceholderMasksLowerScope(t *testing.T) {
 	old, _, err := d.resolveSecrets(ctx, agent)
 	require.NoError(t, err)
 	assert.ElementsMatch(t, old, got, "the same result as the Resolve path")
+}
+
+// TestDispatchDelivery_UndecryptableSecretFailsStart: a stored secret whose
+// value cannot be decrypted fails the start and the restart with a
+// *secretResolutionError (errors.Is secret.ErrResolveDecrypt), as Resolve
+// fails them, instead of being skipped: a lower-scope secret of the same
+// name never stands in for it, and nothing reaches the broker. Both the
+// project over hub and the owner's user scope over project are covered.
+func TestDispatchDelivery_UndecryptableSecretFailsStart(t *testing.T) {
+	ctx := context.Background()
+	const key = "MD_UNDECRYPTABLE"
+	foreign, err := secret.NewLegacyValueCipher("FAKE-foreign-secret").Encrypt("fake-undecryptable-value")
+	require.NoError(t, err)
+
+	type op struct {
+		name   string
+		run    func(m *ldFixture) error
+		called func(m *ldFixture) bool
+		env    func(m *ldFixture) map[string]string
+	}
+	ops := []op{
+		{"start", func(m *ldFixture) error { return m.d.DispatchAgentStart(ctx, m.agent, "task", false) },
+			func(m *ldFixture) bool { return m.client.startCalled },
+			func(m *ldFixture) map[string]string { return m.client.lastResolvedEnv }},
+		{"restart", func(m *ldFixture) error { return m.d.DispatchAgentRestart(ctx, m.agent) },
+			func(m *ldFixture) bool { return m.client.restartCalled },
+			func(m *ldFixture) map[string]string { return m.client.lastRestartResolvedEnv }},
+	}
+	for _, layers := range []struct{ high, low string }{
+		{store.ScopeProject, store.ScopeHub},
+		{store.ScopeUser, store.ScopeProject},
+	} {
+		for _, o := range ops {
+			t.Run(layers.high+"_over_"+layers.low+"/"+o.name, func(t *testing.T) {
+				m := newLDFixture(t, "undecrypt-"+layers.high+"-"+o.name, ldOptions{})
+				require.NoError(t, m.store.CreateSecret(ctx, &store.Secret{
+					ID: api.NewUUID(), Key: key, EncryptedValue: foreign, SecretType: store.SecretTypeEnvironment,
+					Target: key, Scope: layers.high, ScopeID: m.scopeID(layers.high), InjectionMode: store.InjectionModeAlways,
+					CreatedBy: m.projectOwnerID,
+				}))
+				m.secret(t, key, "lower-scope-value", store.SecretTypeEnvironment, layers.low, m.scopeID(layers.low))
+
+				// The selection itself reports the decrypt failure and
+				// returns nothing.
+				secrets, err := m.d.selectDeliverySecrets(ctx, newDeliverySelector(m.authz, m.agent, PurposeRestart), m.agent)
+				require.ErrorIs(t, err, secret.ErrResolveDecrypt)
+				assert.Nil(t, secrets)
+
+				err = o.run(m)
+				require.Error(t, err)
+				var sre *secretResolutionError
+				require.ErrorAs(t, err, &sre)
+				assert.ErrorIs(t, err, secret.ErrResolveDecrypt)
+				assert.False(t, o.called(m), "nothing reaches the broker")
+				assert.NotContains(t, o.env(m), key, "neither value is delivered")
+			})
+		}
+	}
 }

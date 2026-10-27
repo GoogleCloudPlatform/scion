@@ -171,6 +171,12 @@ type ResolveOpts struct {
 	UserScopeCheck func(secret SecretMeta) bool
 }
 
+// ErrValueAccess matches (errors.Is) a FetchResult.Err for a value the
+// backend's external secret store (GCP Secret Manager) could not return,
+// other than not found. GCPBackend.Resolve skips such a secret; a caller
+// that selects through FetchValues may do the same.
+var ErrValueAccess = errors.New("secret value could not be read from the external secret store")
+
 // FetchResult holds the outcome of fetching one secret's value by its
 // recorded metadata. Value is meaningful only when Err is nil; a failed item
 // always carries an empty Value, never a partially-successful one. It is
@@ -187,6 +193,11 @@ type FetchResult struct {
 	// the local backend it is the record's stored ref (normally empty).
 	// Empty when Err is set.
 	Ref string
+	// Err is store.ErrNotFound for a record deleted, replaced or
+	// reclassified since its metadata was recorded; a *ResolveDecryptError
+	// (errors.Is ErrResolveDecrypt) for a stored value that cannot be
+	// decrypted; an error matching ErrValueAccess for an external secret
+	// store read failure; otherwise the store read error.
 	Err error
 }
 

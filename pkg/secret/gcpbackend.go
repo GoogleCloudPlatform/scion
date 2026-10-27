@@ -231,10 +231,12 @@ func (b *GCPBackend) fetchValue(ctx context.Context, meta SecretMeta) FetchResul
 		if status.Code(err) == codes.NotFound {
 			return FetchResult{Err: store.ErrNotFound}
 		}
+		// A Secret Manager access error matches ErrValueAccess, the
+		// failure Resolve skips for this backend.
 		if permErr := b.wrapGCPError(err, "access secret"); permErr != nil {
-			return FetchResult{Err: permErr}
+			return FetchResult{Err: fmt.Errorf("%w: %w", ErrValueAccess, permErr)}
 		}
-		return FetchResult{Err: err}
+		return FetchResult{Err: fmt.Errorf("%w: %w", ErrValueAccess, err)}
 	}
 
 	// Re-read the DB record and repeat the comparison. A metadata update,

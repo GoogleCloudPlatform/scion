@@ -231,8 +231,14 @@ type secretDeliveryCandidate struct {
 //     applies them;
 //   - values are fetched only for the kept secrets, by recorded metadata,
 //     after every authorization, and not for a scope the test-admin
-//     restriction withholds; an item whose fetch fails is skipped, as
-//     Resolve skipped it;
+//     restriction withholds. An item whose record is gone since it was
+//     listed (store.ErrNotFound), or whose Secret Manager read fails
+//     (secret.ErrValueAccess), is skipped, as Resolve skips it. Any other
+//     fetch failure fails the selection, as it fails Resolve: stored
+//     values that cannot be decrypted are reported together as one
+//     *secret.ResolveDecryptError (errors.Is secret.ErrResolveDecrypt),
+//     so no agent starts with an apparently complete but partial set and
+//     no lower-scope item stands in for the failed one;
 //   - each delivered secret's Ref is the external reference the backend
 //     read its value from (FetchResult.Ref), in the form Resolve reported:
 //     for Secret Manager, the projects/<p>/secrets/<name> resource path
@@ -242,7 +248,8 @@ type secretDeliveryCandidate struct {
 //     of the same name, a progeny secret fills only names no scope set,
 //     then the highest scope wins per type and target.
 //
-// A list error or a credential that cannot be minted is an error.
+// A list error, a credential that cannot be minted or a fetch failure other
+// than the two skipped above is an error.
 func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *deliverySelector, agent *store.Agent) ([]ResolvedSecret, error) {
 	if d.secretBackend == nil || agent == nil {
 		return nil, nil
@@ -347,23 +354,35 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 	}
 
 	merged := make(map[string]secret.SecretWithValue)
+	var decryptFailures []secret.ResolveFailure
 	for _, c := range kept {
+		// A progeny secret fills only names no scope set (kept lists every
+		// scope secret before any progeny secret). It is checked before its
+		// fetch result, as Resolve skips it before reading its value.
+		if c.progeny {
+			if _, exists := merged[c.meta.Name]; exists {
+				continue
+			}
+		}
 		sv := secret.SecretWithValue{SecretMeta: c.meta}
 		if !withheld(c.meta.Scope) {
 			r, ok := values[c.meta.ID]
-			if !ok || r.Err != nil {
+			if !ok || errors.Is(r.Err, store.ErrNotFound) || errors.Is(r.Err, secret.ErrValueAccess) {
 				continue
+			}
+			if r.Err != nil {
+				var rde *secret.ResolveDecryptError
+				if errors.As(r.Err, &rde) {
+					decryptFailures = append(decryptFailures, rde.Failures...)
+					continue
+				}
+				return nil, fmt.Errorf("fetching secret %s (%s scope): %w", c.meta.Name, c.meta.Scope, r.Err)
 			}
 			sv.Value = r.Value
 			// The backend's external reference for the value it read, in
 			// the form Resolve reported (for Secret Manager, the resource
 			// path brokers mount, never the stored "gcpsm:" form).
 			sv.SecretRef = r.Ref
-		}
-		if c.progeny {
-			if _, exists := merged[c.meta.Name]; exists {
-				continue
-			}
 		}
 		if sv.SecretType == "" {
 			sv.SecretType = store.SecretTypeEnvironment
@@ -372,6 +391,9 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 			sv.Target = sv.Name
 		}
 		merged[c.meta.Name] = sv
+	}
+	if len(decryptFailures) > 0 {
+		return nil, &secret.ResolveDecryptError{Failures: decryptFailures}
 	}
 	names := make([]string, 0, len(merged))
 	for n := range merged {
