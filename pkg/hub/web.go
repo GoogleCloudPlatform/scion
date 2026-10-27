@@ -1243,8 +1243,10 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 				if !ws.keepsNoAnonymousSession(r) {
 					session.Values[sessKeyReturnTo] = r.URL.RequestURI()
 					_ = session.Save(r, w)
+					http.Redirect(w, r, "/auth/login", http.StatusFound)
+					return
 				}
-				http.Redirect(w, r, "/auth/login", http.StatusFound)
+				http.Redirect(w, r, ws.noSessionLoginLocation(r.URL.RequestURI()), http.StatusFound)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -3659,13 +3661,15 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 
 		// No authenticated user
 		if isBrowserRequest(r) {
-			// Store returnTo for post-login redirect (not on a dev sign-in
-			// server for a request without a session cookie, see
-			// keepsNoAnonymousSession).
-			if !ws.keepsNoAnonymousSession(r) {
-				session.Values[sessKeyReturnTo] = r.URL.Path
-				_ = session.Save(r, w)
+			// Store returnTo for post-login redirect. On a dev sign-in
+			// server, a request without a session cookie carries it in
+			// the redirect instead (see keepsNoAnonymousSession).
+			if ws.keepsNoAnonymousSession(r) {
+				http.Redirect(w, r, ws.noSessionLoginLocation(r.URL.Path), http.StatusFound)
+				return
 			}
+			session.Values[sessKeyReturnTo] = r.URL.Path
+			_ = session.Save(r, w)
 			http.Redirect(w, r, "/auth/login", http.StatusFound)
 			return
 		}
@@ -3732,6 +3736,11 @@ func (ws *WebServer) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 		session, _ = ws.sessionStore.New(r, webSessionName)
 	}
 	session.Values[sessKeyOAuthState] = state
+	// The sign-in page passes returnTo on when a provider is picked; only
+	// a path on this server is stored.
+	if returnTo := r.URL.Query().Get("returnTo"); returnTo != "" {
+		session.Values[sessKeyReturnTo] = localRedirectPath(returnTo)
+	}
 	if err := session.Save(r, w); err != nil {
 		ws.logger().Error("Failed to save OAuth state to session", "error", err)
 		http.Error(w, "session error", http.StatusInternalServerError)
