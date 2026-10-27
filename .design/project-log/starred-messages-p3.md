@@ -55,6 +55,20 @@
   pins "no update when nothing changed": assign only on change.
 - **New test files using the SQLite fixtures need `//go:build !no_sqlite`** like their siblings,
   or the no_sqlite build breaks.
+- **A human DM message is stored with `uuid.Nil` as its project** (`store.CreateMessage` rejects an
+  empty project); test fixtures pass `uuid.Nil.String()`, as production does.
+- **Around pages page by the `(created, id)` tuple in both halves**, not by strict instants, so a
+  starred message sharing the anchor's instant is found by its ID and paging older from the page
+  loses nothing. Ordinary history's around still uses instant bounds.
+- **`URL.Query()` drops a pair it cannot decode**, so routing on it served `?starred=%zz` as
+  unfiltered history; the history handler routes on the raw query key (`rawQueryHasKey`).
+- **A filter change keeps the conversation key**, so key-only guards miss it: the send-completion
+  backfill checks the thread generation (`fetchId`), every ordinary backfill returns in the
+  starred-only center, and the exit target is bound to its conversation key.
+- **The starred-only refresh refetches around the reader** (or its nearest loaded neighbours) when the
+  reader is further up than the largest page; otherwise the newest window.
+- **Experiment off:** a `?messages=starred` conversation URL shows a notice that all messages are
+  shown, then drops the filter from the URL in place.
 
 ## Verification notes
 
