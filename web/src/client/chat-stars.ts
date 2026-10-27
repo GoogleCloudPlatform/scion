@@ -312,6 +312,24 @@ export class ChatStarsController extends EventTarget {
   }
 
   /**
+   * Record messages a starred-only history page returned as starred,
+   * without a state request: that page already confirms it. Pending
+   * mutations and deleted messages are left alone.
+   */
+  markStarred(messageIds: readonly string[]): void {
+    let changed = false;
+    for (const id of messageIds) {
+      if (!isStarrableMessageId(id) || this.pending.has(id) || this.deleted.has(id)) continue;
+      if (this.states.get(id) === true) continue;
+      this.stale.delete(id);
+      this.failed.delete(id);
+      this.track(id, true);
+      changed = true;
+    }
+    if (changed) this.emit('change');
+  }
+
+  /**
    * A message was deleted: it is unstarred everywhere at once (the hub
    * removed every star of it). Its known state becomes unstarred, a pending
    * mutation is dropped, and lists are told to refetch. A later state
