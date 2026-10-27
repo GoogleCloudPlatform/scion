@@ -40,6 +40,19 @@ export const brokerAreaStyles = css`
     margin-bottom: 1rem;
   }
 
+  .storage-mismatch-alert {
+    display: block;
+    margin-bottom: 1rem;
+  }
+
+  .storage-mismatch {
+    margin: 0.5rem 0 0;
+    padding-left: 1.25rem;
+    font-family: var(--scion-font-mono, monospace);
+    font-size: 0.8125rem;
+    word-break: break-word;
+  }
+
   .stats-row {
     display: flex;
     gap: 2rem;
