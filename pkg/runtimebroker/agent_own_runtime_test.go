@@ -578,11 +578,11 @@ func TestKnownAgentProjectDir_HintOutsideKnownDirsIgnored(t *testing.T) {
 	}
 
 	for _, hint := range []string{"", other, filepath.Dir(other), "/nonexistent/path"} {
-		if got := f.srv.knownAgentProjectDir(ownRTAgent, ownRTProjectID, hint); got != f.projectDir {
+		if got := f.srv.knownAgentProjectDir(context.Background(), ownRTAgent, ownRTProjectID, hint); got != f.projectDir {
 			t.Errorf("hint %q: knownAgentProjectDir = %q, want %q", hint, got, f.projectDir)
 		}
 	}
-	if got := f.srv.knownAgentProjectDir(ownRTAgent, ownRTProjectID, f.projectDir); got != f.projectDir {
+	if got := f.srv.knownAgentProjectDir(context.Background(), ownRTAgent, ownRTProjectID, f.projectDir); got != f.projectDir {
 		t.Errorf("hint naming the known dir: got %q, want %q", got, f.projectDir)
 	}
 
@@ -591,7 +591,7 @@ func TestKnownAgentProjectDir_HintOutsideKnownDirsIgnored(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(other, "agents", "hint-only"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.srv.knownAgentProjectDir("hint-only", ownRTProjectID, other); got != "" {
+	if got := f.srv.knownAgentProjectDir(context.Background(), "hint-only", ownRTProjectID, other); got != "" {
 		t.Errorf("hint of another project: knownAgentProjectDir = %q, want empty", got)
 	}
 
@@ -604,7 +604,7 @@ func TestKnownAgentProjectDir_HintOutsideKnownDirsIgnored(t *testing.T) {
 	if err := config.WriteProjectID(linked, ownRTProjectID); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.srv.knownAgentProjectDir("linked-only", ownRTProjectID, filepath.Dir(linked)); got != linked {
+	if got := f.srv.knownAgentProjectDir(context.Background(), "linked-only", ownRTProjectID, filepath.Dir(linked)); got != linked {
 		t.Errorf("linked hint: knownAgentProjectDir = %q, want %q", got, linked)
 	}
 }

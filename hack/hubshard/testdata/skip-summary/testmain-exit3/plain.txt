@@ -1,0 +1,3 @@
+direct stdout
+PASS
+from TestMain

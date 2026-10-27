@@ -21,7 +21,7 @@
  * Supports invite-based user creation and status filtering (invited/active/suspended).
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { keyed } from 'lit/directives/keyed.js';
 
@@ -50,7 +50,77 @@ interface ConfirmAction {
   variant: 'primary' | 'danger' | 'warning';
   confirmLabel: string;
   user: AdminUser;
+  /**
+   * Runs on confirm. The dialog closes afterwards, unless the action
+   * replaced confirmAction with a new dialog state (kept open to show it).
+   */
   action: () => Promise<void>;
+  /** Delete dialogs only: what blocks the delete, once known. */
+  blockers?: UserDeleteBlockers;
+}
+
+/** An agent of the user that blocks the delete. */
+export interface UserDeleteBlockingAgent {
+  id: string;
+  slug: string;
+  projectId: string;
+  /** '' when no delete was asked for, otherwise deleting, finalizing or failed. */
+  deletionState: string;
+}
+
+/** An active delegation from the user that blocks the delete. */
+export interface UserDeleteBlockingEdge {
+  id: string;
+  delegateType: string;
+  delegateId: string;
+  scopeType: string;
+  scopeId: string;
+}
+
+/**
+ * What blocks deleting a user: the body of
+ * GET /api/v1/users/{id}/delete-blockers and the details of a 409
+ * user_delete_blocked refusal. Each list holds at most 50 entries.
+ */
+export interface UserDeleteBlockers {
+  agents: UserDeleteBlockingAgent[];
+  edges: UserDeleteBlockingEdge[];
+  truncated: boolean;
+}
+
+/**
+ * Reads blocker lists from a delete-blockers body or 409 details. Returns
+ * null for anything that is not that shape.
+ */
+export function parseUserDeleteBlockers(value: unknown): UserDeleteBlockers | null {
+  if (!value || typeof value !== 'object') return null;
+  const v = value as Record<string, unknown>;
+  if (!Array.isArray(v.agents) && !Array.isArray(v.edges)) return null;
+  const str = (x: unknown): string => (typeof x === 'string' ? x : '');
+  const agents = (Array.isArray(v.agents) ? v.agents : []).map((a) => {
+    const r = (a ?? {}) as Record<string, unknown>;
+    return {
+      id: str(r.id),
+      slug: str(r.slug),
+      projectId: str(r.projectId),
+      deletionState: str(r.deletionState),
+    };
+  });
+  const edges = (Array.isArray(v.edges) ? v.edges : []).map((e) => {
+    const r = (e ?? {}) as Record<string, unknown>;
+    return {
+      id: str(r.id),
+      delegateType: str(r.delegateType),
+      delegateId: str(r.delegateId),
+      scopeType: str(r.scopeType),
+      scopeId: str(r.scopeId),
+    };
+  });
+  return { agents, edges, truncated: v.truncated === true };
+}
+
+function hasDeleteBlockers(b: UserDeleteBlockers | undefined): b is UserDeleteBlockers {
+  return !!b && (b.agents.length > 0 || b.edges.length > 0);
 }
 
 interface InviteCodeEntry {
@@ -644,6 +714,20 @@ export class ScionPageAdminUsers extends LitElement {
       color: var(--scion-text, #1e293b);
     }
 
+    .delete-blockers ul {
+      margin: 0.25rem 0 0.75rem;
+      padding-left: 1.25rem;
+    }
+
+    .delete-blockers-heading {
+      font-weight: 600;
+    }
+
+    .delete-blockers-state,
+    .delete-blockers-more {
+      color: var(--scion-text-muted, #64748b);
+    }
+
     .confirm-user {
       display: flex;
       align-items: center;
@@ -940,7 +1024,7 @@ export class ScionPageAdminUsers extends LitElement {
   private async deleteUser(
     userId: string,
     userLabel?: string
-  ): Promise<{ securityReview: boolean }> {
+  ): Promise<{ securityReview: boolean; blockers?: UserDeleteBlockers }> {
     const response = await apiFetch(`/api/v1/users/${userId}`, {
       method: 'DELETE',
     });
@@ -948,6 +1032,12 @@ export class ScionPageAdminUsers extends LitElement {
       const errorBody = (await response.json().catch(() => null)) as Record<string, unknown> | null;
       if (errorBody) {
         const label = userLabel ?? userId;
+
+        const apiError = errorBody.error as Record<string, unknown> | undefined;
+        if (response.status === 409 && apiError?.code === 'user_delete_blocked') {
+          const blockers = parseUserDeleteBlockers(apiError.details);
+          if (blockers) return { securityReview: false, blockers };
+        }
 
         const lockout = parseLockoutResponse(errorBody);
         if (lockout) {
@@ -1097,7 +1187,7 @@ export class ScionPageAdminUsers extends LitElement {
       user.status === 'invited'
         ? 'This will remove the invitation. The user will no longer be able to sign in.'
         : 'This action is permanent and cannot be undone. All data associated with this user will be removed.';
-    this.confirmAction = {
+    const confirm: ConfirmAction = {
       title: label,
       message,
       variant: 'danger',
@@ -1105,6 +1195,10 @@ export class ScionPageAdminUsers extends LitElement {
       user,
       action: async () => {
         const result = await this.deleteUser(user.id, user.displayName || user.email);
+        if (result.blockers) {
+          this.confirmAction = { ...confirm, blockers: result.blockers };
+          return;
+        }
         if (result.securityReview) return;
         this.showFeedback(
           'success',
@@ -1115,18 +1209,38 @@ export class ScionPageAdminUsers extends LitElement {
         );
       },
     };
+    this.confirmAction = confirm;
+    void this.loadDeleteBlockers(confirm);
+  }
+
+  /**
+   * Fetches what blocks deleting the dialog's user and shows it in the
+   * dialog, if that same dialog is open. A failed lookup shows nothing:
+   * the delete itself refuses and lists the blockers.
+   */
+  private async loadDeleteBlockers(confirm: ConfirmAction): Promise<void> {
+    let blockers: UserDeleteBlockers | null = null;
+    try {
+      const res = await apiFetch(`/api/v1/users/${confirm.user.id}/delete-blockers`);
+      if (res.ok) blockers = parseUserDeleteBlockers(await res.json());
+    } catch {
+      blockers = null;
+    }
+    if (!blockers || this.confirmAction !== confirm || this.actionInProgress) return;
+    this.confirmAction = { ...confirm, blockers };
   }
 
   private async executeConfirmedAction(): Promise<void> {
-    if (!this.confirmAction) return;
+    const current = this.confirmAction;
+    if (!current) return;
     this.actionInProgress = true;
     try {
-      await this.confirmAction.action();
+      await current.action();
     } catch (err) {
       this.showFeedback('danger', err instanceof Error ? err.message : 'Action failed');
     } finally {
       this.actionInProgress = false;
-      this.confirmAction = null;
+      if (this.confirmAction === current) this.confirmAction = null;
     }
   }
 
@@ -1988,7 +2102,9 @@ export class ScionPageAdminUsers extends LitElement {
               <span class="user-email">${action.user.email}</span>
             </div>
           </div>
-          <p>${action.message}</p>
+          ${hasDeleteBlockers(action.blockers)
+            ? this.renderDeleteBlockers(action.blockers)
+            : html`<p>${action.message}</p>`}
         </div>
         <sl-button
           slot="footer"
@@ -2003,10 +2119,62 @@ export class ScionPageAdminUsers extends LitElement {
           slot="footer"
           variant=${action.variant}
           ?loading=${this.actionInProgress}
+          ?disabled=${hasDeleteBlockers(action.blockers)}
           @click=${() => this.executeConfirmedAction()}
           >${action.confirmLabel}</sl-button
         >
       </sl-dialog>
+    `;
+  }
+
+  /** Lists what blocks a user delete inside the confirm dialog. */
+  private renderDeleteBlockers(blockers: UserDeleteBlockers): TemplateResult {
+    return html`
+      <div class="delete-blockers">
+        <p>
+          This user cannot be deleted while these exist. Delete these agents first, including agents
+          started by them; the user's delegations end with them.
+        </p>
+        ${blockers.agents.length > 0
+          ? html`
+              <div class="delete-blockers-heading">Agents</div>
+              <ul class="delete-blockers-agents">
+                ${blockers.agents.map(
+                  (a) => html`
+                    <li>
+                      <a href="/agents/${a.id}">${a.slug || a.id}</a>
+                      ${a.deletionState
+                        ? html`<span class="delete-blockers-state"
+                            >(delete ${a.deletionState})</span
+                          >`
+                        : nothing}
+                    </li>
+                  `
+                )}
+              </ul>
+            `
+          : nothing}
+        ${blockers.edges.length > 0
+          ? html`
+              <div class="delete-blockers-heading">Active delegations</div>
+              <ul class="delete-blockers-edges">
+                ${blockers.edges.map(
+                  (e) => html`
+                    <li>
+                      ${e.delegateType === 'agent'
+                        ? html`to agent <a href="/agents/${e.delegateId}">${e.delegateId}</a>`
+                        : html`to ${e.delegateType} ${e.delegateId}`}
+                      ${e.scopeId ? html`in ${e.scopeType} ${e.scopeId}` : nothing}
+                    </li>
+                  `
+                )}
+              </ul>
+            `
+          : nothing}
+        ${blockers.truncated
+          ? html`<p class="delete-blockers-more">More are not shown.</p>`
+          : nothing}
+      </div>
     `;
   }
 

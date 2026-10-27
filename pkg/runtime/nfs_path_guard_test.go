@@ -18,7 +18,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -91,111 +90,6 @@ func TestValidateNotExportRoot_Invalid(t *testing.T) {
 				t.Error("expected error for isolation violation, got nil")
 			}
 		})
-	}
-}
-
-// --- NFSSharedDirsToVolumeMounts tests ---
-
-func TestNFSSharedDirsToVolumeMounts_Basic(t *testing.T) {
-	resolved := ResolvedWorkspace{
-		HostPath: "/mnt/nfs/ws1/projects/proj1/workspace",
-		HostBase: "/mnt/nfs/ws1",
-		Backend:  "nfs",
-		SharedDirs: map[string]ResolvedSharedDir{
-			"data": {
-				HostPath:           "/mnt/nfs/ws1/projects/proj1/shared-dirs/data",
-				ServerRelativePath: "projects/proj1/shared-dirs/data",
-			},
-			"cache": {
-				HostPath:           "/mnt/nfs/ws1/projects/proj1/shared-dirs/cache",
-				ServerRelativePath: "projects/proj1/shared-dirs/cache",
-			},
-		},
-	}
-
-	dirs := []api.SharedDir{
-		{Name: "data", ReadOnly: false},
-		{Name: "cache", ReadOnly: true, InWorkspace: true},
-	}
-
-	mounts, err := NFSSharedDirsToVolumeMounts(resolved, dirs, "/workspace")
-	if err != nil {
-		t.Fatalf("NFSSharedDirsToVolumeMounts: %v", err)
-	}
-
-	if len(mounts) != 2 {
-		t.Fatalf("len(mounts) = %d, want 2", len(mounts))
-	}
-
-	// data → /scion-volumes/data
-	if mounts[0].Source != "/mnt/nfs/ws1/projects/proj1/shared-dirs/data" {
-		t.Errorf("mounts[0].Source = %q, want NFS path", mounts[0].Source)
-	}
-	if mounts[0].Target != "/scion-volumes/data" {
-		t.Errorf("mounts[0].Target = %q, want /scion-volumes/data", mounts[0].Target)
-	}
-	if mounts[0].ReadOnly {
-		t.Error("mounts[0].ReadOnly should be false")
-	}
-
-	// cache → /workspace/.scion-volumes/cache (InWorkspace=true)
-	if mounts[1].Source != "/mnt/nfs/ws1/projects/proj1/shared-dirs/cache" {
-		t.Errorf("mounts[1].Source = %q, want NFS path", mounts[1].Source)
-	}
-	if mounts[1].Target != "/workspace/.scion-volumes/cache" {
-		t.Errorf("mounts[1].Target = %q, want /workspace/.scion-volumes/cache", mounts[1].Target)
-	}
-	if !mounts[1].ReadOnly {
-		t.Error("mounts[1].ReadOnly should be true")
-	}
-}
-
-func TestNFSSharedDirsToVolumeMounts_MissingDir(t *testing.T) {
-	resolved := ResolvedWorkspace{
-		HostBase:   "/mnt/nfs/ws1",
-		Backend:    "nfs",
-		SharedDirs: map[string]ResolvedSharedDir{},
-	}
-
-	dirs := []api.SharedDir{
-		{Name: "nonexistent"},
-	}
-
-	_, err := NFSSharedDirsToVolumeMounts(resolved, dirs, "/workspace")
-	if err == nil {
-		t.Error("expected error for missing shared dir in resolution")
-	}
-}
-
-func TestNFSSharedDirsToVolumeMounts_Empty(t *testing.T) {
-	resolved := ResolvedWorkspace{Backend: "nfs"}
-	mounts, err := NFSSharedDirsToVolumeMounts(resolved, nil, "/workspace")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if mounts != nil {
-		t.Errorf("expected nil mounts for empty dirs, got %v", mounts)
-	}
-}
-
-func TestNFSSharedDirsToVolumeMounts_IsolationGuard(t *testing.T) {
-	// Simulate a bad resolution where shared dir path equals the export root.
-	resolved := ResolvedWorkspace{
-		HostPath: "/mnt/nfs/ws1/projects/proj1/workspace",
-		HostBase: "/mnt/nfs/ws1",
-		Backend:  "nfs",
-		SharedDirs: map[string]ResolvedSharedDir{
-			"bad": {
-				HostPath: "/mnt/nfs/ws1", // equals export root — should be rejected
-			},
-		},
-	}
-
-	dirs := []api.SharedDir{{Name: "bad"}}
-
-	_, err := NFSSharedDirsToVolumeMounts(resolved, dirs, "/workspace")
-	if err == nil {
-		t.Error("expected error when shared dir path equals export root")
 	}
 }
 
@@ -285,15 +179,10 @@ func TestNFSResolveRealize_EndToEnd(t *testing.T) {
 		t.Errorf("desc.Target = %q, want /workspace", desc.Target)
 	}
 
-	// Shared dirs should produce NFS-backed mounts
-	dirs := []api.SharedDir{{Name: "data"}}
-	mounts, err := NFSSharedDirsToVolumeMounts(resolved, dirs, "/workspace")
-	if err != nil {
-		t.Fatalf("NFSSharedDirsToVolumeMounts: %v", err)
-	}
+	// Shared dirs resolve next to the workspace.
 	wantSDPath := filepath.Join("/mnt/nfs", "ws1", "projects", "my-project-id", "shared-dirs", "data")
-	if len(mounts) != 1 || mounts[0].Source != wantSDPath {
-		t.Errorf("shared dir mount source = %v, want %q", mounts, wantSDPath)
+	if got := resolved.SharedDirs["data"].HostPath; got != wantSDPath {
+		t.Errorf("shared dir host path = %q, want %q", got, wantSDPath)
 	}
 }
 
@@ -341,7 +230,7 @@ func TestLocalResolveRealize_Unchanged(t *testing.T) {
 // is still used for local backends. This test documents the invariant.
 func TestLocalSharedDirs_Unchanged(t *testing.T) {
 	// The local path calls config.GetSharedDirPath which works on the
-	// local filesystem. For NFS, NFSSharedDirsToVolumeMounts is used instead.
+	// local filesystem. For NFS, pkg/agent resolves shared dirs through projectfs.
 	// This test just ensures local path is still exposed for backward compat.
 	backend := NewLocalBackend()
 	resolved, err := backend.Resolve(ResolveInput{

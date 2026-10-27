@@ -1,0 +1,10 @@
+=== RUN   TestPassLogs
+    toy_test.go:35: passing log
+direct stdout
+    toy_test.go:38: multi
+        line
+=== RUN   TestPassLogs/sub
+    toy_test.go:39: sub log
+--- PASS: TestPassLogs (0.00s)
+    --- PASS: TestPassLogs/sub (0.00s)
+PASS

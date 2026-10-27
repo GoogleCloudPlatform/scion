@@ -43,8 +43,8 @@ type moveSharerManager struct {
 	checker *agent.AgentManager
 }
 
-func (m *moveSharerManager) CheckMoveMarkers(ctx context.Context, projectPath, projectID, agentName, sharerKey, moveID string) ([]string, error) {
-	return m.checker.CheckMoveMarkers(ctx, projectPath, projectID, agentName, sharerKey, moveID)
+func (m *moveSharerManager) CheckMoveMarkers(ctx context.Context, projectPath, projectID, hubProjectID, agentName, sharerKey, moveID string) ([]string, error) {
+	return m.checker.CheckMoveMarkers(ctx, projectPath, projectID, hubProjectID, agentName, sharerKey, moveID)
 }
 
 const sharerMoveID = "reincarnation-5590"

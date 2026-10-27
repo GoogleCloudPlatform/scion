@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -33,10 +34,22 @@ import (
 const routedCSPReport = `[{"type":"csp-violation","body":{"effectiveDirective":"require-trusted-types-for",` +
 	`"blockedURL":"trusted-types-sink","sourceFile":"https://hub.example/assets/main.js","lineNumber":3,"sample":"x"}}]`
 
+// routedCSPReportN is a report that is its own violation for each n, so
+// the hub does not collapse it as a repeat of another n.
+func routedCSPReportN(n int) string {
+	return fmt.Sprintf(`[{"type":"csp-violation","body":{"effectiveDirective":"script-src-%d"}}]`, n)
+}
+
 // postCSPReport sends a report, without signing in, from remoteAddr.
 func postCSPReport(h http.Handler, remoteAddr, body string) *httptest.ResponseRecorder {
+	return postCSPReportAs(h, remoteAddr, "application/reports+json", body)
+}
+
+// postCSPReportAs sends a report with contentType, without signing in,
+// from remoteAddr.
+func postCSPReportAs(h http.Handler, remoteAddr, contentType, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/csp-reports", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/reports+json")
+	req.Header.Set("Content-Type", contentType)
 	req.RemoteAddr = remoteAddr
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -129,7 +142,8 @@ func signedOutGet(h http.Handler, path string) *httptest.ResponseRecorder {
 }
 
 // TestCSPReportRouteRateLimited: one client is refused with 429 past its
-// burst and nothing more is logged; the requests before it were logged.
+// burst and nothing more is logged; the requests before it (each its own
+// violation) were logged.
 func TestCSPReportRouteRateLimited(t *testing.T) {
 	var buf bytes.Buffer
 	srv := routedCSPServer(t, &buf)
@@ -139,14 +153,14 @@ func TestCSPReportRouteRateLimited(t *testing.T) {
 	srv.cspReportLimiter.global.nowFunc = func() time.Time { return now }
 
 	for i := 0; i < cspReportBurst; i++ {
-		if rec := postCSPReport(srv.Handler(), "192.0.2.20:5000", routedCSPReport); rec.Code != http.StatusNoContent {
+		if rec := postCSPReport(srv.Handler(), "192.0.2.20:5000", routedCSPReportN(i)); rec.Code != http.StatusNoContent {
 			t.Fatalf("request %d: status = %d, want 204", i+1, rec.Code)
 		}
 	}
 	if n := cspRecordCount(t, &buf); n != cspReportBurst {
 		t.Fatalf("%d records logged within the burst, want %d", n, cspReportBurst)
 	}
-	rec := postCSPReport(srv.Handler(), "192.0.2.20:5000", routedCSPReport)
+	rec := postCSPReport(srv.Handler(), "192.0.2.20:5000", routedCSPReportN(cspReportBurst))
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("past the burst: status = %d, want 429", rec.Code)
 	}
@@ -216,10 +230,10 @@ func TestCSPReportRouteChargesHubWidePerRecord(t *testing.T) {
 	srv.cspReportLimiter.perIP.nowFunc = func() time.Time { return now }
 	srv.cspReportLimiter.global.nowFunc = func() time.Time { return now }
 
-	one := `{"type":"csp-violation","body":{"effectiveDirective":"script-src"}}`
+	// Each report is its own violation, so none is collapsed as a repeat.
 	parts := make([]string, 15)
 	for i := range parts {
-		parts[i] = one
+		parts[i] = fmt.Sprintf(`{"type":"csp-violation","body":{"effectiveDirective":"script-src-%d"}}`, i)
 	}
 	if rec := postCSPReport(srv.Handler(), "192.0.2.50:5000", "["+strings.Join(parts, ",")+"]"); rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204", rec.Code)
@@ -240,5 +254,52 @@ func TestCSPReportRouteChargesHubWidePerRecord(t *testing.T) {
 	}
 	if ok, _ := srv.cspReportLimiter.AllowRecord(); ok {
 		t.Fatalf("more than %d hub-wide tokens were left: the request was not charged per record", left)
+	}
+}
+
+// safariCSPReport is one report as Safari sends it to the report-to
+// endpoint: a single object (no array) with Content-Type
+// application/csp-report.
+const safariCSPReport = `{"type":"csp-violation","url":"https://hub.example/projects/p1/chat/c1",` +
+	`"body":{"documentURL":"https://hub.example/projects/p1/chat/c1","disposition":"report","referrer":"",` +
+	`"effectiveDirective":"require-trusted-types-for","blockedURL":"trusted-types-sink",` +
+	`"originalPolicy":"require-trusted-types-for 'script'; report-to csp","statusCode":200,"sample":""}}`
+
+// TestCSPReportRouteCollapsesOnePageLoad: one page load's worth of
+// identical reports from one client, each sent as its own request in
+// Safari's shape, all get 204 and give one record.
+func TestCSPReportRouteCollapsesOnePageLoad(t *testing.T) {
+	var buf bytes.Buffer
+	srv := routedCSPServer(t, &buf)
+	now := time.Unix(1_700_000_000, 0)
+	srv.cspReportLimiter.perIP.nowFunc = func() time.Time { return now }
+	srv.cspReportLimiter.global.nowFunc = func() time.Time { return now }
+
+	for i := 0; i < cspReportBurst; i++ {
+		rec := postCSPReportAs(srv.Handler(), "192.0.2.60:5000", "application/csp-report", safariCSPReport)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("report %d: status = %d, want 204; body %q", i+1, rec.Code, rec.Body.String())
+		}
+	}
+	if n := cspRecordCount(t, &buf); n != 1 {
+		t.Fatalf("%d records for %d identical reports, want 1", n, cspReportBurst)
+	}
+	// Repeats take no hub-wide record token: only the one record did.
+	left := cspReportGlobalBurst - 1
+	for i := 0; i < left; i++ {
+		if ok, _ := srv.cspReportLimiter.AllowRecord(); !ok {
+			t.Fatalf("hub-wide token %d of the %d left was refused", i+1, left)
+		}
+	}
+	if ok, _ := srv.cspReportLimiter.AllowRecord(); ok {
+		t.Fatal("more hub-wide tokens than the burst minus one record")
+	}
+}
+
+// TestCSPReportHandlerCollapsesRepeats: the hub's report handler collapses
+// repeats.
+func TestCSPReportHandlerCollapsesRepeats(t *testing.T) {
+	if newCSPReportHandler(newCSPReportLimiter(nil), false).Dedupe == nil {
+		t.Fatal("the report handler logs every repeat")
 	}
 }

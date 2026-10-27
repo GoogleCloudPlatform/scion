@@ -17,6 +17,10 @@ through the whole setup in your browser — no config files to edit. Install Sci
 (below), then run `scion server start`.
 :::
 
+:::note[On Windows?]
+The Windows build (`scion-windows-amd64.zip` and `scion-windows-arm64.zip` on GitHub Releases, verified against `SHA256SUMS`) is a Hub client only: it supports connecting to a remote Hub (`hub`, `project`, `config`, `message`, `secret`, `skills`) and reaching agents over Conduit (`ssh`, `ssh-config`, `tunnel`, `vscode`), while server, Runtime Broker, and local container lifecycle commands exit with a `"not supported on Windows"` error. See [Windows](/scion/hosted/user/windows/) for how to install it and which commands it supports.
+:::
+
 ## Install with Homebrew (recommended)
 
 The easiest way to get a ready-to-run Scion — CLI plus embedded web UI — is the community
@@ -48,8 +52,9 @@ Start the Workstation combo server:
 scion server start
 ```
 
-Your browser opens to the [Onboarding Wizard](/scion/getting-started/onboarding/) at
-`http://127.0.0.1:8080/onboarding`, which handles the rest of setup for you — runtime detection
+Your browser opens, signed in through a single-use link, to the
+[Onboarding Wizard](/scion/getting-started/onboarding/) at
+`http://127.0.0.1:8080/onboarding` (run `scion server open` later for a new sign-in link), which handles the rest of setup for you — runtime detection
 (Docker, Podman, or Apple Container), identity configuration, container image setup (pulling from
 `ghcr.io/homebrew-scion`), and creating your first workspace.
 

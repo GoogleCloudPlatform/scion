@@ -37,6 +37,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -255,7 +256,7 @@ func TestSigningKeySource_SharedAndPreconfiguredLabels(t *testing.T) {
 // exists, else memory-only.
 func TestSigningKeySource_ConduitGrantRing(t *testing.T) {
 	assert.Equal(t, signingKeySourceEphemeral, conduitGrantKeySource(nil))
-	assert.Equal(t, signingKeySourceSharedScope, conduitGrantKeySource(bytes.Repeat([]byte{3}, 32)))
+	assert.Equal(t, signingKeySourceSharedScope, conduitGrantKeySource(secret.NewLegacyValueCipher("fake-test-shared-secret")))
 
 	tiaCaptureAudit(t)
 	srv, _, err := tiaNewServer(t, tiaGateServerConfig())
@@ -906,9 +907,11 @@ var tiaKeyMaterialSites = map[string]string{
 	"oidckeys.go:generateRSAKeyPair:crypto/rsa.GenerateKey":                                         "oidc",
 	"oidckeys.go:decodePEMPrivateKey:crypto/x509.ParsePKCS8PrivateKey":                              "oidc",
 	"download_signing.go:computeSkillFileHMAC:crypto/hmac.New":                                      "download_url",
+	"download_signing.go:computeSkillFileHMACv2:crypto/hmac.New":                                    "download_url",
+	"attachment_delivery.go:deliveryMACv2:crypto/hmac.New":                                          "attachment_delivery",
 	"attachment_delivery.go:deliveryMAC:crypto/hmac.New":                                            "attachment_delivery",
-	"authorized_list.go:newListCursorSealer:crypto/aes.NewCipher":                                   "list_cursor",
-	"authorized_list.go:newListCursorSealer:crypto/cipher.NewGCM":                                   "list_cursor",
+	"authorized_list.go:listCursorAEAD:crypto/aes.NewCipher":                                        "list_cursor",
+	"authorized_list.go:listCursorAEAD:crypto/cipher.NewGCM":                                        "list_cursor",
 	"conduit_grants.go:bootstrap:github.com/GoogleCloudPlatform/scion/pkg/conduit/grant.NewRingKey": "conduit_grant",
 	"conduit_grants.go:rotate:github.com/GoogleCloudPlatform/scion/pkg/conduit/grant.NewRingKey":    "conduit_grant",
 	"web.go:NewWebServer:github.com/GoogleCloudPlatform/scion/pkg/keyring.CookieCodecs":             "web_session",

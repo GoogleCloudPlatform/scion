@@ -34,6 +34,7 @@ type quickstartProbeRecorder struct {
 	statusToken string
 	statusURL   string
 	opened      []string
+	signInCalls int
 }
 
 // stubQuickstartProbes replaces the readiness wait, the onboarding status
@@ -47,11 +48,13 @@ func stubQuickstartProbes(t *testing.T, ready bool, status onboardingStatusResul
 	t.Setenv("HOME", t.TempDir())
 	rec := &quickstartProbeRecorder{}
 	origWait, origTimeout, origStatus := quickstartWaitReady, quickstartReadyTimeout, quickstartOnboardingStatus
-	origAllowed, origOpen := quickstartBrowserAllowed, quickstartOpenBrowser
+	origAllowed, origOpen, origSignIn, origTTY := quickstartBrowserAllowed, quickstartOpenBrowser, quickstartDevSignIn, quickstartStdoutIsTerminal
 	t.Cleanup(func() {
 		quickstartWaitReady, quickstartReadyTimeout, quickstartOnboardingStatus = origWait, origTimeout, origStatus
-		quickstartBrowserAllowed, quickstartOpenBrowser = origAllowed, origOpen
+		quickstartBrowserAllowed, quickstartOpenBrowser, quickstartDevSignIn, quickstartStdoutIsTerminal = origAllowed, origOpen, origSignIn, origTTY
 	})
+	// stdout counts as a terminal unless a test says otherwise.
+	quickstartStdoutIsTerminal = func() bool { return true }
 	quickstartReadyTimeout = time.Millisecond
 	quickstartWaitReady = func(string, int, time.Duration) (bool, healthProbeResponse) {
 		if ready {
@@ -69,6 +72,11 @@ func stubQuickstartProbes(t *testing.T, ready bool, status onboardingStatusResul
 	quickstartOpenBrowser = func(url string) error {
 		rec.opened = append(rec.opened, url)
 		return nil
+	}
+	// No server answers for sign-in links unless a test sets one.
+	quickstartDevSignIn = func(baseURL, token, next string) (devSignInLink, error) {
+		rec.signInCalls++
+		return devSignInLink{}, errDevSignInUnavailable
 	}
 	return rec
 }

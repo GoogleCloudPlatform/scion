@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -57,7 +58,7 @@ func TestCreateTopic_DualWrite_WritesConversation(t *testing.T) {
 	require.NoError(t, s.CreateTopic(ctx, topic))
 
 	// Assert topic row has conversation_id.
-	require.Equal(t, convID, getTopicConvID(t, db, "topic-dw-1"))
+	require.Equal(t, convID, hubtestutil.GetTopicConvID(t, db, "topic-dw-1"))
 
 	// Assert conversation row exists with correct fields.
 	c := getConversation(t, db, convID)
@@ -144,7 +145,7 @@ func TestCreateTopic_AutoGeneratesConversation(t *testing.T) {
 	}))
 
 	// Topic should have an auto-generated conversation_id.
-	convID := getTopicConvID(t, db, "topic-autogen")
+	convID := hubtestutil.GetTopicConvID(t, db, "topic-autogen")
 	require.NotEmpty(t, convID, "topic should have auto-generated conversation_id")
 
 	// Conversation row should exist with correct fields.
@@ -176,7 +177,7 @@ func TestCreateTopic_NoConversationsTable_LegacyPath(t *testing.T) {
 	}))
 
 	// Topic created with no conversation_id.
-	require.Empty(t, getTopicConvID(t, db, "topic-legacy"))
+	require.Empty(t, hubtestutil.GetTopicConvID(t, db, "topic-legacy"))
 }
 
 // ---------------------------------------------------------------------------
@@ -194,7 +195,7 @@ func TestEnsureGeneralTopic_DualWrite_WritesConversation(t *testing.T) {
 	require.NotEmpty(t, id)
 
 	// Assert the topic has a conversation_id.
-	convID := getTopicConvID(t, db, id)
+	convID := hubtestutil.GetTopicConvID(t, db, id)
 	require.NotEmpty(t, convID, "general topic should have conversation_id")
 
 	// Assert conversations row.
@@ -269,7 +270,7 @@ VALUES
 	require.Equal(t, 2, result.MessageCount)
 
 	// Assert topic has conversation_id.
-	require.Equal(t, convID, getTopicConvID(t, db, "promoted-topic"))
+	require.Equal(t, convID, hubtestutil.GetTopicConvID(t, db, "promoted-topic"))
 
 	// Assert conversations row.
 	c := getConversation(t, db, convID)
@@ -403,7 +404,7 @@ VALUES
 
 func TestPromoteDM_EmptyConversationID_PreservesExisting(t *testing.T) {
 	// Use a store WITHOUT the conversations table so ConversationID stays empty.
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 
 	// Messages table WITH conversation_id column.
 	_, err := db.Exec(`
@@ -477,7 +478,7 @@ func TestPromoteDM_NoConversationID_SkipsDualWrite(t *testing.T) {
 	// conversations table is ABSENT, ConversationID stays empty and no
 	// conversation row is created. A future reader should not infer that
 	// production takes this path.
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 
 	// Messages table only — NO conversations table.
 	_, err := db.Exec(`
@@ -540,10 +541,10 @@ VALUES ('msg-10', 'proj-1', 'user:bob', 'user-2', 'agent:helper', 'agent-2', 'we
 // ---------------------------------------------------------------------------
 
 func TestBackfillTopicConversations_CreatesConversations(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 
 	// Create conversations table first.
-	_, err := db.Exec(conversationsTableDDL)
+	_, err := db.Exec(hubtestutil.ConversationsTableDDL)
 	require.NoError(t, err)
 
 	s := NewWebChatStore(db, "sqlite")
@@ -565,7 +566,7 @@ func TestBackfillTopicConversations_CreatesConversations(t *testing.T) {
 
 	// Verify no conversation_id set yet.
 	for _, name := range []string{"alpha", "beta", "gamma"} {
-		require.Empty(t, getTopicConvID(t, db, "topic-"+name))
+		require.Empty(t, hubtestutil.GetTopicConvID(t, db, "topic-"+name))
 	}
 
 	// Reset the migration marker so backfill re-runs.
@@ -578,7 +579,7 @@ func TestBackfillTopicConversations_CreatesConversations(t *testing.T) {
 
 	// Verify all topics now have conversation_id and matching conversation rows.
 	for _, name := range []string{"alpha", "beta", "gamma"} {
-		convID := getTopicConvID(t, db, "topic-"+name)
+		convID := hubtestutil.GetTopicConvID(t, db, "topic-"+name)
 		require.NotEmpty(t, convID, "topic %s should have conversation_id after backfill", name)
 
 		c := getConversation(t, db, convID)
@@ -591,9 +592,9 @@ func TestBackfillTopicConversations_CreatesConversations(t *testing.T) {
 }
 
 func TestBackfillTopicConversations_Idempotent(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 
-	_, err := db.Exec(conversationsTableDDL)
+	_, err := db.Exec(hubtestutil.ConversationsTableDDL)
 	require.NoError(t, err)
 
 	s := NewWebChatStore(db, "sqlite")
@@ -615,7 +616,7 @@ func TestBackfillTopicConversations_Idempotent(t *testing.T) {
 	s2 := NewWebChatStore(db, "sqlite")
 	require.NoError(t, s2.Init())
 
-	convID1 := getTopicConvID(t, db, "topic-idem")
+	convID1 := hubtestutil.GetTopicConvID(t, db, "topic-idem")
 	require.NotEmpty(t, convID1)
 	count1 := countConversations(t, db)
 
@@ -625,7 +626,7 @@ func TestBackfillTopicConversations_Idempotent(t *testing.T) {
 	s3 := NewWebChatStore(db, "sqlite")
 	require.NoError(t, s3.Init())
 
-	convID2 := getTopicConvID(t, db, "topic-idem")
+	convID2 := hubtestutil.GetTopicConvID(t, db, "topic-idem")
 	require.Equal(t, convID1, convID2, "conversation_id should not change on re-run")
 	require.Equal(t, count1, countConversations(t, db), "no duplicate conversations")
 }
@@ -651,7 +652,7 @@ func TestBackfillTopicConversations_SkipsWithoutConversationsTable(t *testing.T)
 	require.NoError(t, s2.Init())
 
 	// Topic should still have no conversation_id.
-	require.Empty(t, getTopicConvID(t, db, "topic-no-conv-table"))
+	require.Empty(t, hubtestutil.GetTopicConvID(t, db, "topic-no-conv-table"))
 }
 
 // ---------------------------------------------------------------------------
@@ -763,9 +764,9 @@ func TestCreateTopic_DualWrite_UTX1_NoDeadlock(t *testing.T) {
 	// openTestMemorySQLite pins MaxOpenConns=1, the production SQLite pool
 	// constraint. If hasConversationsTable() were called inside a tx, this
 	// would deadlock.
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 
-	_, err := db.Exec(conversationsTableDDL)
+	_, err := db.Exec(hubtestutil.ConversationsTableDDL)
 	require.NoError(t, err)
 
 	s := NewWebChatStore(db, "sqlite")
@@ -791,9 +792,9 @@ func TestCreateTopic_DualWrite_UTX1_NoDeadlock(t *testing.T) {
 // hasConversationsTable() is called twice (auto-gen check + shouldDualWrite)
 // but both precede BeginTx, so no ambient-pool contention under the tx.
 func TestCreateTopic_AutoGen_UTX1_NoDeadlock(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite") // MaxOpenConns=1
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite") // MaxOpenConns=1
 
-	_, err := db.Exec(conversationsTableDDL)
+	_, err := db.Exec(hubtestutil.ConversationsTableDDL)
 	require.NoError(t, err)
 
 	s := NewWebChatStore(db, "sqlite")
@@ -813,15 +814,15 @@ func TestCreateTopic_AutoGen_UTX1_NoDeadlock(t *testing.T) {
 	require.NoError(t, err, "CreateTopic (auto-gen) should complete without deadlock")
 
 	// Verify the conversation was actually created.
-	convID := getTopicConvID(t, db, "topic-utx1-autogen")
+	convID := hubtestutil.GetTopicConvID(t, db, "topic-utx1-autogen")
 	require.NotEmpty(t, convID, "auto-generated conversation_id should be set")
 	require.NotNil(t, getConversation(t, db, convID), "conversation row should exist")
 }
 
 func TestEnsureGeneralTopic_DualWrite_UTX1_NoDeadlock(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite") // MaxOpenConns=1
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite") // MaxOpenConns=1
 
-	_, err := db.Exec(conversationsTableDDL)
+	_, err := db.Exec(hubtestutil.ConversationsTableDDL)
 	require.NoError(t, err)
 
 	s := NewWebChatStore(db, "sqlite")
@@ -835,9 +836,9 @@ func TestEnsureGeneralTopic_DualWrite_UTX1_NoDeadlock(t *testing.T) {
 }
 
 func TestPromoteDM_DualWrite_UTX1_NoDeadlock(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite") // MaxOpenConns=1
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite") // MaxOpenConns=1
 
-	_, err := db.Exec(conversationsTableDDL)
+	_, err := db.Exec(hubtestutil.ConversationsTableDDL)
 	require.NoError(t, err)
 
 	// Create the messages table too — PromoteDM needs it.

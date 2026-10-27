@@ -138,6 +138,12 @@ const (
 	// deleteBlocksStart).
 	ErrCodeDeleteInProgress = "delete_in_progress"
 
+	// ErrCodeEncryptionPolicyMismatch is returned (409) when the database
+	// encryption policy refuses a secret payload write from this hub's
+	// encryption keyring (ptone/scion#1530 §6). Nothing was written; there
+	// is no unencrypted fallback.
+	ErrCodeEncryptionPolicyMismatch = "encryption_policy_mismatch"
+
 	// ErrCodeStartOutcomeUnknown is returned (504) by a create or env
 	// submit whose synchronous dispatch to the runtime broker ended without
 	// an answer (the dispatch deadline, or no response to a sent request).
@@ -271,6 +277,13 @@ const (
 	// remove the last direct-user project-owner binding.
 	// D7: normalized from SCREAMING_SNAKE to lower_snake_case (approved breaking change).
 	ErrCodeLastOwner = "last_owner"
+
+	// ErrCodeUserDeleteBlocked is returned with 409 when a user cannot be
+	// deleted because agents or active delegations depend on the user.
+	// details.agents and details.edges list them (each capped) and
+	// details.truncated reports more. GET /api/v1/users/{id}/delete-blockers
+	// returns the same lists without attempting the delete.
+	ErrCodeUserDeleteBlocked = "user_delete_blocked"
 
 	// ErrCodeInvalidCursor is returned for every authorizedList pagination
 	// cursor failure: malformed input, truncation, a tampered byte, a
@@ -418,6 +431,10 @@ func WriteErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusConflict
 		code = ErrCodeDeleteInProgress
 		message = DeleteInProgressMessage
+	case errors.Is(err, store.ErrEncryptionPolicyMismatch):
+		statusCode = http.StatusConflict
+		code = ErrCodeEncryptionPolicyMismatch
+		message = "The database encryption policy refused this write: this hub's encryption keyring does not match it. Nothing was stored."
 	case errors.Is(err, store.ErrVersionConflict):
 		statusCode = http.StatusConflict
 		code = ErrCodeVersionConflict

@@ -380,11 +380,17 @@ const inboxScriptPath = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:
 // stream comes on stdin, or, with $3, from that file in the inbox (a
 // Substrate upload). It never follows a symlink on the inbox path, creates
 // directories 0700 with umask 077, extracts into a temporary directory and
-// moves it into place only under an atomic mkdir claim, so a repeated or
-// concurrent delivery of the same message never nests. Until the move
-// succeeds, the exit trap removes the claim with the temporary directory,
-// so a failed write leaves no claim. A message directory that already
-// exists counts as delivered.
+// moves it into place only under an atomic claim, so a repeated or
+// concurrent delivery of the same message never nests. The claim is a file
+// created by the shell's noclobber redirection (O_EXCL in dash, bash and
+// busybox ash), not by mkdir(1): some mkdir implementations report success
+// when they lose the race to a directory created concurrently (uutils
+// coreutils 0.8 to 0.10 do; 0.11.0 fixed it, but hosts and images may
+// still ship an affected version), which let two writers move. An existing
+// claim of any type, including a directory claim from an older broker,
+// holds the message. Until the move succeeds, the exit trap removes the
+// claim with the temporary directory, so a failed write leaves no claim. A
+// message directory that already exists counts as delivered.
 const inboxWriteScript = inboxScriptPath + `set -eu
 umask 077
 home="${HOME:?}"
@@ -401,7 +407,7 @@ claimed=""
 cleanup() {
   rm -rf "$tmp"
   if [ -n "$src" ]; then rm -f "$inbox/$src"; fi
-  if [ -n "$claimed" ]; then rmdir "$claim" 2>/dev/null || true; fi
+  if [ -n "$claimed" ]; then rm -f "$claim"; fi
 }
 mkdir -m 700 "$tmp"
 trap cleanup EXIT
@@ -410,7 +416,7 @@ if [ -n "$src" ]; then
 else
   tar -x -C "$tmp" -f -
 fi
-if mkdir "$claim" 2>/dev/null; then
+if (set -C; : > "$claim") 2>/dev/null; then
   claimed=1
   if [ ! -e "$inbox/$1" ]; then
     mv "$tmp" "$inbox/$1"
@@ -546,8 +552,9 @@ func (d *inboxDelivery) writeChunked(ctx context.Context, rt scionrt.Runtime, co
 }
 
 // inboxPruneScript removes message directories older than $1 days from the
-// agent's inbox, with their claims, plus claims without a message
-// directory and temporary directories older than an hour. It touches
+// agent's inbox, with their claims, plus claims (files, or directories from
+// an older broker) without a message directory and temporary directories
+// older than an hour. It touches
 // nothing outside the inbox, follows no symlink (find without -L; rm -rf
 // does not follow links inside a directory) and skips top-level .nfs files.
 // A removal that fails (an NFS file still open inside an old directory)
@@ -559,9 +566,9 @@ find "$inbox" -mindepth 1 -maxdepth 1 -type d ! -name '.*' -mtime +"$1" | while 
   n="${d##*/}"
   rm -rf -- "$inbox/$n" "$inbox/.claim-$n" || true
 done
-find "$inbox" -mindepth 1 -maxdepth 1 -type d -name '.claim-*' -mmin +60 | while read -r c; do
+find "$inbox" -mindepth 1 -maxdepth 1 \( -type f -o -type d \) -name '.claim-*' -mmin +60 | while read -r c; do
   n="${c##*/.claim-}"
-  if [ ! -e "$inbox/$n" ]; then rmdir -- "$c" 2>/dev/null || true; fi
+  if [ ! -e "$inbox/$n" ]; then rm -f -- "$c" 2>/dev/null || rmdir -- "$c" 2>/dev/null || true; fi
 done
 find "$inbox" -mindepth 1 -maxdepth 1 -type d -name '.tmp-*' -mmin +60 -exec rm -rf -- {} + || true
 find "$inbox" -mindepth 1 -maxdepth 1 -type f -name '.upload-*' -mmin +60 -exec rm -f -- {} + || true

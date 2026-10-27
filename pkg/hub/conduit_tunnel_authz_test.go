@@ -374,10 +374,11 @@ func TestConduitTunnelAuthz_RevokedClosed4401WithinRecheckInterval(t *testing.T)
 			deadline := f.tracked(t, c, revoked.st.ID()).Deadline()
 			require.True(t, deadline.After(f.relayClock.Now().Add(recheck)), "only the sweep can catch the revocation")
 
+			w := f.watchSessions(t, c)
 			f.revokeKind(t, kind)
 			f.relayClock.Advance(recheck)
 
-			requireAuthzExpired(t, revoked.end(t))
+			requireClosedAuthzExpired(t, revoked.end(t), c, w)
 			f.metrics.wait(t, conduitAuthzTriggerSweep+"/"+conduitAuthzOutcomeClosed+"/"+kind, 1)
 			other.tunnelEcho(t, "after")
 			assert.Nil(t, c.ls.Err(), "the session stays up")

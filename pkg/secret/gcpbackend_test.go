@@ -3127,3 +3127,74 @@ func TestR7_Item5_MetaEdit_RerunConverges(t *testing.T) {
 		t.Errorf("expected a single re-run to converge (unlike a true conflict), got action=%q err=%v served=%q", action, err, sv.Value)
 	}
 }
+
+// TestGCPBackend_Set_ReferenceOnlyKeepsInternalBackup pins the
+// ptone/scion#1530 §6 rule that a reference-only update preserves existing
+// backup bytes: Set on an existing Hub-internal record (a signing-key
+// backup) keeps its local EncryptedValue byte for byte and only points
+// SecretRef at Secret Manager, also while the database encryption policy
+// is active; a user secret stays reference-only.
+func TestGCPBackend_Set_ReferenceOnlyKeepsInternalBackup(t *testing.T) {
+	ctx := context.Background()
+	// The backup is sealed under k1 while the policy allows only k2: the
+	// prepared-policy case, where re-writing the unchanged bytes is not a
+	// payload change and must pass the fence.
+	backup := ciphertestRing(t, "k1")
+	sealed, err := backup.Encrypt("ZmFrZS1zaWduaW5nLWtleQ==")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, withPolicy := range []bool{false, true} {
+		name := "no policy"
+		if withPolicy {
+			name = "policy active"
+		}
+		t.Run(name, func(t *testing.T) {
+			backend, _ := createTestGCPBackend(t)
+			st := backend.store
+			// An existing internal backup row with local ciphertext, written
+			// before the policy (a policy only ever finds such rows).
+			if err := st.CreateSecret(ctx, &store.Secret{ID: tid("gcp-internal-backup"), Key: "agent_signing_key",
+				EncryptedValue: sealed, SecretType: store.SecretTypeInternal, Scope: store.ScopeHub, ScopeID: "test-hub-id"}); err != nil {
+				t.Fatal(err)
+			}
+			if withPolicy {
+				applied, err := st.(store.SecretEncryptionStore).UpdateEncryptionPolicy(ctx, 0, store.EncryptionPolicy{
+					Generation: 1, MinReaderVersion: store.EncryptionPolicyMinReaderVersion,
+					AllowedWriteKIDs: []string{"k2"}, RequiredReadKIDs: []string{"k2"}, State: store.EncryptionPolicyPrepared,
+				})
+				if err != nil || !applied {
+					t.Fatalf("policy: %v %v", applied, err)
+				}
+			}
+			if _, _, err := backend.Set(ctx, &SetSecretInput{Name: "agent_signing_key", Value: "ZmFrZS1zaWduaW5nLWtleQ==",
+				SecretType: store.SecretTypeInternal, Scope: store.ScopeHub, ScopeID: "test-hub-id"}); err != nil {
+				t.Fatalf("Set: %v", err)
+			}
+			got, err := st.GetSecret(ctx, "agent_signing_key", store.ScopeHub, "test-hub-id")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.EncryptedValue != sealed {
+				t.Fatal("a reference-only update erased or changed the internal backup bytes")
+			}
+			if !strings.HasPrefix(got.SecretRef, "gcpsm:") {
+				t.Fatalf("SecretRef = %q, want a gcpsm: reference", got.SecretRef)
+			}
+
+			// A user secret stays reference-only.
+			if _, _, err := backend.Set(ctx, &SetSecretInput{Name: "USER_KEY", Value: "fake-user-value",
+				Scope: ScopeUser, ScopeID: "user-1"}); err != nil {
+				t.Fatalf("Set user: %v", err)
+			}
+			u, err := st.GetSecret(ctx, "USER_KEY", ScopeUser, "user-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if u.EncryptedValue != "" || !strings.HasPrefix(u.SecretRef, "gcpsm:") {
+				t.Fatalf("user secret row: value %d bytes, ref %q; want reference-only", len(u.EncryptedValue), u.SecretRef)
+			}
+		})
+	}
+}

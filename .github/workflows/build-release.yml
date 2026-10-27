@@ -28,10 +28,17 @@ on:
         required: true
         type: string
 
+# Fork guard: forks (e.g. ptone/scion) mirror upstream tags, so without this every
+# upstream tag push would also run this pipeline on the fork, publishing a fork
+# release, moving the fork's channel branch, and merging a LATEST.json PR into fork
+# main. Every job carries the guard (not just the roots) so nothing relies solely on
+# skip propagation through `needs`. Same repository guard as build-nightly.yml (applied to every job here). When called
+# via workflow_call, `github` is the caller's context, so upstream callers still run.
 jobs:
   build:
     name: Build Multi-Arch Binaries
     runs-on: ubuntu-latest
+    if: github.repository == 'GoogleCloudPlatform/scion'
     permissions:
       contents: read     # Only needs to read code for building
     strategy:
@@ -51,6 +58,16 @@ jobs:
           - goos: darwin
             goarch: arm64
             output: scion-darwin-arm64
+          # Windows builds: scion.exe in a .zip (what Windows opens without
+          # extra tools). The docs name these assets exactly.
+          - goos: windows
+            goarch: amd64
+            output: scion-windows-amd64
+            archive: zip
+          - goos: windows
+            goarch: arm64
+            output: scion-windows-arm64
+            archive: zip
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803  # v6
@@ -67,14 +84,13 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6
         with:
           go-version-file: 'go.mod'
-          cache: true
+          cache: false  # release artifacts never restore a cache (zizmor cache-poisoning)
 
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6
         with:
           node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: 'web/package-lock.json'
+          package-manager-cache: false  # release artifacts never restore a cache (zizmor cache-poisoning)
 
       - name: Build Web UI
         working-directory: ./web
@@ -114,19 +130,26 @@ jobs:
           OUTPUT_NAME: ${{ matrix.output }}
         run: |
           mkdir -p dist
-          go build -ldflags "${LDFLAGS}" -o dist/scion ./cmd/scion
-          tar -czvf "${OUTPUT_NAME}.tar.gz" -C dist scion
+          BIN=scion
+          if [ "${GOOS}" = "windows" ]; then BIN=scion.exe; fi
+          go build -ldflags "${LDFLAGS}" -o "dist/${BIN}" ./cmd/scion
+          if [ "${GOOS}" = "windows" ]; then
+            (cd dist && zip -q "../${OUTPUT_NAME}.zip" "${BIN}")
+          else
+            tar -czvf "${OUTPUT_NAME}.tar.gz" -C dist "${BIN}"
+          fi
 
       - name: Upload artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.output }}
-          path: ${{ matrix.output }}.tar.gz
+          path: ${{ matrix.output }}.${{ matrix.archive || 'tar.gz' }}
           if-no-files-found: error
 
   build-plugins:
     name: Build Plugin Binaries
     runs-on: ubuntu-latest
+    if: github.repository == 'GoogleCloudPlatform/scion'
     permissions:
       contents: read     # Only needs to read code for building
     strategy:
@@ -200,7 +223,7 @@ jobs:
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6
         with:
           go-version-file: '${{ matrix.module_dir }}/go.mod'
-          cache: true
+          cache: false  # release artifacts never restore a cache (zizmor cache-poisoning)
 
       - name: Build plugin binary
         env:
@@ -218,7 +241,7 @@ jobs:
           tar -czvf "${GITHUB_WORKSPACE}/${OUTPUT_NAME}.tar.gz" -C dist "${BINARY_NAME}"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ matrix.output }}
           path: ${{ matrix.output }}.tar.gz
@@ -228,6 +251,7 @@ jobs:
     name: Create GitHub Release
     needs: [build, build-plugins]
     runs-on: ubuntu-latest
+    if: github.repository == 'GoogleCloudPlatform/scion'
     permissions:
       contents: write    # Needs to create releases and push branches
     outputs:
@@ -262,7 +286,7 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Download all artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: binaries
 
@@ -289,7 +313,7 @@ jobs:
           mv -- "$sums" SHA256SUMS
 
       - name: Create Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ steps.channel.outputs.tag }}
           files: release/*
@@ -334,6 +358,7 @@ jobs:
     name: Update LATEST.json
     needs: release
     runs-on: ubuntu-latest
+    if: github.repository == 'GoogleCloudPlatform/scion'
     permissions:
       contents: write
       pull-requests: write    # Needed to create and merge PRs

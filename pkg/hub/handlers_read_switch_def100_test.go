@@ -54,7 +54,7 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestDEF100_T1_ProductionWriter_ReadResolver(t *testing.T) {
-	wcs, db := newTestWebChatStoreWithConversations(t)
+	wcs, db := hubNewTestWebChatStoreWithConversations(t)
 	defer db.Close() //nolint:errcheck
 
 	ctx := context.Background()
@@ -193,7 +193,7 @@ func TestDEF100_T2_S1_ProductionWriter_HTTPEndpoint(t *testing.T) {
 	projectID := rsProject(t, s, "def100-t2-project")
 
 	// Create a real webchat store backed by an in-memory SQLite DB.
-	wcs, wcsDB := newTestWebChatStoreWithConversations(t)
+	wcs, wcsDB := hubNewTestWebChatStoreWithConversations(t)
 	defer wcsDB.Close() //nolint:errcheck
 	srv.SetWebChatStore(wcs)
 
@@ -272,7 +272,7 @@ func TestDEF100_T2_S1_ProductionWriter_HTTPEndpoint(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDEF100_T3_BackfilledTopic(t *testing.T) {
-	wcs, db := newTestWebChatStoreWithConversations(t)
+	wcs, db := hubNewTestWebChatStoreWithConversations(t)
 	defer db.Close() //nolint:errcheck
 
 	ctx := context.Background()
@@ -336,7 +336,7 @@ func TestDEF100_T3_BackfilledTopic(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDEF100_T4_NonNativeThread_ExternalRef(t *testing.T) {
-	wcs, db := newTestWebChatStoreWithConversations(t)
+	wcs, db := hubNewTestWebChatStoreWithConversations(t)
 	defer db.Close() //nolint:errcheck
 
 	ctx := context.Background()
@@ -394,7 +394,7 @@ func TestDEF100_T5_S3_ProductionWriter_HTTPEndpoint(t *testing.T) {
 	agentID := rsAgent(t, s, "def100-t5-agent", projectID)
 
 	// Create a real webchat store.
-	wcs, wcsDB := newTestWebChatStoreWithConversations(t)
+	wcs, wcsDB := hubNewTestWebChatStoreWithConversations(t)
 	defer wcsDB.Close() //nolint:errcheck
 	srv.SetWebChatStore(wcs)
 
