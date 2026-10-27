@@ -152,7 +152,8 @@ type Server struct {
 	noticed     map[string]bool          // reconcile notices already logged (pruned each pass)
 	// hijacked: runners killed as hijacked whose registration GitHub has not let go
 	// yet (busy while it still shows the untrusted job running), -> first kill time.
-	// Later kills of the same runner log at WARNING; cleared once the registration is gone.
+	// Later kills of the same runner log at WARNING; cleared once the registration is
+	// gone, or by reconcile after cancelledTTL.
 	hijacked map[string]time.Time
 }
 

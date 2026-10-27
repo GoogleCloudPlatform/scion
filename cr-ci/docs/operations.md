@@ -104,7 +104,8 @@ for waits until the stale registration is reaped. That happened in redeploy #2
 job's image tag differs from the current `runner/` tree hash; deploy the job next.
 (The earlier rule, runner first, came from the mediator's `/home/runner/work`
 work folder, which needs a runner image that links it to `/scratch`; every image
-since PR-img does.)
+since PR-img does.) The mediator-first order assumes the job runs a runner image at or
+after PR-img; with an older one, deploy the job first.
 
 Every script is idempotent, so re-running one after a partial failure is the
 recovery. A mediator deploy restarts the single instance and loses pending
@@ -264,7 +265,7 @@ logged (a unit test enforces this).
 | `cancel` | INFO | Job finished while queued: its idle runner stopped, or left alone because it runs another job (`action=none_busy`) |
 | `claim_consumed` / `claim_rejected` | INFO / WARNING | Runner fetched its JIT config / was refused: `identity_missing` or `identity_invalid` (401, claim kept; repeated ones from outside the runner are worth a look), or an unknown, used or expired token (410) |
 | `SECURITY_REJECT_FORK_PR` | WARNING | A run outside the allowlist was refused a runner: a fork PR (`reason=head_repository_differs`), or any event but `push` and `pull_request` (`reason=event_not_allowed:<event>`). **Alert on this.** |
-| `SECURITY_KILL_HIJACKED_RUNNER` | ERROR / WARNING | An untrusted job started on a cr-ci runner minted for another job; the execution was cancelled and the registration deleted ([architecture](architecture.md#residual-risk-label-matched-job-assignment)). **Alert on the ERROR and review the run.** While GitHub still shows the untrusted job running it refuses to delete the busy registration: the ERROR then has `registration_deleted=false` and GitHub's 422 in `registration_error`, and every later guard pass retries at WARNING (`repeat=true`) until GitHub times the job out, about 10 minutes, and the WARNING `hijacked runner's registration deleted` follows. The execution is gone from the first line on |
+| `SECURITY_KILL_HIJACKED_RUNNER` | ERROR / WARNING | An untrusted job started on a cr-ci runner minted for another job; the execution was cancelled and the registration deleted ([architecture](architecture.md#residual-risk-label-matched-job-assignment)). **Alert on the ERROR and review the run.** While GitHub still shows the untrusted job running it refuses to delete the busy registration: the ERROR then has `registration_deleted=false` and GitHub's 422 in `registration_error`, and every later guard pass retries at WARNING (`repeat=true`) until GitHub times the job out, about 10 minutes. The WARNING `hijacked runner's registration deleted` follows when GitHub's `completed` delivery for that job arrives (if it is lost, reconcile forgets the runner after an hour). The execution is gone from the first line on |
 | `runner_swap` | INFO | A runner started a different legitimate job; harmless. `inherited_budget` is the task time that job has left (`TASK_TIMEOUT` minus `execution_age`) |
 | `runner_swap_low_budget` | WARNING | That job inherited less than 20 minutes; if it fails on the task timeout, re-run it. Frequent ones: lower `RUNNER_IDLE_TIMEOUT` or raise `TASK_TIMEOUT` ([architecture](architecture.md#flow)) |
 | `webhook_rejected` | WARNING | Bad signature, malformed payload or repo outside `TARGET_REPOS` |

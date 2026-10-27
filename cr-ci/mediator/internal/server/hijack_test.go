@@ -662,10 +662,68 @@ func TestHijackBusyRegistration(t *testing.T) {
 	if !strings.Contains(h.logs.String(), "hijacked runner's registration deleted") {
 		t.Errorf("no deletion line after the registration was released:\n%s", h.logs.String())
 	}
-	if _, ok := h.srv.hijacked["cr-job-100"]; ok {
+	if h.hijackedHas("cr-job-100") {
 		t.Error("hijacked runner still remembered after its registration was deleted")
 	}
 	if kills("ERROR") != 1 {
 		t.Errorf("ERROR kill lines = %d, want still 1", kills("ERROR"))
 	}
+}
+
+// TestHijackBusyRegistrationReleasedOnCompleted (D11 live test, F1): in practice GitHub
+// lets the busy registration go when it times the untrusted job out, and reconcile
+// no longer visits a completed job, so the release is seen through the hijacker's
+// completed webhook: the registration is deleted and the runner forgotten. If that
+// delivery is lost, reconcile prunes the entry after cancelledTTL.
+func TestHijackBusyRegistrationReleasedOnCompleted(t *testing.T) {
+	setup := func(t *testing.T) *harness {
+		h := newHarness(t, harnessOpts{})
+		h.addSameRepoRun(10)
+		h.queued(100, 10)
+		h.gh.AddRun(fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: "contributor/example-repo", Event: "pull_request", Status: "in_progress",
+			Jobs: []fakes.GitHubJob{{ID: 120, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-100"}}})
+		h.gh.SetRunnerState("cr-job-100", "online", true)
+		if code, out := h.webhook(inProgress(120, 12, testRepo, "cr-job-100")); code != http.StatusOK || !strings.Contains(out, "killed") {
+			t.Fatalf("in_progress: %d %q", code, out)
+		}
+		if !h.hijackedHas("cr-job-100") {
+			t.Fatalf("busy hijacked runner not remembered:\n%s", h.logs.String())
+		}
+		return h
+	}
+	t.Run("completed delivery", func(t *testing.T) {
+		h := setup(t)
+		// GitHub times the job out and lets the registration go.
+		h.gh.SetJob(12, fakes.GitHubJob{ID: 120, Status: "completed", Labels: []string{testLabel}, RunnerName: "cr-job-100"})
+		h.gh.SetRunnerState("cr-job-100", "offline", false)
+		h.webhook(jobEvent("completed", 120, 12, testRepo, "failure", "cr-job-100"))
+		if !strings.Contains(h.logs.String(), "hijacked runner's registration deleted") {
+			t.Errorf("no deletion line after the completed delivery:\n%s", h.logs.String())
+		}
+		if h.hijackedHas("cr-job-100") {
+			t.Error("hijacked runner still remembered after its registration was deleted")
+		}
+	})
+	t.Run("completed delivery lost", func(t *testing.T) {
+		h := setup(t)
+		h.gh.SetJob(12, fakes.GitHubJob{ID: 120, Status: "completed", Labels: []string{testLabel}, RunnerName: "cr-job-100"})
+		h.reconcile()
+		if !h.hijackedHas("cr-job-100") {
+			t.Fatal("entry pruned before cancelledTTL")
+		}
+		h.clock.Add(cancelledTTL + time.Minute)
+		h.reconcile()
+		if h.hijackedHas("cr-job-100") {
+			t.Error("entry not pruned after cancelledTTL")
+		}
+	})
+}
+
+// hijackedHas reports, under dispatchMu, whether the server remembers runner name as
+// a hijacked runner whose registration GitHub has not let go yet.
+func (h *harness) hijackedHas(name string) bool {
+	h.srv.dispatchMu.Lock()
+	defer h.srv.dispatchMu.Unlock()
+	_, ok := h.srv.hijacked[name]
+	return ok
 }
