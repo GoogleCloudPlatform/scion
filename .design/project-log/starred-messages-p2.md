@@ -51,7 +51,7 @@
   populations, rollback, single connection, access loss and regain). Human DM retrieval runs on the
   real hub (`web/e2e/chat-stars.spec.ts`).
 - **Attachment-only messages.** A native send with attachments and no text cannot be persisted
-  today: the message store refuses an empty body (tracked separately). The star excerpt shows
+  today: the message store refuses an empty body (ptone/scion#6146). The star excerpt shows
   "Attachment" for an empty stored body.
 
 ## Follow-ups (from the phase 1 list)
