@@ -287,6 +287,7 @@ var hubOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/update-available", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/update-available", Method: "DELETE"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/update-status", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/admin/maintenance/releases", Method: "GET"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT},
