@@ -143,6 +143,28 @@ export const LAST_UPDATE_LABELS: Record<string, string> = {
  */
 const SELECTABLE_CLASSES = new Set(['same', 'upgrade', 'switch-newer']);
 
+const CHANNEL_SOURCE_DESCRIPTIONS: Record<string, string> = {
+  selection: 'set by the last successful update',
+  config: 'from the server settings',
+  detected: 'detected from the running version',
+};
+
+/**
+ * Where the effective channel came from (update-status channel.source),
+ * for example "selection (set by the last successful update)".
+ */
+export function channelSourceLabel(source: string | undefined): string {
+  if (!source) return 'unknown';
+  const desc = CHANNEL_SOURCE_DESCRIPTIONS[source];
+  return desc ? `${source} (${desc})` : source;
+}
+
+/** The hub's pin (update-status pin): following latest, or pinned to a tag. */
+export function pinLabel(pin: string | undefined): string {
+  if (!pin || pin === LATEST_VALUE) return 'latest (follows the newest release)';
+  return `pinned to ${pin} (automatic updates do not move it)`;
+}
+
 /** Whether a parsed body has the parts of a releases response the card uses. */
 export function isReleasesResponse(data: unknown): data is ReleasesResponse {
   if (!data || typeof data !== 'object') return false;
@@ -438,6 +460,12 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
       font-size: 0.8125rem;
     }
 
+    .channel-source-note {
+      margin-top: 0.375rem;
+      font-size: 0.75rem;
+      color: var(--scion-text-muted, #64748b);
+    }
+
     .update-blocked {
       color: var(--scion-text-muted, #64748b);
     }
@@ -687,6 +715,22 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
                 : nothing}</span
             >
           </div>
+          ${st.channel.effective
+            ? html`
+                <div class="release-field">
+                  <span class="release-label">Channel source:</span>
+                  <span class="channel-source">${channelSourceLabel(st.channel.source)}</span>
+                </div>
+              `
+            : nothing}
+          ${st.mode.effective === 'release'
+            ? html`
+                <div class="release-field">
+                  <span class="release-label">Pin:</span>
+                  <span class="pin-state">${pinLabel(st.pin)}</span>
+                </div>
+              `
+            : nothing}
           <div class="release-field">
             <span class="release-label">Installer:</span>
             <span class="installer-strategy">${inst.strategy}</span>
@@ -801,6 +845,13 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
                 >`
               : nothing}
           </span>
+        </div>
+        <div class="channel-source-note">
+          The hub's channel is ${this.status?.channel.effective || 'unknown'} (from:
+          ${this.status?.channel.source || 'unknown'})${this.status?.pin &&
+          this.status.pin !== LATEST_VALUE
+            ? html`, pinned to ${this.status.pin}`
+            : nothing}.
         </div>
         ${cat.stale
           ? html`

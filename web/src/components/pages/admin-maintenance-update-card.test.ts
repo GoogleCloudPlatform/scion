@@ -21,7 +21,9 @@ import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 // refresh with "as of" and the stale warning, and when Update is enabled.
 
 import {
+  channelSourceLabel,
   isReleasesResponse,
+  pinLabel,
   releaseBadges,
   releaseDisabledReason,
   type CatalogRelease,
@@ -697,5 +699,73 @@ describe('Refresh and staleness', () => {
     el.status = status({ updatePolicy: 'auto' });
     await settle(el);
     expect(releaseRequests).toHaveLength(1);
+  });
+});
+
+// Release-manager requirement: the card says where the effective channel
+// came from (update-status channel.source) and whether the hub is pinned.
+describe('Channel source and pin', () => {
+  it.each([
+    ['selection', 'selection (set by the last successful update)'],
+    ['config', 'config (from the server settings)'],
+    ['detected', 'detected (detected from the running version)'],
+    ['other', 'other'],
+    [undefined, 'unknown'],
+    ['', 'unknown'],
+  ])('channelSourceLabel(%s)', (source, label) => {
+    expect(channelSourceLabel(source)).toBe(label);
+  });
+
+  it.each([
+    ['latest', 'latest (follows the newest release)'],
+    ['', 'latest (follows the newest release)'],
+    [undefined, 'latest (follows the newest release)'],
+    ['v0.3.0-preview.4', 'pinned to v0.3.0-preview.4 (automatic updates do not move it)'],
+  ])('pinLabel(%s)', (pin, label) => {
+    expect(pinLabel(pin)).toBe(label);
+  });
+
+  function text(e: Card, selector: string): string {
+    return root(e).querySelector(selector)?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+  }
+
+  it('shows a configured channel that follows latest', async () => {
+    el = await mount();
+    expect(text(el, '.channel-source')).toBe('config (from the server settings)');
+    expect(text(el, '.pin-state')).toBe('latest (follows the newest release)');
+    expect(text(el, '.channel-source-note')).toBe("The hub's channel is nightly (from: config).");
+  });
+
+  it('shows a selected channel pinned to a tag', async () => {
+    el = await mount(
+      [catalog()],
+      status({
+        channel: { effective: 'preview', configured: 'nightly', source: 'selection' },
+        pin: 'v0.3.0-preview.4',
+      })
+    );
+    expect(text(el, '.channel-source')).toBe('selection (set by the last successful update)');
+    expect(text(el, '.pin-state')).toBe(
+      'pinned to v0.3.0-preview.4 (automatic updates do not move it)'
+    );
+    expect(text(el, '.channel-source-note')).toBe(
+      "The hub's channel is preview (from: selection), pinned to v0.3.0-preview.4."
+    );
+  });
+
+  it('shows a detected channel', async () => {
+    el = await mount(
+      [catalog()],
+      status({ channel: { effective: 'nightly', source: 'detected' } })
+    );
+    expect(text(el, '.channel-source')).toBe('detected (detected from the running version)');
+    expect(text(el, '.channel-source-note')).toBe("The hub's channel is nightly (from: detected).");
+  });
+
+  it('shows the channel source but no pin or release panel in git mode', async () => {
+    el = await mount([catalog()], status({ mode: { effective: 'git', repoConfigured: true } }));
+    expect(text(el, '.channel-source')).toBe('config (from the server settings)');
+    expect(root(el).querySelector('.pin-state')).toBeNull();
+    expect(root(el).querySelector('.channel-source-note')).toBeNull();
   });
 });
