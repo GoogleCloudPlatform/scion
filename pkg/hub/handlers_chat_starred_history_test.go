@@ -108,6 +108,7 @@ func TestChatStarredHistory_GateAndValidation(t *testing.T) {
 		// A value URL.Query cannot decode is still the starred variant.
 		base + "?starred=%zz",
 		base + "?x=1&starred=%",
+		base + "?x=1;starred=true",
 		starredHistoryPath(f.topicA, "starred=true"),
 		starredHistoryPath(f.topicA, "unknown=1"),
 		starredHistoryPath(f.topicA, "limit=0"),
@@ -394,9 +395,11 @@ func TestChatStarredHistory_DMs(t *testing.T) {
 			assert.Empty(t, decodeHistory(t, f.session(t, f.owner, http.MethodGet, starredHistoryPath(d.humanKey), nil)).Messages)
 			assert.Equal(t, http.StatusNotFound, f.session(t, f.admin, http.MethodGet, starredHistoryPath(d.humanKey), nil).Code)
 
-			// A never-used DM has no starred messages.
+			// A never-used DM has no starred messages, and no around target.
 			unused := f.dm(t, f.member, "agent", f.agentB.ID)
 			assert.Empty(t, decodeHistory(t, f.session(t, f.member, http.MethodGet, starredHistoryPath(unused), nil)).Messages)
+			assert.Equal(t, http.StatusNotFound,
+				f.session(t, f.member, http.MethodGet, starredHistoryPath(unused, "around="+uuid.NewString()), nil).Code)
 		})
 	}
 }

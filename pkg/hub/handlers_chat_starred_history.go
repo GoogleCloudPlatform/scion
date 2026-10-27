@@ -55,10 +55,12 @@ const (
 
 // rawQueryHasKey reports whether the raw query string names key, whether
 // or not its pair decodes. URL.Query drops a pair it cannot decode
-// (starred=%zz), which would serve a malformed filter as unfiltered
-// history; the starred variant must see it and answer 400.
+// (starred=%zz) or that holds a ';' (x=1;starred=true), which would serve
+// a malformed filter as unfiltered history; the starred variant must see
+// it and answer 400. Pairs are split on both '&' and ';'.
 func rawQueryHasKey(rawQuery, key string) bool {
-	for _, pair := range strings.Split(rawQuery, "&") {
+	pairs := strings.FieldsFunc(rawQuery, func(r rune) bool { return r == '&' || r == ';' })
+	for _, pair := range pairs {
 		name, _, _ := strings.Cut(pair, "=")
 		if name == key {
 			return true
@@ -125,7 +127,12 @@ func (s *Server) handleStarredHistory(w http.ResponseWriter, r *http.Request, ke
 	sc, refusal, rerr := s.resolveStarScope(r, call, permInboxRead, key)
 	switch {
 	case rerr != nil && rerr.kind == chatReadAbsent:
-		// A never-used DM has no messages, so no starred ones.
+		// A never-used DM has no messages, so no starred ones; an around
+		// target there cannot be a starred message (the shared 404).
+		if aroundID != "" {
+			writeStarNotFound(w)
+			return
+		}
 		writeJSON(w, http.StatusOK, chatHistoryResponse{Messages: []store.Message{}})
 		return
 	case rerr != nil:
