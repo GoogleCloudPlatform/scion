@@ -158,10 +158,11 @@ projects). The upgrade runs in this order:
    (Admin → Maintenance, or
    `POST /api/v1/admin/maintenance/migrations/project-storage-migrate/run`;
    run it with `dryRun` first) moves the hub's own trees, such as hub-local
-   `~/.scion/projects/<slug>` workspaces. Node-local shared dirs on other
-   Runtime Brokers are not moved by this release and must be copied by hand
-   into `<ProjectRoot>/shared-dirs/<name>` on the share. No `scion` CLI
-   command runs this migration.
+   `~/.scion/projects/<slug>` workspaces. Each Runtime Broker moves its own
+   node-local shared dirs into `<ProjectRoot>/shared-dirs/<name>` on the
+   share on its first start after upgrade with its shared-dir layout on the
+   share (copy-only, never overwriting; the source is kept as
+   `<name>.migrated-<ts>`). No `scion` CLI command runs the hub migration.
 
 Going back after step 2 means restoring `shared_dir_storage` and moving any
 workspaces created on the export back by hand.

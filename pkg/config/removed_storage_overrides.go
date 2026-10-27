@@ -22,14 +22,17 @@ import (
 
 // ProjectStorageMigrationText is the one operator-facing description of
 // how existing project data reaches the project storage layout in this
-// build. Every warning, refusal and doc line that points at the migration
+// build: the hub maintenance migration for the hub's trees, and each
+// broker's start hook (runtimebroker migrateLocalSharedDirs) for its
+// node-local shared dirs. Every warning, refusal and doc line that points at the migration
 // uses it, so none names a command that does not exist (the migration is a
 // hub maintenance migration, not a CLI command) or a step this build does
 // not ship. It is a clause that starts in lower case.
 const ProjectStorageMigrationText = "the hub's project-storage-migrate maintenance migration " +
 	"(Admin → Maintenance, or POST /api/v1/admin/maintenance/migrations/project-storage-migrate/run; run it with dryRun first) " +
-	"moves the hub's own trees; node-local shared dirs on other Runtime Brokers are not moved by this release " +
-	"and must be copied by hand into <ProjectRoot>/shared-dirs/<name> on the share"
+	"moves the hub's own trees; each Runtime Broker moves its own node-local shared dirs into <ProjectRoot>/shared-dirs/<name> " +
+	"on the share on its first start after upgrade with its shared-dir layout on the share " +
+	"(copy-only, never overwriting; the source is kept as <name>.migrated-<ts>)"
 
 // removedStorageOverride is one removed per-runtime or per-profile storage
 // override that a settings source still sets: its settings path and the

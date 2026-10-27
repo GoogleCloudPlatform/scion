@@ -18,7 +18,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -81,7 +80,11 @@ func sharedDirRecordPinRefusal(agentDir string, layout projectfs.Layout, sd *con
 		return nil
 	}
 	for _, name := range []string{legacySharedDirStorageRecordFile, legacySharedDirStorageRecordFile + retiredSharedDirRecordSuffix} {
-		pinned, ok := nfsPinnedSharedDirs(filepath.Join(agentDir, name))
+		pinned, ok, err := nfsPinnedSharedDirs(filepath.Join(agentDir, name))
+		if err != nil {
+			// A link, a non-regular file or an oversized record: fail closed.
+			return fmt.Errorf("cannot check this agent's shared-dir storage record: %w", err)
+		}
 		if !ok {
 			continue
 		}
@@ -95,24 +98,33 @@ func sharedDirRecordPinRefusal(agentDir string, layout projectfs.Layout, sd *con
 	return nil
 }
 
-// nfsPinnedSharedDirs reads a per-agent shared-dir backend record and
-// returns which dirs it pins to nfs ("all" for the record's default
-// backend, else the dir names) and whether it pins any. A missing or
-// unreadable record pins nothing.
-func nfsPinnedSharedDirs(path string) (string, bool) {
-	data, err := os.ReadFile(path)
+// maxSharedDirRecordSize bounds the read of a per-agent shared-dir backend
+// record. Earlier versions wrote a backend and a small per-dir map.
+const maxSharedDirRecordSize = 64 << 10
+
+// nfsPinnedSharedDirs reads a per-agent shared-dir backend record (bounded,
+// readSharedDirRecord) and returns which dirs it pins to nfs ("all" for the
+// record's default backend, else the dir names) and whether it pins any. A
+// missing record, or one that does not parse, pins nothing; a record that
+// cannot be read safely (a link, not a regular file, over the size bound)
+// is an error.
+func nfsPinnedSharedDirs(path string) (string, bool, error) {
+	data, err := readSharedDirRecord(path)
 	if err != nil {
-		return "", false
+		return "", false, err
+	}
+	if data == nil {
+		return "", false, nil
 	}
 	var rec struct {
 		Backend string            `json:"backend"`
 		Dirs    map[string]string `json:"dirs,omitempty"`
 	}
 	if json.Unmarshal(data, &rec) != nil {
-		return "", false
+		return "", false, nil
 	}
 	if rec.Backend == config.WorkspaceStorageBackendNFS {
-		return "all", true
+		return "all", true, nil
 	}
 	var names []string
 	for name, b := range rec.Dirs {
@@ -121,8 +133,8 @@ func nfsPinnedSharedDirs(path string) (string, bool) {
 		}
 	}
 	if len(names) == 0 {
-		return "", false
+		return "", false, nil
 	}
 	sort.Strings(names)
-	return strings.Join(names, ", "), true
+	return strings.Join(names, ", "), true, nil
 }

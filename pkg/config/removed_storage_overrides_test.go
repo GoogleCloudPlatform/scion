@@ -138,8 +138,9 @@ func TestRemovedStorageOverridesForProfile(t *testing.T) {
 func TestProjectStorageMigrationText_PinnedAndRealSteps(t *testing.T) {
 	assert.Equal(t, "the hub's project-storage-migrate maintenance migration "+
 		"(Admin → Maintenance, or POST /api/v1/admin/maintenance/migrations/project-storage-migrate/run; run it with dryRun first) "+
-		"moves the hub's own trees; node-local shared dirs on other Runtime Brokers are not moved by this release "+
-		"and must be copied by hand into <ProjectRoot>/shared-dirs/<name> on the share", ProjectStorageMigrationText)
+		"moves the hub's own trees; each Runtime Broker moves its own node-local shared dirs into <ProjectRoot>/shared-dirs/<name> "+
+		"on the share on its first start after upgrade with its shared-dir layout on the share "+
+		"(copy-only, never overwriting; the source is kept as <name>.migrated-<ts>)", ProjectStorageMigrationText)
 	assertNoNonexistentMigrationStep(t, ProjectStorageMigrationText)
 }
 

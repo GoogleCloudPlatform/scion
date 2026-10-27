@@ -55,7 +55,10 @@ feature. There is no translation and no storage-class change.
   whose per-agent shared-dir backend record from an earlier version pins
   nfs while the layout is not shared. That covers the live
   `shared-dir-storage.json` and the `.retired` copy that phase 3a's first
-  start moved aside; the record is kept. Both cases are a
+  start moved aside; the record is kept. The record is broker-local (in
+  the agent's state directory, never mounted into the container) and is
+  read bounded: regular file only, `O_NOFOLLOW|O_NONBLOCK`, at most 64 KiB.
+  A record that cannot be read safely fails the start closed. Both cases are a
   `config.StorageMigrationRequiredError`. The broker answers it with 422
   `storage_migration_required` on create, start, restart and the async
   launch, and the hub relays it with the code intact. The public text
@@ -77,13 +80,13 @@ feature. There is no translation and no storage-class change.
   `server` and `export` accurate. Then run `scion config validate`.
 - **Operator steps that exist.** The startup warnings said "run the
   project-storage migration", but no CLI command does that. The migration
-  is the hub's `project-storage-migrate` maintenance migration, and in
-  this build it moves only the hub's own trees. One pinned constant,
-  `config.ProjectStorageMigrationText`, now names it exactly, says that
-  node-local shared dirs on other brokers must be copied by hand, and is
-  used by every warning and doc line. A test rejects texts that name
-  nonexistent steps. When the broker-side shared-dir migration (phase 3b)
-  lands, only that constant, its test and the docs change.
+  is the hub's `project-storage-migrate` maintenance migration, which
+  moves the hub's own trees. Each broker moves its own node-local shared
+  dirs on its first start with its shared-dir layout on the share (the
+  phase 3b start hook). One pinned constant,
+  `config.ProjectStorageMigrationText`, now names both exactly and is used
+  by every warning and doc line. A test rejects texts that name
+  nonexistent steps.
 
 ## Tests
 
@@ -119,3 +122,6 @@ feature. There is no translation and no storage-class change.
 - A storage-class or static-PV option for per-dir claims on the local
   backend is a separate feature, planned in the Kubernetes runtime lane.
 - Auto-translation of the removed keys was rejected (design OQ2-A).
+- A web label for the launch failure code `storage_migration_required`
+  (`web/src/shared/agent-launch-labels.ts`); until then the web shows the
+  code with "_" as spaces.
