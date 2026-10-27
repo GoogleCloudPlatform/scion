@@ -45,6 +45,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -213,6 +214,14 @@ type ServerConfig struct {
 	// NFSConfig's first share, as the broker's workspace storage descriptor
 	// (see BuildWorkspaceStorageDescriptor).
 	WorkspaceStorageBackend string
+
+	// StorageLayout is the broker's projectfs Layout, built at startup from
+	// the same server.project_storage struct the hub builds its own from
+	// (config.ResolveProjectStorage, config.ProjectStorageLayout). Its
+	// Homes is reported in the workspace storage descriptor, so the hub
+	// can refuse shared-mode dispatch to a broker whose layout disagrees
+	// with its own (projectfs.Layout.DescriptorDiff).
+	StorageLayout projectfs.Layout
 
 	// DefaultProfile is the broker's default (active) profile name from its
 	// settings (active_profile), reported to the hub on every heartbeat. A

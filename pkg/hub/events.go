@@ -111,6 +111,11 @@ type EventPublisher interface {
 	// scheduled chat messages on user.<id>.chat.scheduled. Only the
 	// sender is ever told about a scheduled message.
 	PublishChatScheduledEvent(ctx context.Context, userID string, evt ChatScheduledEvent)
+	// PublishChatStarsChanged tells the user's own sessions, on
+	// user.<id>.chat.stars, that their starred messages changed. The
+	// payload is a content-free invalidation ({"action":"changed"}):
+	// clients refetch current state. Only the owner is ever told.
+	PublishChatStarsChanged(ctx context.Context, userID string)
 	// Subscribe returns a channel that receives events matching the given
 	// subject patterns, along with an unsubscribe function. Patterns use
 	// NATS-style wildcards: '*' matches a single token, '>' matches the
@@ -161,6 +166,7 @@ func (noopEventPublisher) Close()                                               
 
 func (noopEventPublisher) PublishChatScheduledEvent(_ context.Context, _ string, _ ChatScheduledEvent) {
 }
+func (noopEventPublisher) PublishChatStarsChanged(_ context.Context, _ string) {}
 
 // Subscribe on the no-op publisher returns a nil channel (which blocks forever
 // on receive) and a no-op unsubscribe. Callers that need real subscriptions
@@ -1100,6 +1106,22 @@ func (p *eventBuilder) PublishChatScheduledEvent(_ context.Context, userID strin
 		return
 	}
 	p.sink("user."+userID+".chat.scheduled", evt)
+}
+
+// ChatStarsEvent is the content-free invalidation published on
+// user.<id>.chat.stars when the user's starred messages changed.
+type ChatStarsEvent struct {
+	// Action is always "changed".
+	Action string `json:"action"`
+}
+
+// PublishChatStarsChanged publishes a starred-messages invalidation to its
+// owner only, on user.<userID>.chat.stars.
+func (p *eventBuilder) PublishChatStarsChanged(_ context.Context, userID string) {
+	if userID == "" {
+		return
+	}
+	p.sink("user."+userID+".chat.stars", ChatStarsEvent{Action: "changed"})
 }
 
 // PublishDispatchDone emits a slim completion event when a broker_dispatch row

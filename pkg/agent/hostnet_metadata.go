@@ -59,7 +59,9 @@ func metadataModeIn(env []string, mode string) bool {
 //   - assign is refused: the assigned identity would be served on a host
 //     loopback port that other agents and host processes can reach.
 //   - block starts, with a warning returned for the user, because block is
-//     the default and host networking is the default for a loopback hub.
+//     the default and host networking is the default for a loopback hub,
+//     unless the broker's host network block policy refuses it (see
+//     hostNetworkBlockPolicy: by default on a detected cloud host).
 //
 // It returns the user-facing warning (empty when there is none) or the
 // refusal error.
@@ -68,10 +70,11 @@ func checkHostNetworkMetadata(agentName, runtimeName, networkMode string, env []
 		return "", nil
 	}
 	if metadataModeIn(env, "assign") {
-		return "", fmt.Errorf("cannot start agent %q: GCP metadata mode \"assign\" is not supported under host networking; %s", agentName, hostNetworkMetadataFix)
+		return "", &hostNetworkRefusal{reason: hostNetworkRefusalAssignUnsupported,
+			msg: fmt.Sprintf("cannot start agent %q: GCP metadata mode \"assign\" is not supported under host networking; %s", agentName, hostNetworkMetadataFix)}
 	}
 	if metadataModeIn(env, "block") {
-		return hostNetworkMetadataWarning, nil
+		return hostNetworkBlockPolicy(agentName, hostNetworkMetadataWarning)
 	}
 	return "", nil
 }

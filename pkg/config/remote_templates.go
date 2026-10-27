@@ -243,8 +243,10 @@ func fetchGitHubFolder(ctx context.Context, uri string, destPath string, token s
 }
 
 // GitLsRemoteFunc runs `git ls-remote --heads <repoURL>` and returns its
-// stdout. It is the signature of the ls-remote seam used by resolveGitHubRef.
-type GitLsRemoteFunc func(ctx context.Context, repoURL string) ([]byte, error)
+// stdout, authenticating with token when it is non-empty. repoURL is the plain
+// repository URL. It is the signature of the ls-remote seam used by
+// resolveGitHubRef.
+type GitLsRemoteFunc func(ctx context.Context, repoURL, token string) ([]byte, error)
 
 // gitLsRemote is the ls-remote runner used by resolveGitHubRef. It is a
 // package-level variable only so tests can replace it (see
@@ -263,20 +265,29 @@ var gitLsRemoteTimeout = 30 * time.Second
 var gitLsRemoteWaitDelay = 5 * time.Second
 
 // execGitLsRemote is the production ls-remote runner: it shells out to the
-// git binary with terminal prompts disabled. The invocation is bounded by
-// gitLsRemoteTimeout (a shorter deadline on ctx still wins); if that bound
-// fires, a descriptive timeout error naming owner/repo is returned.
-func execGitLsRemote(ctx context.Context, repoURL string) ([]byte, error) {
+// git binary as host-side git (util.HostGitArgs, util.HostGitEnv) with
+// terminal prompts disabled. When token is non-empty, git authenticates through
+// the credential helper scoped to repoURL's host (util.ScopedCredentialHelperEnv).
+// The invocation is bounded by gitLsRemoteTimeout (a shorter deadline on ctx
+// still wins); if that bound fires, a descriptive timeout error naming
+// owner/repo is returned.
+func execGitLsRemote(ctx context.Context, repoURL, token string) ([]byte, error) {
 	tctx, cancel := context.WithTimeout(ctx, gitLsRemoteTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(tctx, "git", "ls-remote", "--heads", repoURL)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=echo")
+	cmd := exec.CommandContext(tctx, "git", append(util.HostGitArgs(), "ls-remote", "--heads", repoURL)...)
+	env := append(util.HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0", "GIT_ASKPASS=echo")
+	if token != "" {
+		if scoped, ok := util.ScopedCredentialHelperEnv(env, repoURL, token); ok {
+			env = scoped
+		}
+	}
+	cmd.Env = env
 	cmd.WaitDelay = gitLsRemoteWaitDelay
 	out, err := cmd.Output()
 	if err != nil && ctx.Err() == nil && errors.Is(tctx.Err(), context.DeadlineExceeded) {
-		// Our own bound fired (not the caller's ctx). Never include repoURL
-		// here: it may embed an access token.
+		// Our own bound fired (not the caller's ctx). Name the repository as
+		// owner/repo only, with any URL credentials stripped.
 		return out, fmt.Errorf("git ls-remote for %s timed out after %s: %w",
 			redactedRepoName(repoURL), gitLsRemoteTimeout, context.DeadlineExceeded)
 	}
@@ -321,18 +332,13 @@ func resolveGitHubRef(ctx context.Context, parts *GitHubURLParts, token string) 
 		return
 	}
 
-	var repoURL string
-	if token != "" {
-		repoURL = fmt.Sprintf("https://x-access-token:%s@github.com/%s/%s.git", token, parts.Owner, parts.Repo)
-	} else {
-		repoURL = fmt.Sprintf("https://github.com/%s/%s.git", parts.Owner, parts.Repo)
-	}
+	repoURL := fmt.Sprintf("https://github.com/%s/%s.git", parts.Owner, parts.Repo)
 
-	output, err := gitLsRemote(ctx, repoURL)
+	output, err := gitLsRemote(ctx, repoURL, token)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			// Keep the naive parse, but make the stall visible. The error text
-			// names owner/repo only, never the (possibly tokenized) repoURL.
+			// names owner/repo only.
 			slog.Warn("git ls-remote timed out; using naive branch/path parse",
 				"repo", parts.Owner+"/"+parts.Repo, "error", err)
 		}
@@ -550,7 +556,8 @@ func SetGitSparseCheckoutForTest(fn GitSparseCheckoutFunc) (restore func()) {
 
 // execSparseGitCheckout is the production sparse-checkout runner: it performs
 // a sparse git checkout to get only the needed folder.
-// When token is non-empty it is embedded in the remote URL for authentication.
+// When token is non-empty, git authenticates through the credential helper
+// scoped to the remote URL's host (util.ScopedCredentialHelperEnv).
 func execSparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath string, token string) error {
 	// Create a temporary directory for the git clone
 	tmpDir, err := os.MkdirTemp("", "scion-git-sparse-*")
@@ -559,18 +566,21 @@ func execSparseGitCheckout(ctx context.Context, parts *GitHubURLParts, destPath 
 	}
 	defer func() { _ = os.RemoveAll(tmpDir) }()
 
-	var repoURL string
-	if token != "" {
-		repoURL = fmt.Sprintf("https://x-access-token:%s@github.com/%s/%s.git", token, parts.Owner, parts.Repo)
-	} else {
-		repoURL = fmt.Sprintf("https://github.com/%s/%s.git", parts.Owner, parts.Repo)
-	}
+	repoURL := fmt.Sprintf("https://github.com/%s/%s.git", parts.Owner, parts.Repo)
 
 	// Host-side git for the template cache: run with the fixed pins (no
 	// repository hooks, fsmonitor, pager; ext transport off) and with the LFS
 	// smudge skipped, so the checkout below never resolves an LFS pointer
 	// through an endpoint named in the template's own tracked .lfsconfig.
 	gitEnv := append(util.HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1")
+	if token != "" {
+		// Authenticate through the credential helper scoped to the remote
+		// URL's host, so git offers the token to https://github.com and to
+		// no other endpoint.
+		if scoped, ok := util.ScopedCredentialHelperEnv(gitEnv, repoURL, token); ok {
+			gitEnv = scoped
+		}
+	}
 
 	// Initialize git repo with sparse checkout
 	commands := [][]string{

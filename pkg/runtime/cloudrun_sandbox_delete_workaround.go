@@ -48,7 +48,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -123,7 +122,7 @@ func (r *CloudRunSandboxRuntime) runDeleteWithTimeout(ctx context.Context, id st
 	cmd := exec.CommandContext(ctx, r.bin, "delete", "--force", id)
 	// Use a process group so we can kill the entire tree (the sandbox CLI
 	// spawns runsc subprocesses that inherit pipe fds).
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroup(cmd)
 	// Capture output in an unlinked file, never a pipe: orphaned runsc
 	// processes holding a pipe's write end would block cmd.Wait.
 	outFile := newSandboxCommandOutput("delete")
@@ -181,17 +180,6 @@ func (r *CloudRunSandboxRuntime) runDeleteWithTimeout(ctx context.Context, id st
 			"error", err, "output", sandboxCommandOutputForLog(out))
 		return sandboxDeleteFailed, err, ctx.Err()
 	}
-}
-
-// killProcessGroup sends SIGKILL to the entire process group of cmd.
-// This ensures that child processes (e.g., runsc) are also killed when
-// we need to forcibly terminate a hanging delete.
-func killProcessGroup(cmd *exec.Cmd) {
-	if cmd.Process == nil {
-		return
-	}
-	// Kill the entire process group (negative PID).
-	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 }
 
 // reapOrphanedRunsc scans /proc for orphaned `runsc delete` processes

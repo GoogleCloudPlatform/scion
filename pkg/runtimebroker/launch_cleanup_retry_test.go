@@ -60,8 +60,8 @@ func (m *failingCleanupManager) CleanupCalls() int {
 	return m.cleanupCalls
 }
 
-func (m *failingCleanupManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
-	if _, err := m.recFakeManager.DeleteTarget(ctx, agentName, ref, deleteFiles, projectPath, removeBranch); err != nil {
+func (m *failingCleanupManager) DeleteTarget(ctx context.Context, agentName, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	if _, err := m.recFakeManager.DeleteTarget(ctx, agentName, sharerKey, ref, deleteFiles, projectPath, removeBranch); err != nil {
 		return false, err
 	}
 	if m.deleteErr != nil {

@@ -1,0 +1,4 @@
+--- FAIL: TestParA (0.03s)
+    toy_test.go:118: a log
+    toy_test.go:120: a fails
+FAIL

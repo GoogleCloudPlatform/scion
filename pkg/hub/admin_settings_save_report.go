@@ -95,6 +95,27 @@ func (r savedKeysReport) withSkipped(skips layer1ApplySkips) savedKeysReport {
 	return r
 }
 
+// notYetAppliedReason is the skipped reason of a key whose section was
+// saved but not included in the saving hub's self-apply, because the
+// re-read of the store after the write failed or kept losing to newer
+// writes (ptone/scion#5691).
+const notYetAppliedReason = "Saved; this Hub applies it on its next settings refresh."
+
+// withNotYetApplied merges the report of the sections that were saved but
+// not included in the self-apply: their changed keys are listed in
+// Skipped with notYetAppliedReason rather than in Applied, and their
+// restart-required keys stay in PendingRestart (ptone/scion#5691).
+func (r savedKeysReport) withNotYetApplied(pending savedKeysReport) savedKeysReport {
+	skipped := append([]skippedKey{}, r.Skipped...)
+	for _, key := range pending.Applied {
+		skipped = append(skipped, skippedKey{Key: key, Reason: notYetAppliedReason})
+	}
+	r.Skipped = skipped
+	r.PendingRestart = append(append([]string{}, r.PendingRestart...), pending.PendingRestart...)
+	sort.Strings(r.PendingRestart)
+	return r
+}
+
 // skippedChannelsReason names the skipped channels by their 1-based
 // position in the list, never by a configured value.
 func skippedChannelsReason(skips layer1ApplySkips) string {

@@ -693,7 +693,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	var active []experiments.Experiment
 	for _, e := range srv.experimentRegistry().All() {
 		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.FederationProjectVisitors ||
-			e.Name == experiments.AgentEditHeld {
+			e.Name == experiments.ChatStarredMessages || e.Name == experiments.AgentEditHeld {
 			e.Default = true
 		}
 		active = append(active, e)
@@ -705,6 +705,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(experiments.Artifacts))
 	require.True(t, srv.experimentEnabled(experiments.AgentDelegation))
 	require.True(t, srv.experimentEnabled(experiments.FederationProjectVisitors))
+	require.True(t, srv.experimentEnabled(experiments.ChatStarredMessages))
 	require.True(t, srv.experimentEnabled(experiments.AgentEditHeld))
 	// POST /api/v1/auth/federation-token also answers 404 while the OIDC
 	// provider is off: install a test key manager and allow the audience
@@ -881,6 +882,8 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		// Grant revoke and grant read share their pattern; revoke takes
 		// the disposable twin grant.
 		{"agent.delegation.revoke", "/api/v1/agents/{id}/delegations/{grantId}"}: {"id": f.agent, "grantId": f.delegation.grantRevoke},
+		// Per-agent revoke-all takes the disposable agent and its grant.
+		{"agent.delegation.revokeall", "/api/v1/agents/{id}/delegations/revoke-all"}: {"id": f.delegation.revokeAllAgent},
 
 		// Group and direct conversation reads share their patterns.
 		{"project.conversation.read", "/api/v1/conversations/{id}"}:                           {"id": f.inbox.groupConversation},
@@ -1058,6 +1061,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		// --- user family ---
 		"/api/v1/users/{id}":                 {"id": f.user},
 		"/api/v1/users/{id}/revoke-sessions": {"id": f.user},
+		"/api/v1/users/{id}/delete-blockers": {"id": f.user},
 
 		// --- skill family ---
 		"/api/v1/skills/{id}":                          {"id": f.skill},
@@ -1190,6 +1194,9 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/chat/conversations/{id}/typing":               {"id": f.chatTopic},
 		"/api/v1/chat/conversations/{id}/interagent":           {"id": f.chat.dmAgent},
 		"/api/v1/chat/conversations/{id}/promote":              {"id": f.chat.dmAgent},
+		// Starred messages: the fixture thread's message (the PUT entry
+		// stars it before the read entries, the DELETE entry removes it).
+		"/api/v1/chat/stars/{messageId}": {"messageId": f.chat.topicMessage},
 
 		// --- integrations family ---
 		"/api/v1/admin/integrations/{name}":         {"name": f.integrationName},
@@ -1230,6 +1237,9 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 func queryOverrides(f idFixtures) map[string]string {
 	return map[string]string{
 		"/api/v1/chat/prefs": "agentId=" + f.agent,
+		// The star list needs its conversation, the state its messages.
+		"/api/v1/chat/stars":       "conversationKey=" + f.chatTopic,
+		"/api/v1/chat/stars/state": "messageId=" + f.chat.topicMessage,
 		// The single-file publish is selected by ?name= (pkg/artifacts).
 		"/api/v1/artifacts": "name=live-inventory.txt&scope=" + f.project,
 		// handleConversationResolve 400s without a reference.
@@ -1261,6 +1271,8 @@ func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 		// an admitted caller gets 200 instead of a body 400
 		// (seedLiveInventoryFixtures allows it).
 		{"federation.token.mint", "/api/v1/auth/federation-token"}: {"audience": liveInventoryFederationAudience},
+		// A star names the conversation of the message it stars.
+		{"chat.star.add", "/api/v1/chat/stars/{messageId}"}: {"conversationKey": f.chatTopic},
 		// updateProjectMemberRole (handlers_project_members.go) 400s
 		// "roleDefinitionId is required" on an empty body before the
 		// binding ID is used for anything; with a real role ID, the
@@ -1423,11 +1435,15 @@ func seedLiveInventoryArtifact(t *testing.T, ctx context.Context, st artifacts.S
 
 // liveInventoryDelegation is the agent delegation fixture of the live
 // method inventory: a grant bound to the fixture agent, a disposable twin
-// grant for the revoke entry, and an active credential of the first grant.
+// grant for the revoke entry, an active credential of the first grant, and
+// for the per-agent revoke-all entry a disposable agent ID (no agent row:
+// grants outlive their agent) with one grant of its own, so revoke-all
+// leaves the fixture agent's grants alone.
 type liveInventoryDelegation struct {
-	grant       string
-	grantRevoke string
-	credential  string
+	grant          string
+	grantRevoke    string
+	credential     string
+	revokeAllAgent string
 }
 
 // seedLiveInventoryDelegation writes the live inventory's grants and
@@ -1435,9 +1451,9 @@ type liveInventoryDelegation struct {
 // token reaches them as hub authority.
 func seedLiveInventoryDelegation(t *testing.T, ctx context.Context, s store.Store, agentID, projectID string) liveInventoryDelegation {
 	t.Helper()
-	grant := func(name string) string {
+	grantOn := func(boundAgentID, name string) string {
 		g := &store.AgentDelegationGrant{
-			AgentID: agentID, AgentProjectID: projectID, IssuerUserID: DevUserID,
+			AgentID: boundAgentID, AgentProjectID: projectID, IssuerUserID: DevUserID,
 			BoundaryKind: "hub", CeilingVersion: 1, CeilingPermissionIDs: []string{"agent.read"},
 			Name: name, MaxCredentialTTLSeconds: agentDelegationCredentialDefaultTTL,
 			ExpiresAt: time.Now().Add(time.Hour), IssuanceAuditID: uuid.New().String(),
@@ -1445,7 +1461,9 @@ func seedLiveInventoryDelegation(t *testing.T, ctx context.Context, s store.Stor
 		require.NoError(t, s.CreateAgentDelegationGrant(ctx, g))
 		return g.ID
 	}
-	out := liveInventoryDelegation{grant: grant("li-grant"), grantRevoke: grant("li-grant-revoke")}
+	grant := func(name string) string { return grantOn(agentID, name) }
+	out := liveInventoryDelegation{grant: grant("li-grant"), grantRevoke: grant("li-grant-revoke"), revokeAllAgent: uuid.New().String()}
+	grantOn(out.revokeAllAgent, "li-grant-revoke-all")
 	_, hash, err := newDelegatedCredentialToken()
 	require.NoError(t, err)
 	cred := &store.AgentDelegatedCredential{

@@ -23,13 +23,14 @@ import (
 )
 
 // openForLstatVerify is the open step of the non-unix regular-file readers.
-// It is a variable so a test can swap the file between Lstat and open.
+// It is a variable so a test can make it return a different file than the
+// one at path.
 var openForLstatVerify = os.Open
 
 // readSmallRegularFile reads the file at path when it is a regular file of
 // at most max bytes. A symlink or non-regular file is refused with Lstat
-// before opening. After opening, fstat must report a regular file that is
-// the same file Lstat saw, so a swap between the two is refused.
+// before opening, and the opened file is then checked by openLstatVerified,
+// whose comment says what that identity check guarantees on each platform.
 func readSmallRegularFile(path string, max int64) ([]byte, error) {
 	f, err := openLstatVerified(path, openForLstatVerify)
 	if err != nil {
@@ -47,9 +48,9 @@ func readSmallRegularFile(path string, max int64) ([]byte, error) {
 }
 
 // openRegularFileNoFollow opens path read-only. A symlink or non-regular file
-// is refused with Lstat before opening. After opening, fstat must report a
-// regular file that is the same file Lstat saw, so a swap between the two is
-// refused.
+// is refused with Lstat before opening, and the opened file is then checked
+// by openLstatVerified, whose comment says what that identity check
+// guarantees on each platform.
 func openRegularFileNoFollow(path string) (*os.File, error) {
 	return openLstatVerified(path, openForLstatVerify)
 }

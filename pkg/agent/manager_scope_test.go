@@ -138,7 +138,7 @@ func TestDeleteTarget_UsesResolvedContainerWithoutRelisting(t *testing.T) {
 		DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error { deleted = append(deleted, ref.ID); return nil },
 	}
 	mgr := &AgentManager{Runtime: mock}
-	if _, err := mgr.DeleteTarget(context.Background(), "dev", runtime.RunRef{ID: "cid-b"}, false, "", false); err != nil {
+	if _, err := mgr.DeleteTarget(context.Background(), "dev", "", runtime.RunRef{ID: "cid-b"}, false, "", false); err != nil {
 		t.Fatalf("DeleteTarget: %v", err)
 	}
 	if listed {
@@ -156,7 +156,7 @@ func TestDeleteTarget_FileOnlyAgentSkipsRuntime(t *testing.T) {
 		DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error { called = true; return nil },
 	}
 	mgr := &AgentManager{Runtime: mock}
-	if _, err := mgr.DeleteTarget(context.Background(), "dev", runtime.RunRef{}, false, "", false); err != nil {
+	if _, err := mgr.DeleteTarget(context.Background(), "dev", "", runtime.RunRef{}, false, "", false); err != nil {
 		t.Fatalf("DeleteTarget: %v", err)
 	}
 	if called {

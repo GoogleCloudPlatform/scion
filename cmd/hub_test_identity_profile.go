@@ -232,7 +232,7 @@ func printProfileEntry(out io.Writer, verb string, e *hubprofile.CacheEntry, cac
 	_, _ = fmt.Fprintf(out, "  Role:          %s\n", e.Role)
 	_, _ = fmt.Fprintf(out, "  Expires:       %s\n", formatTestIdentityTime(e.ExpiresAt))
 	_, _ = fmt.Fprintf(out, "  Token expires: %s\n", formatTestIdentityTime(e.TokenExpiresAt))
-	_, _ = fmt.Fprintf(out, "  Cache file:    %s (mode 0600)\n", cacheFile)
+	_, _ = fmt.Fprintf(out, "  Cache file:    %s %s\n", cacheFile, tokenFileProtection())
 	return nil
 }
 

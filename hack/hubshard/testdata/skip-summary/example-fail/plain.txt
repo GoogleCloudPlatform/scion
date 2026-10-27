@@ -1,0 +1,6 @@
+--- FAIL: Example_fail (0.00s)
+got:
+got this
+want:
+want that
+FAIL

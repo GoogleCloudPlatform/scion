@@ -21,6 +21,7 @@ import (
 	"database/sql"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -130,14 +131,14 @@ func assertUserPrefsThreadGroupsMarker(t *testing.T, wcs WebChatStore) {
 }
 
 func TestUserPrefsThreadGroupsMarker_SQLite(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	assertUserPrefsThreadGroupsMarker(t, wcs)
 }
 
 func TestUserPrefsThreadGroupsMarker_Postgres(t *testing.T) {
-	dsn := requirePostgresDSN(t)
+	dsn := hubtestutil.RequirePostgresDSN(t)
 	db, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
@@ -152,7 +153,7 @@ func TestUserPrefsThreadGroupsMarker_Postgres(t *testing.T) {
 // The column is added to a database created before it existed, and a row
 // written before the upgrade is pending (NULL marker).
 func TestUserPrefsThreadGroupsMigratedAt_SQLite_PreExistingDB(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite")
+	db := hubtestutil.OpenTestMemorySQLite(t, "sqlite")
 	_, err := db.Exec(preExistingSQLiteSchemaSQL)
 	require.NoError(t, err)
 	require.False(t, sqliteColumnExists(db, "webchat_user_prefs", "thread_groups_migrated_at"))
@@ -171,7 +172,7 @@ func TestUserPrefsThreadGroupsMigratedAt_SQLite_PreExistingDB(t *testing.T) {
 }
 
 func TestUserPrefsThreadGroupsMigratedAt_Postgres_PreExistingDB(t *testing.T) {
-	dsn := requirePostgresDSN(t)
+	dsn := hubtestutil.RequirePostgresDSN(t)
 	db, err := sql.Open("pgx", dsn)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })

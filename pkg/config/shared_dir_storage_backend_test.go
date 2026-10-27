@@ -17,7 +17,6 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -29,98 +28,6 @@ func sdsTestNFSBlock() *V1NFSConfig {
 		MountRoot: "/srv/nfs",
 		Shares:    []V1NFSShare{{ID: "share-1", PVName: "pv-1"}},
 	}
-}
-
-func TestResolveSharedDirStorage_Precedence(t *testing.T) {
-	nfs := sdsTestNFSBlock()
-	base := func() *VersionedSettings {
-		return &VersionedSettings{
-			ActiveProfile: "local",
-			Server:        &V1ServerConfig{SharedDirStorage: &V1SharedDirStorageConfig{Backend: "local", NFS: nfs}},
-			Runtimes: map[string]V1RuntimeConfig{
-				"docker": {Type: "docker"},
-				"k8s":    {Type: "kubernetes", SharedDirStorageBackend: "nfs"},
-			},
-			Profiles: map[string]V1ProfileConfig{
-				"local":     {Runtime: "docker"},
-				"gke":       {Runtime: "k8s"},
-				"gke-local": {Runtime: "k8s", SharedDirStorageBackend: "local"},
-				"dock-nfs":  {Runtime: "docker", SharedDirStorageBackend: "nfs"},
-			},
-		}
-	}
-
-	tests := []struct {
-		name        string
-		profile     string
-		mutate      func(vs *VersionedSettings)
-		wantBackend string // "" means nil config
-		wantSource  string
-	}{
-		{name: "global when profile and runtime are unset", profile: "local", wantBackend: "local", wantSource: SharedDirStorageGlobalSource},
-		{name: "empty profile uses active_profile", profile: "", wantBackend: "local", wantSource: SharedDirStorageGlobalSource},
-		{name: "runtime entry overrides global", profile: "gke", wantBackend: "nfs", wantSource: "runtimes.k8s.shared_dir_storage_backend"},
-		{name: "profile overrides runtime entry", profile: "gke-local", wantBackend: "local", wantSource: "profiles.gke-local.shared_dir_storage_backend"},
-		{name: "profile overrides global", profile: "dock-nfs", wantBackend: "nfs", wantSource: "profiles.dock-nfs.shared_dir_storage_backend"},
-		{name: "unknown profile falls back to global", profile: "nope", wantBackend: "local", wantSource: SharedDirStorageGlobalSource},
-		{
-			name:        "active_profile with an override",
-			profile:     "",
-			mutate:      func(vs *VersionedSettings) { vs.ActiveProfile = "gke" },
-			wantBackend: "nfs", wantSource: "runtimes.k8s.shared_dir_storage_backend",
-		},
-		{
-			name:    "no global block and no override is nil",
-			profile: "local",
-			mutate:  func(vs *VersionedSettings) { vs.Server = nil },
-		},
-		{
-			name:        "override without a global block has no nfs details",
-			profile:     "gke",
-			mutate:      func(vs *VersionedSettings) { vs.Server = nil },
-			wantBackend: "nfs", wantSource: "runtimes.k8s.shared_dir_storage_backend",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			vs := base()
-			if tt.mutate != nil {
-				tt.mutate(vs)
-			}
-			cfg, source := vs.ResolveSharedDirStorage(tt.profile)
-			assert.Equal(t, tt.wantSource, source)
-			if tt.wantBackend == "" {
-				assert.Nil(t, cfg)
-				return
-			}
-			require.NotNil(t, cfg)
-			assert.Equal(t, tt.wantBackend, cfg.Backend)
-			if vs.Server != nil {
-				assert.Same(t, nfs, cfg.NFS, "the nfs details always come from the global block")
-			} else {
-				assert.Nil(t, cfg.NFS)
-			}
-		})
-	}
-}
-
-func TestResolveSharedDirStorage_OverrideDoesNotModifyGlobal(t *testing.T) {
-	global := &V1SharedDirStorageConfig{Backend: "local", NFS: sdsTestNFSBlock()}
-	vs := &VersionedSettings{
-		Server:   &V1ServerConfig{SharedDirStorage: global},
-		Profiles: map[string]V1ProfileConfig{"gke": {Runtime: "k8s", SharedDirStorageBackend: "nfs"}},
-	}
-	cfg, _ := vs.ResolveSharedDirStorage("gke")
-	require.NotNil(t, cfg)
-	assert.NotSame(t, global, cfg)
-	assert.Equal(t, "local", global.Backend)
-}
-
-func TestResolveSharedDirStorage_NilSettings(t *testing.T) {
-	var vs *VersionedSettings
-	cfg, source := vs.ResolveSharedDirStorage("x")
-	assert.Nil(t, cfg)
-	assert.Empty(t, source)
 }
 
 func TestResolveProfileSetting_Generic(t *testing.T) {
@@ -192,75 +99,11 @@ func TestResolveProfileValue_NonString(t *testing.T) {
 	assert.Empty(t, src)
 }
 
-func TestSharedDirStorageNFSAnywhere(t *testing.T) {
-	nfs := sdsTestNFSBlock()
-
-	t.Run("global nfs", func(t *testing.T) {
-		global := &V1SharedDirStorageConfig{Backend: "nfs", NFS: nfs}
-		vs := &VersionedSettings{Server: &V1ServerConfig{SharedDirStorage: global}}
-		cfg, only := vs.SharedDirStorageNFSAnywhere()
-		assert.Same(t, global, cfg)
-		assert.False(t, only)
-	})
-	t.Run("profile override only", func(t *testing.T) {
-		vs := &VersionedSettings{
-			Server:   &V1ServerConfig{SharedDirStorage: &V1SharedDirStorageConfig{Backend: "local", NFS: nfs}},
-			Profiles: map[string]V1ProfileConfig{"gke": {SharedDirStorageBackend: "nfs"}},
-		}
-		cfg, only := vs.SharedDirStorageNFSAnywhere()
-		require.NotNil(t, cfg)
-		assert.Equal(t, "nfs", cfg.Backend)
-		assert.Same(t, nfs, cfg.NFS)
-		assert.True(t, only)
-	})
-	t.Run("runtime override only", func(t *testing.T) {
-		vs := &VersionedSettings{
-			Server:   &V1ServerConfig{SharedDirStorage: &V1SharedDirStorageConfig{NFS: nfs}},
-			Runtimes: map[string]V1RuntimeConfig{"k8s": {SharedDirStorageBackend: "nfs"}},
-		}
-		cfg, only := vs.SharedDirStorageNFSAnywhere()
-		require.NotNil(t, cfg)
-		assert.True(t, only)
-	})
-	t.Run("nothing selects nfs", func(t *testing.T) {
-		vs := &VersionedSettings{
-			Server:   &V1ServerConfig{SharedDirStorage: &V1SharedDirStorageConfig{Backend: "local", NFS: nfs}},
-			Profiles: map[string]V1ProfileConfig{"a": {SharedDirStorageBackend: "local"}},
-		}
-		cfg, only := vs.SharedDirStorageNFSAnywhere()
-		assert.Nil(t, cfg)
-		assert.False(t, only)
-	})
-}
-
-func TestValidateSharedDirStorageBackends(t *testing.T) {
-	complete := &V1SharedDirStorageConfig{Backend: "local", NFS: sdsTestNFSBlock()}
-
-	assert.Empty(t, ValidateSharedDirStorageBackends(
-		map[string]V1RuntimeConfig{"k8s": {SharedDirStorageBackend: "nfs"}, "docker": {}},
-		map[string]V1ProfileConfig{"a": {SharedDirStorageBackend: "local"}, "b": {SharedDirStorageBackend: "nfs"}},
-		complete))
-
-	errs := ValidateSharedDirStorageBackends(
-		map[string]V1RuntimeConfig{"k8s": {SharedDirStorageBackend: "nfs"}},
-		map[string]V1ProfileConfig{"a": {SharedDirStorageBackend: "Nfs"}},
-		nil)
-	require.Len(t, errs, 2)
-	assert.Equal(t, "profiles.a.shared_dir_storage_backend", errs[0].Path)
-	assert.Contains(t, errs[0].Message, `must be "local" or "nfs"`)
-	assert.Equal(t, "runtimes.k8s.shared_dir_storage_backend", errs[1].Path)
-	assert.Contains(t, errs[1].Message, "server.shared_dir_storage.nfs")
-
-	// A global block without shares is still incomplete.
-	errs = ValidateSharedDirStorageBackends(nil,
-		map[string]V1ProfileConfig{"gke": {SharedDirStorageBackend: "nfs"}},
-		&V1SharedDirStorageConfig{NFS: &V1NFSConfig{MountRoot: "/srv"}})
-	require.Len(t, errs, 1)
-	assert.Contains(t, errs[0].Message, "shares")
-}
-
+// The per-runtime and per-profile storage overrides are refused in a
+// settings file: server.project_storage decides placement, and the error
+// points at a volumes: entry for a node-local directory.
 func TestValidateSettings_SharedDirStorageBackend(t *testing.T) {
-	const okYAML = `schema_version: "1"
+	const doc = `schema_version: "1"
 active_profile: local
 server:
   shared_dir_storage:
@@ -276,42 +119,34 @@ runtimes:
   k8s:
     type: kubernetes
     shared_dir_storage_backend: nfs
+    home_storage_leaf: broker
 profiles:
   local:
     runtime: docker
   gke:
     runtime: k8s
-    shared_dir_storage_backend: nfs
+    shared_dir_storage_backends:
+      notes: nfs
+    home_storage_backend: nfs
 `
-	errs, err := ValidateSettings([]byte(okYAML), "1")
+	errs, err := ValidateSettings([]byte(doc), "1")
 	require.NoError(t, err)
-	assert.Empty(t, errs)
-
-	badEnum := strings.Replace(okYAML, "    runtime: k8s\n    shared_dir_storage_backend: nfs", "    runtime: k8s\n    shared_dir_storage_backend: ceph", 1)
-	errs, err = ValidateSettings([]byte(badEnum), "1")
-	require.NoError(t, err)
-	assert.NotEmpty(t, errs, "an unknown backend value must be rejected")
-
-	noBlock := `schema_version: "1"
-active_profile: local
-runtimes:
-  k8s:
-    type: kubernetes
-profiles:
-  gke:
-    runtime: k8s
-    shared_dir_storage_backend: nfs
-`
-	errs, err = ValidateSettings([]byte(noBlock), "1")
-	require.NoError(t, err)
-	require.NotEmpty(t, errs, "an nfs override without an nfs block must fail validation")
-	var found bool
+	got := map[string]string{}
 	for _, e := range errs {
-		if e.Path == "profiles.gke.shared_dir_storage_backend" {
-			found = true
+		got[e.Path] = e.Message
+	}
+	for _, path := range []string{
+		"runtimes.k8s.shared_dir_storage_backend",
+		"runtimes.k8s.home_storage_leaf",
+		"profiles.gke.shared_dir_storage_backends",
+		"profiles.gke.home_storage_backend",
+	} {
+		msg, ok := got[path]
+		if assert.True(t, ok, "%s must be rejected: %v", path, errs) {
+			assert.Contains(t, msg, "is no longer supported")
+			assert.Contains(t, msg, "volumes:")
 		}
 	}
-	assert.True(t, found, "error must name the override key: %v", errs)
 }
 
 func TestLoadGlobalSettingsWithOverlay(t *testing.T) {
@@ -354,40 +189,36 @@ profiles:
 	require.NoError(t, os.Chdir(projectDir))
 	t.Cleanup(func() { _ = os.Chdir(oldWd) })
 
-	// No overlay: file values only.
+	// No overlay: file values only; the project's settings are not merged.
 	vs, _, err := LoadGlobalSettingsWithOverlay()
 	require.NoError(t, err)
-	cfg, _ := vs.ResolveSharedDirStorage("local")
+	cfg := vs.Server.EffectiveSharedDirStorage()
 	require.NotNil(t, cfg)
-	assert.Equal(t, "local", cfg.Backend, "project settings must not choose the backend")
+	assert.Equal(t, "local", cfg.Backend)
+	assert.Empty(t, vs.Profiles["local"].SharedDirStorageBackend, "project settings must not be merged")
 
 	// Overlay installed: its profiles replace the file's.
 	o := NewSettingsOverlay()
 	o.Update(map[string]V1RuntimeConfig{"docker": {Type: "docker"}, "k8s": {Type: "kubernetes"}},
 		map[string]V1ProfileConfig{
 			"local": {Runtime: "docker"},
-			"gke":   {Runtime: "k8s", SharedDirStorageBackend: "nfs"},
+			"gke":   {Runtime: "k8s", DefaultTemplate: "first"},
 		}, nil)
 	SetGlobalSettingsOverlay(o)
 
 	vs, _, err = LoadGlobalSettingsWithOverlay()
 	require.NoError(t, err)
-	cfg, source := vs.ResolveSharedDirStorage("gke")
-	require.NotNil(t, cfg)
-	assert.Equal(t, "nfs", cfg.Backend)
-	assert.Equal(t, "profiles.gke.shared_dir_storage_backend", source)
-	assert.Equal(t, "/srv/nfs", cfg.NFS.MountRoot, "nfs details still come from the global file")
+	assert.Equal(t, "first", vs.Profiles["gke"].DefaultTemplate)
+	assert.Equal(t, "/srv/nfs", vs.Server.EffectiveSharedDirStorage().NFS.MountRoot, "the storage block still comes from the global file")
 
 	// A later overlay update applies to the next load, with no restart.
 	o.Update(nil, map[string]V1ProfileConfig{
 		"local": {Runtime: "docker"},
-		"gke":   {Runtime: "k8s", SharedDirStorageBackend: "local"},
+		"gke":   {Runtime: "k8s", DefaultTemplate: "second"},
 	}, nil)
 	vs, _, err = LoadGlobalSettingsWithOverlay()
 	require.NoError(t, err)
-	cfg, _ = vs.ResolveSharedDirStorage("gke")
-	require.NotNil(t, cfg)
-	assert.Equal(t, "local", cfg.Backend)
+	assert.Equal(t, "second", vs.Profiles["gke"].DefaultTemplate)
 
 	// The plain loader still ignores the overlay.
 	plain, _, err := LoadGlobalSettings()

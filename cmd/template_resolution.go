@@ -283,6 +283,16 @@ func handleHubAndLocalTemplate(ctx context.Context, hubCtx *HubContext, hubTempl
 			TemplateName: hubTemplate.Name,
 		}, nil
 	}
+	// An upload reads through this root; see transfer.ReadCollectedFile.
+	root, err := os.OpenRoot(localTemplate.Path)
+	if err != nil {
+		// Can't read the local files, just use Hub version
+		return &TemplateResolutionResult{
+			TemplateID:   hubTemplate.ID,
+			TemplateName: hubTemplate.Name,
+		}, nil
+	}
+	defer func() { _ = root.Close() }()
 
 	localHash := computeLocalContentHash(files)
 
@@ -307,11 +317,11 @@ func handleHubAndLocalTemplate(ctx context.Context, hubCtx *HubContext, hubTempl
 
 	if uploadTemplate || autoConfirm {
 		// Auto-update Hub with local version
-		return updateHubTemplate(ctx, hubCtx, hubTemplate, localTemplate, files, projectID)
+		return updateHubTemplate(ctx, hubCtx, hubTemplate, localTemplate, root, files, projectID)
 	}
 
 	// Interactive prompt
-	return promptForTemplateHashMismatch(ctx, hubCtx, hubTemplate, localTemplate, files, localHash, projectID)
+	return promptForTemplateHashMismatch(ctx, hubCtx, hubTemplate, localTemplate, root, files, localHash, projectID)
 }
 
 // handleLocalOnlyTemplate handles the case where template exists only locally.
@@ -402,7 +412,7 @@ func promptForLocalTemplateUpload(ctx context.Context, hubCtx *HubContext, local
 }
 
 // promptForTemplateHashMismatch prompts when local and Hub templates differ.
-func promptForTemplateHashMismatch(ctx context.Context, hubCtx *HubContext, hubTemplate *hubclient.Template, localTemplate *config.Template, files []hubclient.FileInfo, localHash, projectID string) (*TemplateResolutionResult, error) {
+func promptForTemplateHashMismatch(ctx context.Context, hubCtx *HubContext, hubTemplate *hubclient.Template, localTemplate *config.Template, root *os.Root, files []hubclient.FileInfo, localHash, projectID string) (*TemplateResolutionResult, error) {
 	fmt.Fprintf(os.Stderr, "\nTemplate '%s' exists on Hub but local version differs:\n", localTemplate.Name)
 	fmt.Fprintf(os.Stderr, "  Hub hash:   %s\n", truncateHash(hubTemplate.ContentHash))
 	fmt.Fprintf(os.Stderr, "  Local hash: %s\n\n", truncateHash(localHash))
@@ -419,7 +429,7 @@ func promptForTemplateHashMismatch(ctx context.Context, hubCtx *HubContext, hubT
 
 	switch strings.ToUpper(choice) {
 	case "U":
-		return updateHubTemplate(ctx, hubCtx, hubTemplate, localTemplate, files, projectID)
+		return updateHubTemplate(ctx, hubCtx, hubTemplate, localTemplate, root, files, projectID)
 	case "H":
 		return &TemplateResolutionResult{
 			TemplateID:   hubTemplate.ID,
@@ -462,7 +472,9 @@ func uploadLocalTemplate(ctx context.Context, hubCtx *HubContext, localTemplate 
 }
 
 // updateHubTemplate updates an existing Hub template with local files.
-func updateHubTemplate(ctx context.Context, hubCtx *HubContext, hubTemplate *hubclient.Template, localTemplate *config.Template, files []hubclient.FileInfo, projectID string) (*TemplateResolutionResult, error) {
+// files were collected from localTemplate.Path, and root is opened there;
+// uploads read through it (see uploadTemplateURLs).
+func updateHubTemplate(ctx context.Context, hubCtx *HubContext, hubTemplate *hubclient.Template, localTemplate *config.Template, root *os.Root, files []hubclient.FileInfo, projectID string) (*TemplateResolutionResult, error) {
 	fmt.Printf("Updating Hub template '%s' with local version...\n", hubTemplate.Name)
 
 	// Build file upload request
@@ -483,29 +495,9 @@ func updateHubTemplate(ctx context.Context, hubCtx *HubContext, hubTemplate *hub
 		return nil, fmt.Errorf("failed to get upload URLs: %w", err)
 	}
 
-	// Upload files
-	for _, urlInfo := range uploadResp.UploadURLs {
-		var fileInfo *hubclient.FileInfo
-		for i := range files {
-			if files[i].Path == urlInfo.Path {
-				fileInfo = &files[i]
-				break
-			}
-		}
-		if fileInfo == nil {
-			continue
-		}
-
-		f, err := os.Open(fileInfo.FullPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to open %s: %w", fileInfo.Path, err)
-		}
-
-		err = hubCtx.Client.Templates().UploadFile(uploadCtx, urlInfo.URL, urlInfo.Method, urlInfo.Headers, f)
-		_ = f.Close()
-		if err != nil {
-			return nil, fmt.Errorf("failed to upload %s: %w", fileInfo.Path, err)
-		}
+	// Upload files (silently: no per-file output here)
+	if err := uploadTemplateURLs(uploadCtx, hubCtx.Client.Templates(), root, files, uploadResp.UploadURLs, ""); err != nil {
+		return nil, err
 	}
 
 	// Build and finalize manifest
@@ -525,7 +517,7 @@ func updateHubTemplate(ctx context.Context, hubCtx *HubContext, hubTemplate *hub
 
 	updated, err := hubCtx.Client.Templates().Finalize(uploadCtx, hubTemplate.ID, manifest, hubTemplate.ContentHash, uploadResp.UploadID)
 	if hubclient.IsTemplateConflictError(err) {
-		updated, err = resyncTemplateAfterConflict(uploadCtx, hubCtx, hubTemplate.Name, hubTemplate.ID, files, manifest)
+		updated, err = resyncTemplateAfterConflict(uploadCtx, hubCtx, hubTemplate.Name, hubTemplate.ID, root, files, manifest)
 		if err != nil {
 			return nil, err
 		}

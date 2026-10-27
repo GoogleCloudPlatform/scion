@@ -31,9 +31,11 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { styleMap } from 'lit/directives/style-map.js';
 import { apiFetch } from '../../../client/api.js';
+import { peekUser, resolveUser, userDisplayName } from '../../../client/user-directory.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
 import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
 import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
@@ -373,7 +375,7 @@ const ENTITY_PATTERNS: EntityPattern[] = [
           {
             class: 'entity-link path-link',
             'data-file-path': path,
-            href: 'javascript:void(0)',
+            href: '#',
             title: `Open ${path}`,
           },
           path
@@ -703,6 +705,14 @@ export class ScionChatMessage extends LitElement {
   fromAgent = false;
 
   /**
+   * Whether the viewer starred this message (web.chat_starred_messages).
+   * Shows a small, noninteractive filled star in the message meta; the
+   * Star/Unstar toggle lives in the message menu.
+   */
+  @property({ type: Boolean })
+  starred = false;
+
+  /**
    * Whether the message's actual sender is an agent, independent of
    * `fromAgent`. v2 chat-thread computes `fromAgent` as "not me" (any
    * sender other than the current viewer, including another *user*) for
@@ -823,6 +833,22 @@ export class ScionChatMessage extends LitElement {
   @property()
   senderProjectSlug = '';
 
+  /**
+   * The user who authorized a message sent with an agent delegated
+   * credential (.design/agent-delegation.md §14.5). The sender stays the
+   * agent; the message shows "authorized by <user>". Empty otherwise.
+   */
+  @property()
+  authorizingUserId = '';
+
+  /** The delegation grant of a message sent with an agent delegated credential. */
+  @property()
+  delegationGrantId = '';
+
+  /** The authorizing user's display name, email or ID, once resolved. */
+  @state()
+  private authorizerName = '';
+
   /** The signed-in user's id; the artifact preview shows their artifacts' owner as "You". */
   @property()
   currentUserId = '';
@@ -938,6 +964,13 @@ export class ScionChatMessage extends LitElement {
       color: var(--scion-text-muted, #64748b);
       font-size: var(--chat-fs-sm);
       font-weight: 400;
+    }
+
+    .authorized-by {
+      font-size: var(--chat-fs-sm);
+      font-weight: 400;
+      color: var(--scion-text-muted, #64748b);
+      margin-bottom: 0.125rem;
     }
 
     .cross-project-label {
@@ -1664,6 +1697,26 @@ export class ScionChatMessage extends LitElement {
       color: var(--scion-neutral-400, #94a3b8);
     }
 
+    /* ---- Starred indicator (shape plus accent, never colour alone) ---- */
+    .star-indicator {
+      display: inline-flex;
+      align-items: center;
+      color: var(--scion-warning-500, #d97706);
+      font-size: var(--chat-fs-xs);
+      margin-left: 0.25rem;
+    }
+
+    .star-meta {
+      display: flex;
+      justify-content: flex-end;
+      line-height: 1;
+      margin-top: 0.125rem;
+    }
+
+    .from-agent .star-meta {
+      justify-content: flex-start;
+    }
+
     /* ---- Phase-3: Edited label ---- */
     .edited-label {
       font-size: var(--chat-fs-xs);
@@ -1836,6 +1889,40 @@ export class ScionChatMessage extends LitElement {
     this.previewObserver?.disconnect();
     this.previewObserver = null;
     this.observedPreviews = new WeakSet();
+  }
+
+  override willUpdate(changed: Map<string, unknown>): void {
+    super.willUpdate(changed);
+    if (changed.has('authorizingUserId')) {
+      this.resolveAuthorizer();
+    }
+  }
+
+  /**
+   * Names the authorizing user: a cached user row at once, else the ID
+   * until `resolveUser` answers (display name, else email, else the ID).
+   */
+  private resolveAuthorizer(): void {
+    const id = this.authorizingUserId;
+    if (!id) {
+      this.authorizerName = '';
+      return;
+    }
+    const cached = peekUser(id);
+    this.authorizerName = cached ? userDisplayName(cached) : id;
+    if (cached) return;
+    void resolveUser(id).then((user) => {
+      if (user && this.authorizingUserId === id) {
+        this.authorizerName = userDisplayName(user);
+      }
+    });
+  }
+
+  private renderAuthorizedBy() {
+    if (!this.authorizingUserId) return nothing;
+    const name = this.authorizerName || this.authorizingUserId;
+    const title = this.delegationGrantId ? `via delegation ${this.delegationGrantId}` : nothing;
+    return html`<div class="authorized-by" title=${title}>authorized by ${name}</div>`;
   }
 
   override updated(changed: Map<string, unknown>): void {
@@ -2184,11 +2271,15 @@ export class ScionChatMessage extends LitElement {
 
   /**
    * A middle-click fires auxclick, not click: keep it from opening the
-   * artifact link's "#" href in a new tab. The preview opens on a plain
-   * click only.
+   * "#" href of an artifact, gs:// or file path link in a new tab. These
+   * links open their preview on a plain click only.
    */
   private handleContentAuxClick(e: MouseEvent): void {
-    if ((e.target as HTMLElement | null)?.closest('.artifact-link[data-artifact-id]')) {
+    if (
+      (e.target as HTMLElement | null)?.closest(
+        '.artifact-link[data-artifact-id], .gcs-link[data-gcs-uri], .path-link[data-file-path]'
+      )
+    ) {
       e.preventDefault();
     }
   }
@@ -2320,6 +2411,7 @@ export class ScionChatMessage extends LitElement {
                     : nothing}
                   <span class="msg-time" title=${this.formatTimeTitle()}>${this.formatTime()}</span>
                   ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}
+                  ${this.renderStarIndicator()}
                 </div>
               `
             : nothing}
@@ -2333,10 +2425,11 @@ export class ScionChatMessage extends LitElement {
                   <span class="routed-to"> &rarr; ${this.routedTo}</span>
                   <span class="msg-time" title=${this.formatTimeTitle()}>${this.formatTime()}</span>
                   ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}
+                  ${this.renderStarIndicator()}
                 </div>
               `
             : nothing}
-          ${this.replyPreview ? this.renderReplyPreview() : nothing}
+          ${this.renderAuthorizedBy()} ${this.replyPreview ? this.renderReplyPreview() : nothing}
           ${isDeleted
             ? html`<div class="bubble-content">
                 <span class="deleted-message">This message was deleted</span>
@@ -2346,10 +2439,37 @@ export class ScionChatMessage extends LitElement {
           ${isDeleted ? nothing : this.renderArtifactChips()}
           ${isDeleted ? nothing : this.renderBadges()}
           ${isDeleted ? nothing : this.renderDeliveryState()}
+          ${isDeleted || this.hasHeaderMeta() ? nothing : this.renderStarMeta()}
         </div>
       </div>
       ${this.renderFullPreview()}
     `;
+  }
+
+  /** Whether this rendering shows a header carrying the time (and the star). */
+  private hasHeaderMeta(): boolean {
+    return this.showHeader && (this.fromAgent || !!this.routedTo);
+  }
+
+  /**
+   * The private starred indicator: a filled star with the accessible name
+   * "Starred by you". It is an image, not a control, so it adds no tab stop.
+   */
+  private renderStarIndicator(): TemplateResult | typeof nothing {
+    if (!this.starred || this.deletedAt) return nothing;
+    return html`<span
+      class="star-indicator"
+      role="img"
+      aria-label="Starred by you"
+      title="Starred by you"
+      ><sl-icon name="star-fill" aria-hidden="true"></sl-icon
+    ></span>`;
+  }
+
+  /** The indicator on its own meta line, for renderings without a header. */
+  private renderStarMeta(): TemplateResult | typeof nothing {
+    if (!this.starred) return nothing;
+    return html`<div class="star-meta">${this.renderStarIndicator()}</div>`;
   }
 
   /** Render delivery state indicator for outbound (user-sent) messages. */

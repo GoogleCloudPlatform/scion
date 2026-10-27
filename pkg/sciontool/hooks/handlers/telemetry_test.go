@@ -754,10 +754,10 @@ func TestTelemetryHandler_TokenMetricsOnModelEnd(t *testing.T) {
 // would catch a regression where the handler goes back to including
 // agent_id/project_id, since the admission test would keep passing.
 //
-// gen_ai.api.calls is asserted to still carry agent_id and project_id in the
-// same run, documenting the intended asymmetry: it keeps them for Cloud
-// descriptor compatibility (design §3.2); scion.usage.tokens does not,
-// because its GCP allowlist doesn't permit them.
+// gen_ai.api.calls is asserted in the same run to carry exactly harness,
+// model and status: like scion.usage.tokens it has no unprefixed agent_id or
+// project_id (ptone/scion#3668), so both metrics share the canonical scion_*
+// identity labels the pipeline stamps.
 func TestTelemetryHandler_UsageTokenLabelsMatchContract(t *testing.T) {
 	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "hooks")
@@ -841,13 +841,29 @@ func TestTelemetryHandler_UsageTokenLabelsMatchContract(t *testing.T) {
 				if !ok {
 					t.Fatalf("%s: unexpected data type %T", m.Name, m.Data)
 				}
+				// Exactly harness, model and status: no unprefixed
+				// agent_id/project_id, so calls and tokens share one
+				// identity label set once the pipeline stamps the
+				// canonical scion_* labels (ptone/scion#3668).
+				wantCallKeys := map[string]bool{
+					telemetrycontract.HarnessLabel: true,
+					telemetrycontract.ModelLabel:   true,
+					telemetrycontract.StatusLabel:  true,
+				}
 				for _, point := range sum.DataPoints {
 					sawAPICallPoint = true
-					if _, ok := point.Attributes.Value(attribute.Key("agent_id")); !ok {
-						t.Errorf("%s point missing agent_id (intended asymmetry vs. %s)", m.Name, telemetrycontract.MetricUsageTokens)
+					gotKeys := map[string]bool{}
+					for _, kv := range point.Attributes.ToSlice() {
+						gotKeys[string(kv.Key)] = true
 					}
-					if _, ok := point.Attributes.Value(attribute.Key("project_id")); !ok {
-						t.Errorf("%s point missing project_id (intended asymmetry vs. %s)", m.Name, telemetrycontract.MetricUsageTokens)
+					if len(gotKeys) != len(wantCallKeys) {
+						t.Errorf("%s point attribute keys = %v, want exactly %v", m.Name, gotKeys, wantCallKeys)
+						continue
+					}
+					for key := range wantCallKeys {
+						if !gotKeys[key] {
+							t.Errorf("%s point attribute keys = %v, missing %q", m.Name, gotKeys, key)
+						}
 					}
 				}
 			}

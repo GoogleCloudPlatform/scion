@@ -32,17 +32,6 @@ import (
 // AttachmentStore interface
 // ---------------------------------------------------------------------------
 
-// AttachmentMeta holds metadata about a stored attachment.
-type AttachmentMeta struct {
-	ID         string    `json:"id"`
-	ProjectID  string    `json:"projectId"`
-	Filename   string    `json:"name"`
-	MimeType   string    `json:"mime"`
-	Size       int64     `json:"size"`
-	UploadedBy string    `json:"uploadedBy"`
-	CreatedAt  time.Time `json:"createdAt"`
-}
-
 // AttachmentRef is the compact form embedded in message metadata (JSON).
 type AttachmentRef struct {
 	ID       string `json:"id"`
@@ -228,7 +217,7 @@ func SanitizeFilename(name string) (string, error) {
 	// type; #1098 tracks re-admitting it safely.
 	switch ext := attachmentExt(name); {
 	case DangerousExtensions[ext]:
-		return "", fmt.Errorf("dangerous file extension: %s", ext)
+		return "", fmt.Errorf("files with a %s extension are not accepted", ext)
 	case refusedMarkupExtensions[ext]:
 		return "", fmt.Errorf("files with a %s extension are not accepted", ext)
 	}

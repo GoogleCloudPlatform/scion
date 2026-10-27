@@ -110,7 +110,7 @@ func TestWarnK8sWorkspaceBackendDropped_OncePerProcess(t *testing.T) {
 	}
 
 	got := logged[0]
-	for _, want := range []string{"gke-shared-volume", "kubernetes", "emptyDir", "nfs"} {
+	for _, want := range []string{"gke-shared-volume", "kubernetes", "emptyDir", "nfs", "server.project_storage.backend", "server.workspace_storage.backend"} {
 		if !strings.Contains(got.msg, want) {
 			t.Errorf("warning %q does not mention %q", got.msg, want)
 		}

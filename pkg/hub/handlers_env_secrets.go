@@ -2206,19 +2206,48 @@ func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request
 // this way.
 const autoProvideLinkedBy = "auto-provide"
 
+// autoProvideBrokersPageSize is the page size autoLinkProviders lists
+// auto-provide brokers with; it follows the cursor through every page.
+const autoProvideBrokersPageSize = 100
+
+// listAutoProvideBrokers returns every broker with auto_provide enabled,
+// newest first, following the list cursor through all pages so a hub with
+// more brokers than one page links them all (ptone/scion#1998). A cursor
+// the store has already returned is an error rather than an endless loop.
+func (s *Server) listAutoProvideBrokers(ctx context.Context) ([]store.RuntimeBroker, error) {
+	autoProvideTrue := true
+	var all []store.RuntimeBroker
+	cursor := ""
+	seen := make(map[string]struct{})
+	for {
+		page, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{
+			AutoProvide: &autoProvideTrue,
+		}, store.ListOptions{Limit: autoProvideBrokersPageSize, Cursor: cursor, SkipTotalCount: true})
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page.Items...)
+		if page.NextCursor == "" {
+			return all, nil
+		}
+		if _, ok := seen[page.NextCursor]; ok {
+			return nil, fmt.Errorf("listing auto-provide brokers: pagination returned repeated cursor %q", page.NextCursor)
+		}
+		seen[page.NextCursor] = struct{}{}
+		cursor = page.NextCursor
+	}
+}
+
 // autoLinkProviders links brokers with auto_provide enabled as providers for a project.
 // If the project has no default runtime broker, the first auto-provided broker is set as default.
 func (s *Server) autoLinkProviders(ctx context.Context, project *store.Project) {
-	autoProvideTrue := true
-	autoProviders, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{
-		AutoProvide: &autoProvideTrue,
-	}, store.ListOptions{})
+	autoProviders, err := s.listAutoProvideBrokers(ctx)
 	if err != nil {
 		s.envSecretLog.Warn("Failed to query auto-provide brokers", "project_id", project.ID, "error", err)
 		return
 	}
 
-	for _, autoBroker := range autoProviders.Items {
+	for _, autoBroker := range autoProviders {
 		// A flat Runtime Broker never receives an automatic link or
 		// default, whatever the experiment state: it is linked only by an
 		// explicit link action.

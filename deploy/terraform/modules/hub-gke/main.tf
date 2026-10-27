@@ -151,7 +151,7 @@ locals {
     }
 
     # Workspace storage: one chart value renders settings.yaml
-    # server.workspace_storage (backend nfs) and mounts the export in the hub
+    # server.project_storage (backend nfs) and mounts the export in the hub
     # pod at <mountRoot>/<shareId>, so the settings and the mount cannot
     # drift. With backend nfs the hub's /readyz returns 503 until that path
     # exists in the hub container. The settings uid/gid come from

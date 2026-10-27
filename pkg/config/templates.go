@@ -251,10 +251,7 @@ func FindTemplateWithContext(ctx context.Context, name string) (*Template, error
 
 	// 1. Check if name is an absolute path
 	if filepath.IsAbs(name) {
-		if info, err := os.Stat(name); err == nil && info.IsDir() {
-			return &Template{Name: templateNameFromDir(name), Path: name}, nil
-		}
-		return nil, fmt.Errorf("template path %s not found or not a directory", name)
+		return TemplateFromDir(name)
 	}
 
 	// 2. Check project-local templates
@@ -308,6 +305,17 @@ func FindTemplateInScope(name, scope string) *Template {
 	}
 
 	return nil
+}
+
+// TemplateFromDir returns the template stored in dir, an absolute directory
+// path. The directory must exist. The template's name is derived from the
+// directory's base name with templateNameFromDir, so it is "" for a
+// content-addressed cache directory.
+func TemplateFromDir(dir string) (*Template, error) {
+	if info, err := os.Stat(dir); err == nil && info.IsDir() {
+		return &Template{Name: templateNameFromDir(dir), Path: dir}, nil
+	}
+	return nil, fmt.Errorf("template path %s not found or not a directory", dir)
 }
 
 // templateNameFromDir derives a template name from a template directory path.
@@ -528,6 +536,13 @@ func projectTemplatesRoot(projectPath string) string {
 // isHubWorkspaceRootWithoutScion reports whether p is a hub-managed
 // workspace root (below the hub projects directory, not a .scion path)
 // that has no .scion entry: it then has no project configuration tier.
+//
+// "Below the hub projects directory" is isUnderHubProjectsDir
+// (hub_projects_dir_other.go and hub_projects_dir_windows.go): p lies below
+// the global directory's projects/ directory, where hub-managed workspaces
+// live. It is the only containment decision for the project layer of a hub
+// workspace root: settings, project templates and harness-configs all read
+// it through this function.
 func isHubWorkspaceRootWithoutScion(p string) bool {
 	if p == "" || filepath.Base(p) == DotScion {
 		return false
@@ -536,28 +551,6 @@ func isHubWorkspaceRootWithoutScion(p string) bool {
 		return false
 	}
 	return isUnderHubProjectsDir(p)
-}
-
-// isUnderHubProjectsDir reports whether p lies below the global
-// directory's projects/ directory, where hub-managed workspaces live.
-func isUnderHubProjectsDir(p string) bool {
-	globalDir, err := GetGlobalDir()
-	if err != nil {
-		return false
-	}
-	projects := filepath.Join(globalDir, "projects")
-	if resolved, err := filepath.EvalSymlinks(projects); err == nil {
-		projects = resolved
-	}
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return false
-	}
-	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
-		abs = resolved
-	}
-	rel, err := filepath.Rel(projects, abs)
-	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // LegacyProjectTemplatesWarning returns a start warning when projectPath is
@@ -651,7 +644,7 @@ func findOrHydrateDefaultTemplate(projectPath string) (*Template, error) {
 	// MkdirTemp creates 0700 and SeedAgnosticTemplate's MkdirAll is a no-op on an
 	// existing dir, so without this the published default diverges from every other
 	// seeding path, which yields 0755.
-	_ = os.Chmod(staging, 0755)
+	_ = os.Chmod(staging, 0755) //winsec:not-protection mode 0755 is not a privacy mode
 
 	if sErr := SeedAgnosticTemplate(staging, false); sErr != nil {
 		util.Debugf("failed to hydrate embedded default template: %v", sErr)
@@ -1318,10 +1311,12 @@ func mergeTelemetryConfig(base, override *api.TelemetryConfig) *api.TelemetryCon
 			if override.Cloud.TLS.CAFile != "" {
 				result.Cloud.TLS.CAFile = override.Cloud.TLS.CAFile
 			}
-			if override.Cloud.TLS.CertFile != "" {
+			// The client certificate and its key are one setting: a layer
+			// that sets either replaces both, so the pair never mixes
+			// files from different layers. A layer that sets only one
+			// leaves the other empty, which ValidateTelemetryTLS reports.
+			if override.Cloud.TLS.CertFile != "" || override.Cloud.TLS.KeyFile != "" {
 				result.Cloud.TLS.CertFile = override.Cloud.TLS.CertFile
-			}
-			if override.Cloud.TLS.KeyFile != "" {
 				result.Cloud.TLS.KeyFile = override.Cloud.TLS.KeyFile
 			}
 		}

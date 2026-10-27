@@ -328,6 +328,62 @@ func closeCode(t *testing.T, err error) uint32 {
 	return ce.Code
 }
 
+// tunnelSessionWatch holds both ends of the sessions a revocation test
+// depends on: the user's session (client and relay side) and every
+// relay-side session of the agent. The relay forgets a session once it
+// ends, so watchSessions takes them before the relay clock moves; a failed
+// close assertion then names the session that ended and its error
+// (ptone/scion#5255, ptone/scion#4893).
+type tunnelSessionWatch struct {
+	names    []string
+	sessions []conduit.LocalSession
+}
+
+func (tf *tunnelFixture) watchSessions(t *testing.T, c *tunnelClient) *tunnelSessionWatch {
+	t.Helper()
+	rt := tf.srv.conduit.Load()
+	require.NotNil(t, rt, "the relay runs")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	w := &tunnelSessionWatch{}
+	w.add("user (client side)", c.ls)
+	if ls, _, ok := rt.relay.Local(ctx, c.ls.Info().SessionID); ok {
+		w.add("user (relay side)", ls)
+	}
+	for _, rec := range tf.agentSessions(t) {
+		if ls, _, ok := rt.relay.Local(ctx, rec.SessionID); ok {
+			w.add("agent (relay side)", ls)
+		}
+	}
+	return w
+}
+
+func (w *tunnelSessionWatch) add(name string, ls conduit.LocalSession) {
+	w.names = append(w.names, name)
+	w.sessions = append(w.sessions, ls)
+}
+
+// String describes each watched session (conduitSessionState).
+func (w *tunnelSessionWatch) String() string {
+	var b strings.Builder
+	for i, ls := range w.sessions {
+		b.WriteString("\n  " + w.names[i] + ": " + conduitSessionState(ls))
+	}
+	return b.String()
+}
+
+// requireClosedAuthzExpired asserts that a tunnel stream ended with err,
+// a 4401 authz_expired close, and that the user's session c stays up. A
+// failure reports the sessions w watches.
+func requireClosedAuthzExpired(t *testing.T, err error, c *tunnelClient, w *tunnelSessionWatch) {
+	t.Helper()
+	var ce *conduit.CloseError
+	require.True(t, errors.As(err, &ce), "want a 4401 authz_expired close, got %v; sessions:%s", err, w)
+	assert.Equal(t, conduit.CloseUnauthenticated, ce.Code, "sessions:%s", w)
+	assert.Equal(t, conduitReasonAuthzExpired, ce.Reason, "sessions:%s", w)
+	assert.Nil(t, c.ls.Err(), "the session stays up; sessions:%s", w)
+}
+
 func (tf *tunnelFixture) ownerClient(t *testing.T) *tunnelClient {
 	t.Helper()
 	c, err := tf.dialUser(t, tf.userToken, tf.launched.OwnerID)
@@ -587,14 +643,10 @@ func TestConduitTunnel_RevokedUserClosed4401(t *testing.T) {
 	require.NoError(t, err)
 	u.Status = store.UserStatusSuspended
 	require.NoError(t, tf.store.UpdateUser(ctx, u))
+	w := tf.watchSessions(t, c)
 	tf.relayClock.Advance(tunnelSweep)
 
-	err = streamEnd(t, st)
-	assert.Equal(t, conduit.CloseUnauthenticated, closeCode(t, err))
-	var ce *conduit.CloseError
-	require.True(t, errors.As(err, &ce))
-	assert.Equal(t, conduitReasonAuthzExpired, ce.Reason)
-	assert.Nil(t, c.ls.Err(), "the session stays up")
+	requireClosedAuthzExpired(t, streamEnd(t, st), c, w)
 	require.Eventually(t, func() bool { return a.Len() == 0 }, 10*time.Second, 20*time.Millisecond)
 }
 

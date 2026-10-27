@@ -61,7 +61,7 @@ func (m *recFakeManager) List(ctx context.Context, filter map[string]string) ([]
 	return append([]api.AgentInfo(nil), m.agents...), nil
 }
 
-func (m *recFakeManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+func (m *recFakeManager) DeleteTarget(ctx context.Context, agentName, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
 	m.fmu.Lock()
 	m.deleted = append(m.deleted, ref)
 	block, started := m.deleteBlock, m.deleteStarted

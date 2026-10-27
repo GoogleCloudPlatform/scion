@@ -48,6 +48,18 @@ var (
 	// GetActiveReservation to tell a retry from a conflict.
 	ErrActiveReservationExists = fmt.Errorf("%w: resource holds an active usage reservation for this limit", ErrAlreadyExists)
 
+	// ErrTransferRaced is returned by TransferBrokerReservation when its
+	// release matched no row although the row was read under lock.
+	// Unreachable by construction; returned (after rollback) so the
+	// contract fails closed. Retryable.
+	ErrTransferRaced = errors.New("store: reservation transfer raced")
+
+	// ErrInvalidTransfer is returned by TransferBrokerReservation for a
+	// contradictory request (CreateIfAbsent together with
+	// FromReservationID), before the transaction starts. The hub also wraps
+	// it when it refuses a transfer to an empty broker ID.
+	ErrInvalidTransfer = errors.New("store: invalid reservation transfer request")
+
 	// ErrTransient marks a database conflict that a retry resolves: a
 	// Postgres serialization failure or deadlock, or a busy or locked
 	// SQLite database. The entadapter WithTx wraps such errors with it.
@@ -190,12 +202,15 @@ type Store interface {
 	// ptone/scion#2483 §2.3), as ONE transaction: it reads the agent
 	// (row-locked where supported), evaluates pred, and when it holds
 	// either applies set (DeletionFinalizeSoft, with UpdateAgentDeletion's
-	// semantics, Derive included) or removes the agent row and its cascade
-	// (DeletionFinalizeHard, as DeleteAgent). Then, still inside the
-	// transaction and just before commit, it calls hook (when non-nil) with
-	// a transaction-scoped Store, the agent (the post-write row for soft,
-	// the pre-delete row for hard) and the mode; a non-nil hook error rolls
-	// the whole finalize back and is returned. Returns affected=0 with a nil
+	// semantics, Derive included, except that soft mode alone also accepts
+	// DeletionFields.SoftFinishRunID and SoftFinishPreviousRunIDs) or
+	// removes the agent row and its cascade (DeletionFinalizeHard, as
+	// DeleteAgent; a set carrying those run fields is refused with
+	// ErrInvalidInput). Then, still inside the transaction and just before
+	// commit, it calls hook (when non-nil) with a transaction-scoped Store,
+	// the agent (the post-write row for soft, the pre-delete row for hard)
+	// and the mode; a non-nil hook error rolls the whole finalize back and
+	// is returned. Returns affected=0 with a nil
 	// error when the predicate did not hold or the agent does not exist.
 	// Must not be called from inside WithTx.
 	FinalizeAgentDeletion(ctx context.Context, id string, pred DeletionPredicate, mode DeletionFinalizeMode, set DeletionFields, hook DeletionFinalizeHook) (affected int, err error)
@@ -1694,6 +1709,19 @@ type RuntimeBrokerStore interface {
 	// UpdateRuntimeBroker updates an existing runtime broker.
 	// Returns ErrNotFound if the broker doesn't exist.
 	UpdateRuntimeBroker(ctx context.Context, broker *RuntimeBroker) error
+
+	// RefreshRuntimeBrokerState is the heartbeat's write. It reads the
+	// broker, calls refresh on that copy and, when refresh reports a
+	// change, writes only Capabilities, WorkspaceStorage, DefaultProfile,
+	// Health and Profiles, as a compare-and-set on the row's version. A
+	// concurrent write between the read and the write makes it retry with
+	// a fresh read, so refresh may run more than once and must change only
+	// those fields; changes it makes to any other field are not stored.
+	// Every other column keeps whatever a concurrent writer stored. On a
+	// flat row Profiles and DefaultProfile are stored empty, as
+	// UpdateRuntimeBroker does. Returns ErrNotFound if the broker doesn't
+	// exist and ErrVersionConflict when the retries run out.
+	RefreshRuntimeBrokerState(ctx context.Context, id string, refresh func(broker *RuntimeBroker) (changed bool)) error
 
 	// SetRuntimeBrokerCreatedByIfEmpty atomically sets created_by on a runtime
 	// broker, but only if the row's created_by is currently empty. Returns
@@ -3558,7 +3586,11 @@ type HubSettingStore interface {
 
 	// UpsertHubSetting creates or updates a hub setting with CAS semantics.
 	//   expectedRevision == 0:  create-only; returns ErrRevisionConflict if the section already exists.
-	//   expectedRevision == -1: unconditional upsert (used for seeding); always succeeds.
+	//   expectedRevision == -1: unconditional upsert (used for seeding). A create that loses a
+	//                           concurrent create of the same section is retried a bounded number
+	//                           of times; if every attempt loses, it returns a wrapped
+	//                           ErrRevisionConflict. Other errors (a different constraint
+	//                           error included) are returned as they are.
 	//   expectedRevision > 0:   CAS update; returns ErrRevisionConflict if current revision != expectedRevision.
 	// origin must be "seeded" or "managed" — seed-writes pass "seeded", admin-PUT writes pass "managed".
 	// A write of an operational section bumps the HubSettingsRevisionSection
@@ -4527,6 +4559,131 @@ type QuotaStore interface {
 	// none. At most one exists (the unique active (limit_definition_id,
 	// resource_id) index). Released reservations are never returned.
 	GetActiveReservation(ctx context.Context, limitDefinitionID, resourceID string) (*UsageReservation, error)
+
+	// TransferBrokerReservation leaves req.AgentID with exactly one active
+	// reservation for req.LimitDefinitionID, broker-scoped on req.ToBrokerID,
+	// in one transaction:
+	//  1. Locks the agent row (FOR UPDATE on Postgres; SQLite serializes
+	//     writers). A missing or soft-deleted (DeletedAt set) agent row
+	//     returns ErrNotFound.
+	//  2. RequireAgentOnTo: checks RuntimeBrokerID (TransferAgentElsewhere).
+	//     Cond: evaluates it (TransferStale).
+	//  3. Reads the agent's active reservation for the limit, locked.
+	//     FromReservationID set: the row must exist with that ID
+	//     (TransferStale).
+	//  4. Row is broker-scoped on ToBrokerID: TransferAlreadyOn.
+	//  5. No row and !CreateIfAbsent: TransferAbsent.
+	//  6. Cap > 0: counts active rows with the predicate Reserve uses
+	//     (CountActiveReservations: subject = scope = (broker, ToBrokerID));
+	//     count >= Cap returns ErrQuotaExceeded.
+	//  7. Releases the held row, if any (released_at = now WHERE id AND
+	//     released_at IS NULL); affected rows != 1 rolls back with
+	//     ErrTransferRaced. Never falls through to the insert.
+	//  8. Inserts a new broker-scoped row on ToBrokerID (subject ToBrokerID,
+	//     reserved 1, created_at now). A unique violation returns
+	//     ErrActiveReservationExists.
+	// Every error rolls the whole transaction back: the agent keeps the
+	// reservation it had. CreateIfAbsent together with FromReservationID
+	// returns ErrInvalidTransfer before any read. Must not be called from
+	// inside WithTx.
+	TransferBrokerReservation(ctx context.Context, req BrokerReservationTransfer) (BrokerReservationTransferResult, error)
+}
+
+// BrokerReservationTransfer asks TransferBrokerReservation to leave AgentID
+// with exactly one active reservation for LimitDefinitionID, on ToBrokerID.
+type BrokerReservationTransfer struct {
+	LimitDefinitionID string
+	AgentID           string
+	ToBrokerID        string
+	// Cap > 0 counts the active broker-scoped reservations on ToBrokerID
+	// inside the transaction and refuses with ErrQuotaExceeded, writing
+	// nothing, when count >= Cap. Cap <= 0 is unchecked.
+	Cap int64
+	// CreateIfAbsent inserts the reservation on ToBrokerID when the agent
+	// holds none. When false, an agent holding none reports TransferAbsent
+	// and nothing is written.
+	CreateIfAbsent bool
+	// RequireAgentOnTo requires the locked agent row's RuntimeBrokerID to
+	// equal ToBrokerID, else TransferAgentElsewhere and nothing is written.
+	RequireAgentOnTo bool
+	// FromReservationID, when set, requires the agent's held active row to
+	// be exactly this ID (a caller acting on a row it read never moves a
+	// newer one). A different row, or none, reports TransferStale and
+	// nothing is written. CreateIfAbsent must be false when it is set:
+	// both set returns ErrInvalidTransfer before any read.
+	FromReservationID string
+	// Cond, when non-nil, is evaluated on the locked agent row; if it does
+	// not hold, TransferStale and nothing is written.
+	Cond *TransferAgentCond
+}
+
+// TransferAgentCond holds preconditions on the agent row that
+// TransferBrokerReservation has locked, for callers acting on an earlier
+// read. Every set field must hold. It differs from AgentReleaseCond (the
+// condition of ReleaseReservationIfAgent) on purpose: NoClaim excludes stop
+// claims too, HoldsCapacity is the inverse of NotCounted, and NotInFlight
+// has no release counterpart.
+type TransferAgentCond struct {
+	// CheckRunID: the row's RunID must equal ExpectedRunID (empty included).
+	CheckRunID    bool
+	ExpectedRunID string
+	// NoClaim: StartClaimID must be "" (no claim of any kind, stop included).
+	NoClaim bool
+	// HoldsCapacity: AgentHoldsBrokerCapacity(row) must be true.
+	HoldsCapacity bool
+	// NotInFlight: !ReincarnationInFlight(row.ReincarnationState).
+	NotInFlight bool
+}
+
+// Holds reports whether c holds for the agent row a.
+func (c TransferAgentCond) Holds(a *Agent) bool {
+	if c.CheckRunID && a.RunID != c.ExpectedRunID {
+		return false
+	}
+	if c.NoClaim && a.StartClaimID != "" {
+		return false
+	}
+	if c.HoldsCapacity && !AgentHoldsBrokerCapacity(a) {
+		return false
+	}
+	if c.NotInFlight && ReincarnationInFlight(a.ReincarnationState) {
+		return false
+	}
+	return true
+}
+
+// BrokerReservationTransferOutcome is what TransferBrokerReservation did.
+type BrokerReservationTransferOutcome string
+
+const (
+	// TransferAlreadyOn: the active row was already on ToBrokerID; no write.
+	TransferAlreadyOn BrokerReservationTransferOutcome = "already_on"
+	// TransferMoved: the old row was released and a new row inserted.
+	TransferMoved BrokerReservationTransferOutcome = "moved"
+	// TransferCreated: none was held and CreateIfAbsent inserted one.
+	TransferCreated BrokerReservationTransferOutcome = "created"
+	// TransferAbsent: none was held, !CreateIfAbsent and no
+	// FromReservationID; no write.
+	TransferAbsent BrokerReservationTransferOutcome = "absent"
+	// TransferAgentElsewhere: RequireAgentOnTo failed; no write.
+	TransferAgentElsewhere BrokerReservationTransferOutcome = "agent_elsewhere"
+	// TransferStale: FromReservationID or Cond failed; no write.
+	TransferStale BrokerReservationTransferOutcome = "stale"
+)
+
+// BrokerReservationTransferResult is the result of
+// TransferBrokerReservation.
+type BrokerReservationTransferResult struct {
+	Outcome BrokerReservationTransferOutcome
+	// FromScopeType and FromScopeID are the scope of the released row
+	// (TransferMoved).
+	FromScopeType string
+	FromScopeID   string
+	// ReleasedID is the ID of the released row (TransferMoved).
+	ReleasedID string
+	// ReservationID is the active row on ToBrokerID afterwards (empty when
+	// no row is on it).
+	ReservationID string
 }
 
 // =============================================================================

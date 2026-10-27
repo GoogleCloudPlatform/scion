@@ -25,6 +25,7 @@ import (
 )
 
 func TestCheckHostNetworkMetadata(t *testing.T) {
+	stubHostNetworkBlockPolicy(t, "", runtime.CloudHost{})
 	tests := []struct {
 		name        string
 		runtime     string
@@ -150,6 +151,7 @@ func TestStart_HostNetworkAssignRefusedBeforeRun(t *testing.T) {
 }
 
 func TestStart_HostNetworkBlockWarnsAndRelays(t *testing.T) {
+	stubHostNetworkBlockPolicy(t, "", runtime.CloudHost{})
 	info, cfg, err := startHostNetFixture(t, "http://localhost:8080", "block")
 	if err != nil {
 		t.Fatalf("Start failed: %v", err)

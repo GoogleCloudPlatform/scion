@@ -16,10 +16,7 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"net/http"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -47,9 +44,9 @@ func newInstallTestResolver(t *testing.T, credential string) (r *GitHubSkillReso
 		apiCalls.Add(1)
 		_, _ = w.Write([]byte(testCommitSHA))
 	})
-	mux.HandleFunc("/repos/acme/private/contents/skills/s", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/repos/acme/private/git/trees/"+testCommitSHA+":skills/s", func(w http.ResponseWriter, _ *http.Request) {
 		apiCalls.Add(1)
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{
+		_ = writeTestTree(w, []fakeTreeFile{
 			{Name: "SKILL.md", Path: "skills/s/SKILL.md", Type: "file", Size: len(content)},
 		})
 	})
@@ -68,7 +65,7 @@ func newInstallTestResolver(t *testing.T, credential string) (r *GitHubSkillReso
 	}
 	first.putEntry(resolutionCacheKey(ghRef, credential), ResolvedSkill{
 		Name: "s", URI: installTestURI,
-		Files: []ResolvedFile{{Path: "SKILL.md", URL: "https://raw.githubusercontent.com/acme/private/x/SKILL.md", Content: []byte(content)}},
+		Files: []ResolvedFile{{Path: "SKILL.md", URL: "https://raw.githubusercontent.com/acme/private/x/SKILL.md", Mode: "0644", Content: []byte(content)}},
 	}, true)
 	first.Flush()
 
@@ -195,29 +192,6 @@ func TestGitHubSkillResolver_FlushCache(t *testing.T) {
 	(&GitHubSkillResolver{}).FlushCache() // no cache: no-op
 }
 
-// TestNewGitHubResolutionCache_DirModeFailureIsNotFatal checks that a cache
-// directory whose mode cannot be changed (for example one owned by another
-// user) still yields a working cache.
-func TestNewGitHubResolutionCache_DirModeFailureIsNotFatal(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	orig := chmod
-	chmod = func(string, os.FileMode) error { return errors.New("operation not permitted") }
-	t.Cleanup(func() { chmod = orig })
-
-	cache, err := newTestResolutionCache(dir, time.Hour)
-	if err != nil {
-		t.Fatalf("NewGitHubResolutionCache: %v", err)
-	}
-	cache.putEntry("gh://o/r/s@main", ResolvedSkill{Name: "s"}, true)
-	cache.Flush()
-	if f := readCacheFile(t, dir); len(f.Entries) != 1 {
-		t.Fatalf("file has %d entries, want 1", len(f.Entries))
-	}
-}
-
 // TestWithContentFlightKeyIsSeparate checks that a caller that cannot use
 // a content-less entry (its install context does not supply the credential
 // it resolves with) resolves under its own flight key, ending in
@@ -247,7 +221,7 @@ func TestWithContentFlightKeyIsSeparate(t *testing.T) {
 	// A stale in-memory entry with content, which every caller accepts.
 	cache.putEntry(resolutionCacheKey(ghRef, credential), ResolvedSkill{
 		Name: "s", URI: installTestURI,
-		Files: []ResolvedFile{{Path: "SKILL.md", Content: []byte("# skill")}},
+		Files: []ResolvedFile{{Path: "SKILL.md", Mode: "0644", Content: []byte("# skill")}},
 	}, true)
 
 	r := newTestGitHubResolver(server)
