@@ -580,7 +580,7 @@ func (s *Server) healthSummaryBrokers(ctx context.Context, agentAgg *store.Agent
 			}
 			row := healthSummaryBroker(b, agentAgg, hubVersion)
 			if layoutErr == nil && row.WorkspaceStorage != nil {
-				row.WorkspaceStorage.LayoutMismatch = projectfs.RenderLayoutIssues(hubLayout.DescriptorIssues(b.WorkspaceStorage, ""), storageIssueView(ctx))
+				row.WorkspaceStorage.LayoutMismatch = projectfs.RenderLayoutIssues(hubLayout.DescriptorIssues(b.WorkspaceStorage, ""), s.storageIssueView(ctx))
 			}
 			list.Items = append(list.Items, row)
 		}

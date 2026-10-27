@@ -168,7 +168,7 @@ func TestHealthSummary_BrokerLayoutMismatch(t *testing.T) {
 	assert.False(t, healthSummaryBrokerHasProblem(rows[tid("hs-layout-ok")]))
 
 	// A hub admin sees the values.
-	adminCtx := contextWithIdentity(ctx, NewAuthenticatedUser("u-admin", "admin@example.com", "Admin", "admin", "cli"))
+	adminCtx := storageAdminCtx(t, s, "hs-layout-admin")
 	list, _, err = srv.healthSummaryBrokers(adminCtx, nil, "")
 	require.NoError(t, err)
 	for _, r := range list.Items {

@@ -15,7 +15,6 @@
 package hub
 
 import (
-	"context"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -28,47 +27,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-// TestStorageValuesAllowed: only an unscoped hub admin may see storage
-// layout values.
-func TestStorageValuesAllowed(t *testing.T) {
-	ctx := context.Background()
-	admin := contextWithIdentity(ctx, NewAuthenticatedUser("u-admin", "admin@example.com", "Admin", "admin", "cli"))
-	member := contextWithIdentity(ctx, NewAuthenticatedUser("u-member", "member@example.com", "Member", "member", "cli"))
-	if !storageValuesAllowed(admin) {
-		t.Error("an admin may not see values")
-	}
-	if storageValuesAllowed(member) || storageValuesAllowed(ctx) {
-		t.Error("a member or an anonymous caller may see values")
-	}
-
-	b := store.RuntimeBroker{ID: "b", WorkspaceStorage: &api.BrokerWorkspaceStorage{Backend: "nfs", Homes: "nfs",
-		NFS:    &api.BrokerNFSWorkspaceStorage{Server: "10.9.8.7", Export: "/fixture-export", SubPathRoot: "fixture-root", Healthy: true, ExportID: "fixture-export-id"},
-		Volume: &api.BrokerVolumeWorkspaceStorage{ClaimName: "fixture-claim", SubPathRoot: "fixture-root"}}}
-	for name, c := range map[string]context.Context{"member": member, "anonymous": ctx} {
-		got := brokerStorageForViewer(c, b, false)
-		if s := fmt.Sprintf("%+v %+v", *got.WorkspaceStorage.NFS, *got.WorkspaceStorage.Volume); strings.Contains(s, "fixture") || strings.Contains(s, "10.9.8.7") {
-			t.Errorf("%s: values shown: %s", name, s)
-		}
-		if got.WorkspaceStorage.Backend != "nfs" || got.WorkspaceStorage.Homes != "nfs" || !got.WorkspaceStorage.NFS.Healthy {
-			t.Errorf("%s: backend, homes or health dropped: %+v", name, got.WorkspaceStorage)
-		}
-		if !got.WorkspaceStorage.Redacted {
-			t.Errorf("%s: the redacted descriptor is not marked Redacted", name)
-		}
-		if b.WorkspaceStorage.NFS.Server != "10.9.8.7" || b.WorkspaceStorage.Redacted {
-			t.Fatal("the stored record was modified")
-		}
-	}
-	if got := brokerStorageForViewer(admin, b, false); got.WorkspaceStorage.NFS.Server != "10.9.8.7" || got.WorkspaceStorage.Redacted {
-		t.Error("an admin does not see the values")
-	}
-	if got := brokerStorageForViewer(member, b, true); got.WorkspaceStorage.NFS.Export != "/fixture-export" {
-		t.Error("the broker reading its own record does not see the values")
-	}
-}
 
 // TestMoveRefusals_NameStorageFieldsOnly: the move refusals for brokers on
 // different exports, or with different export identity markers, name the

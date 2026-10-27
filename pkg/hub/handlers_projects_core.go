@@ -2303,7 +2303,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil && brokerIdent.BrokerID() == broker.ID {
 			self = true
 		}
-		shown := brokerForDisplay(brokerStorageForViewer(ctx, *broker, self))
+		shown := brokerForDisplay(s.brokerStorageForViewer(ctx, *broker, self))
 		broker = &shown
 	}
 	writeJSON(w, http.StatusOK, RegisterProjectResponse{

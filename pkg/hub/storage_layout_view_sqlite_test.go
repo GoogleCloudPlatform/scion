@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -46,6 +47,7 @@ func TestBrokerRecords_StorageValuesForAdminsOnly(t *testing.T) {
 			Server: "10.9.8.7", Export: "/fixture-export", SubPathRoot: "fixture-root", Healthy: true, ExportID: "fixture-export-id"}},
 	}))
 	member := setupNonAdminUser(t, s, []string{"broker.read"})
+	adminUser := newSuperAdminUser(t, s, "redact-records-admin")
 
 	for _, path := range []string{"/api/v1/runtime-brokers/" + tid("redact-broker"), "/api/v1/runtime-brokers"} {
 		rec := doRequestAsIdentity(t, srv, member, http.MethodGet, path, nil)
@@ -63,7 +65,7 @@ func TestBrokerRecords_StorageValuesForAdminsOnly(t *testing.T) {
 			require.NotContains(t, body, key, "%s: a redacted value field is present", path)
 		}
 
-		admin := doRequest(t, srv, http.MethodGet, path, nil)
+		admin := doRequestAsUser(t, srv, adminUser, http.MethodGet, path, nil)
 		require.Equal(t, http.StatusOK, admin.Code, "%s: %s", path, admin.Body.String())
 		adminBody := admin.Body.String()
 		for _, v := range storageFixtureValues {
@@ -105,4 +107,53 @@ func TestRegisterProject_BrokerStorageValuesForAdminsOnly(t *testing.T) {
 		require.Contains(t, rec.Body.String(), v, "an admin sees the storage value %q", v)
 	}
 	require.NotContains(t, rec.Body.String(), `"redacted":true`)
+}
+
+// storageAdminCtx returns a context whose identity is a new super-admin
+// user (store-backed, so the authorization pipeline grants hub.config.read).
+func storageAdminCtx(t *testing.T, s store.Store, name string) context.Context {
+	t.Helper()
+	u := newSuperAdminUser(t, s, name)
+	return contextWithIdentity(context.Background(), NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, "web"))
+}
+
+// TestStorageValuesAllowed: only a caller holding hub.config.read (a hub
+// super-admin here) may see storage layout values; a member with
+// broker.read and an anonymous caller may not.
+func TestStorageValuesAllowed(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+	admin := storageAdminCtx(t, st, "storage-values-admin")
+	member := contextWithIdentity(ctx, setupNonAdminUser(t, st, []string{"broker.read"}))
+	if !srv.storageValuesAllowed(admin) {
+		t.Error("an admin may not see values")
+	}
+	if srv.storageValuesAllowed(member) || srv.storageValuesAllowed(ctx) {
+		t.Error("a member or an anonymous caller may see values")
+	}
+
+	b := store.RuntimeBroker{ID: "b", WorkspaceStorage: &api.BrokerWorkspaceStorage{Backend: "nfs", Homes: "nfs",
+		NFS:    &api.BrokerNFSWorkspaceStorage{Server: "10.9.8.7", Export: "/fixture-export", SubPathRoot: "fixture-root", Healthy: true, ExportID: "fixture-export-id"},
+		Volume: &api.BrokerVolumeWorkspaceStorage{ClaimName: "fixture-claim", SubPathRoot: "fixture-root"}}}
+	for name, c := range map[string]context.Context{"member": member, "anonymous": ctx} {
+		got := srv.brokerStorageForViewer(c, b, false)
+		if v := fmt.Sprintf("%+v %+v", *got.WorkspaceStorage.NFS, *got.WorkspaceStorage.Volume); strings.Contains(v, "fixture") || strings.Contains(v, "10.9.8.7") {
+			t.Errorf("%s: values shown: %s", name, v)
+		}
+		if got.WorkspaceStorage.Backend != "nfs" || got.WorkspaceStorage.Homes != "nfs" || !got.WorkspaceStorage.NFS.Healthy {
+			t.Errorf("%s: backend, homes or health dropped: %+v", name, got.WorkspaceStorage)
+		}
+		if !got.WorkspaceStorage.Redacted {
+			t.Errorf("%s: the redacted descriptor is not marked Redacted", name)
+		}
+		if b.WorkspaceStorage.NFS.Server != "10.9.8.7" || b.WorkspaceStorage.Redacted {
+			t.Fatal("the stored record was modified")
+		}
+	}
+	if got := srv.brokerStorageForViewer(admin, b, false); got.WorkspaceStorage.NFS.Server != "10.9.8.7" || got.WorkspaceStorage.Redacted {
+		t.Error("an admin does not see the values")
+	}
+	if got := srv.brokerStorageForViewer(member, b, true); got.WorkspaceStorage.NFS.Export != "/fixture-export" {
+		t.Error("the broker reading its own record does not see the values")
+	}
 }

@@ -24,18 +24,28 @@ import (
 
 // storageValuesAllowed reports whether the caller of ctx may see storage
 // layout values (servers, exports, share ids, subpath roots, claim names,
-// export identity markers): an unscoped hub admin, the same role check
-// requireAdmin makes. Everyone else sees the differing fields by name
-// only.
-func storageValuesAllowed(ctx context.Context) bool {
+// export identity markers): a user holding hub.config.read, the permission
+// that already reads the hub's server configuration (where those values
+// are set), decided by the authorization pipeline. Everyone else sees the
+// differing fields by name only.
+func (s *Server) storageValuesAllowed(ctx context.Context) bool {
 	user, ok := GetIdentityFromContext(ctx).(UserIdentity)
-	return ok && IsUnscopedLocalPlatformAdmin(user)
+	if !ok || IsNilIdentity(user) || s.authzService == nil {
+		return false
+	}
+	return s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(user),
+		Credential: credentialContextForIdentity(user),
+		Resource:   Resource{Type: "hub", ID: "hub"},
+		Action:     Action("read"),
+		Permission: "hub.config.read",
+	}).Allowed
 }
 
 // storageIssueView is the projectfs.IssueView for the caller of ctx:
-// ViewAdmin for a hub admin, else ViewPublic.
-func storageIssueView(ctx context.Context) projectfs.IssueView {
-	if storageValuesAllowed(ctx) {
+// ViewAdmin when it may see storage values, else ViewPublic.
+func (s *Server) storageIssueView(ctx context.Context) projectfs.IssueView {
+	if s.storageValuesAllowed(ctx) {
 		return projectfs.ViewAdmin
 	}
 	return projectfs.ViewPublic
@@ -48,8 +58,8 @@ func storageIssueView(ctx context.Context) projectfs.IssueView {
 // the nfs server, export, subpath root and export identity marker and the
 // volume claim and subpath root are omitted, and the descriptor is marked
 // Redacted so a client can tell redaction from an empty value.
-func brokerStorageForViewer(ctx context.Context, b store.RuntimeBroker, self bool) store.RuntimeBroker {
-	if b.WorkspaceStorage == nil || self || storageValuesAllowed(ctx) {
+func (s *Server) brokerStorageForViewer(ctx context.Context, b store.RuntimeBroker, self bool) store.RuntimeBroker {
+	if b.WorkspaceStorage == nil || self || s.storageValuesAllowed(ctx) {
 		return b
 	}
 	ws := *b.WorkspaceStorage

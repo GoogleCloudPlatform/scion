@@ -152,7 +152,7 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			// Storage layout values are shown to hub admins only.
-			broker = brokerStorageForViewer(ctx, broker, false)
+			broker = s.brokerStorageForViewer(ctx, broker, false)
 			eb := RuntimeBrokerWithProvider{
 				RuntimeBroker: brokerForDisplay(broker),
 				LocalPath:     brokerLocalPaths[broker.ID],
@@ -197,7 +197,7 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		// Storage layout values are shown to hub admins only.
-		broker = brokerStorageForViewer(ctx, broker, false)
+		broker = s.brokerStorageForViewer(ctx, broker, false)
 		resp := RuntimeBrokerWithCapabilities{RuntimeBroker: withHostIdentity(brokerForDisplay(broker), false)}
 		resp.HostedByThisServer = embedded.has(broker.ID)
 		resp.VersionStatus = runtimeBrokerVersionStatus(&result.Items[i], hubVersion)
@@ -420,7 +420,7 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 
 	// Storage layout values are shown to hub admins and the broker itself
 	// only.
-	shown := brokerStorageForViewer(ctx, *broker, brokerSelf)
+	shown := s.brokerStorageForViewer(ctx, *broker, brokerSelf)
 
 	// Compute capabilities for the requesting user
 	resp := RuntimeBrokerWithCapabilities{RuntimeBroker: withHostIdentity(brokerForDisplay(shown), false)}
@@ -621,7 +621,7 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	}
 
 	// The caller holds broker.update (checked above).
-	writeJSON(w, http.StatusOK, withHostIdentity(brokerForDisplay(brokerStorageForViewer(ctx, *after, false)), true))
+	writeJSON(w, http.StatusOK, withHostIdentity(brokerForDisplay(s.brokerStorageForViewer(ctx, *after, false)), true))
 }
 
 func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id string) {
