@@ -72,6 +72,7 @@ func TestBuildPod_NFSClaimPodGolden(t *testing.T) {
 		{"nfs-claim-home-workspace-claim", func(c *RunConfig) {
 			*c = withTestHomeStorage(*c)
 			c.HomeStorage.PVClaimName = "scion-workspaces"
+			c.HomeStorage.ProjectID = "proj-123"
 		}},
 	}
 	for _, tc := range cases {
