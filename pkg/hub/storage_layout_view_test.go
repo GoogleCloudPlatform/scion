@@ -56,11 +56,14 @@ func TestStorageValuesAllowed(t *testing.T) {
 		if got.WorkspaceStorage.Backend != "nfs" || got.WorkspaceStorage.Homes != "nfs" || !got.WorkspaceStorage.NFS.Healthy {
 			t.Errorf("%s: backend, homes or health dropped: %+v", name, got.WorkspaceStorage)
 		}
-		if b.WorkspaceStorage.NFS.Server != "10.9.8.7" {
+		if !got.WorkspaceStorage.Redacted {
+			t.Errorf("%s: the redacted descriptor is not marked Redacted", name)
+		}
+		if b.WorkspaceStorage.NFS.Server != "10.9.8.7" || b.WorkspaceStorage.Redacted {
 			t.Fatal("the stored record was modified")
 		}
 	}
-	if got := brokerStorageForViewer(admin, b, false); got.WorkspaceStorage.NFS.Server != "10.9.8.7" {
+	if got := brokerStorageForViewer(admin, b, false); got.WorkspaceStorage.NFS.Server != "10.9.8.7" || got.WorkspaceStorage.Redacted {
 		t.Error("an admin does not see the values")
 	}
 	if got := brokerStorageForViewer(member, b, true); got.WorkspaceStorage.NFS.Export != "/fixture-export" {

@@ -56,9 +56,53 @@ func TestBrokerRecords_StorageValuesForAdminsOnly(t *testing.T) {
 		for _, v := range storageFixtureValues {
 			require.NotContains(t, body, v, "%s: a non-admin sees the storage value %q", path, v)
 		}
+		// The value fields are omitted, not empty, and the descriptor says
+		// it was redacted.
+		require.Contains(t, body, `"redacted":true`, "%s: the descriptor is marked redacted", path)
+		for _, key := range []string{`"server":`, `"export":`, `"subPathRoot":`, `"exportId":`} {
+			require.NotContains(t, body, key, "%s: a redacted value field is present", path)
+		}
 
 		admin := doRequest(t, srv, http.MethodGet, path, nil)
 		require.Equal(t, http.StatusOK, admin.Code, "%s: %s", path, admin.Body.String())
-		require.True(t, strings.Contains(admin.Body.String(), "10.9.8.7"), "%s: an admin sees the values", path)
+		adminBody := admin.Body.String()
+		for _, v := range storageFixtureValues {
+			require.True(t, strings.Contains(adminBody, v), "%s: an admin sees the value %q", path, v)
+		}
+		require.NotContains(t, adminBody, `"redacted":true`, "%s: the admin record is not redacted", path)
 	}
+}
+
+// TestRegisterProject_BrokerStorageValuesForAdminsOnly: the project
+// registration response returns the linked broker's storage descriptor
+// without values (redacted:true) to a non-admin broker owner, and with the
+// values to a hub admin.
+func TestRegisterProject_BrokerStorageValuesForAdminsOnly(t *testing.T) {
+	f := brokerAssocSetup(t, "redact-register")
+	ctx := context.Background()
+	b, err := f.store.GetRuntimeBroker(ctx, f.otherBroker.ID)
+	require.NoError(t, err)
+	b.WorkspaceStorage = &api.BrokerWorkspaceStorage{Backend: "nfs", Homes: "local", NFS: &api.BrokerNFSWorkspaceStorage{
+		Server: "10.9.8.7", Export: "/fixture-export", SubPathRoot: "fixture-root", Healthy: true, ExportID: "fixture-export-id"}}
+	require.NoError(t, f.store.UpdateRuntimeBroker(ctx, b))
+
+	rec := doRequestAsUser(t, f.srv, f.brokerOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		Name: "Redact Register Owner", BrokerID: f.otherBroker.ID,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	body := rec.Body.String()
+	require.Contains(t, body, `"redacted":true`, "the owner's response marks the descriptor redacted")
+	for _, v := range storageFixtureValues {
+		require.NotContains(t, body, v, "a non-admin broker owner sees the storage value %q", v)
+	}
+
+	admin := newSuperAdminUser(t, f.store, "redact-register-admin")
+	rec = doRequestAsUser(t, f.srv, admin, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		Name: "Redact Register Admin", BrokerID: f.otherBroker.ID,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	for _, v := range storageFixtureValues {
+		require.Contains(t, rec.Body.String(), v, "an admin sees the storage value %q", v)
+	}
+	require.NotContains(t, rec.Body.String(), `"redacted":true`)
 }

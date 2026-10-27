@@ -46,7 +46,8 @@ func storageIssueView(ctx context.Context) projectfs.IssueView {
 // (storageValuesAllowed) or self is set (the broker reading its own
 // record). The backend, health, homes and shared-dir placement are kept;
 // the nfs server, export, subpath root and export identity marker and the
-// volume claim and subpath root are cleared.
+// volume claim and subpath root are omitted, and the descriptor is marked
+// Redacted so a client can tell redaction from an empty value.
 func brokerStorageForViewer(ctx context.Context, b store.RuntimeBroker, self bool) store.RuntimeBroker {
 	if b.WorkspaceStorage == nil || self || storageValuesAllowed(ctx) {
 		return b
@@ -58,6 +59,7 @@ func brokerStorageForViewer(ctx context.Context, b store.RuntimeBroker, self boo
 	if ws.Volume != nil {
 		ws.Volume = &api.BrokerVolumeWorkspaceStorage{}
 	}
+	ws.Redacted = true
 	b.WorkspaceStorage = &ws
 	return b
 }

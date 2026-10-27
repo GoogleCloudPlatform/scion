@@ -431,3 +431,63 @@ func hasFieldError(errs []FieldError, path string) bool {
 	}
 	return false
 }
+
+// TestMigrateSettingsFile_StorageFieldWarns: migrating a legacy settings
+// file whose storage block breaks a field rule still converts the file and
+// reports the field as a warning; validation still refuses the result.
+func TestMigrateSettingsFile_StorageFieldWarns(t *testing.T) {
+	dir := t.TempDir()
+	legacy := `
+active_profile: local
+runtimes:
+  docker: {}
+profiles:
+  local:
+    runtime: docker
+server:
+  workspace_storage:
+    backend: nfs
+    nfs:
+      shares:
+        - id: ws1
+          server: 10.0.0.2
+          export: /scion
+`
+	path := filepath.Join(dir, "settings.yaml")
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := MigrateSettingsFile(dir, false)
+	if err != nil {
+		t.Fatalf("MigrateSettingsFile: %v", err)
+	}
+	warned := false
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "server.workspace_storage.nfs.mount_root") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Errorf("warnings %q do not name server.workspace_storage.nfs.mount_root", result.Warnings)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := DetectSettingsFormat(data); v != "1" || !strings.Contains(string(data), "workspace_storage") {
+		t.Fatalf("the file was not converted with its storage block:\n%s", data)
+	}
+	errs, err := ValidateSettings(data, "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range errs {
+		if e.StorageField && e.Path == "server.workspace_storage.nfs.mount_root" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("validation errors %v do not report the mount_root field", errs)
+	}
+}
