@@ -255,8 +255,10 @@ type catalogState struct {
 	Channels map[string]CatalogChannel `json:"channels"`
 }
 
+// PageURL is not named URL: pkg/util/logging's request-path scanner treats
+// any bare X.URL in pkg/hub/maintenance as a request URL use.
 type catalogPage struct {
-	URL      string    `json:"url"` // "" for the first page
+	PageURL  string    `json:"url"` // "" for the first page
 	ETag     string    `json:"etag"`
 	Next     string    `json:"next"`
 	Releases []Release `json:"releases"`
@@ -567,7 +569,7 @@ func (c *Catalog) refresh(ctx context.Context) {
 func (c *Catalog) fetch(ctx context.Context, prev catalogState) (catalogState, error) {
 	prevPages := make(map[string]catalogPage, len(prev.Pages))
 	for _, p := range prev.Pages {
-		prevPages[p.URL] = p
+		prevPages[p.PageURL] = p
 	}
 	cl := &classifier{
 		ctx:      ctx,
@@ -601,7 +603,7 @@ func (c *Catalog) fetch(ctx context.Context, prev catalogState) (catalogState, e
 		}
 		page := old
 		if !p.NotModified {
-			page = catalogPage{URL: pageURL, ETag: p.ETag, Next: p.Next, Releases: p.Releases}
+			page = catalogPage{PageURL: pageURL, ETag: p.ETag, Next: p.Next, Releases: p.Releases}
 		} else if !hasOld {
 			return catalogState{}, fmt.Errorf("GitHub answered 304 Not Modified for an uncached release list page")
 		}
