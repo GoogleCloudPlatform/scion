@@ -3801,7 +3801,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	// Check for error from provider
 	if errParam := r.URL.Query().Get("error"); errParam != "" {
 		ws.logger().Warn("OAuth provider returned error", "provider", provider, "error", errParam)
-		http.Redirect(w, r, "/login?error="+errParam, http.StatusFound)
+		http.Redirect(w, r, "/login?error="+url.QueryEscape(errParam), http.StatusFound)
 		return
 	}
 
@@ -3837,7 +3837,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	if denial := checkSignInDenial(ctx, userInfo.Email, ws.authorizedDomains(), ws.adminEmails(), ws.userAccessMode(), ws.store); denial != "" {
 		ws.logger().Warn("Unauthorized user", "email", userInfo.Email, "reason", denial)
 		ws.auditSignInDenied(ctx, userInfo.Email, denial)
-		http.Redirect(w, r, "/login?error="+denial, http.StatusFound)
+		http.Redirect(w, r, "/login?error="+url.QueryEscape(denial), http.StatusFound)
 		return
 	}
 

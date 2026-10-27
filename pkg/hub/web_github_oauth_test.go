@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -207,6 +208,13 @@ func TestOAuthCallback_RedirectsToLocalReturnToOnly(t *testing.T) {
 		"/ok%0d%0aSet-Cookie:%20x=1": "/ok%0d%0aSet-Cookie:%20x=1",
 		"/ok\r\nSet-Cookie: x=1":     "/",
 		"/a/..//evil.example":        "/evil.example",
+		"//user@evil.example/x":      "/",
+		" //evil.example/x":          "/",
+		"/\x7f/evil.example/x":       "/",
+		"/\uFF0Fevil.example":        "/%EF%BC%8Fevil.example",
+		"/\u2215evil.example":        "/%E2%88%95evil.example",
+		"/\u2044evil.example":        "/%E2%81%84evil.example",
+		"/\uFF3Cevil.example":        "/%EF%BC%BCevil.example",
 	} {
 		ws := newTestWebServer(t, WebServerConfig{
 			SessionSecret: secret,
@@ -248,5 +256,45 @@ func TestOAuthCallback_RedirectsToLocalReturnToOnly(t *testing.T) {
 
 		require.Equal(t, http.StatusFound, recCallback.Code, returnTo)
 		assert.Equal(t, want, recCallback.Header().Get("Location"), returnTo)
+	}
+}
+
+// The error code from the provider reaches the sign-in page as one
+// query value.
+func TestOAuthCallback_ProviderErrorIsOneQueryValue(t *testing.T) {
+	for errParam, want := range map[string]string{
+		"access_denied": "/login?error=access_denied",
+		"access_denied&returnTo=https://evil.example/x": "/login?error=access_denied%26returnTo%3Dhttps%3A%2F%2Fevil.example%2Fx",
+	} {
+		ws := newTestWebServer(t, WebServerConfig{
+			SessionSecret: "test-session-secret-for-github-oauth-error-123456",
+			BaseURL:       "http://localhost:8080",
+		})
+		ws.oauthService = NewOAuthService(OAuthConfig{
+			Web: OAuthClientConfig{
+				GitHub: OAuthProviderConfig{
+					ClientID:     "test-client-id",
+					ClientSecret: "test-client-secret",
+				},
+			},
+		}, nil)
+		ws.store = newProxyAuthStoreWithRoles()
+
+		reqSetup := httptest.NewRequest(http.MethodGet, "/auth/login/github", nil)
+		recSetup := httptest.NewRecorder()
+		sess, err := ws.sessionStore.Get(reqSetup, webSessionName)
+		require.NoError(t, err)
+		sess.Values[sessKeyOAuthState] = "test-state-error"
+		require.NoError(t, sess.Save(reqSetup, recSetup))
+
+		reqCallback := httptest.NewRequest(http.MethodGet, "/auth/callback/github?state=test-state-error&error="+url.QueryEscape(errParam), nil)
+		for _, c := range recSetup.Result().Cookies() {
+			reqCallback.AddCookie(c)
+		}
+		recCallback := httptest.NewRecorder()
+		ws.Handler().ServeHTTP(recCallback, reqCallback)
+
+		require.Equal(t, http.StatusFound, recCallback.Code, errParam)
+		assert.Equal(t, want, recCallback.Header().Get("Location"), errParam)
 	}
 }

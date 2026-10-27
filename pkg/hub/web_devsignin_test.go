@@ -454,6 +454,14 @@ func TestLocalRedirectPath(t *testing.T) {
 		"%2F%2Fevil.example/x":       "/",
 		"/%5Cevil.example":           "/%5Cevil.example",
 		"/ok%0d%0aSet-Cookie:%20x=1": "/ok%0d%0aSet-Cookie:%20x=1",
+		"//user@evil.example/":       "/",
+		" /evil.example":             "/",
+		" //evil.example":            "/",
+		"/\x7f/evil.example":         "/",
+		"/\uFF0Fevil.example":        "/\uFF0Fevil.example",
+		"/\u2215evil.example":        "/\u2215evil.example",
+		"/\u2044evil.example":        "/\u2044evil.example",
+		"/\uFF3Cevil.example":        "/\uFF3Cevil.example",
 	} {
 		assert.Equal(t, want, localRedirectPath(in), in)
 	}
@@ -653,7 +661,8 @@ func TestOAuthLogin_ProviderStoresLocalReturnTo(t *testing.T) {
 }
 
 // Outside dev sign-in, an OAuth server stores the return path in the
-// session cookie and redirects to /auth/login.
+// session cookie and redirects to /auth/login. Only a path on this server
+// is stored; any other value is stored as /.
 func TestLoginRedirect_OAuthWithoutDevAuthUsesSessionReturnPath(t *testing.T) {
 	ws := newTestWebServer(t, WebServerConfig{})
 	configureWebGitHubOAuth(ws)
@@ -666,8 +675,10 @@ func TestLoginRedirect_OAuthWithoutDevAuthUsesSessionReturnPath(t *testing.T) {
 	h := ws.Handler()
 
 	for path, want := range map[string]string{
-		"/projects/p1/agents/a1":                    "/projects/p1/agents/a1",
-		"/api/v1/agents/a1/ports/8080/proxy/?tab=x": "/api/v1/agents/a1/ports/8080/proxy/?tab=x",
+		"/projects/p1/agents/a1":                                  "/projects/p1/agents/a1",
+		"/api/v1/agents/a1/ports/8080/proxy/?tab=x":               "/api/v1/agents/a1/ports/8080/proxy/?tab=x",
+		"//evil.example/x":                                        "/",
+		"/api/v1/agents/a1/ports/8080/proxy/?next=\\evil.example": "/",
 	} {
 		page := httptest.NewRequest(http.MethodGet, path, nil)
 		page.Header.Set("Accept", "text/html")
