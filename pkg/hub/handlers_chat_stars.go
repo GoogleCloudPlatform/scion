@@ -732,7 +732,9 @@ func (s *Server) decideStarState(r *http.Request, call starCall, key string, mix
 	type decision = starStateDecision
 	if validDMKey(key) {
 		if canonical, err := canonicalStarDMKey(key); err != nil || canonical != key {
-			slog.Warn("chat stars: state leaves out a stored DM key that is not canonical", "conversation_key", key)
+			// Debug, not Warn: a legacy star repeats this on every state
+			// request that touches it, and only pre-enforcement data has one.
+			slog.Debug("chat stars: state leaves out a stored DM key that is not canonical", "conversation_key", key)
 			return decision{}, nil
 		}
 	}

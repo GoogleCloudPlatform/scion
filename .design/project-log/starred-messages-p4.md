@@ -29,12 +29,15 @@
 - **Scan:** batches of 100 candidates, at most 1,000 per response; the sealed cursor (`chat.starred_conversations.v1`,
   bound to the project scope, the sort and the identity) resumes after the last scanned candidate, so a page can be
   short, or empty with a cursor.
-- **Shared hub file, `pkg/hub/authorized_list.go`:** `listCursorSealer` gains `SealPosition`/`OpenPosition`, an
-  append-only addition (`Seal`/`Open` are unchanged). They seal an opaque position with the same key under their own
-  AAD domain (`scion-list-position-v1:`) and prefix (`p1.`), and do not check the plaintext's shape (the caller
-  does). The rail needs them: its position (a sort value and a conversation key) does not fit `Open`'s
-  `created,id,binding` check, so every rail cursor sealed with `Seal` failed to open. A position cursor never opens
-  as a list cursor, and the reverse (`list_position_seal_test.go`).
+- **Shared hub file, `pkg/hub/authorized_list.go`:** `listCursorSealer` gains `SealPosition`/`OpenPosition` for
+  the signing ring, and `Seal`/`Open` (unchanged on the wire) now share one private `seal`/`open` with them, so a
+  ring change cannot miss either pair. A position seals with the ring's active generation in the form the ring
+  emits (`p1.` with AAD `scion-list-position-v1:`, or `p2.<kid>.` with `scion-list-position-v2:<kid>:`), opens
+  only while its generation verifies, and is not checked for shape (the caller does). The rail needs it: its
+  position (a sort value and a conversation key) does not fit `Open`'s `created,id,binding` check, so every rail
+  cursor sealed with `Seal` failed to open. A position cursor never opens as a list cursor, and the reverse
+  (`list_position_seal_test.go`, legacy and ring modes: rotation, retirement, unknown or swapped generations,
+  closed issuance).
 - **Catalog:** operation `chat.star.conversations`, route tables, bearer matrix exclusion (a filtered list, like
   `chat.star.state`).
 - **Web:** Starred is the third option of the rail's filter control (a labelled group with pressed state). Rows come
@@ -56,7 +59,7 @@
   it (the topic's `conversation_id`; `GetConversationByExternalRef("native", key)`, live rows only). A star counts in
   the rail exactly when it counts in the star list, the state route and the center; a thread with no conversation
   under the switch (the resolver's 409) has no stars there and no rail row.
-- **The rail's first dev run caught what review and the mocked browser harness could not:** the cursor above (every
+- **The first run of the rail's hub tests found what review and the mocked browser harness could not:** the cursor above (every
   "Load more conversations" answered 400), and two test-setup bugs. A project-boundary token can be minted only for
   a project its holder belongs to (the token tests now give the holder a role in project B, so the boundary alone
   refuses project A's rows), and topic names are unique per project regardless of case (the name-tie test puts the
