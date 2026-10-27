@@ -3727,6 +3727,11 @@ func (s *Server) executePostDeletionEffects(ctx context.Context, projectID strin
 		}
 	}
 
+	// Effect 7b: Remove the starred messages stored under the project (its
+	// threads and the DMs with its agents). Best effort: the read checks
+	// already hide them, and upkeep purges any left behind.
+	s.deleteMessageStarsOfProject(ctx, projectID)
+
 	// Effect 8: Publish project-deleted event.
 	s.events.PublishProjectDeleted(ctx, projectID)
 }

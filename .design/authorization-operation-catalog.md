@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 357
+**Operations:** 358
 
 ## Table of Contents
 
@@ -182,10 +182,11 @@
 - [chat.search.project](#chatsearchproject) — Search the messages of one project's chat. Needs project:read on the project; a token keeps a DM row only when the DM rule lets it read the DM under inbox:read
 - [chat.search.unscoped](#chatsearchunscoped) — Search the messages of every project the caller can read. A project token searches only its boundary project; a token keeps a DM row only when the DM rule lets it read the DM under inbox:read
 - [chat.search.dm](#chatsearchdm) — Search the messages of one of the caller's DMs. A token needs inbox:read under the DM rule
-- [chat.star.add](#chatstaradd) — Star a message for the caller (private). Needs project:read on the message's thread, and the message must be a live message of the conversation named in the body; a token also needs inbox:write for the thread's project. 404 while web.chat_starred_messages is off
-- [chat.star.read](#chatstarread) — Read the current detail of one of the caller's stars. Needs project:read on the message's thread now; a token also needs inbox:read for its project. 404 while web.chat_starred_messages is off
-- [chat.star.state](#chatstarstate) — Report which of up to 200 messages the caller starred, keeping only live messages in threads the caller can read now; a token keeps only threads whose project it may read under inbox:read. 404 while web.chat_starred_messages is off
-- [chat.star.list](#chatstarlist) — List the caller's stars in one thread, newest first, with a sealed cursor. Needs project:read on the thread's project; a token also needs inbox:read for it. 404 while web.chat_starred_messages is off
+- [chat.star.add](#chatstaradd) — Star a message for the caller (private). The message must be a live message of the conversation named in the body. A thread needs project:read on its project; a DM needs the caller in a user slot of its key. A token also needs inbox:write: a thread's project, or an agent DM's peer agent project with agent:read on the agent, inside its boundary; a DM between users needs a hub boundary. 404 while web.chat_starred_messages is off
+- [chat.star.read](#chatstarread) — Read the current detail of one of the caller's stars. Needs read access to the star's conversation now (project:read for a thread; the caller in a user slot of a DM key); a token also needs inbox:read under the same rule (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users). 404 while web.chat_starred_messages is off
+- [chat.star.state](#chatstarstate) — Report which of up to 200 messages the caller starred, keeping only live messages in conversations the caller can read now (threads by project:read, DMs by participation); a token keeps only conversations it may read under inbox:read (a thread's or agent DM's project inside its boundary; a hub boundary for a DM between users). 404 while web.chat_starred_messages is off
+- [chat.star.list](#chatstarlist) — List the caller's stars in one conversation (a thread or a DM), newest first, with a sealed cursor. Needs read access to it (project:read for a thread; the caller in a user slot of a DM key); a token also needs inbox:read under the same rule (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users). 404 while web.chat_starred_messages is off
+- [chat.conversation.history.starred](#chatconversationhistorystarred) — Read only the caller's starred messages of one conversation (?starred=true), in history order with a sealed cursor bound to the conversation, the caller and the filter. Needs the conversation's normal read access (project:read on a thread's project, participation in a DM) and inbox:read: a token needs inbox:read for the thread's or peer agent's project, or a hub boundary for a DM between users. An around target must itself be starred. 404 while web.chat_starred_messages is off, never unfiltered history
 - [chat.star.remove](#chatstarremove) — Remove the caller's own star of a message; always 204. No message or conversation lookup; a project token removes only a star whose stored project is inside its boundary. 404 while web.chat_starred_messages is off
 - [chat.attachment.upload.project](#chatattachmentuploadproject) — Upload chat attachments to a space. Needs project:read on the space's project; a token also needs inbox:write for it
 - [chat.attachment.upload.noproject](#chatattachmentuploadnoproject) — Upload project-less chat attachments, reachable only through the messages that reference them. A federated caller is refused. A token needs inbox:write on a hub boundary
@@ -336,7 +337,7 @@
 - [gcp.identity.create](#gcpidentitycreate) — Create a GCP service account binding
 - [gcp.identity.delete](#gcpidentitydelete) — Delete a GCP service account binding
 - [gcp.identity.assign](#gcpidentityassign) — Assign a GCP service account to an agent
-- [gcp.identity.mint](#gcpidentitymint) — Mint a GCP access token for a service account
+- [gcp.identity.mint](#gcpidentitymint) — Mint a GCP access or identity token for the agent's assigned service account
 - [secret.read](#secretread) — Read project secrets or environment variables containing secrets
 - [secret.write](#secretwrite) — Create, update or delete secrets. At user scope, the default, the secrets are the caller's own and a federated caller is refused (requireProfileWriter)
 - [gcp.identity.read](#gcpidentityread) — Read GCP service account details or list accounts. A project's list requires project.read on it (members, and agents of that project only); the hub-scoped list requires gcp_service_account.list at hub scope (hub members)
@@ -6884,7 +6885,7 @@
 
 **Domain:** chat
 
-**Description:** Star a message for the caller (private). Needs project:read on the message's thread, and the message must be a live message of the conversation named in the body; a token also needs inbox:write for the thread's project. 404 while web.chat_starred_messages is off
+**Description:** Star a message for the caller (private). The message must be a live message of the conversation named in the body. A thread needs project:read on its project; a DM needs the caller in a user slot of its key. A token also needs inbox:write: a thread's project, or an agent DM's peer agent project with agent:read on the agent, inside its boundary; a DM between users needs a hub boundary. 404 while web.chat_starred_messages is off
 
 ### Entry Points
 
@@ -6910,6 +6911,7 @@
 
 - `pkg/hub:TestChatStars_TokenSelectors`
 - `pkg/hub:TestChatStars_PutIdempotentAndPrivate`
+- `pkg/hub:TestChatStars_DMTokenBoundaries`
 
 ---
 
@@ -6917,7 +6919,7 @@
 
 **Domain:** chat
 
-**Description:** Read the current detail of one of the caller's stars. Needs project:read on the message's thread now; a token also needs inbox:read for its project. 404 while web.chat_starred_messages is off
+**Description:** Read the current detail of one of the caller's stars. Needs read access to the star's conversation now (project:read for a thread; the caller in a user slot of a DM key); a token also needs inbox:read under the same rule (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users). 404 while web.chat_starred_messages is off
 
 ### Entry Points
 
@@ -6943,6 +6945,7 @@
 
 - `pkg/hub:TestChatStars_TokenSelectors`
 - `pkg/hub:TestChatStars_DetailAndListHideUnreadable`
+- `pkg/hub:TestChatStars_DMTokenBoundaries`
 
 ---
 
@@ -6950,7 +6953,7 @@
 
 **Domain:** chat
 
-**Description:** Report which of up to 200 messages the caller starred, keeping only live messages in threads the caller can read now; a token keeps only threads whose project it may read under inbox:read. 404 while web.chat_starred_messages is off
+**Description:** Report which of up to 200 messages the caller starred, keeping only live messages in conversations the caller can read now (threads by project:read, DMs by participation); a token keeps only conversations it may read under inbox:read (a thread's or agent DM's project inside its boundary; a hub boundary for a DM between users). 404 while web.chat_starred_messages is off
 
 ### Entry Points
 
@@ -6976,6 +6979,7 @@
 
 - `pkg/hub:TestChatStars_TokenSelectors`
 - `pkg/hub:TestChatStars_StateFiltersByAccess`
+- `pkg/hub:TestChatStars_DMTokenBoundaries`
 
 ---
 
@@ -6983,7 +6987,7 @@
 
 **Domain:** chat
 
-**Description:** List the caller's stars in one thread, newest first, with a sealed cursor. Needs project:read on the thread's project; a token also needs inbox:read for it. 404 while web.chat_starred_messages is off
+**Description:** List the caller's stars in one conversation (a thread or a DM), newest first, with a sealed cursor. Needs read access to it (project:read for a thread; the caller in a user slot of a DM key); a token also needs inbox:read under the same rule (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users). 404 while web.chat_starred_messages is off
 
 ### Entry Points
 
@@ -7009,6 +7013,40 @@
 
 - `pkg/hub:TestChatStars_TokenSelectors`
 - `pkg/hub:TestChatStars_ListPaginates`
+- `pkg/hub:TestChatStars_DMTokenBoundaries`
+
+---
+
+## chat.conversation.history.starred
+
+**Domain:** chat
+
+**Description:** Read only the caller's starred messages of one conversation (?starred=true), in history order with a sealed cursor bound to the conversation, the caller and the filter. Needs the conversation's normal read access (project:read on a thread's project, participation in a DM) and inbox:read: a token needs inbox:read for the thread's or peer agent's project, or a hub boundary for a DM between users. An around target must itself be starred. 404 while web.chat_starred_messages is off, never unfiltered history
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/conversations/{id}/messages` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatStarredHistory_TokenSelectors`
+- `pkg/hub:TestChatStarredHistory_GateAndValidation`
 
 ---
 
@@ -12475,19 +12513,20 @@
 
 **Domain:** gcp.identity
 
-**Description:** Mint a GCP access token for a service account
+**Description:** Mint a GCP access or identity token for the agent's assigned service account
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | POST | `/api/v1/agent/gcp-token` |
+| http_route | POST | `/api/v1/agent/gcp-identity-token` |
 
 **Principals:** `agent`
 
 **Credentials:** `agent_jwt`
 
-**Base Permission:** `gcp_service_account.mint`
+**Base Permission:** `gcp_service_account.use`
 
 **Resource Resolver:** agent-gcp-service-account
 
@@ -12496,7 +12535,7 @@
 ### Governance
 
 - **Kind:** issuer_credential
-- Agent mints GCP tokens scoped to its assigned service account
+- Agent mints GCP tokens for its assigned service account while the principal recorded as the assignment's source holds gcp_service_account.assign on it (and passes actAs in enforce mode)
 
 ### Audit
 

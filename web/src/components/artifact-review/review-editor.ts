@@ -165,6 +165,11 @@ export class ScionReviewEditor extends LitElement {
     return this.controller?.hasOwnMarks() ?? false;
   }
 
+  /** Whether an input method composition is still running (flush() gives null until it ends). */
+  isComposing(): boolean {
+    return this.controller?.isComposing ?? false;
+  }
+
   /** The current text; serializes only after an edit. Null if it cannot be written. */
   flush(): string | null {
     if (!this.controller) return this.content;

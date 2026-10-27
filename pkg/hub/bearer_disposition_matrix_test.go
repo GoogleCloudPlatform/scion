@@ -514,6 +514,7 @@ var bearerMatrixCompanionSelectors = map[authzop.OperationID][]string{
 	"chat.star.read":                         {"project:read"},
 	"chat.star.state":                        {"project:read"},
 	"chat.star.list":                         {"project:read"},
+	"chat.conversation.history.starred":      {"project:read"},
 	"chat.star.remove":                       {"project:read"},
 	"quota.brokersettings.update":            {"broker:read"},
 }

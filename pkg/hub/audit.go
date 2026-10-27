@@ -239,6 +239,7 @@ const (
 	GCSLinkReasonNoSA               GCSLinkFetchReason = "no_sa"
 	GCSLinkReasonSANotAdmissible    GCSLinkFetchReason = "sa_not_admissible"
 	GCSLinkReasonSALookupFailed     GCSLinkFetchReason = "sa_lookup_failed"
+	GCSLinkReasonSAUseNotAuthorized GCSLinkFetchReason = "sa_use_not_authorized"
 	GCSLinkReasonMintFailed         GCSLinkFetchReason = "mint_failed"
 	GCSLinkReasonGCSNotFound        GCSLinkFetchReason = "gcs_not_found"
 	GCSLinkReasonGCSDenied          GCSLinkFetchReason = "gcs_denied"

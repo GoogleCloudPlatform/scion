@@ -18,10 +18,13 @@
 // record recheck in handleAgentGCPToken and handleAgentGCPIdentityToken. Each
 // test starts from newGCPMintFixture's "everything current" baseline (a
 // verified, project-scoped, reachable service account assigned to a live
-// agent whose JWT carries the matching per-SA scope) and perturbs exactly one
-// fact away from it, then asserts both mint endpoints deny identically. See
-// authz_gcp_service_account_use_test.go for the kernel-level Decide tests
-// behind the scope-mapping checks.
+// agent whose JWT carries the matching per-SA scope, with the assignment
+// recorded from a project owner who holds gcp_service_account.assign) and
+// perturbs exactly one fact away from it, then asserts both mint endpoints
+// deny identically. See authz_gcp_service_account_use_test.go for the
+// kernel-level Decide tests behind the scope-mapping checks, and
+// handlers_gcp_identity_mint_authority_test.go for the parent ceiling and
+// actAs layers (authorizeAgentGCPMint).
 package hub
 
 import (
@@ -63,6 +66,9 @@ func newGCPMintFixture(t *testing.T, name string) *gcpMintFixture {
 
 	userID := tid("user-" + name)
 	createDCUser(t, s, userID, name+"@test.com", projectID, store.ProjectRoleOwner)
+	// A hub member holds assign on hub-scoped accounts (hub_member_sa_assign),
+	// which the hub-scoped case below relies on.
+	ensureHubMembership(ctx, s, userID)
 
 	saID := tid("sa-" + name)
 	saEmail := name + "-sa@my-gcp-project.iam.gserviceaccount.com"
@@ -89,6 +95,12 @@ func newGCPMintFixture(t *testing.T, name string) *gcpMintFixture {
 		},
 		Created: time.Now(), Updated: time.Now(),
 	}))
+
+	// The assignment's recorded source is the owner, under a session
+	// credential with a principal ceiling: the parent ceiling's allow case.
+	agentRow, err := s.GetAgent(ctx, agentID)
+	require.NoError(t, err)
+	seedAssignment(t, s, agentRow, userID, saID)
 
 	token, err := srv.agentTokenService.GenerateAgentToken(agentID, projectID, []AgentTokenScope{GCPTokenScopeForSA(saID)}, []string{userID})
 	require.NoError(t, err)
@@ -128,8 +140,9 @@ func (f *gcpMintFixture) mutateSA(t *testing.T, mutate func(*store.GCPServiceAcc
 
 // reassignSA creates a brand-new, verified GCP service account row with the
 // given scope/scopeID/email, points the fixture's agent at it
-// (AppliedConfig.GCPIdentity), reissues the agent token with the new SA's
-// per-instance scope, and updates f.SA/f.Token to match. Used instead of
+// (AppliedConfig.GCPIdentity), records the new assignment from the fixture
+// owner, reissues the agent token with the new SA's per-instance scope, and
+// updates f.SA/f.Token to match. Used instead of
 // mutateSA when a test needs to vary Scope or ScopeID, which
 // UpdateGCPServiceAccount cannot persist.
 func (f *gcpMintFixture) reassignSA(t *testing.T, scope, scopeID, email string) {
@@ -149,6 +162,7 @@ func (f *gcpMintFixture) reassignSA(t *testing.T, scope, scopeID, email string) 
 		a.AppliedConfig.GCPIdentity.ServiceAccountID = saID
 		a.AppliedConfig.GCPIdentity.ServiceAccountEmail = email
 	})
+	seedAssignment(t, f.Store, f.getAgent(t), f.UserID, saID)
 
 	token, err := f.Server.agentTokenService.GenerateAgentToken(f.AgentID, f.ProjectID, []AgentTokenScope{GCPTokenScopeForSA(saID)}, []string{f.UserID})
 	require.NoError(t, err)
@@ -378,49 +392,54 @@ func TestAgentGCPToken_NoServiceAccountScopeDenied(t *testing.T) {
 	assertMintDenied(t, f)
 }
 
-// TestGCPServiceAccountUse_MintSucceedsWhilePermissionDecisionDenies is the
-// production-like characterization this test pins: with the delegation-edge
-// backfill migration complete (this test restores the marker that testServer
-// removes, unlike every other test in this file) and a real owner-to-agent
-// delegation edge recorded --
-// the shape every hub-attested agent has post-backfill -- a direct decision
-// against gcp_service_account.use through the agent's own credential still
-// denies, because the delegating owner does not itself hold
-// gcp_service_account.use. The mint endpoints are unaffected by that: they
-// do not decide this permission, so they succeed purely on the live record
-// recheck and the exact token-scope compare. This is the rule enforced: an
-// agent's own credential can name the exact assigned service account;
-// composing it with proof that the delegating authority currently holds
-// authority to assign that account is a separate change.
-func TestGCPServiceAccountUse_MintSucceedsWhilePermissionDecisionDenies(t *testing.T) {
-	f := newGCPMintFixture(t, "parent-authority-pending")
+// TestGCPServiceAccountUse_MintAndDecisionFollowParentProof pins that the
+// direct decision and the mint endpoints agree. Before the mint decided
+// gcp_service_account.use, a direct decision denied with
+// DenyCauseCeilingDelegatorLacksPermission while the endpoints minted on the
+// record checks alone. It runs in production-like state: the delegation-edge
+// backfill marker is restored (testServer removes it) and an owner-to-agent
+// delegation edge with recorded provenance is written (an unrecorded edge
+// would deny at step 10 before the parent ceiling). The recorded source holds
+// gcp_service_account.assign but not gcp_service_account.use; step 10 now
+// applies the account's parent ceiling instead of asking the delegator for
+// use, so a direct decision and both endpoints allow. When the source loses
+// assign, the direct decision denies with the parent ceiling's cause and
+// both endpoints refuse: the decision and the endpoints never disagree.
+func TestGCPServiceAccountUse_MintAndDecisionFollowParentProof(t *testing.T) {
+	f := newGCPMintFixture(t, "parent-authority")
 	setBackfillCompleted(t, f.Store)
-	createDCEdge(t, f.Store, store.DelegationPrincipalUser, f.UserID, store.DelegationPrincipalAgent, f.AgentID,
+	seedRecordedDelegationEdge(t, f.Store, store.DelegationPrincipalUser, f.UserID, store.DelegationPrincipalAgent, f.AgentID,
 		store.RoleScopeProject, f.ProjectID, store.ProjectRoleOwner)
 
-	// The mint endpoints succeed purely on the live record and exact
-	// token-scope checks: they do not call Decide for gcp_service_account.use.
+	decide := func() Decision {
+		agent := newFullAgentIdentity(f.AgentID, f.ProjectID, nil, []AgentTokenScope{GCPTokenScopeForSA(f.SA.ID)})
+		return f.Server.authzService.Decide(context.Background(), AuthzRequest{
+			Principal:  principalContextForIdentity(agent),
+			Credential: credentialContextForIdentity(agent),
+			Resource:   gcpServiceAccountResource(f.SA),
+			Action:     ActionUse,
+			Permission: permissions.PermissionGCPServiceAccountUse,
+		})
+	}
+
+	// The recorded source is a project member other than the agent's root,
+	// so taking its assign away leaves the agent's standing (decided on the
+	// root) untouched and only the parent ceiling can refuse.
+	assigner := f.addAssigner(t, "parent-authority")
+	f.recordAssignment(t, assigner, nil)
+
+	d := decide()
+	require.True(t, d.Allowed, "the recorded source holds assign on the account: cause=%q reason=%q", d.DenyCause, d.Reason)
 	assertMintAllowed(t, f)
 
-	// A direct decision against the same permission, for the same agent and
-	// service account, still denies: the delegating owner (a project owner,
-	// holding gcp_service_account.assign but not gcp_service_account.use)
-	// does not satisfy the delegation ceiling for this permission.
-	agent := newFullAgentIdentity(f.AgentID, f.ProjectID, nil, []AgentTokenScope{GCPTokenScopeForSA(f.SA.ID)})
-	d := f.Server.authzService.Decide(context.Background(), AuthzRequest{
-		Principal:  principalContextForIdentity(agent),
-		Credential: credentialContextForIdentity(agent),
-		Resource:   gcpServiceAccountResource(f.SA),
-		Action:     ActionUse,
-		Permission: permissions.PermissionGCPServiceAccountUse,
-	})
-	if d.Allowed {
-		t.Fatalf("expected deny: the delegating owner does not hold gcp_service_account.use, so the parent proof is missing, got allowed: %s", d.Reason)
-	}
-	if d.DenyCause != DenyCauseCeilingDelegatorLacksPermission {
-		t.Fatalf("expected the delegation-ceiling deny (delegator lacks %s), got cause=%q reason=%q",
-			permissions.PermissionGCPServiceAccountUse, d.DenyCause, d.Reason)
-	}
+	_, err := f.Store.DeleteRoleBindingsForPrincipal(context.Background(), store.RoleBindingPrincipalUser, assigner)
+	require.NoError(t, err)
+
+	d = decide()
+	require.False(t, d.Allowed, "the recorded source no longer holds assign")
+	require.Equal(t, DenyCauseCeilingDelegatorLacksPermission, d.DenyCause, "reason=%q", d.Reason)
+	require.Equal(t, DeniedByDelegationCeiling, d.DeniedBy)
+	assertMintRefusedByAuthority(t, f)
 }
 
 // gcpMintFailingStore wraps a store.Store and injects an error into exactly one
