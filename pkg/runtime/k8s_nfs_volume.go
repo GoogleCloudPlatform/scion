@@ -213,7 +213,7 @@ const (
 // dir's subPath, or the dir's own inline NFS volume (empty subPath).
 // sharedDirClaimSubPath checks the dir's subPath first, as before.
 func sharedDirPodVolume(r *SharedDirRealization, i int, name string, readOnly bool, target string) (corev1.Volume, string, error) {
-	subPath, err := sharedDirClaimSubPath(r, name)
+	_, subPath, err := sharedDirClaimSubPath(r, name)
 	if err != nil {
 		return corev1.Volume{}, "", err
 	}
