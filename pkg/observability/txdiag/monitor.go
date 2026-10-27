@@ -107,6 +107,7 @@ func QuietConfig() *Config {
 // dbmetrics recorder implements it.
 type Recorder interface {
 	RecordTxHold(ctx context.Context, ms float64, op, kind, outcome string)
+	RecordTxCommit(ctx context.Context, ms float64, op, outcome string)
 	RecordLockWait(ctx context.Context, ms float64, op, outcome string)
 	IncDiagDropped(ctx context.Context, n int64)
 }
@@ -365,6 +366,8 @@ type holdStats struct {
 	maxStmt      time.Duration
 	rowsAffected int64
 	busy         int64
+	commitTime   time.Duration // the driver Commit call (tx holds only)
+	committed    bool
 }
 
 func (s *holdStats) add(d time.Duration, rows int64, busy bool) {
@@ -391,11 +394,16 @@ func (m *Monitor) hold(kind, outcome string, pcs []uintptr, start time.Time, beg
 	op := m.op(pcs)
 	if rec != nil {
 		rec.RecordTxHold(context.Background(), ms(d), op, kind, outcome)
+		if st.committed {
+			rec.RecordTxCommit(context.Background(), ms(st.commitTime), op, outcome)
+		}
 	}
 	if !over {
 		return false
 	}
-	idle := d - st.stmtTime
+	// idle is time the connection was held outside BEGIN, SQL and COMMIT:
+	// Go-side work inside the transaction or checkout.
+	idle := d - begin - st.stmtTime - st.commitTime
 	if idle < 0 {
 		idle = 0
 	}
@@ -406,6 +414,7 @@ func (m *Monitor) hold(kind, outcome string, pcs []uintptr, start time.Time, beg
 		slog.Int64("begin_ms", begin.Milliseconds()),
 		slog.Int64("stmts", st.stmts),
 		slog.Int64("stmt_ms", st.stmtTime.Milliseconds()),
+		slog.Int64("commit_ms", st.commitTime.Milliseconds()),
 		slog.Int64("idle_ms", idle.Milliseconds()),
 		slog.Int64("max_stmt_ms", st.maxStmt.Milliseconds()),
 		slog.Int64("rows_affected", st.rowsAffected),

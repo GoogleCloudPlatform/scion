@@ -305,8 +305,16 @@ type tx struct {
 	done  bool
 }
 
+// Commit times the driver's Commit call on its own (commit_ms): on SQLite
+// that is where the WAL is written and synced, so a slow disk shows up there
+// rather than as idle time. A write outside an explicit transaction commits
+// inside its own statement, so its commit time is part of that statement's
+// stmt_ms and cannot be separated here. Rollback is not timed.
 func (t *tx) Commit() error {
+	start := t.c.mon.now()
 	err := t.base.Commit()
+	t.stats.commitTime = t.c.mon.now().Sub(start)
+	t.stats.committed = true
 	t.finish(OutcomeCommit, err)
 	return err
 }

@@ -50,6 +50,7 @@ const (
 	MetricPoolWaitDuration        = "scion.db.pool.connections.wait_duration"
 	MetricTxHoldDuration          = "scion.db.tx.hold.duration"
 	MetricTxLockWaitDuration      = "scion.db.tx.lock_wait.duration"
+	MetricTxCommitDuration        = "scion.db.tx.commit.duration"
 	MetricDiagWarnDropped         = "scion.db.diag.warn.dropped"
 )
 
@@ -161,6 +162,7 @@ type recorder struct {
 
 	txHold      metric.Float64Histogram
 	txLockWait  metric.Float64Histogram
+	txCommit    metric.Float64Histogram
 	diagDropped metric.Int64Counter
 
 	// lastWaitCount and lastWaitDur hold the previous PoolStats.WaitCount
@@ -308,6 +310,15 @@ func New(mp metric.MeterProvider) (Recorder, error) {
 		return nil, fmt.Errorf("registering %s: %w", MetricTxLockWaitDuration, err)
 	}
 
+	if r.txCommit, err = meter.Float64Histogram(
+		MetricTxCommitDuration,
+		metric.WithUnit("ms"),
+		metric.WithDescription("Time a database transaction's commit took (on SQLite, the WAL write and sync)"),
+		metric.WithExplicitBucketBoundaries(txDurationBucketsMS...),
+	); err != nil {
+		return nil, fmt.Errorf("registering %s: %w", MetricTxCommitDuration, err)
+	}
+
 	if r.diagDropped, err = meter.Int64Counter(
 		MetricDiagWarnDropped,
 		metric.WithUnit("{record}"),
@@ -395,6 +406,16 @@ func (r *recorder) RecordTxHold(ctx context.Context, ms float64, op, kind, outco
 	r.txHold.Record(ctx, ms, metric.WithAttributes(
 		attribute.String(AttrOp, op),
 		attribute.String(AttrKind, kind),
+		attribute.String(AttrOutcome, outcome),
+		attribute.String(AttrPool, PoolStore),
+	))
+}
+
+// RecordTxCommit records how long a transaction's driver Commit took, in
+// milliseconds. It implements txdiag.Recorder.
+func (r *recorder) RecordTxCommit(ctx context.Context, ms float64, op, outcome string) {
+	r.txCommit.Record(ctx, ms, metric.WithAttributes(
+		attribute.String(AttrOp, op),
 		attribute.String(AttrOutcome, outcome),
 		attribute.String(AttrPool, PoolStore),
 	))

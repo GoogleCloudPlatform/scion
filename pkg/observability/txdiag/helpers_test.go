@@ -148,6 +148,7 @@ const (
 type FakeRecorder struct {
 	mu      sync.Mutex
 	Holds   []RecordedHold
+	Commits []RecordedWait // MS, Op, Outcome of each RecordTxCommit
 	Waits   []RecordedWait
 	Dropped int64
 }
@@ -168,6 +169,19 @@ func (r *FakeRecorder) RecordTxHold(_ context.Context, ms float64, op, kind, out
 	r.mu.Lock()
 	r.Holds = append(r.Holds, RecordedHold{ms, op, kind, outcome})
 	r.mu.Unlock()
+}
+
+func (r *FakeRecorder) RecordTxCommit(_ context.Context, ms float64, op, outcome string) {
+	r.mu.Lock()
+	r.Commits = append(r.Commits, RecordedWait{ms, op, outcome})
+	r.mu.Unlock()
+}
+
+// CommitsSnapshot returns a copy of the RecordTxCommit calls.
+func (r *FakeRecorder) CommitsSnapshot() []RecordedWait {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]RecordedWait(nil), r.Commits...)
 }
 
 func (r *FakeRecorder) RecordLockWait(_ context.Context, ms float64, op, outcome string) {

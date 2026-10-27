@@ -30,6 +30,8 @@ type fakeDriver struct {
 	minimal bool
 	// onExec runs inside ExecContext (for example to advance a fake clock).
 	onExec func()
+	// onCommit runs inside a transaction's Commit (a slow fsync).
+	onCommit func()
 	// execErr, when set, is returned by every Exec.
 	execErr error
 	valid   atomic.Bool // IsValid result; true by default via newFakeDriver
@@ -93,14 +95,14 @@ func (c *minimalConn) Prepare(string) (driver.Stmt, error) {
 func (c *minimalConn) Close() error { c.d.calls.add("Close"); return nil }
 func (c *minimalConn) Begin() (driver.Tx, error) {
 	c.d.calls.add("Begin")
-	return fakeTx{}, nil
+	return fakeTx{d: c.d}, nil
 }
 
 type fullConn struct{ minimalConn }
 
 func (c *fullConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
 	c.d.calls.add("BeginTx")
-	return fakeTx{}, nil
+	return fakeTx{d: c.d}, nil
 }
 
 func (c *fullConn) ExecContext(context.Context, string, []driver.NamedValue) (driver.Result, error) {
@@ -135,9 +137,15 @@ func (c *fullConn) CheckNamedValue(nv *driver.NamedValue) error {
 // converter rejects structs.
 type customArg struct{ s string }
 
-type fakeTx struct{}
+type fakeTx struct{ d *fakeDriver }
 
-func (fakeTx) Commit() error   { return nil }
+func (t fakeTx) Commit() error {
+	if t.d != nil && t.d.onCommit != nil {
+		t.d.onCommit()
+	}
+	return nil
+}
+
 func (fakeTx) Rollback() error { return nil }
 
 type fakeStmt struct{ d *fakeDriver }

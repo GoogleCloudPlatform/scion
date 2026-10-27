@@ -828,3 +828,43 @@ func TestLockWaitHolderFieldsOmittedOnPostgres(t *testing.T) {
 		}
 	}
 }
+
+// TestCommitTimeIsSeparateFromIdle: a slow driver Commit (fsync) is
+// reported as commit_ms, not as idle time, and recorded in the commit
+// histogram.
+func TestCommitTimeIsSeparateFromIdle(t *testing.T) {
+	hs := newHarness(t, DialectSQLite, nil)
+	hs.drv.onCommit = func() { hs.clk.Advance(3 * time.Second) }
+	hs.holdTx(t, 0)
+	hs.flush(t)
+	lines := hs.h.Lines(MsgHold)
+	if len(lines) != 1 {
+		t.Fatalf("got %d hold lines, want 1", len(lines))
+	}
+	l := lines[0]
+	if l.Int("hold_ms") != 3000 || l.Int("commit_ms") != 3000 || l.Int("idle_ms") != 0 {
+		t.Errorf("hold line: %+v", l.Attrs)
+	}
+	commits := hs.rec.CommitsSnapshot()
+	if len(commits) != 1 || commits[0].MS != 3000 || commits[0].Outcome != OutcomeCommit {
+		t.Errorf("commit histogram calls: %+v", commits)
+	}
+}
+
+// TestSlowWorkInsideTxIsIdleNotCommit: time spent inside the transaction
+// before a fast Commit is idle time, and commit_ms stays 0.
+func TestSlowWorkInsideTxIsIdleNotCommit(t *testing.T) {
+	hs := newHarness(t, DialectSQLite, nil)
+	hs.holdTx(t, 3*time.Second)
+	hs.flush(t)
+	lines := hs.h.Lines(MsgHold)
+	if len(lines) != 1 {
+		t.Fatalf("got %d hold lines, want 1", len(lines))
+	}
+	if l := lines[0]; l.Int("commit_ms") != 0 || l.Int("idle_ms") != 3000 {
+		t.Errorf("hold line: %+v", l.Attrs)
+	}
+	if commits := hs.rec.CommitsSnapshot(); len(commits) != 1 || commits[0].MS != 0 {
+		t.Errorf("commit histogram calls: %+v", commits)
+	}
+}

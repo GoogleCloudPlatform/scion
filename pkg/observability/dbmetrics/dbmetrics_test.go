@@ -90,10 +90,12 @@ func TestRecordedMetricsAreExported(t *testing.T) {
 	r.ObservePoolStats(ctx, PoolStore, PoolStats{Active: 2, Idle: 8, WaitCount: 1, Max: 10, WaitDuration: time.Second}, attrs...)
 	tr := r.(interface {
 		RecordTxHold(context.Context, float64, string, string, string)
+		RecordTxCommit(context.Context, float64, string, string)
 		RecordLockWait(context.Context, float64, string, string)
 		IncDiagDropped(context.Context, int64)
 	})
 	tr.RecordTxHold(ctx, 1, "op", "tx", "commit")
+	tr.RecordTxCommit(ctx, 1, "op", "commit")
 	tr.RecordLockWait(ctx, 1, "op", "acquired")
 	tr.IncDiagDropped(ctx, 1)
 
@@ -119,6 +121,7 @@ func TestRecordedMetricsAreExported(t *testing.T) {
 		MetricPoolWaitDuration,
 		MetricTxHoldDuration,
 		MetricTxLockWaitDuration,
+		MetricTxCommitDuration,
 		MetricDiagWarnDropped,
 	}
 
@@ -288,6 +291,7 @@ func TestTxDiagnosticsInstruments(t *testing.T) {
 	ctx := context.Background()
 	r.RecordTxHold(ctx, 3000, "hub.f", "tx", "commit")
 	r.RecordLockWait(ctx, 90000, "hub.g", "deadline")
+	r.RecordTxCommit(ctx, 2500, "hub.h", "commit")
 	r.IncDiagDropped(ctx, 2)
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(ctx, &rm); err != nil {
@@ -297,7 +301,7 @@ func TestTxDiagnosticsInstruments(t *testing.T) {
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
 			switch m.Name {
-			case MetricTxHoldDuration, MetricTxLockWaitDuration:
+			case MetricTxHoldDuration, MetricTxLockWaitDuration, MetricTxCommitDuration:
 				h, ok := m.Data.(metricdata.Histogram[float64])
 				if !ok || len(h.DataPoints) != 1 {
 					t.Fatalf("%s: data %T with %v", m.Name, m.Data, m.Data)
@@ -307,8 +311,11 @@ func TestTxDiagnosticsInstruments(t *testing.T) {
 					t.Errorf("%s: bounds %v, want the last at 120000 ms", m.Name, b)
 				}
 				want := map[string]string{AttrOp: "hub.f", AttrKind: "tx", AttrOutcome: "commit", AttrPool: PoolStore}
-				if m.Name == MetricTxLockWaitDuration {
+				switch m.Name {
+				case MetricTxLockWaitDuration:
 					want = map[string]string{AttrOp: "hub.g", AttrOutcome: "deadline", AttrPool: PoolStore}
+				case MetricTxCommitDuration:
+					want = map[string]string{AttrOp: "hub.h", AttrOutcome: "commit", AttrPool: PoolStore}
 				}
 				if dp.Attributes.Len() != len(want) {
 					t.Errorf("%s: attributes %v, want %v", m.Name, dp.Attributes, want)
@@ -328,7 +335,7 @@ func TestTxDiagnosticsInstruments(t *testing.T) {
 			}
 		}
 	}
-	for _, n := range []string{MetricTxHoldDuration, MetricTxLockWaitDuration, MetricDiagWarnDropped} {
+	for _, n := range []string{MetricTxHoldDuration, MetricTxLockWaitDuration, MetricTxCommitDuration, MetricDiagWarnDropped} {
 		if !found[n] {
 			t.Errorf("metric %s not collected", n)
 		}
