@@ -253,14 +253,27 @@ func (c *catalogClock) Advance(d time.Duration) {
 }
 
 // catalogMemStore is an in-memory CatalogStore.
+// Like a database client, it fails with ctx's error once ctx has ended.
 type catalogMemStore struct {
 	mu       sync.Mutex
 	data     []byte
 	saves    int
-	loadErrs int // the next loadErrs loads fail
+	loads    int
+	loadErrs int  // the next loadErrs loads fail
+	block    bool // loads hang until their ctx ends (a stalled database)
 }
 
-func (s *catalogMemStore) LoadReleaseCatalog(context.Context) ([]byte, error) {
+func (s *catalogMemStore) LoadReleaseCatalog(ctx context.Context) ([]byte, error) {
+	s.mu.Lock()
+	s.loads++
+	block := s.block
+	s.mu.Unlock()
+	if block {
+		<-ctx.Done()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.loadErrs > 0 {
@@ -268,6 +281,12 @@ func (s *catalogMemStore) LoadReleaseCatalog(context.Context) ([]byte, error) {
 		return nil, errors.New("database is locked")
 	}
 	return slices.Clone(s.data), nil
+}
+
+func (s *catalogMemStore) loadCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loads
 }
 
 func (s *catalogMemStore) SaveReleaseCatalog(_ context.Context, data []byte) error {
@@ -754,7 +773,10 @@ func TestCatalog_BlackholedChecksumsHost(t *testing.T) {
 	)
 	f.hangSums["nightly-20261023"] = true
 	clock := newCatalogClock()
-	c := newTestCatalog(f, clock, func(o *CatalogOptions) { o.ChecksumsBudget = 200 * time.Millisecond })
+	// The budget starts at the first download; nightly-20261024's in-process
+	// download has 1.5 s, and the hang on nightly-20261023 lasts until the
+	// budget runs out.
+	c := newTestCatalog(f, clock, func(o *CatalogOptions) { o.ChecksumsBudget = 1500 * time.Millisecond })
 
 	// A cold hub still gets a catalog when the list succeeds.
 	snap := mustGet(t, c, false)
@@ -807,22 +829,36 @@ func TestCatalog_PersistedLoadRetriedAfterStoreError(t *testing.T) {
 	if _, err := b.Get(context.Background(), false); err == nil {
 		t.Fatal("first Get succeeded with no catalog available")
 	}
-	// The next Get reads the persisted copy and serves it (stale).
+	// Within the backoff the store is not read again.
+	if _, err := b.Get(context.Background(), false); err == nil {
+		t.Fatal("Get during the backoff succeeded with no catalog available")
+	}
+	if n := store.loadCount(); n != 2 { // a's load and b's failed one
+		t.Fatalf("store loads = %d, want 2 (no retry within the backoff)", n)
+	}
+	// After the backoff the next Get reads the persisted copy and serves it
+	// (stale, as GitHub is still down).
+	clock.Advance(DefaultCatalogRefreshInterval)
 	snap := mustGet(t, b, false)
 	if !snap.Stale || !reflect.DeepEqual(snap.Channels, warm.Channels) || !snap.FetchedAt.Equal(warm.FetchedAt) {
 		t.Errorf("after a transient store error: %+v, want the warm copy (stale)", snap)
 	}
 
-	// A cancelled first caller does not lose the persisted copy either.
+	// A cancelled first caller does not lose the persisted copy either: the
+	// read is detached from its ctx (the store fails on an ended ctx), and
+	// it starts no fetch.
 	f2 := newCatalogFake(t, rels...)
 	cctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	cl := newTestCatalog(f2, clock, func(o *CatalogOptions) {
 		o.Store = store
-		o.TTL = 2 * DefaultCatalogTTL
+		o.TTL = 4 * DefaultCatalogTTL
 	})
-	if s, err := cl.Get(cctx, false); err != nil || !s.FetchedAt.Equal(warm.FetchedAt) {
-		t.Errorf("cancelled first Get = %+v, %v; want the persisted copy", s, err)
+	if s, err := cl.Get(cctx, false); err != nil && !errors.Is(err, context.Canceled) {
+		t.Errorf("cancelled first Get = %+v, %v; want the persisted copy or context.Canceled", s, err)
+	}
+	if s := mustGet(t, cl, false); !s.FetchedAt.Equal(warm.FetchedAt) {
+		t.Errorf("Get after a cancelled first caller = %+v, want the persisted copy", s)
 	}
 	if len(f2.requests) != 0 {
 		t.Errorf("requests with a warm persisted copy: %v", f2.requests)
@@ -991,6 +1027,84 @@ func (l *flakySumsLister) FetchChecksums(ctx context.Context, tag string, a Rele
 		return nil, errors.New("connection reset")
 	}
 	return l.ReleaseLister.FetchChecksums(ctx, tag, a)
+}
+
+// getWithin runs c.Get and fails the test when it does not return within d.
+func getWithin(t *testing.T, c *Catalog, d time.Duration) (Snapshot, error) {
+	t.Helper()
+	type res struct {
+		s   Snapshot
+		err error
+	}
+	ch := make(chan res, 1)
+	go func() {
+		s, err := c.Get(context.Background(), false)
+		ch <- res{s, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.s, r.err
+	case <-time.After(d):
+		t.Fatalf("Get did not return within %v", d)
+		return Snapshot{}, nil
+	}
+}
+
+func TestCatalog_StalledStoreIsBounded(t *testing.T) {
+	const bound = 10 * time.Second // far above loadTimeout; only catches a hang
+	t.Run("GitHub up: a fresh catalog", func(t *testing.T) {
+		f := newCatalogFake(t, catalogGood("nightly-20261024", catalogDay(24)))
+		store := &catalogMemStore{block: true}
+		c := newTestCatalog(f, newCatalogClock(), func(o *CatalogOptions) { o.Store = store })
+		c.loadTimeout = 50 * time.Millisecond
+		snap, err := getWithin(t, c, bound)
+		if err != nil || snap.Stale || snap.Channel("nightly").Latest != "nightly-20261024" {
+			t.Fatalf("Get with a stalled store = %+v, %v", snap, err)
+		}
+		// With a fetched catalog the store is never read again.
+		for range 3 {
+			if _, err := getWithin(t, c, bound); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if n := store.loadCount(); n != 1 {
+			t.Errorf("store loads = %d, want 1", n)
+		}
+	})
+	t.Run("GitHub down: an error, then backoff", func(t *testing.T) {
+		f := newCatalogFake(t, catalogGood("nightly-20261024", catalogDay(24)))
+		f.failList = true
+		clock := newCatalogClock()
+		store := &catalogMemStore{block: true}
+		c := newTestCatalog(f, clock, func(o *CatalogOptions) { o.Store = store })
+		c.loadTimeout = 50 * time.Millisecond
+		if _, err := getWithin(t, c, bound); err == nil {
+			t.Fatal("Get succeeded with no catalog anywhere")
+		}
+		// Later Gets within the backoff neither read the store nor block.
+		for range 3 {
+			if _, err := getWithin(t, c, bound); err == nil {
+				t.Fatal("Get succeeded with no catalog anywhere")
+			}
+		}
+		if n := store.loadCount(); n != 1 {
+			t.Errorf("store loads within the backoff = %d, want 1", n)
+		}
+		// After the backoff the store is retried once (now answering
+		// "nothing stored") and GitHub, recovered, is fetched.
+		store.mu.Lock()
+		store.block = false
+		store.mu.Unlock()
+		f.set(func() { f.failList = false })
+		clock.Advance(DefaultCatalogRefreshInterval)
+		snap, err := getWithin(t, c, bound)
+		if err != nil || snap.Stale {
+			t.Fatalf("after recovery: %+v, %v", snap, err)
+		}
+		if n := store.loadCount(); n != 2 {
+			t.Errorf("store loads = %d, want 2", n)
+		}
+	})
 }
 
 func TestGitHubReleases_ListReleases(t *testing.T) {
