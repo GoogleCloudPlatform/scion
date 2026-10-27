@@ -7,36 +7,47 @@ import (
 	"testing"
 )
 
-// dockerfileStage returns the Dockerfile's stage that starts with the FROM line
-// containing from, up to the next FROM, with backslash continuations joined so
-// that each RUN step is one line.
-func dockerfileStage(t *testing.T, from string) string {
+// dockerfileStage returns the instruction lines of the Dockerfile's stage that
+// starts with the FROM line from, up to the next FROM: CRLF normalised to LF,
+// backslash continuations joined (so each RUN step is one line), and comment
+// lines dropped, so that commented-out text can never satisfy a check.
+func dockerfileStage(t *testing.T, from string) []string {
 	t.Helper()
 	b, err := os.ReadFile("Dockerfile")
 	if err != nil {
 		t.Fatal(err)
 	}
-	df := strings.ReplaceAll(string(b), "\\\n", " ")
-	start := strings.Index(df, from)
+	df := strings.ReplaceAll(string(b), "\r\n", "\n")
+	df = strings.ReplaceAll(df, "\\\n", " ")
+	start := strings.Index(df, from+"\n")
 	if start < 0 {
-		t.Fatalf("Dockerfile has no %q", from)
+		t.Fatalf("Dockerfile has no %q line", from)
 	}
-	stage := df[start+len(from):]
+	stage := df[start+len(from)+1:]
 	if end := strings.Index(stage, "\nFROM "); end >= 0 {
 		stage = stage[:end]
 	}
-	return stage
+	var lines []string
+	for _, l := range strings.Split(stage, "\n") {
+		if s := strings.TrimSpace(l); s != "" && !strings.HasPrefix(s, "#") {
+			lines = append(lines, l)
+		}
+	}
+	return lines
 }
 
 // TestDockerfileGitStage: git is built from source without Rust. git 2.55+ builds
 // its Rust parts (libgitcore.a, through cargo) unless NO_RUST is set, and the
 // stage has no Rust toolchain, so a make call without NO_RUST fails the image
 // build ("cargo: not found", Makefile target target/release/libgitcore.a). The
-// stage must also confirm the result ("rust: disabled"), and the final stage must
-// keep its asserts: git >= 2.48 and the HTTPS transport's runtime libraries.
+// stage's last command must confirm the result ("rust: disabled"), no Rust tool
+// may appear in it, and the final stage must keep its asserts: git >= 2.48 and the
+// HTTPS transport's runtime libraries.
 func TestDockerfileGitStage(t *testing.T) {
-	git := dockerfileStage(t, "FROM ${UBUNTU_IMAGE} AS git\n")
-	makes := regexp.MustCompile(`make -C /tmp/git-src [^&]*`).FindAllString(git, -1)
+	git := dockerfileStage(t, "FROM ${UBUNTU_IMAGE} AS git")
+	body := strings.Join(git, "\n")
+
+	makes := regexp.MustCompile(`make -C /tmp/git-src [^&]*`).FindAllString(body, -1)
 	if len(makes) != 2 {
 		t.Fatalf("git stage: %d make calls, want 2 (all, install): %q", len(makes), makes)
 	}
@@ -45,18 +56,26 @@ func TestDockerfileGitStage(t *testing.T) {
 			t.Errorf("git stage make call lacks NO_RUST=YesPlease: %q", m)
 		}
 	}
-	for _, tool := range []string{"cargo", "rustc", "rustup"} {
-		if regexp.MustCompile(`apt-get install[^&]*\b` + tool + `\b`).MatchString(git) {
-			t.Errorf("git stage installs %s; build git with NO_RUST instead", tool)
-		}
-	}
-	if !strings.Contains(git, `/out/usr/local/bin/git version --build-options | grep -qx 'rust: disabled'`) {
-		t.Error("git stage does not assert that the build reports rust: disabled")
+	if tool := regexp.MustCompile(`\b(cargo|rustc|rustup)\b`).FindString(body); tool != "" {
+		t.Errorf("git stage uses %s; build git with NO_RUST instead of a Rust toolchain", tool)
 	}
 
-	final := dockerfileStage(t, "FROM ${UBUNTU_IMAGE}\n")
+	// The assert is the stage's last RUN and its last command, so nothing after it
+	// (such as "|| true") can mask a failure.
+	var lastRun string
+	for _, l := range git {
+		if strings.HasPrefix(l, "RUN ") {
+			lastRun = l
+		}
+	}
+	const assert = " && /out/usr/local/bin/git version --build-options | grep -qx 'rust: disabled'"
+	if !strings.HasSuffix(strings.TrimRight(lastRun, " \t"), assert) {
+		t.Errorf("git stage's last RUN does not end with %q: %q", assert, lastRun)
+	}
+
+	final := strings.Join(dockerfileStage(t, "FROM ${UBUNTU_IMAGE}"), "\n")
 	for _, want := range []string{
-		"COPY --from=git /out/usr/local/ /usr/local/\n",
+		"COPY --from=git /out/usr/local/ /usr/local/",
 		`printf '%s\n%s\n' 2.48 "$v" | sort -V -C`,
 		"for b in git-remote-https git-http-push; do",
 		`grep 'not found' <<<"$libs"`,
