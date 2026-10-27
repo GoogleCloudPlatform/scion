@@ -36,11 +36,8 @@ import { canReissueAllScopes } from '../../lib/admin-permissions.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { showToast } from '../../utils/toast.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
-import {
-  LAST_UPDATE_LABELS,
-  renderInstallerUnsupported,
-  renderReleaseNotesLink,
-} from './admin-maintenance-update-card.js';
+import { renderReleaseNotesLink } from '../../utils/release-notes-link.js';
+import { LAST_UPDATE_LABELS, renderInstallerUnsupported } from './admin-maintenance-update-card.js';
 import type {
   LastUpdate,
   PendingUpdate,
