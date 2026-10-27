@@ -18,7 +18,9 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -156,4 +158,109 @@ func TestStorageValuesAllowed(t *testing.T) {
 	if got := srv.brokerStorageForViewer(member, b, true); got.WorkspaceStorage.NFS.Export != "/fixture-export" {
 		t.Error("the broker reading its own record does not see the values")
 	}
+}
+
+// storageFixtureBroker gives broker b the fixture storage descriptor.
+func storageFixtureBroker(t *testing.T, s store.Store, brokerID string) {
+	t.Helper()
+	ctx := context.Background()
+	b, err := s.GetRuntimeBroker(ctx, brokerID)
+	require.NoError(t, err)
+	b.WorkspaceStorage = &api.BrokerWorkspaceStorage{Backend: "nfs", Homes: "local", NFS: &api.BrokerNFSWorkspaceStorage{
+		Server: "10.9.8.7", Export: "/fixture-export", SubPathRoot: "fixture-root", Healthy: true, ExportID: "fixture-export-id"}}
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, b))
+}
+
+// requireRedactedBroker checks a broker response body carries no fixture
+// storage value and, when it is a 200, a descriptor marked redacted.
+func requireRedactedBroker(t *testing.T, code int, body, who string) {
+	t.Helper()
+	for _, v := range storageFixtureValues {
+		require.NotContains(t, body, v, "%s sees the storage value %q", who, v)
+	}
+	if code == http.StatusOK {
+		require.Contains(t, body, `"redacted":true`, "%s: the descriptor is marked redacted", who)
+	}
+}
+
+// TestStorageValues_ProjectAdminGetsNoValues: a project admin (a
+// project-scoped admin binding, no hub binding) gets no storage values,
+// neither from storageValuesAllowed nor from GET /runtime-brokers/{id} on
+// a broker it owns and can read.
+func TestStorageValues_ProjectAdminGetsNoValues(t *testing.T) {
+	srv, s := testServer(t)
+	projectID := tid("storage-padmin-proj")
+	createDelegateTestProject(t, s, projectID, "storage-padmin-proj", "test")
+	userID := tid("storage-padmin")
+	createTestUserWithProjectRole(t, s, userID, "storage-padmin@test.com", projectID, store.ProjectRoleAdmin)
+	u, err := s.GetUser(context.Background(), userID)
+	require.NoError(t, err)
+
+	ctx := contextWithIdentity(context.Background(), NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, "web"))
+	require.False(t, srv.storageValuesAllowed(ctx), "a project admin must not see storage values")
+
+	broker := createReregistrationTestBroker(t, s, "storage-padmin-broker", u.ID)
+	storageFixtureBroker(t, s, broker.ID)
+	rec := doRequestAsUser(t, srv, u, http.MethodGet, "/api/v1/runtime-brokers/"+broker.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code, "the owner can read its broker: %s", rec.Body.String())
+	requireRedactedBroker(t, rec.Code, rec.Body.String(), "a project admin")
+}
+
+// TestStorageValues_HubAdminRoleGetsValues: a hub-admin (not super-admin)
+// holds hub.config.read and sees the values.
+func TestStorageValues_HubAdminRoleGetsValues(t *testing.T) {
+	srv, s := testServer(t)
+	userID := tid("storage-hubadmin")
+	createTestUserWithRole(t, s, userID, "storage-hubadmin@test.com", "member", store.SystemRoleHubAdmin)
+	u, err := s.GetUser(context.Background(), userID)
+	require.NoError(t, err)
+	ctx := contextWithIdentity(context.Background(), NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, "web"))
+	require.True(t, srv.storageValuesAllowed(ctx), "a hub admin sees storage values")
+
+	broker := createReregistrationTestBroker(t, s, "storage-hubadmin-broker", u.ID)
+	storageFixtureBroker(t, s, broker.ID)
+	rec := doRequestAsUser(t, srv, u, http.MethodGet, "/api/v1/runtime-brokers/"+broker.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	for _, v := range storageFixtureValues {
+		require.Contains(t, rec.Body.String(), v, "a hub admin sees the value %q", v)
+	}
+}
+
+// TestStorageValues_AuthzErrorGivesPublicView: when the authorization
+// decision cannot be made (the role-binding lookup fails), even a
+// super-admin gets the public view: no values, redacted:true.
+func TestStorageValues_AuthzErrorGivesPublicView(t *testing.T) {
+	srv, s := testServer(t)
+	admin := storageAdminCtx(t, s, "storage-authzerr-admin")
+	require.True(t, srv.storageValuesAllowed(admin), "precondition: the admin sees values with a working store")
+
+	srv.authzService = NewAuthzService(&failBindingsStore{Store: s, failErr: errors.New("injected binding resolution failure")}, slog.Default())
+	require.False(t, srv.storageValuesAllowed(admin), "an undecidable request must give the public view")
+	b := store.RuntimeBroker{ID: "b", WorkspaceStorage: &api.BrokerWorkspaceStorage{Backend: "nfs",
+		NFS: &api.BrokerNFSWorkspaceStorage{Server: "10.9.8.7", Export: "/fixture-export", SubPathRoot: "fixture-root", ExportID: "fixture-export-id"}}}
+	got := srv.brokerStorageForViewer(admin, b, false)
+	require.True(t, got.WorkspaceStorage.Redacted, "redacted on an authorization error")
+	require.Empty(t, got.WorkspaceStorage.NFS.Server)
+	require.Empty(t, got.WorkspaceStorage.NFS.Export)
+
+	srv.authzService = nil
+	require.False(t, srv.storageValuesAllowed(admin), "no authorization service gives the public view")
+}
+
+// TestStorageValues_ProjectScopedTokenGetsNoValues: a project-scoped user
+// access token of a super-admin carries no hub.config.read, so the broker
+// detail never shows the values through it.
+func TestStorageValues_ProjectScopedTokenGetsNoValues(t *testing.T) {
+	srv, s := testServer(t)
+	projectID := tid("storage-ptoken-proj")
+	createDelegateTestProject(t, s, projectID, "storage-ptoken-proj", "test")
+	admin := newSuperAdminUser(t, s, "storage-ptoken-admin")
+	broker := createReregistrationTestBroker(t, s, "storage-ptoken-broker", admin.ID)
+	storageFixtureBroker(t, s, broker.ID)
+	key, _, err := srv.uatService.CreateTokenWithParams(rs4MintContext(admin.ID), CreateTokenParams{
+		UserID: admin.ID, Name: "storage-ptoken", ProjectID: projectID, Scopes: []string{"project:read"},
+	})
+	require.NoError(t, err)
+	rec := doRequestWithToken(t, srv, key, http.MethodGet, "/api/v1/runtime-brokers/"+broker.ID, nil)
+	requireRedactedBroker(t, rec.Code, rec.Body.String(), "a project-scoped token")
 }

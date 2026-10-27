@@ -147,12 +147,14 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 
 		// Build extended broker list with provider data
 		extendedBrokers := make([]RuntimeBrokerWithProvider, 0, len(result.Items))
+		// Storage layout values are shown to readers with hub.config.read
+		// only: decided once for the whole listing.
+		showStorage := s.storageValuesAllowed(ctx)
 		for i, broker := range result.Items {
 			if caps != nil && !capabilityAllows(caps[i], ActionRead) {
 				continue
 			}
-			// Storage layout values are shown to hub admins only.
-			broker = s.brokerStorageForViewer(ctx, broker, false)
+			broker = redactBrokerStorage(broker, showStorage)
 			eb := RuntimeBrokerWithProvider{
 				RuntimeBroker: brokerForDisplay(broker),
 				LocalPath:     brokerLocalPaths[broker.ID],
@@ -192,12 +194,14 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 	hubVersion := s.hubFleetVersion(ctx)
 
 	brokersWithCaps := make([]RuntimeBrokerWithCapabilities, 0, len(result.Items))
+	// Storage layout values are shown to readers with hub.config.read only:
+	// decided once for the whole listing.
+	showStorage := s.storageValuesAllowed(ctx)
 	for i, broker := range result.Items {
 		if caps != nil && !capabilityAllows(caps[i], ActionRead) {
 			continue
 		}
-		// Storage layout values are shown to hub admins only.
-		broker = s.brokerStorageForViewer(ctx, broker, false)
+		broker = redactBrokerStorage(broker, showStorage)
 		resp := RuntimeBrokerWithCapabilities{RuntimeBroker: withHostIdentity(brokerForDisplay(broker), false)}
 		resp.HostedByThisServer = embedded.has(broker.ID)
 		resp.VersionStatus = runtimeBrokerVersionStatus(&result.Items[i], hubVersion)
@@ -418,8 +422,8 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 		}
 	}
 
-	// Storage layout values are shown to hub admins and the broker itself
-	// only.
+	// Storage layout values are shown to readers with hub.config.read and
+	// to the broker itself only.
 	shown := s.brokerStorageForViewer(ctx, *broker, brokerSelf)
 
 	// Compute capabilities for the requesting user

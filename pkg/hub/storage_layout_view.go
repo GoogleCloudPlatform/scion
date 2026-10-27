@@ -27,7 +27,11 @@ import (
 // export identity markers): a user holding hub.config.read, the permission
 // that already reads the hub's server configuration (where those values
 // are set), decided by the authorization pipeline. Everyone else sees the
-// differing fields by name only.
+// differing fields by name only. The permission is evaluated at hub scope
+// (resource hub/hub), so a project-scoped grant never admits it. Anything
+// other than an allowed decision, including an authorization or store
+// error (the decision is then a deny), a caller that is not a user, or a
+// missing authorization service, yields false: the public view.
 func (s *Server) storageValuesAllowed(ctx context.Context) bool {
 	user, ok := GetIdentityFromContext(ctx).(UserIdentity)
 	if !ok || IsNilIdentity(user) || s.authzService == nil {
@@ -54,12 +58,23 @@ func (s *Server) storageIssueView(ctx context.Context) projectfs.IssueView {
 // brokerStorageForViewer returns b with its workspace storage descriptor's
 // values removed unless the caller of ctx may see them
 // (storageValuesAllowed) or self is set (the broker reading its own
-// record). The backend, health, homes and shared-dir placement are kept;
-// the nfs server, export, subpath root and export identity marker and the
-// volume claim and subpath root are omitted, and the descriptor is marked
-// Redacted so a client can tell redaction from an empty value.
+// record). See redactBrokerStorage.
 func (s *Server) brokerStorageForViewer(ctx context.Context, b store.RuntimeBroker, self bool) store.RuntimeBroker {
-	if b.WorkspaceStorage == nil || self || s.storageValuesAllowed(ctx) {
+	if b.WorkspaceStorage == nil || self {
+		return b
+	}
+	return redactBrokerStorage(b, s.storageValuesAllowed(ctx))
+}
+
+// redactBrokerStorage returns b unchanged when show is set; otherwise its
+// workspace storage descriptor keeps the backend, health, homes and
+// shared-dir placement, omits the nfs server, export, subpath root and
+// export identity marker and the volume claim and subpath root, and is
+// marked Redacted so a client can tell redaction from an empty value. A
+// list handler decides show once per request (storageValuesAllowed) and
+// applies it to every row.
+func redactBrokerStorage(b store.RuntimeBroker, show bool) store.RuntimeBroker {
+	if b.WorkspaceStorage == nil || show {
 		return b
 	}
 	ws := *b.WorkspaceStorage
