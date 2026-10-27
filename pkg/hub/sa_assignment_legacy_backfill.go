@@ -25,7 +25,7 @@ import (
 // Legacy service-account assignment backfill.
 //
 // The GCP token mint and the GCS link proxy decide gcp_service_account.use
-// with a resource parent ceiling (EvaluateServiceAccountParentCeiling) that
+// with a resource parent ceiling (the service-account parent ceiling) that
 // requires exactly one active agent_service_account_assignments row. Rows
 // are written by agent create, SA PATCH and reincarnate. Agents created
 // before the assignment table existed have no row and are refused with
