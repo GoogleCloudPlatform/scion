@@ -1241,7 +1241,7 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 			// redirect to login instead of letting the Hub return a raw JSON 401.
 			if isBrowserRequest(r) && isProxyRoute(r.URL.Path) {
 				if !ws.keepsNoAnonymousSession(r) {
-					session.Values[sessKeyReturnTo] = r.URL.RequestURI()
+					session.Values[sessKeyReturnTo] = localRedirectPath(r.URL.RequestURI())
 					_ = session.Save(r, w)
 					http.Redirect(w, r, "/auth/login", http.StatusFound)
 					return
@@ -3668,7 +3668,7 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 				http.Redirect(w, r, ws.noSessionLoginLocation(r.URL.Path), http.StatusFound)
 				return
 			}
-			session.Values[sessKeyReturnTo] = r.URL.Path
+			session.Values[sessKeyReturnTo] = localRedirectPath(r.URL.Path)
 			_ = session.Save(r, w)
 			http.Redirect(w, r, "/auth/login", http.StatusFound)
 			return
@@ -3698,7 +3698,7 @@ func (ws *WebServer) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 			session, _ = ws.sessionStore.New(r, webSessionName)
 		}
 		if returnTo := r.URL.Query().Get("returnTo"); returnTo != "" {
-			session.Values[sessKeyReturnTo] = returnTo
+			session.Values[sessKeyReturnTo] = localRedirectPath(returnTo)
 			_ = session.Save(r, w)
 		}
 		http.Redirect(w, r, "/login", http.StatusFound)
@@ -4015,10 +4015,9 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if returnTo == "" {
-		returnTo = "/"
-	}
-	http.Redirect(w, r, returnTo, http.StatusFound)
+	// The redirect goes to a path on this server only, whatever the
+	// session holds.
+	http.Redirect(w, r, localRedirectPath(returnTo), http.StatusFound)
 }
 
 // handleLogout clears the session and redirects to login (or returns JSON for API).

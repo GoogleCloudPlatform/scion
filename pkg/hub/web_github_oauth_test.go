@@ -184,3 +184,63 @@ func TestOAuthCallback_GitHub_ProfileEmailUnverified_Rejected(t *testing.T) {
 		t.Error("expected no user record to be created for an unverified GitHub email")
 	}
 }
+
+// The OAuth callback redirects to the session's returnTo only when it is a
+// path on this server; any other value ends at /.
+func TestOAuthCallback_RedirectsToLocalReturnToOnly(t *testing.T) {
+	const secret = "test-session-secret-for-github-oauth-returnto-12345"
+	const email = "github-returnto@example.com"
+
+	for returnTo, want := range map[string]string{
+		"":                        "/",
+		"/projects/p1/agents/a1":  "/projects/p1/agents/a1",
+		"/projects/p1?tab=agents": "/projects/p1?tab=agents",
+		"https://evil.example/x":  "/",
+		"//evil.example/x":        "/",
+		"/\\evil.example/x":       "/",
+		"\\\\evil.example/x":      "/",
+		"/\t/evil.example/x":      "/",
+		"evil.example/x":          "/",
+	} {
+		ws := newTestWebServer(t, WebServerConfig{
+			SessionSecret: secret,
+			BaseURL:       "http://localhost:8080",
+		})
+		ws.oauthService = NewOAuthService(OAuthConfig{
+			Web: OAuthClientConfig{
+				GitHub: OAuthProviderConfig{
+					ClientID:     "test-client-id",
+					ClientSecret: "test-client-secret",
+				},
+			},
+		}, nil)
+		ws.oauthService.httpClient = &http.Client{
+			Transport: &mockGitHubOAuthTransport{
+				tokenJSON:  `{"access_token":"mock-token","token_type":"bearer","scope":"read:user,user:email"}`,
+				userJSON:   `{"id":43,"login":"octocat2","name":"GitHub User","email":"` + email + `","avatar_url":"https://example.com/a.png"}`,
+				emailsJSON: `[{"email":"` + email + `","primary":true,"verified":true}]`,
+			},
+		}
+		ws.store = newProxyAuthStoreWithRoles()
+
+		reqSetup := httptest.NewRequest(http.MethodGet, "/auth/login/github", nil)
+		recSetup := httptest.NewRecorder()
+		sess, err := ws.sessionStore.Get(reqSetup, webSessionName)
+		require.NoError(t, err)
+		sess.Values[sessKeyOAuthState] = "test-state-returnto"
+		if returnTo != "" {
+			sess.Values[sessKeyReturnTo] = returnTo
+		}
+		require.NoError(t, sess.Save(reqSetup, recSetup))
+
+		reqCallback := httptest.NewRequest(http.MethodGet, "/auth/callback/github?code=test-code&state=test-state-returnto", nil)
+		for _, c := range recSetup.Result().Cookies() {
+			reqCallback.AddCookie(c)
+		}
+		recCallback := httptest.NewRecorder()
+		ws.Handler().ServeHTTP(recCallback, reqCallback)
+
+		require.Equal(t, http.StatusFound, recCallback.Code, returnTo)
+		assert.Equal(t, want, recCallback.Header().Get("Location"), returnTo)
+	}
+}

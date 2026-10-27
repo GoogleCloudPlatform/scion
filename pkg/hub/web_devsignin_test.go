@@ -446,6 +446,10 @@ func TestLocalRedirectPath(t *testing.T) {
 		"/ok\r\nSet-Cookie: x=1":    "/",
 		devSignInPath + "?code=abc": "/",
 		devLaunchPath:               "/",
+		"\\evil.example":            "/",
+		"/\t/evil.example":          "/",
+		"/ok\x00":                   "/",
+		"https:/evil.example":       "/",
 	} {
 		assert.Equal(t, want, localRedirectPath(in), in)
 	}
@@ -673,5 +677,34 @@ func TestLoginRedirect_OAuthWithoutDevAuthUsesSessionReturnPath(t *testing.T) {
 		sess, err := ws.sessionStore.Get(withCookies(httptest.NewRequest(http.MethodGet, "/", nil), cookie), webSessionName)
 		require.NoError(t, err)
 		assert.Equal(t, want, sess.Values[sessKeyReturnTo], path)
+	}
+}
+
+// /auth/login?returnTo= stores the return path only when it is a path on
+// this server, and / otherwise.
+func TestOAuthLogin_ProviderlessStoresLocalReturnTo(t *testing.T) {
+	ws := newTestWebServer(t, WebServerConfig{})
+	h := ws.Handler()
+
+	for returnTo, want := range map[string]string{
+		"/projects/p1/agents/a1":  "/projects/p1/agents/a1",
+		"/projects/p1?tab=agents": "/projects/p1?tab=agents",
+		"https://evil.example/x":  "/",
+		"//evil.example/x":        "/",
+		"/\\evil.example/x":       "/",
+		"/\t/evil.example/x":      "/",
+		"evil.example/x":          "/",
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/auth/login?returnTo="+url.QueryEscape(returnTo), nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusFound, rec.Code, returnTo)
+		assert.Equal(t, "/login", rec.Header().Get("Location"), returnTo)
+
+		cookie := sessionCookieOf(rec)
+		require.NotNil(t, cookie, returnTo)
+		sess, err := ws.sessionStore.Get(withCookies(httptest.NewRequest(http.MethodGet, "/", nil), cookie), webSessionName)
+		require.NoError(t, err)
+		assert.Equal(t, want, sess.Values[sessKeyReturnTo], returnTo)
 	}
 }
