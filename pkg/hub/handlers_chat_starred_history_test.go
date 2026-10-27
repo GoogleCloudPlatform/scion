@@ -30,6 +30,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // Phase 3 of starred messages: the starred=true variant of conversation
@@ -434,6 +436,9 @@ func TestChatStarredHistory_TokenSelectors(t *testing.T) {
 	f.starAs(t, f.member, agentMsg, d.agentKey)
 	f.starAs(t, f.member, humanMsg, d.humanKey)
 	projAReader := f.mint(t, f.member, projectBoundary(f.projA), "inbox:read", "agent:read")
+	// A project-boundary token can be minted only for a project its holder belongs to: give the member a role
+	// in project B, whose boundary does not hold agent A's project.
+	createTestUserWithProjectRole(t, f.s, f.member, f.member+"@test.com", f.projB, store.ProjectRoleMember)
 	projBReader := f.mint(t, f.member, projectBoundary(f.projB), "inbox:read", "agent:read")
 	hubReader := f.mint(t, f.member, hubBoundary(), "inbox:read", "agent:read")
 	assert.Equal(t, []string{agentMsg}, historyIDs(decodeHistory(t, f.call(t, projAReader, http.MethodGet, starredHistoryPath(d.agentKey), nil))))
