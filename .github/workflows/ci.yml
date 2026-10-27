@@ -901,7 +901,9 @@ jobs:
         run: |
           GOOS=windows GOARCH=amd64 go build -buildvcs=false -o /dev/null ./cmd/scion
           GOOS=windows GOARCH=arm64 go build -buildvcs=false -o /dev/null ./cmd/scion
-          GOOS=windows GOARCH=amd64 go vet ./pkg/util/privatefs/... ./pkg/util/pathcanon/... ./pkg/util/filelock/... ./pkg/tunnelclient/...
+          # pkg/hub/maintenance: its unix-only symlink installer and tests
+          # must keep the package (tests included) compiling for Windows.
+          GOOS=windows GOARCH=amd64 go vet ./pkg/util/privatefs/... ./pkg/util/pathcanon/... ./pkg/util/filelock/... ./pkg/tunnelclient/... ./pkg/hub/maintenance/...
 
       - name: Save Go cache
         uses: ./.github/actions/save-go-cache
