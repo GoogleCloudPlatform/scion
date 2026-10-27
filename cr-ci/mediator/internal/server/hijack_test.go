@@ -618,3 +618,54 @@ func TestReconcileGuardViewResetAfterKill(t *testing.T) {
 		t.Errorf("%d active executions, want at most MAX_CONCURRENT_RUNNERS (3)", n)
 	}
 }
+
+// TestHijackBusyRegistration (D11 live test, F1): GitHub refuses to delete a hijacked
+// runner's registration while it still shows the untrusted job running (422, busy).
+// The first kill logs GitHub's refusal at ERROR. Later guard passes, which find the
+// runner again, retry the deletion at WARNING instead of logging a new ERROR each time,
+// and once GitHub lets the registration go the runner is forgotten.
+func TestHijackBusyRegistration(t *testing.T) {
+	h := newHarness(t, harnessOpts{})
+	h.addSameRepoRun(10)
+	h.queued(100, 10)
+	h.gh.AddRun(fakes.GitHubRun{ID: 12, Repo: testRepo, HeadRepo: "contributor/example-repo", Event: "pull_request", Status: "in_progress",
+		Jobs: []fakes.GitHubJob{{ID: 120, Status: "in_progress", Labels: []string{testLabel}, RunnerName: "cr-job-100"}}})
+	h.gh.SetRunnerState("cr-job-100", "online", true)
+
+	kills := func(severity string) int {
+		n := 0
+		for _, l := range strings.Split(h.logs.String(), "\n") {
+			if strings.Contains(l, `"event":"`+logging.EventKillHijacked+`"`) && strings.Contains(l, `"severity":"`+severity+`"`) {
+				n++
+			}
+		}
+		return n
+	}
+	if res := h.reconcile(); res.HijacksKilled != 1 || h.activeFor("cr-job-100") != 0 {
+		t.Fatalf("result %+v; cr-job-100 active = %d, want it killed", res, h.activeFor("cr-job-100"))
+	}
+	if kills("ERROR") != 1 || !strings.Contains(h.logs.String(), `"registration_deleted":false`) ||
+		!strings.Contains(h.logs.String(), `"registration_error":`) || !strings.Contains(h.logs.String(), "still running a job") {
+		t.Fatalf("first kill: want one ERROR with registration_deleted false and GitHub's refusal:\n%s", h.logs.String())
+	}
+
+	// Still busy: the next passes find it again and retry quietly.
+	h.reconcile()
+	h.reconcile()
+	if kills("ERROR") != 1 || kills("WARNING") != 2 || !strings.Contains(h.logs.String(), `"repeat":true`) {
+		t.Errorf("repeats: %d ERROR, %d WARNING kill lines, want 1 and 2:\n%s", kills("ERROR"), kills("WARNING"), h.logs.String())
+	}
+
+	// GitHub lets the registration go: it is deleted and the runner forgotten.
+	h.gh.SetRunnerState("cr-job-100", "offline", false)
+	h.reconcile()
+	if !strings.Contains(h.logs.String(), "hijacked runner's registration deleted") {
+		t.Errorf("no deletion line after the registration was released:\n%s", h.logs.String())
+	}
+	if _, ok := h.srv.hijacked["cr-job-100"]; ok {
+		t.Error("hijacked runner still remembered after its registration was deleted")
+	}
+	if kills("ERROR") != 1 {
+		t.Errorf("ERROR kill lines = %d, want still 1", kills("ERROR"))
+	}
+}
