@@ -1094,3 +1094,40 @@ describe('Restart Hub', () => {
     expect(waitForHubRestart).toHaveBeenCalledTimes(1);
   });
 });
+
+// ptone/scion#6134: the binary check result's release_url comes from the
+// release manifest; only an https URL becomes a link.
+describe('Release notes link', () => {
+  it.each([
+    ['https', 'https://github.com/GoogleCloudPlatform/scion/releases/tag/nightly-20261023', true],
+    ['javascript:', 'javascript:alert(document.cookie)', false],
+    ['data:', 'data:text/html,<script>alert(1)</script>', false],
+    ['http:', 'http://example.com/releases/nightly-20261023', false],
+    ['relative', '/releases/nightly-20261023', false],
+    ['malformed', 'https://', false],
+  ])('renders a %s release_url safely', async (_name, url, linked) => {
+    el = await mount({
+      checkUpdates: {
+        tier: 'binary',
+        update_available: true,
+        current_version: 'nightly-20261022',
+        latest_version: 'nightly-20261023',
+        channel: 'nightly',
+        release_url: url,
+      },
+    });
+    await (el as unknown as { checkForUpdates(): Promise<void> }).checkForUpdates();
+    await settle(el);
+    const link = root(el).querySelector<HTMLAnchorElement>('a.release-notes-link');
+    const text = root(el).querySelector<HTMLElement>('.release-notes-text');
+    if (linked) {
+      expect(link?.getAttribute('href')).toBe(url);
+      expect(text).toBeNull();
+    } else {
+      expect(link).toBeNull();
+      expect(text?.textContent).toBe(url);
+      const hrefs = Array.from(root(el).querySelectorAll('a')).map((a) => a.getAttribute('href'));
+      expect(hrefs).not.toContain(url);
+    }
+  });
+});

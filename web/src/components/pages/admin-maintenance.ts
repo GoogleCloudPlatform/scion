@@ -24,6 +24,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
@@ -34,6 +35,7 @@ import { stateManager } from '../../client/state.js';
 import { canReissueAllScopes } from '../../lib/admin-permissions.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { showToast } from '../../utils/toast.js';
+import { safeHttpsUrl } from '../../utils/http-url.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface MaintenanceOperation {
@@ -260,6 +262,20 @@ export async function hubErrorEnvelope(
     // Not JSON: not the hub's envelope.
   }
   return null;
+}
+
+/**
+ * A release-notes link for a URL from the release manifest: a link only
+ * for an https URL, otherwise the value as plain text (ptone/scion#6134).
+ */
+export function renderReleaseNotesLink(url: string): TemplateResult {
+  const href = safeHttpsUrl(url);
+  return href
+    ? html`<a href="${href}" target="_blank" rel="noopener noreferrer" class="release-notes-link">
+        View Release Notes
+        <sl-icon name="box-arrow-up-right" style="font-size: 0.75rem;"></sl-icon>
+      </a>`
+    : html`<span class="release-notes-text">${url}</span>`;
 }
 
 /** Maintenance mode state from GET and PUT /api/v1/admin/maintenance. */
@@ -3086,10 +3102,7 @@ export class ScionPageAdminMaintenance extends LitElement {
             ? html`
                 <div class="release-field">
                   <span class="release-label">Release notes:</span>
-                  <a href="${r.release_url}" target="_blank" rel="noopener noreferrer">
-                    View Release Notes
-                    <sl-icon name="box-arrow-up-right" style="font-size: 0.75rem;"></sl-icon>
-                  </a>
+                  ${renderReleaseNotesLink(r.release_url)}
                 </div>
               `
             : nothing}
