@@ -609,7 +609,7 @@ The operational content of the deprecated sections still applies to the same fie
 
 #### Configuration source (Layer-0)
 
-`server.project_storage` is a [Layer-0](#layer-0--bootstrap-file--env-only) setting. The Hub and every Runtime Broker read it from their own global `settings.yaml` at startup; the Hub also reads `SCION_SERVER_PROJECT_STORAGE_*` environment variables. It is never read from the database or from a project's settings, cannot be written through the admin settings API, and a change needs a restart. Configure the same block on the Hub and on every Runtime Broker that serves its hub-native projects (see [Layout identity check](#layout-identity-check)).
+`server.project_storage` is a [Layer-0](#layer-0--bootstrap-file--env-only) setting. The Hub and every Runtime Broker read it from their own global `settings.yaml` at startup; the Hub also reads `SCION_SERVER_PROJECT_STORAGE_*` environment variables. It is never read from the database or from a project's settings. On a workstation Hub, a `PUT /api/v1/admin/server-config` body that sets `server.project_storage` writes it into `settings.yaml` and lists the key in the response's `reload.requires_restart`; a hosted Hub refuses it with `422` (see [Layer-0 edits by deployment mode](/scion/reference/admin-settings/#layer-0-edits-by-deployment-mode)). The admin UI has no field for it. Either way, a change needs a restart. Configure the same block on the Hub and on every Runtime Broker that serves its hub-native projects (see [Layout identity check](#layout-identity-check)).
 
 #### Validation
 
