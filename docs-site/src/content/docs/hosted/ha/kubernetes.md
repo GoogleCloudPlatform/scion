@@ -90,7 +90,7 @@ Each project [shared directory](/scion/local/workspace/#5-project-shared-directo
 
 | Key | Default | Description |
 |---|---|---|
-| `shared_dir_storage_class` | cluster default class | StorageClass for new shared-dir PVCs. It must support `ReadWriteMany`. |
+| `shared_dir_storage_class` | none (required to create a claim) | StorageClass for new shared-dir PVCs. It must support `ReadWriteMany`. |
 | `shared_dir_size` | `10Gi` | Requested size for each new shared-dir PVC. |
 
 You can set them in three places. Each key is resolved separately, and the first source that sets it wins:
@@ -99,7 +99,7 @@ You can set them in three places. Each key is resolved separately, and the first
 2. The profile entry in `settings.yaml`.
 3. The profile's runtime entry in `settings.yaml`.
 
-If none of them sets a key, the cluster's default StorageClass and `10Gi` are used.
+If none of them sets `shared_dir_size`, `10Gi` is used. If none of them sets `shared_dir_storage_class`, Scion does not create shared-dir claims (see [Starts that need a new claim](#starts-that-need-a-new-claim)).
 
 An empty value means "not set", so it does not override a lower source. Once a runtime entry or profile sets a class, an agent cannot reset it to the cluster default; name the class explicitly instead.
 
@@ -107,7 +107,7 @@ An empty value means "not set", so it does not override a lower source. Once a r
 
 The settings values are read every time an agent starts. They apply only on the Kubernetes runtime.
 
-On GKE Autopilot the default class (`standard-rwo`) cannot provision `ReadWriteMany` volumes. The claim stays unbound and the agent pod stays `Pending`. To avoid this, set an RWX class such as `standard-rwx` (Filestore CSI) on the runtime or the profile:
+On GKE Autopilot the default class (`standard-rwo`) cannot provision `ReadWriteMany` volumes, so set an RWX class such as `standard-rwx` (Filestore CSI) on the runtime or the profile:
 
 ```yaml
 runtimes:
@@ -133,6 +133,23 @@ kubernetes:
   shared_dir_size: 10Gi
 ```
 
+#### Starts that need a new claim
+
+When a shared directory's claim does not exist yet and no `shared_dir_storage_class` is set, the agent start fails before its pod is created, and no claim is created. The cluster's default class usually cannot provide `ReadWriteMany` volumes, so such a claim would stay `Pending`, and the agent pod with it. The error names the shared directory and the claim, and the fixes:
+
+- configure [`server.project_storage`](/scion/reference/server-config/#project-storage-serverproject_storage) with `backend: nfs` (one share for all projects; recommended), or
+- set `shared_dir_storage_class` to a `ReadWriteMany` class, in any of the places listed above.
+
+This applies only when a claim must be created. Existing claims, including claims you made by hand, are reused as they are, with no class needed.
+
+#### Claims of another project
+
+A shared-dir claim is named `scion-shared-<project>-<dir>`, so two projects with the same name can collide in one namespace. If an existing claim's `scion.project_id` label names a different project, the start fails with an error naming both projects, and the claim is left unchanged. Delete or rename that claim if the other project no longer uses it. A claim without a `scion.project_id` label (for example one you made by hand) is reused, and Scion logs a warning.
+
+#### Upgrading
+
+Earlier versions created shared-dir claims in the cluster's default class when no class was set. If your cluster's default class already supports `ReadWriteMany`, starts that need a new claim now fail until you set `shared_dir_storage_class` to that class, or configure `server.project_storage` backend `nfs`. Existing claims keep working unchanged.
+
 :::note
 Existing PVCs are reused as they are and never changed. A new class or size only applies to claims created after the change. To move an existing shared directory to a new class, delete its PVC (`scion-shared-…`, labelled `scion.shared-dir=<name>`) after copying out its data. When an agent reuses a claim whose class differs from the requested one, Scion logs a warning naming the claim and both classes.
 :::
@@ -140,6 +157,20 @@ Existing PVCs are reused as they are and never changed. A new class or size only
 :::caution[Cost with many projects]
 Each dynamically provisioned RWX PVC can be its own backing volume. On GKE, every `standard-rwx` claim is a separate Filestore instance, with that tier's minimum capacity. With many projects or shared directories this adds up quickly. For larger fleets, use the NFS backend instead: one pre-provisioned RWX export, mounted by every pod with a `subPath` per project and directory, and no per-directory PVCs. See [`server.project_storage`](/scion/reference/server-config/#project-storage-serverproject_storage) (`backend: nfs`), which serves shared directories from the workspace export.
 :::
+
+### Claim Check Before the Pod
+
+Before it creates an agent pod, the Kubernetes runtime checks every PersistentVolumeClaim the pod mounts: the shared-dir claims, the claim of the NFS share (`server.project_storage` `nfs.shares[0].pv_name`), and any other claim in the pod spec. The check only reads.
+
+| Claim state | Result |
+|---|---|
+| Does not exist | The start fails at once. The error names the claim and, where known, the setting that names it. |
+| `Bound` | The start continues. |
+| A `ProvisioningFailed` event | The start fails at once. The error quotes the event. |
+| A `WaitForFirstConsumer` event | The start continues: the claim is bound once the pod is scheduled. |
+| Other (`Pending`, `Lost`) | The runtime re-reads the claim every 2 seconds for up to 30 seconds. If it is still not bound, the runtime logs a warning and creates the pod anyway. |
+
+The events need `get` and `list` on `events` in the agent namespace. Without them, the check uses the claim phase only and logs that once: a provisioning failure is then not detected early, and the first start that uses a new claim of a `WaitForFirstConsumer` class waits the full 30 seconds before its pod is created. Without `get` on `persistentvolumeclaims`, the check is skipped, and that is logged once too.
 
 ### Resource Configuration
 
@@ -956,6 +987,13 @@ When Scion runs on GCE or GKE and the kubeconfig's exec credential plugin fails 
 | pods/log | get |
 | secrets | create, list, delete |
 
+Recommended, for the [claim check before the pod](#claim-check-before-the-pod) and shared-dir claims:
+
+| Resource | Verbs |
+|---|---|
+| persistentvolumeclaims | get (create, to create shared-dir claims on the local backend) |
+| events | get, list |
+
 ### Additional for GKE Mode
 
 | Resource | Verbs |
@@ -1089,6 +1127,10 @@ The Kubernetes runtime provides structured error messages with remediation hints
 | CrashLoopBackOff | Check container logs with `scion logs` |
 | Unschedulable | Check node selectors, tolerations, and resource availability |
 | Invalid resource values | Error includes the field name and invalid value |
+| Shared dir claim does not exist and no `shared_dir_storage_class` is set | Configure `server.project_storage` backend `nfs`, or set `shared_dir_storage_class` to a `ReadWriteMany` class. See [Starts that need a new claim](#starts-that-need-a-new-claim) |
+| Claim is labelled for another project | Delete or rename that claim if the other project no longer uses it |
+| Claim does not exist (before the pod) | Create the claim in the agent namespace, or correct the setting the error names |
+| Claim cannot be provisioned (`ProvisioningFailed`) | Fix the cause the event names, for example the claim's StorageClass |
 
 When an agent create fails on Kubernetes, the Runtime Broker's answer stays generic (`500 runtime_error`), but it keeps the cause: when the Kubernetes API refused the Runtime Broker's own credentials, `error.details.cause` is `runtime_forbidden` (its credentials may not perform the operation) or `runtime_unauthorized` (its credentials were rejected). The Hub relays it as `502 runtime_error` with the same `error.details.cause`. The Runtime Broker's server log records the full cause, with `k8s_reason` (the Kubernetes status reason) and `cause_code` fields. Namespace, ServiceAccount and object names appear only in the log, never in the answer.
 
