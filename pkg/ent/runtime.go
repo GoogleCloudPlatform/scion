@@ -1799,10 +1799,6 @@ func init() {
 	messageDescRecipient := messageFields[4].Descriptor()
 	// message.RecipientValidator is a validator for the "recipient" field. It is called by the builders before save.
 	message.RecipientValidator = messageDescRecipient.Validators[0].(func(string) error)
-	// messageDescMsg is the schema descriptor for msg field.
-	messageDescMsg := messageFields[6].Descriptor()
-	// message.MsgValidator is a validator for the "msg" field. It is called by the builders before save.
-	message.MsgValidator = messageDescMsg.Validators[0].(func(string) error)
 	// messageDescType is the schema descriptor for type field.
 	messageDescType := messageFields[7].Descriptor()
 	// message.DefaultType holds the default value on creation for the type field.

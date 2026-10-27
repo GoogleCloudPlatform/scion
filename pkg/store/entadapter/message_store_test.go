@@ -79,6 +79,29 @@ func TestMessageInvalidInput(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrInvalidInput)
 }
 
+// An attachment-only chat message has no text, so the store accepts an
+// empty body and reads it back unchanged (ptone/scion#6146). The send
+// handlers decide whether a body is required.
+func TestCreateMessage_EmptyBodyRoundTrips(t *testing.T) {
+	s := newTestMessageStore(t)
+	ctx := context.Background()
+	msg := newTestMessage(uuid.NewString(), "agent-1")
+	msg.Msg = ""
+	msg.Type = "chat"
+
+	require.NoError(t, s.CreateMessage(ctx, msg))
+
+	got, err := s.GetMessage(ctx, msg.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "", got.Msg)
+	assert.Equal(t, "chat", got.Type)
+
+	// The identifiers stay required.
+	noProject := newTestMessage("", "agent-1")
+	noProject.Msg = ""
+	assert.ErrorIs(t, s.CreateMessage(ctx, noProject), store.ErrInvalidInput)
+}
+
 func TestMarkMessageRead(t *testing.T) {
 	s := newTestMessageStore(t)
 	ctx := context.Background()

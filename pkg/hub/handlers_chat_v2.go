@@ -1797,7 +1797,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 
 	// Validate through the messaging choke point (AC-8).
 	// Runs after authorization so unauthorized users see 403, not 400.
-	if err := messaging.ValidateLegacyMessage(msg); err != nil {
+	if err := messaging.ValidateLegacyMessage(chatSendValidationEnvelope(msg, attachmentRefs)); err != nil {
 		return nil, chatSendValidationError(err.Error())
 	}
 
@@ -3142,12 +3142,16 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	// and generate reply previews using a single batch query.
 	var messageExtensions map[string]*WebChatMessageExt
 	var replyPreviews map[string]chatReplyPreview
+	// extsKnown records that the extension rows were read, so
+	// messageExtensions tells which messages are soft-deleted.
+	extsKnown := false
 	if wcs != nil && len(result.Items) > 0 {
 		msgIDs2 := make([]string, len(result.Items))
 		for i, msg := range result.Items {
 			msgIDs2[i] = msg.ID
 		}
 		exts, err := wcs.GetMessageExts(ctx, msgIDs2)
+		extsKnown = err == nil
 		if err == nil && len(exts) > 0 {
 			messageExtensions = exts
 
@@ -3169,7 +3173,10 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 			if len(replyToIDs) > 0 {
 				// Also fetch extensions for the referenced messages so
 				// we can detect deleted reply parents.
-				replyExts, _ := wcs.GetMessageExts(ctx, replyToIDs)
+				replyExts, replyExtsErr := wcs.GetMessageExts(ctx, replyToIDs)
+				if replyExtsErr != nil {
+					slog.Warn("chat v2 reply preview extension lookup failed", "key", key, "error", replyExtsErr)
+				}
 
 				refMsgs, err := s.store.GetMessagesByIDs(ctx, replyToIDs)
 				if err == nil && len(refMsgs) > 0 {
@@ -3188,6 +3195,13 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 							if rExt, ok := replyExts[id]; ok && rExt.DeletedAt != nil {
 								content = "[deleted]"
 							}
+						}
+						// No text: an attachment-only message. (A deleted
+						// message has no text either, but its extension
+						// row marked it above; if that lookup failed, its
+						// text is gone all the same.)
+						if content == "" {
+							content = chatAttachmentOnlyPreview
 						}
 						if content != "[deleted]" && len([]rune(content)) > 100 {
 							content = string([]rune(content)[:100]) + "..."
@@ -3213,7 +3227,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	if len(result.Items) > 0 {
 		msgIDs := make([]string, 0, len(result.Items))
 		for _, msg := range result.Items {
-			if msg.Msg != "" { // soft-deleted messages show no references
+			if !chatHistoryMessageDeleted(msg, messageExtensions, extsKnown) { // soft-deleted messages show no references
 				msgIDs = append(msgIDs, msg.ID)
 			}
 		}

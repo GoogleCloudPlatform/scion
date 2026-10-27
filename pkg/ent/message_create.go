@@ -417,11 +417,6 @@ func (_c *MessageCreate) check() error {
 	if _, ok := _c.mutation.Msg(); !ok {
 		return &ValidationError{Name: "msg", err: errors.New(`ent: missing required field "Message.msg"`)}
 	}
-	if v, ok := _c.mutation.Msg(); ok {
-		if err := message.MsgValidator(v); err != nil {
-			return &ValidationError{Name: "msg", err: fmt.Errorf(`ent: validator failed for field "Message.msg": %w`, err)}
-		}
-	}
 	if _, ok := _c.mutation.GetType(); !ok {
 		return &ValidationError{Name: "type", err: errors.New(`ent: missing required field "Message.type"`)}
 	}

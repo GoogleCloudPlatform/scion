@@ -2330,6 +2330,11 @@ export class ScionChatMessage extends LitElement {
     const dirClass = this.fromAgent ? 'from-agent' : 'from-user';
     const groupClass = !this.showHeader ? ' grouped' : '';
     const isDeleted = !!this.deletedAt;
+    // An attachment-only message (ptone/scion#6146) has no text: its
+    // attachments render without an empty text bubble above them.
+    const attachmentOnly =
+      !(this.body ?? '').trim() &&
+      ((this.attachmentRefs?.length ?? 0) > 0 || (this.attachments?.length ?? 0) > 0);
 
     return html`
       <div class="message-wrapper ${dirClass}${groupClass}">
@@ -2376,7 +2381,9 @@ export class ScionChatMessage extends LitElement {
             ? html`<div class="bubble-content">
                 <span class="deleted-message">This message was deleted</span>
               </div>`
-            : html`<div class="bubble-content">${this.renderBody()}</div>`}
+            : attachmentOnly
+              ? nothing
+              : html`<div class="bubble-content">${this.renderBody()}</div>`}
           ${isDeleted ? nothing : this.renderAttachments()}
           ${isDeleted ? nothing : this.renderArtifactChips()}
           ${isDeleted ? nothing : this.renderBadges()}

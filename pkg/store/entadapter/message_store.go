@@ -120,8 +120,10 @@ func uuidPtrToStringPtr(u *uuid.UUID) *string {
 }
 
 // CreateMessage persists a new message and announces it via the publisher.
+// Msg may be empty: an attachment-only chat message has no text. Send
+// handlers decide whether a body is required.
 func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) error {
-	if msg.ID == "" || msg.ProjectID == "" || msg.Msg == "" {
+	if msg.ID == "" || msg.ProjectID == "" {
 		return store.ErrInvalidInput
 	}
 	uid, err := parseUUID(msg.ID)

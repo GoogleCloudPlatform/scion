@@ -1474,3 +1474,44 @@ describe('inline image thumbnail box', () => {
     expect(knownImageSize(ref('broken', { width: 0, height: 0 }))).toBeNull();
   });
 });
+
+describe('scion-chat-message attachment-only (ptone/scion#6146)', () => {
+  async function mountWith(
+    body: string,
+    attachments: string[],
+    deletedAt = ''
+  ): Promise<ScionChatMessage> {
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    el.body = body;
+    el.attachments = attachments;
+    el.deletedAt = deletedAt;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await Promise.resolve();
+    await el.updateComplete;
+    return el;
+  }
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('renders the attachments without an empty text bubble', async () => {
+    const el = await mountWith('', ['/scratch/shot.png']);
+    expect(el.shadowRoot?.querySelector('.bubble-content')).toBeNull();
+    const chip = el.shadowRoot?.querySelector('.attachments .attachment-chip');
+    expect(chip?.textContent).toContain('shot.png');
+  });
+
+  it('keeps the text bubble for a message with text and attachments', async () => {
+    const el = await mountWith('see this', ['/scratch/shot.png']);
+    expect(el.shadowRoot?.querySelector('.bubble-content')).not.toBeNull();
+    expect(el.shadowRoot?.querySelector('.attachments')).not.toBeNull();
+  });
+
+  it('still shows a deleted message as deleted', async () => {
+    const el = await mountWith('', ['/scratch/shot.png'], '2026-10-24T00:00:00Z');
+    expect(el.shadowRoot?.querySelector('.deleted-message')).not.toBeNull();
+    expect(el.shadowRoot?.querySelector('.attachments')).toBeNull();
+  });
+});

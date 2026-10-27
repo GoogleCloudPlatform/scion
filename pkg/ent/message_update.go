@@ -379,11 +379,6 @@ func (_u *MessageUpdate) check() error {
 			return &ValidationError{Name: "recipient", err: fmt.Errorf(`ent: validator failed for field "Message.recipient": %w`, err)}
 		}
 	}
-	if v, ok := _u.mutation.Msg(); ok {
-		if err := message.MsgValidator(v); err != nil {
-			return &ValidationError{Name: "msg", err: fmt.Errorf(`ent: validator failed for field "Message.msg": %w`, err)}
-		}
-	}
 	if v, ok := _u.mutation.Channel(); ok {
 		if err := message.ChannelValidator(v); err != nil {
 			return &ValidationError{Name: "channel", err: fmt.Errorf(`ent: validator failed for field "Message.channel": %w`, err)}
@@ -883,11 +878,6 @@ func (_u *MessageUpdateOne) check() error {
 	if v, ok := _u.mutation.Recipient(); ok {
 		if err := message.RecipientValidator(v); err != nil {
 			return &ValidationError{Name: "recipient", err: fmt.Errorf(`ent: validator failed for field "Message.recipient": %w`, err)}
-		}
-	}
-	if v, ok := _u.mutation.Msg(); ok {
-		if err := message.MsgValidator(v); err != nil {
-			return &ValidationError{Name: "msg", err: fmt.Errorf(`ent: validator failed for field "Message.msg": %w`, err)}
 		}
 	}
 	if v, ok := _u.mutation.Channel(); ok {
