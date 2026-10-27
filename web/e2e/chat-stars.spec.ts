@@ -200,6 +200,11 @@ async function openMenuItem(
       }
       await msgLocator(page, id).click({ button: 'right', timeout: 2_000 });
       await expect(item).toBeVisible({ timeout: 1_000 });
+      // At phone width the menu is exactly one bottom action sheet, which
+      // guards the mirrored MENU_SHEET_MAX_WIDTH_PX threshold above.
+      if ((page.viewportSize()?.width ?? Number.MAX_SAFE_INTEGER) <= MENU_SHEET_MAX_WIDTH_PX) {
+        await expect(openSheets).toHaveCount(1);
+      }
     } catch (e) {
       previousError = shortError(e);
       throw e;
