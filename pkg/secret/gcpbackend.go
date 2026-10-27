@@ -307,6 +307,15 @@ func (b *GCPBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *Sec
 	secret := toStoreSecret(input)
 	secret.EncryptedValue = "" // Don't store value in DB
 	secret.SecretRef = "gcpsm:" + fullName
+	// A reference-only update of a Hub-internal record keeps its existing
+	// local backup ciphertext (ptone/scion#1530 §6): the Hub maintains that
+	// backup itself, and erasing it here would leave the key with no local
+	// copy until the Hub rewrites it. User secrets stay reference-only.
+	if secret.SecretType == store.SecretTypeInternal {
+		if existing, err := b.store.GetSecret(ctx, input.Name, input.Scope, input.ScopeID); err == nil && existing.EncryptedValue != "" {
+			secret.EncryptedValue = existing.EncryptedValue
+		}
+	}
 
 	created, err := b.store.UpsertSecret(ctx, secret)
 	if err != nil {

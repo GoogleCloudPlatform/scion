@@ -475,7 +475,7 @@ func TestMintConduitGrant_AgentReadAndPortSkipKernel(t *testing.T) {
 
 func newTestDBGrantKeyStore(t *testing.T, s store.SecretStore) *dbConduitGrantKeyStore {
 	t.Helper()
-	db, err := newDBConduitGrantKeyStore(s, testGrantEncryptionKey)
+	db, err := newDBConduitGrantKeyStore(s, testGrantCipher)
 	require.NoError(t, err)
 	return db
 }
@@ -525,7 +525,7 @@ func TestConduitGrantKeys_BootstrapKeyIsRandom(t *testing.T) {
 	var seeds [][]byte
 	for range 2 {
 		_, s := testServer(t) // separate databases, same shared secret
-		db, err := newDBConduitGrantKeyStore(s, secret.DeriveLocalEncryptionKey(sharedSecret))
+		db, err := newDBConduitGrantKeyStore(s, secret.NewLegacyValueCipher(sharedSecret))
 		require.NoError(t, err)
 		k := newConduitGrantKeys(db, clock.Now)
 		_, err = k.signer(context.Background())
@@ -548,7 +548,7 @@ func TestConduitGrantKeySet_EphemeralWithoutEncryption(t *testing.T) {
 	require.Error(t, err, "persistence requires an encryption key")
 
 	srv, s := testServer(t)
-	srv.encryptionKey = nil
+	srv.cipher = secret.NewLegacyValueCipher("")
 	setConduitExperiment(t, srv, true)
 	restart := func() {
 		srv.conduitGrantsOnce = sync.Once{}
@@ -576,7 +576,7 @@ func TestConduitGrantKeySet_EphemeralWithoutEncryption(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound, "nothing is written to the secret store")
 
 	// With encryption configured the ring is persisted.
-	srv.encryptionKey = testGrantEncryptionKey
+	srv.cipher = testGrantCipher
 	restart()
 	_, err = srv.ConduitGrantPublicKeys(ctx)
 	require.NoError(t, err)
@@ -600,7 +600,7 @@ func TestConduitGrantKeySet_EphemeralLogs(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, _ := testServer(t)
-			srv.encryptionKey = nil
+			srv.cipher = secret.NewLegacyValueCipher("")
 			srv.config.RequireStableSigningKey = tc.stableKeys
 			srv.conduitGrantsOnce = sync.Once{}
 			srv.conduitGrants = nil
@@ -639,7 +639,7 @@ func TestConduitGrantKeys_UnreadableRingFailsClosedAndLogs(t *testing.T) {
 	_, err := writer.signer(ctx)
 	require.NoError(t, err)
 
-	other, err := newDBConduitGrantKeyStore(s, secret.DeriveLocalEncryptionKey("a-different-secret"))
+	other, err := newDBConduitGrantKeyStore(s, secret.NewLegacyValueCipher("a-different-secret"))
 	require.NoError(t, err)
 	node := newConduitGrantKeys(other, clock.Now)
 	buf := captureSlogDefault(t)
