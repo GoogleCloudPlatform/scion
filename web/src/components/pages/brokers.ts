@@ -33,6 +33,11 @@ import '../shared/view-toggle.js';
 import { formatRelative } from '../../utils/time.js';
 import { navigateTo } from '../../client/navigation.js';
 import { visibleInterval } from '../../client/visible-interval.js';
+import {
+  brokerVersionStyles,
+  renderBrokerVersion,
+  renderHubVersionNote,
+} from '../shared/broker-version.js';
 
 @customElement('scion-page-brokers')
 export class ScionPageBrokers extends LitElement {
@@ -61,6 +66,13 @@ export class ScionPageBrokers extends LitElement {
   private error: string | null = null;
 
   /**
+   * The fleet hub version each broker's versionStatus was compared with
+   * (the list's hubVersion): a build token, "mixed", or "" when unknown.
+   */
+  @state()
+  private hubVersion = '';
+
+  /**
    * Current view mode (grid or list)
    */
   @state()
@@ -72,6 +84,7 @@ export class ScionPageBrokers extends LitElement {
   static override styles = [
     listPageStyles,
     brokerTypeBadgeStyles,
+    brokerVersionStyles,
     css`
       .broker-header {
         display: flex;
@@ -86,6 +99,10 @@ export class ScionPageBrokers extends LitElement {
          shared wrapping rules can break the name instead. */
       .broker-header > div {
         min-width: 0;
+      }
+
+      .hub-version-row {
+        margin-bottom: 0.75rem;
       }
 
       .broker-version {
@@ -204,8 +221,11 @@ export class ScionPageBrokers extends LitElement {
         );
       }
 
-      const data = (await response.json()) as { brokers?: RuntimeBroker[] } | RuntimeBroker[];
+      const data = (await response.json()) as
+        | { brokers?: RuntimeBroker[]; hubVersion?: string }
+        | RuntimeBroker[];
       this.brokers = Array.isArray(data) ? data : data.brokers || [];
+      this.hubVersion = Array.isArray(data) ? '' : data.hubVersion || '';
 
       // Seed stateManager so SSE delta merging has full baseline data
       stateManager.seedBrokers(this.brokers);
@@ -316,7 +336,10 @@ export class ScionPageBrokers extends LitElement {
       return this.renderEmptyState();
     }
 
-    return this.viewMode === 'grid' ? this.renderGrid() : this.renderTable();
+    return html`
+      <div class="hub-version-row">${renderHubVersionNote(this.hubVersion)}</div>
+      ${this.viewMode === 'grid' ? this.renderGrid() : this.renderTable()}
+    `;
   }
 
   private renderEmptyState() {
@@ -357,7 +380,9 @@ export class ScionPageBrokers extends LitElement {
               <sl-icon name="hdd-rack"></sl-icon>
               <span>${broker.name} ${this.renderBrokerTypeBadge(broker)}</span>
             </h3>
-            ${broker.version ? html`<div class="broker-version">v${broker.version}</div>` : ''}
+            <div class="broker-version">
+              ${renderBrokerVersion(broker.version, broker.versionStatus, this.hubVersion)}
+            </div>
           </div>
           <scion-status-badge
             status=${this.getStatusVariant(broker.status)}
@@ -449,7 +474,7 @@ export class ScionPageBrokers extends LitElement {
           </span>
         </td>
         <td class="hide-mobile">
-          ${broker.version ? html`<span class="mono-cell">v${broker.version}</span>` : '\u2014'}
+          ${renderBrokerVersion(broker.version, broker.versionStatus, this.hubVersion)}
         </td>
         <td>
           <scion-status-badge

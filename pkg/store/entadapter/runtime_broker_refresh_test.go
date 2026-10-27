@@ -111,3 +111,44 @@ func TestRefreshRuntimeBrokerState_NotFound(t *testing.T) {
 	})
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
+
+// The heartbeat refresh stores the broker's build token (Version). A
+// refresh that leaves Version alone keeps a version a concurrent
+// re-registration stored, because it writes the value of its fresh read,
+// and a version set on a stale read is not stored (ptone/scion#5972).
+func TestRefreshRuntimeBrokerState_Version(t *testing.T) {
+	ctx := context.Background()
+	s := NewProjectStore(enttest.NewClient(t))
+	b := newRecordsTestBroker(t, ctx, s, "77777777-7777-7777-7777-777777777777", "refresh-version")
+
+	require.NoError(t, s.RefreshRuntimeBrokerState(ctx, b.ID, func(cur *store.RuntimeBroker) bool {
+		cur.Version = "1.4.0"
+		return true
+	}))
+	got, err := s.GetRuntimeBroker(ctx, b.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "1.4.0", got.Version, "the refresh stores the version it sets")
+
+	calls := 0
+	require.NoError(t, s.RefreshRuntimeBrokerState(ctx, b.ID, func(cur *store.RuntimeBroker) bool {
+		calls++
+		if calls == 1 {
+			// A re-registration with a newer build lands after this read.
+			reg, err := s.GetRuntimeBroker(ctx, b.ID)
+			require.NoError(t, err)
+			reg.Version = "1.5.0"
+			require.NoError(t, s.UpdateRuntimeBroker(ctx, reg))
+			// A version set on the stale copy is never stored: the
+			// write conflicts and the refresh runs again on the fresh row.
+			cur.Version = "stale"
+		}
+		cur.Capabilities = &store.BrokerCapabilities{Attach: true}
+		return true
+	}))
+	assert.Equal(t, 2, calls, "the write conflicts once and is retried on a fresh read")
+	got, err = s.GetRuntimeBroker(ctx, b.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "1.5.0", got.Version, "a refresh that does not set the version keeps the concurrent one")
+	require.NotNil(t, got.Capabilities)
+	assert.True(t, got.Capabilities.Attach)
+}
