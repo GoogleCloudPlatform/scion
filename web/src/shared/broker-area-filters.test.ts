@@ -67,6 +67,15 @@ describe('broker area filters', () => {
     );
   });
 
+  it('an online broker whose version differs from the hub counts; unknown does not', () => {
+    expect(needsAttention(broker({ versionStatus: 'mismatch' }))).toBe(true);
+    expect(needsAttention(broker({ versionStatus: 'unknown' }))).toBe(false);
+    expect(needsAttention(broker({ versionStatus: 'match' }))).toBe(false);
+    expect(needsAttention(broker({}))).toBe(false);
+    expect(matchesBrokerFilter(broker({ versionStatus: 'mismatch' }), 'attention')).toBe(true);
+    expect(matchesBrokerFilter(broker({ versionStatus: 'unknown' }), 'attention')).toBe(false);
+  });
+
   it('a self-reported degraded or unhealthy status is a problem even with no failing check', () => {
     expect(healthProblem({ status: 'unhealthy', checks: {} })).toBe(true);
     expect(healthProblem({ status: 'degraded' })).toBe(true);
