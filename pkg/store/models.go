@@ -3884,6 +3884,11 @@ const (
 	MaintenanceStatusRunning   = "running"
 	MaintenanceStatusCompleted = "completed"
 	MaintenanceStatusFailed    = "failed"
+	// MaintenanceStatusRestarting marks an operation run (update-binary)
+	// whose binary is installed and whose hub restart has been requested.
+	// It is written before the restart; boot reconciliation completes it.
+	// AbortRunningMaintenanceOps leaves it alone (it only aborts "running").
+	MaintenanceStatusRestarting = "restarting"
 )
 
 // =============================================================================
@@ -3931,6 +3936,7 @@ type SkillVersion struct {
 	Version            string         `json:"version"`
 	Status             string         `json:"status"`
 	ContentHash        string         `json:"contentHash,omitempty"`
+	ContentHashV2      string         `json:"contentHashV2,omitempty"` // skill content hash v2 (ptone/scion#5935): derived by the hub for responses while hub.skill_content_hash_v2 is on, never stored
 	Files              []TemplateFile `json:"files,omitempty"`
 	PublisherID        string         `json:"publisherId,omitempty"`
 	DeprecationMessage string         `json:"deprecationMessage,omitempty"`

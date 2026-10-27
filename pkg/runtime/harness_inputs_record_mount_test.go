@@ -286,7 +286,7 @@ func testRecordOutsideCloudRunPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	workspace := filepath.Join("/mnt/filestore", root, "proj-123", "workspace")
-	paths, err := cloudRunNFSHostPaths(workspace, "", "proj-123", "agent-1")
+	paths, err := cloudRunNFSHostPaths(workspace, "", "proj-123", "agent-1", "6f1c2b3a-4d5e-4f60-8a9b-0c1d2e3f4a5b")
 	if err != nil {
 		t.Fatalf("cloudRunNFSHostPaths: %v", err)
 	}

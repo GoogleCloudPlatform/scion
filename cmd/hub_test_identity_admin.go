@@ -275,7 +275,7 @@ func printTestAdminIdentityToken(out io.Writer, resp *hubclient.TestAdminIdentit
 	if id.Purpose != "" {
 		_, _ = fmt.Fprintf(out, "  Purpose:       %s\n", id.Purpose)
 	}
-	_, _ = fmt.Fprintf(out, "  Token file:    %s (mode 0600)\n", absPath)
+	_, _ = fmt.Fprintf(out, "  Token file:    %s %s\n", absPath, tokenFileProtection())
 	return nil
 }
 

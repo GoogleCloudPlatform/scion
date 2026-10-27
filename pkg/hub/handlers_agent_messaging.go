@@ -3889,6 +3889,13 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 		ValidationError(w, "structured_message is required", nil)
 		return
 	}
+	// A broadcast carries text: attachment ids are refused above, and the
+	// messages store accepts an empty body (attachment-only chat messages,
+	// ptone/scion#6146), so an empty one is refused here, before fan-out.
+	if req.StructuredMessage.Msg == "" {
+		ValidationError(w, "msg is required", nil)
+		return
+	}
 
 	// B5 SECURITY FIX: ALWAYS derive sender identity from the
 	// authenticated context, same as handleAgentMessage. Client-supplied
@@ -4276,6 +4283,19 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 
 	// Resolve mentions using the shared package.
 	results := messages.ResolveMentions(mentionSlugs, agentInfos, primaryAgent.Slug)
+
+	// A mention copy carries the text only, not the attachments, so a
+	// message without text (an attachment-only message, ptone/scion#6146)
+	// would reach the mentioned agents as an empty message. It is not
+	// copied; each resolved mention reports why.
+	if originalMsg.Msg == "" {
+		for i := range results {
+			if results[i].Status == "delivered" {
+				results[i].Status, results[i].Error = "error", errMentionCopyNeedsText
+			}
+		}
+		return results
+	}
 
 	// Phase 3 msg-authz: extract sender identity once for per-mention checks.
 	senderIdentity := GetIdentityFromContext(ctx)

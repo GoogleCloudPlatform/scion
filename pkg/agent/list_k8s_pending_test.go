@@ -33,30 +33,49 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
 
-// TestListKubernetesPendingPodIsStarting (ptone/scion#5365): Start writes
-// phase "running" to agent-info.json before the pod exists. Through the real
-// Kubernetes runtime, Manager.List (which the broker heartbeat uses) lists an
-// agent whose pod is still Pending as starting, not as that "running"; once
-// the pod is Running it lists as running.
+// TestListKubernetesPendingPodIsStarting (ptone/scion#5365): before
+// ptone/scion#5368, Start wrote phase "running" to agent-info.json before the
+// pod existed; on Kubernetes it now writes "starting" until Run returns.
+// Through the real Kubernetes runtime, Manager.List (which the broker
+// heartbeat uses) lists an agent whose pod is still Pending as starting,
+// whatever agent-info.json holds; a Running pod lists agent-info.json's
+// phase, so "running" once Run has returned and "starting" while the startup
+// gate is still closed.
 func TestListKubernetesPendingPodIsStarting(t *testing.T) {
 	tests := []struct {
 		name         string
 		podPhase     corev1.PodPhase
 		agentState   corev1.ContainerState
+		infoPhase    string
+		infoActivity string
 		wantPhase    string
 		wantActivity string
 	}{
 		{
-			name:      "pending pod awaiting capacity",
-			podPhase:  corev1.PodPending,
-			wantPhase: string(state.PhaseStarting),
+			name:         "pending pod awaiting capacity",
+			podPhase:     corev1.PodPending,
+			infoPhase:    string(state.PhaseRunning),
+			infoActivity: string(state.ActivityThinking),
+			wantPhase:    string(state.PhaseStarting),
 		},
 		{
 			name:         "running pod",
 			podPhase:     corev1.PodRunning,
 			agentState:   corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			infoPhase:    string(state.PhaseRunning),
+			infoActivity: string(state.ActivityThinking),
 			wantPhase:    string(state.PhaseRunning),
 			wantActivity: string(state.ActivityThinking),
+		},
+		{
+			// ptone/scion#5368: Start records starting until Run returns;
+			// a Running pod whose startup gate is still closed lists no
+			// runtime phase, so agent-info.json's starting is used.
+			name:       "running pod, startup gate closed",
+			podPhase:   corev1.PodRunning,
+			agentState: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			infoPhase:  string(state.PhaseStarting),
+			wantPhase:  string(state.PhaseStarting),
 		},
 	}
 
@@ -72,8 +91,8 @@ func TestListKubernetesPendingPodIsStarting(t *testing.T) {
 			}
 			infoData, err := json.Marshal(api.AgentInfo{
 				Name:     agentName,
-				Phase:    string(state.PhaseRunning),
-				Activity: string(state.ActivityThinking),
+				Phase:    tc.infoPhase,
+				Activity: tc.infoActivity,
 				Runtime:  "kubernetes",
 			})
 			if err != nil {

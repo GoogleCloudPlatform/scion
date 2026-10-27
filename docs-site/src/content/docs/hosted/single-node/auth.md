@@ -406,11 +406,14 @@ To minimize friction during local setup, Scion includes a "Dev Auth" mode. When 
 Dev auth is for a single-user workstation Hub. Pre-registering other users (`POST /api/v1/users`, `scion hub users provision`) is not available while the Hub runs with dev auth, for any caller, and returns `403` with `details.reason: dev_auth_not_supported`.
 
 ### Enabling Dev Auth
-Start the server with the `--dev-auth` flag or set it in your `server.yaml`:
+Start the server with the `--dev-auth` flag or set it in your `settings.yaml`:
 
 ```yaml
-auth:
-  devMode: true
+server:
+  hub:
+    host: 127.0.0.1
+  auth:
+    dev_mode: true
 ```
 
 Or via environment variable:
@@ -418,10 +421,12 @@ Or via environment variable:
 export SCION_SERVER_AUTH_DEVMODE=true
 ```
 
+Dev auth requires a loopback listen host (`127.0.0.1`, `::1`, or `localhost`). The server refuses to start when dev auth (`--dev-auth`, `server.auth.dev_mode`, or the workstation-mode default) is combined with a non-loopback host such as `0.0.0.0` (including an empty host, which normalizes to `0.0.0.0`), both when the web server is enabled and when the Hub API runs standalone with the web server disabled.
+
 ### Using the Developer Token
-When the Hub starts with `devMode: true`, it writes the token to `~/.scion/dev-token`.
+When the Hub starts with `dev_mode: true`, it writes the token to `~/.scion/dev-token`.
 - **CLI**: The `scion` CLI automatically uses `~/.scion/dev-token` (or `SCION_DEV_TOKEN` / `SCION_DEV_TOKEN_FILE`) only when the target Hub endpoint is on loopback (`localhost`, `127.0.0.1`, or `::1`). For any non-loopback Hub, `SCION_DEV_TOKEN` and `SCION_DEV_TOKEN_FILE` are not sent and, when no other credential applies, print a one-line notice to stderr naming the Hub, and `~/.scion/dev-token` is not sent and prints no notice.
-- **Web**: The Web Dashboard automatically uses this token for the "Development User" login when `SCION_DEV_AUTH_ENABLED=true` is set.
+- **Web**: Browser sign-in in dev auth mode uses a single-use launch link rather than logging in automatically on page load. `scion server start` and `scion server open` (or `scion server open --print`) exchange the local dev token via `POST /auth/dev-launch` (`Authorization: Bearer <dev-token>`) for a short-lived, single-use code (valid for about two minutes, up to 32 pending codes) and open `GET /auth/dev-signin?code=<code...>`, which consumes the code and sets the browser session cookie. Visiting `/login` directly without a launch link does not sign in automatically (`POST /auth/dev-launch` and `GET /auth/dev-signin` return `404` when dev auth is off).
 - **Agent containers**: Hub-dispatched agents authenticate with the token the Hub issues for their run (`~/.scion/scion-token` or `SCION_AUTH_TOKEN`). The Runtime Broker never passes its own `SCION_DEV_TOKEN` or `SCION_AUTH_TOKEN` values into an agent's environment. When a Hub and Runtime Broker run co-located with dev auth enabled, the Runtime Broker offers its dev token only to an agent that has no Hub-issued token, whose dispatch comes from the co-located Hub on a loopback endpoint, and whose Hub endpoint comes from the server's own configuration rather than from project settings or the agent's environment.
 
 Alternatively, you can set the token in your environment for a loopback Hub:
@@ -476,6 +481,19 @@ GCP identity passthrough mode does not work inside Cloud Run Sandbox (gVisor) ru
 
 While the Hub automatically translates passthrough to assign mode at agent creation and PATCH time (using the broker's host service account), explicitly configuring assign mode is recommended for clarity and consistency.
 :::
+
+#### Host networking on Docker and Podman
+
+On the Docker runtime, an agent container runs with `--network=host` when its Hub endpoint is on loopback (`localhost`, `127.0.0.1`, `::1`, or `host.docker.internal`). On Docker and Podman, it also runs with `--network=host` whenever `SCION_FORCE_HOST_NETWORK` is set on the Runtime Broker. Because the container shares the host network namespace, `sciontool` cannot install its `iptables` rule for `169.254.169.254` without altering the host's own networking:
+
+- **`assign`** is always refused under host networking.
+- **`block`** is governed by the Runtime Broker's [`SCION_HOST_NETWORK_BLOCK_POLICY`](/scion/reference/server-config/#runtime-broker-environment-variables) environment variable:
+  - `auto` (default when unset): refuses agent start when the Runtime Broker runs on a detected Linux cloud host (GCE, AWS EC2, Azure, Oracle Cloud, Alibaba Cloud, OpenStack, DigitalOcean, or Hetzner, identified from local DMI files under `/sys/class/dmi/id/`, `/run/cloud-init/instance-data.json`, or GCE guest-agent files with no network calls). On other hosts (such as a local workstation), the agent starts and the Runtime Broker logs and returns a warning that `169.254.169.254` is not blocked.
+  - `strict`: always refuses agent start when `block` combines with host networking, even off-cloud.
+  - `allow`: allows agent start under host networking even on a detected cloud host, logging a warning and appending an acknowledgement to the start warning.
+  - Any unrecognized value is logged at `ERROR` and treated as `strict`.
+
+To run agents with `block` or `assign` on a cloud VM, configure a non-loopback, bridge-reachable Hub URL (`SCION_SERVER_BASE_URL` or `server.hub.public_url`) so containers run on bridge networking, and leave `SCION_FORCE_HOST_NETWORK` unset on the Runtime Broker.
 
 ### Management UI & Hub-Minted Service Accounts
 

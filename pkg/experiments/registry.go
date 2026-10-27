@@ -257,13 +257,39 @@ const SecretRotation = "server.secret_rotation"
 // checks it at every commit, so toggling needs no restart. Rows keep the
 // version they were last committed with, and the commit compare-and-swap is
 // a strict equality on the stored value, so mixed rows are safe in both
-// directions. Skill hashes are v1 regardless. Brokers and CLIs do not read
-// it: their cache keys and sync checks do not depend on the hash version.
+// directions. Skill hashes do not follow it (see SkillContentHashV2).
+// Brokers and CLIs do not read it: their cache keys and sync checks do not
+// depend on the hash version.
 // While it is off, a rename-only or chmod-only re-upload is not visible to
 // the expected-hash check (the behaviour before ptone/scion#5658). Enable it
 // once every CLI and agent image is at or after the release that added it;
 // ptone/scion#5995 makes it the default and removes the gate.
 const ContentHashV2 = "hub.content_hash_v2"
+
+// SkillContentHashV2 gates the skill content hash v2 transition
+// (ptone/scion#5935). Skill hash v2 is transfer.ComputeContentHashV2 over a
+// skill's files (paths, normalised modes and per-file hashes); v1
+// (transfer.ComputeContentHashV1, file hashes only) stays the recorded
+// skill_versions.content_hash and the contentHash field of every response,
+// because brokers before ptone/scion#5935 verify an installed bundle by
+// recomputing v1 and existing registry pins hold v1. v2 is never stored: it
+// is derived from a version's immutable file list. While it is on, the hub
+// adds contentHashV2 to skill resolve and skill version responses, accepts a
+// v2 value wherever it accepts a skill content hash ("@sha256:" version
+// lookup and pinned-registry trust; v1 is tried first). For a federated
+// skill, at every trust level, it recomputes v1 and v2 from the registry's
+// file list (paths, per-file hashes, modes) and fails closed when the
+// claimed contentHash or a claimed contentHashV2 disagrees, and it sends
+// only its own recomputed v2. A pinned registry must list a hash for every
+// file and its pin must equal the recomputed v1 or v2; a skill that has no
+// contentHash and cannot be recomputed fails at every trust level; a
+// trusted registry that lists no per-file hashes but does send a
+// contentHash is accepted without contentHashV2 (the broker still verifies
+// v1). While it is off the API is unchanged and a claimed v1 that
+// disagrees with the files is only logged. Brokers verify contentHashV2 when a
+// response carries it and do not read the experiment. ptone/scion#5995 makes
+// it the default and removes the gate.
+const SkillContentHashV2 = "hub.skill_content_hash_v2"
 
 // ArtifactReviewEditor gates the graphical review editor for Markdown
 // artifacts (ptone/scion#5913). It is web-only: every save goes through the
@@ -509,6 +535,18 @@ var compiled = []Experiment{
 		Owner:       "templates",
 		// ptone/scion#5995 makes it the default and removes the gate.
 		ReviewBy: "2027-01-21",
+	},
+	{
+		Name:        SkillContentHashV2,
+		Title:       "Skill content hash v2 (paths and modes)",
+		Description: "While on, skill resolve and skill version responses also carry contentHashV2, a skill content hash that covers each file's path and executable bit as well as its content, and the hub accepts either hash form for an @sha256: version and for a pinned registry hash, so a skill can be pinned by a hash that a rename-only or chmod-only change would break. A federated skill is also checked against the hashes the hub recomputes from the registry's file list, and fails if the registry's claimed hash disagrees; a pinned registry must list a hash for every file, and a skill that sends no content hash and lists no per-file hashes is rejected from any registry. contentHash stays the earlier hash (file contents only), which older brokers verify and existing pins hold. While off (the default), responses are unchanged and pins match the earlier hash only. Brokers at or after this release verify contentHashV2 whenever a response carries it.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#5935",
+		Owner:       "skills",
+		// ptone/scion#5995 makes it the default and removes the gate.
+		ReviewBy: "2027-01-24",
 	},
 }
 

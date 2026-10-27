@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// These tests exercise the unix git-metadata mounts and private config checks
+// (symlinks, link counts, ownership); on other platforms they are
+// ErrUnsupported stubs.
+//go:build unix
+
 package runtime
 
 import (
