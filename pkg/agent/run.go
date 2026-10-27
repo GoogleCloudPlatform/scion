@@ -158,11 +158,31 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// GetAgent will use (AgentStateDir, including its effective
 	// shared-workspace detection). The record is read again, from that same
 	// dir, where image selection uses it.
-	if preDir, _, dirErr := AgentStateDir(projectDir, opts.Name, opts.SharedWorkspace, opts.HubProjectID, opts.BrokerMode || opts.HubProjectID != ""); dirErr == nil {
-		if _, provErr := readImageProvenance(preDir); provErr != nil {
+	preDir, _, dirErr := AgentStateDir(projectDir, opts.Name, opts.SharedWorkspace, opts.HubProjectID, opts.BrokerMode || opts.HubProjectID != "")
+	if dirErr != nil {
+		preDir = ""
+	}
+	var preProvenance *imageProvenance
+	if preDir != "" {
+		prov, provErr := readImageProvenance(preDir)
+		if provErr != nil {
 			logImageProvenanceError(opts.Name, provErr)
 			return nil, provErr
 		}
+		preProvenance = prov
+	}
+	// Refuse, before any side effect, a start whose storage would be
+	// placed differently than configured before server.project_storage: a
+	// removed storage override on the start's profile chain, or a
+	// per-agent record pinning shared dirs to nfs while the layout is not
+	// shared (ptone/scion#6371). The profile is chosen as startProfile is
+	// below.
+	refusalProfile := opts.Profile
+	if refusalProfile == "" && preProvenance != nil {
+		refusalProfile = preProvenance.Profile
+	}
+	if err := checkStartStorageRefusals(ctx, preDir, refusalProfile); err != nil {
+		return nil, err
 	}
 
 	// Every new runtime entry carries a run ID (ptone/scion#2550). The hub

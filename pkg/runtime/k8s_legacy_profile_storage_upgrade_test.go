@@ -157,7 +157,12 @@ func TestUpgrade_LegacyProfileNFSSharedDirs_NeverDefaultClassRWXClaim(t *testing
 			}
 			require.Error(t, refusal, "a start of the profile carrying the removed override must be refused")
 			require.Empty(t, pvcs.Items, "a refused start must create no claim")
-			require.Contains(t, refusal.Error(), "profiles.shared-nfs.shared_dir_storage_backend")
+			var se *config.StorageMigrationRequiredError
+			require.ErrorAs(t, refusal, &se)
+			require.Contains(t, se.Error(), "profiles.shared-nfs.shared_dir_storage_backend")
+			require.Contains(t, se.Error(), "server.shared_dir_storage.backend: \"nfs\"")
+			require.Contains(t, se.Error(), `pv_name "share-a-pv"`)
+			require.NotContains(t, se.PublicMessage(), "share-a-pv")
 
 			// The profile without the override is admitted, and keeps the
 			// local layout's per-dir claims.
@@ -173,6 +178,9 @@ func TestUpgrade_LegacyProfileNFSSharedDirs_NeverDefaultClassRWXClaim(t *testing
 // returns the start's refusal, if any.
 func upgradeAgentStartSharedDirStorage(t *testing.T, vs *config.VersionedSettings, profile string, cfg *RunConfig) error {
 	t.Helper()
+	if err := vs.RemovedStorageOverridesForProfile(profile); err != nil {
+		return err
+	}
 	layout, _, err := config.SharedDirStorageLayout(vs.Server)
 	require.NoError(t, err)
 	if layout.Backend.Shared() {
