@@ -14,10 +14,10 @@
   the caller cannot read is a 404.
 - **Store:** `MessageStarStore.ListStarredConversationCandidates` in both dialects groups the caller's stars by
   conversation key before the page is cut. A star counts when its message exists, is a message of the conversation
-  under either form of the read-switch selector (`messages.thread_id` is the key, or `messages.conversation_id` is
-  the key's conversation: the topic's `conversation_id`, or the native conversation whose `external_ref` is the DM
-  key; a promotion moves both with the star), is in the history channel and is not soft-deleted, and (for a
-  thread) its topic is live. The order is keyset-paged on values the query computes: activity as fixed-width UTC
+  under the one selector the read switch chooses, as the other star paths apply it (switch off:
+  `messages.thread_id` is the key; on: `messages.conversation_id` is the key's conversation, i.e. the topic's
+  non-empty `conversation_id`, or the live native conversation whose `external_ref` is the DM key), is in the
+  history channel and is not soft-deleted, and (for a thread) its topic is live. The order is keyset-paged on values the query computes: activity as fixed-width UTC
   text (newest first, none last), or the name folded for ASCII letters only (the topic name, or the DM peer's label
   computed in SQL like `starUserLabel`/`starAgentLabel`, trimmed of the same Unicode whitespace as
   `strings.TrimSpace`), then the key. PostgreSQL folds and compares under `COLLATE "C"`, so both dialects give the
@@ -45,10 +45,11 @@
 - **The rail's filter follows the page only on the page's changes.** `syncStarredFilter` reacts to a change of
   `selectedKey` or `centerFilter`, never to the user's own pick, so a click on Starred is not undone before the page
   applies the filter.
-- **The rail matches both selector forms in SQL instead of resolving the read switch per conversation**, so a star
-  that counts in the star list, the state route and the center also counts in the rail (a modern DM row with only
-  a conversation ID included). A conversation whose read target cannot be resolved still lists in the rail; the
-  center shows its error.
+- **The rail applies the read switch's selector in SQL instead of resolving it per conversation**: the handler
+  passes the switch (`ByConversationID`), and the query matches the key's conversation the way the resolvers find
+  it (the topic's `conversation_id`; `GetConversationByExternalRef("native", key)`, live rows only). A star counts in
+  the rail exactly when it counts in the star list, the state route and the center; a thread with no conversation
+  under the switch (the resolver's 409) has no stars there and no rail row.
 - **Only a pick in the filter control is persisted.** A change the page drives (a full-context permalink, a jump,
   Show all) or the experiment drives (the browser flag off, or the hub answering 404) moves the rail to All and
   stops the reconcile poll without touching the stored preference.

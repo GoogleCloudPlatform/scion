@@ -283,10 +283,11 @@ func testStarredConversationsContract(t *testing.T, env starStoreEnv) {
 		assert.Equal(t, starLabelUser, starUserLabel(&store.User{DisplayName: "\u00a0\u2003"}))
 	})
 
-	t.Run("a message listed by its conversation ID counts (the read switch's selector)", func(t *testing.T) {
+	t.Run("the read switch chooses one selector, as the other star paths", func(t *testing.T) {
 		u := uuid.NewString()
 		peer := uuid.NewString()
-		// A modern DM row: no thread ID, only the DM's native conversation.
+		// (b) A modern DM row: no thread ID, only the DM's live native
+		// conversation; and a modern thread row in the topic's conversation.
 		dmKey := "dm:user:" + u + ":user:" + peer
 		dmConv := uuid.NewString()
 		env.addNativeConversation(t, dmConv, dmKey)
@@ -295,7 +296,6 @@ func testStarredConversationsContract(t *testing.T, env starStoreEnv) {
 		_, _, err := st.AddMessageStar(ctx, u, StarTarget{MessageID: dmMsg,
 			Selector: StarSelector{ConversationKey: dmKey, Channel: "web", ConversationID: dmConv}})
 		require.NoError(t, err)
-		// A modern thread row: the topic's conversation.
 		modern := topic(projA, "modern", at(time.Minute))
 		topicConv := uuid.NewString()
 		env.setTopicConversation(t, modern, topicConv)
@@ -304,14 +304,33 @@ func testStarredConversationsContract(t *testing.T, env starStoreEnv) {
 		_, _, err = st.AddMessageStar(ctx, u, StarTarget{MessageID: threadMsg, ProjectID: projA,
 			Selector: StarSelector{ConversationKey: modern, Channel: "web", ConversationID: topicConv}})
 		require.NoError(t, err)
-		// A row of another conversation stored under a key it is not in.
-		stray := topic(projA, "stray", at(2*time.Minute))
-		strayMsg := uuid.NewString()
-		env.addMsg(t, strayMsg, "web", "", uuid.NewString(), base)
-		env.insertStar(t, u, strayMsg, stray, projA, base)
+		// (a) A legacy thread row: the thread ID is the key, the conversation
+		// ID another conversation's.
+		legacy := topic(projA, "legacy", at(2*time.Minute))
+		env.setTopicConversation(t, legacy, uuid.NewString())
+		legacyMsg := uuid.NewString()
+		env.addMsg(t, legacyMsg, "web", legacy, uuid.NewString(), base)
+		add(u, legacyMsg, legacy, projA)
+		// (c) A DM whose starred message is in a soft-deleted native
+		// conversation that shares the key with a live one.
+		oldKey := "dm:user:" + u + ":user:" + uuid.NewString()
+		oldConv := uuid.NewString()
+		env.addNativeConversation(t, oldConv, oldKey)
+		oldMsg := uuid.NewString()
+		env.addMsg(t, oldMsg, "web", "", oldConv, base)
+		_, _, err = st.AddMessageStar(ctx, u, StarTarget{MessageID: oldMsg,
+			Selector: StarSelector{ConversationKey: oldKey, Channel: "web", ConversationID: oldConv}})
+		require.NoError(t, err)
+		env.deleteConversation(t, oldConv)
+		env.addNativeConversation(t, uuid.NewString(), oldKey)
 
-		f := StarredConversationFilter{UserID: u, Channel: "web", Sort: StarredConversationsByActivity}
-		assert.ElementsMatch(t, []string{dmKey, modern}, walkStarredConversations(t, st, f, 10))
+		off := StarredConversationFilter{UserID: u, Channel: "web", Sort: StarredConversationsByActivity}
+		on := off
+		on.ByConversationID = true
+		assert.ElementsMatch(t, []string{legacy}, walkStarredConversations(t, st, off, 10),
+			"switch off: the thread ID selects; the modern rows and the deleted conversation's star do not count")
+		assert.ElementsMatch(t, []string{dmKey, modern}, walkStarredConversations(t, st, on, 10),
+			"switch on: the conversation ID selects; the legacy row is another conversation's, and a deleted conversation never counts")
 	})
 
 	t.Run("invalid input", func(t *testing.T) {

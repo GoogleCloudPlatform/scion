@@ -158,11 +158,15 @@ func (s *Server) handleChatStarredConversations(w http.ResponseWriter, r *http.R
 		after = &pos
 	}
 
+	// The read switch chooses the history selector, as resolveChatReadTarget
+	// reads it for the other star paths.
+	ops := s.GetOperationalSettings()
 	filter := StarredConversationFilter{
-		UserID:    call.user.ID(),
-		Channel:   chatHistoryChannel(GetIdentityFromContext(ctx)),
-		ProjectID: projectID,
-		Sort:      sortMode,
+		UserID:           call.user.ID(),
+		Channel:          chatHistoryChannel(GetIdentityFromContext(ctx)),
+		ByConversationID: ops != nil && ops.ConversationEnvelopeSwitch(),
+		ProjectID:        projectID,
+		Sort:             sortMode,
 	}
 	items, next, err := s.scanStarredConversations(ctx, call, auth, filter, after, limit,
 		starredConversationsScanBatch, starredConversationsScanBudget)

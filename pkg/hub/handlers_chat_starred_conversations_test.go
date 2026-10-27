@@ -391,10 +391,20 @@ func TestChatStarredConversations_MatchesStarScopeForTokens(t *testing.T) {
 		{"member project A token", f.member, f.mint(t, f.member, projectBoundary(f.projA), "inbox:read", "project:read", "agent:read")},
 		{"member project A token without agent:read", f.member, f.mint(t, f.member, projectBoundary(f.projA), "inbox:read", "project:read")},
 		{"member project B token", f.member, f.mint(t, f.member, projectBoundary(f.projB), "inbox:read", "project:read", "agent:read")},
-		{"owner project A token, owner removed from A", f.owner, f.mint(t, f.owner, projectBoundary(f.projA), "inbox:read", "project:read", "agent:read")},
+		{"owner project A token, owner's project A binding removed", f.owner, f.mint(t, f.owner, projectBoundary(f.projA), "inbox:read", "project:read", "agent:read")},
 	}
-	_, err := f.s.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.owner)
+	// Remove only the owner's project A binding (the owner keeps hub
+	// membership): its project-A token is then refused at request level.
+	bindings, err := f.s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.owner)
 	require.NoError(t, err)
+	removed := 0
+	for _, b := range bindings {
+		if b.ScopeType == store.RoleScopeProject && b.ScopeID == f.projA {
+			require.NoError(t, f.s.DeleteRoleBinding(ctx, b.ID))
+			removed++
+		}
+	}
+	require.Equal(t, 1, removed, "the owner's project A binding")
 
 	keys := []string{f.topicA, f.topicA2, f.topicB, f.dms.agentKey, f.dms.humanKey}
 	for _, c := range callers {
@@ -411,6 +421,11 @@ func TestChatStarredConversations_MatchesStarScopeForTokens(t *testing.T) {
 		for _, it := range decodeStarredConversations(t, rec).Items {
 			rows[it.ConversationKey] = true
 		}
+		if c.name == "member hub token" {
+			// Positive control: a refusal everywhere would make every
+			// comparison trivially equal.
+			assert.Len(t, rows, 4, "the member's hub token lists its four readable starred conversations")
+		}
 		for _, key := range keys {
 			page, err := f.stars.ListMessageStarCandidates(ctx, StarFilter{UserID: c.user,
 				Selector: StarSelector{ConversationKey: key, Channel: "web", ThreadID: key}, Limit: 1})
@@ -421,6 +436,38 @@ func TestChatStarredConversations_MatchesStarScopeForTokens(t *testing.T) {
 			readable := list.Code == http.StatusOK
 			assert.Equal(t, starred && readable, rows[key], "%s, conversation %s (starred %t, readable %t)", c.name, key, starred, readable)
 		}
+	}
+}
+
+// TestChatStarredConversations_DriftedRowAgreesWithStarList pins that the
+// rail selects a conversation's messages exactly as the star list does,
+// under both read-switch settings: a row whose thread ID is the key but
+// whose conversation ID is another conversation's counts only with the
+// switch off, in the rail and in GET /api/v1/chat/stars alike.
+func TestChatStarredConversations_DriftedRowAgreesWithStarList(t *testing.T) {
+	for _, readSwitch := range []bool{true, false} {
+		t.Run(fmt.Sprintf("readSwitch=%t", readSwitch), func(t *testing.T) {
+			f := newStarredRailFixture(t, readSwitch)
+			ctx := context.Background()
+			drifted := f.topic(t, f.projA)
+			m := uuid.NewString()
+			require.NoError(t, f.s.CreateMessage(ctx, &store.Message{
+				ID: m, ProjectID: f.projA, Sender: "user:" + f.member + "@test.com", SenderID: f.member, Recipient: "chat",
+				Msg: "drifted", Type: "chat", Channel: "web", ThreadID: drifted, ConversationID: uuid.NewString(),
+				CreatedAt: time.Now().UTC().Add(-time.Minute),
+			}))
+			_, err := f.db.Exec(`INSERT INTO webchat_message_star (user_id, message_id, conversation_key, project_id, starred_at) VALUES (?, ?, ?, ?, ?)`,
+				f.member, m, drifted, f.projA, sqliteStarTime(time.Now()))
+			require.NoError(t, err)
+
+			listed := len(decodeStarPage(t, f.session(t, f.member, http.MethodGet, starListPath(drifted), nil)).Items) > 0
+			assert.Equal(t, !readSwitch, listed, "the star list counts the row only with the switch off")
+			assert.Equal(t, listed, contains(starredConversationRowKeys(f.rail(t, f.member).Items), drifted),
+				"the rail agrees with the star list")
+			// The fixture's ordinary rows count under both settings.
+			assert.Subset(t, starredConversationRowKeys(f.rail(t, f.member).Items),
+				[]string{f.topicA, f.topicA2, f.dms.agentKey, f.dms.humanKey})
+		})
 	}
 }
 

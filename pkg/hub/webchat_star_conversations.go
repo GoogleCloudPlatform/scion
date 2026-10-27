@@ -27,13 +27,14 @@ import (
 // user has at least one live star.
 //
 // A star counts for a conversation when its message still exists, is a
-// message of the conversation under either history selector (the read
-// switch's two forms: messages.thread_id equals the star's conversation
-// key, or messages.conversation_id is the key's conversation, which is the
-// topic's conversation_id for a thread and the native conversation whose
-// external_ref is the key for a DM; a promotion moves both with the star),
-// is in the history channel, and is not soft-deleted; a thread must also
-// be a live topic. Stars are grouped by
+// message of the conversation under the history selector the read switch
+// chooses, exactly as the other star paths select it (resolveChatReadTarget):
+// with the switch off, messages.thread_id equals the star's conversation
+// key; with it on, messages.conversation_id is the key's conversation (the
+// topic's conversation_id for a thread, none when it is empty; the live
+// native conversation whose external_ref is the key for a DM). It must also
+// be in the history channel and not soft-deleted, and a thread must be a
+// live topic. A promotion moves both selector columns with the star. Stars are grouped by
 // that key before the page is cut, so a conversation appears once
 // whatever its number of stars, and a page boundary never splits one.
 //
@@ -76,6 +77,9 @@ type StarredConversationFilter struct {
 	// Channel limits stars to messages of one channel ("web" for native
 	// chat); empty matches every channel.
 	Channel string
+	// ByConversationID selects messages by the key's conversation ID (the
+	// read switch on) instead of by thread ID (off).
+	ByConversationID bool
 	// ProjectID, when set, keeps the threads of that project and the DMs
 	// whose stars are stored under it (its agents' DMs); never a DM
 	// between users.
@@ -197,6 +201,16 @@ func sqliteStarredConversationsQuery(f StarredConversationFilter) (string, []any
   LEFT JOIN users u ON d.peer_kind = 'user' AND u.id = d.peer_id
   LEFT JOIN agents a ON d.peer_kind = 'agent' AND a.id = d.peer_id`
 	}
+	selector := `m.thread_id = st.conversation_key`
+	if f.ByConversationID {
+		selector = `m.conversation_id IN (
+                     SELECT lower(t2.conversation_id) FROM webchat_topic t2
+                      WHERE t2.id = st.conversation_key AND COALESCE(t2.conversation_id, '') <> ''
+                     UNION ALL
+                     SELECT c.id FROM conversations c
+                      WHERE substr(st.conversation_key, 1, 3) = 'dm:' AND c.surface = 'native'
+                        AND c.external_ref = st.conversation_key AND c.deleted_at IS NULL)`
+	}
 	args = append(args, f.UserID, f.Channel, f.Channel, f.UserID)
 	var conds []string
 	if f.ProjectID != "" {
@@ -231,14 +245,7 @@ SELECT el.ckey AS ckey,
           FROM webchat_message_star st
           JOIN messages m ON m.id = st.message_id
          WHERE st.user_id = ?
-           AND (m.thread_id = st.conversation_key
-                OR m.conversation_id IN (
-                     SELECT lower(t2.conversation_id) FROM webchat_topic t2
-                      WHERE t2.id = st.conversation_key AND COALESCE(t2.conversation_id, '') <> ''
-                     UNION ALL
-                     SELECT c.id FROM conversations c
-                      WHERE substr(st.conversation_key, 1, 3) = 'dm:'
-                        AND c.surface = 'native' AND c.external_ref = st.conversation_key))
+           AND ` + selector + `
            AND (? = '' OR m.channel = ?)
            AND NOT EXISTS (SELECT 1 FROM webchat_message_ext e WHERE e.message_id = st.message_id AND e.deleted_at IS NOT NULL)
          GROUP BY st.conversation_key) el

@@ -83,6 +83,8 @@ type starStoreEnv struct {
 	addNativeConversation func(t *testing.T, id, ref string)
 	// setTopicConversation sets a topic's conversation_id.
 	setTopicConversation func(t *testing.T, topicID, conversationID string)
+	// deleteConversation soft-deletes a conversation row.
+	deleteConversation func(t *testing.T, id string)
 }
 
 func threadSel(key string) StarSelector {
@@ -367,6 +369,9 @@ func TestMessageStarStore_SQLite(t *testing.T) {
 			_, err := db.Exec(`UPDATE webchat_topic SET conversation_id = ? WHERE id = ?`, conversationID, topicID)
 			require.NoError(t, err)
 		},
+		deleteConversation: func(t *testing.T, id string) {
+			require.NoError(t, s.DeleteConversation(context.Background(), id))
+		},
 	}
 	require.NotNil(t, env.stars)
 	testMessageStarStoreContract(t, env)
@@ -417,7 +422,8 @@ CREATE TABLE agents (id uuid PRIMARY KEY, name text, slug text);
 CREATE TABLE projects (id uuid PRIMARY KEY);
 CREATE TABLE conversations (
     id uuid PRIMARY KEY, project_id uuid, kind text, surface text, external_ref text, parent_ref text,
-    display_name text, default_agent_id uuid, drift_state text, last_activity_at timestamptz, created_at timestamptz)`)
+    display_name text, default_agent_id uuid, drift_state text, last_activity_at timestamptz, created_at timestamptz,
+    deleted_at timestamptz)`)
 	require.NoError(t, err)
 	projectID := uuid.NewString()
 	_, err = db.ExecContext(ctx, `INSERT INTO projects (id) VALUES ($1)`, projectID)
@@ -507,6 +513,10 @@ VALUES ($1, 'direct', 'native', $2, 'active', NOW(), NOW())`, id, ref)
 		},
 		setTopicConversation: func(t *testing.T, topicID, conversationID string) {
 			_, err := db.Exec(`UPDATE webchat_topic SET conversation_id = $1 WHERE id = $2`, conversationID, topicID)
+			require.NoError(t, err)
+		},
+		deleteConversation: func(t *testing.T, id string) {
+			_, err := db.Exec(`UPDATE conversations SET deleted_at = NOW() WHERE id = $1`, id)
 			require.NoError(t, err)
 		},
 	}
