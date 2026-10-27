@@ -39,7 +39,8 @@ func homesOrLocal(b Backend) Backend {
 // for nfs the share's server and export (trailing slashes ignored) and the
 // subpath root; the export identity marker when both sides know it
 // (hubExportID, d.NFS.ExportID); and homes. A broker that reports no
-// descriptor, or (for nfs) no usable share, disagrees. A broker that
+// descriptor, reports its storage settings invalid, or (for nfs) has no
+// usable share, disagrees. A broker that
 // predates the homes field disagrees only when this Layout keeps homes on
 // nfs. For the volume backends: the subpath root and, for
 // gke-shared-volume, the claim. Share IDs, mount roots and volume names are
@@ -50,6 +51,9 @@ func (l Layout) DescriptorDiff(d *api.BrokerWorkspaceStorage, hubExportID string
 	}
 	if d == nil {
 		return []string{"broker reports no storage layout (upgrade it)"}
+	}
+	if d.Invalid {
+		return []string{"broker reports invalid project storage settings (fix them on the broker and restart it)"}
 	}
 	var diff []string
 	if Backend(d.Backend) != l.Backend {

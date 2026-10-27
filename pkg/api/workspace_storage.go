@@ -45,6 +45,10 @@ type BrokerWorkspaceStorage struct {
 	// homes: "local" or "nfs" (on the share described by NFS). Empty when
 	// the broker predates the field (unknown).
 	Homes string `json:"homes,omitempty"`
+	// Invalid reports that the broker's project storage settings are
+	// unusable: the broker places no agent files and refuses agent starts
+	// until they are fixed. Only Backend is set alongside it.
+	Invalid bool `json:"invalid,omitempty"`
 }
 
 // BrokerNFSWorkspaceStorage identifies the NFS export a broker places agent

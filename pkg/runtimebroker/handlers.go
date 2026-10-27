@@ -128,6 +128,14 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		}
 	}
 
+	// Invalid project storage settings: the broker refuses every agent
+	// start, so it is degraded. The check carries a fixed value only; the
+	// fields at fault are in the startup log and in each refusal.
+	if s.storageInvalid() {
+		checks[healthCheckProjectStorage] = api.BrokerHealthUnavailable
+		status = degradeHealthStatus(status)
+	}
+
 	return &HealthResponse{
 		Status:  status,
 		Version: s.version,
@@ -879,6 +887,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// Refused while the broker drains for shutdown, before the dispatch
 	// attempt, the registration and any file work (design wave 3 §1 C-e).
 	if s.refuseIfDraining(w, "create", req.ID) {
+		return
+	}
+	// Refused while the broker has no usable project storage settings,
+	// before any tracker, registration or file work.
+	if s.refuseIfStorageInvalid(w, "create", req.ID) {
 		return
 	}
 
@@ -3362,6 +3375,11 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	if s.refuseIfDraining(w, "start", id) {
 		return
 	}
+	// Refused while the broker has no usable project storage settings,
+	// before any tracker, registration or file work.
+	if s.refuseIfStorageInvalid(w, "start", id) {
+		return
+	}
 	// An async start's launch deadline is measured from here (design
 	// §3.8.2 step 4), as a create's is from its receipt.
 	startReceivedAt := time.Now()
@@ -4700,6 +4718,11 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// Refused while the broker drains for shutdown, before the start is
 	// tracked or registered (design wave 3 §1 C-e).
 	if s.refuseIfDraining(w, "restart", id) {
+		return
+	}
+	// Refused while the broker has no usable project storage settings,
+	// before any tracker, registration or file work.
+	if s.refuseIfStorageInvalid(w, "restart", id) {
 		return
 	}
 	// Tracked until the start leg, including Run's deferred cleanup, has

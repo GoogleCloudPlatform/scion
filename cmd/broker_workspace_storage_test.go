@@ -96,7 +96,8 @@ func TestBrokerStorageLayout(t *testing.T) {
 		Backend: "nfs", Homes: "nfs",
 		NFS: &config.V1NFSConfig{MountRoot: "/mnt/scion-nfs", Shares: []config.V1NFSShare{{ID: "a", Server: "10.0.0.2", Export: "/vol-a", PVName: "pv-a"}}},
 	}}}
-	layout, warnings := brokerStorageLayout(ps)
+	layout, warnings, storageErr := brokerStorageLayout(ps)
+	require.NoError(t, storageErr)
 	assert.Empty(t, warnings)
 	assert.Equal(t, projectfs.BackendNFS, layout.Backend)
 	assert.Equal(t, "/mnt/scion-nfs/a", layout.HostBase)
@@ -111,7 +112,8 @@ func TestBrokerStorageLayout(t *testing.T) {
 	legacy := &config.VersionedSettings{Server: &config.V1ServerConfig{WorkspaceStorage: &config.V1WorkspaceStorageConfig{
 		Backend: "nfs", NFS: &config.V1NFSConfig{MountRoot: "/mnt/scion-nfs", Shares: []config.V1NFSShare{{ID: "a", Server: "10.0.0.2", Export: "/vol-a"}}},
 	}}}
-	layout, warnings = brokerStorageLayout(legacy)
+	layout, warnings, storageErr = brokerStorageLayout(legacy)
+	require.NoError(t, storageErr)
 	assert.Equal(t, projectfs.BackendNFS, layout.Backend)
 	require.NotEmpty(t, warnings)
 	assert.Contains(t, warnings[0], "legacy storage blocks in use")
@@ -120,10 +122,11 @@ func TestBrokerStorageLayout(t *testing.T) {
 		ProjectStorage:   &config.V1ProjectStorageConfig{Backend: "local"},
 		WorkspaceStorage: &config.V1WorkspaceStorageConfig{Backend: "local"},
 	}}
-	layout, warnings = brokerStorageLayout(both)
-	assert.Equal(t, projectfs.BackendLocal, layout.Backend, "an unusable block reports the local layout")
-	require.Len(t, warnings, 1)
-	assert.Contains(t, warnings[0], "exactly one storage block")
+	layout, warnings, storageErr = brokerStorageLayout(both)
+	assert.Equal(t, projectfs.Layout{}, layout, "an unusable block reports no layout (never the local one)")
+	assert.Empty(t, warnings)
+	require.Error(t, storageErr)
+	assert.Contains(t, storageErr.Error(), "exactly one storage block")
 }
 
 // TestBrokerSharedDirLayoutWarnings: a shared-dir Layout that would fail
