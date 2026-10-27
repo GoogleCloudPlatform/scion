@@ -1706,15 +1706,24 @@ export class ScionChatMessage extends LitElement {
       margin-left: 0.25rem;
     }
 
+    /* Renderings without a header (grouped and dense rows, user bubbles):
+       the star sits in the gutter beside the bubble, level with its first
+       line, so a starred row is no taller than its neighbours. */
     .star-meta {
+      position: absolute;
+      top: 0.5rem;
+      right: calc(100% + 0.25rem);
       display: flex;
-      justify-content: flex-end;
       line-height: 1;
-      margin-top: 0.125rem;
     }
 
     .from-agent .star-meta {
-      justify-content: flex-start;
+      right: auto;
+      left: calc(100% + 0.25rem);
+    }
+
+    .star-meta .star-indicator {
+      margin-left: 0;
     }
 
     /* ---- Phase-3: Edited label ---- */
