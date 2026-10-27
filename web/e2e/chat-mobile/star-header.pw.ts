@@ -364,7 +364,8 @@ test.describe('starred messages: keyboard', () => {
     const button = target.locator('button.msg-actions');
     await button.focus();
     await page.keyboard.press('Shift+F10');
-    const menu = page.locator('scion-chat-thread [role="menu"]');
+    // By name: the composer's agent menu is also a role="menu" whenever the thread has agents.
+    const menu = page.getByRole('menu', { name: /^Message actions/ });
     await expect(menu).toBeVisible();
     await expect(button).toHaveAttribute('aria-expanded', 'true');
     const star = menu.locator('[role="menuitemcheckbox"]');
