@@ -613,7 +613,7 @@ The operational content of the deprecated sections still applies to the same fie
 
 #### Validation
 
-The Hub refuses to start, and `scion config validate` reports an error, when the conditions below hold. The error names the field at fault.
+The Hub refuses to start, and `scion config validate` reports an error, when the conditions below hold. The error names the field at fault. `scion config migrate` still converts a file whose storage block breaks a [field rule](#field-rules), and reports each such field as a warning, so that you can fix the converted file.
 
 A Runtime Broker with an invalid block still starts, so that you can stop and delete its existing agents, but it has no storage. It does not fall back to the local layout. It logs the error at startup and refuses every agent create, start and restart with `422` and error code `storage_invalid`, naming the fields at fault. Its `GET /healthz` status is `degraded`, with the check `project_storage: unavailable`. Its storage descriptor is marked invalid, so the Hub also refuses shared-mode dispatches to it (see [Layout identity](#layout-identity-check)). Stop, delete, logs and status keep working. Fix the block and restart the broker.
 
@@ -728,7 +728,7 @@ Every Runtime Broker reports its storage layout in its heartbeat descriptor: the
 
 - **Dispatch refusal**: the Hub refuses to dispatch an agent of a hub-native project in the shared-plain or worktree-per-agent sharing mode to a broker whose layout disagrees, with `409` and a message naming each differing field (for example `nfs export: differs`) and asking for the same `server.project_storage` on the broker. The refusal never includes the configured values; `details.storageLayoutDiff` lists the field names. The hub log has the full values. A broker that reports no layout (an older version) is refused the same way; upgrade it. Linked projects, which the broker provides from its own path, and per-agent workspace modes are not checked.
 - **Health**: the admin health summary shows the differences as `layout_mismatch` in the broker's storage entry and counts the broker as a problem. A hub admin sees the values on both sides; any other reader sees the differing fields by name only.
-- **Broker records**: `GET /api/v1/runtime-brokers` and `GET /api/v1/runtime-brokers/{id}` include the NFS server, export, subpath root and export identity marker, and the volume claim, of a broker's storage descriptor for hub admins only (and for the broker reading its own record). Other readers see the backend, homes and share health without these values. Agent-move refusals between brokers on different exports also name the differing fields only.
+- **Broker records**: `GET /api/v1/runtime-brokers` and `GET /api/v1/runtime-brokers/{id}` include the NFS server, export, subpath root and export identity marker, and the volume claim, of a broker's storage descriptor for hub admins only (and for the broker reading its own record). Other readers see the backend, homes and share health; the value fields are omitted and the descriptor carries `redacted: true`. The project registration response follows the same rule for the linked broker. Agent-move refusals between brokers on different exports also name the differing fields only.
 
 ### Workspace Storage (`server.workspace_storage`)
 
