@@ -80,7 +80,20 @@ interface Options {
   checkUpdates?: Json | number;
   /** Response to POST restart: 'down' rejects; text is a non-JSON body. */
   restart?: 'down' | { status: number; body?: Json; text?: string };
+  /** Body of GET releases (default: no releases in any channel). */
+  releases?: Json;
 }
+
+const EMPTY_CATALOG: Json = {
+  repo: 'GoogleCloudPlatform/scion',
+  fetchedAt: '2026-10-22T00:00:00Z',
+  stale: false,
+  channels: {
+    nightly: { latest: null, releases: [] },
+    preview: { latest: null, releases: [] },
+    stable: { latest: null, releases: [] },
+  },
+};
 
 function json(body: unknown, status = 200): Promise<Response> {
   return Promise.resolve(
@@ -109,6 +122,9 @@ function handler(opts: Options) {
         return json({ error: { code: 'internal_error', message: 'status unavailable' } }, s);
       }
       return json(s);
+    }
+    if (path === '/api/v1/admin/maintenance/releases') {
+      return json(opts.releases ?? EMPTY_CATALOG);
     }
     if (path === '/api/v1/admin/maintenance/update-available') {
       return json(opts.updateAvailable ?? { update_available: false });
@@ -198,8 +214,15 @@ function root(e: Page): ShadowRoot {
   return e.shadowRoot!;
 }
 
+/** The shadow root of the page's "Server Version & Updates" card. */
+function cardRoot(e: Page): ShadowRoot {
+  const card = root(e).querySelector('scion-admin-maintenance-update-card');
+  expect(card?.shadowRoot).toBeTruthy();
+  return card!.shadowRoot!;
+}
+
 function versionSection(e: Page): HTMLElement {
-  const s = root(e).querySelector<HTMLElement>('.section.server-version');
+  const s = cardRoot(e).querySelector<HTMLElement>('.section.server-version');
   expect(s).not.toBeNull();
   return s!;
 }
@@ -855,7 +878,7 @@ describe('Reconnect after an update restart', () => {
     confirmUpdate(el);
     await settle(el);
     expect(root(el).querySelector('.error-state')).toBeNull();
-    expect(root(el).querySelector('.section.server-version')).not.toBeNull();
+    expect(cardRoot(el).querySelector('.section.server-version')).not.toBeNull();
 
     await el.loadData(true);
     await settle(el);
@@ -1129,5 +1152,163 @@ describe('Release notes link', () => {
       const hrefs = Array.from(root(el).querySelectorAll('a')).map((a) => a.getAttribute('href'));
       expect(hrefs).not.toContain(url);
     }
+  });
+});
+
+// Phase 2: the release picker in the card asks the page to update; the page
+// confirms and posts {target_version, channel, pin}.
+describe('Release picker updates', () => {
+  const CATALOG: Json = {
+    repo: 'GoogleCloudPlatform/scion',
+    fetchedAt: '2026-10-23T10:00:00Z',
+    stale: false,
+    channels: {
+      nightly: {
+        latest: 'nightly-20261023',
+        releases: [
+          { tag: 'nightly-20261023', installable: true, class: 'upgrade', local: false },
+          { tag: 'nightly-20261022', installable: true, class: 'same', local: true },
+        ],
+      },
+      preview: {
+        latest: 'v0.3.0-preview.4',
+        releases: [{ tag: 'v0.3.0-preview.4', installable: true, class: 'switch-newer' }],
+      },
+      stable: { latest: null, releases: [] },
+    },
+  };
+
+  type Select = HTMLElement & { value: string };
+
+  function pick(e: Page, cls: string, value: string): void {
+    const sel = cardRoot(e).querySelector<Select>(`sl-select.${cls}`)!;
+    sel.value = value;
+    sel.dispatchEvent(new Event('sl-change'));
+  }
+
+  function updateButton(e: Page): HTMLElement {
+    return cardRoot(e).querySelector<HTMLElement>('sl-button.update-release')!;
+  }
+
+  function dialogText(e: Page): string {
+    return root(e).querySelector('sl-dialog[label="Update Hub"]')?.textContent ?? '';
+  }
+
+  it('posts the latest tag with its channel and pin latest', async () => {
+    el = await mount({ releases: CATALOG });
+    updateButton(el).click();
+    await settle(el);
+    expect(el.updateConfirmTarget).toBe('nightly-20261023');
+    expect(dialogText(el)).toContain('follows the latest');
+    expect(dialogText(el)).not.toContain('switches the hub');
+    confirmUpdate(el);
+    await settle(el);
+    expect(runBodies).toEqual([
+      { params: { target_version: 'nightly-20261023', channel: 'nightly', pin: 'latest' } },
+    ]);
+  });
+
+  it('posts a picked tag in another channel pinned to that tag', async () => {
+    el = await mount({ releases: CATALOG });
+    pick(el, 'channel-select', 'preview');
+    await settle(el);
+    pick(el, 'release-select', 'v0.3.0-preview.4');
+    await settle(el);
+    updateButton(el).click();
+    await settle(el);
+    expect(el.updateConfirmTarget).toBe('v0.3.0-preview.4');
+    const text = dialogText(el).replace(/\s+/g, ' ');
+    expect(text).toContain('switches the hub from the nightly channel to the preview channel');
+    expect(text).toContain('stays pinned to v0.3.0-preview.4');
+    confirmUpdate(el);
+    await settle(el);
+    expect(runBodies).toEqual([
+      {
+        params: {
+          target_version: 'v0.3.0-preview.4',
+          channel: 'preview',
+          pin: 'v0.3.0-preview.4',
+        },
+      },
+    ]);
+  });
+
+  it('a banner update after a cancelled picker update posts the P1 payload', async () => {
+    el = await mount({
+      releases: CATALOG,
+      updateAvailable: {
+        update_available: true,
+        update: {
+          version: 'nightly-20261023',
+          channel: 'nightly',
+          detected_at: '2026-10-23T00:00:00Z',
+        },
+      },
+    });
+    updateButton(el).click();
+    await settle(el);
+    root(el)
+      .querySelector<HTMLElement>('sl-dialog[label="Update Hub"] sl-button[variant="default"]')!
+      .click();
+    await settle(el);
+    expect(el.updateConfirmTarget).toBeNull();
+    findButton(root(el), 'Apply Update')!.click();
+    await settle(el);
+    confirmUpdate(el);
+    await settle(el);
+    expect(runBodies).toEqual([{ params: { target_version: 'nightly-20261023', pin: 'latest' } }]);
+  });
+
+  it('disables Update while an update run is in progress', async () => {
+    el = await mount({
+      releases: CATALOG,
+      operations: () => [
+        op('update-binary', 'Update Binary', {
+          id: 'run-7',
+          operationKey: 'update-binary',
+          status: 'running',
+          startedAt: '2026-10-23T10:00:00Z',
+        }),
+      ],
+    });
+    expect(updateButton(el).hasAttribute('disabled')).toBe(true);
+    expect(cardRoot(el).querySelector('.update-blocked')?.textContent).toContain(
+      'An update is in progress'
+    );
+  });
+
+  it("opens the run detail from the card's View run link", async () => {
+    el = await mount({
+      status: updateStatus({
+        lastUpdate: {
+          runId: 'run-9',
+          from: 'nightly-20261021',
+          to: 'nightly-20261022',
+          status: 'verified',
+          at: '2026-10-22T01:00:00Z',
+        },
+      }),
+    });
+    versionSection(el).querySelector<HTMLElement>('a.last-update-run')!.click();
+    await settle(el);
+    expect(
+      fetchMock.mock.calls.some(
+        (c) =>
+          pathOf(c[0] as string) === '/api/v1/admin/maintenance/operations/update-binary/runs/run-9'
+      )
+    ).toBe(true);
+  });
+
+  it('does not load releases in git mode', async () => {
+    el = await mount({
+      releases: CATALOG,
+      status: updateStatus({ mode: { effective: 'git', repoConfigured: true } }),
+    });
+    expect(cardRoot(el).querySelector('.release-panel')).toBeNull();
+    expect(
+      fetchMock.mock.calls.some(
+        (c) => pathOf(c[0] as string) === '/api/v1/admin/maintenance/releases'
+      )
+    ).toBe(false);
   });
 });
