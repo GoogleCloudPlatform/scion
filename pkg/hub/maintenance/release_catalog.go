@@ -58,7 +58,7 @@ const (
 	// cannot keep a hub without a catalog.
 	DefaultCatalogChecksumsBudget = 60 * time.Second
 
-	// catalogLoadTimeout bounds one read of the persisted copy.
+	// catalogLoadTimeout bounds one read or write of the persisted copy.
 	catalogLoadTimeout = 10 * time.Second
 
 	// catalogStateVersion versions the persisted JSON; another version is
@@ -220,7 +220,8 @@ type Catalog struct {
 	// onWait, when set (tests only), runs after a caller has joined a fetch
 	// and before it waits for the result.
 	onWait func()
-	// loadTimeout bounds one store read; catalogLoadTimeout (tests lower it).
+	// loadTimeout bounds one store read or write; catalogLoadTimeout (tests
+	// lower it).
 	loadTimeout time.Duration
 
 	mu          sync.Mutex
@@ -516,7 +517,11 @@ func (c *Catalog) refresh(ctx context.Context) {
 	}
 	data, err := json.Marshal(st)
 	if err == nil {
-		err = c.opts.Store.SaveReleaseCatalog(ctx, data)
+		// Its own bound, like the load: a slow store must not use up the
+		// refresh's budget while callers wait on the shared fetch.
+		sctx, cancelSave := context.WithTimeout(context.WithoutCancel(ctx), c.loadTimeout)
+		err = c.opts.Store.SaveReleaseCatalog(sctx, data)
+		cancelSave()
 	}
 	if err != nil {
 		log.Warn("Failed to persist the release catalog", "error", err)

@@ -1150,6 +1150,36 @@ func TestCatalog_CtxIgnoringStoreIsAbandoned(t *testing.T) {
 	}
 }
 
+// catalogSlowSaveStore blocks saves until their ctx ends.
+type catalogSlowSaveStore struct {
+	catalogMemStore
+	saveErr error
+}
+
+func (s *catalogSlowSaveStore) SaveReleaseCatalog(ctx context.Context, _ []byte) error {
+	<-ctx.Done()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.saveErr = ctx.Err()
+	return s.saveErr
+}
+
+func TestCatalog_SlowSaveIsBounded(t *testing.T) {
+	f := newCatalogFake(t, catalogGood("nightly-20261024", catalogDay(24)))
+	store := &catalogSlowSaveStore{}
+	c := newTestCatalog(f, newCatalogClock(), func(o *CatalogOptions) { o.Store = store })
+	c.loadTimeout = 50 * time.Millisecond
+	snap, err := getWithin(t, c, 10*time.Second)
+	if err != nil || snap.Channel("nightly").Latest != "nightly-20261024" {
+		t.Fatalf("Get with a stalled save = %+v, %v", snap, err)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if !errors.Is(store.saveErr, context.DeadlineExceeded) {
+		t.Errorf("save ended with %v, want its own deadline", store.saveErr)
+	}
+}
+
 func TestGitHubReleases_ListReleases(t *testing.T) {
 	var gotAuth, gotINM, gotQuery []string
 	var next string
