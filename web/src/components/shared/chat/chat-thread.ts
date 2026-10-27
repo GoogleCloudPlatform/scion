@@ -427,6 +427,16 @@ function isJumpScrollClamped(
 }
 
 /**
+ * Whether a key event comes from inside an open popup menu (its
+ * `.context-menu` container): the menu's own keys, never a scroll gesture.
+ */
+function isInOpenMenu(e: Event): boolean {
+  return e
+    .composedPath()
+    .some((n) => n instanceof HTMLElement && n.classList.contains('context-menu'));
+}
+
+/**
  * Whether `node` is (or is inside) an editable element — an input, textarea,
  * select, or contenteditable — for the purpose of ignoring scroll-shaped
  * keydowns (Space, arrows, ...) typed there as ordinary text input rather
@@ -437,16 +447,6 @@ function isJumpScrollClamped(
  * its native `<textarea>` in shadow DOM, so `e.target` there is the
  * `<sl-textarea>` host, not the editable element itself (review N3).
  */
-/**
- * Whether a key event comes from inside an open popup menu (its
- * `.context-menu` container): the menu's own keys, never a scroll gesture.
- */
-function isInOpenMenu(e: Event): boolean {
-  return e
-    .composedPath()
-    .some((n) => n instanceof HTMLElement && n.classList.contains('context-menu'));
-}
-
 function isEditableKeydownTarget(node: EventTarget | null): boolean {
   if (!(node instanceof Element)) return false;
   if (node.tagName === 'INPUT' || node.tagName === 'TEXTAREA' || node.tagName === 'SELECT') {
@@ -4679,7 +4679,8 @@ export class ScionChatThread extends LitElement {
    * grab/middle-click via `pointerdown`, or a scroll-relevant `keydown`
    * anywhere in the document — not just on the scroll container, since focus
    * often isn't there, and ignoring the same keys typed into an editable
-   * field like the composer, review N3), another jump (scrollToMessageById
+   * field like the composer, review N3, or inside the open message menu),
+   * another jump (scrollToMessageById
    * re-entry, or scrollToBottom for "Jump to latest" / autoscroll), or
    * thread switch/disconnect — never yanks the user back to a target they've
    * since scrolled away from on purpose.

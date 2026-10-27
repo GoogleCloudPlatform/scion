@@ -28,8 +28,8 @@
 - **Message keyboard entry**: a More actions button per message (under the experiment) is the message list's single
   tab stop (roving tabindex); Up/Down/Home/End move it, Enter/Space, Shift+F10 and the ContextMenu key open the menu
   there. After a jump, the landed message holds the stop. Removing the focused message hands the stop and focus to the
-  closest one (an empty starred-only center gives focus to Show all). The architect fixed this keyboard contract
-  during the phase (a roving native button rather than focusable message rows).
+  closest one (an empty starred-only center gives focus to Show all). The keyboard contract was settled by a design
+  decision during the phase (a roving native button rather than focusable message rows).
 - **Dense rows**: in renderings without a header the star sits in the gutter beside the bubble, so a starred row is
   no taller than its neighbours.
 - **Starred-only center**: loading/error/empty are status or alert regions; its list is a labelled region.
