@@ -51,6 +51,12 @@ const (
 	// downloads). Each request has its own 15 s timeout as well.
 	catalogFetchTimeout = 2 * time.Minute
 
+	// DefaultCatalogChecksumsBudget bounds the SHA256SUMS downloads of one
+	// refresh. When it runs out, the releases still unclassified are marked
+	// ReasonChecksumsUnavailable (not cached) instead of failing the refresh,
+	// so a blackholed download host cannot keep a hub without a catalog.
+	DefaultCatalogChecksumsBudget = 60 * time.Second
+
 	// catalogStateVersion versions the persisted JSON; another version is
 	// ignored on load.
 	catalogStateVersion = 1
@@ -59,7 +65,8 @@ const (
 // CatalogChannels are the release channels, in display order.
 var CatalogChannels = []string{"nightly", "preview", "stable"}
 
-// Catalog release sources.
+// Catalog release sources. SourceLocal marks a release retained locally
+// and not in the listed window.
 const (
 	SourceGitHub = "github"
 	SourceLocal  = "local"
@@ -90,8 +97,9 @@ type CatalogRelease struct {
 	Reason string `json:"reason,omitempty"`
 	// Local is set when the install root retains a copy of this release.
 	Local bool `json:"local"`
-	// Source is SourceGitHub, or SourceLocal for a retained release that is
-	// no longer listed on GitHub (deleted nightly).
+	// Source is SourceGitHub, or SourceLocal for a release retained locally
+	// and not in the listed window (a deleted nightly, or one older than the
+	// releases the channel lists).
 	Source   string `json:"source"`
 	NotesURL string `json:"notesUrl,omitempty"`
 }
@@ -106,7 +114,9 @@ type CatalogChannel struct {
 }
 
 // Snapshot is the release catalog at one point in time. It is a value: the
-// caller may keep and read it without locking.
+// caller may keep and read it without locking. It is not the API wire DTO:
+// the hub builds the D5 response from it (adding class, and mapping an
+// empty Latest to null and a zero PublishedAt to omitted).
 type Snapshot struct {
 	Repo string `json:"repo"`
 	// FetchedAt is when the release list was last fetched successfully.
@@ -183,6 +193,9 @@ type CatalogOptions struct {
 	// 0 means the default, a negative value means none.
 	NonInstallable int
 	MaxPages       int
+	// ChecksumsBudget bounds the SHA256SUMS downloads of one refresh;
+	// default DefaultCatalogChecksumsBudget.
+	ChecksumsBudget time.Duration
 
 	// Now is the clock; default time.Now.
 	Now func() time.Time
@@ -195,6 +208,9 @@ type CatalogOptions struct {
 type Catalog struct {
 	opts  CatalogOptions
 	group singleflight.Group
+	// onWait, when set (tests only), runs after a caller has joined a fetch
+	// and before it waits for the result.
+	onWait func()
 
 	mu          sync.Mutex
 	loaded      bool
@@ -258,6 +274,9 @@ func NewCatalog(opts CatalogOptions) *Catalog {
 	if opts.MaxPages <= 0 {
 		opts.MaxPages = DefaultCatalogMaxPages
 	}
+	if opts.ChecksumsBudget <= 0 {
+		opts.ChecksumsBudget = DefaultCatalogChecksumsBudget
+	}
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
@@ -270,6 +289,10 @@ func NewCatalog(opts CatalogOptions) *Catalog {
 // fails and a previous catalog exists, that catalog is returned with Stale
 // set and a nil error. The error is non-nil only when there is no catalog
 // at all.
+//
+// The fetch itself is detached from ctx (other callers may share it), but
+// Get stops waiting when ctx ends: it then returns the cached catalog, or
+// ctx's error when there is none.
 func (c *Catalog) Get(ctx context.Context, refresh bool) (Snapshot, error) {
 	c.mu.Lock()
 	c.loadLocked(ctx)
@@ -278,11 +301,12 @@ func (c *Catalog) Get(ctx context.Context, refresh bool) (Snapshot, error) {
 	need := c.needsFetchLocked(refresh) || (c.inflight && (refresh || c.state.FetchedAt.IsZero()))
 	c.mu.Unlock()
 
+	cancelled := false
 	if need {
-		// Do collapses concurrent fetches: a caller arriving during a fetch
-		// joins it. The re-check inside stops a caller that decided to
-		// fetch just before another fetch finished from fetching again.
-		_, _, _ = c.group.Do("refresh", func() (any, error) {
+		// DoChan collapses concurrent fetches: a caller arriving during a
+		// fetch joins it. The re-check inside stops a caller that decided
+		// to fetch just before another fetch finished from fetching again.
+		done := c.group.DoChan("refresh", func() (any, error) {
 			c.mu.Lock()
 			again := c.needsFetchLocked(refresh)
 			c.mu.Unlock()
@@ -291,6 +315,14 @@ func (c *Catalog) Get(ctx context.Context, refresh bool) (Snapshot, error) {
 			}
 			return nil, nil
 		})
+		if c.onWait != nil {
+			c.onWait()
+		}
+		select {
+		case <-done:
+		case <-ctx.Done():
+			cancelled = true
+		}
 	}
 
 	var local []InstalledRelease
@@ -301,6 +333,9 @@ func (c *Catalog) Get(ctx context.Context, refresh bool) (Snapshot, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.state.FetchedAt.IsZero() {
+		if cancelled {
+			return Snapshot{}, ctx.Err()
+		}
 		if c.lastErr != nil {
 			return Snapshot{}, fmt.Errorf("release catalog of %s unavailable: %w", c.opts.Repo, c.lastErr)
 		}
@@ -323,22 +358,27 @@ func (c *Catalog) needsFetchLocked(refresh bool) bool {
 	return now.Sub(c.state.FetchedAt) >= c.opts.TTL
 }
 
-// loadLocked reads the persisted copy once. A copy for another repo, asset
-// or format version is ignored.
+// loadLocked reads the persisted copy until one load gives a definite
+// answer: a copy, nothing stored, or a copy that is unusable (unreadable, or
+// for another repo, asset or format version, which is ignored). A store
+// error is retried on the next Get. Once a fetch has succeeded the
+// persisted copy is no longer needed. The read is detached from the
+// caller's cancellation so that a cancelled first caller cannot lose it.
 func (c *Catalog) loadLocked(ctx context.Context) {
 	if c.loaded {
 		return
 	}
-	c.loaded = true
-	if c.opts.Store == nil {
+	if c.opts.Store == nil || !c.state.FetchedAt.IsZero() {
+		c.loaded = true
 		return
 	}
 	log := logging.Subsystem("hub.maintenance.release-catalog")
-	data, err := c.opts.Store.LoadReleaseCatalog(ctx)
+	data, err := c.opts.Store.LoadReleaseCatalog(context.WithoutCancel(ctx))
 	if err != nil {
-		log.Warn("Failed to load the persisted release catalog", "error", err)
+		log.Warn("Failed to load the persisted release catalog; retrying on the next request", "error", err)
 		return
 	}
+	c.loaded = true
 	if len(data) == 0 {
 		return
 	}
@@ -403,8 +443,11 @@ func (c *Catalog) fetch(ctx context.Context, prev catalogState) (catalogState, e
 	for _, p := range prev.Pages {
 		prevPages[p.URL] = p
 	}
+	sumsCtx, cancelSums := context.WithTimeout(ctx, c.opts.ChecksumsBudget)
+	defer cancelSums()
 	cl := &classifier{
 		ctx:      ctx,
+		sumsCtx:  sumsCtx,
 		lister:   c.opts.Lister,
 		asset:    c.opts.Asset,
 		prevSums: prev.Sums,
@@ -524,7 +567,8 @@ func (c *Catalog) build(cl *classifier, releases []Release) (map[string]CatalogC
 // classifier decides installability, downloading SHA256SUMS at most once
 // per refresh and reusing verdicts cached per tag + asset updated_at.
 type classifier struct {
-	ctx      context.Context
+	ctx      context.Context // the refresh
+	sumsCtx  context.Context // the refresh, limited to ChecksumsBudget
 	lister   ReleaseLister
 	asset    string
 	prevSums map[string]sumsVerdict // from the previous catalog
@@ -563,14 +607,20 @@ func (cl *classifier) decide(r Release) (sumsVerdict, error) {
 		cl.sums[key] = v
 		return v, nil
 	}
-	data, err := cl.lister.FetchChecksums(cl.ctx, r.Tag, sumsAsset)
+	// Not cached either way below: the next refresh tries again.
+	if ctxErr := cl.ctx.Err(); ctxErr != nil {
+		return sumsVerdict{}, fmt.Errorf("release catalog fetch: %w", ctxErr)
+	}
+	if cl.sumsCtx.Err() != nil {
+		return sumsVerdict{Reason: ReasonChecksumsUnavailable}, nil
+	}
+	data, err := cl.lister.FetchChecksums(cl.sumsCtx, r.Tag, sumsAsset)
 	if err != nil {
 		if ctxErr := cl.ctx.Err(); ctxErr != nil {
 			return sumsVerdict{}, fmt.Errorf("release catalog fetch: %w", ctxErr)
 		}
 		logging.Subsystem("hub.maintenance.release-catalog").Warn("SHA256SUMS download failed",
 			"tag", r.Tag, "error", err)
-		// Not cached: the next refresh tries again.
 		return sumsVerdict{Reason: ReasonChecksumsUnavailable}, nil
 	}
 	// The same per-asset rule the executor applies at install time: only
