@@ -211,10 +211,11 @@ func TestOAuthCallback_RedirectsToLocalReturnToOnly(t *testing.T) {
 		"//user@evil.example/x":      "/",
 		" //evil.example/x":          "/",
 		"/\x7f/evil.example/x":       "/",
-		"/\uFF0Fevil.example":        "/%EF%BC%8Fevil.example",
-		"/\u2215evil.example":        "/%E2%88%95evil.example",
-		"/\u2044evil.example":        "/%E2%81%84evil.example",
-		"/\uFF3Cevil.example":        "/%EF%BC%BCevil.example",
+		// net/http.Redirect escapes non-ASCII bytes in lowercase hex.
+		"/\uFF0Fevil.example": "/%ef%bc%8fevil.example",
+		"/\u2215evil.example": "/%e2%88%95evil.example",
+		"/\u2044evil.example": "/%e2%81%84evil.example",
+		"/\uFF3Cevil.example": "/%ef%bc%bcevil.example",
 	} {
 		ws := newTestWebServer(t, WebServerConfig{
 			SessionSecret: secret,
