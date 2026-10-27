@@ -34,15 +34,18 @@ import {
 import type { CriticRange } from '../../../utils/critic.js';
 
 import { chooseOpeningAlphabet } from '../../../utils/critic-sentinels.js';
+import type { SentinelAlphabet } from '../../../utils/critic-sentinels.js';
 import { loadDocument } from './bridge.js';
 import type { LoadedDoc } from './bridge.js';
-import type { Core } from './create.js';
+import { definitionNodes } from './create.js';
+import type { Core, MdNode, MdRead, MdRoot } from './create.js';
 import {
   docMarkRuns,
   earlierKept,
   keyedMarks,
   marksReadBack,
   sameRuns,
+  TextMarks,
   textMarkRuns,
 } from './guard.js';
 import {
@@ -85,9 +88,12 @@ export class ReviewSession {
   private literalOpeners = new Map<string, number>();
   /**
    * The source's link reference definitions, so that a unit read on its
-   * own resolves its reference links as it does in the document.
+   * own resolves its reference links as it does in the document; null
+   * until read (sourceDefinitions).
    */
-  private definitions = '';
+  private definitions: string | null = '';
+  /** Counts loads, so a reading scheduled by an earlier load is dropped. */
+  private loads = 0;
   /**
    * Per top-level block: whether another block in its line run (blocks
    * with no blank line between them, whose backticks the critic parser can
@@ -109,8 +115,25 @@ export class ReviewSession {
   constructor(private readonly core: Core) {}
 
   /** Parses Markdown with the document's link reference definitions. */
-  private readonly parseInDocument = (md: string): Node =>
-    this.core.parse(this.definitions ? `${md}\n\n${this.definitions}\n` : md);
+  private readonly parseInDocument = (md: string): Node => {
+    const defs = this.sourceDefinitions();
+    return this.core.parse(defs ? `${md}\n\n${defs}\n` : md);
+  };
+
+  /**
+   * The opening text's link reference definitions. When the load did not
+   * read the source as Markdown, they are read when the browser is next
+   * idle, or here, when an edit or save needs them first.
+   */
+  private sourceDefinitions(): string {
+    if (this.definitions === null) {
+      this.definitions = definitionsOf(
+        this.source,
+        definitionNodes(this.core.parseMdRaw(this.source))
+      );
+    }
+    return this.definitions;
+  }
 
   /**
    * Opens md in the editor. Returns false (and leaves the editor empty)
@@ -120,23 +143,10 @@ export class ReviewSession {
    * text (the load invariant: consumedAsInSource, then readOnlyUnits).
    */
   load(md: string): boolean {
-    const { view, schema, parse, parseMd } = this.core;
-    // The alphabet must be free in the source and in what the Markdown
-    // parser makes of the sentinel form (character references decode to
-    // candidate characters, which would otherwise read as sentinels).
-    const a = chooseOpeningAlphabet(
-      md,
-      (text) => `${docStrings(parse(md))}\n${docStrings(parse(text))}`
-    );
-    if (!a) return false;
-    const loaded = loadDocument(md, parse, schema, a);
-    if (!loaded) return false;
-    if (sentinelInDefinition(md, a, this.core.parseMdRaw)) return false;
-    const held = consumedAsInSource(md, a, parseMd, loaded.doc.childCount, loaded.consumed);
-    if (!held) return false;
-    const base = makeBaseline(md, loaded.doc, parseMd, a);
-    const readOnly = this.readOnlyUnits(md, loaded, base, held);
-    if (!readOnly) return false;
+    const { view, parseMd } = this.core;
+    const o = this.opening(md);
+    if (!o) return false;
+    const { a, loaded, held, base, readOnly } = o;
     // A fresh state: the opened document, with no undo history. Every
     // mark in it is earlier: a mark is the reviewer's own only if it is
     // made in this editor after this load (design E5/E6), and that is
@@ -148,13 +158,22 @@ export class ReviewSession {
         selection: TextSelection.atStart(loaded.doc),
       })
     );
-    this.baseline = makeBaseline(md, view.state.doc, parseMd, a);
+    // The state holds the opened document itself, so its baseline is the
+    // one the load checks built (block nodes are matched by identity).
+    this.baseline =
+      view.state.doc === loaded.doc ? base : makeBaseline(md, view.state.doc, parseMd, a);
     this.source = md;
     this.readOnly = readOnly;
     this.starts = this.baseline ? blockStarts(this.baseline) : [];
     this.held = held;
     this.literalOpeners = literalOpeners(md);
-    this.definitions = definitionsOf(md, this.core.parseMdRaw);
+    this.definitions = o.definitions;
+    const load = ++this.loads;
+    if (o.definitions === null) {
+      whenIdle(() => {
+        if (load === this.loads) this.sourceDefinitions();
+      });
+    }
     this.codeNeighbours = this.baseline ? codeNeighbours(this.baseline) : [];
     this.hazardous =
       !this.baseline ||
@@ -187,6 +206,18 @@ export class ReviewSession {
     if (!base) return out;
     const { schema } = this.core;
     const starts = blockStarts(base);
+    // The whole text is read once; each unit takes the marks of its range.
+    const marks = new TextMarks(md);
+    // plain is a function of its input alone: each distinct text is read once.
+    const shown = new Map<string, string>();
+    const plain = (t: string): string => {
+      let v = shown.get(t);
+      if (v === undefined) {
+        v = this.core.plain(t);
+        shown.set(t, v);
+      }
+      return v;
+    };
     for (let k = 0; k < base.blocks.length; k++) {
       const [i, j] = unitRange(base, k, k);
       k = j;
@@ -194,10 +225,9 @@ export class ReviewSession {
       for (let q = i; q <= j; q++) nodes.push(base.nodes[q]);
       const runs = docMarkRuns(schema.topNodeType.create(null, nodes));
       const end = starts[j] + base.blocks[j].src.length;
-      const plain = this.core.plain;
-      if (sameRuns(runs, textMarkRuns(md, plain, starts[i], end), true)) continue;
+      if (sameRuns(runs, marks.runs(plain, starts[i], end), true)) continue;
       // The only differences allowed are the held tokens.
-      if (!sameRuns(runs, textMarkRuns(md, plain, starts[i], end, held), true)) return null;
+      if (!sameRuns(runs, marks.runs(plain, starts[i], end, held), true)) return null;
       for (let q = i; q <= j; q++) out.add(q);
     }
     // Code the critic parser reads across the edge of a block (a code span
@@ -315,17 +345,56 @@ export class ReviewSession {
 
   /** Whether md opens in the editor (the load checks, without showing it). */
   private reopens(md: string): boolean {
-    const { schema, parse, parseMd } = this.core;
+    return this.opening(md) !== null;
+  }
+
+  /**
+   * The load checks for md, without showing it: what load needs, or null
+   * when md does not open (no free alphabet, a note or sentinel not placed
+   * as in the source, a sentinel in a link reference definition, or marks
+   * other than the critic parser's). Each distinct text is read as Markdown
+   * once (Core.read) and that reading serves every check that reads it.
+   */
+  private opening(md: string): Opening | null {
+    const { schema } = this.core;
+    const reads = new Map<string, MdRead>();
+    const read = (text: string): MdRead => {
+      let r = reads.get(text);
+      if (!r) {
+        r = this.core.read(text);
+        reads.set(text, r);
+      }
+      return r;
+    };
+    // The alphabet must be free in the source and in what the Markdown
+    // parser makes of the sentinel form (character references decode to
+    // candidate characters, which would otherwise read as sentinels).
     const a = chooseOpeningAlphabet(
       md,
-      (text) => `${docStrings(parse(md))}\n${docStrings(parse(text))}`
+      (text) => `${docStrings(read(md).doc)}\n${docStrings(read(text).doc)}`
     );
-    if (!a) return false;
-    const loaded = loadDocument(md, parse, schema, a);
-    if (!loaded || sentinelInDefinition(md, a, this.core.parseMdRaw)) return false;
-    const held = consumedAsInSource(md, a, parseMd, loaded.doc.childCount, loaded.consumed);
-    if (!held) return false;
-    return this.readOnlyUnits(md, loaded, makeBaseline(md, loaded.doc, parseMd, a), held) !== null;
+    if (!a) return null;
+    let tagged = '';
+    const loaded = loadDocument(
+      md,
+      (text) => {
+        tagged = text;
+        return read(text).doc;
+      },
+      schema,
+      a
+    );
+    if (!loaded) return null;
+    if (sentinelInDefinition(md, a, read(tagged).definitions)) return null;
+    const tree = (text: string): MdRoot => read(text).tree;
+    const held = consumedAsInSource(md, a, tree, loaded.doc.childCount, loaded.consumed);
+    if (!held) return null;
+    const base = makeBaseline(md, loaded.doc, tree, a);
+    const readOnly = this.readOnlyUnits(md, loaded, base, held);
+    if (!readOnly) return null;
+    const source = reads.get(md);
+    const definitions = source ? definitionsOf(md, source.definitions) : null;
+    return { a, loaded, held, base, readOnly, definitions };
   }
 
   /** unitCheck passes. */
@@ -517,7 +586,7 @@ export function fenceLines(text: string): number {
  * no blank line in the source between them; text between blocks that holds
  * a backtick counts for the runs on both sides of it, blank line or not.
  */
-function codeNeighbours(base: Baseline): boolean[] {
+export function codeNeighbours(base: Baseline): boolean[] {
   const n = base.blocks.length;
   const run: number[] = [];
   let r = 0;
@@ -526,6 +595,9 @@ function codeNeighbours(base: Baseline): boolean[] {
     if (/\n[ \t]*\r?\n/.test(base.blocks[k].after.replace(/\r\n/g, '\n'))) r++;
   }
   const ticks = base.blocks.map((b) => b.src.includes('`'));
+  // Per line run, how many of its blocks hold a backtick.
+  const runTicks = new Map<number, number>();
+  for (let k = 0; k < n; k++) if (ticks[k]) runTicks.set(run[k], (runTicks.get(run[k]) ?? 0) + 1);
   const gapTicks = new Set<number>();
   if (n > 0 && base.lead.includes('`')) gapTicks.add(run[0]);
   for (let k = 0; k < n; k++) {
@@ -534,8 +606,7 @@ function codeNeighbours(base: Baseline): boolean[] {
     if (k + 1 < n) gapTicks.add(run[k + 1]);
   }
   return base.blocks.map(
-    (_, k) =>
-      gapTicks.has(run[k]) || base.blocks.some((_, m) => m !== k && run[m] === run[k] && ticks[m])
+    (_, k) => gapTicks.has(run[k]) || (runTicks.get(run[k]) ?? 0) > (ticks[k] ? 1 : 0)
   );
 }
 
@@ -592,20 +663,37 @@ function literalOpeners(md: string): Map<string, number> {
   return out;
 }
 
-/** The link reference definitions of md, one per line, in order. */
-function definitionsOf(md: string, parseRaw: Core['parseMdRaw']): string {
+/** The text of md's link reference definitions (definitionNodes of md), one per line, in order. */
+function definitionsOf(md: string, definitions: readonly MdNode[]): string {
   const out: string[] = [];
-  const walk = (n: ReturnType<Core['parseMdRaw']>): void => {
-    if (n.type === 'definition') {
-      const from = n.position?.start.offset;
-      const to = n.position?.end.offset;
-      if (from !== undefined && to !== undefined) out.push(md.slice(from, to));
-      return;
-    }
-    for (const k of n.children ?? []) walk(k);
-  };
-  walk(parseRaw(md));
+  for (const n of definitions) {
+    const from = n.position?.start.offset;
+    const to = n.position?.end.offset;
+    if (from !== undefined && to !== undefined) out.push(md.slice(from, to));
+  }
   return out.join('\n');
+}
+
+/** Runs f when the browser is next idle (soon after, where it cannot say). */
+function whenIdle(f: () => void): void {
+  const idle = (
+    globalThis as {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+    }
+  ).requestIdleCallback;
+  if (idle) idle(f, { timeout: 1000 });
+  else setTimeout(f, 0);
+}
+
+/** What the load checks found for a text that opens (ReviewSession.opening). */
+interface Opening {
+  a: SentinelAlphabet;
+  loaded: LoadedDoc;
+  held: Set<number>;
+  base: Baseline | null;
+  readOnly: Set<number>;
+  /** The text's link reference definitions, when the checks read the text itself; else null. */
+  definitions: string | null;
 }
 
 /** The source offset of each top-level block. */
