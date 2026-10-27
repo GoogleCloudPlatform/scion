@@ -59,12 +59,12 @@ func (p *probe) stopWaiting() {
 }
 
 // stampProbe stamps the probe carried by ctx, if any.
-func stampProbe(ctx context.Context, now func() time.Time) {
+func stampProbe(ctx context.Context, now time.Time) {
 	if ctx == nil {
 		return
 	}
 	if p, ok := ctx.Value(probeKey{}).(*probe); ok && p.acquired.Load() == 0 {
-		p.stamp(now())
+		p.stamp(now)
 	}
 }
 
@@ -99,19 +99,19 @@ func (d *EntDriver) Dialect() string { return d.inner.Dialect() }
 func (d *EntDriver) Close() error { return d.inner.Close() }
 
 // Exec implements dialect.ExecQuerier.
-func (d *EntDriver) Exec(ctx context.Context, query string, args, v any) error {
+// The probe is finished in a defer, so a panic in the inner driver still
+// releases its pending count.
+func (d *EntDriver) Exec(ctx context.Context, query string, args, v any) (err error) {
 	ctx, p := d.start(ctx)
-	err := d.inner.Exec(ctx, query, args, v)
-	d.finish(p, err, reqExec)
-	return err
+	defer func() { d.finish(p, err, reqExec) }()
+	return d.inner.Exec(ctx, query, args, v)
 }
 
 // Query implements dialect.ExecQuerier.
-func (d *EntDriver) Query(ctx context.Context, query string, args, v any) error {
+func (d *EntDriver) Query(ctx context.Context, query string, args, v any) (err error) {
 	ctx, p := d.start(ctx)
-	err := d.inner.Query(ctx, query, args, v)
-	d.finish(p, err, reqQuery)
-	return err
+	defer func() { d.finish(p, err, reqQuery) }()
+	return d.inner.Query(ctx, query, args, v)
 }
 
 // Tx implements dialect.Driver.
@@ -120,11 +120,10 @@ func (d *EntDriver) Tx(ctx context.Context) (dialect.Tx, error) {
 }
 
 // BeginTx starts a transaction with options, as *entsql.Driver does.
-func (d *EntDriver) BeginTx(ctx context.Context, opts *entsql.TxOptions) (dialect.Tx, error) {
+func (d *EntDriver) BeginTx(ctx context.Context, opts *entsql.TxOptions) (tx dialect.Tx, err error) {
 	ctx, p := d.start(ctx)
-	tx, err := d.inner.BeginTx(ctx, opts)
-	d.finish(p, err, reqTx)
-	return tx, err
+	defer func() { d.finish(p, err, reqTx) }()
+	return d.inner.BeginTx(ctx, opts)
 }
 
 // start attaches a probe to ctx. A ctx that already carries one (defence in

@@ -23,8 +23,13 @@ import (
 )
 
 // stackDepth is how many caller PCs are recorded per transaction or
-// connection checkout.
-const stackDepth = 24
+// connection checkout. The deepest known path (a non-transactional ent
+// mutation that opens sqlgraph's internal transaction) has about 22
+// infrastructure frames ahead of the first caller frame: database/sql,
+// entsql, this package, sqlgraph, and the generated ent code with withHooks
+// and the two entc mutation hooks. 32 leaves headroom; overflowing it would
+// silently report op=unknown.
+const stackDepth = 32
 
 // siteFrames is how many non-infrastructure frames the WARN's site lists.
 const siteFrames = 3
@@ -161,6 +166,34 @@ func (c *callsites) frames(pc uintptr) []frameInfo {
 // non-infrastructure frame's short function name. capped reports whether the
 // op cap was reached by this call (so the caller can log it once).
 func (c *callsites) op(pcs []uintptr) (op string, capped bool) {
+	// Fast path: walk the cached frames under one read lock.
+	c.mu.RLock()
+	name, miss := "", false
+walk:
+	for _, pc := range pcs {
+		f, ok := c.pcs[pc]
+		if !ok {
+			miss = true
+			break
+		}
+		for _, fr := range f {
+			if !fr.infra {
+				name = fr.fn
+				break walk
+			}
+		}
+	}
+	if name != "" {
+		if v, ok := c.ops[name]; ok {
+			c.mu.RUnlock()
+			return v, false
+		}
+	}
+	c.mu.RUnlock()
+	if name != "" && !miss {
+		return c.intern(name)
+	}
+	// Slow path: symbolize the PCs not yet cached.
 	for _, pc := range pcs {
 		for _, f := range c.frames(pc) {
 			if !f.infra {

@@ -163,6 +163,9 @@ type Monitor struct {
 	pending   atomic.Int64
 	pendingHW atomic.Int64
 
+	// capLogged is set once the op-cap INFO line has been queued.
+	capLogged atomic.Bool
+
 	// holders remembers recent connection checkouts (SQLite only), so a
 	// lock_wait line can name who held the connection during the wait.
 	holders holderRing
@@ -300,11 +303,21 @@ const (
 	msgOpCap    = "db_diag_op_cap_reached"
 )
 
-// op resolves the capped op of a stack, queueing the one-time cap line.
+// Messages of the WARN lines, for log queries and tests.
+const (
+	MessageHold     = msgHold
+	MessageLockWait = msgLockWait
+)
+
+// op resolves the capped op of a stack. The first time an op falls past the
+// cap, it queues the one-time cap line; if the queue is full then, a later
+// call retries, so the line is not lost.
 func (m *Monitor) op(pcs []uintptr) string {
-	op, capped := m.sites.op(pcs)
-	if capped {
-		m.offer(record{msg: msgOpCap, attrs: []slog.Attr{slog.Int("max_ops", maxOps)}})
+	op, _ := m.sites.op(pcs)
+	if op == OpOther && !m.capLogged.Load() && m.capLogged.CompareAndSwap(false, true) {
+		if !m.offer(record{msg: msgOpCap, attrs: []slog.Attr{slog.Int("max_ops", maxOps)}}) {
+			m.capLogged.Store(false)
+		}
 	}
 	return op
 }

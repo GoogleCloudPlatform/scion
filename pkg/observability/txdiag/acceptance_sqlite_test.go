@@ -31,10 +31,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"modernc.org/sqlite"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/txdiag"
 )
 
@@ -412,22 +414,49 @@ func TestWrappedAndUnwrappedClients(t *testing.T) {
 	}
 }
 
+// benchVariants are the three ways the benchmarks open the store: without
+// diagnostics, with diagnostics and no recorder (metrics export off), and
+// with diagnostics and the hub's real dbmetrics recorder (metrics export on).
+var benchVariants = []string{"unwrapped", "wrapped", "wrapped+recorder"}
+
+func openBenchClient(b *testing.B, variant string) *ent.Client {
+	b.Helper()
+	pool := entc.PoolConfig{MaxOpenConns: 1}
+	if variant != "unwrapped" {
+		pool.Diag = txdiag.QuietConfig()
+	}
+	client, err := entc.OpenSQLite("file:"+filepath.Join(b.TempDir(), "b.db"), pool)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = client.Close() })
+	if err := entc.AutoMigrate(context.Background(), client); err != nil {
+		b.Fatal(err)
+	}
+	if variant == "wrapped+recorder" {
+		mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewManualReader()))
+		b.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
+		rec, err := dbmetrics.New(mp)
+		if err != nil {
+			b.Fatal(err)
+		}
+		mon, ok := entc.DiagMonitor(client)
+		tr, isRec := rec.(txdiag.Recorder)
+		if !ok || !isRec {
+			b.Fatal("cannot attach the dbmetrics recorder")
+		}
+		mon.SetRecorder(tr)
+	}
+	return client
+}
+
+// BenchmarkTx measures one write transaction (BEGIN, INSERT, COMMIT).
 func BenchmarkTx(b *testing.B) {
-	for _, wrapped := range []bool{false, true} {
-		b.Run(fmt.Sprintf("wrapped=%v", wrapped), func(b *testing.B) {
-			pool := entc.PoolConfig{MaxOpenConns: 1}
-			if wrapped {
-				pool.Diag = txdiag.QuietConfig()
-			}
-			client, err := entc.OpenSQLite("file:"+filepath.Join(b.TempDir(), "b.db"), pool)
-			if err != nil {
-				b.Fatal(err)
-			}
-			defer func() { _ = client.Close() }()
-			if err := entc.AutoMigrate(context.Background(), client); err != nil {
-				b.Fatal(err)
-			}
+	for _, v := range benchVariants {
+		b.Run(v, func(b *testing.B) {
+			client := openBenchClient(b, v)
 			ctx := context.Background()
+			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				tx, err := client.Tx(ctx)
@@ -438,6 +467,28 @@ func BenchmarkTx(b *testing.B) {
 					b.Fatal(err)
 				}
 				if err := tx.Commit(); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkStmt measures one cheap statement outside a transaction (a
+// primary-key read): the per-checkout cost of the wrapper and probe.
+func BenchmarkStmt(b *testing.B) {
+	for _, v := range benchVariants {
+		b.Run(v, func(b *testing.B) {
+			client := openBenchClient(b, v)
+			ctx := context.Background()
+			s, err := newSetting(ctx, client, "bench")
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := client.HubSetting.Get(ctx, s.ID); err != nil {
 					b.Fatal(err)
 				}
 			}

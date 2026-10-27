@@ -868,3 +868,70 @@ func TestSlowWorkInsideTxIsIdleNotCommit(t *testing.T) {
 		t.Errorf("commit histogram calls: %+v", commits)
 	}
 }
+
+// TestPendingReleasedWhenInnerDriverPanics: a panic inside the wrapped
+// driver (recovered by the caller) must not leave the request counted as a
+// pending waiter, or every later waiters_max would be inflated.
+func TestPendingReleasedWhenInnerDriverPanics(t *testing.T) {
+	hs := newHarness(t, DialectSQLite, nil)
+	ed := WrapEntDriver(entsql.OpenDB(dialect.SQLite, hs.db), hs.mon)
+	// Panic while the connection is being opened, before any driver call
+	// could mark the request acquired: only the deferred finish releases it.
+	hs.drv.onOpen = func() { panic("driver panic") }
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("expected the driver panic to propagate")
+			}
+		}()
+		_ = ed.Exec(context.Background(), "UPDATE", []any{}, nil)
+	}()
+	if got := hs.mon.pending.Load(); got != 0 {
+		t.Fatalf("pending = %d after a recovered panic, want 0", got)
+	}
+}
+
+// TestOpCapLineRetriedWhenQueueFull: if the queue is full when the op cap
+// is first crossed, the cap line is queued by a later call instead of being
+// lost.
+func TestOpCapLineRetriedWhenQueueFull(t *testing.T) {
+	block := make(chan struct{})
+	h := &CaptureHandler{Block: block, Entered: make(chan struct{}, 1)}
+	m := NewMonitor(Config{Logger: newLogger(h)})
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			close(block)
+		}
+		m.Close()
+	})
+	m.warn(mkrec("first"))
+	<-h.Entered
+	for i := 0; i < queueSize; i++ {
+		m.warn(mkrec(fmt.Sprintf("fill%d", i)))
+	}
+	for i := 0; i < maxOps; i++ {
+		_, _ = m.sites.intern(fmt.Sprintf("op%d", i))
+	}
+	var pcs [stackDepth]uintptr
+	n := runtime.Callers(1, pcs[:])
+	if got := m.op(pcs[:n]); got != OpOther { // queue full: cap line not queued
+		t.Fatalf("op = %q", got)
+	}
+	if m.capLogged.Load() {
+		t.Fatal("cap line marked logged although the queue was full")
+	}
+	close(block)
+	released = true
+	if err := m.Flush(flushTimeout); err != nil {
+		t.Fatal(err)
+	}
+	_ = m.op(pcs[:n]) // retried now
+	_ = m.op(pcs[:n]) // not again
+	if err := m.Flush(flushTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(h.Lines(MsgOpCap)); got != 1 {
+		t.Fatalf("got %d op-cap lines, want 1", got)
+	}
+}

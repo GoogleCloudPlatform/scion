@@ -104,12 +104,17 @@ func (c *conn) Unwrap() driver.Conn { return c.base }
 // request's probe (once) and opens a checkout if none is open.
 func (c *conn) touch(ctx context.Context) {
 	now := c.mon.now()
-	stampProbe(ctx, func() time.Time { return now })
+	stampProbe(ctx, now)
 	c.mu.Lock()
 	if !c.open {
 		c.open = true
 		c.start = now
-		c.npcs = runtime.Callers(3, c.pcs[:])
+		// The checkout's stack feeds only the conn hold and the holder
+		// ring, which are SQLite-only.
+		c.npcs = 0
+		if c.mon.sqlite {
+			c.npcs = runtime.Callers(3, c.pcs[:])
+		}
 		c.stats = holdStats{}
 		c.txWarned = false
 		pcs, n := c.pcs, c.npcs

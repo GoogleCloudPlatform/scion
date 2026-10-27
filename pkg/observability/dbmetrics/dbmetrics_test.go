@@ -12,6 +12,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/txdiag"
 )
 
 // TestNewDisabledRegisters verifies that the safe default (no MeterProvider,
@@ -341,3 +343,7 @@ func TestTxDiagnosticsInstruments(t *testing.T) {
 		}
 	}
 }
+
+// The hub attaches the dbmetrics recorder to the transaction diagnostics by
+// a type assertion to txdiag.Recorder; fail the build if it stops matching.
+var _ txdiag.Recorder = (*recorder)(nil)

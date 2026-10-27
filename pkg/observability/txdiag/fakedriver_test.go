@@ -30,6 +30,8 @@ type fakeDriver struct {
 	minimal bool
 	// onExec runs inside ExecContext (for example to advance a fake clock).
 	onExec func()
+	// onOpen runs when a new connection is opened.
+	onOpen func()
 	// onCommit runs inside a transaction's Commit (a slow fsync).
 	onCommit func()
 	// execErr, when set, is returned by every Exec.
@@ -68,6 +70,9 @@ func newFakeDriver() *fakeDriver {
 }
 
 func (d *fakeDriver) Open(string) (driver.Conn, error) {
+	if d.onOpen != nil {
+		d.onOpen()
+	}
 	if d.minimal {
 		return &minimalConn{d: d}, nil
 	}
