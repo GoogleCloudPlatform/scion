@@ -357,6 +357,73 @@ func TestChatStarredConversations_MatchesStarScope(t *testing.T) {
 	}
 }
 
+// TestChatStarredConversations_MatchesStarScopeForTokens checks the batched
+// decisions against resolveStarScope for user access tokens, whose checks
+// go through other entry points (the token's credential, the self-scope
+// check with its membership cache, agent:read): for each token and every
+// conversation key (threads of both projects, both DM kinds), the rail
+// lists the conversation exactly when the caller has a live star in it and
+// the per-conversation star list (resolveStarScope with the same token)
+// answers it. The read switch is off, as in the session parity test.
+func TestChatStarredConversations_MatchesStarScopeForTokens(t *testing.T) {
+	f := newStarredRailFixture(t, false)
+	ctx := context.Background()
+	// The owner, a participant of the member's human DM, stars in both A
+	// threads, project B's thread and that DM, then loses project A.
+	for _, c := range []struct{ key, projectID string }{
+		{f.topicA, f.projA}, {f.topicA2, f.projA}, {f.topicB, f.projB}, {f.dms.humanKey, ""},
+	} {
+		var m string
+		if c.projectID == "" {
+			m = f.dmMsg(t, c.key, f.dms.humanConv, uuid.Nil.String(), "user:"+f.owner, f.owner, "o", "web", time.Now().Add(-time.Minute))
+		} else {
+			m = f.threadMsg(t, c.key, c.projectID, "o", time.Now().Add(-time.Minute))
+		}
+		_, _, err := f.stars.AddMessageStar(ctx, f.owner, StarTarget{MessageID: m, ProjectID: c.projectID,
+			Selector: StarSelector{ConversationKey: c.key, Channel: "web", ThreadID: c.key}})
+		require.NoError(t, err)
+	}
+	type caller struct {
+		name, user, token string
+	}
+	callers := []caller{
+		{"member hub token", f.member, f.mint(t, f.member, hubBoundary(), "inbox:read", "project:read", "agent:read")},
+		{"member project A token", f.member, f.mint(t, f.member, projectBoundary(f.projA), "inbox:read", "project:read", "agent:read")},
+		{"member project A token without agent:read", f.member, f.mint(t, f.member, projectBoundary(f.projA), "inbox:read", "project:read")},
+		{"member project B token", f.member, f.mint(t, f.member, projectBoundary(f.projB), "inbox:read", "project:read", "agent:read")},
+		{"owner project A token, owner removed from A", f.owner, f.mint(t, f.owner, projectBoundary(f.projA), "inbox:read", "project:read", "agent:read")},
+	}
+	_, err := f.s.DeleteRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.owner)
+	require.NoError(t, err)
+
+	keys := []string{f.topicA, f.topicA2, f.topicB, f.dms.agentKey, f.dms.humanKey}
+	for _, c := range callers {
+		rec := f.call(t, c.token, http.MethodGet, starredConversationsPath, nil)
+		if rec.Code == http.StatusForbidden {
+			// The request-level token check (a project token whose holder is no
+			// longer a member) refuses both routes alike, before any lookup.
+			for _, key := range keys {
+				assert.Equal(t, http.StatusForbidden, f.call(t, c.token, http.MethodGet, starListPath(key), nil).Code, "%s %s", c.name, key)
+			}
+			continue
+		}
+		rows := map[string]bool{}
+		for _, it := range decodeStarredConversations(t, rec).Items {
+			rows[it.ConversationKey] = true
+		}
+		for _, key := range keys {
+			page, err := f.stars.ListMessageStarCandidates(ctx, StarFilter{UserID: c.user,
+				Selector: StarSelector{ConversationKey: key, Channel: "web", ThreadID: key}, Limit: 1})
+			require.NoError(t, err)
+			starred := len(page.Items) > 0
+			list := f.call(t, c.token, http.MethodGet, starListPath(key), nil)
+			require.Contains(t, []int{http.StatusOK, http.StatusNotFound}, list.Code, "%s %s: %s", c.name, key, list.Body.String())
+			readable := list.Code == http.StatusOK
+			assert.Equal(t, starred && readable, rows[key], "%s, conversation %s (starred %t, readable %t)", c.name, key, starred, readable)
+		}
+	}
+}
+
 // TestChatStarredConversations_ScanBudget pins the bounded scan: hidden
 // candidates use the budget, a short or empty page then carries a cursor,
 // and resuming reaches the readable rows after them.

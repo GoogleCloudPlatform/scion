@@ -36,11 +36,16 @@ func (s *pgWebChatStore) ListStarredConversationCandidates(ctx context.Context, 
 	if err != nil {
 		return StarredConversationPage{}, err
 	}
+	conversationsTable, err := s.table(ctx, "conversations")
+	if err != nil {
+		return StarredConversationPage{}, err
+	}
 	const isDM = `left(el.ckey, 3) = 'dm:'`
 	activity := `(CASE WHEN ` + isDM + ` THEN d.last_activity_at ELSE t.last_activity_at END)`
 	// TIMESTAMPTZ keeps microseconds: the nine-digit form ends in 000.
 	sortValue := `COALESCE(to_char(` + activity + ` AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US') || '000Z', '')`
 	peerJoins := ""
+	a := &pgArgs{}
 	if f.Sort == StarredConversationsByName {
 		usersTable, err := s.table(ctx, "users")
 		if err != nil {
@@ -50,12 +55,14 @@ func (s *pgWebChatStore) ListStarredConversationCandidates(ctx context.Context, 
 		if err != nil {
 			return StarredConversationPage{}, err
 		}
-		sortValue = `(CASE WHEN ` + isDM + ` THEN ` + starPeerNameSQL("lower", "btrim") + ` ELSE lower(t.name) END)`
+		trim := func(col string) string { return `btrim(` + col + `, ` + a.add(starLabelSpace) + `::text)` }
+		// Folding under "C" lower-cases ASCII letters only, as SQLite's lower
+		// does, whatever the database's ctype.
+		sortValue = `(CASE WHEN ` + isDM + ` THEN ` + starPeerNameSQL(trim, ` COLLATE "C"`) + ` ELSE lower(t.name COLLATE "C") END)`
 		peerJoins = `
   LEFT JOIN ` + usersTable + ` u ON d.peer_kind = 'user' AND u.id = ` + pgUUIDText("d.peer_id") + `
   LEFT JOIN ` + agentsTable + ` a ON d.peer_kind = 'agent' AND a.id = ` + pgUUIDText("d.peer_id")
 	}
-	a := &pgArgs{}
 	user := a.add(f.UserID)
 	ch := a.add(f.Channel)
 	var conds []string
@@ -89,7 +96,14 @@ SELECT el.ckey AS ckey,
           FROM webchat_message_star st
           JOIN `+messagesTable+` m ON m.id = `+pgUUIDText("st.message_id")+`
          WHERE st.user_id = `+user+`::text
-           AND m.thread_id = st.conversation_key
+           AND (m.thread_id = st.conversation_key
+                OR m.conversation_id IN (
+                     SELECT `+pgUUIDText("lower(t2.conversation_id)")+` FROM webchat_topic t2
+                      WHERE t2.id = st.conversation_key
+                     UNION ALL
+                     SELECT c.id FROM `+conversationsTable+` c
+                      WHERE left(st.conversation_key, 3) = 'dm:'
+                        AND c.surface = 'native' AND c.external_ref = st.conversation_key))
            AND (`+ch+`::text = '' OR m.channel = `+ch+`::text)
            AND NOT EXISTS (SELECT 1 FROM webchat_message_ext e WHERE e.message_id = st.message_id AND e.deleted_at IS NOT NULL)
          GROUP BY st.conversation_key) el

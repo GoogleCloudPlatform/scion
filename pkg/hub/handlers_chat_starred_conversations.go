@@ -56,8 +56,6 @@ const (
 	// starredConversationsScanBudget bounds the candidates one response
 	// scans.
 	starredConversationsScanBudget = 1000
-	// starredConversationsMaxValueLen bounds a sealed sort value.
-	starredConversationsMaxValueLen = 4096
 )
 
 // starredConversationItem is one row of the Starred rail.
@@ -243,7 +241,9 @@ func (s *Server) sealStarredConversationsCursor(pos StarredConversationPosition,
 
 // openStarredConversationsCursor opens a sealed position and validates it
 // for the order: a conversation key, and for activity a fixed-width UTC
-// activity value or "" (no activity).
+// activity value or "" (no activity). A name value is not length-bounded:
+// the hub sealed it from a stored name, and the sealer's authentication
+// already rejects any other value.
 func (s *Server) openStarredConversationsCursor(sealed, binding, sortMode string) (StarredConversationPosition, error) {
 	inner, err := openAndValidateListCursor(s.listCursorSealer, sealed, binding)
 	if err != nil {
@@ -259,7 +259,7 @@ func (s *Server) openStarredConversationsCursor(sealed, binding, sortMode string
 	if err := dec.Decode(&c); err != nil || dec.More() {
 		return StarredConversationPosition{}, errInvalidCursor
 	}
-	if !validStarConversationKey(c.Key) || len(c.Value) > starredConversationsMaxValueLen {
+	if !validStarConversationKey(c.Key) {
 		return StarredConversationPosition{}, errInvalidCursor
 	}
 	if sortMode == StarredConversationsByActivity {
@@ -549,7 +549,8 @@ func (a *starredConversationAuthorizer) loadProjects(ctx context.Context, ids []
 	if len(missing) == 0 {
 		return nil
 	}
-	res, err := a.s.store.ListProjectSummaries(ctx, store.ProjectFilter{MemberProjectIDs: missing}, store.ListOptions{Limit: len(missing)})
+	res, err := a.s.store.ListProjectSummaries(ctx, store.ProjectFilter{MemberProjectIDs: missing},
+		store.ListOptions{Limit: len(missing), SkipTotalCount: true})
 	if err != nil {
 		return err
 	}

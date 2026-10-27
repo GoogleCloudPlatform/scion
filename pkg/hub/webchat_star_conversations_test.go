@@ -23,6 +23,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -242,6 +243,77 @@ func testStarredConversationsContract(t *testing.T, env starStoreEnv) {
 		assert.Contains(t, keys, otherChannel, "an empty channel matches every channel")
 	})
 
+	t.Run("non-ASCII names fold ASCII letters only, in byte order, on both dialects", func(t *testing.T) {
+		u := uuid.NewString()
+		eclair := topic(projA, "Éclair", at(time.Minute))
+		ea := topic(projA, "éa", at(2*time.Minute))
+		zed := topic(projA, "Zed", at(3*time.Minute))
+		for _, k := range []string{eclair, ea, zed} {
+			add(u, msg(k, base), k, projA)
+		}
+		f := StarredConversationFilter{UserID: u, Channel: "web", Sort: StarredConversationsByName, Limit: 10}
+		page, err := st.ListStarredConversationCandidates(ctx, f)
+		require.NoError(t, err)
+		// "zed" (0x7a) < "Éclair" (0xc3 0x89) < "éa" (0xc3 0xa9): É is not folded.
+		assert.Equal(t, []string{zed, eclair, ea}, starredConversationKeys(page))
+		assert.Equal(t, []string{"zed", "Éclair", "éa"}, []string{
+			page.Items[0].Position.Value, page.Items[1].Position.Value, page.Items[2].Position.Value})
+		assert.Equal(t, []string{zed, eclair, ea}, walkStarredConversations(t, st, f, 1))
+	})
+
+	t.Run("a peer label trims the whitespace the displayed label trims", func(t *testing.T) {
+		u := uuid.NewString()
+		padded, blank := uuid.NewString(), uuid.NewString()
+		env.addNamedUser(t, padded, "\u00a0\tNia\u3000")
+		env.addNamedUser(t, blank, "\u00a0\u2003")
+		for _, peer := range []string{padded, blank} {
+			key := "dm:user:" + u + ":user:" + peer
+			env.addDMRow(t, u, key, "user", peer, base)
+			add(u, msg(key, base), key, "")
+		}
+		f := StarredConversationFilter{UserID: u, Channel: "web", Sort: StarredConversationsByName, Limit: 10}
+		page, err := st.ListStarredConversationCandidates(ctx, f)
+		require.NoError(t, err)
+		var values []string
+		for _, c := range page.Items {
+			values = append(values, c.Position.Value)
+		}
+		assert.Equal(t, []string{"nia", "user"}, values, "as starUserLabel: the trimmed name, or User for a blank one")
+		assert.Equal(t, "Nia", starUserLabel(&store.User{DisplayName: "\u00a0\tNia\u3000"}))
+		assert.Equal(t, starLabelUser, starUserLabel(&store.User{DisplayName: "\u00a0\u2003"}))
+	})
+
+	t.Run("a message listed by its conversation ID counts (the read switch's selector)", func(t *testing.T) {
+		u := uuid.NewString()
+		peer := uuid.NewString()
+		// A modern DM row: no thread ID, only the DM's native conversation.
+		dmKey := "dm:user:" + u + ":user:" + peer
+		dmConv := uuid.NewString()
+		env.addNativeConversation(t, dmConv, dmKey)
+		dmMsg := uuid.NewString()
+		env.addMsg(t, dmMsg, "web", "", dmConv, base)
+		_, _, err := st.AddMessageStar(ctx, u, StarTarget{MessageID: dmMsg,
+			Selector: StarSelector{ConversationKey: dmKey, Channel: "web", ConversationID: dmConv}})
+		require.NoError(t, err)
+		// A modern thread row: the topic's conversation.
+		modern := topic(projA, "modern", at(time.Minute))
+		topicConv := uuid.NewString()
+		env.setTopicConversation(t, modern, topicConv)
+		threadMsg := uuid.NewString()
+		env.addMsg(t, threadMsg, "web", "", topicConv, base)
+		_, _, err = st.AddMessageStar(ctx, u, StarTarget{MessageID: threadMsg, ProjectID: projA,
+			Selector: StarSelector{ConversationKey: modern, Channel: "web", ConversationID: topicConv}})
+		require.NoError(t, err)
+		// A row of another conversation stored under a key it is not in.
+		stray := topic(projA, "stray", at(2*time.Minute))
+		strayMsg := uuid.NewString()
+		env.addMsg(t, strayMsg, "web", "", uuid.NewString(), base)
+		env.insertStar(t, u, strayMsg, stray, projA, base)
+
+		f := StarredConversationFilter{UserID: u, Channel: "web", Sort: StarredConversationsByActivity}
+		assert.ElementsMatch(t, []string{dmKey, modern}, walkStarredConversations(t, st, f, 10))
+	})
+
 	t.Run("invalid input", func(t *testing.T) {
 		for name, f := range map[string]StarredConversationFilter{
 			"no user":  {Sort: StarredConversationsByActivity, Limit: 1},
@@ -252,6 +324,16 @@ func testStarredConversationsContract(t *testing.T, env starStoreEnv) {
 			assert.ErrorIs(t, err, store.ErrInvalidInput, name)
 		}
 	})
+}
+
+// TestStarredConversations_LabelSpaceIsTrimSpace pins starLabelSpace to
+// exactly the characters strings.TrimSpace strips.
+func TestStarredConversations_LabelSpaceIsTrimSpace(t *testing.T) {
+	for r := rune(0); r <= unicode.MaxRune; r++ {
+		if unicode.IsSpace(r) != strings.ContainsRune(starLabelSpace, r) {
+			t.Errorf("rune %U: IsSpace %t, in starLabelSpace %t", r, unicode.IsSpace(r), strings.ContainsRune(starLabelSpace, r))
+		}
+	}
 }
 
 // TestStarredConversations_SQLiteActivityKey pins the SQLite activity sort

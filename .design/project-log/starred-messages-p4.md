@@ -13,12 +13,15 @@
   the query is strict (unknown or repeated parameters, a bad sort, limit, project ID or cursor are 400); a project
   the caller cannot read is a 404.
 - **Store:** `MessageStarStore.ListStarredConversationCandidates` in both dialects groups the caller's stars by
-  conversation key before the page is cut. A star counts when its message exists, carries the star's key as its
-  native routing key (`messages.thread_id`, which a promotion moves with the star), is in the history channel and
-  is not soft-deleted, and (for a thread) its topic is live. The order is keyset-paged on values the query computes:
-  activity as fixed-width UTC text (newest first, none last), or the case-folded name (the topic name, or the DM
-  peer's label computed in SQL like `starUserLabel`/`starAgentLabel`), then the key. PostgreSQL compares under
-  `COLLATE "C"` so both dialects use byte order.
+  conversation key before the page is cut. A star counts when its message exists, is a message of the conversation
+  under either form of the read-switch selector (`messages.thread_id` is the key, or `messages.conversation_id` is
+  the key's conversation: the topic's `conversation_id`, or the native conversation whose `external_ref` is the DM
+  key; a promotion moves both with the star), is in the history channel and is not soft-deleted, and (for a
+  thread) its topic is live. The order is keyset-paged on values the query computes: activity as fixed-width UTC
+  text (newest first, none last), or the name folded for ASCII letters only (the topic name, or the DM peer's label
+  computed in SQL like `starUserLabel`/`starAgentLabel`, trimmed of the same Unicode whitespace as
+  `strings.TrimSpace`), then the key. PostgreSQL folds and compares under `COLLATE "C"`, so both dialects give the
+  same order whatever the database's locale.
 - **Authorization:** `starredConversationAuthorizer` applies `resolveStarScope`'s rules per candidate, batched: one
   project lookup (`ListProjectSummaries`), one agent lookup and one user lookup per batch, one
   `ComputeCapabilitiesForActions` for the threads' projects, the token's self-scope check (membership cached per
@@ -42,8 +45,13 @@
 - **The rail's filter follows the page only on the page's changes.** `syncStarredFilter` reacts to a change of
   `selectedKey` or `centerFilter`, never to the user's own pick, so a click on Starred is not undone before the page
   applies the filter.
-- **The rail lists a conversation by its native key and does not resolve the read-switch selector** (one query per
-  conversation); the center does, so a drifted conversation shows its error there.
+- **The rail matches both selector forms in SQL instead of resolving the read switch per conversation**, so a star
+  that counts in the star list, the state route and the center also counts in the rail (a modern DM row with only
+  a conversation ID included). A conversation whose read target cannot be resolved still lists in the rail; the
+  center shows its error.
+- **Only a pick in the filter control is persisted.** A change the page drives (a full-context permalink, a jump,
+  Show all) or the experiment drives (the browser flag off, or the hub answering 404) moves the rail to All and
+  stops the reconcile poll without touching the stored preference.
 - **SQLite activity text** is RFC3339Nano for current writers; the query pads it to nine digits so a whole second
   sorts before its fractions. Another layout (a legacy row) sorts as having no activity.
 - **`CreateTopic` stores no activity**; a topic's `last_activity_at` comes from its messages.
@@ -52,7 +60,6 @@
 
 ## Verification notes
 
-- The hub tests run per shard; locate them with `hack/hubshard` at the exact commit. Build-lane runs follow the
-  project's lane process (dev-time Go runs need a lane START).
+- The Go hub tests run per shard; see `hack/hubshard`, and locate the new tests at the exact commit.
 - Mocked browser cases: `web/e2e/chat-mobile/star-rail.pw.ts` (hub mock in `star-rail-mock.ts`). Chromium ran under
   a 1 s session RSS watcher with a kill limit (peak about 600 MB).

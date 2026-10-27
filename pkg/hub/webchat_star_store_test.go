@@ -78,6 +78,11 @@ type starStoreEnv struct {
 	addAgent func(t *testing.T, id, name, slug string)
 	// addNamedUser creates a user with a display name.
 	addNamedUser func(t *testing.T, id, displayName string)
+	// addNativeConversation creates a native conversation row whose
+	// external_ref is ref (a DM's conversation under the read switch).
+	addNativeConversation func(t *testing.T, id, ref string)
+	// setTopicConversation sets a topic's conversation_id.
+	setTopicConversation func(t *testing.T, topicID, conversationID string)
 }
 
 func threadSel(key string) StarSelector {
@@ -352,6 +357,16 @@ func TestMessageStarStore_SQLite(t *testing.T) {
 				ID: id, Email: id + "@stars.test", DisplayName: displayName, Role: "member", Status: store.UserStatusActive,
 			}))
 		},
+		addNativeConversation: func(t *testing.T, id, ref string) {
+			at := time.Now().UTC()
+			require.NoError(t, s.CreateConversation(context.Background(), &store.Conversation{
+				ID: id, Kind: "direct", Surface: "native", ExternalRef: ref, DriftState: "active", LastActivityAt: at, CreatedAt: at,
+			}))
+		},
+		setTopicConversation: func(t *testing.T, topicID, conversationID string) {
+			_, err := db.Exec(`UPDATE webchat_topic SET conversation_id = ? WHERE id = ?`, conversationID, topicID)
+			require.NoError(t, err)
+		},
 	}
 	require.NotNil(t, env.stars)
 	testMessageStarStoreContract(t, env)
@@ -483,6 +498,15 @@ CREATE TRIGGER star_promote_fails BEFORE DELETE ON webchat_dm FOR EACH ROW EXECU
 		},
 		addNamedUser: func(t *testing.T, id, displayName string) {
 			_, err := db.Exec(`INSERT INTO users (id, display_name) VALUES ($1, $2)`, id, displayName)
+			require.NoError(t, err)
+		},
+		addNativeConversation: func(t *testing.T, id, ref string) {
+			_, err := db.Exec(`INSERT INTO conversations (id, kind, surface, external_ref, drift_state, last_activity_at, created_at)
+VALUES ($1, 'direct', 'native', $2, 'active', NOW(), NOW())`, id, ref)
+			require.NoError(t, err)
+		},
+		setTopicConversation: func(t *testing.T, topicID, conversationID string) {
+			_, err := db.Exec(`UPDATE webchat_topic SET conversation_id = $1 WHERE id = $2`, conversationID, topicID)
 			require.NoError(t, err)
 		},
 	}

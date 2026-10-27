@@ -27,10 +27,13 @@ import (
 // user has at least one live star.
 //
 // A star counts for a conversation when its message still exists, is a
-// message of the conversation's native routing key (messages.thread_id
-// equals the star's conversation key, which a promotion moves in the same
-// transaction as the star), is in the history channel, and is not
-// soft-deleted; a thread must also be a live topic. Stars are grouped by
+// message of the conversation under either history selector (the read
+// switch's two forms: messages.thread_id equals the star's conversation
+// key, or messages.conversation_id is the key's conversation, which is the
+// topic's conversation_id for a thread and the native conversation whose
+// external_ref is the key for a DM; a promotion moves both with the star),
+// is in the history channel, and is not soft-deleted; a thread must also
+// be a live topic. Stars are grouped by
 // that key before the page is cut, so a conversation appears once
 // whatever its number of stars, and a page boundary never splits one.
 //
@@ -41,9 +44,10 @@ import (
 //     or the caller's own DM row, the sources the chat rail reads) as
 //     fixed-width UTC text, newest first; no activity sorts last. Then the
 //     conversation key, ascending.
-//   - alpha: the case-folded conversation name (the topic name, or a DM
-//     peer's label as the star routes label it), then the key, both
-//     ascending, by byte order.
+//   - alpha: the conversation name folded to lower case for ASCII letters
+//     only, in both dialects (the topic name, or a DM peer's label as the
+//     star routes label it, trimmed of the same whitespace), then the key,
+//     both ascending, by byte order.
 //
 // Read access is not applied here: the handler authorizes every candidate
 // before it serializes anything.
@@ -153,17 +157,24 @@ func sqliteStarActivityKey(col string) string {
 	      ELSE '' END)`
 }
 
+// starLabelSpace is every character strings.TrimSpace strips (Unicode
+// White_Space), so the SQL sort label trims a name as the displayed label
+// does. Both dialects' trim functions take it as a character set.
+const starLabelSpace = "\t\n\v\f\r \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+
 // starPeerNameSQL is the case-folded label of a DM row's peer, as
 // starUserLabel and starAgentLabel label it, over the users row u and the
-// agents row a joined for the peer (fold is the dialect's lower-casing
-// function, trim its trim).
-func starPeerNameSQL(fold, trim string) string {
-	return fold + `(CASE
-	    WHEN d.peer_kind = 'user' THEN COALESCE(NULLIF(` + trim + `(u.display_name), ''),
+// agents row a joined for the peer. trim returns the dialect's call that
+// strips starLabelSpace from a column; collate is the collation the
+// folding runs under (PostgreSQL's "C", so that both dialects fold ASCII
+// letters only, as SQLite's lower does).
+func starPeerNameSQL(trim func(col string) string, collate string) string {
+	return `lower((CASE
+	    WHEN d.peer_kind = 'user' THEN COALESCE(NULLIF(` + trim("u.display_name") + `, ''),
 	         CASE WHEN u.id IS NULL THEN '` + starLabelDeletedUser + `' ELSE '` + starLabelUser + `' END)
-	    WHEN d.peer_kind = 'agent' THEN COALESCE(NULLIF(` + trim + `(a.name), ''), NULLIF(` + trim + `(a.slug), ''),
+	    WHEN d.peer_kind = 'agent' THEN COALESCE(NULLIF(` + trim("a.name") + `, ''), NULLIF(` + trim("a.slug") + `, ''),
 	         CASE WHEN a.id IS NULL THEN '` + starLabelDeletedAgent + `' ELSE '` + starLabelAgent + `' END)
-	    ELSE '` + starLabelDM + `' END)`
+	    ELSE '` + starLabelDM + `' END)` + collate + `)`
 }
 
 // sqliteStarredConversationsQuery returns the Starred rail statement and
@@ -173,13 +184,20 @@ func sqliteStarredConversationsQuery(f StarredConversationFilter) (string, []any
 	activity := `(CASE WHEN ` + isDM + ` THEN d.last_activity_at ELSE t.last_activity_at END)`
 	sortValue := sqliteStarActivityKey(activity)
 	peerJoins := ""
+	// The sort value sits in the outer SELECT, before every other
+	// placeholder, so its arguments come first.
+	var args []any
 	if f.Sort == StarredConversationsByName {
-		sortValue = `(CASE WHEN ` + isDM + ` THEN ` + starPeerNameSQL("lower", "trim") + ` ELSE lower(t.name) END)`
+		trim := func(col string) string {
+			args = append(args, starLabelSpace)
+			return `trim(` + col + `, ?)`
+		}
+		sortValue = `(CASE WHEN ` + isDM + ` THEN ` + starPeerNameSQL(trim, "") + ` ELSE lower(t.name) END)`
 		peerJoins = `
   LEFT JOIN users u ON d.peer_kind = 'user' AND u.id = d.peer_id
   LEFT JOIN agents a ON d.peer_kind = 'agent' AND a.id = d.peer_id`
 	}
-	args := []any{f.UserID, f.Channel, f.Channel, f.UserID}
+	args = append(args, f.UserID, f.Channel, f.Channel, f.UserID)
 	var conds []string
 	if f.ProjectID != "" {
 		conds = append(conds, "c.project_id = ?")
@@ -213,7 +231,14 @@ SELECT el.ckey AS ckey,
           FROM webchat_message_star st
           JOIN messages m ON m.id = st.message_id
          WHERE st.user_id = ?
-           AND m.thread_id = st.conversation_key
+           AND (m.thread_id = st.conversation_key
+                OR m.conversation_id IN (
+                     SELECT lower(t2.conversation_id) FROM webchat_topic t2
+                      WHERE t2.id = st.conversation_key AND COALESCE(t2.conversation_id, '') <> ''
+                     UNION ALL
+                     SELECT c.id FROM conversations c
+                      WHERE substr(st.conversation_key, 1, 3) = 'dm:'
+                        AND c.surface = 'native' AND c.external_ref = st.conversation_key))
            AND (? = '' OR m.channel = ?)
            AND NOT EXISTS (SELECT 1 FROM webchat_message_ext e WHERE e.message_id = st.message_id AND e.deleted_at IS NOT NULL)
          GROUP BY st.conversation_key) el
