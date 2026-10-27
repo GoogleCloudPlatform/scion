@@ -22,7 +22,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
@@ -96,7 +95,7 @@ func ReadTransportTokenFile(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("transport token file %s: %w", path, err)
 	}
-	defer func() { _ = syscall.Close(dirFd) }()
+	defer func() { _ = dirfd.Close(dirFd) }()
 	data, err := dirfd.ReadAtNoFollow(dirFd, leaf, transportTokenFileMaxBytes)
 	if err != nil {
 		return "", fmt.Errorf("transport token file %s: %w", path, err)

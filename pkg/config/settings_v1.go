@@ -1317,6 +1317,41 @@ type V1MaintenanceConfig struct {
 	UpdatePolicy       string `json:"update_policy,omitempty" yaml:"update_policy,omitempty" koanf:"update_policy"`
 	CheckIntervalHours int    `json:"check_interval_hours,omitempty" yaml:"check_interval_hours,omitempty" koanf:"check_interval_hours"`
 	GitHubRepo         string `json:"github_repo,omitempty" yaml:"github_repo,omitempty" koanf:"github_repo"`
+	// InstallRoot is the hub's versioned install root (releases/, current,
+	// previous) used by release self-update; see MaintenanceInstallRoot.
+	InstallRoot string `json:"install_root,omitempty" yaml:"install_root,omitempty" koanf:"install_root"`
+}
+
+// EnvMaintenanceInstallRoot overrides server.maintenance.install_root.
+const EnvMaintenanceInstallRoot = "SCION_MAINTENANCE_INSTALL_ROOT"
+
+// DefaultMaintenanceInstallRoot is the install root when neither the env
+// override nor server.maintenance.install_root is set.
+const DefaultMaintenanceInstallRoot = "/opt/scion"
+
+// MaintenanceInstallRoot resolves the install root: $SCION_MAINTENANCE_INSTALL_ROOT,
+// else m.InstallRoot, else DefaultMaintenanceInstallRoot. m may be nil. A
+// relative value is ignored with a warning (it would resolve against the
+// hub's working directory) and the next source is used.
+func MaintenanceInstallRoot(m *V1MaintenanceConfig) string {
+	candidates := []struct{ source, value string }{
+		{EnvMaintenanceInstallRoot, os.Getenv(EnvMaintenanceInstallRoot)},
+	}
+	if m != nil {
+		candidates = append(candidates, struct{ source, value string }{"server.maintenance.install_root", m.InstallRoot})
+	}
+	for _, c := range candidates {
+		v := strings.TrimSpace(c.value)
+		if v == "" {
+			continue
+		}
+		if !filepath.IsAbs(v) {
+			slog.Warn("Ignoring relative maintenance install root; it must be an absolute path", "source", c.source, "value", v)
+			continue
+		}
+		return filepath.Clean(v)
+	}
+	return DefaultMaintenanceInstallRoot
 }
 
 // V1ServerConfig holds server-side configuration in the versioned settings format.
@@ -6775,7 +6810,9 @@ func replaceSettingsFileByName(lock *SettingsLock, path string, data []byte) err
 // backupSettingsFile makes backupPath a backup of the settings file at path
 // without moving path: a symlink is copied as a new symlink with the same
 // target (as renaming it would have kept it), and a regular file is hard
-// linked, or copied with its mode where hard links are not supported.
+// linked, or copied where hard links are not supported: with its mode on
+// unix, privately on Windows when the original is private (see
+// copySettingsBackup).
 func backupSettingsFile(path, backupPath string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -6791,25 +6828,7 @@ func backupSettingsFile(path, backupPath string) error {
 	if err := os.Link(path, backupPath); err == nil {
 		return nil
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	f, err := os.OpenFile(backupPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		_ = os.Remove(backupPath)
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(backupPath)
-		return err
-	}
-	return f.Close()
+	return copySettingsBackup(path, backupPath, info)
 }
 
 // loadServerConfigOnly loads a GlobalConfig from a single server.yaml file

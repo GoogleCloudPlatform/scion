@@ -17,6 +17,7 @@ package delegation
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -675,6 +676,15 @@ func TestAudience_ResolvedFromHubHealth(t *testing.T) {
 		res := hs.get(t, "grant-1")
 		assert.Equal(t, http.StatusServiceUnavailable, res.status)
 		assert.Empty(t, hs.hub.exchangeLog())
+	})
+
+	t.Run("unreadable health answer wraps the parse error", func(t *testing.T) {
+		hs := newHarness(t, func(f *fakeHub, _ *Config) { f.healthzRaw = "not json" })
+		_, err := hs.helper.resolveAudience(context.Background())
+		require.Error(t, err)
+		var syntaxErr *json.SyntaxError
+		assert.True(t, errors.As(err, &syntaxErr), "the JSON error is wrapped: %v", err)
+		assert.Contains(t, err.Error(), "/healthz did not answer JSON")
 	})
 
 	t.Run("configured audience", func(t *testing.T) {

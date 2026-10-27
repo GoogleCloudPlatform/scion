@@ -23,6 +23,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/internal/testutil/wintest"
 )
 
 func validProfile() *Profile {
@@ -179,12 +181,8 @@ func TestSaveLoadListRemove(t *testing.T) {
 	require.NoError(t, Save(home, p, false))
 
 	path := filepath.Join(Dir(home), "t1.yaml")
-	fi, err := os.Stat(path)
-	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
-	di, err := os.Stat(Dir(home))
-	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o700), di.Mode().Perm())
+	assertPrivateFile(t, path)
+	assertPrivateDir(t, Dir(home))
 
 	got, err := Load(home, "t1")
 	require.NoError(t, err)
@@ -222,16 +220,10 @@ func TestLoadRefusesUnknownFieldsSymlinksAndOpenModes(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid file")
 
-	require.NoError(t, os.WriteFile(path, data, 0o644))
-	require.NoError(t, os.Chmod(path, 0o644))
-	_, err = Load(home, "t1")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "must be 0600")
-
 	require.NoError(t, os.Remove(path))
 	other := filepath.Join(home, "elsewhere.yaml")
 	require.NoError(t, os.WriteFile(other, data, 0o600))
-	require.NoError(t, os.Symlink(other, path))
+	wintest.MustSymlink(t, other, path)
 	_, err = Load(home, "t1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "symlink")

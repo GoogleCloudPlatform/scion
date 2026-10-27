@@ -359,6 +359,15 @@ server:
               auth_selected_type: vertex-ai
 ```
 
+#### Runtime Broker environment variables
+
+These environment variables are read by the Runtime Broker process when launching Docker or Podman agent containers:
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `SCION_FORCE_HOST_NETWORK` | unset | When set to any non-empty value, forces agent containers to run with `--network=host` whenever a Hub endpoint is configured. Without it, only Docker uses host networking, and only for a loopback Hub endpoint (`localhost`, `127.0.0.1`, `::1`, or `host.docker.internal`). |
+| `SCION_HOST_NETWORK_BLOCK_POLICY` | `auto` | Controls how the Runtime Broker handles an agent whose GCP identity metadata mode is `block` when the container runs with `--network=host` (where in-container `iptables` interception of `169.254.169.254` cannot be installed). `auto` (or unset) refuses agent start on a detected Linux cloud host (GCE, AWS EC2, Azure, Oracle Cloud, Alibaba Cloud, OpenStack, DigitalOcean, or Hetzner, detected from local DMI, `cloud-init`, or GCE guest-agent files) and allows it with a warning on other hosts; `strict` always refuses `block` under host networking; `allow` allows agent start even on a detected cloud host and logs a warning. Any unrecognized value is logged at `ERROR` and treated as `strict`. See [Host networking on Docker and Podman](/scion/hosted/single-node/auth/#host-networking-on-docker-and-podman). |
+
 ### Database (`server.database`)
 
 Persistence settings for the Hub.
@@ -911,19 +920,34 @@ Configuring a modest concurrency limit (such as the default `2`) is highly recom
 
 ### Maintenance (`server.maintenance`)
 
-Controls how the Hub checks for and applies its own updates. The Hub dispatches update checks by **deployment tier**: a `binary` Hub reads the `LATEST.json` release manifest and the GitHub Releases API, while a `source` Hub checks its git checkout for new commits.
+Controls how the Hub checks for and applies its own updates. The **deployment tier** sets the update mode: a `binary` Hub updates from release binaries (it checks the effective channel's latest release in the `LATEST.json` manifest), while a `source` Hub rebuilds from its git checkout.
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `deployment_tier` | string | `binary` if no repository path is configured, otherwise `source` | Update strategy. `binary` updates from GitHub Releases; `source` updates from a git checkout. The single-node VM deploy script sets `binary`. |
-| `release_channel` | string | Detected from the running version | Release channel to track: `stable`, `preview`, or `nightly`. When empty, the channel is derived from the version string (`v0.5.0` → `stable`, `v0.5.0-rc1` → `preview`, `nightly-*` → `nightly`). Development builds have no channel and skip scheduled checks. |
-| `update_policy` | string | `auto` for `binary`, `disabled` for `source` | `auto` checks on a schedule and installs updates automatically. `notify` checks on a schedule and shows an update-available banner in the admin UI, where an admin applies or dismisses it. `disabled` turns off scheduled checks; manual checks from the admin UI still work. |
+| `deployment_tier` | string | `binary` if no repository path is configured, otherwise `source` | Update mode. `binary` updates from GitHub Releases; `source` updates from a git checkout. The single-node VM deploy script sets `binary`. |
+| `release_channel` | string | Detected from the running version | Release channel to track: `nightly`, `preview`, or `stable`. When empty, the channel is derived from the version string (`v0.5.0` → `stable`, `v0.5.0-preview.1` or `v0.5.0-rc1` → `preview`, `nightly-*` → `nightly`). Development builds have no channel and skip scheduled checks. A Hub configured for another channel than the one it runs is offered that channel's latest release once it was published after the running one (for example, a nightly Hub set to `preview`). |
+| `update_policy` | string | `notify` for `binary`, `disabled` for `source` | `notify` checks on a schedule and shows an update-available banner in the admin UI, where an admin applies or dismisses it. `auto` checks on a schedule and installs the channel's latest release automatically, through the same installer as the admin UI. `disabled` turns off scheduled checks; manual checks from the admin UI still work. |
 | `check_interval_hours` | integer | `6` | How often the scheduled release check runs. Minimum `1`. Each run is jittered by up to ±30 minutes. |
 | `github_repo` | string | `GoogleCloudPlatform/scion` | GitHub repository used for release and manifest lookups. |
+| `install_root` | string | `/opt/scion` | Versioned install root (`releases/<tag>/scion`, `current`, `previous`) used by release self-update. `SCION_MAINTENANCE_INSTALL_ROOT` overrides it. The single-node VM deploy script writes it. |
 
-Scheduled checks run only when `deployment_tier` is `binary` and `update_policy` is not `disabled`. A binary update downloads the release tarball, verifies the new binary's version, backs up the current binary, installs the new one, and restarts the `scion-hub` systemd service. If the install fails, the backup is restored.
+Scheduled checks run whenever `update_policy` is not `disabled`; a Hub in `source` mode skips them. Before `update_policy` defaulted to `notify`, a `binary` Hub defaulted to `auto`; set `auto` explicitly to keep unattended updates.
 
-The related admin endpoints are `POST /api/v1/admin/maintenance/check-updates` (manual check) and `GET` / `DELETE` on `/api/v1/admin/maintenance/update-available` (read or dismiss a pending update notification). Both require the `hub.maintenance.execute` permission.
+**How a release is installed.** At startup the Hub detects an installer strategy for its host, shown on the Maintenance page:
+
+- `symlink`: the running binary lives under `<install_root>/releases/` and `<install_root>/current` is a symlink owned by the Hub's user (the single-node VM layout). The Hub verifies the release, places it in `releases/<tag>/`, switches `current` atomically (the old release becomes `previous`), then exits so that systemd restarts it on the new binary. **Restart Hub** also restarts this way. Restart Hub is refused (`409`) while an update or rebuild is running, and holds back new ones until the Hub is back.
+- `sudo-install`: a repository path is configured and the Hub user has the starter hub's exact sudoers rules. The verified binary is staged at `<repo>/scion.rebuild` and installed with `sudo -n install`, then the service is restarted with `sudo -n systemctl restart`. No other sudo rights are used.
+- `unsupported`: anything else. The update and the automatic policy stop before anything is downloaded, and the Maintenance page shows the reason and how to fix it.
+
+Every installed release is downloaded only from the configured repository's GitHub release, and checked against its `SHA256SUMS` and its own `version` output. The Hub records the update before it restarts and verifies, on the next start, that it came back on the target version. See [Binary layout and updates](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/single-node-vm.md#binary-layout-and-updates) for the layout and for converting an existing VM.
+
+:::caution[Behaviour change for single-node VMs]
+Hubs with no repository path used to update through whatever `sudo` the `scion` user happened to have (for example a GCE `google-sudoers` grant). They now report `unsupported` until the VM is converted to the `/opt/scion` layout with `deploy.sh migrate-layout`.
+:::
+
+On the `preview` channel, a weekly workflow (Fridays at 14:00 UTC) publishes the next `vX.Y.Z-preview.N` build. It fast-forwards the newest `release/vX.Y` branch to the newest `nightly-YYYYMMDD` tag that the branch does not yet contain and whose `Build & Test` check succeeded, tags it, and builds the release, which updates `LATEST.json` and the `preview` branch. A week with no such nightly publishes no preview. If the release branch has commits that are not on `main` (for example, fixes cherry-picked during a freeze before stable), the weekly run fails instead of force-pushing. Maintainers then tag previews by hand until the line is promoted to `vX.Y.Z` on `stable` or the branch is realigned.
+
+The related admin endpoints are `GET /api/v1/admin/maintenance/update-status` (running version, update mode, effective channel, installer, and the pending and last update), `POST /api/v1/admin/maintenance/check-updates` (manual check) and `GET` / `DELETE` on `/api/v1/admin/maintenance/update-available` (read or dismiss a pending update notification). All require the `hub.maintenance.execute` permission.
 
 ```yaml
 server:
@@ -1024,7 +1048,7 @@ When it starts, the server checks every `SCION_SERVER_*` and `SCION_SEED_*` vari
 :::caution[Upgrade note]
 Many alias spellings, for example `SCION_SERVER_HUB_ADMIN_EMAILS`, `SCION_SERVER_BROKER_PORT`, `SCION_SERVER_HUB_CORS_ENABLED` and `SCION_SERVER_LOG_LEVEL`, used to be ignored by the Hub and reported at startup as matching no setting. They now take effect. Before upgrading, remove any such variable that you do not want applied.
 
-The env also now overrides the settings that live at the top level of `settings.yaml` (`telemetry`, `default_timezone`, `default_gcp_identity_mode`, `default_gcp_identity_service_account_id`, `default_harness_config`, `quotas`, `agent_secrets`, `project_defaults`) and `server.workspace_storage` and `server.native_chat`, for example `SCION_SERVER_DEFAULTTIMEZONE`. A value that does not parse for one of these keys (for example `SCION_SERVER_QUOTAS_ENFORCEBROKERQUOTAS=maybe`) makes the server fail to load its configuration at startup, as it already did for the other `SCION_SERVER_*` keys.
+The env also now overrides the settings that live at the top level of `settings.yaml` (`telemetry`, `default_timezone`, `default_gcp_identity_mode`, `default_gcp_identity_service_account_id`, `default_harness_config`, `quotas`, `agent_secrets`, `project_defaults`) and `server.project_storage` (and the deprecated `server.workspace_storage`) and `server.native_chat`, for example `SCION_SERVER_DEFAULTTIMEZONE`. A value that does not parse for one of these keys (for example `SCION_SERVER_QUOTAS_ENFORCEBROKERQUOTAS=maybe`) makes the server fail to load its configuration at startup, as it already did for the other `SCION_SERVER_*` keys.
 :::
 
 `server.log_format` and `server.env` have no environment variable. Neither is read by the Hub: both are accepted so existing settings files still load. The log output format is chosen at startup; set `SCION_LOG_GCP=true` for Cloud Logging JSON. `server.log_level` (or `SCION_SERVER_LOGLEVEL`) is applied when the server starts, and again when a file-mode admin server-config save or reload re-reads the config; clearing it reverts to `info`. `--debug` and `SCION_LOG_LEVEL` take precedence over it (see [Precedence](/scion/hosted/single-node/observability/#precedence)). Upgrade note: a Hub whose settings still contain `server.log_level: debug` from an earlier change now starts at `debug`, because earlier releases ignored the setting at startup.

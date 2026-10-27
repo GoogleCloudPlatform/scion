@@ -36,7 +36,6 @@ type (
 	RebuildServerOptions             = maintenance.RebuildServerOptions
 	RebuildWebExecutor               = maintenance.RebuildWebExecutor
 	RebuildWebOptions                = maintenance.RebuildWebOptions
-	ReleaseUpdateCheckResult         = maintenance.ReleaseUpdateCheckResult
 	SecretMigrationExecutor          = maintenance.SecretMigrationExecutor
 	SecretMigrationResult            = maintenance.SecretMigrationResult
 	UnitDriftStatus                  = maintenance.UnitDriftStatus
@@ -50,7 +49,6 @@ const (
 )
 
 var (
-	CheckForReleaseUpdates              = maintenance.CheckForReleaseUpdates
 	CheckForUpdates                     = maintenance.CheckForUpdates
 	NewBinaryUpdateExecutor             = maintenance.NewBinaryUpdateExecutor
 	NewBuildHarnessConfigImageExecutor  = maintenance.NewBuildHarnessConfigImageExecutor
