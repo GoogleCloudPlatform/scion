@@ -182,8 +182,11 @@ func checkK8sHomeFileTargets(placements []k8sFilePlacement) error {
 // non-directory there, or a symlink at the target itself, stops placement.
 // A missing directory is created by the running user: the directory that
 // directly holds the file gets 0700, any missing ancestors get the default
-// mode (0777 masked by the umask). Existing directories are left as they
-// are. The holding directory must be writable. An existing regular file at
+// mode (0777 masked by the umask). Each directory the script creates is
+// checked again right after mkdir: it must be a real directory, not a
+// symlink or another file type, or placement stops before any file is
+// written. Existing directories are left as they are. The holding directory
+// must be writable. An existing regular file at
 // the target is replaced; anything else at the target stops placement. The
 // file is copied to a temporary file in the target's directory, given its
 // mode there, and renamed over the target, so the target is always either
@@ -223,10 +226,17 @@ place() {
 			return 1
 		elif [ -e "$cur" ]; then
 			[ -d "$cur" ] || { fail "$cur is not a directory"; return 1; }
-		elif [ "$cur" = "$dir" ]; then
-			mkdir -m 0700 "$cur" || { fail "cannot create directory $cur"; return 1; }
 		else
-			mkdir "$cur" || { fail "cannot create directory $cur"; return 1; }
+			if [ "$cur" = "$dir" ]; then
+				mkdir -m 0700 "$cur" || { fail "cannot create directory $cur"; return 1; }
+			else
+				mkdir "$cur" || { fail "cannot create directory $cur"; return 1; }
+			fi
+			if [ -L "$cur" ]; then
+				fail "created directory $cur is a symbolic link; placement requires real directories"
+				return 1
+			fi
+			[ -d "$cur" ] || { fail "created directory $cur is not a directory"; return 1; }
 		fi
 	done
 	[ -w "$dir" ] || { fail "directory $dir is not writable"; return 1; }
