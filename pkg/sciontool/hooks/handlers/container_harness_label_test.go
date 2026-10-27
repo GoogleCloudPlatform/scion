@@ -25,7 +25,8 @@ const containerHarnessCasesPath = "../../../agent/testdata/harness_env_cases.jso
 // TestTelemetryHandler_ContainerHarnessCasesLabelHookPoints: for each
 // SCION_HARNESS value Start emits in the shared case table (including
 // "generic"), hook-sourced gen_ai.api.calls and scion.usage.tokens points
-// carry that value, and only it, as their harness label.
+// carry that value, and only it, as their harness label, and the one
+// hook-sourced agent.usage event carries it as its harness field.
 func TestTelemetryHandler_ContainerHarnessCasesLabelHookPoints(t *testing.T) {
 	data, err := os.ReadFile(containerHarnessCasesPath)
 	if err != nil {
@@ -54,7 +55,9 @@ func TestTelemetryHandler_ContainerHarnessCasesLabelHookPoints(t *testing.T) {
 			reader := sdkmetric.NewManualReader()
 			mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 			defer func() { _ = mp.Shutdown(context.Background()) }()
+			analytics, outboxDir := hookAnalytics(t)
 			h := NewTelemetryHandler(nil, nil, nil, mp)
+			h.Analytics = analytics
 			if err := h.Handle(&hooks.Event{
 				Name: hooks.EventModelEnd,
 				Data: hooks.EventData{Success: true, InputTokens: 5, OutputTokens: 2},
@@ -86,6 +89,14 @@ func TestTelemetryHandler_ContainerHarnessCasesLabelHookPoints(t *testing.T) {
 			}
 			if checked[telemetrycontract.MetricUsageTokens] == 0 || checked[telemetrycontract.MetricAPICalls] == 0 {
 				t.Fatalf("points checked = %v, want both %s and %s", checked, telemetrycontract.MetricUsageTokens, telemetrycontract.MetricAPICalls)
+			}
+			events := hookStagedEvents(t, outboxDir)
+			if len(events) != 1 || events[0].Harness != harness {
+				var got []string
+				for _, ev := range events {
+					got = append(got, ev.Harness)
+				}
+				t.Fatalf("agent.usage harness fields = %q, want exactly one event with %q", got, harness)
 			}
 		})
 	}
