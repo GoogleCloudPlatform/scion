@@ -508,6 +508,18 @@ describe('space rail — Starred and the experiment', () => {
     expect(el._starredPoll).toBeNull();
   });
 
+  it('server flags applied with the experiment off leave Starred at once', async () => {
+    const { setFeatureFlag } = await import('../../../utils/feature-flags.js');
+    starredPages = [{ items: ROWS }];
+    const el = await mount();
+    button(el, 'Starred').click();
+    await settle(el);
+    setFeatureFlag('web.chat_starred_messages', false);
+    await settle(el);
+    expect(el.spaceFilter).toBe('all');
+    expect(filterButtons(el).map((b) => b.textContent?.trim())).toEqual(['All', 'Unread']);
+  });
+
   it('a page-driven change to All keeps the stored Starred preference', async () => {
     const el = await mount();
     starredPages = [{ items: ROWS }];

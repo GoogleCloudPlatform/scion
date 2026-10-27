@@ -64,6 +64,7 @@ import {
 import type { ActionSheetSelectDetail } from './chat-action-sheet.js';
 import { stateManager } from '../../../client/state.js';
 import { chatStarsLocalChanges, starredMessagesEnabled } from '../../../client/chat-stars.js';
+import { FEATURE_FLAGS_CHANGED_EVENT } from '../../../utils/feature-flags.js';
 import {
   STARRED_RAIL_RECONCILE_MS,
   StarredRailController,
@@ -1424,6 +1425,8 @@ export class ScionChatSpaceRail extends LitElement {
     // Returning to the tab refetches once (visibilitychange covers it; a
     // window focus listener as well would refetch twice).
     document.addEventListener('visibilitychange', this.handleStarredVisibility);
+    // A flag change re-runs syncStarredFilter (leaving Starred if it is off).
+    window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.handleFlagsChanged);
     if (this.spaceFilter === 'starred') this.startStarred();
     // Collapsed thread-groups are restored in willUpdate, not here — see its
     // doc comment (round-4 review, N7).
@@ -1624,6 +1627,7 @@ export class ScionChatSpaceRail extends LitElement {
     stateManager.removeEventListener('connected', this.handleStarredInvalidate);
     chatStarsLocalChanges.removeEventListener('changed', this.handleStarredInvalidate);
     document.removeEventListener('visibilitychange', this.handleStarredVisibility);
+    window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, this.handleFlagsChanged);
     this.stopStarred();
     if (this._pullAnnounceTimer) {
       clearTimeout(this._pullAnnounceTimer);
@@ -4538,6 +4542,10 @@ export class ScionChatSpaceRail extends LitElement {
   /** A stars invalidation, a local star change, reconnect or focus: refetch. */
   private handleStarredInvalidate = (): void => {
     if (this.spaceFilter === 'starred') void this.starred.refresh();
+  };
+
+  private handleFlagsChanged = (): void => {
+    this.requestUpdate();
   };
 
   private handleStarredVisibility = (): void => {

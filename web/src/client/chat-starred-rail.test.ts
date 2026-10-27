@@ -323,6 +323,17 @@ describe('StarredRailController', () => {
     expect(c.unavailable).toBe(false);
   });
 
+  it('a Load more answered 404 marks the rail unavailable too', async () => {
+    const { StarredRailError } = await import('./chat-starred-rail.js');
+    const fetchPage = vi.fn().mockResolvedValueOnce(page(['a'], 'c1'));
+    const c = new StarredRailController(fetchPage);
+    await c.start('activity');
+    fetchPage.mockRejectedValueOnce(new StarredRailError('gone', 404));
+    await c.loadMore();
+    expect(c.unavailable).toBe(true);
+    expect(c.moreStatus).toBe('error');
+  });
+
   it('drops answers for a stopped rail or an older sort', async () => {
     const old = deferred<StarredConversationPage>();
     const fetchPage = vi

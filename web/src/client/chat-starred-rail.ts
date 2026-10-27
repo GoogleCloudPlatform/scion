@@ -277,8 +277,9 @@ export class StarredRailController extends EventTarget {
       this.rows = mergeStarredRows(this.rows, page.items);
       this.nextCursor = page.nextCursor;
       this.moreStatus = 'idle';
-    } catch {
+    } catch (err) {
       if (generation !== this.generation) return;
+      if (err instanceof StarredRailError && err.status === 404) this.unavailable = true;
       this.moreStatus = 'error';
     }
     this.emit();
