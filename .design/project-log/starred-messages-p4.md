@@ -83,11 +83,10 @@
 
 ## Verification notes
 
-- The Go hub tests run per shard; see `hack/hubshard`, and locate the new tests at the exact commit.
-- Mocked browser cases: `web/e2e/chat-mobile/star-rail.pw.ts` (hub mock in `star-rail-mock.ts`). Chromium ran under
-  a 1 s session RSS watcher with a kill limit (peak about 600 MB).
+- The pkg/hub tests run in parts (`hack/hubshard`); locate the new tests at the exact commit.
+- Mocked browser cases: `web/e2e/chat-mobile/star-rail.pw.ts` (hub mock in `star-rail-mock.ts`).
 
 ## Follow-ups
 
-None. Code review round 4d's three follow-ups (the rail's canonical DM check, the state route's leave-out of a
-non-canonical stored key, and the canonical-key test's doc comment) are done in this batch.
+None. The three code review follow-ups (the rail's canonical DM check, the state route's leave-out of a
+non-canonical stored key, and the canonical-key test's doc comment) are done.
