@@ -171,20 +171,9 @@ func (s *Server) federateResolve(ctx context.Context, registryName string, skill
 
 	resolved := &resolveResp.Resolved[0]
 
-	// Trust enforcement
-	if registry.TrustLevel == store.SkillRegistryTrustPinned {
-		pinnedHash, err := s.store.GetPinnedHash(ctx, registry.ID, skillRef.URI)
-		if err != nil {
-			return nil, newSkillResolveError(ctx, skillResolveSourceFederation, skillRef.URI,
-				agent.SkillErrCodeTrustViolation, 0,
-				fmt.Sprintf("no pinned hash for %q in registry %q; use 'scion skills registries pin' first", skillRef.URI, registryName))
-		}
-		if resolved.ContentHash != pinnedHash {
-			return nil, newSkillResolveError(ctx, skillResolveSourceFederation, skillRef.URI,
-				agent.SkillErrCodeTrustViolation, 0,
-				fmt.Sprintf("content hash mismatch for %q from registry %q: expected %s, got %s",
-					skillRef.URI, registryName, pinnedHash, resolved.ContentHash))
-		}
+	// Content hash checks and trust enforcement (ptone/scion#5935).
+	if resolveErr := s.checkFederatedSkillHashes(ctx, registry, registryName, skillRef, resolved); resolveErr != nil {
+		return nil, resolveErr
 	}
 
 	return resolved, nil

@@ -290,7 +290,7 @@ func shortenHome(path string) string {
 	if path == home {
 		return "~"
 	}
-	if rel, err := filepath.Rel(home, path); err == nil && !strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel) {
+	if rel, err := filepath.Rel(home, path); err == nil && !strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel) { //winsec:not-containment display only: shortens a path under home to ~
 		return filepath.Join("~", rel)
 	}
 	return path

@@ -1333,9 +1333,42 @@ func computeContentHashVersion(files []store.TemplateFile, v2 bool) string {
 // It stays transfer.ComputeContentHashV1, which ignores paths and modes:
 // published skill versions are immutable and pinned by this value (registry
 // pins, content-addressed version lookup), and brokers verify an installed
-// bundle by recomputing it.
+// bundle by recomputing it. It is what skill_versions.content_hash records
+// and what every contentHash field carries; see computeSkillContentHashV2
+// for the hash that also covers paths and modes.
 func computeSkillContentHash(files []store.TemplateFile) string {
 	return transfer.ComputeContentHashV1(templateFileInfos(files))
+}
+
+// computeSkillContentHashV2 is skill content hash v2 (ptone/scion#5935):
+// transfer.ComputeContentHashV2 over a skill version's files, so a rename,
+// an executable-bit change and a content change each change it. It is
+// derived, never stored: a published version's file list is immutable, so
+// the value is stable, and versions published before v2 existed get one
+// too. A file with no recorded mode counts as "0644", the mode the broker
+// installs it with. The hub emits and accepts it only while the
+// hub.skill_content_hash_v2 experiment is on.
+func computeSkillContentHashV2(files []store.TemplateFile) string {
+	return transfer.ComputeContentHashV2(templateFileInfos(files))
+}
+
+// resolvedSkillContentHashes recomputes the v1 and v2 skill content hashes
+// of a resolved skill from its file list (path, per-file hash and mode),
+// the metadata the broker verifies the downloaded files against. ok is
+// false when there are no files or a file has no per-file hash, since the
+// bundle hashes then cannot be recomputed.
+func resolvedSkillContentHashes(files []DownloadURLInfo) (v1, v2 string, ok bool) {
+	if len(files) == 0 {
+		return "", "", false
+	}
+	infos := make([]transfer.FileInfo, len(files))
+	for i, f := range files {
+		if f.Hash == "" {
+			return "", "", false
+		}
+		infos[i] = transfer.FileInfo{Path: f.Path, Size: f.Size, Hash: f.Hash, Mode: f.Mode}
+	}
+	return transfer.ComputeContentHashV1(infos), transfer.ComputeContentHashV2(infos), true
 }
 
 // templateFileInfos converts manifest entries to transfer.FileInfo.

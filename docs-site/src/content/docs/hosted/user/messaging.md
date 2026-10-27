@@ -359,6 +359,8 @@ When an agent finishes a turn, its Stop hook mirrors the agent's reply to the us
 
 Messages record the sender's and recipient's projects. Human callers see these as `senderProjectId` and `recipientProjectId` on conversation messages; agent callers see them only on direct messages where both parties are named in the conversation.
 
+Messages sent by an agent with a [delegated credential](/scion/reference/agent-delegation/) keep the agent as `sender` (`agent:<slug>`) and record `authorizingUserId` and `delegationGrantId`. The CLI (`scion conversation messages`, `scion conversation catch-up`, and `scion messages`) and the Web Dashboard's agent message viewer show `authorized by <user> via delegation <grant>` (with the user's display name, email, or ID); web chat shows `authorized by <user>` with `via delegation <grant>` in the tooltip; and `scion conversation get-message` prints `AUTHORIZED BY`, `AUTHORIZING USER ID`, and `DELEGATION GRANT ID` rows.
+
 ### Delivery failures
 
 Messages are not silently dropped in these cases:

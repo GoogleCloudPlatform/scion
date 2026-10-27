@@ -26,7 +26,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
-	"golang.org/x/sys/unix"
 )
 
 // nfsWorkspaceExportHint is appended to every pre-create failure so the
@@ -39,7 +38,7 @@ const nfsWorkspaceExportHint = "workspace_storage nfs needs the broker to be abl
 // to reach it through its group: setgid (new entries inherit the group) and
 // group write. A directory the broker creates always has them (2775); an
 // existing one only counts as prepared when it has them too.
-const nfsLeafGroupAccessBits = unix.S_ISGID | 0o020
+const nfsLeafGroupAccessBits = 0o2000 | 0o020 // S_ISGID | group write
 
 // ensureNFSWorkspaceLeaf makes sure the project's NFS workspace directory
 // (<subpath_root>/<projectID>/workspace), its provisioning state directory
@@ -233,38 +232,4 @@ func ensureNFSWorkspaceLeavesClaim(runtimeName, projectID string, resolved runti
 		}
 	}
 	return prepared, agentDirCreated, nil
-}
-
-// isNFSLeafPermissionError reports whether err means the broker was not
-// allowed to create or open a directory (as opposed to a path that is not a
-// usable directory, such as a symlink or a regular file).
-func isNFSLeafPermissionError(err error) bool {
-	return errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM) || errors.Is(err, unix.EROFS)
-}
-
-// ensureNFSLeaf creates rel under hostBase via shareddirs.EnsureLeaf and
-// reports whether the leaf was created now or already carries
-// nfsLeafGroupAccessBits.
-func ensureNFSLeaf(hostBase, rel string) (prepared bool, err error) {
-	prepared, _, err = ensureNFSLeafClaim(hostBase, rel)
-	return prepared, err
-}
-
-// ensureNFSLeafClaim is ensureNFSLeaf that also reports whether this call
-// created the leaf directory (shareddirs.EnsureLeaf's own report, not a
-// separate check).
-func ensureNFSLeafClaim(hostBase, rel string) (prepared, created bool, err error) {
-	leafFd, existed, err := shareddirs.EnsureLeaf(hostBase, rel)
-	if err != nil {
-		return false, false, err
-	}
-	defer func() { _ = shareddirs.CloseFd(leafFd) }()
-	if !existed {
-		return true, true, nil
-	}
-	var st unix.Stat_t
-	if err := unix.Fstat(leafFd, &st); err != nil {
-		return false, false, fmt.Errorf("stat existing directory: %w", err)
-	}
-	return st.Mode&nfsLeafGroupAccessBits == nfsLeafGroupAccessBits, false, nil
 }

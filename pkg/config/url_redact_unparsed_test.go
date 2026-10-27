@@ -34,6 +34,8 @@ func loadUnparsedURLCases(t *testing.T) []unparsedURLCase {
 	}
 	var cases []unparsedURLCase
 	for i, line := range strings.Split(string(data), "\n") {
+		// A CRLF checkout (Windows) leaves a "\r" at the end of each line.
+		line = strings.TrimSuffix(line, "\r")
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}

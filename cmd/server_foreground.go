@@ -334,6 +334,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if err := checkServerPorts(cfg); err != nil {
 		return err
 	}
+	// A standalone Hub API (web disabled) refuses dev auth on a
+	// non-loopback host; the web path does the same in webStartupPreflight.
+	if err := hubAPIStartupPreflight(cfg, enableHub, enableWeb); err != nil {
+		return err
+	}
 	// The web server's listener checks (dev auth bind, then the web base
 	// URL; ptone/scion#5364) run here, before the store, dev auth and the
 	// hub are initialised. The base URL is resolved once, here.
@@ -2123,6 +2128,11 @@ func logWorkstationReadyBanner(cfg *config.GlobalConfig, globalDir string, webEn
 			displayHost = "127.0.0.1"
 		}
 		log.Printf("Web UI: http://%s:%d", displayHost, port)
+		if devAuthToken != "" {
+			// The web UI signs a browser in only from a single-use link,
+			// which is never written to this log.
+			log.Printf("To sign in to the web UI, run: scion server open")
+		}
 	}
 	if devAuthToken != "" {
 		log.Printf("Developer token: %s", devTokenStartupHint(cfg, globalDir))
@@ -3732,7 +3742,7 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 	webHost := webListenHost(cfg)
 
 	// Refuse to start when dev auth is enabled on a non-loopback interface.
-	// Dev auth auto-logs in every request as admin — exposing it on a public
+	// Dev auth signs browsers in as admin — exposing it on a public
 	// address would create an unauthenticated admin endpoint. Startup runs
 	// the same check earlier (webStartupPreflight); this one stays as
 	// defense in depth.
