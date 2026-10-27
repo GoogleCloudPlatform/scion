@@ -52,11 +52,13 @@ type catalogFakeRelease struct {
 type catalogFake struct {
 	t *testing.T
 
-	mu         sync.Mutex
-	releases   []catalogFakeRelease // list order, newest created first
-	orphanTags []string             // git tags without a release
-	perPage    int
-	failList   bool
+	mu       sync.Mutex
+	releases []catalogFakeRelease // list order, newest created first
+	perPage  int
+	failList bool
+	// hangSums holds tags whose SHA256SUMS download hangs until the
+	// request's context ends (a blackholed download host).
+	hangSums map[string]bool
 	// started, when set, receives once per list request; block, when set,
 	// holds list requests until closed.
 	started chan struct{}
@@ -71,7 +73,7 @@ type catalogFake struct {
 }
 
 func newCatalogFake(t *testing.T, rels ...catalogFakeRelease) *catalogFake {
-	return &catalogFake{t: t, releases: rels, perPage: 100, sumsCalls: map[string]int{}}
+	return &catalogFake{t: t, releases: rels, perPage: 100, sumsCalls: map[string]int{}, hangSums: map[string]bool{}}
 }
 
 // catalogDay is 2026-10-<day> 04:00 UTC.
@@ -92,7 +94,13 @@ func (f *catalogFake) RoundTrip(r *http.Request) (*http.Response, error) {
 	f.mu.Lock()
 	f.requests = append(f.requests, r.URL.String())
 	started, block := f.started, f.block
+	hang := r.URL.Host == "objects.githubusercontent.com" &&
+		f.hangSums[strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/"+testRepo+"/releases/download/"), "/"+ChecksumsAssetName)]
 	f.mu.Unlock()
+	if hang {
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	}
 	isList := r.URL.Host == "api.github.com" &&
 		(r.URL.Path == "/repos/"+testRepo+"/releases" || r.URL.Path == "/repositories/1/releases")
 	if isList {
@@ -246,14 +254,19 @@ func (c *catalogClock) Advance(d time.Duration) {
 
 // catalogMemStore is an in-memory CatalogStore.
 type catalogMemStore struct {
-	mu    sync.Mutex
-	data  []byte
-	saves int
+	mu       sync.Mutex
+	data     []byte
+	saves    int
+	loadErrs int // the next loadErrs loads fail
 }
 
 func (s *catalogMemStore) LoadReleaseCatalog(context.Context) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.loadErrs > 0 {
+		s.loadErrs--
+		return nil, errors.New("database is locked")
+	}
 	return slices.Clone(s.data), nil
 }
 
@@ -316,7 +329,9 @@ func TestCatalog_Classification(t *testing.T) {
 		catalogGood("nightly-bogus", catalogDay(18)),
 		catalogGood("some-other-tag", catalogDay(18)),
 	)
-	f.orphanTags = []string{"nightly-20261026", "v0.3.0-preview.5"}
+	// Orphan tags (git tags without a release, here nightly-20261026 and
+	// v0.3.0-preview.5) are excluded by construction: the catalog lists
+	// releases, never tags. The fake fails the test on any /tags request.
 	snap := mustGet(t, newTestCatalog(f, newCatalogClock(), nil), false)
 
 	nightly := snap.Channel("nightly")
@@ -370,11 +385,8 @@ func TestCatalog_Classification(t *testing.T) {
 	if got := snap.Channel("bogus"); got.Releases == nil || len(got.Releases) != 0 {
 		t.Errorf("unknown channel = %+v", got)
 	}
-	// JSON: stable is {"latest":"","releases":[]}, never null releases.
-	b, _ := json.Marshal(snap.Channels["stable"])
-	if string(b) != `{"latest":"","releases":[]}` {
-		t.Errorf("stable JSON = %s", b)
-	}
+	// The Snapshot is not the wire DTO: hu-p2-hub builds the D5 response
+	// (mapping Latest "" to null and a zero PublishedAt to omitted).
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -625,6 +637,8 @@ func TestCatalog_Singleflight(t *testing.T) {
 	f.started = make(chan struct{}, 10)
 	f.block = make(chan struct{})
 	c := newTestCatalog(f, newCatalogClock(), nil)
+	waiting := make(chan struct{}, 10)
+	c.onWait = func() { waiting <- struct{}{} }
 
 	const n = 10
 	type result struct {
@@ -632,14 +646,25 @@ func TestCatalog_Singleflight(t *testing.T) {
 		err  error
 	}
 	results := make(chan result, n)
-	get := func() {
-		s, err := c.Get(context.Background(), true)
+	get := func(refresh bool) {
+		s, err := c.Get(context.Background(), refresh)
 		results <- result{s, err}
 	}
-	go get()
+	go get(true)
 	<-f.started // the first fetch is in flight and blocked
+	<-waiting
+	// Cold callers (refresh or not) join the fetch in flight instead of
+	// failing with "unavailable".
+	for i := range n - 1 {
+		go get(i%2 == 0)
+	}
 	for range n - 1 {
-		go get()
+		<-waiting
+	}
+	select {
+	case r := <-results:
+		t.Fatalf("a caller returned before the shared fetch finished: %+v", r)
+	default:
 	}
 	close(f.block)
 	for range n {
@@ -659,23 +684,148 @@ func TestCatalog_Singleflight(t *testing.T) {
 	}
 }
 
-func TestCatalog_CancelledCallerDoesNotFailTheFetch(t *testing.T) {
-	f := newCatalogFake(t, catalogGood("nightly-20261024", catalogDay(24)))
-	f.started = make(chan struct{}, 1)
-	f.block = make(chan struct{})
-	c := newTestCatalog(f, newCatalogClock(), nil)
+func TestCatalog_CancelledCallerStopsWaiting(t *testing.T) {
+	t.Run("cold: ctx error, and the fetch still completes", func(t *testing.T) {
+		f := newCatalogFake(t, catalogGood("nightly-20261024", catalogDay(24)))
+		f.started = make(chan struct{}, 1)
+		f.block = make(chan struct{})
+		c := newTestCatalog(f, newCatalogClock(), nil)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() {
-		_, err := c.Get(ctx, false)
-		done <- err
-	}()
-	<-f.started
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() {
+			_, err := c.Get(ctx, false)
+			done <- err
+		}()
+		<-f.started
+		cancel()
+		// Get returns while the fetch is still blocked.
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled cold Get: err = %v, want context.Canceled", err)
+		}
+		close(f.block)
+		// The detached fetch finishes; the next caller gets its result
+		// without another request.
+		snap := mustGet(t, c, false)
+		if snap.Channel("nightly").Latest != "nightly-20261024" {
+			t.Errorf("snapshot after the detached fetch = %+v", snap)
+		}
+		if n := f.listCalls(); n != 1 {
+			t.Errorf("list calls = %d, want 1", n)
+		}
+	})
+	t.Run("warm: the cached catalog", func(t *testing.T) {
+		f := newCatalogFake(t, catalogGood("nightly-20261024", catalogDay(24)))
+		clock := newCatalogClock()
+		c := newTestCatalog(f, clock, nil)
+		mustGet(t, c, false)
+
+		f.set(func() {
+			f.started = make(chan struct{}, 1)
+			f.block = make(chan struct{})
+		})
+		defer close(f.block)
+		clock.Advance(DefaultCatalogRefreshInterval)
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan catalogGetResult, 1)
+		go func() {
+			s, err := c.Get(ctx, true)
+			done <- catalogGetResult{s, err}
+		}()
+		<-f.started
+		cancel()
+		r := <-done
+		if r.err != nil || r.snap.Channel("nightly").Latest != "nightly-20261024" {
+			t.Errorf("cancelled warm Get = %+v, %v; want the cached catalog", r.snap, r.err)
+		}
+	})
+}
+
+type catalogGetResult struct {
+	snap Snapshot
+	err  error
+}
+
+func TestCatalog_BlackholedChecksumsHost(t *testing.T) {
+	f := newCatalogFake(t,
+		catalogGood("nightly-20261024", catalogDay(24)),
+		catalogGood("nightly-20261023", catalogDay(23)),
+		catalogGood("nightly-20261022", catalogDay(22)),
+	)
+	f.hangSums["nightly-20261023"] = true
+	clock := newCatalogClock()
+	c := newTestCatalog(f, clock, func(o *CatalogOptions) { o.ChecksumsBudget = 200 * time.Millisecond })
+
+	// A cold hub still gets a catalog when the list succeeds.
+	snap := mustGet(t, c, false)
+	if snap.Stale {
+		t.Errorf("catalog stale after a SUMS timeout: %+v", snap)
+	}
+	if r, _ := snap.Lookup("nightly-20261024"); !r.Installable {
+		t.Errorf("release classified before the hang = %+v, want installable", r)
+	}
+	for _, tag := range []string{"nightly-20261023", "nightly-20261022"} {
+		if r, _ := snap.Lookup(tag); r.Installable || r.Reason != ReasonChecksumsUnavailable {
+			t.Errorf("%s = %+v, want %q", tag, r, ReasonChecksumsUnavailable)
+		}
+	}
+	if got := f.sums("nightly-20261022"); got != 0 {
+		t.Errorf("SHA256SUMS of nightly-20261022 downloaded after the budget ran out: %d", got)
+	}
+	if l, _ := snap.Latest("nightly"); l.Tag != "nightly-20261024" {
+		t.Errorf("latest = %q", l.Tag)
+	}
+
+	// The host recovers: the unavailable verdicts were not cached, the good
+	// one was.
+	f.set(func() { delete(f.hangSums, "nightly-20261023") })
+	clock.Advance(DefaultCatalogTTL)
+	snap = mustGet(t, c, false)
+	for _, tag := range []string{"nightly-20261024", "nightly-20261023", "nightly-20261022"} {
+		if r, _ := snap.Lookup(tag); !r.Installable {
+			t.Errorf("%s after recovery = %+v", tag, r)
+		}
+	}
+	if got := f.sums("nightly-20261024"); got != 1 {
+		t.Errorf("downloads of the cached verdict = %d, want 1", got)
+	}
+}
+
+func TestCatalog_PersistedLoadRetriedAfterStoreError(t *testing.T) {
+	rels := []catalogFakeRelease{catalogGood("nightly-20261024", catalogDay(24))}
+	clock := newCatalogClock()
+	store := &catalogMemStore{}
+	a := newTestCatalog(newCatalogFake(t, rels...), clock, func(o *CatalogOptions) { o.Store = store })
+	warm := mustGet(t, a, false)
+
+	// A restarted hub whose first store read fails, while GitHub is down.
+	clock.Advance(DefaultCatalogTTL)
+	f := newCatalogFake(t, rels...)
+	f.failList = true
+	store.loadErrs = 1
+	b := newTestCatalog(f, clock, func(o *CatalogOptions) { o.Store = store })
+	if _, err := b.Get(context.Background(), false); err == nil {
+		t.Fatal("first Get succeeded with no catalog available")
+	}
+	// The next Get reads the persisted copy and serves it (stale).
+	snap := mustGet(t, b, false)
+	if !snap.Stale || !reflect.DeepEqual(snap.Channels, warm.Channels) || !snap.FetchedAt.Equal(warm.FetchedAt) {
+		t.Errorf("after a transient store error: %+v, want the warm copy (stale)", snap)
+	}
+
+	// A cancelled first caller does not lose the persisted copy either.
+	f2 := newCatalogFake(t, rels...)
+	cctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	close(f.block)
-	if err := <-done; err != nil {
-		t.Fatalf("Get with a cancelled caller: %v", err)
+	cl := newTestCatalog(f2, clock, func(o *CatalogOptions) {
+		o.Store = store
+		o.TTL = 2 * DefaultCatalogTTL
+	})
+	if s, err := cl.Get(cctx, false); err != nil || !s.FetchedAt.Equal(warm.FetchedAt) {
+		t.Errorf("cancelled first Get = %+v, %v; want the persisted copy", s, err)
+	}
+	if len(f2.requests) != 0 {
+		t.Errorf("requests with a warm persisted copy: %v", f2.requests)
 	}
 }
 
