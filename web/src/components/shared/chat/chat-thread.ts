@@ -104,8 +104,9 @@ import type { PreviewTarget } from './chat-file-preview.js';
 import './chat-action-sheet.js';
 import type { ActionSheetSelectDetail } from './chat-action-sheet.js';
 import {
+  MenuFocus,
   placeMenuInViewport,
-  renderMenuRows,
+  renderMenu,
   runMenuAction,
   shouldUseMenuSheet,
   type MenuAction,
@@ -885,6 +886,9 @@ export class ScionChatThread extends LitElement {
 
   /** The user scrolled since the popup menu opened (it then closes). */
   private _menuUserScrolled = false;
+
+  /** Keyboard focus around the popup message menu. */
+  private readonly _menuFocus = new MenuFocus();
 
   // ---- Starred messages (web.chat_starred_messages) ----
 
@@ -1714,8 +1718,15 @@ export class ScionChatThread extends LitElement {
         transition: background 0.1s;
       }
 
-      .context-menu-item:hover {
+      .context-menu-item:hover,
+      .context-menu-item:focus {
         background: var(--scion-primary-50, #eff6ff);
+        outline: none;
+      }
+
+      .context-menu-item:focus-visible {
+        outline: 2px solid var(--scion-primary, #3b82f6);
+        outline-offset: -2px;
       }
 
       .context-menu-item.danger {
@@ -1788,10 +1799,9 @@ export class ScionChatThread extends LitElement {
       if (list) list.scrollTop = list.scrollHeight;
     }
     if (this.contextMenuMessage && !this.contextMenuAsSheet) {
-      placeMenuInViewport(
-        this.renderRoot.querySelector<HTMLElement>('.context-menu'),
-        this.contextMenuPosition
-      );
+      const menu = this.renderRoot.querySelector<HTMLElement>('.context-menu');
+      placeMenuInViewport(menu, this.contextMenuPosition);
+      this._menuFocus.afterRender(menu);
     }
     if (
       changedProperties.has('conversationKey') &&
@@ -5550,11 +5560,21 @@ export class ScionChatThread extends LitElement {
   /** Render the context menu when a message is right-clicked or tapped. */
   private renderContextMenu() {
     if (!this.contextMenuMessage || this.contextMenuAsSheet) return nothing;
+    const msg = this.contextMenuMessage;
+    const sender = this.getSenderDisplayName(msg) || msg.sender;
     return html`
-      <div class="context-menu-overlay" @click=${this.closeContextMenu}></div>
-      <div class="context-menu">
-        ${renderMenuRows(this.messageMenuActions(this.contextMenuMessage))}
-      </div>
+      <div
+        class="context-menu-overlay"
+        @click=${(): void => {
+          this.closeContextMenu();
+          this._menuFocus.closed();
+        }}
+      ></div>
+      ${renderMenu(this.messageMenuActions(msg), {
+        label: sender ? `Message actions, ${sender}` : 'Message actions',
+        focus: this._menuFocus,
+        close: () => this.closeContextMenu(),
+      })}
     `;
   }
 
@@ -5667,6 +5687,7 @@ export class ScionChatThread extends LitElement {
     this.contextMenuPosition = { x: e.clientX, y: e.clientY };
     this.contextMenuAsSheet = shouldUseMenuSheet();
     document.addEventListener('keydown', this.handleContextMenuKeydown);
+    if (!this.contextMenuAsSheet) this._menuFocus.opened();
     this.trackMenuAnchor(msg.id);
   }
 
@@ -5724,19 +5745,23 @@ export class ScionChatThread extends LitElement {
    */
   private followMenuAnchor(scrollEl: HTMLElement): void {
     const anchor = this._menuAnchor;
-    if (this._menuUserScrolled || !anchor || anchor.top === null) {
+    const dismiss = (): void => {
       this.closeContextMenu();
+      this._menuFocus.restoreIfLost();
+    };
+    if (this._menuUserScrolled || !anchor || anchor.top === null) {
+      dismiss();
       return;
     }
     const el = this.shadowRoot?.getElementById(`msg-${anchor.messageId}`);
     if (!el) {
-      this.closeContextMenu();
+      dismiss();
       return;
     }
     const rect = el.getBoundingClientRect();
     const view = scrollEl.getBoundingClientRect();
     if (rect.bottom <= view.top || rect.top >= view.bottom) {
-      this.closeContextMenu();
+      dismiss();
       return;
     }
     const delta = rect.top - anchor.top;
@@ -5775,6 +5800,7 @@ export class ScionChatThread extends LitElement {
   private handleContextMenuKeydown = (e: KeyboardEvent): void => {
     if (e.key === 'Escape') {
       this.closeContextMenu();
+      this._menuFocus.restore();
     }
   };
 

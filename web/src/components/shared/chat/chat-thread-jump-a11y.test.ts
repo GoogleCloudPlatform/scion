@@ -250,3 +250,44 @@ describe('scion-chat-thread popup menu while the thread scrolls', () => {
     expect((el as unknown as Internals).contextMenuPosition).toEqual(before);
   });
 });
+
+describe('scion-chat-thread message menu keyboard contract', () => {
+  it('opens as a named menu with focus on its first item; Escape restores the opener', async () => {
+    const el = await mount();
+    const opener = document.createElement('button');
+    document.body.appendChild(opener);
+    opener.focus();
+    msgEl(el, 'm2').dispatchEvent(
+      new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 5, clientY: 5 })
+    );
+    await el.updateComplete;
+    await el.updateComplete;
+    const menu = el.shadowRoot!.querySelector<HTMLElement>('[role="menu"]')!;
+    expect(menu.getAttribute('aria-label')).toMatch(/^Message actions/);
+    const items = [...menu.querySelectorAll('[role="menuitem"], [role="menuitemcheckbox"]')];
+    expect(items.length).toBeGreaterThan(1);
+    expect(el.shadowRoot!.activeElement).toBe(items[0]);
+    menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    expect(el.shadowRoot!.activeElement).toBe(items[1]);
+    menu.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await el.updateComplete;
+    expect((el as unknown as Internals).contextMenuMessage).toBeNull();
+    expect(document.activeElement).toBe(opener);
+  });
+
+  it('a click on the overlay closes without pulling focus back', async () => {
+    const el = await mount();
+    const opener = document.createElement('button');
+    document.body.appendChild(opener);
+    opener.focus();
+    msgEl(el, 'm2').dispatchEvent(
+      new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 5, clientY: 5 })
+    );
+    await el.updateComplete;
+    el.shadowRoot!.querySelector<HTMLElement>('.context-menu-overlay')!.click();
+    await el.updateComplete;
+    await new Promise((r) => setTimeout(r, 5));
+    expect((el as unknown as Internals).contextMenuMessage).toBeNull();
+    expect(document.activeElement).not.toBe(opener);
+  });
+});
