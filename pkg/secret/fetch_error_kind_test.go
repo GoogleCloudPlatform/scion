@@ -54,7 +54,7 @@ func TestLocalBackend_FetchValues_DecryptFailureIsResolveDecrypt(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := s.CreateSecret(ctx, &store.Secret{
-		ID: "fetch-kind-undecryptable", Key: "UNDECRYPTABLE", EncryptedValue: foreign,
+		ID: tid("fetch-kind-undecryptable"), Key: "UNDECRYPTABLE", EncryptedValue: foreign,
 		SecretType: store.SecretTypeEnvironment, Target: "UNDECRYPTABLE",
 		Scope: store.ScopeProject, ScopeID: "project-1", InjectionMode: store.InjectionModeAlways,
 	}); err != nil {
@@ -119,7 +119,7 @@ func TestGCPBackend_FetchValues_AccessErrorIsValueAccess(t *testing.T) {
 			ctx := context.Background()
 			s := fetchErrorKindStore(t)
 			if err := s.CreateSecret(ctx, &store.Secret{
-				ID: "fetch-kind-" + tc.name, Key: "SM_KEY", SecretRef: "gcpsm:projects/test-project/secrets/sm-key",
+				ID: tid("fetch-kind-" + tc.name), Key: "SM_KEY", SecretRef: "gcpsm:projects/test-project/secrets/sm-key",
 				SecretType: store.SecretTypeEnvironment, Target: "SM_KEY",
 				Scope: store.ScopeProject, ScopeID: "project-1", InjectionMode: store.InjectionModeAlways,
 			}); err != nil {
