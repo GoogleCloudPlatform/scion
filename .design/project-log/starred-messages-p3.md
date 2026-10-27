@@ -29,7 +29,7 @@
   starred-only center: standalone rows, a "Starred messages only" banner with Show all messages in
   place of the composer, its own loading and empty states. No read watermark, unread divider,
   typing indicator, inter-agent exchanges or live appends there; star invalidations, edits and
-  deletions refetch the window and keep the reader's place. "Jump to message in conversation"
+  deletions refetch the loaded messages and keep the reader's place. "Jump to message in conversation"
   resolves the star, then opens the full conversation at the message in a new history entry (Back
   returns to the filtered view and its position); Reply, Edit, a reply preview and a header entry
   open the full conversation first.
@@ -66,15 +66,16 @@
   backfill checks the thread generation (`fetchId`), every ordinary backfill returns in the
   starred-only center, and the exit target is bound to its conversation key.
 - **The starred-only refresh refetches around the reader** (or its nearest loaded neighbours) when the
-  reader is further up than the largest page, or the loaded list is already an around window (a second
-  refresh, such as an unstar followed by the hub's own stars event); otherwise the newest window, which
+  reader is further up than the largest page, or the loaded list is already an around page (a second
+  refresh, such as an unstar followed by the hub's own stars event); otherwise the newest page, which
   clears the around state.
 - **Experiment off:** a `?messages=starred` conversation URL shows a notice that all messages are
   shown, then drops the filter from the URL in place.
 
 ## Verification notes
 
-- The hub tests run per shard; locate the new tests with `hack/hubshard` at the exact commit.
+- The pkg/hub test package is split into groups by `hack/` tooling; find the group that holds a new test at the exact commit
+  before running it.
 - The mocked Playwright harness (`web/e2e/chat-mobile/star-center.pw.ts`) covers the browser cases;
   the real-hub case in `web/e2e/chat-stars.spec.ts` covers the filtered view and the jump end to end.
 - Chromium does not start under `ulimit -v`; local Playwright runs used a 1 s session RSS watcher
@@ -82,8 +83,8 @@
 
 ## Follow-ups
 
-- Held for the fix batch after the hub dev runs: add `?x=1;starred=true` to the experiment-off 404 list in
+- Planned for a follow-up change: add `?x=1;starred=true` to the experiment-off 404 list in
   `TestChatStarredHistory_GateAndValidation` (the routing already sends it to the starred variant, which is a 404 while the
   experiment is off).
-- Held for the same batch: a web unit case where a refresh in the middle of the starred-only list leaves it empty: the empty state
+- Also planned for that follow-up: a web unit case where a refresh in the middle of the starred-only list leaves it empty: the empty state
   renders, there is no Jump to latest, and Show all opens the full conversation with no anchor.
