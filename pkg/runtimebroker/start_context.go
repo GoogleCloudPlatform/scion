@@ -321,6 +321,18 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			in.OwnedAbandon.projectPath = in.ProjectPath
 		}
 	}()
+	// On a shared storage backend: the Layout's project root
+	// (sharedHubProjectPath), checked, never written.
+	if in.ProjectSlug != "" && in.ProjectPath == "" {
+		sharedPath, shared, sce := s.sharedHubProjectPath(ctx, in.ProjectID)
+		if sce != nil {
+			span.SetStatus(codes.Error, startContextSpanText(sce))
+			return nil, sce
+		}
+		if shared {
+			in.ProjectPath = sharedPath
+		}
+	}
 	if in.ProjectSlug != "" && in.ProjectPath == "" {
 		globalDir, err := config.GetGlobalDir()
 		if err != nil {
@@ -1130,8 +1142,26 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// --- Shared-plain provisioning backstop (shared storage) ---
+	// A git project's shared workspace on the broker's shared Layout is
+	// provisioned by the broker before a local container starts (reuse when
+	// already provisioned, clone otherwise), and the in-container clone is
+	// then not requested (provisionSharedPlainWorkspace).
+	sharedPlainProvisioned := false
+	if !worktreeProvisioned && !linkedCheckout && in.Config != nil && in.Config.GitClone != nil &&
+		(in.Config.SharedWorkspace || in.WorkspaceMode == store.WorkspaceModeShared) && localContainerRuntime(dispatchRuntimeType) {
+		provisioned, err := s.provisionSharedPlainWorkspace(ctx, in, env)
+		if err != nil {
+			s.agentLifecycleLog.Error("Shared workspace provisioning failed", "agent_id", in.AgentID, "project_id", in.ProjectID,
+				"error", sanitizeCloneErrorText(err.Error(), in.Config.GitClone.URL))
+			span.SetStatus(codes.Error, "shared workspace provisioning failed")
+			return nil, &startContextError{Status: http.StatusInternalServerError, Message: "the project's shared workspace could not be provisioned"}
+		}
+		sharedPlainProvisioned = provisioned
+	}
+
 	// --- Git clone mode ---
-	if !worktreeProvisioned && !linkedCheckout && in.Config != nil && in.Config.GitClone != nil {
+	if !worktreeProvisioned && !linkedCheckout && !sharedPlainProvisioned && in.Config != nil && in.Config.GitClone != nil {
 		gc := in.Config.GitClone
 		env["SCION_GIT_CLONE_URL"] = gc.URL
 		// Clone URL may embed credentials — the original #127 bug.
@@ -2331,7 +2361,8 @@ func ambiguousNonGitWorkspace(in startContextInputs, worktreeProvisioned bool) s
 	// from the slug before buildStartContext) is checked; a linked
 	// project's own ProjectPath keeps its existing resolution.
 	globalDir, err := config.GetGlobalDir()
-	if err != nil || filepath.Clean(in.ProjectPath) != filepath.Join(globalDir, "projects", in.ProjectSlug) {
+	hubManagedPath := err == nil && filepath.Clean(in.ProjectPath) == filepath.Join(globalDir, "projects", in.ProjectSlug)
+	if !hubManagedPath && !isSharedHubProjectRoot(in.ProjectPath) {
 		return ""
 	}
 	if in.WorkspaceStoragePath != "" {
@@ -2348,6 +2379,16 @@ func ambiguousNonGitWorkspace(in startContextInputs, worktreeProvisioned bool) s
 // project directory and creates its split storage directories. The caller
 // holds the workspace lock on in.ProjectPath.
 func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInputs) {
+	// A shared-backend project root's configuration is hub-seeded and
+	// never written by a broker (sharedHubProjectPath checked it). Only the
+	// broker-local external agents root is created.
+	if isSharedHubProjectRoot(in.ProjectPath) {
+		scionDir := filepath.Join(in.ProjectPath, config.DotScion)
+		if root, err := config.AgentsRootForProject(scionDir, false, in.ProjectID); err == nil {
+			_ = os.MkdirAll(root, 0755)
+		}
+		return
+	}
 	// A broker copy of a hub workspace (~/.scion/projects/<slug>)
 	// records the hub project ID as its identity; see
 	// recordHubProjectIdentity. Done before the checks below, which

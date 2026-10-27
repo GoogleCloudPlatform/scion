@@ -1823,6 +1823,9 @@ authDone:
 		if rootsErr != nil {
 			return nil, rootsErr
 		}
+		if legacy := legacyAgentWorkspaceRoot(projectDir, opts.Name, agentDir, explicitWorkspace || opts.SharedWorkspace); legacy != "" {
+			roots = append(roots, legacy)
+		}
 	}
 	resolvedWorkspace, err := runtime.ValidateWorkspaceSource(effectiveWorkspace, roots...)
 	if err != nil {
@@ -2219,17 +2222,20 @@ authDone:
 	//
 	// The root was composed against the PRE-backend workspace. The derivation
 	// depends on the workspace, so when the backend actually changed it,
-	// recompose against the value RunConfig will use, exactly as the upstream
-	// broker-known-path derivation does on main: validatedWorktreeRepoRoot(
-	// candidate, ws) falling back to detectRepoRoot, with the record
-	// intersection re-applied (failing closed).
+	// recompose against the value RunConfig will use: validatedWorktreeRepoRoot(
+	// candidate, ws) falling back to the shared layout's workspace
+	// (composeSharedRepoRoot), with the record intersection re-applied
+	// (failing closed).
 	// On Kubernetes the runtime builds its workspace mounts from
 	// containerWorkspace and the NFS* fields above, not from repoRoot, and reads
 	// RepoRoot only to decide whether the shared workspace's in-project agents
 	// dir is kept out of the pod (see k8sWorkspaceAgentsExcluded).
 	if effectiveWorkspace != preBackendWorkspace && !emptyPerAgent {
+		// The backend placed the workspace on the shared tree: the candidate
+		// root is the shared layout's workspace, and the backend's path must
+		// be that one (ptone/scion#5826; composeSharedRepoRoot).
 		var reErr error
-		repoRoot, reErr = composeRepoRoot(opts.Name, candidateRepoRoot, repoRootRec, effectiveWorkspace, projectDir, explicitWorkspace, settings)
+		repoRoot, reErr = composeSharedRepoRoot(opts.Name, candidateRepoRoot, repoRootRec, effectiveWorkspace, projectDir, projectID, explicitWorkspace, settings)
 		if reErr != nil {
 			return nil, reErr
 		}
@@ -3009,7 +3015,15 @@ func detectRepoRoot(explicit bool, effectiveWorkspace, projectDir string, settin
 	if explicit {
 		return "", nil
 	}
-	projectRoot := brokerProjectRoot(settings, projectDir)
+	return detectRepoRootFrom(effectiveWorkspace, projectDir, brokerProjectRoot(settings, projectDir))
+}
+
+// detectRepoRootFrom is detectRepoRoot for a non-explicit workspace with the
+// candidate project root already taken from the layout authority: the local
+// layout's (brokerProjectRoot), or, for a workspace a shared backend placed
+// on this host, the shared layout's (sharedLayoutWorkspaceRoot). Git only
+// verifies the candidate.
+func detectRepoRootFrom(effectiveWorkspace, projectDir, projectRoot string) (string, error) {
 	if effectiveWorkspace != "" {
 		ownGitDir := filepath.Join(effectiveWorkspace, ".git")
 		ownGitInfo, ownGitErr := os.Lstat(ownGitDir)
@@ -3164,21 +3178,30 @@ func boundedCommonGitDir(dir, ceiling string) (string, error) {
 	return filepath.Clean(commonDir), nil
 }
 
-// brokerProjectRoot is the project's own root directory as the broker knows
-// it, from paths only: the recorded workspace path of a project whose
-// configuration lives in the broker's project-configs tree, otherwise the
-// directory holding the project's .scion directory, otherwise the project
-// directory itself. A workspace_path setting is used only from the
-// project-configs tree: merged settings can include a settings file inside
-// the project, which a shared workspace mount exposes.
+// brokerProjectRoot is the project's workspace root on the local layout, as
+// the layout authority places it (localLayoutWorkspaceRoot) for the
+// project's own root directory as the broker knows it, from paths only: the
+// recorded workspace path of a project whose configuration lives in the
+// broker's project-configs tree, otherwise the directory holding the
+// project's .scion directory, otherwise the project directory itself. A
+// workspace_path setting is used only from the project-configs tree: merged
+// settings can include a settings file inside the project, which a shared
+// workspace mount exposes.
 func brokerProjectRoot(settings *config.VersionedSettings, projectDir string) string {
-	if settings != nil && settings.WorkspacePath != "" && isProjectConfigsPath(projectDir) {
-		return settings.WorkspacePath
+	// A shared project configuration (<ProjectRoot>/.scion): the candidate
+	// is the shared layout's project-level workspace, <ProjectRoot>/workspace,
+	// whatever the backend places on this host.
+	if config.IsSharedProjectConfigDir(projectDir) {
+		return filepath.Join(filepath.Dir(filepath.Clean(projectDir)), projectfs.ProjectWorkspaceDirName)
 	}
-	if filepath.Base(projectDir) == config.DotScion {
-		return filepath.Dir(projectDir)
+	own := projectDir
+	switch {
+	case settings != nil && settings.WorkspacePath != "" && isProjectConfigsPath(projectDir):
+		own = settings.WorkspacePath
+	case filepath.Base(projectDir) == config.DotScion:
+		own = filepath.Dir(projectDir)
 	}
-	return projectDir
+	return localLayoutWorkspaceRoot(own)
 }
 
 // projectRepoRoot returns the project's repository root: the nearest of

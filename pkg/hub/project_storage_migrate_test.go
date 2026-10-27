@@ -365,3 +365,60 @@ func TestAdoptUnverifiedParam(t *testing.T) {
 	assert.True(t, some("b"))
 	assert.False(t, some("c"))
 }
+
+// Step 5 (ptone/scion#5825) through the hub's maintenance operation: a
+// stopped agent's legacy Cloud Run home and secrets move to
+// agents/<slug>/{home-,secrets-}<agent ID>; a running agent's are deferred
+// (the project stays pending) and move once it is stopped.
+func TestProjectStorageMigrate_CloudRunHomes(t *testing.T) {
+	f := newStorageMigrateFixture(t)
+	share := f.useNFS(t)
+	ctx := context.Background()
+	stopped := &store.Agent{ID: uuid.NewString(), Slug: "dev", Name: "dev", ProjectID: f.project.ID, Phase: "stopped"}
+	running := &store.Agent{ID: uuid.NewString(), Slug: "ops", Name: "ops", ProjectID: f.project.ID, Phase: "running"}
+	for _, a := range []*store.Agent{stopped, running} {
+		require.NoError(t, f.srv.store.CreateAgent(ctx, a))
+	}
+	root := filepath.Join(share, "projects", f.project.ID)
+	for _, a := range []*store.Agent{stopped, running} {
+		writeFiles(t, root, map[string]string{
+			filepath.Join("agents", a.ID, "home", ".bashrc"):  "home " + a.Slug,
+			filepath.Join("agents", a.ID, "secrets", "token"): "secret " + a.Slug,
+		})
+	}
+
+	log, err := runStorageMigrate(t, f.srv, false)
+	require.NoError(t, err, log)
+	for p, want := range map[string]string{
+		filepath.Join("agents", "dev", "home-"+stopped.ID, ".bashrc"):  "home dev",
+		filepath.Join("agents", "dev", "secrets-"+stopped.ID, "token"): "secret dev",
+		filepath.Join("agents", running.ID, "home", ".bashrc"):         "home ops",
+	} {
+		got, err := os.ReadFile(filepath.Join(root, p))
+		require.NoError(t, err, "%s\n%s", p, log)
+		assert.Equal(t, want, string(got))
+	}
+	assert.Contains(t, log, "step 5-cloudrun-homes deferred")
+	_, statErr := os.Stat(filepath.Join(root, "agents", "ops", "home-"+running.ID))
+	assert.True(t, os.IsNotExist(statErr), "nothing is created for a running agent")
+
+	running.Phase = "stopped"
+	require.NoError(t, f.srv.store.UpdateAgent(ctx, running))
+	log, err = runStorageMigrate(t, f.srv, false)
+	require.NoError(t, err, log)
+	got, err := os.ReadFile(filepath.Join(root, "agents", "ops", "home-"+running.ID, ".bashrc"))
+	require.NoError(t, err, log)
+	assert.Equal(t, "home ops", string(got))
+
+	log, err = runStorageMigrate(t, f.srv, false)
+	require.NoError(t, err, log)
+	assert.Contains(t, log, "moves=0")
+}
+
+// Step 5 moves only agents whose instance is gone: an agent in phase error
+// may still have one, and is deferred like a running agent.
+func TestStorageMigrateAgentStopped(t *testing.T) {
+	for phase, want := range map[string]bool{"stopped": true, "halted": true, "error": false, "running": false, "starting": false, "suspended": false, "": false} {
+		assert.Equal(t, want, storageMigrateAgentStopped(phase), phase)
+	}
+}
