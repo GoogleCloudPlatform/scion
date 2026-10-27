@@ -774,6 +774,15 @@ func AuditableBrokerAuthMiddleware(svc *BrokerAuthService, logger AuditLogger) f
 				event.Details["on_behalf_of_user_id"] = userIdent.ID()
 			}
 
+			// A conduit dial whose nonce Admit records is a success with the
+			// nonce deferred, not a replay check that ran.
+			if svc.defersNonce(r) {
+				if event.Details == nil {
+					event.Details = make(map[string]string)
+				}
+				event.Details["nonce_reason"] = "broker_nonce_deferred_to_admit"
+			}
+
 			if logger != nil {
 				_ = logger.LogBrokerAuthEvent(ctx, event)
 			}
