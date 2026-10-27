@@ -138,7 +138,7 @@ func TestChatStarredConversations_GateAndValidation(t *testing.T) {
 		starredConversationsURL("sort", "custom"),
 		starredConversationsURL("sort", ""),
 		starredConversationsURL("projectId", "nope"),
-		starredConversationsURL("projectId", "A0000000-0000-0000-0000-000000000000"),
+		starredConversationsURL("projectId", "a0000000-0000-0000-0000-00000000000"),
 		starredConversationsURL("conversationKey", f.topicA),
 		starredConversationsPath + "?limit=1&limit=2",
 		starredConversationsURL("cursor", "garbage"),
@@ -169,6 +169,8 @@ func TestChatStarredConversations_GroupsAndPaginates(t *testing.T) {
 	ctx := context.Background()
 	owner, err := f.s.GetUser(ctx, f.owner)
 	require.NoError(t, err)
+	// A topic's activity is recorded by its messages (CreateTopic sets none).
+	require.NoError(t, f.wcs.TouchTopicActivity(ctx, f.topicA, ""))
 	topicA, err := f.wcs.GetTopic(ctx, f.topicA)
 	require.NoError(t, err)
 
@@ -187,6 +189,7 @@ func TestChatStarredConversations_GroupsAndPaginates(t *testing.T) {
 	assert.Equal(t, f.projA, thread.ProjectID)
 	assert.Equal(t, "Inbox A", thread.ProjectName)
 	require.NotNil(t, thread.LastActivityAt)
+	require.False(t, topicA.LastActivityAt.IsZero())
 	assert.True(t, thread.LastActivityAt.Equal(topicA.LastActivityAt))
 
 	agent := rows[f.dms.agentKey]

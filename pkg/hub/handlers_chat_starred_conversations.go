@@ -275,7 +275,6 @@ func (s *Server) openStarredConversationsCursor(sealed, binding, sortMode string
 // only this request's lookups and decisions.
 type starredConversationAuthorizer struct {
 	s        *Server
-	r        *http.Request
 	call     starCall
 	identity Identity
 	// check is the token's inbox:read self-scope check (nil without a
@@ -297,7 +296,7 @@ type starredConversationAuthorizer struct {
 
 func (s *Server) newStarredConversationAuthorizer(r *http.Request, call starCall) *starredConversationAuthorizer {
 	a := &starredConversationAuthorizer{
-		s: s, r: r, call: call,
+		s: s, call: call,
 		identity:    GetIdentityFromContext(r.Context()),
 		projects:    map[string]*store.Project{},
 		projectRead: map[string]bool{},
@@ -351,10 +350,10 @@ func (a *starredConversationAuthorizer) decide(ctx context.Context, cands []Star
 	userID := a.call.user.ID()
 	peers := make([]starDMPeerRef, len(cands))
 	participant := make([]bool, len(cands))
-	var agentIDs, userIDs, projectIDs []string
+	var agentIDs, userIDs, threadProjectIDs []string
 	for i, c := range cands {
 		if !c.IsDM {
-			projectIDs = append(projectIDs, c.ProjectID)
+			threadProjectIDs = append(threadProjectIDs, c.ProjectID)
 			continue
 		}
 		peer, ok := starDMPeer(c.ConversationKey, userID)
@@ -378,6 +377,10 @@ func (a *starredConversationAuthorizer) decide(ctx context.Context, cands []Star
 	if err := a.loadUsers(ctx, userIDs); err != nil {
 		return nil, err
 	}
+	// One project lookup for the threads' projects and the agents' projects
+	// (an agent DM row names its agent's project); read decisions are needed
+	// for the threads' projects only.
+	projectIDs := append([]string{}, threadProjectIDs...)
 	for i := range cands {
 		if participant[i] && peers[i].kind == "agent" {
 			if agent := a.agents[peers[i].id]; agent != nil && agent.ProjectID != "" {
@@ -388,7 +391,7 @@ func (a *starredConversationAuthorizer) decide(ctx context.Context, cands []Star
 	if err := a.loadProjects(ctx, projectIDs); err != nil {
 		return nil, err
 	}
-	a.decideProjectReads(ctx, projectIDs)
+	a.decideProjectReads(ctx, threadProjectIDs)
 
 	out := make([]*starredConversationItem, len(cands))
 	for i, c := range cands {
