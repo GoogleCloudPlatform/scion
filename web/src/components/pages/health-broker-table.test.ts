@@ -454,3 +454,65 @@ describe('scion-health-broker-table version against the hub (ptone/scion#5972)',
     expect(sorted.map((b) => b.id)).toEqual(['z', 'a']);
   });
 });
+
+describe('scion-health-broker-table storage layout mismatch', () => {
+  /** The storage cell's markup without Lit's comment markers. */
+  function storageMarkup(row: Element): string {
+    return (row.querySelector('td.storage')?.innerHTML ?? '')
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  it('renders a row without differences as before', async () => {
+    const root = await mount(
+      list([
+        broker({ id: 'a', name: 'a', workspace_storage: { backend: 'nfs', nfs_healthy: true } }),
+        broker({
+          id: 'b',
+          name: 'b',
+          workspace_storage: { backend: 'nfs', nfs_healthy: true, layout_mismatch: [] },
+        }),
+      ])
+    );
+    const [a, b] = rows(root);
+    expect(cell(a, 'storage')).toBe('NFS ✓');
+    expect(storageMarkup(b)).toBe(storageMarkup(a));
+    expect(root.querySelector('.layout-mismatch')).toBeNull();
+  });
+
+  it('shows a layout mismatch pill with the redacted differences', async () => {
+    const lines = [
+      'nfs server: hub "filer", broker "user:secretpw@filer"',
+      'homes: hub "nfs", broker "local"',
+    ];
+    const root = await mount(
+      list([
+        broker({
+          workspace_storage: { backend: 'nfs', nfs_healthy: true, layout_mismatch: lines },
+        }),
+      ])
+    );
+    const pill = root.querySelector('td.storage .layout-mismatch') as HTMLElement;
+    expect(pill.textContent?.trim()).toBe('layout mismatch');
+    expect(pill.classList.contains('tone-warn')).toBe(true);
+    expect(pill.title).toBe(
+      'nfs server: hub "filer", broker "***@filer"\nhomes: hub "nfs", broker "local"'
+    );
+    expect(root.querySelector('td.storage .visually-hidden')?.textContent).toContain(
+      'homes: hub "nfs", broker "local"'
+    );
+    expect(root.querySelector('td.storage')?.innerHTML).not.toContain('secretpw');
+  });
+
+  it('leaves problem detection and order unchanged', () => {
+    const mismatched = broker({
+      id: 'm',
+      name: 'b-mismatch',
+      workspace_storage: { backend: 'nfs', nfs_healthy: true, layout_mismatch: ['x'] },
+    });
+    expect(brokerHasProblem(mismatched)).toBe(false);
+    const plain = broker({ id: 'p', name: 'a-plain' });
+    expect(sortBrokers([mismatched, plain]).map((b) => b.id)).toEqual(['p', 'm']);
+  });
+});
