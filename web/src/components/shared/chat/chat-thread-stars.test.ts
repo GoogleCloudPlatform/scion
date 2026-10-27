@@ -450,7 +450,7 @@ describe('scion-chat-thread starred messages', () => {
       (c) => (c[1] as RequestInit | undefined)?.method === 'PUT'
     );
     expect(put).toBeTruthy();
-    expect(JSON.parse(String((put![1] as RequestInit).body))).toEqual({ conversationKey: key });
+    expect(JSON.parse((put![1] as RequestInit).body as string)).toEqual({ conversationKey: key });
   });
 
   it('a deleted message loses its star indicator at once, from any surface', async () => {

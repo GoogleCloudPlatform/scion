@@ -38,6 +38,9 @@ import { formatInstant } from '../../../utils/time.js';
 /** Page size of the header list. */
 export const STARRED_LIST_PAGE = 20;
 
+/** The most deleted message IDs the list remembers. */
+const DELETED_MAX = 500;
+
 /** `detail` of the `starred-message-open` event. */
 export interface StarredMessageOpenDetail {
   messageId: string;
@@ -62,6 +65,13 @@ export class ScionChatStarredList extends LitElement {
   private abort: AbortController | null = null;
   /** An invalidation arrived while a first page was loading. */
   private refetchAfterLoad = false;
+  /**
+   * Messages deleted while this list is mounted. A page whose request was
+   * already in flight when the deletion arrived may still carry the row;
+   * every merged page is filtered through this set so it cannot come back.
+   * Bounded: the oldest entries are dropped past DELETED_MAX.
+   */
+  private readonly deleted = new Set<string>();
   private readonly panelId = `starred-panel-${++panelSeq}`;
 
   static override styles = css`
@@ -295,7 +305,7 @@ export class ScionChatStarredList extends LitElement {
     try {
       const page = await fetchStarPage(key, STARRED_LIST_PAGE, undefined, abort.signal);
       if (generation !== this.generation) return;
-      this.items = page.items;
+      this.items = page.items.filter((i) => !this.deleted.has(i.messageId));
       this.nextCursor = page.nextCursor;
     } catch (err) {
       if (generation !== this.generation || abort.signal.aborted) return;
@@ -322,7 +332,10 @@ export class ScionChatStarredList extends LitElement {
       const page = await fetchStarPage(key, STARRED_LIST_PAGE, cursor);
       if (generation !== this.generation) return;
       const seen = new Set(this.items.map((i) => i.messageId));
-      this.items = [...this.items, ...page.items.filter((i) => !seen.has(i.messageId))];
+      this.items = [
+        ...this.items,
+        ...page.items.filter((i) => !seen.has(i.messageId) && !this.deleted.has(i.messageId)),
+      ];
       this.nextCursor = page.nextCursor;
     } catch (err) {
       if (generation !== this.generation) return;
@@ -356,6 +369,12 @@ export class ScionChatStarredList extends LitElement {
     const detail = (e as CustomEvent<{ data?: { messageId?: string }; messageId?: string }>).detail;
     const messageId = detail?.data?.messageId ?? detail?.messageId;
     if (!messageId) return;
+    this.deleted.delete(messageId);
+    this.deleted.add(messageId);
+    for (const oldest of this.deleted) {
+      if (this.deleted.size <= DELETED_MAX) break;
+      this.deleted.delete(oldest);
+    }
     if (this.items.some((i) => i.messageId === messageId)) {
       this.items = this.items.filter((i) => i.messageId !== messageId);
     }

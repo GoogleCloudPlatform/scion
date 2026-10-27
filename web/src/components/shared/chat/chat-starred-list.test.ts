@@ -152,6 +152,22 @@ describe('scion-chat-starred-list', () => {
     expect(apiFetch).toHaveBeenCalledTimes(1);
   });
 
+  it('a page already in flight when a message is deleted cannot bring its row back', async () => {
+    let release!: (r: Response) => void;
+    apiFetch.mockImplementationOnce(() => new Promise<Response>((resolve) => (release = resolve)));
+    const el = await mount();
+    await openPanel(el);
+    // The first page is in flight; the message is deleted meanwhile.
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-message-deleted', {
+        detail: { data: { conversationKey: 'topic-1', messageId: item(2).messageId } },
+      })
+    );
+    release(json({ items: [item(2), item(1)] }));
+    await vi.waitFor(() => expect(entries(el)).toHaveLength(1));
+    expect(el.shadowRoot!.textContent).not.toContain('Mock excerpt 2');
+  });
+
   it('lists a DM conversation with its DM permalink', async () => {
     const dm = {
       ...item(3),
