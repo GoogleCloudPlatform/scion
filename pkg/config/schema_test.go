@@ -433,6 +433,7 @@ server:
   workspace_storage:
     backend: nfs
     nfs:
+      mount_root: /mnt/nfs
       %s: %d
       shares:
         - id: ws1
