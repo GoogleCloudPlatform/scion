@@ -931,7 +931,7 @@ Controls how the Hub checks for and applies its own updates. The **deployment ti
 | `github_repo` | string | `GoogleCloudPlatform/scion` | GitHub repository whose releases the Hub lists and installs. |
 | `install_root` | string | `/opt/scion` | Versioned install root (`releases/<tag>/scion`, `current`, `previous`) used by release self-update. `SCION_MAINTENANCE_INSTALL_ROOT` overrides it. The single-node VM deploy script writes it. |
 
-Scheduled checks run whenever `update_policy` is not `disabled`; a Hub in `source` mode skips them.
+Scheduled checks run whenever `update_policy` is not `disabled`; a Hub in `source` mode skips them. Before `update_policy` defaulted to `notify`, a `binary` Hub defaulted to `auto`; set `auto` explicitly to keep unattended updates.
 
 **Release selection.** An update that an operator starts from the Maintenance page or the API (an explicit target release, channel and pin) records that choice once the Hub has restarted on the new release and verified it. Auto-updates (`update_policy: auto`) never record a selection, so they never change which channel the Hub follows. update-status reports where the **effective channel** came from in `channel.source`:
 
