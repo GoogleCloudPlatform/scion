@@ -118,7 +118,8 @@ func sdStartDelivery(t *testing.T, d *HTTPAgentDispatcher, s store.Store, agentI
 			out.private = r.Value == sdPrivateValue
 		}
 	}
-	got := d.resolveAsNeededForKeys(ctx, agent, []string{sdAsNeededKey}, nil)
+	got, err := d.resolveAsNeededForKeys(ctx, agent, []string{sdAsNeededKey}, nil)
+	require.NoError(t, err)
 	out.asNeeded = got[sdAsNeededKey] == sdAsNeededValue
 	return out
 }
