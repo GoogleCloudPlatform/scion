@@ -389,6 +389,69 @@ func TestHubReleaseCatalogStore(t *testing.T) {
 	}
 }
 
+// catalogCtxKey marks the context a test passes to the catalog store.
+type catalogCtxKey struct{}
+
+// catalogCtxStore records whether the hub_settings calls of the catalog
+// store received the caller's context, and fails them when it is done.
+type catalogCtxStore struct {
+	store.Store
+	mu   sync.Mutex
+	seen []string
+}
+
+func (c *catalogCtxStore) note(ctx context.Context, op string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if ctx.Value(catalogCtxKey{}) == "caller" {
+		c.seen = append(c.seen, op)
+	}
+	return ctx.Err()
+}
+
+func (c *catalogCtxStore) GetHubSetting(ctx context.Context, section string) (*store.HubSetting, error) {
+	if err := c.note(ctx, "get"); err != nil {
+		return nil, err
+	}
+	return c.Store.GetHubSetting(ctx, section)
+}
+
+func (c *catalogCtxStore) UpsertHubSetting(ctx context.Context, section string, value json.RawMessage, updatedBy string, expectedRevision int64, origin string) (*store.HubSetting, error) {
+	if err := c.note(ctx, "upsert"); err != nil {
+		return nil, err
+	}
+	return c.Store.UpsertHubSetting(ctx, section, value, updatedBy, expectedRevision, origin)
+}
+
+// TestHubReleaseCatalogStore_PassesCtx pins that Load and Save hand the
+// caller's context to the store, so a cancelled refresh cannot hang in a
+// database call (a ctx-ignoring Save would hold the catalog's singleflight).
+func TestHubReleaseCatalogStore_PassesCtx(t *testing.T) {
+	_, s := newTestServerWithStore(t)
+	rec := &catalogCtxStore{Store: s}
+	cs := hubReleaseCatalogStore{s: &Server{store: rec}}
+
+	ctx := context.WithValue(context.Background(), catalogCtxKey{}, "caller")
+	if err := cs.SaveReleaseCatalog(ctx, []byte(`{"version":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cs.LoadReleaseCatalog(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.seen) != 2 || rec.seen[0] != "upsert" || rec.seen[1] != "get" {
+		t.Fatalf("store calls with the caller's ctx = %v, want [upsert get]", rec.seen)
+	}
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := cs.SaveReleaseCatalog(cancelled, []byte(`{}`)); !errors.Is(err, context.Canceled) {
+		t.Errorf("Save on a cancelled ctx = %v, want context.Canceled", err)
+	}
+	if _, err := cs.LoadReleaseCatalog(cancelled); !errors.Is(err, context.Canceled) {
+		t.Errorf("Load on a cancelled ctx = %v, want context.Canceled", err)
+	}
+}
+
 func TestUpdateReleaseCatalog(t *testing.T) {
 	t.Run("configured catalog is used", func(t *testing.T) {
 		srv, _ := newTestServerWithStore(t)
