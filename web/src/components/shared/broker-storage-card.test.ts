@@ -119,4 +119,13 @@ describe('scion-broker-storage-card', () => {
     );
     expect(root.textContent).not.toContain('secretpw');
   });
+
+  it('redacts a difference line whose value contains an escaped quote', async () => {
+    const root = await mount(nfsStorage(), ['nfs server: hub "filer", broker "user:p\\"w@filer"']);
+    expect(root.querySelector('.storage-mismatch-alert li')?.textContent?.trim()).toBe(
+      'nfs server: hub "filer", broker "***@filer"'
+    );
+    expect(root.textContent).not.toContain('user:p');
+    expect(root.textContent).not.toContain('\\"w@');
+  });
 });

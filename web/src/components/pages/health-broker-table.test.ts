@@ -505,6 +505,27 @@ describe('scion-health-broker-table storage layout mismatch', () => {
     expect(root.querySelector('td.storage')?.innerHTML).not.toContain('secretpw');
   });
 
+  it('redacts a difference whose value contains an escaped quote', async () => {
+    const root = await mount(
+      list([
+        broker({
+          workspace_storage: {
+            backend: 'nfs',
+            nfs_healthy: true,
+            layout_mismatch: ['nfs server: hub "filer", broker "user:p\\"w@filer"'],
+          },
+        }),
+      ])
+    );
+    const pill = root.querySelector('td.storage .layout-mismatch') as HTMLElement;
+    expect(pill.title).toBe('nfs server: hub "filer", broker "***@filer"');
+    const hidden = root.querySelector('td.storage .visually-hidden')?.textContent ?? '';
+    expect(hidden).toContain('nfs server: hub "filer", broker "***@filer"');
+    expect(hidden).not.toContain('user:p');
+    expect(pill.title).not.toContain('user:p');
+    expect(root.querySelector('td.storage')?.innerHTML).not.toContain('user:p');
+  });
+
   it('leaves problem detection and order unchanged', () => {
     const mismatched = broker({
       id: 'm',

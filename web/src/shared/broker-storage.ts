@@ -47,9 +47,15 @@ export function redactUserinfo(value: string): string {
   return `${scheme}***@${rest.slice(at + 1)}`;
 }
 
+/**
+ * A double-quoted value whose embedded quotes and backslashes are escaped
+ * with a backslash; the match runs to the first unescaped quote.
+ */
+const QUOTED = /"((?:[^"\\]|\\.)*)"/g;
+
 /** A layout comparison line with every double-quoted value redacted. */
 export function redactMismatchLine(line: string): string {
-  return line.replace(/"([^"]*)"/g, (_, v: string) => `"${redactUserinfo(v)}"`);
+  return line.replace(QUOTED, (_, v: string) => `"${redactUserinfo(v)}"`);
 }
 
 /** The hub's layout comparison lines, redacted for display; [] for none. */

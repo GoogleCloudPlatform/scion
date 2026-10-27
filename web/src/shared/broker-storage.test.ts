@@ -58,6 +58,19 @@ describe('mismatchLines', () => {
     );
   });
 
+  it('redacts a quoted value that contains an escaped quote as a whole', () => {
+    const out = redactMismatchLine('nfs server: hub "filer", broker "user:p\\"w@filer"');
+    expect(out).toBe('nfs server: hub "filer", broker "***@filer"');
+    expect(out).not.toContain('user');
+    expect(out).not.toContain('p\\"w');
+  });
+
+  it('ends a quoted value at a quote that follows an escaped backslash', () => {
+    expect(redactMismatchLine('nfs server: hub "a\\\\", broker "u:pw@filer"')).toBe(
+      'nfs server: hub "a\\\\", broker "***@filer"'
+    );
+  });
+
   it('is empty for null, undefined or no lines', () => {
     expect(mismatchLines(null)).toEqual([]);
     expect(mismatchLines(undefined)).toEqual([]);
