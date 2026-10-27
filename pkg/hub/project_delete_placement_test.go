@@ -25,6 +25,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -102,24 +103,45 @@ func TestProjectDelete_RefusalWithoutPlacementRefusedAgentsUnchanged(t *testing.
 }
 
 // A Runtime Broker row read that fails leaves the agent unflagged; the
-// refusal itself still lists it.
+// refusal itself still lists it. The agent's pin is valid but names a
+// runtime target its flat Runtime Broker does not serve, so its placement
+// check has to read the Runtime Broker row: a stale pin would be refused
+// before any read, and the failing read would never be reached.
 func TestProjectDelete_PlacementCheckFailureLeavesAgentUnflagged(t *testing.T) {
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
-	stale := f.stalePinnedAgent(t, "pd-stale-fault", string(state.PhaseRunning))
+	mismatched := f.pinnedAgentWith(t, "pd-mismatch-fault", string(state.PhaseRunning), func(a *store.Agent) {
+		a.PinnedRuntimeTargetID = "rt-not-served-by-the-broker"
+	})
+	require.True(t, mismatched.PinValid())
+	require.NotEqual(t, f.flat.RuntimeTarget.ID, mismatched.PinnedRuntimeTargetID)
 
-	faulty := &brokerReadErrStore{Store: f.s, err: errors.New("broker read failed")}
+	// failedReads counts the reads that reached the failing store, each of
+	// which returned the injected error.
+	var failedReads atomic.Int32
+	faulty := brokerReadCountingStore{
+		Store: &brokerReadErrStore{Store: f.s, err: errors.New("broker read failed")},
+		reads: &failedReads,
+	}
 	err := checkProjectAgentsDeletedTx(context.Background(), faulty, f.project.ID)
 	var refused *projectHasAgentsDeleteError
 	require.ErrorAs(t, err, &refused)
 	require.Len(t, refused.agents, 1)
-	assert.Equal(t, stale.ID, refused.agents[0].ID)
+	assert.Equal(t, mismatched.ID, refused.agents[0].ID)
+	assert.GreaterOrEqual(t, failedReads.Load(), int32(1),
+		"the placement check never read the Runtime Broker row, so the injected error did not decide the result")
 	assert.Empty(t, refused.agents[0].PlacementRefusal)
 	assert.False(t, refused.placementRefused())
 
-	// The same agent with the row readable is flagged.
-	err = checkProjectAgentsDeletedTx(context.Background(), f.s, f.project.ID)
+	// The same agent with the row readable is flagged: the row read shows
+	// that the broker does not serve the pinned target.
+	var reads atomic.Int32
+	readable := brokerReadCountingStore{Store: f.s, reads: &reads}
+	err = checkProjectAgentsDeletedTx(context.Background(), readable, f.project.ID)
 	require.ErrorAs(t, err, &refused)
-	assert.Equal(t, ErrCodeRuntimeTargetPinStale, refused.agents[0].PlacementRefusal)
+	require.Len(t, refused.agents, 1)
+	assert.GreaterOrEqual(t, reads.Load(), int32(1), "the placement check never read the Runtime Broker row")
+	assert.Equal(t, ErrCodeRuntimeTargetMismatch, refused.agents[0].PlacementRefusal)
+	assert.True(t, refused.placementRefused())
 }
 
 // --- project delete dispatch log (ptone/scion#4964) --------------------------
