@@ -388,6 +388,9 @@ func (s *Server) removeUserScopedData(ctx context.Context, userID string) bool {
 	// context (best effort; one left behind fails at fire time and is
 	// purged later).
 	defer s.deleteScheduledMessagesOfSender(ctx, userID)
+	// So do the user's starred messages (best effort; upkeep purges any
+	// left behind, and a deleted user cannot read them).
+	defer s.deleteMessageStarsOfUser(ctx, userID)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), userScopedDataCleanupTimeout)
 	defer cancel()
 	return s.removeUserScopedDataCtx(ctx, userID)
