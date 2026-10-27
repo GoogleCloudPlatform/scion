@@ -52,7 +52,7 @@ jobs:
           echo "_It does not detect file-level TOCTOU, database races, or cross-process concurrency issues._" >> $GITHUB_STEP_SUMMARY
       - name: Upload race detection results
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: race-detection-results
           path: race-detection-output.txt
@@ -113,7 +113,7 @@ jobs:
           echo "_The Go race detector instruments shared-memory access in exercised code paths only._" >> $GITHUB_STEP_SUMMARY
       - name: Upload race detection results
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: race-detection-hub-results
           path: race-detection-hub-output.txt
