@@ -4283,6 +4283,11 @@ func removeCheckedAgentDir(agentDir, agentWorkspace string) {
 		_ = os.Chmod(path, 0755)
 		return nil
 	})
+	// The agent's scion-agent.json goes first (a link is removed, never
+	// followed): a removal that then fails part-way leaves a directory the
+	// legacy agent look-up (config.LegacySharedProjectAgentDir) no longer
+	// recognises as the agent's.
+	_ = os.Remove(filepath.Join(agentDir, "scion-agent.json"))
 	_ = os.RemoveAll(agentDir)
 	removeWorkspaceWorktreeEntry(agentWorkspace)
 }

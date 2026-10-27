@@ -19,10 +19,12 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
@@ -160,5 +162,90 @@ func TestClaimReleasers_OnlyKubernetesRuntimes(t *testing.T) {
 	srv, _, _ := newNFSDeleteTestServer(t)
 	if got := srv.claimReleasers(); len(got) != 0 {
 		t.Fatalf("a broker without a Kubernetes runtime has no releasers: %d", len(got))
+	}
+}
+
+// A project delete keeps the project directory, whole, while this broker
+// still runs an agent of the project: a forced delete can reach a broker
+// whose agents were not stopped, and the directory holds their legacy agent
+// directories (with their clone-per-agent workspaces). The directory is
+// audited as kept and the delete answers 409. Stopped agents, agents of
+// other projects and an empty listing do not block the removal; a listing
+// that fails does.
+func TestDeleteProject_KeepsDirWithAgentsRunningOnThisBroker(t *testing.T) {
+	withPhase := func(a api.AgentInfo, phase string) api.AgentInfo {
+		a.Phase = phase
+		return a
+	}
+	unlabelledAt := func(projectPath, phase string) api.AgentInfo {
+		return api.AgentInfo{Name: "dev", ContainerID: "cid-legacy", ProjectPath: projectPath, Phase: phase,
+			Labels: map[string]string{"scion.agent": "true", "scion.name": "dev"}}
+	}
+	tests := []struct {
+		name    string
+		agents  func(scionDir string) []api.AgentInfo
+		listErr error
+		keep    bool
+	}{
+		{name: "running agent of the project", keep: true, agents: func(d string) []api.AgentInfo {
+			return []api.AgentInfo{withPhase(labelled("dev", "cid-a", scopeProjA, d), "running")}
+		}},
+		{name: "agent of the project in an unknown phase", keep: true, agents: func(d string) []api.AgentInfo {
+			return []api.AgentInfo{labelled("dev", "cid-a", scopeProjA, d)}
+		}},
+		{name: "unlabelled container whose project path is the project", keep: true, agents: func(d string) []api.AgentInfo {
+			return []api.AgentInfo{unlabelledAt(d, "running")}
+		}},
+		{name: "listing fails", keep: true, listErr: errors.New("runtime unreachable"), agents: func(string) []api.AgentInfo { return nil }},
+		{name: "stopped agent of the project", agents: func(d string) []api.AgentInfo {
+			return []api.AgentInfo{withPhase(labelled("dev", "cid-a", scopeProjA, d), "stopped")}
+		}},
+		{name: "running agent of another project", agents: func(string) []api.AgentInfo {
+			return []api.AgentInfo{withPhase(labelled("dev", "cid-b", scopeProjB, "/elsewhere/.scion"), "running")}
+		}},
+		{name: "no agents", agents: func(string) []api.AgentInfo { return nil }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mgr := &filteringMockManager{}
+			srv, home := newScopeTestServer(t, mgr)
+			scionDir, _ := makeHubProject(t, home, "proj-a", scopeProjA, "dev")
+			agentJSON := filepath.Join(scionDir, "agents", "dev", "scion-agent.json")
+			if err := os.WriteFile(agentJSON, []byte("{}"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			mgr.agents = tt.agents(scionDir)
+			mgr.listErr = tt.listErr
+			logs := captureBrokerLog(srv)
+			projectDir := filepath.Join(home, ".scion", "projects", "proj-a")
+
+			rec := doDeleteProject(t, srv, "proj-a", scopeProjA)
+			lines := auditLines(logs.String())
+			if !tt.keep {
+				if rec.Code != http.StatusNoContent {
+					t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+				}
+				assertGone(t, projectDir)
+				return
+			}
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
+			}
+			assertPresent(t, agentJSON)
+			kept := false
+			for _, l := range lines {
+				if strings.Contains(l, "outcome=deleted") {
+					t.Errorf("nothing may be removed while the project has running agents here: %s", l)
+				}
+				if strings.Contains(l, "tree=project-dir") && strings.Contains(l, "outcome=kept") &&
+					strings.Contains(l, "deleter=broker") && strings.Contains(l, "project_id="+scopeProjA) &&
+					strings.Contains(l, liveAgentsKeptReason) {
+					kept = true
+				}
+			}
+			if !kept {
+				t.Errorf("the kept project directory must be audited as kept (%q):\n%s", liveAgentsKeptReason, strings.Join(lines, "\n"))
+			}
+		})
 	}
 }

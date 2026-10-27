@@ -120,6 +120,30 @@ func testDeleteSharedProjectLegacyDir(t *testing.T, hubID string) {
 	}
 }
 
+// removeCheckedAgentDir removes the agent's scion-agent.json before the
+// rest of the directory; when it is a symbolic link, the link goes and its
+// target is left unchanged.
+func TestRemoveCheckedAgentDir_AgentJSONLinkNotFollowed(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "target.json")
+	if err := os.WriteFile(outside, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	agentDir := filepath.Join(t.TempDir(), "agents", "old")
+	mustMkdirAll(t, filepath.Join(agentDir, "home"))
+	if err := os.Symlink(outside, filepath.Join(agentDir, "scion-agent.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	removeCheckedAgentDir(agentDir, "")
+
+	if _, err := os.Lstat(agentDir); !os.IsNotExist(err) {
+		t.Fatalf("agent dir should be removed (err %v)", err)
+	}
+	if data, err := os.ReadFile(outside); err != nil || string(data) != "keep" {
+		t.Fatalf("the link's target must be left unchanged: %q, %v", data, err)
+	}
+}
+
 // sharedRootUUID is the project ID of the shared-root start tests: the
 // shared tree is keyed by canonical project UUIDs.
 const sharedRootUUID = "4f1d2c3b-5a69-4e70-8b91-a2b3c4d5e6f7"

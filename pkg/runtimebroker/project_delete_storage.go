@@ -18,6 +18,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
@@ -131,4 +132,38 @@ func (s *Server) auditBrokerDeletion(ctx context.Context, projectID string, tree
 	projectfs.Audit(ctx, s.agentLifecycleLog, projectfs.DeleterBroker, projectID, "", projectfs.Deletion{
 		Tree: tree, Path: path, Outcome: projectfs.OutcomeDeleted,
 	})
+}
+
+// liveAgentsKeptReason is the audit reason of a project directory a project
+// delete leaves in place because this broker still runs agents in it.
+const liveAgentsKeptReason = "agents still running on this broker"
+
+// projectHasLiveAgentsHere reports whether this broker knows an agent of
+// projectID in any phase other than stopped, error or halted: an entry
+// labelled with the project, or a legacy entry whose recorded project path
+// identifies as it (legacyEntryInProject). A project delete must not remove
+// the project directory of such an agent: on a forced delete its legacy
+// agent directory (~/.scion/projects/<slug>/.scion/agents/<name>, with a
+// clone-per-agent workspace that may hold unpushed work) is still in use.
+// A broker without a manager, or a listing that fails, counts as in use.
+func (s *Server) projectHasLiveAgentsHere(ctx context.Context, projectID string) (bool, error) {
+	mgr := s.currentManager()
+	if mgr == nil {
+		return true, nil
+	}
+	agents, err := mgr.List(ctx, map[string]string{"scion.agent": "true"})
+	if err != nil {
+		return true, err
+	}
+	for _, a := range agents {
+		if !agentInProjectStrict(a, projectID) && !legacyEntryInProject(a, projectID) {
+			continue
+		}
+		switch state.Phase(a.Phase) {
+		case state.PhaseStopped, state.PhaseError, state.PhaseHalted:
+		default:
+			return true, nil
+		}
+	}
+	return false, nil
 }

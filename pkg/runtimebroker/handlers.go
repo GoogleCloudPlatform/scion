@@ -7813,6 +7813,25 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 		return
 	}
 
+	// Nor does this broker remove the directory of a project it still runs
+	// agents in: a forced project delete can reach a broker whose agents
+	// were not stopped, and the directory holds their legacy agent
+	// directories and workspaces. It is kept, whole, and audited as kept.
+	if inUseID != "" {
+		live, err := s.projectHasLiveAgentsHere(r.Context(), inUseID)
+		if err != nil {
+			s.agentLifecycleLog.Warn("Project delete: listing this broker's agents failed; the project directory is kept",
+				"slug", slug, "project_id", inUseID, "error", err)
+		}
+		if live {
+			projectfs.Audit(r.Context(), s.agentLifecycleLog, projectfs.DeleterBroker, inUseID, "", projectfs.Deletion{
+				Tree: projectfs.TreeProjectDir, Path: projectPath, Outcome: projectfs.OutcomeKept, Reason: liveAgentsKeptReason,
+			})
+			Conflict(w, "the project still has running agents on this Runtime Broker")
+			return
+		}
+	}
+
 	// The project's tree on the shared project storage (projects/<id>) is
 	// not this broker's to remove: the hub removes it, from its own mount
 	// of the share, once the project delete has committed
