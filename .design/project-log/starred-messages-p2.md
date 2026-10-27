@@ -51,10 +51,8 @@
   could only fail late in a gate. The hub promotion path is covered by the Go store and handler
   tests (both dialects, both message populations, rollback, single connection, access loss and
   regain). Human DM retrieval runs on the real hub (`web/e2e/chat-stars.spec.ts`).
-- **Chromium does not start under `ulimit -v`.** For dev-time mocked Playwright runs a 1 s
-  session RSS watcher with a kill limit (self-tested) was used instead; peak about 550 MB.
-- **A `go build` on broker-01 needs the FIFO GO.** One dev-time build was started without it
-  this phase (killed in seconds, disclosed). Every compile goes through heavy-build after a GO.
+- **Dev-time compiles and browser runs follow the project's build-lane process**, with a memory
+  limit on every heavy process.
 
 ## Follow-ups (from the phase 1 list)
 

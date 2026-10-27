@@ -278,6 +278,8 @@ type starConversation struct {
 	// themselves).
 	PeerKind   string
 	PeerUserID string
+	// PeerID is the DM's other participant's ID as the key names it.
+	PeerID string
 }
 
 // resolveStarScope resolves a conversation key for the star routes
@@ -348,6 +350,7 @@ func (s *Server) resolveStarDM(r *http.Request, call starCall, permissionID, key
 		peerKind, peerID = parts[3], parts[4]
 	}
 	sc.PeerKind = peerKind
+	sc.PeerID = peerID
 	switch peerKind {
 	case "user":
 		sc.PeerUserID = peerID
@@ -788,10 +791,14 @@ func (s *Server) hydrateStarItems(ctx context.Context, wcs WebChatStore, sc star
 		}
 	}
 	if sc.IsDM {
-		switch sc.PeerKind {
-		case "user":
+		switch {
+		case !canonicalStarID(sc.PeerID):
+			// No usable stable ID: the batch lookups skip it, so its absence
+			// says nothing about deletion.
+			conversationName = starKindLabel(sc.PeerKind)
+		case sc.PeerKind == "user":
 			conversationName = starUserLabel(labels.users[sc.PeerUserID])
-		case "agent":
+		case sc.PeerKind == "agent":
 			conversationName = starAgentLabel(sc.PeerAgent)
 		default:
 			conversationName = starLabelDM
@@ -865,21 +872,36 @@ func starSenderKind(sender string) string {
 }
 
 // sender is the display label of a message's sender. It never falls back
-// to the raw sender address.
+// to the raw sender address. A sender ID that is not a canonical UUID is no
+// usable stable ID (the batch lookups skip it), so it gets the neutral kind
+// label rather than a "Deleted" one.
 func (l starLabels) sender(msg *store.Message) string {
-	switch starSenderKind(msg.Sender) {
-	case "user":
-		if msg.SenderID == "" {
-			return starLabelUser
-		}
+	kind := starSenderKind(msg.Sender)
+	switch {
+	case kind == "":
+		return starLabelSomeone
+	case !canonicalStarID(msg.SenderID):
+		return starKindLabel(kind)
+	case kind == "user":
 		return starUserLabel(l.users[msg.SenderID])
-	case "agent":
-		if msg.SenderID == "" {
-			return starLabelAgent
-		}
+	default:
 		return starAgentLabel(l.agents[msg.SenderID])
 	}
-	return starLabelSomeone
+}
+
+// starKindLabel is the neutral label of a user or agent with no usable ID.
+func starKindLabel(kind string) string {
+	if kind == "agent" {
+		return starLabelAgent
+	}
+	return starLabelUser
+}
+
+// canonicalStarID reports whether id is a canonical (lower-case) UUID, the
+// only form the batched user and agent lookups return records for.
+func canonicalStarID(id string) bool {
+	u, err := uuid.Parse(id)
+	return err == nil && u.String() == id
 }
 
 // starUserLabel labels a looked-up user: its display name, "User" when
@@ -895,7 +917,9 @@ func starUserLabel(u *store.User) string {
 }
 
 // starAgentLabel labels a looked-up agent (soft-deleted included): its
-// name, then its slug, then "Agent"; "Deleted agent" without a record.
+// name, then its slug, then "Agent"; "Deleted agent" without a record. Ent
+// refuses an empty agent name, so the slug fallback is reached by a
+// whitespace-only name.
 func starAgentLabel(a *store.Agent) string {
 	if a == nil {
 		return starLabelDeletedAgent

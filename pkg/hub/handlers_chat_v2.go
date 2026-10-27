@@ -2834,6 +2834,10 @@ func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key
 		NotFound(w, "Message")
 		return
 	}
+	// From here on use the stored, canonical ID: the path may spell the same
+	// UUID another way (upper case, braces), and the deletion, its mention
+	// and star cleanup and the event are all keyed by the canonical form.
+	messageID = msg.ID
 
 	// Verify the caller is the message sender.
 	if msg.SenderID != user.ID() {

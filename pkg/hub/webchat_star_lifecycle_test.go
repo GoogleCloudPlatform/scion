@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -120,7 +121,8 @@ func testMessageStarLifecycleContract(t *testing.T, env starStoreEnv) {
 		}
 		otherRec := addDM(u1, other, StarSelector{ConversationKey: otherKey, Channel: "web", ThreadID: otherKey})
 
-		// A promotion that fails (a thread name already taken) moves no star.
+		// A promotion that fails at its first step (a thread name already
+		// taken) moves no star.
 		name := "Promoted " + uuid.NewString()[:8]
 		now := time.Now().UTC()
 		first := WebChatTopic{ID: uuid.NewString(), ProjectID: env.projectID, Name: name, CreatedBy: u1, CreatedAt: now, LastActivityAt: now}
@@ -138,6 +140,34 @@ func testMessageStarLifecycleContract(t *testing.T, env starStoreEnv) {
 			assert.Equal(t, dmKey, got.ConversationKey, "rolled back: %s", k)
 			assert.Equal(t, "", got.ProjectID, "rolled back: %s", k)
 		}
+
+		// A promotion that fails AFTER its star update (the DM registry
+		// delete, its last step, is refused) rolls the star update back with
+		// everything else: stars keep the DM key and no project, and the
+		// messages stay in the DM (both arms still list them).
+		require.NoError(t, env.wcs.UpsertDM(ctx, WebChatDM{ConversationKey: dmKey, ParticipantID: u1,
+			PeerID: strings.Split(dmKey, ":")[2], PeerKind: "agent"}))
+		undo := env.failDMDelete(t)
+		late := WebChatTopic{ID: uuid.NewString(), ProjectID: env.projectID, Name: "Promoted " + uuid.NewString()[:8],
+			CreatedBy: u1, CreatedAt: now, LastActivityAt: now}
+		_, err = env.wcs.PromoteDM(ctx, late, PromoteKeys{DMKey: dmKey, DirectConversationID: conv})
+		undo()
+		require.Error(t, err, "the refused DM delete fails the promotion after its star update")
+		for k, rec := range before {
+			got := get(rec.UserID, rec.MessageID)
+			require.NotNil(t, got, k)
+			assert.Equal(t, dmKey, got.ConversationKey, "rolled back after the star update: %s", k)
+			assert.Equal(t, "", got.ProjectID, "rolled back after the star update: %s", k)
+			assert.True(t, got.StarredAt.Equal(rec.StarredAt), k)
+		}
+		for name, sel := range map[string]StarSelector{"modern": modernSel, "legacy": legacySel} {
+			page, err := st.ListMessageStarCandidates(ctx, StarFilter{UserID: u1, Selector: sel, Limit: 10})
+			require.NoError(t, err)
+			assert.Len(t, page.Items, 1, "the %s message is still in the DM after the rollback", name)
+		}
+		lateTopic, err := env.wcs.GetTopic(ctx, late.ID)
+		require.NoError(t, err)
+		assert.Nil(t, lateTopic, "the rolled-back topic does not exist")
 
 		topic := WebChatTopic{ID: uuid.NewString(), ProjectID: env.projectID, Name: "Promoted " + uuid.NewString()[:8],
 			CreatedBy: u1, CreatedAt: now, LastActivityAt: now}
@@ -333,7 +363,25 @@ func TestMessageStarStore_SQLite_SingleConnection(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"user-uuid-1"}, owners)
 
+	// A promotion refused at its last step (after the star update) rolls the
+	// star update back, on the single connection too.
+	_, err = db.Exec(`CREATE TRIGGER star_promote_fails BEFORE DELETE ON webchat_dm BEGIN SELECT RAISE(ABORT, 'dm delete refused'); END`)
+	require.NoError(t, err)
 	now := time.Now().UTC()
+	_, err = wcs.PromoteDM(ctx, WebChatTopic{ID: "topic-stars-late", ProjectID: "proj-1", Name: "Late", CreatedBy: "user-uuid-1",
+		CreatedAt: now, LastActivityAt: now}, PromoteKeys{DMKey: dmKey})
+	require.Error(t, err)
+	_, err = db.Exec(`DROP TRIGGER star_promote_fails`)
+	require.NoError(t, err)
+	kept, err := stars.GetMessageStar(ctx, "user-uuid-1", "msg-1")
+	require.NoError(t, err)
+	require.NotNil(t, kept)
+	assert.Equal(t, dmKey, kept.ConversationKey, "the star update rolled back")
+	assert.Equal(t, "", kept.ProjectID)
+	var threadID string
+	require.NoError(t, db.QueryRow(`SELECT thread_id FROM messages WHERE id = 'msg-1'`).Scan(&threadID))
+	assert.Equal(t, dmKey, threadID, "the message re-key rolled back")
+
 	_, err = wcs.PromoteDM(ctx, WebChatTopic{ID: "topic-stars-1", ProjectID: "proj-1", Name: "Stars", CreatedBy: "user-uuid-1",
 		CreatedAt: now, LastActivityAt: now}, PromoteKeys{DMKey: dmKey})
 	require.NoError(t, err)

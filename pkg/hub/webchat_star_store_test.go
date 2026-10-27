@@ -60,9 +60,13 @@ type starStoreEnv struct {
 	projectID string
 	// addUser creates a user row.
 	addUser func(t *testing.T, id string)
-	// insertStar stores an association directly, bypassing the add guard
+	// insertStar stores an association directly, without the add guard
 	// (rows an older binary or a lost race could leave behind).
 	insertStar func(t *testing.T, userID, messageID, key, projectID string, at time.Time)
+	// failDMDelete installs a trigger that refuses every DELETE on
+	// webchat_dm (a promotion's last step, after its star update), and
+	// returns the function that removes it.
+	failDMDelete func(t *testing.T) func()
 }
 
 func threadSel(key string) StarSelector {
@@ -308,6 +312,14 @@ func TestMessageStarStore_SQLite(t *testing.T) {
 				userID, messageID, key, nullableString(projectID), sqliteStarTime(at))
 			require.NoError(t, err)
 		},
+		failDMDelete: func(t *testing.T) func() {
+			_, err := db.Exec(`CREATE TRIGGER star_promote_fails BEFORE DELETE ON webchat_dm BEGIN SELECT RAISE(ABORT, 'dm delete refused'); END`)
+			require.NoError(t, err)
+			return func() {
+				_, err := db.Exec(`DROP TRIGGER star_promote_fails`)
+				require.NoError(t, err)
+			}
+		},
 	}
 	require.NotNil(t, env.stars)
 	testMessageStarStoreContract(t, env)
@@ -406,6 +418,15 @@ VALUES ($1, $2, $3, $4, $5, $6, 'user:x@test.com')`, id, created, channel, threa
 			_, err := db.Exec(`INSERT INTO webchat_message_star (user_id, message_id, conversation_key, project_id, starred_at) VALUES ($1, $2, $3, $4, $5)`,
 				userID, messageID, key, nullableString(projectID), at.UTC().Truncate(starTimePrecision))
 			require.NoError(t, err)
+		},
+		failDMDelete: func(t *testing.T) func() {
+			_, err := db.Exec(`CREATE FUNCTION star_promote_fails() RETURNS trigger AS $f$ BEGIN RAISE EXCEPTION 'dm delete refused'; END $f$ LANGUAGE plpgsql;
+CREATE TRIGGER star_promote_fails BEFORE DELETE ON webchat_dm FOR EACH ROW EXECUTE FUNCTION star_promote_fails()`)
+			require.NoError(t, err)
+			return func() {
+				_, err := db.Exec(`DROP TRIGGER star_promote_fails ON webchat_dm; DROP FUNCTION star_promote_fails()`)
+				require.NoError(t, err)
+			}
 		},
 	}
 	require.NotNil(t, env.stars)

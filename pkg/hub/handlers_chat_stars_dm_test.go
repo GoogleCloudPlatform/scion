@@ -48,14 +48,17 @@ func (f *starFixture) dmConversation(t *testing.T, key string) string {
 	return id
 }
 
-// dmMsg stores a native DM message in key (and its conversation convID,
-// "" for a legacy row).
-func (f *starFixture) dmMsg(t *testing.T, key, convID, projectID, sender, senderID, text, channel string, at time.Time) string {
+// dmMsg stores a native DM message with thread ID threadID (the DM key; ""
+// for a modern row matched only by its conversation) and conversation
+// convID ("" for a legacy row). It is already dispatched, as a delivered
+// DM message is: a pending one would make a promotion answer 409.
+func (f *starFixture) dmMsg(t *testing.T, threadID, convID, projectID, sender, senderID, text, channel string, at time.Time) string {
 	t.Helper()
 	id := uuid.NewString()
 	require.NoError(t, f.s.CreateMessage(context.Background(), &store.Message{
 		ID: id, ProjectID: projectID, Sender: sender, SenderID: senderID, Recipient: "chat",
-		Msg: text, Type: "chat", Channel: channel, ThreadID: key, ConversationID: convID, CreatedAt: at.UTC(),
+		Msg: text, Type: "chat", Channel: channel, ThreadID: threadID, ConversationID: convID, CreatedAt: at.UTC(),
+		DispatchState: store.MessageDispatchDispatched,
 	}))
 	return id
 }
@@ -252,7 +255,9 @@ func TestChatStars_SenderLabels(t *testing.T) {
 	ctx := context.Background()
 	blank := uuid.NewString()
 	require.NoError(t, f.s.CreateUser(ctx, &store.User{ID: blank, Email: blank + "@test.com", DisplayName: "  ", Role: store.UserRoleMember, Status: "active"}))
-	unnamed := &store.Agent{ID: uuid.NewString(), Slug: "slug-only", ProjectID: f.projA}
+	// A blank name falls back to the slug. Ent refuses an empty name, so a
+	// whitespace-only one exercises the same TrimSpace path.
+	unnamed := &store.Agent{ID: uuid.NewString(), Slug: "slug-only", Name: "   ", ProjectID: f.projA}
 	require.NoError(t, f.s.CreateAgent(ctx, unnamed))
 	softDeleted := &store.Agent{ID: uuid.NewString(), Slug: "gone-agent", Name: "Retired Agent", ProjectID: f.projA}
 	require.NoError(t, f.s.CreateAgent(ctx, softDeleted))
@@ -268,6 +273,12 @@ func TestChatStars_SenderLabels(t *testing.T) {
 		{"agent:gone-agent", softDeleted.ID, "Retired Agent"},
 		{"agent:never-was", uuid.NewString(), starLabelDeletedAgent},
 		{"agent:never-was", "", starLabelAgent},
+		// No usable stable ID (not a canonical UUID): the neutral kind
+		// label, never "Deleted ...".
+		{"user:someone@example.test", "not-a-uuid", starLabelUser},
+		{"user:someone@example.test", strings.ToUpper(f.owner), starLabelUser},
+		{"agent:never-was", strings.ToUpper(f.agentA.ID), starLabelAgent},
+		{"agent:never-was", "{" + f.agentA.ID + "}", starLabelAgent},
 		{"system", "", starLabelSomeone},
 	}
 	owner, err := f.s.GetUser(ctx, f.owner)
@@ -369,7 +380,9 @@ func TestChatStars_PromotionKeepsStarsAndRechecksAccess(t *testing.T) {
 	f := newStarFixture(t, true)
 	ctx := context.Background()
 	d := f.memberDMs(t)
-	modern := f.dmMsg(t, d.agentKey, d.agentConv, f.projA, "user:"+f.member, f.member, "modern", "web", time.Now().Add(-time.Hour))
+	// The modern row is matched only by its conversation ID (no thread ID),
+	// the legacy row only by its thread ID: promotion's two arms.
+	modern := f.dmMsg(t, "", d.agentConv, f.projA, "user:"+f.member, f.member, "modern", "web", time.Now().Add(-time.Hour))
 	legacy := f.dmMsg(t, d.agentKey, "", f.projA, "user:"+f.member, f.member, "legacy", "web", time.Now().Add(-2*time.Hour))
 	first := decodeStarPut(t, f.put(t, f.member, modern, d.agentKey))
 	// The legacy row is in history only under the thread-ID selector (the
@@ -487,4 +500,37 @@ func TestChatStars_UpkeepPass(t *testing.T) {
 	next := rt.next
 	rt.mu.Unlock()
 	assert.Equal(t, StarCleanupPosition{}, next, "fewer rows than a batch: the next pass starts over")
+}
+
+// TestChatStars_MessageDeleteNonCanonicalID: a delete whose path spells the
+// message UUID in upper case still removes every star of the message and
+// keys the soft delete by the canonical ID, so the star reads see it as
+// deleted.
+func TestChatStars_MessageDeleteNonCanonicalID(t *testing.T) {
+	f := newStarFixture(t, true)
+	ctx := context.Background()
+	msg := f.threadMsg(t, f.topicA, f.projA, "delete me loudly", time.Now().Add(-time.Minute))
+	decodeStarPut(t, f.put(t, f.admin, msg, f.topicA))
+	decodeStarPut(t, f.put(t, f.member, msg, f.topicA))
+	ch, unsub := f.ep.Subscribe("user.*.chat.stars")
+	defer unsub()
+
+	rec := f.session(t, f.admin, http.MethodDelete, chatConversationPath(f.topicA, "messages/"+strings.ToUpper(msg)), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp struct {
+		MessageID string `json:"messageId"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, msg, resp.MessageID, "the canonical ID")
+
+	for _, u := range []string{f.admin, f.member} {
+		got, err := f.stars.GetMessageStar(ctx, u, msg)
+		require.NoError(t, err)
+		assert.Nil(t, got, "no association survives the deletion")
+	}
+	assert.ElementsMatch(t, []string{"user." + f.admin + ".chat.stars", "user." + f.member + ".chat.stars"}, starEvents(t, ch))
+	exts, err := f.wcs.GetMessageExts(ctx, []string{msg})
+	require.NoError(t, err)
+	require.NotNil(t, exts[msg], "the extension row is keyed by the canonical ID")
+	assert.NotNil(t, exts[msg].DeletedAt)
 }
