@@ -31,6 +31,7 @@ import type { EditorView } from '@milkdown/prose/view';
 import { artifactLinkTarget } from '../../../client/artifact-preview.js';
 import { createCore } from './create.js';
 import type { Core } from './create.js';
+import { reviewKeymap } from './keymap.js';
 import { guardTransfers, pastePlugin } from './paste.js';
 import { containerClass, policyPlugin, touchesEarlier } from './policy.js';
 import type { HintKind } from './policy.js';
@@ -125,6 +126,7 @@ export class ReviewController {
     const onRefuse = (hint: HintKind): void => opts.onHint(hint);
     const unitCheck = (doc: Node, first: number, last: number): HintKind | null =>
       this.session.unitCheck(doc, first, last);
+    const keys = reviewKeymap(onRefuse);
     let parse: (md: string) => Node = () => {
       throw new Error('editor not ready');
     };
@@ -137,6 +139,7 @@ export class ReviewController {
         trackPlugin(),
         this.uiPlugin(),
         keymap({
+          ...keys,
           'Mod-Alt-m': () => {
             void this.comment();
             return true;
@@ -145,9 +148,9 @@ export class ReviewController {
             void this.comment();
             return true;
           },
-          Enter: (state) => {
+          Enter: (state, dispatch, view) => {
             const c = selectedComment(state);
-            if (!c) return false;
+            if (!c) return keys.Enter(state, dispatch, view);
             void this.editNote(c.pos);
             return true;
           },
@@ -353,9 +356,9 @@ export class ReviewController {
     const docBefore = view.state.doc;
     const id: unknown = this.uiKey.getState(view.state);
     const refused = reconcileComposition(view, snap, id, (doc, pos, at, before) => {
-      const container = containerClass(view.state.doc.resolve(pos + 1));
-      if (container === 'code') return 'code';
-      if (container) return 'list-table';
+      // Composed text in a list item or a table cell is an insertion like
+      // any other; code takes no suggestions.
+      if (containerClass(view.state.doc.resolve(pos + 1)) === 'code') return 'code';
       // The same hint as for typing at that place.
       if (touchesEarlier(before, at, at))
         return this.session.earlierHint(before.resolve(at).index(0));
@@ -363,11 +366,12 @@ export class ReviewController {
       return this.session.unitCheck(doc, i, i);
     });
     if (refused) this.opts.onHint(refused as HintKind);
-    if (view.state.doc === docBefore && docBefore.eq(snap.doc)) {
-      // The composition changed nothing: the document is as before it, and
-      // no change was reported while it ran.
+    if (view.state.doc.eq(snap.doc)) {
+      // The document has the content it had before the composition (it
+      // changed nothing, or it was restored): it is as edited as it was
+      // then. Compared by content, since a restore builds a new document.
       this.session.setDirty(this.dirtyAt.get(snap) ?? true);
-      this.opts.onChange();
+      if (view.state.doc === docBefore) this.opts.onChange();
     }
   }
 
@@ -400,9 +404,14 @@ export class ReviewController {
   /**
    * The current text, serializing only after an edit; null when it cannot
    * be written faithfully (every unit written must read back as the
-   * document and keep every earlier mark, design 4.6 item 3 and E5).
+   * document and keep every earlier mark, design 4.6 item 3 and E5). A
+   * composition that has ended but whose settle step is still pending is
+   * settled first, so Save or a switch to Source right after it keeps the
+   * composed text as a suggestion; while a composition runs, the text
+   * cannot be written (null).
    */
   flush(): string | null {
+    if (this.ended && !this.core.view.composing) this.settleComposition();
     return this.session.save();
   }
 
@@ -418,6 +427,16 @@ export class ReviewController {
 
   get dirty(): boolean {
     return this.session.isDirty;
+  }
+
+  /** Whether the opened text gets the whole-text check on every edit (design E7). */
+  get isHazardous(): boolean {
+    return this.session.isHazardous;
+  }
+
+  /** Whether an input method composition is running in the view. */
+  get isComposing(): boolean {
+    return this.core.view.composing || this.composing !== null;
   }
 
   /**

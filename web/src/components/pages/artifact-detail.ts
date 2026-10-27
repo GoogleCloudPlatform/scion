@@ -170,6 +170,8 @@ export type ReviewHint =
   | 'earlier'
   | 'moved'
   | 'source-own'
+  | 'composing'
+  | 'code-run'
   | 'generic'
   | 'load-failed';
 
@@ -185,8 +187,8 @@ export const REVIEW_HINT_TEXT: Record<ReviewHint, { title: string; body: string 
     body: 'A review can only use images already in this version.',
   },
   'list-table': {
-    title: "Lists and tables can't take suggestions here yet.",
-    body: 'Edit them in the Source view.',
+    title: "List and table structure can't be changed in a suggestion.",
+    body: 'You can edit the text in them; use the Source view to add, remove or move items, rows or columns.',
   },
   break: {
     title: "Paragraph breaks can't be suggested here yet.",
@@ -208,6 +210,14 @@ export const REVIEW_HINT_TEXT: Record<ReviewHint, { title: string; body: string 
     title:
       "Suggestions you've made so far become read-only in the graphical view after you switch to Source.",
     body: 'You can still change them there.',
+  },
+  composing: {
+    title: "Finish the text you're typing first.",
+    body: 'Then save or switch views again.',
+  },
+  'code-run': {
+    title: 'That edit would change code that continues on the lines next to it.',
+    body: 'Use the Source view to change backticks here.',
   },
   generic: {
     title: "That change can't be recorded as a suggestion.",
@@ -1150,7 +1160,8 @@ export class ScionPageArtifactDetail extends LitElement {
     if (!ed) return true;
     const t = ed.flush();
     if (t === null) {
-      this.showHint('generic');
+      // While an input method composition runs, its text is not written yet.
+      this.showHint(ed.isComposing() ? 'composing' : 'generic');
       return false;
     }
     this.reviewText = t;
