@@ -118,6 +118,13 @@ describe('mismatchLines', () => {
     expect(out).not.toContain('u:p');
   });
 
+  it('redacts the rest of a mismatch line with a backslash before a line break inside a value', () => {
+    const out = redactMismatchLine('x: hub "u:p@b\\\n", broker "v:q@c"');
+    expect(out).toBe('x: hub "***');
+    expect(out).not.toContain('u:p');
+    expect(out).not.toContain('v:q');
+  });
+
   it('is empty for null, undefined or no lines', () => {
     expect(mismatchLines(null)).toEqual([]);
     expect(mismatchLines(undefined)).toEqual([]);
