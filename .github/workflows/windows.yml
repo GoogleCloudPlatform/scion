@@ -52,6 +52,16 @@ on:
   push:
     branches: [ main ]
 
+# One run per PR: a new push to the same PR cancels the superseded run, as
+# in ci.yml (same block; github.workflow is "Windows", so the group never
+# collides with ci.yml's). Runs on main are never cancelled: outside
+# pull_request the group is the unique run_id, not github.ref, because
+# GitHub cancels an older pending run in a shared group even when
+# cancel-in-progress is false.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -99,6 +109,31 @@ jobs:
             echo "::error::$list must list packages explicitly, without wildcards"; exit 1
           fi
           printf '%s\n' "$pkgs"
+
+      # The list's header also forbids any package whose test binary links
+      # pkg/hub; the guard above sees only ./pkg/hub lines. One compile-free
+      # go list over every listed package prints each test binary (the
+      # <pkg>.test main package) with its full dependency list; a test
+      # binary that depends on pkg/hub fails the job (a pkg/hub recompiled
+      # for that test prints as "pkg/hub [x.test]"; awk splits on spaces, so
+      # its first word matches too). ./cmd is the one documented exception: its test
+      # binary links pkg/hub production code (never pkg/hub's tests).
+      - name: Allowlist guard (no test binary links pkg/hub)
+        shell: bash
+        run: |
+          set -euo pipefail
+          list=.github/windows-test-packages.txt
+          pkgs=$(sed -e 's/\r$//' -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^[[:space:]]*$/d' "$list" | awk '!seen[$1]++ {print $1}')
+          deps=$(GOOS=windows go list -test -f '{{if and (not .ForTest) (eq .Name "main")}}{{.ImportPath}}{{range .Deps}} {{.}}{{end}}{{"\n"}}{{end}}' $pkgs)
+          mod=github.com/GoogleCloudPlatform/scion
+          bad=$(printf '%s\n' "$deps" | awk -v hub="$mod/pkg/hub" -v exempt="$mod/cmd.test" '
+            $1 ~ /\.test$/ && $1 != exempt {
+              for (i = 2; i <= NF; i++) if ($i == hub) { print $1; break }
+            }')
+          if [ -n "$bad" ]; then
+            printf '::error::%s lists a package whose test binary links pkg/hub: %s\n' "$list" $bad; exit 1
+          fi
+          echo "test binaries checked: $(printf '%s\n' "$deps" | awk '$1 ~ /\.test$/' | wc -l)"
 
       # Runner capabilities. Every check FAILS the job; none is skippable.
       # A symlink or junction test that cannot create its link must fail,
@@ -246,10 +281,18 @@ jobs:
           done <<< "$(printf '%s\n' "$lines" | awk 'NF > 1')"
           echo "passed tests: $(grep -cE '"Action":"pass","Package":"[^"]*","Test":' test.json)"
 
+      # The full go test -json streams (test.json, and each flagged line's
+      # flagged-N.json), so a failure or a timeout's goroutine dump can be
+      # read without a rerun; the console above shows only the last 200
+      # output lines. Plain go test -json output: test names, results and
+      # test output, no credentials.
       - name: Upload test log
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: windows-test-json
-          path: test.json
+          path: |
+            test.json
+            flagged-*.json
           if-no-files-found: ignore
+          retention-days: 7
