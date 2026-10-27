@@ -18,11 +18,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -30,8 +27,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/identity"
 	"github.com/GoogleCloudPlatform/scion/extras/scion-chat-app/internal/state"
 	agentstate "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
@@ -2292,13 +2291,10 @@ func (r *CommandRouter) downloadInboundAttachment(ctx context.Context, att Event
 		safeConvID = "unknown"
 	}
 
-	// Resolve the host-side directory.
-	hostDir, err := resolveGChatAttachmentDir(projectSlug, projectID, safeConvID)
+	// Resolve the scratchpad through the layout authority.
+	scratchpad, err := resolveGChatScratchpad(projectSlug, projectID)
 	if err != nil {
 		return "", fmt.Errorf("resolving attachment directory: %w", err)
-	}
-	if mkErr := os.MkdirAll(hostDir, 0o755); mkErr != nil {
-		return "", fmt.Errorf("creating attachment directory: %w", mkErr)
 	}
 
 	// Download the file via the authenticated downloader.
@@ -2314,29 +2310,16 @@ func (r *CommandRouter) downloadInboundAttachment(ctx context.Context, att Event
 		safeName = "attachment"
 	}
 	destName := fmt.Sprintf("%d_%s", time.Now().UnixNano(), safeName)
-	destPath := filepath.Join(hostDir, destName)
 
-	f, fErr := os.Create(destPath)
-	if fErr != nil {
-		return "", fmt.Errorf("creating file: %w", fErr)
+	// Written below <scratchpad>/.attachments/_gchat/<conversation>/ through
+	// Resolved.Open; the container path comes from the scratchpad Mount.
+	agentPath, err := projectfs.WriteAttachment(scratchpad.Resolved, true,
+		projectfs.SharedDirMount(api.SharedDir{Name: projectfs.ScratchpadName}, ""),
+		gchatAttachmentDir, safeConvID, destName,
+		&maxSizeReader{r: body, max: MaxAttachmentSize, name: att.Name})
+	if err != nil {
+		return "", fmt.Errorf("writing attachment: %w", err)
 	}
-	defer f.Close()
-
-	written, copyErr := io.Copy(f, io.LimitReader(body, MaxAttachmentSize+1))
-	if copyErr != nil {
-		f.Close()
-		os.Remove(destPath)
-		return "", fmt.Errorf("writing attachment: %w", copyErr)
-	}
-	if written > MaxAttachmentSize {
-		f.Close()
-		os.Remove(destPath)
-		return "", fmt.Errorf("attachment %q too large (%d bytes, max %d)", att.Name, written, MaxAttachmentSize)
-	}
-
-	agentPath := filepath.ToSlash(filepath.Join(
-		"/scion-volumes/scratchpad/.attachments", gchatAttachmentDir, safeConvID, destName,
-	))
 
 	r.log.Info("downloaded Google Chat attachment",
 		"filename", att.Name,

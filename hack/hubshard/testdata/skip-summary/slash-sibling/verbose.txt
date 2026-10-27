@@ -1,0 +1,11 @@
+=== RUN   TestSlashSibling
+=== RUN   TestSlashSibling/a
+    toy_test.go:165: a passes
+=== RUN   TestSlashSibling/a/b
+    toy_test.go:166: a/b fails
+=== NAME  TestSlashSibling
+    toy_test.go:167: parent after
+--- FAIL: TestSlashSibling (0.00s)
+    --- PASS: TestSlashSibling/a (0.00s)
+    --- FAIL: TestSlashSibling/a/b (0.00s)
+FAIL

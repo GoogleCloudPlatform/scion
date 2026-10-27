@@ -78,9 +78,12 @@ import (
 //     part of the checks here, and never fetches from submodule URLs.
 //   - merge.verifySignatures=false, commit.gpgsign=false, tag.gpgsign=false:
 //     no git invocation runs gpg.program to verify or make a signature.
-//   - protocol.file.allow=user: the file:// transport is used only for a URL
-//     given on the command line (a hub clone URL that is a local path), never
-//     one coming from config (a submodule URL, an alternates entry).
+//   - protocol.file.allow=user: the file:// and local-path transports are
+//     allowed for a top-level operation the user drives directly (git treats
+//     those as GIT_PROTOCOL_FROM_USER=1), which includes a hub clone URL that is
+//     a local path, but are blocked for git's own indirect uses such as
+//     submodule fetches. It is not restricted to command-line URLs: a top-level
+//     fetch of a configured file:// remote is still allowed.
 func HostGitArgs() []string {
 	return []string{
 		"-c", "core.hooksPath=" + os.DevNull,

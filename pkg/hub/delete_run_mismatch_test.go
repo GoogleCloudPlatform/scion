@@ -127,23 +127,17 @@ func requireNotFinalized(t *testing.T, s store.Store, agentID string, r deleteRe
 	assert.Equal(t, string(wantPhase), got.Phase, "the prior phase is restored")
 }
 
-// The current run's delete is refused (run-b holds the name): the row is
-// kept, with or without force, and no previous-run
-// delete is sent.
+// The current run's delete is refused (run-b holds the name, and is not
+// one of the row's previous runs): a plain delete keeps the row, and no
+// previous-run delete is sent. A force delete deletes run-b instead
+// (ptone/scion#5016, delete_run_mismatch_force_test.go).
 func TestAgentDelete_CurrentRunMismatch_NotFinalized(t *testing.T) {
-	for _, tc := range []struct{ name, query string }{
-		{"plain", ""},
-		{"force", "?force=true"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newRunMismatchFixture(t, "rm-cur-"+tc.name, state.PhaseRunning, "run-p")
-			f.client.answer = func(runID string) error {
-				return runMismatchEnvelope(t, runID, "run-b", true)
-			}
-			requireNotFinalized(t, f.store, f.agent.ID, f.del(t, tc.query), state.PhaseRunning)
-			assert.Equal(t, []string{"run-a"}, f.client.deleted(), "no previous-run delete after the refusal")
-		})
+	f := newRunMismatchFixture(t, "rm-cur-plain", state.PhaseRunning, "run-p")
+	f.client.answer = func(runID string) error {
+		return runMismatchEnvelope(t, runID, "run-b", true)
 	}
+	requireNotFinalized(t, f.store, f.agent.ID, f.del(t, ""), state.PhaseRunning)
+	assert.Equal(t, []string{"run-a"}, f.client.deleted(), "no previous-run delete after the refusal")
 }
 
 // A created row with no launch (the best-effort dispatch, ptone/scion#2635)

@@ -31,7 +31,7 @@ func TestDeleteTarget_ErrAgentFilesDeleteScope(t *testing.T) {
 	ok := &runtime.MockRuntime{DeleteFunc: func(context.Context, runtime.RunRef) error { deleted = true; return nil }}
 	// "../escape" fails DeleteAgentFiles' containment check after the
 	// runtime delete has succeeded.
-	_, err := NewManager(ok).DeleteTarget(context.Background(), "../escape", runtime.RunRef{ID: "cid", RunID: "r1"}, true, projectDir, false)
+	_, err := NewManager(ok).DeleteTarget(context.Background(), "../escape", "", runtime.RunRef{ID: "cid", RunID: "r1"}, true, projectDir, false)
 	if !deleted {
 		t.Fatal("premise: runtime delete not called")
 	}
@@ -46,7 +46,7 @@ func TestDeleteTarget_ErrAgentFilesDeleteScope(t *testing.T) {
 
 	cause := errors.New("apiserver unavailable")
 	bad := &runtime.MockRuntime{DeleteFunc: func(context.Context, runtime.RunRef) error { return cause }}
-	_, err = NewManager(bad).DeleteTarget(context.Background(), "dev", runtime.RunRef{ID: "cid", RunID: "r1"}, true, projectDir, false)
+	_, err = NewManager(bad).DeleteTarget(context.Background(), "dev", "", runtime.RunRef{ID: "cid", RunID: "r1"}, true, projectDir, false)
 	if !errors.Is(err, cause) {
 		t.Errorf("runtime failure does not wrap its cause: %v", err)
 	}

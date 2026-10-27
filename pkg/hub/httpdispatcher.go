@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -172,6 +173,9 @@ type HTTPAgentDispatcher struct {
 	transportMode     string               // Transport auth mode (iap, cloudrun_invoker)
 	debug             bool
 	log               *slog.Logger
+	// storageLayout is the hub's projectfs Layout source for
+	// storageLayoutPrecheck (SetStorageLayout); nil disables the check.
+	storageLayout func() (projectfs.Layout, error)
 
 	// attachmentIssuer issues the attachment delivery capabilities of a
 	// message on every dispatch attempt (ptone/scion#4596). Nil issues none.
@@ -1856,6 +1860,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
+	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
 
 	req, err := d.buildCreateRequestFor(ctx, agent, "DispatchAgentCreate", failOnSecretResolutionError)
 	if err != nil {
@@ -1982,6 +1990,9 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
 		return err
 	}
+	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
+		return err
+	}
 
 	// Provision and reprovision keep going on a secret resolution error:
 	// the broker's provision never reads the resolved secrets, and the
@@ -2015,12 +2026,6 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	req.ExpectExistingNFSWorkspace = expectNFSWorkspace
 	req.MoveReincarnationID = moveReincarnationID
 	req.GatherEnv = true
-	wantSharedDirChange := false
-	if reprovision && agent.AppliedConfig != nil && len(agent.AppliedConfig.SharedDirBackendChanges) > 0 {
-		req.SharedDirBackendChanges = agent.AppliedConfig.SharedDirBackendChanges
-		req.AllowEmptySharedDir = agent.AppliedConfig.AllowEmptySharedDir
-		wantSharedDirChange = true
-	}
 
 	// Track which scope provided each key
 	req.EnvSources = d.buildEnvSources(ctx, agent, req.ResolvedEnv)
@@ -2063,7 +2068,11 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	if envReqs != nil && (len(envReqs.Needs) > 0 || tzNeeded) {
 		var asNeededEnv map[string]string
 		if len(envReqs.Needs) > 0 {
-			asNeededEnv = d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
+			var asErr error
+			asNeededEnv, asErr = d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
+			if asErr != nil {
+				return asErr
+			}
 		}
 		if len(asNeededEnv) > 0 || tzNeeded {
 			if req.ResolvedEnv == nil {
@@ -2126,11 +2135,6 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 		if !finalResp.Reprovisioned {
 			return fmt.Errorf("%s: broker did not confirm the reprovision (it may not support reincarnate; its reported capabilities may be stale)", callerName)
 		}
-		// A broker that predates shared dir backend changes ignores the
-		// field and reprovisions without changing the record.
-		if wantSharedDirChange && !finalResp.SharedDirBackendsChanged {
-			return fmt.Errorf("%s: broker did not confirm the shared dir backend change (it may not support --shared-dir-backend; upgrade the broker)", callerName)
-		}
 	}
 
 	// Merge resolved storage env vars back into AppliedConfig so they are
@@ -2185,6 +2189,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 
 	// Hub check before dispatch (see DispatchAgentCreate).
 	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
+		return nil, err
+	}
+	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
 		return nil, err
 	}
 
@@ -2275,7 +2282,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	if envReqs != nil && (len(envReqs.Needs) > 0 || tzNeeded) {
 		var asNeededEnv map[string]string
 		if len(envReqs.Needs) > 0 {
-			asNeededEnv = d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
+			var asErr error
+			asNeededEnv, asErr = d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
+			if asErr != nil {
+				return nil, asErr
+			}
 		}
 		if len(asNeededEnv) > 0 || tzNeeded {
 			finalized, err := d.finalizeEnv(ctx, agent, asNeededEnv, tzNeeded)
@@ -2381,6 +2392,9 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
 		return nil, err
 	}
+	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
+		return nil, err
+	}
 
 	req, err := d.buildCreateRequestFor(ctx, agent, "DispatchFinalizeEnv", failOnSecretResolutionError)
 	if err != nil {
@@ -2453,7 +2467,11 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 		// mirroring the pattern in DispatchAgentCreateWithGather.
 		var asNeededEnv map[string]string
 		if len(envReqs.Needs) > 0 {
-			asNeededEnv = d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
+			var asErr error
+			asNeededEnv, asErr = d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
+			if asErr != nil {
+				return nil, asErr
+			}
 		}
 		if len(asNeededEnv) > 0 || tzNeeded {
 			for k, v := range asNeededEnv {
@@ -2884,7 +2902,7 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 	agent *store.Agent,
 	keys []string,
 	alternatives map[string][]string,
-) map[string]string {
+) (map[string]string, error) {
 	result := make(map[string]string)
 	keySet := make(map[string]struct{}, len(keys))
 	for _, k := range keys {
@@ -3003,6 +3021,11 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 		if err == nil {
 			resolved = d.restrictTestAdminRootedSecrets(ctx, agent, resolved)
 		}
+		if errors.Is(err, secret.ErrResolveDecrypt) {
+			// A stored secret could not be decrypted: never answer the
+			// broker's needs as if it were missing (ptone/scion#1530 §5).
+			return nil, err
+		}
 		if err != nil {
 			if d.debug {
 				d.log.Warn("resolveAsNeededForKeys: failed to resolve secrets", "error", err)
@@ -3057,7 +3080,7 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 	}
 
 	delete(result, agentTZEnvKey)
-	return result
+	return result, nil
 }
 
 // buildEnvSources creates a map of env key -> scope for reporting to the CLI.
@@ -3572,6 +3595,10 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
+	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
 
 	// Capture the phase and launch-error this dispatch found the agent in,
 	// before buildStartEnv/applyBrokerResponse can change either. The
@@ -3942,6 +3969,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 
 	// Hub check before dispatch (see DispatchAgentStart).
 	if err := d.kubernetesIdentityPrecheck(ctx, agent); err != nil {
+		return err
+	}
+	if err := d.storageLayoutPrecheck(ctx, agent); err != nil {
 		return err
 	}
 

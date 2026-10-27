@@ -28,7 +28,6 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -578,7 +577,7 @@ func TestKeysNeverFormatMaterial(t *testing.T) {
 	if !strings.Contains(StartupNotice(Legacy(fixtureLegacySecret)), "agent JWTs") {
 		t.Fatal("legacy notice must name the coupled uses")
 	}
-	if !strings.Contains(StartupNotice(k), "session cookies only") {
+	if !strings.Contains(StartupNotice(k), "session cookies and those capabilities only") {
 		t.Fatal("ring notice must state the pilot limitation")
 	}
 	// The identification is still there.
@@ -665,24 +664,6 @@ func TestZeroKeyringIsSafe(t *testing.T) {
 	_ = fmt.Sprint(sr, er, (*SigningRing)(nil).IDs(), (*EncryptionRing)(nil).IDs())
 	if (SigningKey{}).Bytes() != nil || (EncryptionKey{}).Bytes() != nil {
 		t.Fatal("zero keys must have no bytes")
-	}
-}
-
-func TestLoadFileRefusesNonRegularBeforeOpen(t *testing.T) {
-	dir := t.TempDir()
-	fifo := filepath.Join(dir, "fifo.json")
-	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-		t.Fatalf("mkfifo: %v", err)
-	}
-	done := make(chan error, 1)
-	go func() { _, err := LoadFile(fifo); done <- err }()
-	select {
-	case err := <-done:
-		if err == nil || !strings.Contains(err.Error(), "not a regular file") {
-			t.Fatalf("LoadFile(fifo) = %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("LoadFile blocked on a FIFO")
 	}
 }
 

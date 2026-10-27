@@ -56,8 +56,8 @@ type fileDeletingRunManager struct {
 	runLabelManager
 }
 
-func (m *fileDeletingRunManager) DeleteTarget(ctx context.Context, name string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
-	if _, err := m.runLabelManager.DeleteTarget(ctx, name, ref, deleteFiles, projectPath, removeBranch); err != nil {
+func (m *fileDeletingRunManager) DeleteTarget(ctx context.Context, name, sharerKey string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	if _, err := m.runLabelManager.DeleteTarget(ctx, name, sharerKey, ref, deleteFiles, projectPath, removeBranch); err != nil {
 		return false, err
 	}
 	if deleteFiles {

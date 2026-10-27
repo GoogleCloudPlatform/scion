@@ -151,7 +151,7 @@ func TestDeleteAgent_SoftDeleteMarkFailure_Warns204(t *testing.T) {
 // failure that is not wrapped by a sentinel would.
 type plainErrorManager struct{ k8sStyleManager }
 
-func (m *plainErrorManager) DeleteTarget(context.Context, string, runtime.RunRef, bool, string, bool) (bool, error) {
+func (m *plainErrorManager) DeleteTarget(context.Context, string, string, runtime.RunRef, bool, string, bool) (bool, error) {
 	return false, errors.New("runtime lookup failed")
 }
 

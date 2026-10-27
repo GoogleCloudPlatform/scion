@@ -15,8 +15,10 @@ Per repository, in this order (details in
 2. The [deploy preconditions](architecture.md#deploy-preconditions) hold,
    above all "Require approval for **all** external contributors".
 3. The P6 [PoC checklist](poc-checklist.md) passed on this target.
-4. `ci.yml` carries the routing expression (P7). Until then, the variable
-   changes nothing.
+4. The workflows carry the routing expression on the routed jobs (primary-runner
+   PR-wf1 for phase A, PR-wf2 for phase B; see
+   [workflows/README.md](../workflows/README.md#routing-in-githubworkflows)). Until
+   then, the variable changes nothing.
 5. `scripts/set-routing-variable.sh --repo <owner/repo> --apply` sets
    `ROUTING_VARIABLE_NAME` to `RUNNER_LABEL` (needs write access).
 6. Watch for 48 hours: `dispatch` and `claim_consumed` for every routed job,
@@ -211,7 +213,14 @@ lint job uses too: a change there changes both.
 ## Capacity and quotas
 
 `MAX_CONCURRENT_RUNNERS` caps running executions; jobs above it stay queued
-and are dispatched first in, first out as executions finish. Each execution
+and are dispatched first in, first out as executions finish: by the next
+scheduled `/reconcile` (`RECONCILE_SCHEDULE`), since nothing else dispatches a
+job that was left queued. With cr-ci as a repository's primary runner, run it every
+minute (`*/1 * * * *`, Cloud Scheduler's minimum), so an over-capacity job is
+served within about a minute of a slot freeing. The mediator has no in-process
+timer for this on purpose: it runs with Cloud Run's request-based CPU allocation
+(min-instances 0, no `--no-cpu-throttling`), so work after a response would be
+throttled until the next request arrives. Each execution
 uses `RUNNER_DISK_GI` of the regional ephemeral-disk quota (default 100 GiB:
 5 x 10 GiB fits, 4 x 25 GiB fits). Above 10 GiB per runner, the per-instance
 quota must be raised as well. To raise the cap, first request the quota increase

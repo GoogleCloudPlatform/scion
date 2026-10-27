@@ -619,7 +619,7 @@ func mockHubEnv(t *testing.T, handler http.Handler) *httptest.Server {
 	t.Helper()
 	ws := newDevAuthWebServer(t)
 	ws.MountHubAPI(handler, func(context.Context) error { return nil })
-	ts := httptest.NewServer(ws.Handler())
+	ts := httptest.NewServer(devSignedIn(t, ws))
 	t.Cleanup(ts.Close)
 	return ts
 }
@@ -729,7 +729,7 @@ func TestWebSSE_EventsNotCompressed(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(largeJSON())
 	}), func(context.Context) error { return nil })
-	ts := httptest.NewServer(ws.Handler())
+	ts := httptest.NewServer(devSignedIn(t, ws))
 	t.Cleanup(ts.Close)
 
 	ctx, cancel := context.WithCancel(context.Background())

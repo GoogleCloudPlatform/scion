@@ -53,10 +53,8 @@ whose precondition failed is recorded as `not run` with the reason.
 - R1-06x is an observation and is not graded. It records whether the
   Share dialog's people search offers a user who shares no project with
   the owner.
-- R1-B1..B5 need an agent-owned artifact, which means a broker and a
-  publishing agent. They are separate tests, declared outside the serial
-  R1-A group so their bodies always run, and each is skipped and marked
-  `NOT RUN` with that reason.
+- The agent-owned artifact rows (R1-B, which need a broker and a
+  publishing agent) are the separate suite `e2e/artifacts-agent-owned/`.
 - Every row is seeded `not run` (`not reached`) before anything runs.
   A row that nothing reached keeps `not run`, with the first setup, stop
   or hard failure as the cause. A row with a failed precondition is

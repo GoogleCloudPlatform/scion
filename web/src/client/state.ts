@@ -448,6 +448,7 @@ export type StateEventType =
   | 'chat-message-deleted'
   | 'chat-dm-promoted'
   | 'chat-scheduled-updated'
+  | 'chat-stars-updated'
   | 'agent-created';
 
 /**
@@ -809,7 +810,7 @@ export class StateManager extends EventTarget {
       return;
     }
 
-    // User-scoped chat events: user.{userId}.chat.{dm|typing|scheduled|message.edited|message.deleted}
+    // User-scoped chat events: user.{userId}.chat.{dm|typing|scheduled|stars|message.edited|message.deleted}
     if (parts[0] === 'user' && parts.length >= 4 && parts[2] === 'chat') {
       // Human-to-human DMs have no project, so their typing events arrive on
       // the user-scoped subject rather than project.{id}.chat.typing.
@@ -818,6 +819,10 @@ export class StateManager extends EventTarget {
       } else if (parts[3] === 'scheduled') {
         // The user's own scheduled messages (sender-only; never a message).
         this.notifyWithData('chat-scheduled-updated', data);
+      } else if (parts[3] === 'stars') {
+        // The user's own starred messages changed: a content-free
+        // invalidation (owner-only; never a message). Refetch over REST.
+        this.notifyWithData('chat-stars-updated', data);
       } else if (parts[3] === 'typing') {
         this.notifyWithData('chat-typing-received', data);
       } else if (parts[3] === 'read-state') {

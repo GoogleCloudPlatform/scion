@@ -4,11 +4,11 @@ title: Release Notes
 
 Scion release notes are published weekly.
 
-## Latest: Week of October 12 -- 18, 2026
+## Latest: Week of October 19 -- 25, 2026
 
-The CLI's local-only mode is gone. Every agent command now goes through a Hub, picked from a per-user list of named Hubs and a current context set with `scion use`. Async agent launch became the `hub.async_agent_launch` experiment, with per-step progress, typed failures and launches that survive Runtime Broker restarts. User access tokens now need matching selectors for chat, quota, agent and user-scope operations, and can now administer invitations, membership and schedules, create global skills and manage skill registries. `scion ssh` and `scion vscode` open shells and editors on agents, and the terminal workspace left its experiment.
+Scion now mounts repository git metadata into agents read-only with a private, credential-stripped `.git/config`, mounts project `.scion` directories read-only in shared layouts, and requires clone-per-agent for Kubernetes git projects that would otherwise share one repository across agents. Project storage consolidated into a single `server.project_storage` block and layout authority that backs the Files tab and chat attachments, while WebDAV, project-level `scion sync`, the Hub project copy and GCS workspace sync were retired. Agent-bound delegation added in-memory credential exchange over `~/.scion/delegation.sock`, lifecycle revocation, revoke-all endpoints and visible delegation attribution on messages, alongside `project.chat_post` for project thread posts and expanded User Access Token scopes for users, groups, roles, access boundaries and project creation. Across the web client, CLI and Runtime Brokers, API responses and static assets are compressed, the Agent Edit page replaced Configure, a single model channel feeds the harness `--model` argument, and `scion reincarnate --broker <target> --force` can move agents by recreating their workspace on another Runtime Broker.
 
-[Read the full release notes for this week ->](/scion/release-notes/2026-10-12/)
+[Read the full release notes for this week ->](/scion/release-notes/2026-10-19/)
 
 ## Templates describe the job, not the environment
 
@@ -45,6 +45,10 @@ A template now describes the agent's **job** (harness config, model, instruction
 - Agents without recorded create inputs that are reincarnated keep any old template-derived env keys as explicit env, with a warning ([ptone/scion#4224](https://github.com/ptone/scion/issues/4224)).
 
 **Minimum Runtime Broker version and upgrade order** ([ptone/scion#4224](https://github.com/ptone/scion/issues/4224)): the Hub no longer sends telemetry in the old inline form. Runtime Brokers older than the release that introduced the `templateTiers` capability (TS-2a, [ptone/scion#4218](https://github.com/ptone/scion/issues/4218)) keep working but receive no Hub telemetry default and no project telemetry policy; the Hub logs a warning once per such Runtime Broker. **Upgrade all Runtime Brokers to at least that release before upgrading the Hub to this one.** This replaces the earlier advice to upgrade the Hub first. While the Hub is still older, an upgraded Runtime Broker receives Hub `agent_defaults.resources` only at create. It also gets no live template env: the older Hub sends no template identity on start, so the Runtime Broker uses the template version the agent was provisioned from if that version is still in its cache, and otherwise applies no template env, with a start warning.
+
+## `scion templates sync` and `push` accept a directory path
+
+`scion templates sync` and `scion templates push` now also take a template directory path: `.` or `..`, an absolute path, or one that contains a path separator (such as `./name`). The directory is synced as is, and the Hub name defaults to its base name (`--name` overrides it). Agents that share the project workspace see the project's `.scion` directory read-only, so they now edit a template elsewhere in their checkout and sync it by path, for example `scion templates sync ./templates/planner --name planner`. **An argument containing a `/`, and `.` or `..`, is now read relative to the current directory**: before, `sync a/b` looked up `<templates dir>/a/b`, and `sync .` resolved to the templates directory itself. Bare names are looked up as before. See [Templates & Roles](/scion/local/templates/#hub-commands).
 
 ## The harness command line uses the Hub-resolved model
 
@@ -86,6 +90,7 @@ Upgrade note: on the first start after upgrading, the Hub has no record yet, so 
 
 ## Previous Weeks
 
+- [Week of October 12 -- 18, 2026](/scion/release-notes/2026-10-12/)
 - [Week of October 5 -- 11, 2026](/scion/release-notes/2026-10-05/)
 - [Week of September 28 -- October 4, 2026](/scion/release-notes/2026-09-28/)
 - [Week of September 21 -- 27, 2026](/scion/release-notes/2026-09-21/)

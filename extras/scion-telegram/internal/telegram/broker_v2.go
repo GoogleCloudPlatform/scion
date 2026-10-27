@@ -34,9 +34,11 @@ import (
 	"sync"
 	"time"
 
+	scionapi "github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"golang.org/x/sync/singleflight"
@@ -47,11 +49,6 @@ const (
 	defaultDBPath        = "telegram_v2.db"
 	askUserExpiry        = 30 * time.Minute
 )
-
-// legacyProjectsRoot is the base path for legacy download directories
-// when no downloads_path override or shared-dir config is available.
-// Extracted as a var to allow tests to redirect to a temp directory.
-var legacyProjectsRoot = "/home/scion/.scion/projects"
 
 // TelegramBrokerV2 implements plugin.MessageBrokerPluginInterface with
 // dynamic group-link routing, inline keyboard support, and persistent
@@ -2775,12 +2772,14 @@ const maxTelegramFileSize = 20 * 1024 * 1024 // 20 MB
 // Telegram message and saves it so the agent can access it. Returns the
 // agent-visible path and a placeholder string for the message body.
 //
-// The function uses a three-tier fallback for the destination directory:
-//  1. downloadsPath config (highest priority)
-//  2. The scratchpad shared dir, resolved through its storage backend (local
-//     or nfs) — makes the file available at /scion-volumes/scratchpad/.attachments/_telegram/.
-//     An unavailable nfs mount is an error, never a local fallback.
-//  3. Legacy /home/scion/.scion/projects/<slug>/downloads/ (last resort)
+// The destination is:
+//  1. downloadsPath config (an operator override), or
+//  2. the project's scratchpad shared dir, resolved through the layout
+//     authority (pkg/projectfs, local or nfs): the file is written through
+//     Resolved.Open to <scratchpad>/.attachments/_telegram/tg_<ts>/<name>,
+//     and the agent path comes from the scratchpad Mount's Target. An
+//     unavailable nfs mount, or a message with no project, is an error;
+//     there is no local fallback (ptone/scion#5827).
 func (b *TelegramBrokerV2) downloadTelegramFile(ctx context.Context, api *TelegramAPIClient, tgMsg *TGMessage, projectSlug, projectID string) (agentPath, placeholder string, err error) {
 	var fileID, fileName, fileType string
 	var fileSize int64
@@ -2850,58 +2849,48 @@ func (b *TelegramBrokerV2) downloadTelegramFile(ctx context.Context, api *Telegr
 	defer body.Close()
 
 	timestamp := time.Now().UnixNano()
-	destName := fmt.Sprintf("tg_%d_%s", timestamp, fileName)
-
-	// Route attachments through the shared dir infrastructure so container-based
-	// agents can access them at /scion-volumes/scratchpad/.attachments/_telegram/.
-	var hostDir string
-	var useSharedDir bool
+	var destPath string
 	if b.downloadsPath != "" {
-		hostDir = b.downloadsPath
-	} else if projectID != "" {
+		destName := fmt.Sprintf("tg_%d_%s", timestamp, fileName)
+		if err := os.MkdirAll(b.downloadsPath, 0o755); err != nil {
+			return "", "", fmt.Errorf("create downloads dir: %w", err)
+		}
+		destPath = filepath.Join(b.downloadsPath, destName)
+		f, err := os.Create(destPath)
+		if err != nil {
+			return "", "", fmt.Errorf("create file: %w", err)
+		}
+		defer f.Close()
+		if _, err := io.Copy(f, body); err != nil {
+			os.Remove(destPath)
+			return "", "", fmt.Errorf("write file: %w", err)
+		}
+		agentPath = filepath.ToSlash(destPath)
+	} else {
+		if projectID == "" {
+			return "", "", fmt.Errorf("no project for %q: attachments are stored in the project's scratchpad", fileName)
+		}
 		home, homeErr := os.UserHomeDir()
-		if homeErr == nil {
-			// The scratchpad dir resolves through its storage backend (local
-			// or nfs). It is not checked against the project's declared
-			// shared dirs: if scratchpad is not configured, the file is
-			// written on the host but no agent container sees it.
-			sharedDirBase, resolveErr := resolveSharedDirHostPath(home, projectSlug, projectID, "scratchpad")
-			if resolveErr != nil {
-				// Never fall back to a local directory for an nfs-backed
-				// scratchpad: no agent mounts it.
-				return "", "", fmt.Errorf("resolve scratchpad shared dir for %q: %w", fileName, resolveErr)
-			}
-			hostDir = filepath.Join(sharedDirBase, ".attachments", "_telegram")
-			useSharedDir = true
+		if homeErr != nil {
+			return "", "", fmt.Errorf("resolve home directory: %w", homeErr)
+		}
+		// The scratchpad resolves through the layout authority (local or
+		// nfs). It is not checked against the project's declared shared
+		// dirs: if scratchpad is not configured, the file is written on the
+		// host but no agent container sees it. Never fall back to a local
+		// directory for an nfs-backed scratchpad: no agent mounts it.
+		scratchpad, resolveErr := resolveSharedDir(home, projectSlug, projectID, projectfs.ScratchpadName)
+		if resolveErr != nil {
+			return "", "", fmt.Errorf("resolve scratchpad shared dir for %q: %w", fileName, resolveErr)
+		}
+		destPath = scratchpad.Path
+		agentPath, err = projectfs.WriteAttachment(scratchpad.Resolved, true,
+			projectfs.SharedDirMount(scionapi.SharedDir{Name: projectfs.ScratchpadName}, ""),
+			projectfs.AttachmentChannelTelegram, fmt.Sprintf("tg_%d", timestamp), fileName, body)
+		if err != nil {
+			return "", "", fmt.Errorf("write file: %w", err)
 		}
 	}
-	if hostDir == "" {
-		hostDir = filepath.Join(legacyProjectsRoot, projectSlug, "downloads")
-	}
-	if err := os.MkdirAll(hostDir, 0o755); err != nil {
-		return "", "", fmt.Errorf("create downloads dir: %w", err)
-	}
-
-	destPath := filepath.Join(hostDir, destName)
-	f, err := os.Create(destPath)
-	if err != nil {
-		return "", "", fmt.Errorf("create file: %w", err)
-	}
-	defer f.Close()
-
-	if _, err := io.Copy(f, body); err != nil {
-		os.Remove(destPath)
-		return "", "", fmt.Errorf("write file: %w", err)
-	}
-
-	if b.downloadsPath != "" {
-		agentPath = filepath.Join(b.downloadsPath, destName)
-	} else if useSharedDir {
-		agentPath = filepath.Join("/scion-volumes/scratchpad/.attachments/_telegram", destName)
-	} else {
-		agentPath = filepath.Join("/workspace/downloads", destName)
-	}
-	agentPath = filepath.ToSlash(agentPath)
 	placeholder = fmt.Sprintf("📎 [%s attached: %s]", fileType, fileName)
 
 	b.log.Info("Downloaded telegram file",

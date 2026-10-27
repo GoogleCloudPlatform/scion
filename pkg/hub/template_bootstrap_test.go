@@ -637,9 +637,9 @@ func TestDeriveTemplateIndexFromDir_NameBased(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			got := deriveTemplateIndexFromDir(dir, tt.name)
+			got := deriveTemplateIndexForTest(t, dir, tt.name)
 			if got.Harness != tt.expected {
-				t.Errorf("deriveTemplateIndexFromDir(%q, %q).Harness = %q, want %q", dir, tt.name, got.Harness, tt.expected)
+				t.Errorf("deriveTemplateIndexFromCollected(%q, %q).Harness = %q, want %q", dir, tt.name, got.Harness, tt.expected)
 			}
 			if got.DefaultHarnessConfig != "" {
 				t.Errorf("expected empty DefaultHarnessConfig for name-based, got %q", got.DefaultHarnessConfig)
@@ -657,7 +657,7 @@ func TestDeriveTemplateIndexFromDir_FromConfigFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := deriveTemplateIndexFromDir(dir, "my-template")
+	got := deriveTemplateIndexForTest(t, dir, "my-template")
 	if got.Harness != "claude" {
 		t.Errorf("expected Harness 'claude' from config, got %q", got.Harness)
 	}
@@ -675,7 +675,7 @@ func TestDeriveTemplateIndexFromDir_DefaultHarnessConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := deriveTemplateIndexFromDir(dir, "my-template")
+	got := deriveTemplateIndexForTest(t, dir, "my-template")
 	if got.Harness != "gemini-cli" {
 		t.Errorf("expected Harness 'gemini-cli', got %q", got.Harness)
 	}
@@ -693,7 +693,7 @@ func TestDeriveTemplateIndexFromDir_HarnessField(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := deriveTemplateIndexFromDir(dir, "my-template")
+	got := deriveTemplateIndexForTest(t, dir, "my-template")
 	if got.Harness != "codex" {
 		t.Errorf("expected Harness 'codex' from config, got %q", got.Harness)
 	}
@@ -711,7 +711,7 @@ func TestDeriveTemplateIndexFromDir_CustomDefaultHarnessConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := deriveTemplateIndexFromDir(dir, "my-template")
+	got := deriveTemplateIndexForTest(t, dir, "my-template")
 	if got.Harness != "" {
 		t.Errorf("expected empty Harness for unknown config name 'adk', got %q", got.Harness)
 	}
@@ -1384,13 +1384,17 @@ const testLsRemoteHeads = "1111111111111111111111111111111111111111\trefs/heads/
 	"3333333333333333333333333333333333333333\trefs/heads/feature/x\n"
 
 // assertLsRemoteCalledWithToken checks that branch resolution went through the
-// stubbed ls-remote seam exactly once, authenticated with the project token.
-// If a regression bypassed the seam, real git would run and this fails.
+// stubbed ls-remote seam exactly once, for the anonymous repository URL, and
+// was given the project token separately. If a regression bypassed the seam,
+// real git would run and this fails.
 func assertLsRemoteCalledWithToken(t *testing.T, stub *gitLsRemoteStub) {
 	t.Helper()
-	want := "https://x-access-token:my-secret-token-12345@github.com/chiefkarlin/scion-experiments.git"
-	if got := stub.URLs(); len(got) != 1 || got[0] != want {
-		t.Errorf("expected exactly one stubbed ls-remote call for %q, got %q", want, got)
+	wantURL := "https://github.com/chiefkarlin/scion-experiments.git"
+	if got := stub.URLs(); len(got) != 1 || got[0] != wantURL {
+		t.Errorf("expected exactly one stubbed ls-remote call for %q, got %q", wantURL, got)
+	}
+	if got := stub.Tokens(); len(got) != 1 || got[0] != "my-secret-token-12345" {
+		t.Errorf("expected the project token to be passed to ls-remote once, got %d token(s)", len(got))
 	}
 }
 

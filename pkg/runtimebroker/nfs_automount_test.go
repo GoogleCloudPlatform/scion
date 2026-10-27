@@ -496,7 +496,10 @@ func TestCheckNFSForDispatch(t *testing.T) {
 		{name: "docker broker, kubernetes dispatch: warned only, no mount", autoMount: true, brokerRuntime: "docker", runtime: "kubernetes", wantRefused: false, wantMounts: false},
 		{name: "kubernetes broker, docker dispatch: verify-only, refused without mounting", autoMount: true, brokerRuntime: "kubernetes", runtime: "docker", wantRefused: true, wantMounts: false},
 		{name: "cloudrun broker, docker dispatch: verify-only, refused without mounting", autoMount: true, brokerRuntime: "cloudrun", runtime: "docker", wantRefused: true, wantMounts: false},
-		{name: "auto_mount on, project on local backend: not gated", autoMount: true, runtime: "docker", localProj: true, wantRefused: false, wantMounts: false},
+		// The storage blocks are Layer-0: a project's settings.yaml naming
+		// workspace_storage local cannot take the project off the global
+		// nfs backend, so the dispatch is gated like any nfs project.
+		{name: "auto_mount on, project settings naming local: still gated", autoMount: true, runtime: "docker", localProj: true, wantRefused: true, wantMounts: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

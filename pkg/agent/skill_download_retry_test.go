@@ -452,7 +452,7 @@ func TestInstallFromDiskCacheHit_OwnerKeyCredentialLabelled(t *testing.T) {
 	}
 	first.putEntry(resolutionCacheKey(ghRef, ownerTok), ResolvedSkill{
 		Name: "s", URI: uri,
-		Files: []ResolvedFile{{Path: "SKILL.md", URL: fakeRawFileURL, Content: []byte("# skill")}},
+		Files: []ResolvedFile{{Path: "SKILL.md", URL: fakeRawFileURL, Mode: "0644", Content: []byte("# skill")}},
 	}, true)
 	first.Flush()
 	cache, err := newTestResolutionCache(dir, time.Hour)

@@ -419,10 +419,14 @@ func (c *client) restError(ctx context.Context, err error, doing string) error {
 	return Errorf(ExitError, "the hub refused while %s: %v", doing, he)
 }
 
-// current returns the session new tunnels go to.
-func (c *client) current() *session {
+// acquireCurrent returns the session new tunnels go to, counted as in
+// use until release. The session is read and counted under one hold of
+// c.mu: a setCurrent in between would otherwise see it unused and close
+// it before the request is sent (ptone/scion#4634).
+func (c *client) acquireCurrent() *session {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.cur.users++
 	return c.cur
 }
 
@@ -493,15 +497,7 @@ type tunnelEntry struct {
 	deadline *time.Time
 }
 
-// acquire counts a tunnel request on s; the count passes to the tunnel
-// when the request succeeds and is released otherwise.
-func (c *client) acquire(s *session) {
-	c.mu.Lock()
-	s.users++
-	c.mu.Unlock()
-}
-
-// release drops a count taken by acquire. A session that is no longer
+// release drops a count taken by acquireCurrent. A session that is no longer
 // current is closed when nothing uses it.
 func (c *client) release(s *session) {
 	c.mu.Lock()

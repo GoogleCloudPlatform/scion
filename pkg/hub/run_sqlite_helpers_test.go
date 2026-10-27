@@ -236,7 +236,7 @@ func (m *runLabelManager) List(_ context.Context, filter map[string]string) ([]a
 	return out, nil
 }
 
-func (m *runLabelManager) DeleteTarget(_ context.Context, _ string, ref runtime.RunRef, _ bool, _ string, _ bool) (bool, error) {
+func (m *runLabelManager) DeleteTarget(_ context.Context, _, _ string, ref runtime.RunRef, _ bool, _ string, _ bool) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.deletes = append(m.deletes, ref)

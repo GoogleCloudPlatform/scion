@@ -586,6 +586,12 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 	if len(files) == 0 {
 		return fmt.Errorf("no files to sync in %s (backup and temp files are excluded); a harness-config needs at least one file", localPath)
 	}
+	// Uploads read through this root; see transfer.ReadCollectedFile.
+	root, err := os.OpenRoot(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to open harness-config directory %s: %w", localPath, err)
+	}
+	defer func() { _ = root.Close() }()
 
 	fileReqs := make([]hubclient.FileUploadRequest, len(files))
 	for i, f := range files {
@@ -719,7 +725,7 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 		}
 
 		fmt.Printf("Uploading %d file(s)...\n", len(uploadResp.UploadURLs))
-		if err := uploadHarnessConfigFiles(ctx, hubCtx.Client.HarnessConfigs(), hcID, localFileMap, filesToUpload, uploadResp.UploadURLs); err != nil {
+		if err := uploadHarnessConfigFiles(ctx, hubCtx.Client.HarnessConfigs(), hcID, root, localFileMap, filesToUpload, uploadResp.UploadURLs); err != nil {
 			return err
 		}
 		uploadID = uploadResp.UploadID
@@ -762,15 +768,8 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 		if retryErr != nil {
 			return fmt.Errorf("failed to get upload URLs for retry: %w", retryErr)
 		}
-		for _, urlInfo := range retryResp.UploadURLs {
-			fileInfo := localFileMap[urlInfo.Path]
-			if fileInfo == nil {
-				continue
-			}
-			if err := uploadHarnessConfigFileBySignedURL(ctx, hubCtx.Client.HarnessConfigs(), fileInfo, urlInfo); err != nil {
-				return err
-			}
-			fmt.Printf("  Re-uploaded: %s\n", fileInfo.Path)
+		if err := uploadHarnessConfigFilesBySignedURL(ctx, hubCtx.Client.HarnessConfigs(), root, localFileMap, retryResp.UploadURLs, "Re-uploaded", false); err != nil {
+			return err
 		}
 		hc, err = hubCtx.Client.HarnessConfigs().Finalize(ctx, hcID, manifest, sourceURL, retryResp.UploadID)
 		if err != nil {

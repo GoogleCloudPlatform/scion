@@ -46,7 +46,7 @@ func newEmbeddedCleanupFixture(t *testing.T, slug string, wsCfg func(home string
 
 	srv, s := testServer(t)
 	if wsCfg != nil {
-		srv.config.WorkspaceStorageConfig = wsCfg(home)
+		srv.config.ProjectStorageConfig = projectStorageFromWorkspace(wsCfg(home))
 	}
 
 	ctx := context.Background()
@@ -258,7 +258,7 @@ func TestDeleteProject_BackendConfiguredCombinedServer_RemovesOnlyDirectChildOfP
 	t.Setenv("HOME", home)
 
 	srv, s := testServer(t)
-	srv.config.WorkspaceStorageConfig = nfsWorkspaceStorage(home)
+	srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsWorkspaceStorage(home))
 
 	ctx := context.Background()
 	project := &store.Project{

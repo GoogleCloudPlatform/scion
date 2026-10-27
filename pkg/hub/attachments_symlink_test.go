@@ -181,7 +181,7 @@ func TestAttachmentStaging_SymlinkMatrix(t *testing.T) {
 			before := outside.snapshot(t)
 
 			src := writeTempFile(t, "notes.txt", "hello agent")
-			st := newAttachmentStaging(sharedDir, false)
+			st := newLocalTestStaging(sharedDir, false)
 			require.NotNil(t, st)
 
 			_, err := st.stage(src, "att-1", "notes.txt")
@@ -200,7 +200,7 @@ func TestAttachmentStaging_RefusesSymlinkedSharedDir(t *testing.T) {
 	before := outside.snapshot(t)
 
 	src := writeTempFile(t, "notes.txt", "hello agent")
-	st := newAttachmentStaging(sharedDir, false)
+	st := newLocalTestStaging(sharedDir, false)
 	require.NotNil(t, st)
 
 	_, err := st.stage(src, "att-1", "notes.txt")

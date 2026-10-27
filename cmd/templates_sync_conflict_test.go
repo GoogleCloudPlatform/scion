@@ -196,7 +196,7 @@ func TestUpdateHubTemplate_RetriesOnceOnConflict(t *testing.T) {
 
 	hubTemplate := &hubclient.Template{ID: "conflict-tpl", Name: "base", ContentHash: "sha256:old"}
 	captureStdout(t, func() {
-		res, err := updateHubTemplate(context.Background(), newTemplateSyncHubCtx(t, server), hubTemplate, &config.Template{Name: "base", Path: localPath}, files, "")
+		res, err := updateHubTemplate(context.Background(), newTemplateSyncHubCtx(t, server), hubTemplate, &config.Template{Name: "base", Path: localPath}, openTestRoot(t, localPath), files, "")
 		require.NoError(t, err)
 		require.Equal(t, "conflict-tpl", res.TemplateID)
 	})
@@ -288,7 +288,7 @@ func TestTemplateFinalize_SendsUploadID(t *testing.T) {
 		defer server.Close()
 		hubTemplate := &hubclient.Template{ID: "conflict-tpl", Name: "base", ContentHash: "sha256:old"}
 		captureStdout(t, func() {
-			_, err := updateHubTemplate(context.Background(), newTemplateSyncHubCtx(t, server), hubTemplate, &config.Template{Name: "base", Path: localPath}, files, "")
+			_, err := updateHubTemplate(context.Background(), newTemplateSyncHubCtx(t, server), hubTemplate, &config.Template{Name: "base", Path: localPath}, openTestRoot(t, localPath), files, "")
 			require.NoError(t, err)
 		})
 		require.Len(t, h.uploadRequested, 2)

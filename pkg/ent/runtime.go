@@ -43,6 +43,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/group"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/harnessconfig"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubencryptionmigration"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubencryptionpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/hubsetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationconfig"
@@ -1449,6 +1451,42 @@ func init() {
 	harnessconfigDescID := harnessconfigFields[0].Descriptor()
 	// harnessconfig.DefaultID holds the default value on creation for the id field.
 	harnessconfig.DefaultID = harnessconfigDescID.Default.(func() uuid.UUID)
+	hubencryptionmigrationFields := schema.HubEncryptionMigration{}.Fields()
+	_ = hubencryptionmigrationFields
+	// hubencryptionmigrationDescTargetKid is the schema descriptor for target_kid field.
+	hubencryptionmigrationDescTargetKid := hubencryptionmigrationFields[2].Descriptor()
+	// hubencryptionmigration.TargetKidValidator is a validator for the "target_kid" field. It is called by the builders before save.
+	hubencryptionmigration.TargetKidValidator = hubencryptionmigrationDescTargetKid.Validators[0].(func(string) error)
+	// hubencryptionmigrationDescLastScannedID is the schema descriptor for last_scanned_id field.
+	hubencryptionmigrationDescLastScannedID := hubencryptionmigrationFields[4].Descriptor()
+	// hubencryptionmigration.DefaultLastScannedID holds the default value on creation for the last_scanned_id field.
+	hubencryptionmigration.DefaultLastScannedID = hubencryptionmigrationDescLastScannedID.Default.(string)
+	// hubencryptionmigrationDescPlaintextReadAdmitted is the schema descriptor for plaintext_read_admitted field.
+	hubencryptionmigrationDescPlaintextReadAdmitted := hubencryptionmigrationFields[5].Descriptor()
+	// hubencryptionmigration.DefaultPlaintextReadAdmitted holds the default value on creation for the plaintext_read_admitted field.
+	hubencryptionmigration.DefaultPlaintextReadAdmitted = hubencryptionmigrationDescPlaintextReadAdmitted.Default.(bool)
+	// hubencryptionmigrationDescScanned is the schema descriptor for scanned field.
+	hubencryptionmigrationDescScanned := hubencryptionmigrationFields[6].Descriptor()
+	// hubencryptionmigration.DefaultScanned holds the default value on creation for the scanned field.
+	hubencryptionmigration.DefaultScanned = hubencryptionmigrationDescScanned.Default.(int64)
+	// hubencryptionmigrationDescRewritten is the schema descriptor for rewritten field.
+	hubencryptionmigrationDescRewritten := hubencryptionmigrationFields[7].Descriptor()
+	// hubencryptionmigration.DefaultRewritten holds the default value on creation for the rewritten field.
+	hubencryptionmigration.DefaultRewritten = hubencryptionmigrationDescRewritten.Default.(int64)
+	// hubencryptionmigrationDescFailures is the schema descriptor for failures field.
+	hubencryptionmigrationDescFailures := hubencryptionmigrationFields[8].Descriptor()
+	// hubencryptionmigration.DefaultFailures holds the default value on creation for the failures field.
+	hubencryptionmigration.DefaultFailures = hubencryptionmigrationDescFailures.Default.(int64)
+	hubencryptionpolicyFields := schema.HubEncryptionPolicy{}.Fields()
+	_ = hubencryptionpolicyFields
+	// hubencryptionpolicyDescGeneration is the schema descriptor for generation field.
+	hubencryptionpolicyDescGeneration := hubencryptionpolicyFields[1].Descriptor()
+	// hubencryptionpolicy.GenerationValidator is a validator for the "generation" field. It is called by the builders before save.
+	hubencryptionpolicy.GenerationValidator = hubencryptionpolicyDescGeneration.Validators[0].(func(int64) error)
+	// hubencryptionpolicyDescMinReaderVersion is the schema descriptor for min_reader_version field.
+	hubencryptionpolicyDescMinReaderVersion := hubencryptionpolicyFields[2].Descriptor()
+	// hubencryptionpolicy.DefaultMinReaderVersion holds the default value on creation for the min_reader_version field.
+	hubencryptionpolicy.DefaultMinReaderVersion = hubencryptionpolicyDescMinReaderVersion.Default.(int)
 	hubinstanceFields := schema.HubInstance{}.Fields()
 	_ = hubinstanceFields
 	// hubinstanceDescLabel is the schema descriptor for label field.
@@ -1794,7 +1832,7 @@ func init() {
 	// message.ThreadIDValidator is a validator for the "thread_id" field. It is called by the builders before save.
 	message.ThreadIDValidator = messageDescThreadID.Validators[0].(func(string) error)
 	// messageDescCreated is the schema descriptor for created field.
-	messageDescCreated := messageFields[21].Descriptor()
+	messageDescCreated := messageFields[23].Descriptor()
 	// message.DefaultCreated holds the default value on creation for the created field.
 	message.DefaultCreated = messageDescCreated.Default.(func() time.Time)
 	// messageDescID is the schema descriptor for id field.

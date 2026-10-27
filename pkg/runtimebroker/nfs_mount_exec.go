@@ -21,7 +21,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"syscall"
 	"time"
 )
 
@@ -66,32 +65,6 @@ var mountCommandTimeout = 90 * time.Second
 // output pipes to close after it has been killed. A variable so tests can
 // shorten it.
 var commandWaitDelay = 3 * time.Second
-
-// execRunCommand runs a command bounded by both parent (for a dispatch,
-// the request context) and mountCommandTimeout, and returns its combined
-// output.
-//
-// The command runs in its own process group, and the whole group is killed
-// when the context is done: mount(8) runs the mount.nfs helper as a child
-// that inherits the output pipes, and killing only mount would leave the
-// helper running and the call waiting on the pipes. WaitDelay is a backstop
-// for a descendant that left the group.
-func execRunCommand(parent context.Context, name string, args ...string) ([]byte, error) {
-	timeout := mountCommandTimeout
-	ctx, cancel := context.WithTimeout(parent, timeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
-	cmd.WaitDelay = commandWaitDelay
-	out, err := cmd.CombinedOutput()
-	return out, classifyCommandError(name, timeout, err, ctx, parent)
-}
 
 // classifyCommandError attributes a failed command to its context: a
 // cancelled parent, then the timeout. A command that succeeded is a

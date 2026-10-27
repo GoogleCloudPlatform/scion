@@ -36,6 +36,9 @@ func (c *CompositeStore) FinalizeAgentDeletion(ctx context.Context, id string, p
 	default:
 		return 0, fmt.Errorf("finalize agent deletion %s: %w: mode %q", id, store.ErrInvalidInput, mode)
 	}
+	if mode == store.DeletionFinalizeHard && set.SetsSoftFinishRunIDs() {
+		return 0, fmt.Errorf("finalize agent deletion %s: %w: run IDs are written only by a soft finalize", id, store.ErrInvalidInput)
+	}
 	uid, err := parseUUID(id)
 	if err != nil {
 		return 0, err
@@ -80,7 +83,7 @@ func (c *CompositeStore) finalizeAgentDeletionOnce(ctx context.Context, uid uuid
 		if set.Derive != nil {
 			set.Derive(current, &set)
 		}
-		n, err := applyAgentDeletionFields(ctx, tx, row, set)
+		n, err := applyAgentDeletionFields(ctx, tx, row, set, true)
 		if err != nil {
 			return 0, false, err
 		}

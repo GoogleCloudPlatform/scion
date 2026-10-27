@@ -30,6 +30,86 @@ func newTestResponse(status int, body string) *http.Response {
 	}
 }
 
+type decodeStatusBody struct {
+	*strings.Reader
+	closeCalls int
+}
+
+func (b *decodeStatusBody) Close() error {
+	b.closeCalls++
+	return nil
+}
+
+func TestDecodeResponse_Status(t *testing.T) {
+	type resource struct {
+		ID string `json:"id"`
+	}
+	const payload = `{"id":"r1","error":{"code":"unexpected_reply","message":"request not completed"}}`
+	for name, decode := range map[string]func(*http.Response) (*resource, error){
+		"optional": DecodeResponse[resource],
+		"required": DecodeRequired[resource],
+	} {
+		for _, tt := range []struct {
+			name    string
+			status  int
+			body    string
+			wantErr bool
+		}{
+			{"101", http.StatusSwitchingProtocols, payload, true},
+			{"199", 199, payload, true},
+			{"200", http.StatusOK, payload, false},
+			{"201", http.StatusCreated, payload, false},
+			{"202", http.StatusAccepted, payload, false},
+			{"299", 299, payload, false},
+			{"300", http.StatusMultipleChoices, payload, true},
+			{"302", http.StatusFound, payload, true},
+			{"304", http.StatusNotModified, payload, true},
+			{"307", http.StatusTemporaryRedirect, payload, true},
+			{"308", http.StatusPermanentRedirect, payload, true},
+			{"399", 399, payload, true},
+			{"400", http.StatusBadRequest, payload, true},
+			{"503", http.StatusServiceUnavailable, payload, true},
+			{"304_empty", http.StatusNotModified, "", true},
+			{"307_html", http.StatusTemporaryRedirect, "<html>moved</html>", true},
+		} {
+			t.Run(name+"/"+tt.name, func(t *testing.T) {
+				body := &decodeStatusBody{Reader: strings.NewReader(tt.body)}
+				resp := &http.Response{
+					StatusCode: tt.status,
+					Header:     http.Header{"X-Request-Id": {"request-123"}},
+					Body:       body,
+				}
+				got, err := decode(resp)
+				if body.closeCalls != 1 {
+					t.Errorf("response body closed %d times, want 1", body.closeCalls)
+				}
+				if !tt.wantErr {
+					if err != nil || got == nil || got.ID != "r1" {
+						t.Fatalf("decode = (%+v, %v), want resource r1 without an error", got, err)
+					}
+					return
+				}
+				if got != nil {
+					t.Errorf("decoded an unsuccessful response: %+v", got)
+				}
+				var apiErr *APIError
+				if !errors.As(err, &apiErr) {
+					t.Fatalf("expected an APIError for status %d, got %v", tt.status, err)
+				}
+				if apiErr.StatusCode != tt.status || apiErr.RequestID != "request-123" {
+					t.Errorf("response metadata not preserved: %+v", apiErr)
+				}
+				if tt.body == payload && (apiErr.Code != "unexpected_reply" || apiErr.Message != "request not completed") {
+					t.Errorf("structured error not preserved: %+v", apiErr)
+				}
+				if errors.Is(err, ErrNoContent) {
+					t.Errorf("unsuccessful status misclassified as a missing success body: %v", err)
+				}
+			})
+		}
+	}
+}
+
 func TestDecodeRequired(t *testing.T) {
 	type resource struct {
 		ID string `json:"id"`

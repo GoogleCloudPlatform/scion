@@ -111,6 +111,13 @@ func envSendOptInError(gathered map[string]string) error {
 		len(sorted), strings.Join(sorted, ", "), sendEnvFlagName, sendEnvFlagName)
 }
 
+// envSendNamesLine names the keys (never their values), sorted, that the
+// CLI sends to the hub.
+func envSendNamesLine(gathered map[string]string) string {
+	sorted := slices.Sorted(maps.Keys(gathered))
+	return fmt.Sprintf("Sending %d environment value(s) to the Hub: %s", len(sorted), strings.Join(sorted, ", "))
+}
+
 // agentLogLevelFlagName is the start/resume flag that sets SCION_LOG_LEVEL
 // in the agent's environment. Agents never inherit debug settings from the
 // CLI or the server; this flag is the explicit per-agent opt-in.
@@ -498,7 +505,7 @@ func CheckAgentsGitignore(projectPath string) error {
 		return nil
 	}
 
-	rel, err := filepath.Rel(root, projectDir)
+	rel, err := filepath.Rel(root, projectDir) //winsec:not-containment only RunAgent (start, create, resume) reaches it, and those are gated on Windows
 	if err != nil || strings.HasPrefix(rel, "..") {
 		return nil
 	}
@@ -1230,6 +1237,7 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 	// every file in the project directory, which is extremely expensive for
 	// large workspaces.
 	var workspaceFiles []transfer.FileInfo
+	var workspaceRoot *os.Root // opened at the collected directory; uploads read through it
 	if hubCtx.ProjectPath != "" && !hubCtx.IsGlobal && !config.IsHubContext() {
 		projectDir := filepath.Dir(hubCtx.ProjectPath) // parent of .scion
 		if _, statErr := os.Stat(projectDir); statErr == nil && !util.IsGitRepoDir(projectDir) {
@@ -1245,6 +1253,11 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 				return fmt.Errorf("failed to collect workspace files: %w", err)
 			}
 			if len(files) > 0 {
+				workspaceRoot, err = os.OpenRoot(projectDir)
+				if err != nil {
+					return fmt.Errorf("failed to open workspace directory %s: %w", projectDir, err)
+				}
+				defer func() { _ = workspaceRoot.Close() }()
 				req.WorkspaceFiles = files
 				workspaceFiles = files
 			}
@@ -1439,7 +1452,7 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 	if len(resp.UploadURLs) > 0 && len(workspaceFiles) > 0 {
 		statusf("Uploading workspace (%d files)...\n", len(workspaceFiles))
 		tc := transfer.NewClient(nil)
-		uploadErr := tc.UploadFiles(ctx, workspaceFiles, resp.UploadURLs, func(file transfer.FileInfo, bytesTransferred int64) error {
+		uploadErr := tc.UploadFiles(ctx, workspaceRoot, workspaceFiles, resp.UploadURLs, func(file transfer.FileInfo, bytesTransferred int64) error {
 			if bytesTransferred == file.Size {
 				statusf("  Uploaded: %s\n", file.Path)
 			}
@@ -2103,9 +2116,10 @@ func gatherAndSubmitEnvGuarded(ctx context.Context, hubCtx *HubContext, projectI
 	}
 
 	// In interactive mode, confirm before sending env vars
-	if isInteractiveTerminal() && !autoConfirm {
+	prompted := isInteractiveTerminal() && !autoConfirm
+	if prompted {
 		reader := bufio.NewReader(os.Stdin)
-		fmt.Fprintf(os.Stderr, "\nSend %d environment variable(s) to use in provisioning this agent? (will not be stored) [Y/n]: ", len(gatheredEnv))
+		fmt.Fprintf(os.Stderr, "\nSend %d environment value(s) to use in provisioning this agent? (will not be stored) [Y/n]: ", len(gatheredEnv))
 		input, err := reader.ReadString('\n')
 		if err != nil {
 			return nil, fmt.Errorf("failed to read input: %w", err)
@@ -2116,7 +2130,14 @@ func gatherAndSubmitEnvGuarded(ctx context.Context, hubCtx *HubContext, projectI
 		}
 	}
 
-	statusf("Submitting %d gathered environment variable(s)...\n", len(gatheredEnv))
+	// The text-mode prompt follows the list of keys found locally. In
+	// every other case (--yes, --format json, a non-interactive send
+	// with --send-env) the keys are named here, on stderr only.
+	if prompted && !isJSONOutput() {
+		statusf("Submitting %d gathered environment value(s)...\n", len(gatheredEnv))
+	} else {
+		fmt.Fprintln(os.Stderr, envSendNamesLine(gatheredEnv))
+	}
 
 	// Submit gathered env to Hub. From here the Hub may launch the agent.
 	// A context that already ended sends nothing: report it as a failure

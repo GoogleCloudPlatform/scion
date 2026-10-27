@@ -17,8 +17,6 @@ package config
 import (
 	"os"
 	"strings"
-
-	yamlv3 "gopkg.in/yaml.v3"
 )
 
 // RetiredAsyncAgentLaunchWarning is logged at hub startup when the retired
@@ -59,7 +57,7 @@ func retiredAsyncAgentLaunchSet(configPath string) bool {
 			continue
 		}
 		var raw map[string]interface{}
-		if yamlv3.Unmarshal(data, &raw) != nil {
+		if unmarshalSettingsYAML(data, &raw) != nil {
 			continue
 		}
 		if hasNestedKey(raw, "hub", "asyncAgentLaunch") {

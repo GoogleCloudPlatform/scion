@@ -3865,6 +3865,269 @@ describe('scion-chat-thread unread-divider open anchor', () => {
       restore();
     }
   });
+
+  /**
+   * ptone/scion#5964: in a browser, the bottom pin written while the history
+   * rendered queues a 'scroll' event that is dispatched in the next frame,
+   * before animation-frame callbacks. When the read state arrived first, that
+   * event landed after the open had chosen the unread anchor but before its
+   * deferred first write, was taken for the user scrolling away, and cancelled
+   * the anchor: the thread stayed at the bottom with the divider out of view.
+   */
+  it('a scroll event queued before the first anchor write does not cancel the anchor', async () => {
+    mockEndpoints('m1');
+    globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+    const { callbacks: rafCallbacks, restore } = installRafStub();
+
+    try {
+      const el = mountThread();
+      await vi.waitFor(() =>
+        expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull()
+      );
+      // The deferred first anchor write is still pending.
+      await vi.waitFor(() => expect(rafCallbacks.size).toBe(1));
+      const container = scrollContainer(el);
+
+      // The earlier bottom pin's scroll event arrives first.
+      container.scrollTop = SCROLL_HEIGHT;
+      container.dispatchEvent(new Event('scroll'));
+
+      // Then the frame's animation callbacks run.
+      for (const [handle, cb] of [...rafCallbacks]) {
+        rafCallbacks.delete(handle);
+        cb(0);
+      }
+
+      expect(container.scrollTop).toBe(DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX);
+    } finally {
+      restore();
+    }
+  });
+
+  it('stands the anchor down when the render before its first write fails', async () => {
+    mockEndpoints('m1');
+    globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+    const el = mountThread();
+    await vi.waitFor(() => expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull());
+    await vi.waitFor(() =>
+      expect(scrollContainer(el).scrollTop).toBe(DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX)
+    );
+
+    type Internal = {
+      _unreadAnchorActive: boolean;
+      _unreadAnchorPending: boolean;
+      scrollToUnreadDivider(): void;
+    };
+    const internal = el as unknown as Internal;
+    // A reactive update that throws rejects updateComplete.
+    Object.defineProperty(el, 'updateComplete', {
+      configurable: true,
+      get: () => Promise.reject(new Error('render failed')),
+    });
+    try {
+      internal.scrollToUnreadDivider();
+      expect(internal._unreadAnchorActive).toBe(true);
+
+      await vi.waitFor(() => expect(internal._unreadAnchorActive).toBe(false));
+      expect(internal._unreadAnchorPending).toBe(false);
+    } finally {
+      delete (el as unknown as Record<string, unknown>).updateComplete;
+    }
+  });
+
+  type FrameThrowInternal = {
+    _unreadAnchorActive: boolean;
+    _unreadAnchorPending: boolean;
+    pinnedToBottom: boolean;
+    scrollToUnreadDivider(): void;
+  };
+
+  /**
+   * Re-run the open-time anchor and fire its first frame callback with
+   * `breakWrite` in effect, expecting that callback to throw `message`. The
+   * callback runs outside the updateComplete promise chain, so its throw
+   * escapes to the caller instead of reaching the .catch.
+   */
+  async function runFirstAnchorFrameThrowing(
+    internal: FrameThrowInternal,
+    breakWrite: () => () => void,
+    message: string
+  ): Promise<void> {
+    const { callbacks, restore } = installRafStub();
+    try {
+      internal.scrollToUnreadDivider();
+      await vi.waitFor(() => expect(callbacks.size).toBeGreaterThan(0));
+      expect(internal._unreadAnchorActive).toBe(true);
+      const unbreak = breakWrite();
+      try {
+        for (const [handle, cb] of [...callbacks]) {
+          callbacks.delete(handle);
+          expect(() => cb(0)).toThrow(message);
+        }
+      } finally {
+        unbreak();
+      }
+      expect(internal._unreadAnchorActive).toBe(false);
+      expect(internal._unreadAnchorPending).toBe(false);
+    } finally {
+      restore();
+    }
+  }
+
+  function emitM4(): void {
+    emitChatMessage({
+      threadId: CONVERSATION_KEY,
+      id: 'm4',
+      msg: 'new incoming',
+      sender: 'them@example.com',
+      createdAt: '2026-01-01T00:03:00Z',
+    });
+  }
+
+  it('keeps the view at the divider, unpinned, when the anchor frame throws after its write', async () => {
+    mockEndpoints('m1');
+    globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+    const el = mountThread();
+    await vi.waitFor(() => expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull());
+    const container = scrollContainer(el);
+    const anchoredTop = DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX;
+    await vi.waitFor(() => expect(container.scrollTop).toBe(anchoredTop));
+    const internal = el as unknown as FrameThrowInternal;
+
+    // The scrollTop write lands, then the guard-clearing frame request throws.
+    await runFirstAnchorFrameThrowing(
+      internal,
+      () => {
+        const stubbedRaf = globalThis.requestAnimationFrame;
+        globalThis.requestAnimationFrame = (() => {
+          throw new Error('frame request failed');
+        }) as typeof requestAnimationFrame;
+        return (): void => {
+          globalThis.requestAnimationFrame = stubbedRaf;
+        };
+      },
+      'frame request failed'
+    );
+
+    expect(container.scrollTop).toBe(anchoredTop);
+    expect(internal.pinnedToBottom).toBe(false);
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('.jump-btn')).not.toBeNull();
+
+    // A message arriving afterwards does not drag the reader to the tail.
+    emitM4();
+    await vi.waitFor(() =>
+      expect(el.shadowRoot?.querySelectorAll('scion-chat-message').length).toBe(4)
+    );
+    await el.updateComplete;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(container.scrollTop).toBe(anchoredTop);
+    expect(internal.pinnedToBottom).toBe(false);
+  });
+
+  /**
+   * Open with the divider above the tail, park the view `distFromBottom`
+   * pixels up from the bottom, then fire the anchor's first frame with its
+   * scrollTop write throwing. applyUnreadAnchor has already set the pin off
+   * (the divider is above the tail) when the write throws, so the view stays
+   * where it was parked.
+   */
+  async function throwOnAnchorWriteFrom(distFromBottom: number): Promise<{
+    el: ScionChatThread;
+    container: HTMLElement;
+    internal: FrameThrowInternal;
+    parkedTop: number;
+  }> {
+    mockEndpoints('m1');
+    globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+    const el = mountThread();
+    await vi.waitFor(() => expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull());
+    const container = scrollContainer(el);
+    await vi.waitFor(() => expect(container.scrollTop).toBe(DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX));
+    const internal = el as unknown as FrameThrowInternal;
+    const parkedTop = SCROLL_HEIGHT - CLIENT_HEIGHT - distFromBottom;
+    container.scrollTop = parkedTop;
+
+    await runFirstAnchorFrameThrowing(
+      internal,
+      () => {
+        Object.defineProperty(container, 'scrollTop', {
+          configurable: true,
+          get: () => parkedTop,
+          set: () => {
+            throw new Error('scroll write failed');
+          },
+        });
+        return (): void => {
+          delete (container as unknown as Record<string, unknown>).scrollTop;
+        };
+      },
+      'scroll write failed'
+    );
+    expect(container.scrollTop).toBe(parkedTop);
+    return { el, container, internal, parkedTop };
+  }
+
+  it('re-pins the bottom when the anchor frame throws on its scrollTop write', async () => {
+    // The history render's own bottom pin left the view at the tail.
+    const { el, container, internal } = await throwOnAnchorWriteFrom(0);
+    expect(internal.pinnedToBottom).toBe(true);
+
+    // A message arriving afterwards keeps the view stuck to the bottom.
+    emitM4();
+    await vi.waitFor(() =>
+      expect(el.shadowRoot?.querySelectorAll('scion-chat-message').length).toBe(4)
+    );
+    await vi.waitFor(() => expect(container.scrollTop).toBe(SCROLL_HEIGHT));
+    expect(internal.pinnedToBottom).toBe(true);
+  });
+
+  it('leaves the bottom unpinned when the anchor write throws exactly the threshold up from the bottom', async () => {
+    // SCROLL_BOTTOM_THRESHOLD (80px) is strict: exactly that far up is not at the bottom.
+    const { internal } = await throwOnAnchorWriteFrom(80);
+    expect(internal.pinnedToBottom).toBe(false);
+  });
+
+  it("a failed render of a superseded open leaves the next open's anchor alone", async () => {
+    mockEndpoints('m1');
+    globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+    const el = mountThread();
+    await vi.waitFor(() => expect(el.shadowRoot?.querySelector('.unread-divider')).not.toBeNull());
+    await vi.waitFor(() =>
+      expect(scrollContainer(el).scrollTop).toBe(DIVIDER_OFFSET_TOP - ANCHOR_MARGIN_PX)
+    );
+
+    type Internal = {
+      fetchId: number;
+      _unreadAnchorActive: boolean;
+      _unreadAnchorPending: boolean;
+      scrollToUnreadDivider(): void;
+      deactivateUnreadAnchor(): void;
+    };
+    const internal = el as unknown as Internal;
+    let rejectRender: (err: Error) => void = () => {};
+    const render = new Promise<boolean>((_resolve, reject) => (rejectRender = reject));
+    Object.defineProperty(el, 'updateComplete', { configurable: true, get: () => render });
+    try {
+      internal.scrollToUnreadDivider();
+
+      // A thread switch lands before that render settles, and the new open
+      // arms its own anchor.
+      internal.fetchId++;
+      internal._unreadAnchorActive = true;
+      internal._unreadAnchorPending = true;
+
+      rejectRender(new Error('render failed'));
+      await render.catch(() => {});
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(internal._unreadAnchorActive).toBe(true);
+      expect(internal._unreadAnchorPending).toBe(true);
+    } finally {
+      delete (el as unknown as Record<string, unknown>).updateComplete;
+      internal.deactivateUnreadAnchor();
+    }
+  });
 });
 
 describe('scion-chat-thread search result navigation', () => {

@@ -30,12 +30,13 @@ import (
 // permission for a credential kind outside the set. This covers every
 // principal, including hub administrators holding a role binding.
 //
-// The set is empty. The gate is a precondition for deliver, never a grant:
-// a request that passes it needs every later stage to admit it.
+// The set holds only the internal delivery credential kind,
+// CredentialKindHubDelivery (ptone/scion#2228 part 2). The gate is a
+// precondition for deliver, never a grant: a request that passes it needs
+// every later stage to admit it.
 //
-// The internal delivery credential (ptone/scion#2228 part 2) adds its kind
-// to this set together with the rest of its contract, which a kind-only set
-// cannot express:
+// The kind is admitted together with the rest of its contract, which a
+// kind-only set cannot express:
 //
 //   - BoundAgentID: the delivery credential names the agent it delivers
 //     to, and a deliver request is denied unless BoundAgentID equals the
@@ -50,8 +51,8 @@ import (
 //     enforces this before its kind joins the set, and
 //     TestDeliveryGate_Part2RoleDoesNotSubstituteForItemGrant pins it.
 //
-// Binding preconditions for adding any kind to this set (ptone/scion#2228
-// part 2 scope):
+// Binding preconditions for any kind in this set (ptone/scion#2228 part 2
+// scope), met for CredentialKindHubDelivery:
 //
 //   - The kind is bound to the credential type. Decide takes the gated
 //     kind from the unexported delivery credential type or its
@@ -61,12 +62,14 @@ import (
 //   - The F design section 4.6 deliver effect ceiling is enforced: the
 //     EffectCeiling contains the exact deliver permission, and the source
 //     authority is live. The generic Step 10 delegation ceiling ("the
-//     delegator holds the permission") does not meet this.
+//     delegator holds the permission") does not meet this; the
+//     hub_delivery step-10 arm (hubDeliveryAdmission) does.
 //
 // The TestDeliveryGate_Part2* tests in authz_delivery_gate_test.go state
-// these rules and cite ptone/scion#2228; those that depend on parts of the
-// contract outside this change are skipped.
-var deliveryCredentialKinds = map[CredentialKind]struct{}{}
+// these rules and cite ptone/scion#2228.
+var deliveryCredentialKinds = map[CredentialKind]struct{}{
+	CredentialKindHubDelivery: {},
+}
 
 // deliveryCredentialKindsMu guards deliveryCredentialKinds: every read of
 // the set (deliveryCredentialAdmitted) takes an RLock, and every write

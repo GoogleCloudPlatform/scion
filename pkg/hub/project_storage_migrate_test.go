@@ -62,7 +62,7 @@ func newStorageMigrateFixture(t *testing.T) storageMigrateFixture {
 
 func (f storageMigrateFixture) useNFS(t *testing.T) string {
 	t.Helper()
-	f.srv.config.WorkspaceStorageConfig = nfsConfig(f.mountRoot)
+	f.srv.config.ProjectStorageConfig = projectStorageFromWorkspace(nfsConfig(f.mountRoot))
 	share := filepath.Join(f.mountRoot, "share1")
 	require.NoError(t, os.MkdirAll(share, 0o755))
 	return share
@@ -235,7 +235,7 @@ func TestProjectStorageMigrate_M3DeletesOnlyLegacyCopy(t *testing.T) {
 // fallback to local paths.
 func TestProjectStorageMigrate_VolumeWithoutNameFailsClosed(t *testing.T) {
 	f := newStorageMigrateFixture(t)
-	f.srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{Backend: "cloudrun-volume", CloudRunVolume: &config.V1CloudRunVolumeConfig{}}
+	f.srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{Backend: "cloudrun-volume", CloudRunVolume: &config.V1CloudRunVolumeConfig{}}
 	_, err := runStorageMigrate(t, f.srv, true)
 	require.Error(t, err)
 }
