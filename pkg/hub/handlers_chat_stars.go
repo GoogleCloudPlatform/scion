@@ -723,8 +723,19 @@ type starStateDecision struct {
 //
 // A never-used DM (no conversation yet) has no starred messages. A real
 // lookup failure (a 500) fails the request either way.
+//
+// A stored DM key that is not canonical (a legacy star under swapped slots,
+// or one that does not canonicalise) is left out, logged, like a drifted
+// conversation: the star routes refuse such a key (400), but it comes from
+// storage here, not from the client, so it must not fail the batch.
 func (s *Server) decideStarState(r *http.Request, call starCall, key string, mixed bool) (starStateDecision, *chatReadError) {
 	type decision = starStateDecision
+	if validDMKey(key) {
+		if canonical, err := canonicalStarDMKey(key); err != nil || canonical != key {
+			slog.Warn("chat stars: state leaves out a stored DM key that is not canonical", "conversation_key", key)
+			return decision{}, nil
+		}
+	}
 	sc, refusal, rerr := s.resolveStarScope(r, call, permInboxRead, key)
 	switch {
 	case refusal != "":
