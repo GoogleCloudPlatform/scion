@@ -375,7 +375,8 @@ test.describe('starred messages: keyboard', () => {
     }
     await page.keyboard.press('Enter');
     await expect(target.locator('.star-indicator')).toBeVisible();
-    expect(hub.conversations[0].starred.has(58)).toBe(true);
+    // The indicator is optimistic: wait for the mocked hub to record the request.
+    await expect.poll(() => hub.conversations[0].starred.has(58)).toBe(true);
     // Focus came back to the message's button.
     await expect.poll(async () => (await deepFocus(page))?.cls ?? '').toContain('msg-actions');
 
@@ -387,7 +388,8 @@ test.describe('starred messages: keyboard', () => {
     }
     await page.keyboard.press('Enter');
     await expect(target.locator('.star-indicator')).toHaveCount(0);
-    expect(hub.conversations[0].starred.has(58)).toBe(false);
+    // The indicator is optimistic: wait for the mocked hub to record the request.
+    await expect.poll(() => hub.conversations[0].starred.has(58)).toBe(false);
   });
 
   test('Up/Down move between messages from the action button; Tab leaves the list', async ({
