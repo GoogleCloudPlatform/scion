@@ -66,7 +66,9 @@
   backfill checks the thread generation (`fetchId`), every ordinary backfill returns in the
   starred-only center, and the exit target is bound to its conversation key.
 - **The starred-only refresh refetches around the reader** (or its nearest loaded neighbours) when the
-  reader is further up than the largest page; otherwise the newest window.
+  reader is further up than the largest page, or the loaded list is already an around window (a second
+  refresh, such as an unstar followed by the hub's own stars event); otherwise the newest window, which
+  clears the around state.
 - **Experiment off:** a `?messages=starred` conversation URL shows a notice that all messages are
   shown, then drops the filter from the URL in place.
 
