@@ -17,6 +17,7 @@ package config
 import (
 	"path/filepath"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/pathcanon"
 )
 
@@ -27,10 +28,13 @@ import (
 // junctions and symlinks are resolved before the comparison. Every
 // ambiguity resolves to "below" (its own files are then not loaded as a
 // project layer): an unknown global directory, and any Within error. The
-// boolean Within returns with an error is never used.
+// boolean Within returns with an error is never used. Each of these cases
+// is logged at debug level, so a project layer skipped for that reason can
+// be diagnosed; the outcome is the same with or without debug output.
 func isUnderHubProjectsDir(p string) bool {
 	globalDir, err := GetGlobalDir()
 	if err != nil {
+		util.Debugf("hub workspace check: global directory unknown (%v); treating %s as a hub workspace root, its project layer is skipped", err, p)
 		return true
 	}
 	return projectsDirContains(filepath.Join(globalDir, "projects"), p)
@@ -41,6 +45,7 @@ func isUnderHubProjectsDir(p string) bool {
 func projectsDirContains(projects, p string) bool {
 	under, err := pathcanon.Within(projects, p)
 	if err != nil {
+		util.Debugf("hub workspace check: cannot resolve %s against %s (%v); treating it as a hub workspace root, its project layer is skipped", p, projects, err)
 		return true
 	}
 	if !under {
@@ -49,6 +54,7 @@ func projectsDirContains(projects, p string) bool {
 	// Within is true for projects itself, which is not below it.
 	same, err := pathcanon.Within(p, projects)
 	if err != nil {
+		util.Debugf("hub workspace check: cannot resolve %s against %s (%v); treating it as a hub workspace root, its project layer is skipped", projects, p, err)
 		return true
 	}
 	return !same

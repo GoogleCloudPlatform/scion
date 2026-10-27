@@ -754,25 +754,35 @@ func (t *Tree) Create(rel string, excl bool, p Protection) (*os.File, error) {
 			access |= windows.WRITE_DAC
 		}
 	}
-	h, info, err := t.openLeaf(rel, access, disposition, windows.FILE_NON_DIRECTORY_FILE, sd)
+	var f *os.File
+	err := retryReplaced(t.display(rel), func() error {
+		h, info, err := t.openLeaf(rel, access, disposition, windows.FILE_NON_DIRECTORY_FILE, sd)
+		if err != nil {
+			return err
+		}
+		f = os.NewFile(uintptr(h), t.display(rel))
+		if info == fileOpened {
+			afterLinkCheckOpen(f.Name())
+			// An existing file opened for writing: one name only (the
+			// one-name rule, checked by verifyOrRepair for Private), and
+			// for Private the verify-or-repair rule. A file whose name
+			// went after the open (errNoNames) is opened again.
+			var err error
+			if p == Private {
+				err = verifyOrRepair(f, true)
+			} else {
+				err = checkSingleLink(f)
+			}
+			if err != nil {
+				_ = f.Close()
+				f = nil
+				return err
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	f := os.NewFile(uintptr(h), t.display(rel))
-	if info == fileOpened {
-		// An existing file opened for writing: one name only (the one-name
-		// rule, checked by verifyOrRepair for Private), and for Private the
-		// verify-or-repair rule.
-		var err error
-		if p == Private {
-			err = verifyOrRepair(f, true)
-		} else {
-			err = checkSingleLink(f)
-		}
-		if err != nil {
-			_ = f.Close()
-			return nil, err
-		}
 	}
 	return f, nil
 }
@@ -804,13 +814,27 @@ func (t *Tree) OpenPrivate(rel string, flag int) (*os.File, error) {
 		// accept it).
 		return nil, &fs.PathError{Op: "open private", Path: t.display(rel), Err: syscall.EINVAL}
 	}
-	h, _, err := t.openLeaf(rel, access, windows.FILE_OPEN, windows.FILE_NON_DIRECTORY_FILE, nil)
+	var f *os.File
+	err := retryReplaced(t.display(rel), func() error {
+		h, _, err := t.openLeaf(rel, access, windows.FILE_OPEN, windows.FILE_NON_DIRECTORY_FILE, nil)
+		if err != nil {
+			return err
+		}
+		f = os.NewFile(uintptr(h), t.display(rel))
+		if write {
+			// Only a write open checks the link count (verifyOrRepair).
+			afterLinkCheckOpen(f.Name())
+		}
+		// A file opened for writing whose name went after the open
+		// (errNoNames) is opened again.
+		if err := verifyOrRepair(f, write); err != nil {
+			_ = f.Close()
+			f = nil
+			return err
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, err
-	}
-	f := os.NewFile(uintptr(h), t.display(rel))
-	if err := verifyOrRepair(f, write); err != nil {
-		_ = f.Close()
 		return nil, err
 	}
 	if write && flag&os.O_TRUNC != 0 {
@@ -1276,13 +1300,22 @@ func OwnedByCurrentUser(f *os.File) (bool, error) {
 // (the one-name rule). NumberOfLinks comes from
 // GetFileInformationByHandle on the handle itself. If it cannot be read the
 // file is refused (fail closed), as the attribute fallback does for
-// anything but ERROR_INVALID_PARAMETER.
+// anything but ERROR_INVALID_PARAMETER. A count of zero (the name was
+// removed after the open) is refused with errNoNames, so the caller can
+// open the path again.
 func checkSingleLink(f *os.File) error {
 	var bhfi windows.ByHandleFileInformation
 	err := windows.GetFileInformationByHandle(windows.Handle(f.Fd()), &bhfi)
 	runtime.KeepAlive(f)
 	if err != nil {
 		return fmt.Errorf("refusing %s: cannot read its link count: %v: %w", f.Name(), err, ErrHardLinked)
+	}
+	if bhfi.NumberOfLinks == 0 {
+		// The name went after the open: another writer renamed a file
+		// over it or deleted it with POSIX semantics (the handle shares
+		// delete, see shareAll). Not a hard link; the caller opens the
+		// path again (retryReplaced).
+		return fmt.Errorf("refusing %s: %w", f.Name(), errNoNames)
 	}
 	if bhfi.NumberOfLinks != 1 {
 		return fmt.Errorf("refusing %s: it has %d names: %w", f.Name(), bhfi.NumberOfLinks, ErrHardLinked)

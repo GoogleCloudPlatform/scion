@@ -1317,6 +1317,41 @@ type V1MaintenanceConfig struct {
 	UpdatePolicy       string `json:"update_policy,omitempty" yaml:"update_policy,omitempty" koanf:"update_policy"`
 	CheckIntervalHours int    `json:"check_interval_hours,omitempty" yaml:"check_interval_hours,omitempty" koanf:"check_interval_hours"`
 	GitHubRepo         string `json:"github_repo,omitempty" yaml:"github_repo,omitempty" koanf:"github_repo"`
+	// InstallRoot is the hub's versioned install root (releases/, current,
+	// previous) used by release self-update; see MaintenanceInstallRoot.
+	InstallRoot string `json:"install_root,omitempty" yaml:"install_root,omitempty" koanf:"install_root"`
+}
+
+// EnvMaintenanceInstallRoot overrides server.maintenance.install_root.
+const EnvMaintenanceInstallRoot = "SCION_MAINTENANCE_INSTALL_ROOT"
+
+// DefaultMaintenanceInstallRoot is the install root when neither the env
+// override nor server.maintenance.install_root is set.
+const DefaultMaintenanceInstallRoot = "/opt/scion"
+
+// MaintenanceInstallRoot resolves the install root: $SCION_MAINTENANCE_INSTALL_ROOT,
+// else m.InstallRoot, else DefaultMaintenanceInstallRoot. m may be nil. A
+// relative value is ignored with a warning (it would resolve against the
+// hub's working directory) and the next source is used.
+func MaintenanceInstallRoot(m *V1MaintenanceConfig) string {
+	candidates := []struct{ source, value string }{
+		{EnvMaintenanceInstallRoot, os.Getenv(EnvMaintenanceInstallRoot)},
+	}
+	if m != nil {
+		candidates = append(candidates, struct{ source, value string }{"server.maintenance.install_root", m.InstallRoot})
+	}
+	for _, c := range candidates {
+		v := strings.TrimSpace(c.value)
+		if v == "" {
+			continue
+		}
+		if !filepath.IsAbs(v) {
+			slog.Warn("Ignoring relative maintenance install root; it must be an absolute path", "source", c.source, "value", v)
+			continue
+		}
+		return filepath.Clean(v)
+	}
+	return DefaultMaintenanceInstallRoot
 }
 
 // V1ServerConfig holds server-side configuration in the versioned settings format.

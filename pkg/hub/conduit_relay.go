@@ -140,7 +140,7 @@ func (s *Server) conduitServingIn(snap ExperimentsSnapshot) bool {
 // verifies with the same ring. Without it each node holds its own
 // in-memory ring, which hosted HA refuses (C8).
 func (s *Server) ConduitGrantRingShared() bool {
-	return len(s.encryptionKey) > 0
+	return s.cipher.Enabled()
 }
 
 // SetConduitRelayStartFailure records that the in-process relay failed to

@@ -499,7 +499,9 @@ func TestEnsureVSCodeSettings(t *testing.T) {
 		m["terminal.integrated.defaultProfile.linux"] = "Container shell"
 		m["terminal.integrated.sendKeybindingsToShell"] = false
 		m["terminal.integrated.profiles.linux"].(map[string]any)["Scion agent"].(map[string]any)["args"] = []any{"-c", "echo edited"}
-		require.NoError(t, writeVSCodeSettings(p.settings(), m))
+		data, err := encodeVSCodeSettings(m)
+		require.NoError(t, err)
+		require.NoError(t, writeVSCodeSettingsData(p.settings(), data))
 
 		require.NoError(t, ensureVSCodeSettings(p))
 		got, err := decodeVSCodeSettingsJSON([]byte(readTestFile(t, p.settings())))
