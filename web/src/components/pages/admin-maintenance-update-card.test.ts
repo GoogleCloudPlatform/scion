@@ -207,6 +207,22 @@ function option(e: Card, value: string): Option {
   return o!;
 }
 
+/**
+ * The label sl-select shows for a picked option. Mirrors Shoelace 2.x
+ * SlOption.getTextLabel(): text nodes plus the text of child elements
+ * without a slot attribute (Shoelace is not registered under vitest).
+ */
+function selectedLabel(o: Option): string {
+  let label = '';
+  for (const node of Array.from(o.childNodes)) {
+    if (node.nodeType === Node.ELEMENT_NODE && !(node as Element).hasAttribute('slot')) {
+      label += node.textContent ?? '';
+    }
+    if (node.nodeType === Node.TEXT_NODE) label += node.textContent ?? '';
+  }
+  return label.trim();
+}
+
 function badges(o: Option): string[] {
   return Array.from(o.querySelectorAll('sl-badge')).map((b) => b.textContent?.trim() ?? '');
 }
@@ -313,6 +329,39 @@ describe('Release picker', () => {
     const date = formatInstantWithZone('2026-10-23T04:00:00Z', 'date');
     expect(option(el, 'nightly-20261023').querySelector('.release-date')?.textContent).toBe(date);
     expect(select(el, 'release-select').value).toBe('latest');
+  });
+
+  it('keeps the date and badges out of the label shown for a picked release', async () => {
+    el = await mount();
+    const o = option(el, 'nightly-20261022');
+    expect(o.querySelector('.release-date')?.getAttribute('slot')).toBe('suffix');
+    expect(selectedLabel(o)).toBe('nightly-20261022');
+    expect(selectedLabel(option(el, 'nightly-20261020'))).toBe('nightly-20261020');
+    expect(selectedLabel(option(el, 'latest'))).toBe('Latest (nightly-20261023)');
+  });
+
+  it('renders no date for a release without publishedAt', async () => {
+    el = await mount([
+      catalog({
+        channels: {
+          nightly: {
+            latest: 'nightly-20261024',
+            releases: [
+              { tag: 'nightly-20261024', installable: true, class: 'upgrade' },
+              {
+                tag: 'nightly-20261023',
+                publishedAt: 'not a date',
+                installable: true,
+                class: 'upgrade',
+              },
+            ],
+          },
+        },
+      }),
+    ]);
+    expect(option(el, 'nightly-20261024').querySelector('.release-date')).toBeNull();
+    expect(option(el, 'nightly-20261023').querySelector('.release-date')).toBeNull();
+    expect(option(el, 'nightly-20261024').textContent).not.toContain('Invalid');
   });
 
   it('shows the badges for each entry', async () => {
@@ -547,6 +596,8 @@ describe('Refresh and staleness', () => {
       '/api/v1/admin/maintenance/releases?refresh=1',
     ]);
     expect(option(el, 'latest').textContent?.trim()).toBe('Latest (nightly-20261024)');
+    // nightly-20261024 has no publishedAt.
+    expect(option(el, 'nightly-20261024').querySelector('.release-date')).toBeNull();
   });
 
   it('keeps the previous list and shows the error when a refresh fails', async () => {
@@ -563,6 +614,21 @@ describe('Refresh and staleness', () => {
     el = await mount(['down']);
     expect(root(el).querySelector('sl-alert.releases-error')).not.toBeNull();
     expect(root(el).querySelector('sl-select.release-select')).toBeNull();
+  });
+
+  it('retries a failed first load from the error state', async () => {
+    el = await mount(['down', catalog()]);
+    const retry = root(el).querySelector<HTMLElement>('sl-button.retry-releases');
+    expect(retry).not.toBeNull();
+    retry!.click();
+    await settle(el);
+    expect(releaseRequests).toEqual([
+      '/api/v1/admin/maintenance/releases',
+      '/api/v1/admin/maintenance/releases',
+    ]);
+    expect(root(el).querySelector('sl-alert.releases-error')).toBeNull();
+    expect(root(el).querySelector('sl-button.retry-releases')).toBeNull();
+    expect(option(el, 'latest').textContent?.trim()).toBe('Latest (nightly-20261023)');
   });
 
   it('rejects a malformed body', async () => {

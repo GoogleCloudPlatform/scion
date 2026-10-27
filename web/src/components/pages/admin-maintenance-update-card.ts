@@ -30,7 +30,7 @@ import type { TemplateResult, PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
-import { safeHttpsUrl } from '../../utils/http-url.js';
+import { renderReleaseNotesLink } from '../../utils/release-notes-link.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
@@ -209,21 +209,6 @@ export function releaseBadges(r: CatalogRelease, floor?: string): ReleaseBadge[]
     });
   }
   return badges;
-}
-
-/**
- * A release-notes link for a URL that comes from outside the hub (the
- * release manifest or the GitHub catalog): a link only for an https URL,
- * otherwise the value as plain text (ptone/scion#6134).
- */
-export function renderReleaseNotesLink(url: string): TemplateResult {
-  const href = safeHttpsUrl(url);
-  return href
-    ? html`<a href="${href}" target="_blank" rel="noopener noreferrer" class="release-notes-link">
-        View Release Notes
-        <sl-icon name="box-arrow-up-right" style="font-size: 0.75rem;"></sl-icon>
-      </a>`
-    : html`<span class="release-notes-text">${url}</span>`;
 }
 
 /** The alert shown when the installer cannot update this hub. */
@@ -463,7 +448,11 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
 
     .release-date {
       color: var(--scion-text-muted, #64748b);
-      margin-left: 0.5rem;
+      margin: 0 0.5rem;
+    }
+
+    .retry-releases {
+      margin-top: 0.5rem;
     }
   `;
 
@@ -744,7 +733,16 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
       return html`
         <div class="release-panel">
           ${this.releasesError
-            ? this.renderReleasesError()
+            ? html`${this.renderReleasesError()}
+                <sl-button
+                  size="small"
+                  class="retry-releases"
+                  ?loading=${this.releasesLoading}
+                  @click=${() => this.loadReleases(false)}
+                >
+                  <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                  Retry
+                </sl-button>`
             : html`<div class="card-meta releases-loading">
                 <sl-spinner></sl-spinner><span>Loading releases...</span>
               </div>`}
@@ -862,7 +860,7 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
           data-tag=${r.tag}
           ?disabled=${!!reason}
           title=${reason ?? ''}
-          >${r.tag}${date ? html`<span class="release-date">${date}</span>` : nothing}
+          >${r.tag}${date ? html`<span slot="suffix" class="release-date">${date}</span>` : nothing}
           ${releaseBadges(r, this.floor).map((b) =>
             b.tooltip
               ? html`<sl-tooltip slot="suffix" content=${b.tooltip}
