@@ -621,6 +621,8 @@ func TestSessionAuthMiddleware_ReturnPathKeepsQuery(t *testing.T) {
 		"http://evil.example/projects/p1?tab=agents": "/projects/p1?tab=agents",
 		"/%2F%2Fevil.example/x?tab=a":                "/%2F%2Fevil.example/x?tab=a",
 		"/projects/%2F%2Fevil.example?tab=a":         "/projects/%2F%2Fevil.example?tab=a",
+		"/%5Cevil.example?tab=a":                     "/%5Cevil.example?tab=a",
+		"/ok%0d%0aSet-Cookie:%20a=1":                 "/ok%0d%0aSet-Cookie:%20a=1",
 		"//evil.example/x?tab=a":                     "/",
 		"/projects/p1?next=\\evil.example":           "/",
 		"/projects/p1?next=/\\evil.example":          "/",
