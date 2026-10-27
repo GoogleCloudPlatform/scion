@@ -62,7 +62,7 @@ import { chatNotifications } from '../../client/chat-notifications.js';
 import { chatUnread, type UnreadCountAnswer } from '../../client/chat-unread.js';
 import { badgeCountFromLists, type ChatDMListEntry } from '../../client/chat-unread-dms.js';
 // Type-only: the rail module itself is loaded lazily (loadSpaceRail).
-import type { DMSelectDetail } from '../shared/chat/chat-space-rail.js';
+import type { DMSelectDetail, RailFilterChangeDetail } from '../shared/chat/chat-space-rail.js';
 import {
   CHAT_STARTUP_REUSE_MS,
   chatDMsLoad,
@@ -3291,9 +3291,33 @@ export class ScionPageChat extends LitElement {
         projectSlug?: string;
         threadName: string;
         defaultAgent?: string;
+        messageFilter?: 'starred';
       }
     );
   }
+
+  /** The center filter a rail selection asks for (only while the experiment is on). */
+  private railSelectionFilter(requested: 'starred' | undefined): ChatMessageFilter {
+    return requested === 'starred' && starredMessagesEnabled() ? 'starred' : '';
+  }
+
+  /**
+   * The user picked a rail filter. With a conversation open, Starred shows
+   * it as the starred-only center at once (its empty state when it has no
+   * stars), and All or Unread return a starred-only center to full
+   * context; each is a new history entry, as other filter changes are.
+   */
+  private handleRailFilterChange = (e: CustomEvent<RailFilterChangeDetail>): void => {
+    const conv = this.v2Conversation;
+    if (!conv) return;
+    const path = stripBasePath(window.location.pathname);
+    if (!isChatConversationPath(path)) return;
+    const filter = this.railSelectionFilter(e.detail?.filter === 'starred' ? 'starred' : undefined);
+    if (filter === this.centerMessageFilter) return;
+    ++this._userNavSeq;
+    this.pushChatPath(`${path}${searchWithMessageFilter(window.location.search, filter)}`);
+    this.centerMessageFilter = filter;
+  };
 
   /**
    * In-page thread navigation shared by the space rail's `thread-select`
@@ -3312,6 +3336,7 @@ export class ScionPageChat extends LitElement {
     projectSlug?: string;
     threadName: string;
     defaultAgent?: string;
+    messageFilter?: 'starred';
   }): void {
     ++this._userNavSeq;
     // Determine the slug for the readable URL
@@ -3347,7 +3372,11 @@ export class ScionPageChat extends LitElement {
     } else {
       threadPath = `/chat/space/${encodeURIComponent(detail.projectId)}/thread/${encodeURIComponent(detail.conversationKey)}`;
     }
-    this.pushChatPath(threadPath);
+    // A Starred rail row opens the starred-only center (the filter is part of
+    // the URL); any other selection opens full context.
+    const filter = this.railSelectionFilter(detail.messageFilter);
+    this.pushChatPath(threadPath + searchWithMessageFilter('', filter));
+    this.centerMessageFilter = filter;
 
     dispatchPageTitle(this, `#${detail.threadName}`, 'Chat');
     void this.loadV2Members(detail.projectId);
@@ -4319,7 +4348,37 @@ export class ScionPageChat extends LitElement {
   private handleRailDMSelect(e: CustomEvent<DMSelectDetail>): void {
     const detail = e.detail;
     if (!detail?.peerId) return;
+    const filter = this.railSelectionFilter(detail.messageFilter);
+    if (filter && detail.conversationKey) {
+      this.openStarredDM(detail, filter);
+      return;
+    }
     this.openDM(detail.peerId, detail.peerKind, detail.displayName);
+  }
+
+  /**
+   * Open a DM chosen in the Starred rail as its starred-only center. The
+   * row carries the DM's key, so nothing needs resolving.
+   */
+  private openStarredDM(detail: DMSelectDetail, filter: ChatMessageFilter): void {
+    ++this._userNavSeq;
+    this.v2Conversation = {
+      conversationKey: detail.conversationKey,
+      projectId: this.inheritedProjectId(),
+      projectSlug: '',
+      threadName: '',
+      defaultAgent: '',
+      isDM: true,
+      peerName: detail.displayName,
+      peerId: detail.peerId,
+      peerKind: detail.peerKind,
+    };
+    this.mobilePanel = 'center';
+    this.pushChatPath(
+      `/chat/dm/${encodeURIComponent(detail.conversationKey)}${searchWithMessageFilter('', filter)}`
+    );
+    this.centerMessageFilter = filter;
+    dispatchPageTitle(this, detail.displayName, 'Chat');
   }
 
   /** Handle member click from the members sidebar to open a DM. */
@@ -6503,9 +6562,11 @@ export class ScionPageChat extends LitElement {
             : ''}
           currentUserId=${this.pageData?.user?.id || ''}
           .dms=${this.v2DMList}
+          .centerFilter=${this.v2Conversation ? this.centerMessageFilter : ''}
           @thread-select=${this.handleThreadSelect}
           @dm-select=${this.handleRailDMSelect}
           @reset-view=${this.handleResetView}
+          @rail-filter-change=${this.handleRailFilterChange}
         ></scion-chat-space-rail>
       `;
     }
