@@ -1422,8 +1422,12 @@ export class ScionChatThread extends LitElement {
         flex-shrink: 0;
       }
 
-      .star-filter-show-all::part(base) {
-        min-height: 2.75rem;
+      /* A 44 px touch target on a phone or tablet; Shoelace centres the
+         label from this height. */
+      @media (max-width: 768px), (pointer: coarse) {
+        .star-filter-show-all {
+          --sl-input-height-small: 2.75rem;
+        }
       }
 
       .send-error {
