@@ -706,7 +706,7 @@ describe('Refresh and staleness', () => {
 // came from (update-status channel.source) and whether the hub is pinned.
 describe('Channel source and pin', () => {
   it.each([
-    ['selection', 'selection (set by the last successful update)'],
+    ['selection', "selection (chosen by an administrator's update)"],
     ['config', 'config (from the server settings)'],
     ['detected', 'detected (detected from the running version)'],
     ['other', 'other'],
@@ -744,7 +744,7 @@ describe('Channel source and pin', () => {
         pin: 'v0.3.0-preview.4',
       })
     );
-    expect(text(el, '.channel-source')).toBe('selection (set by the last successful update)');
+    expect(text(el, '.channel-source')).toBe("selection (chosen by an administrator's update)");
     expect(text(el, '.pin-state')).toBe(
       'pinned to v0.3.0-preview.4 (automatic updates do not move it)'
     );

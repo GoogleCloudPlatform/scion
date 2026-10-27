@@ -144,14 +144,14 @@ export const LAST_UPDATE_LABELS: Record<string, string> = {
 const SELECTABLE_CLASSES = new Set(['same', 'upgrade', 'switch-newer']);
 
 const CHANNEL_SOURCE_DESCRIPTIONS: Record<string, string> = {
-  selection: 'set by the last successful update',
+  selection: "chosen by an administrator's update",
   config: 'from the server settings',
   detected: 'detected from the running version',
 };
 
 /**
  * Where the effective channel came from (update-status channel.source),
- * for example "selection (set by the last successful update)".
+ * for example "selection (chosen by an administrator's update)".
  */
 export function channelSourceLabel(source: string | undefined): string {
   if (!source) return 'unknown';
