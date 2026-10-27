@@ -392,7 +392,7 @@ The Hub measures how long each database transaction and connection checkout hold
 | `enabled` | bool | `true` | Install the diagnostics. `false` opens the database exactly as without them. |
 | `hold_warn_threshold` | duration | `"2s"` | Log a transaction or connection checkout held at least this long. `"0"` turns these lines off; metrics are still recorded. |
 | `lock_wait_warn_threshold` | duration | `"1s"` | Log a request that waited at least this long for a connection. `"0"` turns these lines off. |
-| `warn_interval` | duration | `"1m"` | At most one line per call site and kind per interval. Lines dropped by this limit are counted in the next line's `suppressed`. |
+| `warn_interval` | duration | `"1m"` | At most one line per call site and kind per interval. Must be positive; `"0"` or a negative value fails startup. Lines dropped by this limit are counted in the next line's `suppressed`. |
 
 The lines are WARN records from the `hub.db` subsystem:
 

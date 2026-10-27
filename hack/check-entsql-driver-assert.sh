@@ -10,7 +10,7 @@
 # entc.SQLDB, which unwrap. The only allowed assertion is the one inside
 # entc.SQLDriver itself (pkg/ent/entc/client.go, func SQLDriver).
 #
-# Scans non-test AND _test.go files under pkg and cmd. Comment lines are
+# Scans non-test AND _test.go files under pkg, cmd and internal. Comment lines are
 # ignored.
 #
 # Severity: FORMATTING-GRADE exit-code handling.
@@ -33,7 +33,7 @@ require_tool grep check-entsql-driver-assert
 require_tool awk check-entsql-driver-assert
 
 name="check-entsql-driver-assert"
-roots=(pkg cmd)
+roots=(pkg cmd internal)
 pattern='.(*entsql.Driver)'
 
 # Allowed: file path + enclosing function (never line numbers).
