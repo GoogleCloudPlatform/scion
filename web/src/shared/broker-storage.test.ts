@@ -73,15 +73,49 @@ describe('mismatchLines', () => {
 
   it('redacts the rest of a mismatch line after an unpaired quote', () => {
     const out = redactMismatchLine('nfs server: hub "filer", broker "user:pw@filer');
-    expect(out).toBe('nfs server: hub "filer", broker "***');
+    expect(out).toBe('nfs server: hub "***');
     expect(out).not.toContain('user');
     expect(out).not.toContain(':pw');
   });
 
   it('redacts the rest of a mismatch line after an unpaired quote with an escaped quote', () => {
     const out = redactMismatchLine('nfs server: hub "filer", broker "a\\"b@c');
-    expect(out).toBe('nfs server: hub "filer", broker "***');
+    expect(out).toBe('nfs server: hub "***');
     expect(out).not.toContain('b@c');
+  });
+
+  it('redacts the rest of a mismatch line when the unpaired quote is not the last one', () => {
+    const out = redactMismatchLine('x: hub "u:p@a, broker "v:q@b"');
+    expect(out).toBe('x: hub "***');
+    expect(out).not.toContain('u:p');
+    expect(out).not.toContain('v:q');
+  });
+
+  it('redacts the rest of a mismatch line after an unpaired quote followed by a pair', () => {
+    const out = redactMismatchLine('x: hub "u:p@a, broker "filer", other "v:q@b"');
+    expect(out).toBe('x: hub "***');
+    expect(out).not.toContain('u:p');
+    expect(out).not.toContain('v:q');
+  });
+
+  it('redacts the rest of a mismatch line when an escaped quote leaves a value unclosed', () => {
+    const out = redactMismatchLine('x: hub "u:p@a\\", broker "v:q@b"');
+    expect(out).toBe('x: hub "***');
+    expect(out).not.toContain('u:p');
+    expect(out).not.toContain('v:q');
+  });
+
+  it('pairs a backslash before a quote outside a value as an opening quote', () => {
+    const out = redactMismatchLine('x: a \\"u:p@a" hub "v:q@b"');
+    expect(out).toBe('x: a \\"***@a" hub "***@b"');
+    expect(out).not.toContain('u:p');
+    expect(out).not.toContain('v:q');
+  });
+
+  it('redacts the rest of a mismatch line that ends in a backslash inside a value', () => {
+    const out = redactMismatchLine('x: hub "filer", broker "u:p@b\\');
+    expect(out).toBe('x: hub "***');
+    expect(out).not.toContain('u:p');
   });
 
   it('is empty for null, undefined or no lines', () => {

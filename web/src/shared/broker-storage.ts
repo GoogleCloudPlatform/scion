@@ -49,21 +49,45 @@ export function redactUserinfo(value: string): string {
 
 /**
  * A double-quoted value whose embedded quotes and backslashes are escaped
- * with a backslash; the match runs to the first unescaped quote. A quote
- * with no closing quote matches the second alternative, which runs to the
- * end of the line.
+ * with a backslash; the match runs to the first unescaped quote.
  */
-const QUOTED = /"((?:[^"\\]|\\.)*)"|"[\s\S]*$/g;
+const QUOTED = /"((?:[^"\\]|\\.)*)"/g;
+
+/** A line terminator, which "." in QUOTED does not match. */
+const LINE_END = /[\n\r\u2028\u2029]/;
 
 /**
- * A layout comparison line with every double-quoted value redacted. The
- * rest of the line after a quote with no closing quote is replaced by
- * "***", so a value that is not closed is never shown.
+ * Whether every quoted value in line is closed, pairing quotes as QUOTED
+ * does: outside a value every quote opens one; inside a value a backslash
+ * escapes the next character and an unescaped quote closes it. A backslash
+ * at the end of the line or before a line terminator leaves its value
+ * unclosed.
+ */
+function quotesBalanced(line: string): boolean {
+  let inside = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (!inside) {
+      if (c === '"') inside = true;
+    } else if (c === '\\') {
+      i++;
+      if (i >= line.length || LINE_END.test(line[i])) return false;
+    } else if (c === '"') {
+      inside = false;
+    }
+  }
+  return !inside;
+}
+
+/**
+ * A layout comparison line with every double-quoted value redacted. When a
+ * quoted value is not closed, the pairing of the other quotes is not
+ * reliable, so everything after the first quote of the line is replaced
+ * by "***".
  */
 export function redactMismatchLine(line: string): string {
-  return line.replace(QUOTED, (_, v: string | undefined) =>
-    v === undefined ? '"***' : `"${redactUserinfo(v)}"`
-  );
+  if (!quotesBalanced(line)) return `${line.slice(0, line.indexOf('"') + 1)}***`;
+  return line.replace(QUOTED, (_, v: string) => `"${redactUserinfo(v)}"`);
 }
 
 /** The hub's layout comparison lines, redacted for display; [] for none. */
