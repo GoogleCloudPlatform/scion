@@ -62,7 +62,8 @@ func runUserSecretAttributionRepair(ctx context.Context, s store.Store) {
 		return
 	}
 	slog.Info("User secret attribution repair: pass completed",
-		"examined", res.Examined, "repaired", len(res.Repaired), "skipped", len(res.Skipped), "vanished", res.Vanished)
+		"examined", res.Examined, "repaired", len(res.Repaired), "skipped", len(res.Skipped), "vanished", res.Vanished,
+		"author_changed", res.AuthorChanged)
 	if n := res.RowChanged(); n > 0 {
 		slog.Warn("User secret attribution repair: rows changed during the repair; marker not written, will retry next boot",
 			"row_changed", n)
