@@ -318,6 +318,10 @@ const (
 	placementFlatUnresolvedCause = "runtime placement is unresolved; reload the broker configuration"
 	placementFlatInvalidCause    = "the instance's runtime_target placement is not valid; fix it in the instance's settings and restart the agent runtime"
 	placementFlatRuntimeCause    = "the agent's runtime is not this instance's runtime target; restart the agent runtime, or re-create the agent on this instance"
+	// placementFlatRestartNoProjectCause refuses a restart on a flat
+	// instance whose project path is empty after every recovery (the
+	// request's path or slug, the matched container's recorded path).
+	placementFlatRestartNoProjectCause = "cannot check the agent's stored config before restart: no project path; restart the agent from its project"
 )
 
 // resolveFlatPlacement resolves the placement of a start on this flat
@@ -603,7 +607,15 @@ func (s *Server) checkStartLegacyPlacement(agentName, projectPath string, inline
 // the agent's persisted kubernetes block against the placement in effect. A
 // config that cannot be read fails closed.
 func (s *Server) checkRestartLegacyPlacement(agentName, projectPath string, sharedWorkspace bool, rp *api.ResolvedPlacement) error {
-	if rp != nil && rp.OperatorOwned && projectPath != "" {
+	if rp != nil && rp.OperatorOwned {
+		if projectPath == "" {
+			// Without a project path the stored config cannot be read
+			// before the stop, and operator-owned placement must be
+			// checked before it (the request names no project, and no
+			// container of the project recorded one).
+			s.agentLifecycleLog.Warn("Kubernetes placement: refusing a restart whose stored config cannot be checked before the stop", "agent", agentName)
+			return placementRefusal(placementFlatRestartNoProjectCause)
+		}
 		return s.checkRestartOperatorPlacement(agentName, projectPath, sharedWorkspace, rp)
 	}
 	if !rp.InEffect() || projectPath == "" {

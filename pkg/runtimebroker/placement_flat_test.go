@@ -550,3 +550,48 @@ func TestFlatPlacementSiblingInstancesUseOwnTarget(t *testing.T) {
 		t.Error("instance agents placed a start on instance batch's runtime")
 	}
 }
+
+// On a flat Kubernetes instance, a restart whose project path is empty
+// after every recovery (no path or slug in the request, no container of
+// the project with a recorded path) is refused before the stop, naming the
+// missing project path; a start is not affected by this rule.
+func TestFlatRestartWithoutProjectPathRefusedBeforeStop(t *testing.T) {
+	f := newFlatPlacementInstanceServer(t, flatPlacementTarget())
+	f.seedOwnedAgent(t)
+	// The agent's container is in the request's project but recorded no
+	// project path: it matches, so without this rule its stop would run
+	// before any stored-config check.
+	f.mgr.mu.Lock()
+	for i := range f.mgr.agents {
+		if f.mgr.agents[i].Name == "test-agent-1" {
+			f.mgr.agents[i].ProjectID = flatTestProjectID
+			f.mgr.agents[i].ProjectPath = ""
+		}
+	}
+	f.mgr.mu.Unlock()
+	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/restart"+flatStartQuery, flatRestartBody(f))
+	expectPlacementRefusal(t, w, placementFlatRestartNoProjectCause)
+	f.mgr.mu.Lock()
+	stops, starts := f.mgr.stopCalls, f.mgr.startCalls
+	f.mgr.mu.Unlock()
+	if stops != 0 || starts != 0 {
+		t.Errorf("stop=%d start=%d, want 0 and 0", stops, starts)
+	}
+
+	// The check itself: operator-owned placement with no project path
+	// refuses; legacy placement keeps today's skip.
+	rp := &api.ResolvedPlacement{OperatorOwned: true}
+	err := f.srv.checkRestartLegacyPlacement("test-agent-1", "", false, rp)
+	var sce *startContextError
+	if !errors.As(err, &sce) || sce.Status != http.StatusBadRequest || sce.Message != placementFlatRestartNoProjectCause {
+		t.Fatalf("operator-owned, no project path: got %v", err)
+	}
+	if err := f.srv.checkRestartLegacyPlacement("test-agent-1", "", false, &api.ResolvedPlacement{RuntimeClassName: "gvisor"}); err != nil {
+		t.Fatalf("legacy placement without a project path: got %v, want the existing skip", err)
+	}
+	// A start with no project path keeps checking the request's own block
+	// only, as before.
+	if err := f.srv.checkStartLegacyPlacement("test-agent-1", "", nil, false, rp); err != nil {
+		t.Fatalf("start without a project path: got %v", err)
+	}
+}
