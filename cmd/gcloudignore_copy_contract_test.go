@@ -116,13 +116,12 @@ func cloudBuildDockerBuilds(name, content string) ([]dockerBuild, error) {
 		if dir == "" {
 			dir = "."
 		}
-		dockerfile := "Dockerfile"
-		for j, a := range st.Args {
-			if (a == "-f" || a == "--file") && j+1 < len(st.Args) {
-				dockerfile = st.Args[j+1]
-			} else if v, ok := strings.CutPrefix(a, "--file="); ok {
-				dockerfile = v
-			}
+		dockerfile, err := dockerfileFlag(st.Args)
+		if err != nil {
+			return nil, fmt.Errorf("%s step %s: %v", name, id, err)
+		}
+		if dockerfile == "" {
+			dockerfile = "Dockerfile"
 		}
 		ctx := st.Args[len(st.Args)-1]
 		if strings.HasPrefix(ctx, "-") {
@@ -136,6 +135,52 @@ func cloudBuildDockerBuilds(name, content string) ([]dockerBuild, error) {
 		})
 	}
 	return out, nil
+}
+
+// dockerfileFlag returns the Dockerfile a docker build step names with -f or
+// --file, in every form the docker CLI accepts: "-f X", "--file X",
+// "--file=X", "-f=X" and "-fX". It returns "" when the step names none (the
+// build then uses the Dockerfile in its directory). An empty or missing value,
+// an unrecognised -f or --file token, more than one Dockerfile flag, or a flag
+// whose value would be the step's build context (its last arg) is an error:
+// a flag read wrongly would make the contract check the wrong Dockerfile.
+func dockerfileFlag(args []string) (string, error) {
+	file, found := "", false
+	set := func(v, flag string) error {
+		if found {
+			return fmt.Errorf("more than one Dockerfile flag (%s)", flag)
+		}
+		if v == "" {
+			return fmt.Errorf("%s with an empty value", flag)
+		}
+		file, found = v, true
+		return nil
+	}
+	last := len(args) - 1
+	for j := 0; j < len(args); j++ {
+		a := args[j]
+		var err error
+		switch {
+		case a == "-f" || a == "--file":
+			if j+1 >= last {
+				return "", fmt.Errorf("%s with no value before the build context", a)
+			}
+			j++
+			err = set(args[j], a)
+		case strings.HasPrefix(a, "--file="):
+			err = set(strings.TrimPrefix(a, "--file="), "--file=")
+		case strings.HasPrefix(a, "--file"):
+			return "", fmt.Errorf("unrecognised Dockerfile flag %q", a)
+		case strings.HasPrefix(a, "-f="):
+			err = set(strings.TrimPrefix(a, "-f="), "-f=")
+		case strings.HasPrefix(a, "-f") && !strings.HasPrefix(a, "--"):
+			err = set(strings.TrimPrefix(a, "-f"), "-f")
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+	return file, nil
 }
 
 // dockerCopySources returns the build-context sources of every COPY and ADD
@@ -357,5 +402,59 @@ func TestCloudBuildCopyContractDetectsViolations(t *testing.T) {
 	srcs := dockerCopySources(t, "FROM a\nCOPY --from=b /x /y\nCOPY --chown=1:1 a b /dst/\nCOPY [\"c d\", \"/e\"]\nADD https://h/f /g\n")
 	if fmt.Sprint(srcs) != fmt.Sprint([]string{"a", "b", "c d"}) {
 		t.Errorf("COPY sources: got %q", srcs)
+	}
+}
+
+// TestCloudBuildDockerfileFlagForms: every form of the docker -f flag names
+// the same Dockerfile, and a flag that does not resolve to exactly one
+// Dockerfile fails the config instead of falling back to <dir>/Dockerfile.
+func TestCloudBuildDockerfileFlagForms(t *testing.T) {
+	step := func(args ...string) string {
+		parts := append([]string{"build"}, args...)
+		parts = append(parts, ".")
+		quoted := make([]string, len(parts))
+		for i, a := range parts {
+			quoted[i] = "'" + a + "'"
+		}
+		return "steps:\n  - name: 'gcr.io/cloud-builders/docker'\n    id: 's'\n    dir: 'image-build'\n" +
+			"    args: [" + strings.Join(quoted, ", ") + "]\n"
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"-f X", []string{"-f", "sub/Dockerfile"}, "image-build/sub/Dockerfile"},
+		{"--file X", []string{"--file", "sub/Dockerfile"}, "image-build/sub/Dockerfile"},
+		{"--file=X", []string{"--file=sub/Dockerfile"}, "image-build/sub/Dockerfile"},
+		{"-f=X", []string{"-f=sub/Dockerfile"}, "image-build/sub/Dockerfile"},
+		{"-fX", []string{"-fsub/Dockerfile"}, "image-build/sub/Dockerfile"},
+		{"no flag", nil, "image-build/Dockerfile"},
+	} {
+		builds, err := cloudBuildDockerBuilds("cfg.yaml", step(tc.args...))
+		if err != nil {
+			t.Errorf("%s: %v", tc.name, err)
+			continue
+		}
+		if len(builds) != 1 || builds[0].dockerfile != tc.want || builds[0].context != "image-build" {
+			t.Errorf("%s: got %+v, want dockerfile %s with context image-build", tc.name, builds, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"-f= empty", []string{"-f="}, "-f= with an empty value"},
+		{"--file= empty", []string{"--file="}, "--file= with an empty value"},
+		{"-f empty arg", []string{"-f", ""}, "-f with an empty value"},
+		{"two flags", []string{"-f", "a/Dockerfile", "--file=b/Dockerfile"}, "more than one Dockerfile flag"},
+		{"unrecognised --file form", []string{"--filex=a"}, "unrecognised Dockerfile flag"},
+		{"-f takes the context", []string{"-f"}, "-f with no value before the build context"},
+	} {
+		_, err := cloudBuildDockerBuilds("cfg.yaml", step(tc.args...))
+		if err == nil || !strings.Contains(err.Error(), "cfg.yaml step s: ") || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want an error for cfg.yaml step s containing %q", tc.name, err, tc.want)
+		}
 	}
 }
