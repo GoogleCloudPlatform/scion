@@ -218,6 +218,48 @@ func TestVerifyPodClaims_ProvisioningFailedThenNewerEventWaits(t *testing.T) {
 	assert.Contains(t, out, "last_event_reason=Provisioning")
 }
 
+// A ProvisioningFailed event at the same time as another event of the
+// claim is not fatal, whatever the list order (the fake client lists
+// events by name): the claim counts as Pending, so the check waits, warns
+// and lets the start continue.
+func TestVerifyPodClaims_ProvisioningFailedTieWaits(t *testing.T) {
+	cases := []struct {
+		name       string
+		failedName string
+		otherName  string
+		otherWhy   string
+		wantReason string
+	}{
+		{"failed listed first", "a-failed", "b-other", "Provisioning", "last_event_reason=Provisioning"},
+		{"failed listed last", "b-failed", "a-other", "Provisioning", "last_event_reason=Provisioning"},
+		{"two failures", "a-failed", "b-other", claimEventProvisioningFailed, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			setRuntimeLogHandler(t, slog.NewTextHandler(&buf, nil))
+			shortenClaimCheckWait(t, 50*time.Millisecond, 10*time.Millisecond)
+			rt, clientset, _ := newTestK8sRuntime()
+			createClaim(t, clientset, "c1", "uid-1", corev1.ClaimPending)
+			at := time.Now().Truncate(time.Second)
+			createClaimEvent(t, clientset, tc.failedName, "c1", "uid-1", claimEventProvisioningFailed, "rpc error: DeadlineExceeded", at)
+			createClaimEvent(t, clientset, tc.otherName, "c1", "uid-1", tc.otherWhy, "External provisioner is provisioning volume", at)
+
+			start := time.Now()
+			require.NoError(t, rt.verifyPodClaims(context.Background(), "default", claimCheckPod("c1"), nil))
+			assert.GreaterOrEqual(t, time.Since(start), 50*time.Millisecond, "waits for the claim check wait")
+			out := buf.String()
+			assert.Contains(t, out, "level=WARN")
+			assert.Contains(t, out, "creating the pod anyway")
+			if tc.wantReason != "" {
+				assert.Contains(t, out, tc.wantReason)
+			} else {
+				assert.NotContains(t, out, "last_event_reason")
+			}
+		})
+	}
+}
+
 func TestVerifyPodClaims_StaleProvisioningFailedIgnored(t *testing.T) {
 	shortenClaimCheckWait(t, 30*time.Millisecond, 10*time.Millisecond)
 	rt, clientset, _ := newTestK8sRuntime()
@@ -248,11 +290,13 @@ func TestVerifyPodClaims_PendingWithoutEventWarnsAndContinues(t *testing.T) {
 }
 
 // The check has one wait budget for all of the pod's claims, not one per
-// claim: two Pending claims together wait about one budget.
+// claim: two Pending claims together wait about one budget. The budget is
+// wide so a loaded runner cannot push one shared budget past the bound,
+// which stays below two budgets.
 func TestVerifyPodClaims_OneWaitBudgetForAllClaims(t *testing.T) {
 	var buf bytes.Buffer
 	setRuntimeLogHandler(t, slog.NewTextHandler(&buf, nil))
-	const budget = 300 * time.Millisecond
+	const budget = time.Second
 	shortenClaimCheckWait(t, budget, 10*time.Millisecond)
 	rt, clientset, _ := newTestK8sRuntime()
 	createClaim(t, clientset, "c1", "uid-1", corev1.ClaimPending)
@@ -262,7 +306,7 @@ func TestVerifyPodClaims_OneWaitBudgetForAllClaims(t *testing.T) {
 	require.NoError(t, rt.verifyPodClaims(context.Background(), "default", claimCheckPod("c1", "c2"), nil))
 	elapsed := time.Since(start)
 	assert.GreaterOrEqual(t, elapsed, budget)
-	assert.Less(t, elapsed, 2*budget-50*time.Millisecond, "two claims share one wait budget")
+	assert.Less(t, elapsed, 2*budget-200*time.Millisecond, "two claims share one wait budget")
 	out := buf.String()
 	assert.Contains(t, out, "pvc=c1")
 	assert.Contains(t, out, "pvc=c2")

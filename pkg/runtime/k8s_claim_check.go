@@ -146,13 +146,17 @@ func (r *KubernetesRuntime) verifyClaim(ctx context.Context, namespace, name, so
 }
 
 // claimEvent returns the event about pvc the claim check acts on: the
-// newest event when it is ProvisioningFailed, else the newest
-// WaitForFirstConsumer event, else the newest event, else nil. A
-// ProvisioningFailed event with a newer event after it is not returned for
-// its reason: the provisioner is retrying. Events of an earlier claim with
-// the same name are ignored by UID. When events cannot be read it returns
-// nil, logging that once per runtime instance, so the check falls back to
-// the claim phase.
+// newest event when it is ProvisioningFailed and strictly newer than every
+// other event of the claim, else the newest WaitForFirstConsumer event,
+// else the newest event if it is not ProvisioningFailed (of events with
+// the same newest time, one that is not), else nil. A ProvisioningFailed
+// event with a newer event after it, or another event at the same time, is
+// not returned for its reason: the provisioner may be retrying, and event
+// times often have one-second resolution, so the claim counts as Pending
+// whatever the list order. Events of an earlier claim with the same name
+// are ignored by UID. When events cannot be read it returns nil, logging
+// that once per runtime instance, so the check falls back to the claim
+// phase.
 func (r *KubernetesRuntime) claimEvent(ctx context.Context, namespace string, pvc *corev1.PersistentVolumeClaim) *corev1.Event {
 	selector := fields.Set{
 		"involvedObject.kind": "PersistentVolumeClaim",
@@ -161,12 +165,15 @@ func (r *KubernetesRuntime) claimEvent(ctx context.Context, namespace string, pv
 	list, err := r.Client.Clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{FieldSelector: selector})
 	if err != nil {
 		if r.claimEventsFallbackLogged.CompareAndSwap(false, true) {
-			runtimeLog().Warn("Cannot read events for claims; the claim check uses the claim phase only (grant events get and list to see provisioning failures early)",
+			runtimeLog().Warn("Cannot read events for claims; the claim check uses the claim phase only (grant events list to see provisioning failures early)",
 				"namespace", namespace, "error", err)
 		}
 		return nil
 	}
 	var newest, firstConsumer *corev1.Event
+	// tied is whether another event has the same time as newest. On a tie,
+	// newest is the event that is not ProvisioningFailed, if there is one.
+	tied := false
 	for i := range list.Items {
 		ev := &list.Items[i]
 		if ev.InvolvedObject.Kind != "PersistentVolumeClaim" || ev.InvolvedObject.Name != pvc.Name {
@@ -178,10 +185,23 @@ func (r *KubernetesRuntime) claimEvent(ctx context.Context, namespace string, pv
 		if ev.Reason == claimEventWaitForFirstConsumer {
 			firstConsumer = newerEvent(firstConsumer, ev)
 		}
-		newest = newerEvent(newest, ev)
+		switch {
+		case newest == nil || eventTime(ev).After(eventTime(newest)):
+			newest, tied = ev, false
+		case eventTime(ev).Equal(eventTime(newest)):
+			tied = true
+			if newest.Reason == claimEventProvisioningFailed {
+				newest = ev
+			}
+		}
 	}
 	if newest != nil && newest.Reason == claimEventProvisioningFailed {
-		return newest
+		if !tied {
+			return newest
+		}
+		// Only ProvisioningFailed events share the newest time: the
+		// claim counts as Pending, with no event to act on.
+		newest = nil
 	}
 	if firstConsumer != nil {
 		return firstConsumer
