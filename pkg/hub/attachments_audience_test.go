@@ -216,6 +216,16 @@ func TestAttachmentAudience_LocalDefaults_ParticipantGroupSend(t *testing.T) {
 	group := seedGroupConversation(t, f.st, f.projA.ID, "crew")
 	id := f.uploadAs(t, f.ua, f.projA.ID, "group.txt", "group bytes")
 	alice := NewAuthenticatedUser(f.ua.ID, f.ua.Email, f.ua.DisplayName, f.ua.Role, string(ClientTypeWeb))
+	// The agent message route delivers through the agent's runtime broker.
+	ctx := context.Background()
+	brokerID := uuid.NewString()
+	require.NoError(t, f.st.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: brokerID, Name: "group-broker", Slug: "group-broker", Status: store.BrokerStatusOnline,
+	}))
+	aa, err := f.st.GetAgent(ctx, f.aa.ID)
+	require.NoError(t, err)
+	aa.RuntimeBrokerID = brokerID
+	require.NoError(t, f.st.UpdateAgent(ctx, aa))
 
 	body, err := json.Marshal(MessageRequest{StructuredMessage: &messages.StructuredMessage{
 		Version: messages.Version, Timestamp: time.Now().UTC().Format(time.RFC3339),
