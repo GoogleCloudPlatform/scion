@@ -138,9 +138,9 @@ func TestPoCWorkflow(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		"/sys/fs/cgroup/memory.peak", "df -h /scratch", "golangci-lint run ",
-		// memory.peak is NA under gVisor: the lint step samples memory and /scratch.
-		"/proc/meminfo", "df -k --output=used /scratch", "sample peaks:",
+		"/sys/fs/cgroup/memory.peak", "df -h /home/runner", "golangci-lint run ",
+		// memory.peak is NA under gVisor: the lint step samples memory and the volume (HOME).
+		"/proc/meminfo", "df -k --output=used /home/runner", "sample peaks:",
 		"LINT_CONCURRENCY: ${{ inputs.lint-concurrency || '8' }}",
 		"GOGC: '100'", "GOMEMLIMIT: '24GiB'",
 		// P6b sampler: CPU from /proc/stat, the memory guard on the lint's process group, -v timings.
@@ -175,10 +175,12 @@ func TestCacheParityCheck(t *testing.T) {
 		}
 		for _, want := range []string{
 			`check HOME "$HOME" /home/runner`,
-			`check "work folder link /home/runner/work" "$(readlink /home/runner/work)" /scratch/_work`,
-			// /scratch mirrors $HOME: tar resolves ".." physically from the workspace
-			`check "~/.cache link" "$(readlink "$HOME/.cache")" /scratch/.cache`,
-			`check "~/go link" "$(readlink "$HOME/go")" /scratch/go`,
+			// The volume is mounted at HOME: real directories, so ".." from the workspace
+			// resolves to them physically, and whole-directory archives restore in place.
+			`check "real directory /home/runner/work" "$(readlink -f /home/runner/work)" /home/runner/work`,
+			`check "real directory ~/.cache" "$(readlink -f "$HOME/.cache")" /home/runner/.cache`,
+			`check "real directory ~/go" "$(readlink -f "$HOME/go")" /home/runner/go`,
+			`check "HOME not on the root filesystem"`,
 			`check "go env GOCACHE" "$(go env GOCACHE)" /home/runner/.cache/go-build`,
 			`check "go env GOMODCACHE" "$(go env GOMODCACHE)" /home/runner/go/pkg/mod`,
 			`check "GITHUB_WORKSPACE parent" "${GITHUB_WORKSPACE%/*/*}" /home/runner/work`,
@@ -190,7 +192,7 @@ func TestCacheParityCheck(t *testing.T) {
 			}
 		}
 		// Verify only: the templates create nothing.
-		for _, banned := range []string{"ln -s", "GITHUB_ENV", "/scratch/cache", "/scratch/gopath", "rm -rf"} {
+		for _, banned := range []string{"ln -s", "GITHUB_ENV", "/scratch", "rm -rf"} {
 			if strings.Contains(s, banned) {
 				t.Errorf("%s contains %q; the parity step must only verify", f, banned)
 			}
