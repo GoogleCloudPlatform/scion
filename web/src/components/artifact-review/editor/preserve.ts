@@ -447,7 +447,8 @@ export function savePreserving(
       units: [{ i: -1, j: -1, md: whole, at: 0, written: true }],
     };
   }
-  let md = base.lead;
+  const parts: string[] = [base.lead];
+  let at = base.lead.length;
   let rewritten = 0;
   const units: SaveResult['units'] = [];
   let i = 0;
@@ -456,22 +457,36 @@ export function savePreserving(
     let same = true;
     for (let k = i; k <= j; k++) if (doc.child(k) !== base.nodes[k]) same = false;
     for (let k = i; k <= j; k++) if (verbatim.has(k)) same = true;
-    const at = md.length;
+    const start = at;
     if (same) {
       const unit = unitSource(base, i, j);
-      units.push({ i, j, md: unit, at, written: false });
-      md += unit;
+      units.push({ i, j, md: unit, at: start, written: false });
+      parts.push(unit);
+      at += unit.length;
     } else {
       const unit = writeUnit(doc, base, i, j, serialize, schema, parse);
       if (unit === null) return null;
       rewritten += j - i + 1;
-      units.push({ i, j, md: unit, at, written: true });
-      md += unit;
+      units.push({ i, j, md: unit, at: start, written: true });
+      parts.push(unit);
+      at += unit.length;
     }
-    md += base.blocks[j].after;
+    parts.push(base.blocks[j].after);
+    at += base.blocks[j].after.length;
     i = j + 1;
   }
-  return { md, rewritten, units };
+  return { md: joinFlat(parts), rewritten, units };
+}
+
+/**
+ * parts joined into one string, built once from the whole list. Keep it
+ * this way rather than adding the parts to a string one by one: the review
+ * editor reads the saved text with the critic parser on every edit of some
+ * documents (design E7), and in Chromium that parser runs about three times
+ * slower on a string built up piece by piece than on one built at once.
+ */
+export function joinFlat(parts: readonly string[]): string {
+  return parts.join('');
 }
 
 /** What savePreserving wrote. */
@@ -554,25 +569,22 @@ export function consumedAsInSource(
 /**
  * Whether a sentinel of md's tagged sentinel form lies inside a link
  * reference definition at any depth (inside a block quote or a list item
- * too), read from the Markdown parser's tree before its transforms (which
- * copy definitions onto references and drop them).
+ * too). definitions are the sentinel form's definitions as the Markdown
+ * parser reads them before its transforms (which copy definitions onto
+ * references and drop them): definitionNodes, or MdRead.definitions.
  */
 export function sentinelInDefinition(
   md: string,
   a: SentinelAlphabet,
-  parseRaw: (s: string) => MdTreeNode
+  definitions: readonly MdTreeNode[]
 ): boolean {
   const { text } = criticToSentinelText(md, a, true);
   const sentinels = sentinelSet(a);
-  const hit = (n: MdTreeNode): boolean => {
-    if (n.type === 'definition') {
-      const from = n.position?.start.offset;
-      const to = n.position?.end.offset;
-      if (from === undefined || to === undefined) return true;
-      for (let i = from; i < to; i++) if (sentinels.has(text[i])) return true;
-      return false;
-    }
-    return (n.children ?? []).some(hit);
-  };
-  return hit(parseRaw(text));
+  return definitions.some((n) => {
+    const from = n.position?.start.offset;
+    const to = n.position?.end.offset;
+    if (from === undefined || to === undefined) return true;
+    for (let i = from; i < to; i++) if (sentinels.has(text[i])) return true;
+    return false;
+  });
 }
