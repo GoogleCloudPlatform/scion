@@ -3000,6 +3000,12 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetAgentRunScopeMetrics(runScopeRec)
 	}
 
+	if legacyFallbackRec, err := hub.NewOTelLegacyAdoptedFallbackMetrics(mp); err != nil {
+		log.Printf("WARNING: hub legacy adopted-agent fallback metrics disabled: %v", err)
+	} else {
+		hubSrv.SetLegacyAdoptedFallbackMetrics(legacyFallbackRec)
+	}
+
 	// Decision logging (remaining-audit P1): the audit writer's
 	// scion.logging.* series and the decision-log disposition counter.
 	// The same instruments carry writer=cloud (P2): the Cloud Logging

@@ -4939,6 +4939,9 @@ func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent 
 				return true
 			}
 			ceiling := d.authzService.EvaluateUserSecretParentCeiling(ctx, ident, userSecretResource(s.ID, s.ScopeID))
+			if ceiling.Allowed && ceiling.legacyFallback != nil {
+				d.authzService.recordLegacyAdoptedFallback(ctx, legacyFallbackPathStart, ceiling.legacyFallback, agentID, s.ScopeID, s.ID, s.Name)
+			}
 			if !ceiling.Allowed {
 				withheld("owner", s, Decision{DenyCause: ceiling.DenyCause, Reason: ceiling.Reason})
 			}

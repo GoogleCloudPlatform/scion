@@ -61,6 +61,56 @@ the permission registry or role scopes.
 New children of an adopted agent are created through the normal create path,
 so their ceilings stay within the adopted chain.
 
+### Legacy exception: the owner's own user secrets for adopted baseline and readonly agents
+
+The V1 table gives `secret.use` to `full` only, so the user secret parent
+ceiling refuses an adopted `baseline` or `readonly` agent its owner's
+progeny-shared user secrets. Before that ceiling applied to agent start and
+restart, these agents received them there. As a **legacy compatibility
+exception**, the Hub keeps that behaviour at start and restart for exactly
+this cohort:
+
+- the agent's own edge (no agent above it), delegated by the agent's owner;
+- written by adoption (source credential `system_migration`) and bounded;
+- whose ceiling is exactly the `baseline` or the `readonly` V1 row (with or
+  without the assigned service account permissions), and that row's role
+  does not rank above the edge's recorded role. Adoption ceilings an edge at
+  the lower of its role and the agent's applied role but keeps the edge's
+  role, so an edge recorded as `full` for an agent whose applied role is
+  `baseline` carries the `baseline` row and is in the cohort, reported as
+  `adopted_baseline`;
+- with an adoption record under policy V1 (`adopted` or `recognized`) for
+  that edge.
+
+For such an agent the ceiling lets the missing `secret.use` pass, and every
+other check still applies: a held or deleted agent, an agent-delegated chain,
+an edge recorded any other way, a terminal user who is inactive or not
+admitted to the project, and the secret source check (the secret must be the
+owner's own, shared with progeny and authored by the owner) all still deny.
+
+The runtime read (`scion secret get` inside the agent, the agent secret
+fetch) and the agent secret list are **not** restored for this cohort. Since
+ptone/scion#2072 every runtime read and list has required the agent token
+scope `project:secret:read`, and `baseline` and `readonly` tokens never
+carry it, so these agents are refused there (`capability_required`), as they
+were before the ceiling. To give such an agent its owner's secrets at
+runtime, reincarnate it as its owner with role `full`.
+
+An edge written later for such an agent, for example by a scope re-issue,
+keeps the `system_migration` source but has no adoption record of its own,
+so the agent leaves the cohort and its owner's shared secrets are withheld at
+start again (fail closed). Reincarnating the agent as its owner with role
+`full` restores them.
+
+Each use at start or restart is counted
+(`scion.hub.user_secret.legacy_adopted_fallback`, attributes `path` and
+`role`) and logged at warning level as `user secret allowed under the legacy
+adopted-agent fallback`, with the agent, the cohort (`adopted_baseline` or
+`adopted_readonly`), the edge and the secret name, never the value. The
+warning is logged at most once every 10 minutes per agent and secret. **The
+exception ends with the planned policy V2 backfill**, which is to re-ceiling
+these edges; the counter shows when it is no longer used.
+
 ## Which edges are adopted
 
 The planner examines the ancestor closure of every live agent (a stopped
