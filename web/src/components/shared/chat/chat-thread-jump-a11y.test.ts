@@ -417,6 +417,22 @@ describe('scion-chat-thread message list tab stop (More actions)', () => {
     expect(rows(el)[0].actionsButton!.hasAttribute('aria-describedby')).toBe(false);
   });
 
+  it('with no stop yet, a message taller than the view takes it when no message fits inside', async () => {
+    setFlag(true);
+    const el = await mount();
+    await settled(el);
+    placeAt(el.shadowRoot!.querySelector<HTMLElement>('.messages-scroll')!, 0, 600);
+    placeAt(msgEl(el, 'm1'), -900, 200);
+    placeAt(msgEl(el, 'm2'), -100, 900);
+    placeAt(msgEl(el, 'm3'), 900);
+    const state = el as unknown as { _activeActionsId: string; _activeActionsIndex: number };
+    state._activeActionsId = '';
+    state._activeActionsIndex = -1;
+    el.requestUpdate();
+    await settled(el);
+    expect(tabStops(el)).toEqual(['m2']);
+  });
+
   it('Up/Down/Home/End move the stop and focus through the rendered messages', async () => {
     setFlag(true);
     const el = await mount();

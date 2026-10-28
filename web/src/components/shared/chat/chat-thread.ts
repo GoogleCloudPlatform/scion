@@ -5807,7 +5807,10 @@ export class ScionChatThread extends LitElement {
     }
   }
 
-  /** The last rendered message whose box is inside the scroller, else the last. */
+  /**
+   * The last rendered message whose box is inside the scroller; else the last one that overlaps
+   * it (a message taller than the view); else the last.
+   */
   private lastVisibleMessageIndex(
     els: Array<import('./chat-message.js').ScionChatMessage>
   ): number {
@@ -5815,10 +5818,14 @@ export class ScionChatThread extends LitElement {
     const scroller = this.shadowRoot?.querySelector<HTMLElement>('.messages-scroll');
     if (scroller) {
       const view = scroller.getBoundingClientRect();
+      let overlapping = -1;
       for (let i = els.length - 1; i >= 0; i--) {
         const r = els[i].getBoundingClientRect();
-        if (r.height > 0 && r.top >= view.top && r.bottom <= view.bottom) return i;
+        if (r.height <= 0) continue;
+        if (r.top >= view.top && r.bottom <= view.bottom) return i;
+        if (overlapping < 0 && r.bottom > view.top && r.top < view.bottom) overlapping = i;
       }
+      if (overlapping >= 0) return overlapping;
     }
     return els.length - 1;
   }
