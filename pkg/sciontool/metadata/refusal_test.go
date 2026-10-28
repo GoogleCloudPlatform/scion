@@ -294,3 +294,122 @@ func TestRefusal_DirectPathTyped(t *testing.T) {
 		t.Fatalf("hub hits: %d, want 1", got)
 	}
 }
+
+// A request that passed the first window check before the leader recorded
+// the refusal, and takes the singleflight lock after the leader released it,
+// must not become a second leader inside the window: one hub call, one
+// back-off step, one log line (round 1, R1). Deterministic: the second
+// request is held between its first check and the lock until the leader is
+// done.
+func TestRefusal_LateRequestDoesNotBecomeSecondLeader(t *testing.T) {
+	f := newRefusalFixture(t)
+	f.set(errHubRefused)
+	var hookCalls atomic.Int64
+	reached := make(chan struct{})
+	release := make(chan struct{})
+	f.srv.afterRefusalCheck = func() {
+		if hookCalls.Add(1) == 1 {
+			close(reached)
+			<-release
+		}
+	}
+	lateCode := make(chan int, 1)
+	go func() {
+		code, _ := f.accessToken(t)
+		lateCode <- code
+	}()
+	<-reached // the late request passed its first check, no window yet
+	if code, _ := f.accessToken(t); code != http.StatusForbidden {
+		t.Fatalf("leader: %d, want 403", code)
+	}
+	close(release)
+	if code := <-lateCode; code != http.StatusForbidden {
+		t.Fatalf("late request: %d, want 403 (the cached refusal)", code)
+	}
+	if got := f.calls.Load(); got != 1 {
+		t.Fatalf("hub calls: %d, want 1", got)
+	}
+	if got := f.logLines.Load(); got != 1 {
+		t.Fatalf("log lines: %d, want 1", got)
+	}
+}
+
+// The same for identity tokens of another audience.
+func TestRefusal_LateIdentityRequestDoesNotBecomeSecondLeader(t *testing.T) {
+	f := newRefusalFixture(t)
+	f.set(errHubRefused)
+	var hookCalls atomic.Int64
+	reached := make(chan struct{})
+	release := make(chan struct{})
+	f.srv.afterRefusalCheck = func() {
+		if hookCalls.Add(1) == 1 {
+			close(reached)
+			<-release
+		}
+	}
+	lateCode := make(chan int, 1)
+	go func() { lateCode <- f.idToken(t, "aud-late") }()
+	<-reached
+	if code := f.idToken(t, "aud-lead"); code != http.StatusForbidden {
+		t.Fatalf("leader: %d, want 403", code)
+	}
+	close(release)
+	if code := <-lateCode; code != http.StatusForbidden {
+		t.Fatalf("late request: %d, want 403", code)
+	}
+	if got := f.idCalls.Load(); got != 1 {
+		t.Fatalf("hub calls: %d, want 1", got)
+	}
+	if got := f.logLines.Load(); got != 1 {
+		t.Fatalf("log lines: %d, want 1", got)
+	}
+}
+
+// refused is idempotent within one open window for the same assignment;
+// a new window, or another assignment, takes a step.
+func TestRefusal_RefusedIdempotentWithinWindow(t *testing.T) {
+	r := newRefusalState()
+	r.backoff.Rand = func() float64 { return 0 }
+	t0 := time.Date(2026, 10, 28, 2, 0, 0, 0, time.UTC)
+	if d, stepped := r.refused(t0, "k1"); d != 10*time.Second || !stepped {
+		t.Fatalf("first: %s %v, want 10s true", d, stepped)
+	}
+	if d, stepped := r.refused(t0.Add(3*time.Second), "k1"); d != 7*time.Second || stepped {
+		t.Fatalf("inside the window: %s %v, want 7s false", d, stepped)
+	}
+	if d, stepped := r.refused(t0.Add(10*time.Second), "k1"); d != 20*time.Second || !stepped {
+		t.Fatalf("after the window: %s %v, want 20s true", d, stepped)
+	}
+	if d, stepped := r.refused(t0.Add(11*time.Second), "k2"); d != 10*time.Second || !stepped {
+		t.Fatalf("another assignment inside the window: %s %v, want 10s true (reset)", d, stepped)
+	}
+}
+
+// The refresh loop's tick skips while a refusal window is open, and asks the
+// hub again once it has closed; a refusal there is one step, one line.
+func TestRefusal_RefreshTickSkipsWhileRefusing(t *testing.T) {
+	f := newRefusalFixture(t)
+	f.srv.mu.Lock()
+	f.srv.cachedToken = &GCPAccessTokenResponse{AccessToken: "ya29.old", ExpiresIn: 100, TokenType: "Bearer", FetchedAt: time.Now()}
+	f.srv.mu.Unlock()
+	f.set(errHubRefused)
+	ctx := context.Background()
+
+	f.srv.refreshTick(ctx) // near expiry: asks the hub, which refuses
+	if got := f.calls.Load(); got != 1 {
+		t.Fatalf("first tick hub calls: %d, want 1", got)
+	}
+	f.srv.refreshTick(ctx) // window open: skipped
+	f.srv.refreshTick(ctx)
+	if got := f.calls.Load(); got != 1 {
+		t.Fatalf("hub calls while the window is open: %d, want 1", got)
+	}
+	if got := f.logLines.Load(); got != 1 {
+		t.Fatalf("log lines: %d, want 1", got)
+	}
+	f.advance(10 * time.Second)
+	f.srv.refreshTick(ctx)
+	if got := f.calls.Load(); got != 2 {
+		t.Fatalf("hub calls after the window: %d, want 2", got)
+	}
+}

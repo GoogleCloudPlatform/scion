@@ -633,8 +633,9 @@ func (c *Client) DeletePort(ctx context.Context, port int) error {
 }
 
 // StatusError is returned by the port API methods and the GCP credential
-// fetches when the hub answers with an unexpected HTTP status. Its message keeps the
-// "hub returned error <code>: <body>" form used by the other methods.
+// fetches when the hub answers with an unexpected HTTP status. Its message
+// keeps the "hub returned error <code>: <body>" form used by the other
+// methods.
 type StatusError struct {
 	StatusCode int
 	Body       string

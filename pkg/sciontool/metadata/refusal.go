@@ -62,16 +62,18 @@ func newRefusalState() *refusalState {
 	return &refusalState{backoff: backoff.Backoff{Base: refusalBackoffBase, Max: refusalBackoffMax, Jitter: backoff.DefaultJitter}}
 }
 
-// active reports whether a refusal window recorded for assignment key is
-// open at now, and the time left. A different key (the assignment changed)
-// clears the state, so the request goes to the hub at once.
-func (r *refusalState) active(now time.Time, key string) (time.Duration, bool) {
+// active reports whether a refusal window is open at now for the current
+// assignment, and the time left. key returns the current assignment key; it
+// is called only when a window has been recorded. A different key (the
+// assignment changed) clears the state, so the request goes to the hub at
+// once.
+func (r *refusalState) active(now time.Time, key func() string) (time.Duration, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.until.IsZero() {
 		return 0, false
 	}
-	if key != r.key {
+	if key() != r.key {
 		r.clearLocked()
 		return 0, false
 	}
@@ -81,18 +83,25 @@ func (r *refusalState) active(now time.Time, key string) (time.Duration, bool) {
 	return 0, false
 }
 
-// refused records a hub refusal for assignment key at now and returns the
-// back-off delay before the hub is asked again.
-func (r *refusalState) refused(now time.Time, key string) time.Duration {
+// refused records a hub refusal for assignment key at now. It returns the
+// time until the hub is asked again, and stepped = true when this refusal
+// took a new back-off step (the caller logs one line for it). A refusal
+// recorded while a window for the same key is still open (a request that
+// raced the window, the refresh loop, another identity-token audience) does
+// not take another step and must not be logged: one step, one line.
+func (r *refusalState) refused(now time.Time, key string) (left time.Duration, stepped bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if key == r.key && !r.until.IsZero() && now.Before(r.until) {
+		return r.until.Sub(now), false
+	}
 	if key != r.key {
 		r.backoff.Reset()
 	}
 	d := r.backoff.Failure()
 	r.until = now.Add(d)
 	r.key = key
-	return d
+	return d, true
 }
 
 // succeeded clears the state after the hub issued a credential.
@@ -151,18 +160,29 @@ func (s *Server) noteFetchResult(r *refusalState, what string, err error) {
 		return
 	}
 	if isHubRefusal(err) {
-		d := r.refused(s.clock(), s.assignmentKey())
-		logRefusal("GCP %s: credential refused by hub (403); next attempt in %s", what, d.Round(time.Second))
+		if d, stepped := r.refused(s.clock(), s.assignmentKey()); stepped {
+			logRefusal("GCP %s: credential refused by hub (403); next attempt in %s", what, d.Round(time.Second))
+		}
 	}
+}
+
+// refusalLeft reports whether r's window is open for the current assignment,
+// and the time left.
+func (s *Server) refusalLeft(r *refusalState) (time.Duration, bool) {
+	return r.active(s.clock(), s.assignmentKey)
+}
+
+// writeRefusal answers with the cached refusal.
+func writeRefusal(w http.ResponseWriter, left time.Duration) {
+	http.Error(w, fmt.Sprintf("credential refused by hub; retry after %s", left.Round(time.Second)), http.StatusForbidden)
 }
 
 // serveRefusal answers with the cached refusal while r's window is open,
 // and reports whether it did.
 func (s *Server) serveRefusal(w http.ResponseWriter, r *refusalState) bool {
-	left, ok := r.active(s.clock(), s.assignmentKey())
-	if !ok {
-		return false
+	left, ok := s.refusalLeft(r)
+	if ok {
+		writeRefusal(w, left)
 	}
-	http.Error(w, fmt.Sprintf("credential refused by hub; retry after %s", left.Round(time.Second)), http.StatusForbidden)
-	return true
+	return ok
 }

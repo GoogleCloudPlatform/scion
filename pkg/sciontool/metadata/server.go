@@ -256,6 +256,9 @@ type Server struct {
 	idRefusal     *refusalState
 	// now, if set, replaces time.Now for the refusal windows (tests).
 	now func() time.Time
+	// afterRefusalCheck, if set, runs in the token handlers between the
+	// first refusal check and the singleflight lock (tests).
+	afterRefusalCheck func()
 }
 
 // authToken returns the current auth token, preferring the dynamic TokenFunc
@@ -1021,6 +1024,9 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	if s.serveRefusal(w, s.accessRefusal) {
 		return
 	}
+	if s.afterRefusalCheck != nil {
+		s.afterRefusalCheck()
+	}
 
 	// Singleflight: collapse concurrent fetches into one Hub request
 	s.fetchMu.Lock()
@@ -1035,6 +1041,20 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Error(w, "token generation failed", http.StatusBadGateway)
+		return
+	}
+	// A request that passed the checks above before the previous leader
+	// finished must not become a new leader inside the window that leader
+	// opened (or after the token it cached): re-check both while holding
+	// fetchMu. Lock order: fetchMu, then refusalState.mu / mu; neither is
+	// held while fetchMu is taken.
+	if left, ok := s.refusalLeft(s.accessRefusal); ok {
+		s.fetchMu.Unlock()
+		writeRefusal(w, left)
+		return
+	}
+	if s.serveCachedToken(w) {
+		s.fetchMu.Unlock()
 		return
 	}
 	s.fetchInFlight = true
@@ -1088,6 +1108,9 @@ func (s *Server) handleIdentityToken(w http.ResponseWriter, r *http.Request) {
 	if s.serveRefusal(w, s.idRefusal) {
 		return
 	}
+	if s.afterRefusalCheck != nil {
+		s.afterRefusalCheck()
+	}
 
 	// Singleflight: collapse concurrent fetches for the same audience
 	s.idFetchMu.Lock()
@@ -1102,6 +1125,18 @@ func (s *Server) handleIdentityToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Error(w, "identity token generation failed", http.StatusBadGateway)
+		return
+	}
+	// As in handleToken: re-check the window and the cache while holding
+	// idFetchMu before becoming the leader (lock order idFetchMu, then
+	// refusalState.mu / idTokenMu).
+	if left, ok := s.refusalLeft(s.idRefusal); ok {
+		s.idFetchMu.Unlock()
+		writeRefusal(w, left)
+		return
+	}
+	if s.serveCachedIDToken(w, audience) {
+		s.idFetchMu.Unlock()
 		return
 	}
 	s.idFetchInFlight = true
@@ -1262,27 +1297,35 @@ func (s *Server) proactiveRefreshLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.mu.RLock()
-			cached := s.cachedToken
-			s.mu.RUnlock()
-
-			if cached == nil {
-				continue
-			}
-
-			elapsed := time.Since(cached.FetchedAt)
-			remaining := time.Duration(cached.ExpiresIn)*time.Second - elapsed
-			if _, refusing := s.accessRefusal.active(s.clock(), s.assignmentKey()); refusing {
-				continue
-			}
-			if remaining < 300*time.Second {
-				log.Debug("Proactively refreshing GCP access token (remaining: %v)", remaining)
-				refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-				if _, err := s.fetchAccessToken(refreshCtx); err != nil {
-					log.Error("Proactive token refresh failed: %v", err)
-				}
-				cancel()
-			}
+			s.refreshTick(ctx)
 		}
+	}
+}
+
+// refreshTick is one tick of proactiveRefreshLoop: refresh the cached access
+// token when it has less than 5 minutes left, unless no token is cached or a
+// hub refusal window is open. A hub refusal is logged once, by its back-off
+// step (noteFetchResult); its body is not logged again here.
+func (s *Server) refreshTick(ctx context.Context) {
+	s.mu.RLock()
+	cached := s.cachedToken
+	s.mu.RUnlock()
+
+	if cached == nil {
+		return
+	}
+	if _, refusing := s.refusalLeft(s.accessRefusal); refusing {
+		return
+	}
+
+	elapsed := time.Since(cached.FetchedAt)
+	remaining := time.Duration(cached.ExpiresIn)*time.Second - elapsed
+	if remaining < 300*time.Second {
+		log.Debug("Proactively refreshing GCP access token (remaining: %v)", remaining)
+		refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		if _, err := s.fetchAccessToken(refreshCtx); err != nil && !isHubRefusal(err) {
+			log.Error("Proactive token refresh failed: %v", err)
+		}
+		cancel()
 	}
 }
