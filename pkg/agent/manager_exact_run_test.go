@@ -29,14 +29,14 @@ func TestSelectExactRunTarget(t *testing.T) {
 	other := api.AgentInfo{Name: "a", ContainerID: "c-other", RunID: "run-other"}
 	exact := api.AgentInfo{Name: "a", ContainerID: "c-exact", RunID: "run-1"}
 
-	if _, found, err := SelectExactRunTarget([]api.AgentInfo{legacy, other}, "a", "", "run-1"); err != nil || found {
+	if _, found, err := SelectExactRunTarget([]api.AgentInfo{legacy, other}, "a", "", "", "run-1"); err != nil || found {
 		t.Fatalf("legacy/other-run entries must not be selected: found=%v err=%v", found, err)
 	}
-	got, found, err := SelectExactRunTarget([]api.AgentInfo{legacy, other, exact}, "a", "", "run-1")
+	got, found, err := SelectExactRunTarget([]api.AgentInfo{legacy, other, exact}, "a", "", "", "run-1")
 	if err != nil || !found || got.ContainerID != "c-exact" {
 		t.Fatalf("expected the exact-run entry, got %+v found=%v err=%v", got, found, err)
 	}
-	if _, found, _ := SelectExactRunTarget([]api.AgentInfo{legacy, exact}, "a", "", ""); found {
+	if _, found, _ := SelectExactRunTarget([]api.AgentInfo{legacy, exact}, "a", "", "", ""); found {
 		t.Fatal("an empty run ID must select nothing")
 	}
 }

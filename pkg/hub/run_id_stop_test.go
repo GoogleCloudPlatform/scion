@@ -107,6 +107,39 @@ func TestDispatchAgentStopAndDelete_SendAgentID(t *testing.T) {
 	}
 }
 
+// Both broker transports carry the hub's agent ID on a delete: the broker
+// finds the agent's worktree and sharer registry entry under it
+// (ptone/scion#3405).
+func TestBrokerTransports_DeleteAgentSendsAgentID(t *testing.T) {
+	ctx := withDispatchAgentID(context.Background(), "uuid-a")
+
+	var gotQuery url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	if err := NewHTTPRuntimeBrokerClient().DeleteAgent(ctx, tid("host-1"), server.URL, "dev", "p1", DeleteAgentOptions{DeleteFiles: true}); err != nil {
+		t.Fatalf("HTTP DeleteAgent: %v", err)
+	}
+	if got := gotQuery.Get(api.AgentIDQueryParam); got != "uuid-a" {
+		t.Errorf("HTTP transport agentId = %q, want uuid-a (query %v)", got, gotQuery)
+	}
+
+	tunnel := &mockControlChannelTunnel{connected: true}
+	client := &ControlChannelBrokerClient{manager: tunnel}
+	if err := client.DeleteAgent(ctx, "broker-1", "unused", "dev", "p1", DeleteAgentOptions{DeleteFiles: true}); err != nil {
+		t.Fatalf("control channel DeleteAgent: %v", err)
+	}
+	q, err := url.ParseQuery(tunnel.lastRequest.Query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := q.Get(api.AgentIDQueryParam); got != "uuid-a" {
+		t.Errorf("control channel agentId = %q, want uuid-a (query %q)", got, tunnel.lastRequest.Query)
+	}
+}
+
 func TestStopAndDeleteAgentQuery_AgentID(t *testing.T) {
 	ctx := withDispatchAgentID(context.Background(), "agent a&b")
 	q, err := url.ParseQuery(stopAgentQuery(ctx, "p1", "run-1"))
@@ -278,6 +311,7 @@ func stopE2EBroker(t *testing.T) (*runLabelManager, string) {
 	t.Helper()
 	mgr := &runLabelManager{}
 	cfg := runtimebroker.DefaultServerConfig()
+	cfg.BrokerAuthEnabled = false // no hub keys here: serve the broker API without auth
 	cfg.BrokerID = "e2e-broker"
 	cfg.BrokerName = "e2e-broker"
 	brokerSrv := runtimebroker.New(cfg, mgr, &runtime.MockRuntime{NameFunc: func() string { return "docker" }}, config.RuntimeBuildRecord{})

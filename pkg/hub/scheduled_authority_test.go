@@ -908,3 +908,121 @@ func TestSchedStartClaimOutcomes(t *testing.T) {
 		})
 	}
 }
+
+// --- account status of a user principal --------------------------------------
+
+// schedUserReader is a userRowReader returning row, err, or (nilRow) neither.
+type schedUserReader struct {
+	row    *store.User
+	err    error
+	nilRow bool
+}
+
+func (r schedUserReader) GetUser(_ context.Context, id string) (*store.User, error) {
+	switch {
+	case r.err != nil:
+		return nil, r.err
+	case r.nilRow:
+		return nil, nil
+	case r.row == nil || r.row.ID != id:
+		return nil, store.ErrNotFound
+	}
+	return r.row, nil
+}
+
+// scheduledUserAccount holds a scheduled run's user principal to the
+// account-status rule: an active row passes; every other defined status, a
+// status added later, a missing row and a lookup that returns neither a row
+// nor an error are refused with reasonPrincipalInactive; a lookup error is
+// the shared lookup fault, not a refusal of the principal.
+func TestScheduledUserAccount_Outcomes(t *testing.T) {
+	ctx := context.Background()
+	row := func(status string) schedUserReader {
+		return schedUserReader{row: &store.User{ID: "u1", Status: status}}
+	}
+
+	u, err := scheduledUserAccount(ctx, row(store.UserStatusActive), "u1")
+	require.NoError(t, err)
+	require.NotNil(t, u)
+	assert.Equal(t, "u1", u.ID)
+
+	refused := map[string]schedUserReader{
+		"suspended":        row(store.UserStatusSuspended),
+		"invited":          row(store.UserStatusInvited),
+		"pending":          row(store.UserStatusPending),
+		"added_later":      row("status-added-later"),
+		"empty_status":     row(""),
+		"missing_row":      {},
+		"nil_row_no_error": {nilRow: true},
+	}
+	for name, r := range refused {
+		u, err := scheduledUserAccount(ctx, r, "u1")
+		assert.Nil(t, u, name)
+		require.ErrorIs(t, err, errScheduledAuthorityDenied, name)
+		assert.Contains(t, err.Error(), reasonPrincipalInactive, name)
+		assert.False(t, isProjectAccessLookupFault(err), name)
+	}
+
+	storeErr := errors.New("users table unavailable")
+	u, err = scheduledUserAccount(ctx, schedUserReader{err: storeErr}, "u1")
+	assert.Nil(t, u)
+	require.ErrorIs(t, err, storeErr)
+	assert.NotErrorIs(t, err, errScheduledAuthorityDenied)
+	assert.True(t, isProjectAccessLookupFault(err), "store error is the shared lookup fault")
+}
+
+// A scheduled run's user principal is checked against its current users
+// row: an active row fires; a suspended or invited row, or no row, is
+// refused with reasonPrincipalInactive.
+func TestSchedUserAccountStatusOutcomes(t *testing.T) {
+	f := newSchedFire(t, "sched-acct")
+	ctx := context.Background()
+
+	_, identity, err := f.srv.resolveScheduledAuthority(ctx, withSessionRevision(f.event("sched-acct-active"), f.creator.ID))
+	require.NoError(t, err)
+	assert.True(t, identity != nil, "active principal has an identity")
+
+	for _, status := range []string{store.UserStatusSuspended, store.UserStatusInvited} {
+		u := hubMemberUser(t, f.store, "sched-acct-"+status)
+		grantFixtureRole(t, f.bypassAgentsFixture, u.ID, store.ProjectRoleMember)
+		u.Status = status
+		require.NoError(t, f.store.UpdateUser(ctx, u))
+		_, _, err := f.srv.resolveScheduledAuthority(ctx, withSessionRevision(f.event("sched-acct-"+status), u.ID))
+		require.ErrorIs(t, err, errScheduledAuthorityDenied, status)
+		assert.Contains(t, err.Error(), reasonPrincipalInactive, status)
+	}
+
+	_, _, err = f.srv.resolveScheduledAuthority(ctx, withSessionRevision(f.event("sched-acct-missing"), "no-such-user"))
+	require.ErrorIs(t, err, errScheduledAuthorityDenied)
+	assert.Contains(t, err.Error(), reasonPrincipalInactive)
+}
+
+// userLookupErrStore fails every users-row lookup with err; no other method
+// is used.
+type userLookupErrStore struct {
+	store.Store
+	err error
+}
+
+func (s userLookupErrStore) GetUser(context.Context, string) (*store.User, error) {
+	return nil, s.err
+}
+
+// resolveScheduledUser checks the principal through the shared account
+// check: a users-row lookup error comes back as checkUserAccount's lookup
+// fault (keeping the store error), not as a refusal of the principal.
+func TestSchedUserLookupFaultUsesAccountCheck(t *testing.T) {
+	storeErr := errors.New("users table unavailable")
+	srv := &Server{store: userLookupErrStore{err: storeErr}}
+	auth := &ScheduledAuthority{
+		PrincipalKind:  store.DelegationPrincipalUser,
+		PrincipalID:    "u1",
+		CredentialKind: store.InitiatorCredentialKindSession,
+	}
+	identity, err := srv.resolveScheduledUser(context.Background(), auth, "p1", "agent.create")
+	require.Error(t, err)
+	assert.Nil(t, identity)
+	assert.ErrorIs(t, err, storeErr)
+	assert.NotErrorIs(t, err, errScheduledAuthorityDenied)
+	assert.True(t, isProjectAccessLookupFault(err), "lookup fault from checkUserAccount: %v", err)
+}

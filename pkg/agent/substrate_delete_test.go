@@ -210,7 +210,7 @@ func TestSubstrateAgentManagerDelete_RecordExists(t *testing.T) {
 	mgr := NewManager(rt)
 	defer mgr.Close()
 
-	if _, err := mgr.Delete(context.Background(), agentSlug, false, "", false); err != nil {
+	if _, err := mgr.Delete(context.Background(), agentSlug, false, "", "", false); err != nil {
 		t.Fatalf("Delete(%q) error = %v", agentSlug, err)
 	}
 
@@ -260,7 +260,7 @@ func TestSubstrateAgentManagerDelete_NoRecord(t *testing.T) {
 	mgr := NewManager(rt)
 	defer mgr.Close()
 
-	if _, err := mgr.Delete(context.Background(), agentSlug, false, "", false); err != nil {
+	if _, err := mgr.Delete(context.Background(), agentSlug, false, "", "", false); err != nil {
 		t.Fatalf("Delete(%q) error = %v", agentSlug, err)
 	}
 
@@ -312,7 +312,7 @@ func TestSubstrateAgentManagerDelete_RecordlessAmbiguousSlugDeletesNothing(t *te
 			mgr := NewManager(rt)
 			defer mgr.Close()
 
-			if _, err := mgr.Delete(context.Background(), "dev", false, "", false); err != nil {
+			if _, err := mgr.Delete(context.Background(), "dev", false, "", "", false); err != nil {
 				t.Fatalf(`Delete("dev") error = %v`, err)
 			}
 
@@ -396,7 +396,7 @@ func TestSubstrateAgentManagerDelete_RecordExistsAndRecordlessSameSlug(t *testin
 			mgr := NewManager(rt)
 			defer mgr.Close()
 
-			if _, err := mgr.Delete(context.Background(), "dev", false, "", false); err != nil {
+			if _, err := mgr.Delete(context.Background(), "dev", false, "", "", false); err != nil {
 				t.Fatalf(`Delete("dev") error = %v`, err)
 			}
 
@@ -499,7 +499,7 @@ func TestSubstrateAgentManagerDelete_SameSlugDifferentProjectsFailsClosed(t *tes
 			// which performs no re-list, so this instead covers Delete's
 			// own slug-resolution fallback for other, non-broker-resolved
 			// callers.
-			if _, err := mgr.Delete(context.Background(), "dev", false, "", false); err != nil {
+			if _, err := mgr.Delete(context.Background(), "dev", false, "", "", false); err != nil {
 				t.Fatalf(`Delete("dev") error = %v`, err)
 			}
 

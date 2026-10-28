@@ -364,7 +364,7 @@ func TestInstallResolvedSkills_OptionalCacheFallthroughLeavesNoPartialDir(t *tes
 	content := []byte("# Cached Skill")
 	srv := newInstallFailServer(t, content)
 	fileHash := transfer.HashBytes(content)
-	bundleHash := transfer.ComputeContentHash([]transfer.FileInfo{{Path: "SKILL.md", Hash: fileHash}})
+	bundleHash := transfer.ComputeContentHashV1([]transfer.FileInfo{{Path: "SKILL.md", Hash: fileHash}})
 
 	// A cache entry whose copy fails after SKILL.md: copyDir copies entries
 	// in name order, and "zz-broken" is a dangling symlink that cannot be

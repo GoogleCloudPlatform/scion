@@ -68,10 +68,19 @@ func (e *UTCTimestampNormalizeExecutor) Run(ctx context.Context, logger io.Write
 //   - auto-expose-env-normalize: a run removes every stamp it re-derives, so
 //     a second run finds nothing to do; an agent skipped because a lookup
 //     failed is retried by the next run.
+//   - group-participant-mode-cleanup: a run without apply only reports but
+//     still completes the migration, so the applied run must be allowed
+//     afterwards; an applied run marks the rows it removes as left, so a
+//     second run removes 0.
+//   - project-storage-migrate: a run moves every legacy tree away (renamed
+//     or kept as <name>.migrated-<ts>), so a second run reports moves=0; a
+//     run that failed for one project is completed by the next.
 var rerunnableMigrations = map[string]bool{
-	entadapter.UTCTimestampNormalizeKey:  true,
-	entadapter.AppliedConfigTZCleanupKey: true,
-	entadapter.AutoExposeEnvNormalizeKey: true,
+	entadapter.UTCTimestampNormalizeKey:       true,
+	entadapter.AppliedConfigTZCleanupKey:      true,
+	entadapter.AutoExposeEnvNormalizeKey:      true,
+	entadapter.GroupParticipantModeCleanupKey: true,
+	entadapter.ProjectStorageMigrateKey:       true,
 }
 
 // storeDB returns the store's *sql.DB and ent dialect, or nil and "" when

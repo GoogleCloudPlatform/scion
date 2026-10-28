@@ -924,6 +924,34 @@ func Spec() []TableFixture {
 			},
 		}},
 
+		// ---- Secret encryption policy and migrations (ptone/scion#1530
+		// §6; key IDs and progress only, never key material) ----
+		{Table: "hub_encryption_policy", Rows: []row{
+			{ // the singleton row (id is always 1), bound to the migration below
+				"id": 1, "generation": int64(2), "min_reader_version": 2,
+				"allowed_write_kids": `["fixture-k2"]`, "required_read_kids": `["fixture-k1","fixture-k2"]`,
+				"migration_id": "e5000000-0000-4000-8000-000000000001",
+				"state":        "rewrapping", "updated_at": baseTime,
+			},
+		}},
+		{Table: "hub_encryption_migrations", Rows: []row{
+			{ // running job with plaintext admission
+				"id": "e5000000-0000-4000-8000-000000000001", "source_generation": int64(1),
+				"target_kid": "fixture-k2", "state": "running",
+				"last_scanned_id":         "00000000-0000-4000-8000-000000000042",
+				"plaintext_read_admitted": true,
+				"scanned":                 int64(42), "rewritten": int64(40), "failures": int64(0),
+				"created": baseTime, "updated": baseTime,
+			},
+			{ // verified job: admission cleared, empty cursor default
+				"id": "e5000000-0000-4000-8000-000000000002", "source_generation": int64(0),
+				"target_kid": "fixture-k1", "state": "verified",
+				"last_scanned_id": "", "plaintext_read_admitted": false,
+				"scanned": int64(7), "rewritten": int64(7), "failures": int64(0),
+				"created": baseTime, "updated": baseTime,
+			},
+		}},
+
 		// ---- Test infrastructure marker (admin tier A0, ptone/scion#4240;
 		// single row, written only by `scion server test-infra mark`) ----
 		{Table: "test_infra_marker", Rows: []row{

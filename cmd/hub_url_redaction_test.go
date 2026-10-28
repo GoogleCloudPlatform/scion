@@ -179,24 +179,27 @@ func TestDoctorReportAdd_RedactsURLUserInfo(t *testing.T) {
 	}
 }
 
+// An endpoint containing "@" is never shown by doctor, not even in part
+// (see doctorDisplayEndpoint).
 func TestDoctorHubHealthResult_RedactsEndpoint(t *testing.T) {
 	const ep = "https://alice:s3cret@hub.example.com"
 	healthy := doctorHubHealthResult(ep, healthProbeResponse{Status: probeStatusHealthy})
-	assert.Equal(t, "Hub at https://alice:xxxxx@hub.example.com is healthy", healthy.Message)
+	assert.Equal(t, "Hub at "+doctorEndpointRedacted+" is healthy", healthy.Message)
 	unhealthy := doctorHubHealthResult(ep, healthProbeResponse{Status: probeStatusUnhealthy})
-	assert.Equal(t, "Hub at https://alice:xxxxx@hub.example.com is unhealthy", unhealthy.Message)
+	assert.Equal(t, "Hub at "+doctorEndpointRedacted+" is unhealthy", unhealthy.Message)
+	assertNoHubURLSecrets(t, healthy.Message+unhealthy.Message)
 }
 
-// The connectivity check, with a hub that cannot be reached: the endpoint
-// and the error quoting it are both shown without the user info once the
-// check is added to the report.
+// The connectivity check, with a hub that cannot be reached: an endpoint
+// containing "@" is not shown, and the error quoting it is replaced by a
+// fixed note (see doctorDisplayEndpoint and doctorHubError).
 func TestDoctorHubConnectivity_UnreachableRedacted(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	ep := strings.Replace(srv.URL, "http://", "http://tok3n@", 1)
 	srv.Close()
 	res := checkDoctorHubConnectivity(ep, nil)
 	require.Equal(t, "fail", res.Status)
-	assert.Contains(t, res.Message, "Cannot reach Hub at http://xxxxx@127.0.0.1:")
+	assert.Equal(t, "Cannot reach Hub at "+doctorEndpointRedacted+": "+doctorHubErrorHidden, res.Message)
 	var buf bytes.Buffer
 	r := &doctorReport{stdout: &buf}
 	r.add(&r.HubChecks, res)

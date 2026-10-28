@@ -180,7 +180,7 @@ func TestStart_ListSuccessRecordsNewRunEvenIfCreateFails(t *testing.T) {
 			} else {
 				writeRun1AgentInfo(t, projectScionDir, agentDir)
 				entries = []api.AgentInfo{{
-					Name: "tz-agent", ContainerID: "cid-run-1", RunID: "run-1", Phase: "stopped",
+					Name: "tz-agent", ContainerID: "cid-run-1", RunID: "run-1", Phase: "stopped", ProjectID: identityProjB,
 					Labels: map[string]string{"scion.name": "tz-agent", api.LabelRunID: "run-1"},
 				}}
 			}
@@ -195,7 +195,7 @@ func TestStart_ListSuccessRecordsNewRunEvenIfCreateFails(t *testing.T) {
 			}
 			if _, err := NewManager(rt).Start(context.Background(), api.StartOptions{
 				Name: "tz-agent", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true, RunID: "run-2",
-				Template: "default",
+				Template: "default", Env: map[string]string{"SCION_PROJECT_ID": identityProjB},
 			}); err == nil {
 				t.Fatal("Start succeeded although the create failed")
 			}
@@ -220,7 +220,7 @@ func TestStart_RunningEntryKeepsRecordedRun(t *testing.T) {
 	rt := &runtime.MockRuntime{
 		ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
 			return []api.AgentInfo{{
-				Name: "tz-agent", ContainerID: "cid-run-1", RunID: "run-1", Phase: "running",
+				Name: "tz-agent", ContainerID: "cid-run-1", RunID: "run-1", Phase: "running", ProjectID: identityProjB,
 				Labels: map[string]string{"scion.name": "tz-agent", api.LabelRunID: "run-1"},
 			}}, nil
 		},
@@ -231,6 +231,7 @@ func TestStart_RunningEntryKeepsRecordedRun(t *testing.T) {
 	}
 	info, err := NewManager(rt).Start(context.Background(), api.StartOptions{
 		Name: "tz-agent", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true, RunID: "run-2",
+		Env: map[string]string{"SCION_PROJECT_ID": identityProjB},
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)

@@ -401,99 +401,42 @@ func TestSanitizeGitOutput(t *testing.T) {
 	}
 }
 
-func TestBuildAuthenticatedURL(t *testing.T) {
+func TestNormalizeCloneURL(t *testing.T) {
+	// normalizeCloneURL only ensures an https:// scheme; it never embeds a
+	// credential (the token is supplied through a run-time credential helper).
 	tests := []struct {
 		name     string
 		cloneURL string
-		token    string
 		expected string
 	}{
-		{
-			name:     "adds oauth2 credentials to HTTPS URL",
-			cloneURL: "https://github.com/org/repo.git",
-			token:    "ghp_token123",
-			expected: "https://oauth2:ghp_token123@github.com/org/repo.git",
-		},
-		{
-			name:     "no token returns URL unchanged",
-			cloneURL: "https://github.com/org/repo.git",
-			token:    "",
-			expected: "https://github.com/org/repo.git",
-		},
-		{
-			name:     "handles URL without .git suffix",
-			cloneURL: "https://github.com/org/repo",
-			token:    "ghp_abc",
-			expected: "https://oauth2:ghp_abc@github.com/org/repo",
-		},
-		{
-			name:     "handles URL with port",
-			cloneURL: "https://github.example.com:8443/org/repo.git",
-			token:    "tok",
-			expected: "https://oauth2:tok@github.example.com:8443/org/repo.git",
-		},
-		{
-			name:     "schemeless URL gets https prefix added with token",
-			cloneURL: "github.com/org/repo",
-			token:    "ghp_abc",
-			expected: "https://oauth2:ghp_abc@github.com/org/repo",
-		},
-		{
-			name:     "schemeless URL gets https prefix added without token",
-			cloneURL: "github.com/org/repo",
-			token:    "",
-			expected: "https://github.com/org/repo",
-		},
+		{"https URL unchanged", "https://github.com/org/repo.git", "https://github.com/org/repo.git"},
+		{"schemeless URL gets https", "github.com/org/repo", "https://github.com/org/repo"},
+		{"url with port unchanged", "https://github.example.com:8443/org/repo.git", "https://github.example.com:8443/org/repo.git"},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := buildAuthenticatedURL(tt.cloneURL, tt.token)
-			if result != tt.expected {
-				t.Errorf("expected %q, got %q", tt.expected, result)
+			got := normalizeCloneURL(tt.cloneURL)
+			if got != tt.expected {
+				t.Errorf("expected %q, got %q", tt.expected, got)
+			}
+			if strings.Contains(got, "oauth2:") || strings.Contains(got, "@") {
+				t.Errorf("normalized URL must carry no credential, got %q", got)
 			}
 		})
 	}
 }
 
-func TestBuildAuthenticatedURL_SpecialCharsInToken(t *testing.T) {
-	tests := []struct {
-		name     string
-		token    string
-		contains string
-	}{
-		{
-			name:     "token with percent sign",
-			token:    "ghp_abc%def",
-			contains: "oauth2:ghp_abc%25def@",
-		},
-		{
-			name:     "token with at sign",
-			token:    "ghp_abc@def",
-			contains: "oauth2:ghp_abc%40def@",
-		},
-		{
-			name:     "token with hash sign",
-			token:    "ghp_abc#def",
-			contains: "oauth2:ghp_abc%23def@",
-		},
-		{
-			name:     "token with all special characters",
-			token:    "ghp_%@#tok",
-			contains: "oauth2:ghp_%25%40%23tok@",
-		},
+// The in-container clone supplies the token through a run-time credential helper
+// that reads it from the environment, so the token never appears in the helper
+// text constant.
+func TestInitTokenCredentialHelper_NoEmbeddedToken(t *testing.T) {
+	if strings.Contains(initTokenCredentialHelper, "oauth2:") {
+		t.Error("the credential helper must not embed a token in a URL")
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := buildAuthenticatedURL("https://github.com/org/repo.git", tt.token)
-			if !strings.Contains(result, tt.contains) {
-				t.Errorf("expected result to contain %q, got %q", tt.contains, result)
-			}
-		})
+	if !strings.Contains(initTokenCredentialHelper, "${GITHUB_TOKEN}") {
+		t.Errorf("the credential helper must read the token from the environment, got %q", initTokenCredentialHelper)
 	}
 }
-
 func TestDetectDefaultBranch(t *testing.T) {
 	t.Setenv("GIT_CONFIG_COUNT", "1")
 	t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
@@ -3840,5 +3783,187 @@ func runInReaperChild(t *testing.T) {
 	passLine := regexp.MustCompile(`(?m)^--- PASS: ` + quotedName + ` \(`)
 	if !passLine.Match(out) {
 		t.Fatalf("%s did not run in the child test process:\n%s", t.Name(), out)
+	}
+}
+
+// The in-container clone must not put the token on any git argv (the host process
+// list) or leave a credential in .git/config. A PATH-first fake git records every
+// git argv; gitCloneWorkspace clones a local repo with GITHUB_TOKEN set.
+func TestGitCloneWorkspace_NoTokenInArgvOrConfig(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("runs as root; privilege-drop path differs")
+	}
+	const token = "clone-argv-must-not-have-me"
+	root := t.TempDir()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A bare "remote" with one commit.
+	bare := filepath.Join(root, "remote.git")
+	run := func(dir string, args ...string) {
+		t.Helper()
+		c := exec.Command(realGit, args...)
+		c.Dir = dir
+		c.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+filepath.Join(root, "gc"), "GIT_CONFIG_SYSTEM="+os.DevNull)
+		if out, e := c.CombinedOutput(); e != nil {
+			t.Fatalf("git %v: %v\n%s", args, e, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "gc"), []byte("[user]\n\temail=a@b.c\n\tname=A\n[init]\n\tdefaultBranch=main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run(root, "init", "-q", "--bare", bare)
+	seed := filepath.Join(root, "seed")
+	run(root, "init", "-q", "-b", "main", seed)
+	if err := os.WriteFile(filepath.Join(seed, "f.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(seed, "add", ".")
+	run(seed, "-c", "core.hooksPath="+os.DevNull, "commit", "-q", "-m", "init")
+	run(seed, "push", "-q", bare, "main")
+
+	// A PATH-first fake git that logs its argv and execs the real git.
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	argvLog := filepath.Join(root, "argv.log")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '" + argvLog + "'\nexec '" + realGit + "' \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	workspace := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("HOME", root)
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(root, "gc"))
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	t.Setenv("SCION_GIT_CLONE_URL", "file://"+bare)
+	t.Setenv("SCION_WORKSPACE_PATH", workspace)
+	t.Setenv("SCION_GIT_BRANCH", "main")
+	t.Setenv("SCION_GIT_DEPTH", "0")
+	t.Setenv("GITHUB_TOKEN", token)
+	t.Setenv("SCION_AGENT_BRANCH", "")
+	// Set explicitly so the test does not depend on a leaked container variable.
+	t.Setenv("SCION_AGENT_NAME", "test-agent")
+
+	if err := gitCloneWorkspace(0, 0, root, false); err != nil {
+		t.Fatalf("gitCloneWorkspace: %v", err)
+	}
+	// No git argv carried the token.
+	if b, _ := os.ReadFile(argvLog); strings.Contains(string(b), token) {
+		t.Errorf("the token appeared on a git argv:\n%s", b)
+	}
+	// No credential left in the workspace .git/config.
+	if b, _ := os.ReadFile(filepath.Join(workspace, ".git", "config")); strings.Contains(string(b), token) {
+		t.Errorf("the token was left in .git/config:\n%s", b)
+	}
+}
+
+// The actual fetch argv carries the host-scoped credential key
+// (credential.<scheme>://<host>.helper=), not the unscoped credential.helper.
+// The existing argv test above uses a file:// URL (no host -> unscoped fallback),
+// so it cannot catch a fetch that uses the unscoped key; this one uses an https
+// URL and reverting the fetch to the unscoped key turns it red. The fake git
+// blocks the real fetch (no network) but still logs its argv.
+func TestGitCloneWorkspace_FetchUsesHostScopedCredential(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("runs as root; privilege-drop path differs")
+	}
+	const token = "fetch-argv-must-not-have-me"
+	root := t.TempDir()
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "gc"), []byte("[user]\n\temail=a@b.c\n\tname=A\n[init]\n\tdefaultBranch=main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A PATH-first fake git that logs its argv and execs the real git for every
+	// subcommand except fetch and ls-remote, which it fails immediately so the test
+	// never makes a network call (gitCloneWorkspace probes the default branch with
+	// ls-remote after a failed fetch).
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	argvLog := filepath.Join(root, "argv.log")
+	script := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$*\" >> '" + argvLog + "'\n" +
+		"for a in \"$@\"; do if [ \"$a\" = fetch ] || [ \"$a\" = ls-remote ]; then exit 1; fi; done\n" +
+		"exec '" + realGit + "' \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	workspace := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("HOME", root)
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(root, "gc"))
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+	t.Setenv("SCION_GIT_CLONE_URL", "https://github.com/org/repo.git")
+	t.Setenv("SCION_WORKSPACE_PATH", workspace)
+	t.Setenv("SCION_GIT_BRANCH", "main")
+	t.Setenv("SCION_GIT_DEPTH", "0")
+	t.Setenv("GITHUB_TOKEN", token)
+	t.Setenv("SCION_AGENT_BRANCH", "")
+	t.Setenv("SCION_AGENT_NAME", "test-agent")
+
+	// The fetch fails (blocked), so gitCloneWorkspace returns an error; we only
+	// assert on what it put on the fetch argv.
+	_ = gitCloneWorkspace(0, 0, root, false)
+
+	logBytes, _ := os.ReadFile(argvLog)
+	logged := string(logBytes)
+	var fetchLine string
+	for _, line := range strings.Split(logged, "\n") {
+		if strings.Contains(line, " fetch") || strings.HasPrefix(line, "fetch") {
+			fetchLine = line
+			break
+		}
+	}
+	if fetchLine == "" {
+		t.Fatalf("no git fetch was attempted; argv log:\n%s", logged)
+	}
+	if !strings.Contains(fetchLine, "credential.https://github.com.helper=") {
+		t.Errorf("fetch must use the host-scoped credential key, got:\n%s", fetchLine)
+	}
+	if strings.Contains(fetchLine, "-c credential.helper=") {
+		t.Errorf("fetch must not use the unscoped credential.helper key, got:\n%s", fetchLine)
+	}
+	if strings.Contains(logged, token) {
+		t.Errorf("the token must never appear on a git argv:\n%s", logged)
+	}
+}
+
+// The in-container fetch installs the credential helper host-scoped
+// (credential.<scheme>://<host>.helper), so the token is offered only to the
+// clone URL's host. An unscoped key would fail this test.
+func TestScopedCredentialConfigArg_HostScoped(t *testing.T) {
+	got := scopedCredentialConfigArg("https://github.com/org/repo.git")
+	want := "credential.https://github.com.helper=" + initTokenCredentialHelper
+	if got != want {
+		t.Errorf("fetch credential config must be host-scoped:\n got %q\nwant %q", got, want)
+	}
+	// It must NOT be the unscoped key.
+	if strings.HasPrefix(got, "credential.helper=") {
+		t.Errorf("credential helper must be host-scoped, not unscoped: %q", got)
+	}
+	// A schemeless URL is normalized to https and still scoped to the host.
+	if s := scopedCredentialConfigArg("github.com/org/repo"); !strings.HasPrefix(s, "credential.https://github.com.helper=") {
+		t.Errorf("schemeless URL must scope to the https host, got %q", s)
 	}
 }

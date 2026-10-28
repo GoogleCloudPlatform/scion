@@ -86,4 +86,8 @@ type GitHubFileEntry struct {
 	URL  string `json:"url"`  // GitHub CDN download URL (raw.githubusercontent.com)
 	Hash string `json:"hash"` // Git blob SHA for content-addressed caching
 	Size int64  `json:"size"` // File size in bytes
+	// Mode is the normalised file mode from the repository tree, "0755" or
+	// "0644". Rows written before modes were recorded have none and are
+	// re-resolved (ptone/scion#5781).
+	Mode string `json:"mode,omitempty"`
 }

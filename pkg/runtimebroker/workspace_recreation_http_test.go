@@ -111,6 +111,7 @@ func TestStartAgent_SurvivingStateKeepsTemplateUnset(t *testing.T) {
 	agentDir := config.GetAgentDir(projectDir, "kept-agent", false)
 	require.NoError(t, os.MkdirAll(filepath.Join(agentDir, "home"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{"harness":"claude"}`), 0o644))
+	writeProvisionedProfile(t, projectDir, "kept-agent", "")
 
 	postStart(t, srv, "kept-agent", projectDir)
 	require.Equal(t, 1, mgr.startCalls)
@@ -133,6 +134,7 @@ func writeProvisionedAgent(t *testing.T, projectPath, agentName string) {
 	agentDir := config.GetAgentDir(projectDir, agentName, false)
 	require.NoError(t, os.MkdirAll(filepath.Join(agentDir, "home"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{"harness":"claude"}`), 0o644))
+	writeProvisionedProfile(t, projectDir, agentName, "")
 }
 
 // addLiveContainer lists a running container for agentName, recorded in the

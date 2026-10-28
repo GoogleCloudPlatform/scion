@@ -554,10 +554,14 @@ type reincarnateAuthority struct {
 // Any error rolls everything back, so nothing is claimed.
 //
 // Without sa the existing assignment stays in force: the agent ID and its
-// account do not change. If the reincarnation later fails and restores the
-// previous configuration, a replaced assignment is not restored with it, so
-// the restored account differs from the active assignment and its use
-// is refused until the account is assigned again.
+// account do not change. When sa names another account than the agent's
+// active row (or the agent has none), the replacement is restorable: the
+// replaced row is deactivated with cause reincarnate_replaced under the
+// reincarnation ID, and the new row takes the reincarnation ID as its own
+// ID. A failure that restores the previous configuration then restores the
+// replaced row with it (restoreReincarnationAssignment). When sa names the
+// same account, the row is replaced as by any other write (sa_replaced) and
+// stays after a failure, like the re-recorded edge.
 func (s *Server) reincarnateClaimTx(ctx context.Context, agent *store.Agent, rec *store.AgentReincarnation, auth *reincarnateAuthority, sa *store.AgentServiceAccountAssignment, actor AuditActor) error {
 	if agent == nil {
 		return fmt.Errorf("%w: nil agent in reincarnateClaimTx", store.ErrInvalidInput)
@@ -615,10 +619,26 @@ func (s *Server) reincarnateClaimTx(ctx context.Context, agent *store.Agent, rec
 				return fmt.Errorf("reincarnate: record delegation edge: %w", err)
 			}
 		}
+		restorable := false
 		if sa != nil {
 			sa.AgentID = row.ID
 			sa.ProjectID = row.ProjectID
-			if err := tx.ReplaceAgentServiceAccountAssignment(ctx, sa); err != nil {
+			changed, err := claimChangesAssignedAccount(ctx, tx, row.ID, sa.ServiceAccountID)
+			if err != nil {
+				return fmt.Errorf("reincarnate: read service-account assignment: %w", err)
+			}
+			if changed {
+				restorable = true
+				sa.ID = rec.ID
+				err = tx.ReplaceAgentServiceAccountAssignmentWith(ctx, sa, store.Deactivation{
+					Cause: store.EdgeDeactivationReincarnateReplaced,
+					At:    &now,
+					OpID:  rec.ID,
+				})
+			} else {
+				err = tx.ReplaceAgentServiceAccountAssignment(ctx, sa)
+			}
+			if err != nil {
 				return fmt.Errorf("reincarnate: record service-account assignment: %w", err)
 			}
 		}
@@ -642,7 +662,8 @@ func (s *Server) reincarnateClaimTx(ctx context.Context, agent *store.Agent, rec
 			ReRecorded           bool   `json:"re_recorded"`
 			EdgesReplaced        int    `json:"edges_replaced"`
 			ServiceAccountRecord *bool  `json:"service_account_recorded,omitempty"`
-		}{opID, rec.ID, auth != nil, replaced, saRecorded})
+			AssignmentRestorable bool   `json:"service_account_restorable,omitempty"`
+		}{opID, rec.ID, auth != nil, replaced, saRecorded, restorable})
 		if err != nil {
 			return err
 		}
@@ -656,4 +677,23 @@ func (s *Server) reincarnateClaimTx(ctx context.Context, agent *store.Agent, rec
 	}
 	*agent = row
 	return nil
+}
+
+// claimChangesAssignedAccount reports whether a reincarnation claim that
+// records an assignment for serviceAccountID changes the agent's account:
+// the agent has no active assignment, or its one active row names another
+// account. More than one active row is ambiguous and is not treated as a
+// change, so the claim replaces it as any other write does.
+func claimChangesAssignedAccount(ctx context.Context, tx store.Store, agentID, serviceAccountID string) (bool, error) {
+	rows, err := tx.GetActiveAgentServiceAccountAssignments(ctx, agentID)
+	if err != nil {
+		return false, err
+	}
+	switch len(rows) {
+	case 0:
+		return true, nil
+	case 1:
+		return rows[0].ServiceAccountID != serviceAccountID, nil
+	}
+	return false, nil
 }

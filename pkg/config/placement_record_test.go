@@ -15,6 +15,8 @@
 package config
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -125,6 +127,21 @@ func TestProjectSettingsDefinesRuntime(t *testing.T) {
 		dir := projectDir(t, "", "")
 		if err := os.Mkdir(filepath.Join(dir, "settings.yaml"), 0755); err != nil {
 			t.Fatal(err)
+		}
+		if !ProjectSettingsDefinesRuntime(dir, "gke") {
+			t.Error("want true (fail closed)")
+		}
+	})
+	t.Run("project settings file that cannot be stat'd fails closed", func(t *testing.T) {
+		// settings.yaml is a symlink to itself: stat fails with a loop
+		// error, not not-exist. This does not depend on file permissions,
+		// so it holds when the tests run as root.
+		dir := projectDir(t, "", "")
+		if err := os.Symlink("settings.yaml", filepath.Join(dir, "settings.yaml")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "settings.yaml")); err == nil || errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("setup: want a stat error other than not-exist, got %v", err)
 		}
 		if !ProjectSettingsDefinesRuntime(dir, "gke") {
 			t.Error("want true (fail closed)")

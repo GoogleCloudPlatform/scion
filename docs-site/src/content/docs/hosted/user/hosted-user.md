@@ -17,7 +17,7 @@ scion hub auth login --hub team
 scion use --hub team
 ```
 
-`scion --hub https://hub.example.com hub auth login` also adds a Hub URL that is not in the list yet, with a nickname derived from its host; it does not make it the current Hub. Commands run outside a project directory now target the current Hub. To pick a project on it as well, run `scion use <project>`; then commands such as `scion list` and `scion start` work from any directory without `--project`. See [Working with Several Hubs](/scion/hosted/user/multiple-hubs/) for the hub list, `scion use`, and how the CLI chooses a Hub and project.
+`scion --hub https://hub.example.com hub auth login` also adds a Hub URL that is not in the list yet, with a nickname derived from its host; when no Hub is current yet, it also becomes the current Hub, and a login never switches a Hub that is already current. Commands run outside a project directory now target the current Hub. To pick a project on it as well, run `scion use <project>`; then commands such as `scion list` and `scion start` work from any directory without `--project`. See [Working with Several Hubs](/scion/hosted/user/multiple-hubs/) for the hub list, `scion use`, and how the CLI chooses a Hub and project.
 
 **Note:** In workstation mode, a background `scion server start` (the default) adds the local Hub as `local` for you. Authentication is not required there: the CLI uses a machine-specific developer token, and the Hub listens only on localhost.
 

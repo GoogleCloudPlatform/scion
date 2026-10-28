@@ -677,8 +677,12 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		agentID = msg.SenderID
 	}
 
+	storeID := msg.StoredMessageID
+	if storeID == "" {
+		storeID = api.NewUUID()
+	}
 	storeMsg := &store.Message{
-		ID:          api.NewUUID(),
+		ID:          storeID,
 		ProjectID:   projectID,
 		Sender:      msg.Sender,
 		SenderID:    msg.SenderID,
@@ -696,124 +700,22 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		DispatchState: store.MessageDispatchDispatched,
 		CreatedAt:     time.Now(),
 	}
-	// Phase 5 dual-write: resolve-or-create conversation for broker-delivered user messages.
-	// Skip broadcasts — they are ephemeral and do not belong to a conversation.
-	if !msg.Broadcasted {
-		var convResult *messaging.ConversationResult
-
-		// DEF-138 P-3: honour a pre-resolved ConversationID from the
-		// upstream handler instead of re-deriving. The handler resolved
-		// and stamped structuredMsg before publishing to the broker.
-		// Re-deriving here produced the inbound/outbound conversation
-		// split: the handler resolved a thread conversation, then the
-		// broker re-derived a DM because the agent's reply carries no
-		// ThreadID. Note: non-emptiness means "already resolved upstream"
-		// — it does NOT mean "the caller asserted this". Provenance is
-		// carried by ConversationAsserted (DEF-141).
+	// A message the sending handler already stored (StoredMessageID,
+	// ptone/scion#4596 decision D2): the handler resolved its conversation,
+	// stored, linked and bound its attachments, stamped the watermarks and
+	// published the SSE event. Only the message record runs here, so no
+	// second row and no second event exist; msg is shared with the bus's
+	// other subscribers and is left unchanged (ptone/scion#5504).
+	if msg.StoredMessageID != "" {
 		if msg.ConversationID != "" {
 			storeMsg.ConversationID = msg.ConversationID
-			// Build a minimal ConversationResult for divergence logging.
-			// We do not re-fetch the conversation row — the handler
-			// already looked it up (explicit path) or created it
-			// (derivation path), and re-querying would add latency for
-			// information we have.
-			convResult = &messaging.ConversationResult{
-				ConversationID: msg.ConversationID,
-			}
-		} else if msg.ThreadID != "" {
-			var threadOpts []messaging.ThreadConversationOption
-			if p.webChatStore != nil {
-				threadOpts = append(threadOpts, messaging.WithTopicLookup(p.webChatStore))
-			}
-			if surface := messaging.ChannelToSurface(msg.Channel, p.log); surface != "native" {
-				threadOpts = append(threadOpts, messaging.WithThreadSurface(surface))
-			}
-			// A25.6 F1/F3: msg.ThreadID may carry a dm: prefix, in which case
-			// this resolves as kind=="direct"; register both principals so
-			// the conversation is discoverable via `conversation list`.
-			threadOpts = append(threadOpts, messaging.WithThreadParticipants(p.store))
-			var convErr error
-			convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
-			if convErr != nil {
-				if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
-					messaging.WriteDenialMetrics.Inc("mb.user.thread")
-					p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
-					return
-				}
-				p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
-			}
-		} else if msg.SenderID != "" && msg.RecipientID != "" {
-			senderKind, sOK := messages.PrincipalKindFromAddress(msg.Sender)
-			recipientKind, rOK := messages.PrincipalKindFromAddress(msg.Recipient)
-			if sOK && rOK {
-				// Only here, where DM key derivation would fail anyway: the
-				// undetermined-kind branch below persists without a
-				// conversation, as before.
-				if !canPersistUserDM(msg.RecipientID, p.writeDenyEnabled != nil && p.writeDenyEnabled()) {
-					messaging.WriteDenialMetrics.Inc("mb.user.dm")
-					p.log.Error("DM recipient is not a canonical UUID under write-deny, message not persisted",
-						"notification_id", notificationIDFromContext(ctx))
-					return
-				}
-				var convErr error
-				convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, recipientKind, msg.RecipientID)
-				if convErr != nil {
-					if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
-						messaging.WriteDenialMetrics.Inc("mb.user.dm")
-						p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
-						return
-					}
-					p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
-				}
-			} else {
-				p.log.Warn("skipping DM conversation resolution: principal kind undetermined",
-					"sender", msg.Sender, "sender_ok", sOK, "recipient", msg.Recipient, "recipient_ok", rOK)
-			}
 		}
-		if convResult != nil && storeMsg.ConversationID == "" {
-			storeMsg.ConversationID = convResult.ConversationID
-		}
-		// DEF-141: Classification is a three-way decision on provenance,
-		// separated from the honouring block above. Honouring is gated on
-		// non-emptiness (P-3, must not regress). Classification branches on
-		// ConversationAsserted — never on ConversationID != "".
-		switch {
-		case msg.ConversationAsserted:
-			// Caller named a conversation and the handler authorized it.
-			messaging.LogExplicitRouting(p.log, storeMsg.ID, storeMsg.ConversationID)
-
-		case msg.ConversationID != "":
-			// Handler-derived and propagated. Deliberately NOT compared:
-			// ComputeDivergenceMatch would take both sides from the same input
-			// fields in the same request, so the verdict is tautological (DEF-139,
-			// [^72]/[^73]). Counting it as a "match" would inflate the board with
-			// confirmations that confirm nothing. CheckConversationConsistency
-			// below is the independent check and runs on every path regardless.
-			messaging.LogDerivedRouting(p.log, storeMsg.ID, storeMsg.ConversationID)
-
-		default:
-			// No pre-resolved conversation — compare old-model vs new-model routing.
-			oldRouting := messaging.OldRoutingFromMessage(msg.SenderID, msg.RecipientID, msg.ThreadID)
-			convID := ""
-			actualRef := ""
-			if convResult != nil {
-				convID = convResult.ConversationID
-				actualRef = convResult.ExternalRef
-			}
-			match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
-			messaging.LogDivergence(p.log, messaging.DivergenceEntry{
-				MessageID:  storeMsg.ID,
-				OldRouting: oldRouting,
-				NewRouting: messaging.NewRoutingStr(convID),
-				Match:      match,
-				Reason:     reason,
-			})
-		}
-		// DEF-3: Independent consistency check against prior messages.
-		if consistent := messaging.CheckConversationConsistency(ctx, p.store, storeMsg.ID, storeMsg.ConversationID, msg.ThreadID, msg.SenderID, msg.RecipientID, p.log); !consistent {
-			p.log.Warn("DEF-3: conversation consistency mismatch (user message from broker)",
-				"message_id", storeMsg.ID, "conversation_id", storeMsg.ConversationID)
-		}
+		p.logUserMessageDelivered(projectID, topic, storeMsg, msg)
+		recorded = true
+		return
+	}
+	if !p.resolveUserMessageConversation(ctx, projectID, storeMsg, msg) {
+		return
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist user message from broker", "topic", topic, "error", err)
@@ -826,22 +728,28 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		return
 	}
 
-	// W7: Link the sender's attachments, recorded before publish, to the message
-	// row created here — the ID they need exists nowhere else. Done before the
-	// SSE event so a client refetching on it already sees them. Only files the
-	// sender owns are linked (linkSenderOwnedAttachmentRefs): the refs come
-	// from message metadata, and a linked file downloads for the message's
-	// readers. The live event below carries exactly the linked refs, the
-	// files history lists (ptone/scion#5504). msg is shared with the bus's
-	// other subscribers, so its metadata, transport key included, is left
-	// as it is: nothing below reads the attachments key.
+	// Attachments on this re-publish path (ptone/scion#4596, ptone/scion#5504;
+	// W7). msg is shared with the bus's other subscribers: nothing here
+	// modifies it, its metadata (transport key included) or the maps it holds.
+	// The AttachmentStore refs parsed from the transport metadata are linked
+	// to the row created here, the only place their message ID exists, before
+	// the SSE event, so a client refetching on it already sees them. A ref is
+	// linked only after it passes the AttachmentStore lookup and the sender
+	// ownership check (linkSenderOwnedAttachmentRefs), and the SSE event and
+	// the member fan-out carry exactly the linked refs, the files history
+	// lists. A linked file downloads for the message's readers, so naming it
+	// to them discloses nothing they may not read. An attachment stored as an
+	// artifact is not an AttachmentStore file, so an artifact id that appears
+	// in transport metadata fails the lookup and is dropped: this path never
+	// binds or publishes one (artifact references come only from the admitted
+	// references below). Pinned by
+	// TestDeliverToUser_RepublishCarriesNoArtifactAttachments.
 	linkedRefs := linkSenderOwnedAttachmentRefs(ctx, p.webChatStore, storeMsg.ID, projectID, msg.SenderID, parseAttachmentRefs(msg.Metadata), p.log)
 
 	// Artifact references are recorded only when the hub's admission step
 	// set them on this in-process message. Any other value is ignored: it
-	// is never recorded, and nothing below reads it. msg is shared with the
-	// bus's other subscribers, so it is not modified here. The live chat
-	// event carries exactly the references recorded here.
+	// is never recorded, and nothing below reads it. The live chat event
+	// carries exactly the references recorded here.
 	var artifactRefs []artifacts.MessageRef
 	if msg.ArtifactRefsAdmitted && p.recordArtifactRefs != nil {
 		if refs, _ := artifacts.ParseMessageRefs(msg.Metadata[artifacts.MessageMetadataKey]); len(refs) > 0 {
@@ -849,6 +757,25 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		}
 	}
 
+	p.afterUserMessagePersisted(ctx, storeMsg)
+
+	// Publish SSE event so connected browser clients receive real-time inbox updates.
+	p.events.PublishUserMessage(ctx, storeMsg, linkedRefs, artifactRefs)
+	if p.memberFanout != nil {
+		p.memberFanout(ctx, storeMsg, linkedRefs, artifactRefs)
+	}
+
+	p.logUserMessageDelivered(projectID, topic, storeMsg, msg)
+	recorded = true
+}
+
+// afterUserMessagePersisted runs the watermark steps of a stored user
+// message, with its stored id, before its SSE event is published: the DM or
+// topic watermark, then the cross-channel DM watermark. deliverToUser runs
+// it, and so does a sending handler that stores the message itself
+// (ptone/scion#4596, decision D2), so a client that refetches the rail on
+// the event already sees the new last_message_id.
+func (p *MessageBrokerProxy) afterUserMessagePersisted(ctx context.Context, storeMsg *store.Message) {
 	// Stamp the DM watermark with the store-assigned message ID. The web
 	// channel spoke already registered the participant rows and bumped
 	// last_activity_at, but it runs before the ID exists — without this the
@@ -899,13 +826,11 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 			}
 		}
 	}
+}
 
-	// Publish SSE event so connected browser clients receive real-time inbox updates.
-	p.events.PublishUserMessage(ctx, storeMsg, linkedRefs, artifactRefs)
-	if p.memberFanout != nil {
-		p.memberFanout(ctx, storeMsg, linkedRefs, artifactRefs)
-	}
-
+// logUserMessageDelivered writes the message record of a user message
+// delivered through the broker.
+func (p *MessageBrokerProxy) logUserMessageDelivered(projectID, topic string, storeMsg *store.Message, msg *messages.StructuredMessage) {
 	// Log to dedicated message audit log
 	if p.messageLog != nil {
 		logAttrs := []any{
@@ -913,7 +838,9 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 			"topic", topic,
 			"source", "broker",
 		}
-		// A copy: msg is shared with the bus's other subscribers.
+		// A shallow copy, so ConversationID can be set for the record: msg is
+		// shared with the bus's other subscribers. Metadata is the same map as
+		// msg's; do not modify it here.
 		logged := *msg
 		if storeMsg.ConversationID != "" {
 			logged.ConversationID = storeMsg.ConversationID
@@ -921,7 +848,136 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 		logAttrs = append(logAttrs, logged.LogAttrs()...)
 		p.messageLog.Info("user message delivered via broker", logAttrs...)
 	}
-	recorded = true
+}
+
+// resolveUserMessageConversation resolves or creates the conversation of a
+// user message before it is stored (Phase 5 dual-write), sets
+// storeMsg.ConversationID, logs the routing classification and runs the
+// DEF-3 consistency check. Broadcasts are skipped: they are ephemeral and
+// belong to no conversation. It reports false when the message must not be
+// stored (a resolution failure while write-deny is on). deliverToUser and a
+// sending handler that stores the message itself (ptone/scion#4596,
+// decision D2) share it.
+func (p *MessageBrokerProxy) resolveUserMessageConversation(ctx context.Context, projectID string, storeMsg *store.Message, msg *messages.StructuredMessage) bool {
+	if msg.Broadcasted {
+		return true
+	}
+	var convResult *messaging.ConversationResult
+
+	// DEF-138 P-3: honour a pre-resolved ConversationID from the
+	// upstream handler instead of re-deriving. The handler resolved
+	// and stamped structuredMsg before publishing to the broker.
+	// Re-deriving here produced the inbound/outbound conversation
+	// split: the handler resolved a thread conversation, then the
+	// broker re-derived a DM because the agent's reply carries no
+	// ThreadID. Note: non-emptiness means "already resolved upstream"
+	// — it does NOT mean "the caller asserted this". Provenance is
+	// carried by ConversationAsserted (DEF-141).
+	if msg.ConversationID != "" {
+		storeMsg.ConversationID = msg.ConversationID
+		// Build a minimal ConversationResult for divergence logging.
+		// We do not re-fetch the conversation row — the handler
+		// already looked it up (explicit path) or created it
+		// (derivation path), and re-querying would add latency for
+		// information we have.
+		convResult = &messaging.ConversationResult{
+			ConversationID: msg.ConversationID,
+		}
+	} else if msg.ThreadID != "" {
+		var threadOpts []messaging.ThreadConversationOption
+		if p.webChatStore != nil {
+			threadOpts = append(threadOpts, messaging.WithTopicLookup(p.webChatStore))
+		}
+		if surface := messaging.ChannelToSurface(msg.Channel, p.log); surface != "native" {
+			threadOpts = append(threadOpts, messaging.WithThreadSurface(surface))
+		}
+		// A25.6 F1/F3: msg.ThreadID may carry a dm: prefix, in which case
+		// this resolves as kind=="direct"; register both principals so
+		// the conversation is discoverable via `conversation list`.
+		threadOpts = append(threadOpts, messaging.WithThreadParticipants(p.store))
+		var convErr error
+		convResult, convErr = messaging.ResolveOrCreateThreadConversation(ctx, p.store, p.log, msg.ThreadID, projectID, threadOpts...)
+		if convErr != nil {
+			if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
+				messaging.WriteDenialMetrics.Inc("mb.user.thread")
+				p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
+				return false
+			}
+			p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+		}
+	} else if msg.SenderID != "" && msg.RecipientID != "" {
+		senderKind, sOK := messages.PrincipalKindFromAddress(msg.Sender)
+		recipientKind, rOK := messages.PrincipalKindFromAddress(msg.Recipient)
+		if sOK && rOK {
+			// Only here, where DM key derivation would fail anyway: the
+			// undetermined-kind branch below persists without a
+			// conversation, as before.
+			if !canPersistUserDM(msg.RecipientID, p.writeDenyEnabled != nil && p.writeDenyEnabled()) {
+				messaging.WriteDenialMetrics.Inc("mb.user.dm")
+				p.log.Error("DM recipient is not a canonical UUID under write-deny, message not persisted",
+					"notification_id", notificationIDFromContext(ctx))
+				return false
+			}
+			var convErr error
+			convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, recipientKind, msg.RecipientID)
+			if convErr != nil {
+				if p.writeDenyEnabled != nil && p.writeDenyEnabled() {
+					messaging.WriteDenialMetrics.Inc("mb.user.dm")
+					p.log.Error("conversation resolution failed, message not persisted", "error", convErr)
+					return false
+				}
+				p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
+			}
+		} else {
+			p.log.Warn("skipping DM conversation resolution: principal kind undetermined",
+				"sender", msg.Sender, "sender_ok", sOK, "recipient", msg.Recipient, "recipient_ok", rOK)
+		}
+	}
+	if convResult != nil && storeMsg.ConversationID == "" {
+		storeMsg.ConversationID = convResult.ConversationID
+	}
+	// DEF-141: Classification is a three-way decision on provenance,
+	// separated from the honouring block above. Honouring is gated on
+	// non-emptiness (P-3, must not regress). Classification branches on
+	// ConversationAsserted — never on ConversationID != "".
+	switch {
+	case msg.ConversationAsserted:
+		// Caller named a conversation and the handler authorized it.
+		messaging.LogExplicitRouting(p.log, storeMsg.ID, storeMsg.ConversationID)
+
+	case msg.ConversationID != "":
+		// Handler-derived and propagated. Deliberately NOT compared:
+		// ComputeDivergenceMatch would take both sides from the same input
+		// fields in the same request, so the verdict is tautological (DEF-139,
+		// [^72]/[^73]). Counting it as a "match" would inflate the board with
+		// confirmations that confirm nothing. CheckConversationConsistency
+		// below is the independent check and runs on every path regardless.
+		messaging.LogDerivedRouting(p.log, storeMsg.ID, storeMsg.ConversationID)
+
+	default:
+		// No pre-resolved conversation — compare old-model vs new-model routing.
+		oldRouting := messaging.OldRoutingFromMessage(msg.SenderID, msg.RecipientID, msg.ThreadID)
+		convID := ""
+		actualRef := ""
+		if convResult != nil {
+			convID = convResult.ConversationID
+			actualRef = convResult.ExternalRef
+		}
+		match, reason := messaging.ComputeDivergenceMatch(oldRouting, actualRef, convID)
+		messaging.LogDivergence(p.log, messaging.DivergenceEntry{
+			MessageID:  storeMsg.ID,
+			OldRouting: oldRouting,
+			NewRouting: messaging.NewRoutingStr(convID),
+			Match:      match,
+			Reason:     reason,
+		})
+	}
+	// DEF-3: Independent consistency check against prior messages.
+	if consistent := messaging.CheckConversationConsistency(ctx, p.store, storeMsg.ID, storeMsg.ConversationID, msg.ThreadID, msg.SenderID, msg.RecipientID, p.log); !consistent {
+		p.log.Warn("DEF-3: conversation consistency mismatch (user message from broker)",
+			"message_id", storeMsg.ID, "conversation_id", storeMsg.ConversationID)
+	}
+	return true
 }
 
 // subscribeGlobalBroadcast creates a broker subscription for global broadcasts.

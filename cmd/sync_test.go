@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -311,5 +312,29 @@ func TestSyncToViaHub_AppliesExcludeFlag(t *testing.T) {
 	want := []string{"docs/readme.md", "main.go"}
 	if !slices.Equal(gotPaths, want) {
 		t.Errorf("SyncTo request files = %v, want %v", gotPaths, want)
+	}
+}
+
+// Project-level sync (bare, push and pull) was removed with the hub's WebDAV
+// endpoint. Each form must fail before touching a hub, as a usage error that
+// points at agent sync.
+func TestRunSync_ProjectModeRemoved(t *testing.T) {
+	for _, args := range [][]string{nil, {"push"}, {"pull"}, {"push", "my-agent"}, {"pull", "my-agent"}} {
+		err := runSync(syncCmd, args)
+		if err == nil {
+			t.Fatalf("scion sync %v: expected an error", args)
+		}
+		if !isUsageError(err) {
+			t.Errorf("scion sync %v: want a usage error, got %T: %v", args, err, err)
+		}
+		for _, want := range []string{"project-level sync", "has been removed", "scion sync to <agent>", "scion sync from <agent>"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("scion sync %v: error %q does not mention %q", args, err.Error(), want)
+			}
+		}
+	}
+
+	if syncCmd.Flags().Lookup("force") != nil {
+		t.Error("--force only served project bisync and should be gone")
 	}
 }

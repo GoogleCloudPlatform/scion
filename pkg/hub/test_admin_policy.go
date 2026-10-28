@@ -97,6 +97,7 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"agent.delegation.credential.revoke": testAdminPolicyDeny,
 	"agent.delegation.list":              testAdminPolicyDeny,
 	"agent.delegation.read":              testAdminPolicyDeny,
+	"agent.delegation.revoke_all":        testAdminPolicyDeny,
 	// Agent-principal permissions: only agent credentials use them.
 	"agent.status_update":  testAdminPolicyAllow,
 	"agent.log_append":     testAdminPolicyAllow,
@@ -115,6 +116,9 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"project.set_messaging_policy": testAdminPolicyAllow,
 	"project.clone":                testAdminPolicyAllow,
 	"project.list":                 testAdminPolicyAllow,
+	// Posting into a project's chat threads, held by the built-in
+	// project roles.
+	"project.chat_post": testAdminPolicyAllow,
 	// Visitor access for federated accounts (ptone/scion#4603): deny. A
 	// test hub is not federated (A0 gate), like federation.project_visitors.
 	// Still grantable at project scope (testAdminGrantableAtProjectScope):
@@ -436,6 +440,8 @@ var testAdminSettingsSectionPolicy = map[string]testAdminPolicy{
 	"experiments":       testAdminPolicyDeny,
 	"artifacts":         testAdminPolicyDeny,
 	"profiling":         testAdminPolicyDeny,
+
+	"agent_delegation_policy": testAdminPolicyDeny,
 }
 
 // testAdminSettingsKeyPolicy classifies every operational settings key
@@ -460,6 +466,7 @@ var testAdminSettingsKeyPolicy = map[string]testAdminPolicy{
 	"telemetry.cloud.protocol":                 testAdminPolicyDeny,
 	"telemetry.cloud.headers":                  testAdminPolicyDeny,
 	"telemetry.cloud.provider":                 testAdminPolicyDeny,
+	"telemetry.cloud.gcp_project_id":           testAdminPolicyDeny,
 	"telemetry.cloud.tls":                      testAdminPolicyDeny,
 	"telemetry.cloud.tls.enabled":              testAdminPolicyDeny,
 	"telemetry.cloud.tls.insecure_skip_verify": testAdminPolicyDeny,
@@ -555,9 +562,17 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.Artifacts:                    testAdminPolicyDeny,
 	"hub.conduit":                            testAdminPolicyDeny,
 	experiments.ChatScheduledSend:            testAdminPolicyDeny,
+	experiments.ChatStarredMessages:          testAdminPolicyDeny,
 	experiments.AgentEdit:                    testAdminPolicyDeny,
+	experiments.AgentEditHeld:                testAdminPolicyDeny,
 	experiments.AttachmentArtifacts:          testAdminPolicyDeny,
 	experiments.AgentPlugins:                 testAdminPolicyDeny,
+	experiments.AgentBadges:                  testAdminPolicyDeny,
+	experiments.SSEHiddenTabClose:            testAdminPolicyDeny,
+	experiments.SecretRotation:               testAdminPolicyDeny,
+	experiments.ContentHashV2:                testAdminPolicyDeny,
+	experiments.ArtifactReviewEditor:         testAdminPolicyDeny,
+	experiments.SkillContentHashV2:           testAdminPolicyDeny,
 }
 
 // testAdminPolicyInputs are the vocabularies the classification must cover.

@@ -177,6 +177,13 @@ type Config struct {
 	// failed self-check is logged and the relay registers as unaddressable,
 	// so no other node routes to it.
 	RequireSelfCheck bool
+	// Singleton marks a non-HA singleton relay (server.relay.singleton;
+	// design §3.9 "Cloud Run singleton"): it registers the relay feature
+	// singleton, retries its startup self-check for up to
+	// SingletonSelfCheckBound before registering, and on every heartbeat
+	// counts the other live rows sharing its internal endpoint
+	// (SingletonEndpointPeers).
+	Singleton bool
 	// Registry is the conduit registry. Required.
 	Registry *registry.Registry
 	// Store is the registry's store (the one Registry wraps). Required:
@@ -292,6 +299,10 @@ type Relay struct {
 	// the state became stopped, so an Add never races a Wait.
 	wg     sync.WaitGroup
 	serves sync.WaitGroup
+
+	// singletonPeers is the count of other live, non-draining rows with
+	// this singleton's internal endpoint at the last check.
+	singletonPeers atomic.Int64
 
 	// bridges tracks owner-side stream bridges (internal stream WS
 	// handlers) so tests can prove none leak.
@@ -455,7 +466,10 @@ func (r *Relay) Start(ctx context.Context) error {
 	r.mu.Unlock()
 
 	endpoint := r.cfg.InternalEndpoint
-	if err := registry.SelfCheck(ctx, endpoint, r.cfg.InstanceID, r.probe); err != nil {
+	if err := r.selfCheck(ctx, endpoint); err != nil {
+		if r.cfg.Singleton {
+			return fmt.Errorf("conduit relay %s: startup failed (non-HA singleton): %w", r.cfg.InstanceID, err)
+		}
 		if r.cfg.RequireSelfCheck {
 			return fmt.Errorf("conduit relay %s: owner-addressability self-check failed (hosted-HA requires an addressable relay; set --internal-listen and an internal endpoint that reaches exactly this process): %w", r.cfg.InstanceID, err)
 		}
@@ -468,7 +482,11 @@ func (r *Relay) Start(ctx context.Context) error {
 		InstanceID:       r.cfg.InstanceID,
 		InternalEndpoint: endpoint,
 		PublicEndpoint:   r.cfg.PublicEndpoint,
+		Features:         r.relayFeatures(),
 	})
+	if errors.Is(err, registry.ErrRelayFeaturesColumnMissing) {
+		return fmt.Errorf("conduit relay %s: cannot register: %w (upgrade the hubs, which migrate the schema, before the relays)", r.cfg.InstanceID, registry.ErrRelayFeaturesColumnMissing)
+	}
 	if err != nil {
 		return fmt.Errorf("conduit relay %s: register: %w", r.cfg.InstanceID, err)
 	}
@@ -482,7 +500,12 @@ func (r *Relay) Start(ctx context.Context) error {
 	r.mu.Lock()
 	r.gen, r.endpoint, r.state = gen, endpoint, stateServing
 	r.mu.Unlock()
-	r.log.Info("Conduit relay serving", "generation", gen, "internal_endpoint", endpoint)
+	if r.cfg.Singleton {
+		r.log.Info("Conduit relay serving as a non-HA singleton", "generation", gen, "internal_endpoint", endpoint)
+		r.checkSingletonPeers(ctx)
+	} else {
+		r.log.Info("Conduit relay serving", "generation", gen, "internal_endpoint", endpoint)
+	}
 	r.armHeartbeat()
 	return nil
 }
@@ -515,6 +538,10 @@ func (r *Relay) heartbeat() {
 		// registry already treats our sessions as stale, so nobody
 		// routes to them; the next successful beat restores them.
 		r.log.Warn("Conduit relay heartbeat failed", "error", err)
+	case r.cfg.Singleton:
+		pctx, pcancel := context.WithTimeout(context.Background(), r.cfg.HeartbeatInterval)
+		r.checkSingletonPeers(pctx)
+		pcancel()
 	}
 	r.armHeartbeat()
 }

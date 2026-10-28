@@ -74,6 +74,8 @@ Things to know before you publish:
 
 Open a project, go to its **Files** area and choose the **Artifacts** view. **New artifact** uploads a file, or a folder with a chosen entry file, with a title, an optional key and an optional note. The new artifact is homed in that project.
 
+You can also start from the **Artifacts** item in the sidebar. Its **New artifact** asks which project to home the artifact in. It offers only the projects where you may publish (for example, as owner, as a member with publish rights, or as an admin), and preselects the Hub's global project when you may publish there. If you may not publish in any project, the button is disabled and says so. After publishing, the new artifact's page opens.
+
 You can also start from chat: in a conversation that belongs to a project, when the **Attach artifact…** picker has nothing to list, it offers **New artifact**, and the new artifact is attached to your message.
 
 ## Publish new versions and get an artifact
@@ -161,6 +163,14 @@ On the current version of a Markdown artifact, choose **Review**. An editor open
 1. Select text and choose **Comment**, **Suggest**, **Insert** or **Delete** to add a mark. Marks cannot be nested, and the toolbar refuses a selection that falls inside code; a short hint says why.
 2. **Save review** publishes your marked-up copy as a version of kind *review*, with an optional note. It stays disabled until there is at least one mark, and while text outside your marks differs from the version you started from.
 3. If someone publishes a newer version while you review, your review is not saved. The editor restarts from the current version, and your text is shown read-only with **Copy** so you can redo your marks.
+
+:::note[Graphical review editor (experimental)]
+When the `web.artifact_review_editor` [experiment](/scion/reference/experiments/) is on (in addition to `hub.artifacts`), **Review** opens a graphical review editor with a **Graphical** and **Source** view toggle:
+- In **Graphical** view (**Track changes** is always on), you edit the rendered document directly: typing, deleting and replacing text are recorded inline as CriticMarkup suggestions, and **Comment** (`Ctrl+Alt+M` or `Cmd+Alt+M`) adds a note on the selection (`Enter` edits a comment you added in this review; comments from earlier reviews are read-only).
+- Changes that cannot be recorded in the graphical view — formatting, headings, lists, tables, code blocks, paragraph breaks, multi-paragraph paste, or edits that would move an earlier comment — show a hint to switch to **Source** view.
+- **Source** view uses the CriticMarkup source editor and toolbar (**Comment**, **Suggest**, **Insert**, **Delete**). Suggestions you made in the graphical view become read-only in the graphical view after you switch to **Source**, though you can still edit them in **Source**. Undo history is kept per view and resets when you switch, and your last chosen view is remembered in the browser.
+- Every save goes through the same review publish and Hub checks whether or not `web.artifact_review_editor` is on.
+:::
 
 While a review is the current version, the artifact shows a *Review pending* badge (also in the Artifacts list), and a banner names the reviewer and counts the marks. On a review, the preview's **Marks · Clean · Accepted** switch shows the marks, the text with every mark rejected, or the text with every mark accepted.
 

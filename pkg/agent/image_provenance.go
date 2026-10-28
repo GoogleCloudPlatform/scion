@@ -263,6 +263,18 @@ func logImageProvenanceError(agentName string, err error) {
 	}
 }
 
+// ProvisionedTemplate returns the template and template content hash
+// recorded in the image provenance record in agentDir (a broker-side agent
+// dir). ok is false when there is no record; a record that exists but is
+// unusable is an *ImageProvenanceError.
+func ProvisionedTemplate(agentDir string) (template, templateHash string, ok bool, err error) {
+	p, err := readImageProvenance(agentDir)
+	if err != nil || p == nil {
+		return "", "", false, err
+	}
+	return p.Template, p.TemplateHash, true, nil
+}
+
 // ProvisionedTemplateHash returns the content hash of the template agentName
 // was provisioned from when it was loaded from a content-addressed cache
 // (broker-side image provenance), or "" when none is recorded or the agent

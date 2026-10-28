@@ -17,6 +17,8 @@ package config
 import (
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact/urlredacttest"
 )
 
 func TestRedactDatabaseURL(t *testing.T) {
@@ -202,6 +204,37 @@ func TestRedactDatabaseURL_NeverLeaksPassword(t *testing.T) {
 		got := RedactDatabaseURL(d.driver, d.dsn)
 		if strings.Contains(got, fakePassword) {
 			t.Errorf("RedactDatabaseURL(%q, %q) = %q leaked the password", d.driver, d.dsn, got)
+		}
+	}
+}
+
+// A URL-style connection string whose password holds a '/', '?', '#' or
+// '@' is shown whole only when url.Parse places its password exactly;
+// otherwise it is replaced by the placeholder. The whole output is pinned,
+// and no 4-byte part of the password is shown. Every value is made up.
+func TestRedactDatabaseURL_PasswordDelimiters(t *testing.T) {
+	for _, tc := range []struct {
+		name, dsn, secret, want string
+	}{
+		{"slash in password", "postgres://scion:Qv7/Lm3x@db.example.com:5432/scion", "Qv7/Lm3x", redactedPlaceholder},
+		{"question mark in password", "postgres://scion:Qv7?Lm3x@db.example.com/scion", "Qv7?Lm3x", redactedPlaceholder},
+		{"hash in password", "postgres://scion:Qv7#Lm3x@db.example.com/scion", "Qv7#Lm3x", redactedPlaceholder},
+		{"password read as a port and a path", "postgres://scion:4821/Lm3x@db.example.com/scion", "4821/Lm3x", redactedPlaceholder},
+		{"password read as a port, then '?'", "postgres://scion:4821?Lm3x@db.example.com/scion", "4821?Lm3x", redactedPlaceholder},
+		{"password read as a port, then '#'", "postgres://scion:4821#Lm3x@db.example.com/scion", "4821#Lm3x", redactedPlaceholder},
+		{"'@' then '/' in password", "postgres://scion:Qv7@Lm/3x@db.example.com/scion", "Qv7@Lm/3x", redactedPlaceholder},
+		{"token read as a host", "postgres://Qv7Lm3x/k@db.example.com/scion", "Qv7Lm3x/k", redactedPlaceholder},
+		{"space in password", "postgres://scion:Qv7 Lm3x@db.example.com/scion", "Qv7 Lm3x", redactedPlaceholder},
+		{"second '@' in password", "postgres://scion:Qv7@Lm3x@db.example.com/scion", "Qv7@Lm3x", "postgres://scion:xxxxx@db.example.com/scion"},
+		{"socket in the query", "postgres://scion:Qv7Lm3x@/scion?host=/cloudsql/p:r:i", "Qv7Lm3x", "postgres://scion:xxxxx@/scion?host=/cloudsql/p:r:i"},
+		{"no credential", "postgres://db.example.com:5432/scion?sslmode=require", "", "postgres://db.example.com:5432/scion?sslmode=require"},
+	} {
+		got := RedactDatabaseURL("postgres", tc.dsn)
+		if got != tc.want {
+			t.Errorf("%s: RedactDatabaseURL(%q) = %q, want %q", tc.name, tc.dsn, got, tc.want)
+		}
+		if frag := urlredacttest.SecretFragment(got, tc.secret); frag != "" {
+			t.Errorf("%s: RedactDatabaseURL(%q) = %q shows %q of the password", tc.name, tc.dsn, got, frag)
 		}
 	}
 }

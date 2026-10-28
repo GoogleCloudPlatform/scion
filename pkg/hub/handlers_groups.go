@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -640,7 +641,7 @@ func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request, id string) 
 
 	// Constraint-coverage gate (R5): if this group participates in any
 	// AccessConstraint, deleting it silently removes the constraint's subject.
-	// Require access_constraint.admin permission to proceed.
+	// Session only, and requires access_constraint.admin permission.
 	if !s.requireConstraintAdminForGroup(w, r, group.ID) {
 		return
 	}
@@ -1268,7 +1269,7 @@ func (s *Server) removeGroupMember(w http.ResponseWriter, r *http.Request, group
 
 	// Constraint-coverage gate (R5): if this group participates in any
 	// AccessConstraint, removing a member silently relaxes that constraint.
-	// Require access_constraint.admin permission to proceed.
+	// Session only, and requires access_constraint.admin permission.
 	if !s.requireConstraintAdminForGroup(w, r, group.ID) {
 		return
 	}
@@ -1454,9 +1455,15 @@ func (s *Server) isConstraintBearingGroup(ctx context.Context, groupID string) (
 }
 
 // requireConstraintAdminForGroup checks whether the group is constraint-bearing
-// and, if so, requires the caller to hold access_constraint.admin permission.
-// Returns true if the operation may proceed, false if it was denied (response
-// already written).
+// and, if so, requires an interactive session or dev credential and the
+// caller's access_constraint.admin permission. Returns true if the operation
+// may proceed, false if it was denied (response already written).
+//
+// Removing a member from, or deleting, a group that is the subject of an
+// access constraint is session only. This is deliberate: the gate is not a
+// resource check to be given a token selector or a bearer target. Every
+// other credential kind gets the session-only refusal with the GOV_PENDING
+// reason (session_only_gate.go) before the access_constraint.admin decision.
 func (s *Server) requireConstraintAdminForGroup(w http.ResponseWriter, r *http.Request, groupID string) bool {
 	ctx := r.Context()
 	isCB, err := s.isConstraintBearingGroup(ctx, groupID)
@@ -1474,6 +1481,13 @@ func (s *Server) requireConstraintAdminForGroup(w http.ResponseWriter, r *http.R
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
+		return false
+	}
+	if !sessionCredentialAllowed(ctx) {
+		writeSessionOnlyDenial(w, ErrCodeForbidden,
+			fmt.Sprintf("removing a member from, or deleting, a group that is the subject of an access constraint requires an interactive session; credential kind %q is not allowed",
+				GetCredentialContextFromContext(ctx).Kind),
+			authzop.ReasonGovernancePending)
 		return false
 	}
 	if s.authzService == nil {

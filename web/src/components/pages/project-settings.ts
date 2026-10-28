@@ -38,6 +38,7 @@ import type {
   ProjectMessagingPolicy,
 } from '../../shared/types.js';
 import { can, canAny } from '../../shared/types.js';
+import { projectVisitorsVisible } from '../../shared/project-visitors.js';
 import { isBrokerKubernetesOnly } from '../../shared/runtime-kind.js';
 import { KUBERNETES_BLOCK_HINT } from '../../shared/gcp-identity-state.js';
 import { projectServiceAccountListUrl } from '../../shared/gcp-sa-assign-status.js';
@@ -53,6 +54,7 @@ import '../shared/env-var-list.js';
 import '../shared/secret-list.js';
 import '../shared/shared-dir-list.js';
 import '../shared/project-members-editor.js';
+import '../shared/project-visitors-editor.js';
 import '../shared/gcp-service-account-list.js';
 import type { SAListChangedDetail } from '../shared/gcp-service-account-list.js';
 import '../shared/scheduled-event-list.js';
@@ -162,6 +164,9 @@ export class ScionPageProjectSettings extends LitElement {
 
   @state()
   private activeResourcesTab = 'env-vars';
+
+  @state()
+  private activeMembersTab = 'members';
 
   @state()
   private activeSchedulesTab = 'events';
@@ -1010,6 +1015,59 @@ export class ScionPageProjectSettings extends LitElement {
     }
   }
 
+  /**
+   * Members, and, while the federation.project_visitors experiment is on
+   * and the caller holds project.manage_visitors, a Visitors tab beside it
+   * (ptone/scion#4603). Without the Visitors tab the section is unchanged.
+   */
+  private renderMembersSection() {
+    const project = this.project!;
+    const readOnly = !canAny(project._capabilities, 'update', 'manage');
+    const description =
+      'Users and groups with access to this project. Each member holds at most one built-in tier (owner, admin or member) and may also hold custom project roles.';
+    if (!projectVisitorsVisible(project._capabilities)) {
+      return html`
+        <scion-project-members-editor
+          projectId=${project.id}
+          ?readOnly=${readOnly}
+          compact
+          sectionTitle="Members"
+          sectionDescription=${description}
+        ></scion-project-members-editor>
+      `;
+    }
+    return html`
+      <div class="section" data-members-section>
+        <sl-tab-group
+          @sl-tab-show=${(e: CustomEvent) => {
+            this.activeMembersTab = (e.detail as { name: string }).name;
+          }}
+        >
+          <sl-tab slot="nav" panel="members" ?active=${this.activeMembersTab === 'members'}
+            >Members</sl-tab
+          >
+          <sl-tab slot="nav" panel="visitors" ?active=${this.activeMembersTab === 'visitors'}
+            >Visitors</sl-tab
+          >
+          <sl-tab-panel name="members">
+            <scion-project-members-editor
+              projectId=${project.id}
+              ?readOnly=${readOnly}
+              sectionTitle="Members"
+              sectionDescription=${description}
+            ></scion-project-members-editor>
+          </sl-tab-panel>
+          <sl-tab-panel name="visitors">
+            <scion-project-visitors-editor
+              projectId=${project.id}
+              userId=${this.pageData?.user?.id ?? ''}
+            ></scion-project-visitors-editor>
+          </sl-tab-panel>
+        </sl-tab-group>
+      </div>
+    `;
+  }
+
   private renderMessagingPolicySection() {
     // Don't render until data is loaded (or if the endpoint is unavailable)
     if (this.messagingPolicyLoading) {
@@ -1293,7 +1351,10 @@ export class ScionPageProjectSettings extends LitElement {
       } else {
         this.defaultModelSelection = '';
       }
-      this.defaultThinkingLevel = this.settings.defaultThinkingLevel ?? null;
+      // The API accepts 1-100 (null clears); a value outside it is clamped,
+      // so a save never sends one the API refuses.
+      const tl = this.settings.defaultThinkingLevel;
+      this.defaultThinkingLevel = typeof tl === 'number' ? Math.min(100, Math.max(1, tl)) : null;
     } catch (err) {
       console.error('Failed to load project settings:', err);
     } finally {
@@ -1689,16 +1750,8 @@ export class ScionPageProjectSettings extends LitElement {
         <h1>${this.project.name} Settings</h1>
       </div>
 
-      ${this.renderConfigSection()}
-      <scion-project-members-editor
-        projectId=${this.project.id}
-        ?readOnly=${!canAny(this.project._capabilities, 'update', 'manage')}
-        compact
-        sectionTitle="Members"
-        sectionDescription="Users and groups with access to this project. Each member holds at most one built-in tier (owner, admin or member) and may also hold custom project roles."
-      ></scion-project-members-editor>
-      ${this.renderResourcesSection()} ${this.renderMessagingPolicySection()}
-      ${this.renderGitHubAppSection()}
+      ${this.renderConfigSection()} ${this.renderMembersSection()} ${this.renderResourcesSection()}
+      ${this.renderMessagingPolicySection()} ${this.renderGitHubAppSection()}
       <scion-boundary-summary-notice
         label="Access constraints affecting this project"
         .groups=${this.boundaryGroups}
@@ -2266,7 +2319,7 @@ export class ScionPageProjectSettings extends LitElement {
                 >
                 <div style="display:flex;align-items:center;gap:0.75rem">
                   <sl-range
-                    min="0"
+                    min="1"
                     max="100"
                     step="1"
                     .value=${this.defaultThinkingLevel ?? 50}

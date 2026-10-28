@@ -36,7 +36,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { setDocumentTitle } from '../../client/page-title.js';
-import { navigateTo, pushUrl } from '../../client/navigation.js';
+import { addLeaveGuard, navigateTo } from '../../client/navigation.js';
 import * as accessBoundariesApi from '../../client/access-boundaries-api.js';
 import type {
   ConstraintSubject,
@@ -110,7 +110,8 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
 
   // Bound event handlers for dirty-draft detection
   private boundBeforeUnload = this.handleBeforeUnload.bind(this);
-  private boundPopState = this.handlePopState.bind(this);
+  /** Removes the router leave guard added on connect. */
+  private removeLeaveGuard: (() => void) | null = null;
 
   static override styles = css`
     :host {
@@ -278,13 +279,14 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
       this.draftScopeType = 'system';
     }
     window.addEventListener('beforeunload', this.boundBeforeUnload);
-    window.addEventListener('popstate', this.boundPopState);
+    this.removeLeaveGuard = addLeaveGuard(() => this.confirmLeave());
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     window.removeEventListener('beforeunload', this.boundBeforeUnload);
-    window.removeEventListener('popstate', this.boundPopState);
+    this.removeLeaveGuard?.();
+    this.removeLeaveGuard = null;
   }
 
   private handleBeforeUnload(e: BeforeUnloadEvent): void {
@@ -293,18 +295,13 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
     }
   }
 
-  private handlePopState(): void {
-    if (this.isDirty) {
-      const leave = confirm('You have unsaved changes. Are you sure you want to leave?');
-      if (!leave) {
-        // Push current state back to prevent navigation
-        pushUrl(
-          this.isEditMode
-            ? `/admin/access-boundaries/${encodeURIComponent(this.boundaryId)}/edit`
-            : '/admin/access-boundaries/new'
-        );
-      }
-    }
+  /**
+   * Router leave guard: links, in-app navigation and browser Back/Forward
+   * all ask here before the router renders, so staying keeps both the URL
+   * and the page (with its draft) on the editor.
+   */
+  private confirmLeave(): boolean {
+    return !this.isDirty || confirm('You have unsaved changes. Are you sure you want to leave?');
   }
 
   private async loadBoundary(): Promise<void> {
@@ -533,7 +530,7 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
           <sl-button
             variant="default"
             @click=${() => {
-              window.location.href = '/admin/access-boundaries';
+              navigateTo('/admin/access-boundaries');
             }}
           >
             Back to inventory
@@ -548,18 +545,8 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
           <h1 class="editor-title">
             ${this.isEditMode ? 'Edit Access Constraint' : 'New Access Constraint'}
           </h1>
-          <a
-            class="editor-back-link"
-            href="/admin/access-boundaries"
-            @click=${(e: Event) => {
-              if (this.isDirty) {
-                if (!confirm('You have unsaved changes. Are you sure you want to leave?')) {
-                  e.preventDefault();
-                  return;
-                }
-              }
-            }}
-          >
+          <!-- Leaving with unsaved changes asks through the router leave guard. -->
+          <a class="editor-back-link" href="/admin/access-boundaries">
             <sl-icon name="arrow-left"></sl-icon>
             Back to inventory
           </a>
@@ -804,19 +791,7 @@ export class ScionPageAdminAccessBoundaryEditor extends LitElement {
                 </sl-button>
               `
             : html`
-                <sl-button
-                  variant="default"
-                  href="/admin/access-boundaries"
-                  @click=${(e: Event) => {
-                    if (this.isDirty) {
-                      if (!confirm('You have unsaved changes. Are you sure you want to leave?')) {
-                        e.preventDefault();
-                      }
-                    }
-                  }}
-                >
-                  Cancel
-                </sl-button>
+                <sl-button variant="default" href="/admin/access-boundaries"> Cancel </sl-button>
               `}
         </div>
         <div class="nav-right">

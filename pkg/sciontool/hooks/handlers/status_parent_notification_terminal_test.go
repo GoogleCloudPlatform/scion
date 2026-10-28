@@ -23,7 +23,8 @@ import (
 //   - working, blocked and completed still move to a notification-set
 //     waiting_for_input that is reported to the Hub;
 //   - the parent's own question (a claude AskUserQuestion or ExitPlanMode)
-//     still moves blocked and completed to waiting_for_input.
+//     still moves blocked and completed to waiting_for_input, and keeps
+//     limits_exceeded and crashed as the Notification does.
 // All payloads are synthetic and go through the real dialects.
 
 type parentNotificationDialect struct {
@@ -200,6 +201,39 @@ func TestParentNotificationTerminal_ParentQuestionMovesHeld(t *testing.T) {
 				assert.Equal(t, string(state.ActivityWaitingForInput), info["activity"])
 				assert.NotContains(t, info, activitySourceKey, "the wait is agent-set")
 				assert.Equal(t, []string{parentHeldWaiting}, got)
+			})
+		}
+	}
+}
+
+// The parent's own question (a claude AskUserQuestion or ExitPlanMode
+// tool-start) leaves limits_exceeded and crashed unchanged, as the parent's
+// Notification does: agent-info.json is not rewritten and the Hub gets no
+// update. The prompt-submit control shows that the Hub was live.
+func TestParentNotificationTerminal_ParentQuestionKeepsTerminal(t *testing.T) {
+	for _, tool := range []string{"AskUserQuestion", "ExitPlanMode"} {
+		for _, held := range []state.Activity{state.ActivityLimitsExceeded, state.ActivityCrashed} {
+			t.Run(tool+"/"+string(held), func(t *testing.T) {
+				event := parentHeldParent(t, "PreToolUse", tool)
+				require.True(t, isClaudeUserWaitTool(event), "a question event")
+				require.False(t, isSubagentEvent(event), "the parent's own event")
+
+				sh, hh, sent := claudeHubSetup(t)
+				parentHeldHold(t, sh, string(held))
+				beforeFI, err := os.Stat(sh.StatusPath)
+				require.NoError(t, err)
+
+				got, info := parentHeldStep(t, sh, hh, sent, event)
+				assert.Equal(t, string(held), info["activity"], "the terminal status is kept")
+				assert.NotContains(t, info, activitySourceKey, "no notification marker")
+				assert.Empty(t, got, "no hub update")
+				afterFI, err := os.Stat(sh.StatusPath)
+				require.NoError(t, err)
+				assert.True(t, os.SameFile(beforeFI, afterFI), "agent-info.json is not rewritten")
+
+				got, info = parentHeldStep(t, sh, hh, sent, parentHeldParent(t, "UserPromptSubmit", ""))
+				assert.Equal(t, string(state.ActivityThinking), info["activity"], "control: prompt-submit starts new work")
+				assert.Equal(t, []string{parentHeldThinking}, got, "control: the Hub is live")
 			})
 		}
 	}

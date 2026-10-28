@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 346
+**Operations:** 359
 
 ## Table of Contents
 
@@ -18,6 +18,7 @@
 - [agent.read](#agentread) — Read a single agent's metadata by ID
 - [agent.list](#agentlist) — List agents within the caller's authorized project scope. A user access token needs agent:list on either boundary: a project token lists only its boundary project's agents. The project form lists one project's agents and decides agent.list on that project
 - [agent.update](#agentupdate) — Update agent configuration or metadata
+- [agent.update.pendingconfig.delete](#agentupdatependingconfigdelete) — Discard an agent's pending config edits (behind hub.agent_edit_held; 404 while it is off)
 - [agent.status.update](#agentstatusupdate) — Report an agent's status: the agent itself, or a user who may update the agent
 - [agent.workspace.read](#agentworkspaceread) — Read an agent's workspace sync status
 - [agent.workspace.sync](#agentworkspacesync) — Sync an agent's workspace from or to the agent
@@ -107,8 +108,8 @@
 - [project.template.set](#projecttemplateset) — Mark or unmark a project as a template. The caller needs project.update and project.clone on the project
 - [template.project.import](#templateprojectimport) — Discover or import templates into a project
 - [harnessconfig.project.import](#harnessconfigprojectimport) — Discover or import harness configs into a project
-- [project.workspace.read](#projectworkspaceread) — Read a project's workspace: WebDAV reads, sync status, cache status, archive and file reads
-- [project.workspace.write](#projectworkspacewrite) — Change a project's workspace: WebDAV writes, cache refresh and notify, file upload, write and delete, and git pull
+- [project.workspace.read](#projectworkspaceread) — Read a project's workspace: archive and file reads
+- [project.workspace.write](#projectworkspacewrite) — Change a project's workspace: file upload, write and delete, and git pull
 - [project.github.read](#projectgithubread) — Read a project's GitHub status, GitHub permissions and git identity
 - [project.github.write](#projectgithubwrite) — Change a project's GitHub installation, status check, GitHub permissions and git identity
 - [project.members.assignableroles](#projectmembersassignableroles) — List the roles the caller may assign in a project
@@ -153,9 +154,9 @@
 - [chat.topic.read](#chattopicread) — Read a chat thread. Needs project:read on the thread's project
 - [chat.topic.update](#chattopicupdate) — Rename a chat thread or set its default agent. Needs project:read on the thread's project; a token also needs inbox:write for it
 - [chat.topic.delete](#chattopicdelete) — Delete a chat thread (soft delete; the last thread of a space stays). Needs project:read on the thread's project; a token also needs inbox:write for it
-- [chat.conversation.history.topic](#chatconversationhistorytopic) — Read the messages of a chat thread. Needs project:read on the thread's project
+- [chat.conversation.history.topic](#chatconversationhistorytopic) — Read the messages of a chat thread. Needs project:read on the thread's project; canPost reports whether the caller's account holds project.chat_post on it
 - [chat.conversation.history.dm](#chatconversationhistorydm) — Read the messages of one of the caller's DMs. A token needs inbox:read: a DM with an agent needs the agent's project inside its boundary and agent:read on the agent; a DM between users needs a hub boundary
-- [chat.conversation.send.topic](#chatconversationsendtopic) — Post a message to a chat thread. Needs project:read on the thread's project; a token also needs inbox:write for it. Agent recipients need agent:message
+- [chat.conversation.send.topic](#chatconversationsendtopic) — Post a message to a chat thread. Needs project:read and project.chat_post on the thread's project; a caller that reads the thread but lacks project.chat_post gets 403 chat_post_denied. A token also needs inbox:write for it; project.chat_post is checked on the token holder's account, and the project:chat_post selector is not needed (it only lets a token delegate roles that include project.chat_post). Agent recipients need agent:message
 - [chat.conversation.send.dmagent](#chatconversationsenddmagent) — Post a message to one of the caller's DMs with an agent. Needs agent:message on the agent; a token also needs inbox:write for the agent's project
 - [chat.conversation.send.dmuser](#chatconversationsenddmuser) — Post a message to one of the caller's DMs with another user. Every caller needs read access to the peer user record; a token also needs inbox:write on a hub boundary
 - [chat.message.edit](#chatmessageedit) — Edit one of the caller's chat messages. Only the author edits, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked: project:read for a thread, the DM rule for a DM
@@ -181,18 +182,27 @@
 - [chat.search.project](#chatsearchproject) — Search the messages of one project's chat. Needs project:read on the project; a token keeps a DM row only when the DM rule lets it read the DM under inbox:read
 - [chat.search.unscoped](#chatsearchunscoped) — Search the messages of every project the caller can read. A project token searches only its boundary project; a token keeps a DM row only when the DM rule lets it read the DM under inbox:read
 - [chat.search.dm](#chatsearchdm) — Search the messages of one of the caller's DMs. A token needs inbox:read under the DM rule
+- [chat.star.add](#chatstaradd) — Star a message for the caller (private). The message must be a live message of the conversation named in the body. A thread needs project:read on its project; a DM needs the caller in a user slot of its key. A token also needs inbox:write: a thread's project, or an agent DM's peer agent project with agent:read on the agent, inside its boundary; a DM between users needs a hub boundary. 404 while web.chat_starred_messages is off
+- [chat.star.read](#chatstarread) — Read the current detail of one of the caller's stars. Needs read access to the star's conversation now (project:read for a thread; the caller in a user slot of a DM key); a token also needs inbox:read under the same rule (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users). 404 while web.chat_starred_messages is off
+- [chat.star.state](#chatstarstate) — Report which of up to 200 messages the caller starred, keeping only live messages in conversations the caller can read now (threads by project:read, DMs by participation); a token keeps only conversations it may read under inbox:read (a thread's or agent DM's project inside its boundary; a hub boundary for a DM between users). 404 while web.chat_starred_messages is off
+- [chat.star.list](#chatstarlist) — List the caller's stars in one conversation (a thread or a DM), newest first, with a sealed cursor. Needs read access to it (project:read for a thread; the caller in a user slot of a DM key); a token also needs inbox:read under the same rule (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users). 404 while web.chat_starred_messages is off
+- [chat.star.conversations](#chatstarconversations) — List the conversations in which the caller has at least one live star (the Starred rail): one row per conversation with its current name, activity and project, no excerpt or count, sorted by activity or name, with a sealed cursor. Each conversation is kept only while the caller can read it now (project:read for a thread; the caller in a user slot of a DM key); a token keeps only conversations it may read under inbox:read (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users). An optional projectId must be a project the caller can read. 404 while web.chat_starred_messages is off
+- [chat.conversation.history.starred](#chatconversationhistorystarred) — Read only the caller's starred messages of one conversation (?starred=true), in history order with a sealed cursor bound to the conversation, the caller and the filter. Needs the conversation's normal read access (project:read on a thread's project, participation in a DM) and inbox:read: a token needs inbox:read for the thread's or peer agent's project, or a hub boundary for a DM between users. An around target must itself be starred. 404 while web.chat_starred_messages is off, never unfiltered history
+- [chat.star.remove](#chatstarremove) — Remove the caller's own star of a message; always 204. No message or conversation lookup; a project token removes only a star whose stored project is inside its boundary. 404 while web.chat_starred_messages is off
 - [chat.attachment.upload.project](#chatattachmentuploadproject) — Upload chat attachments to a space. Needs project:read on the space's project; a token also needs inbox:write for it
 - [chat.attachment.upload.noproject](#chatattachmentuploadnoproject) — Upload project-less chat attachments, reachable only through the messages that reference them. A federated caller is refused. A token needs inbox:write on a hub boundary
+- [chat.attachment.upload.agent](#chatattachmentuploadagent) — Upload attachments as the calling agent, stored as artifacts in the agent's own upload scope (ptone/scion#4596). The agent must be in good standing (agentMaySend); the upload is readable only by the agent until a send binds it
+- [chat.attachment.probe](#chatattachmentprobe) — Answer where the caller's attachment uploads go (artifact or legacy) and the delivery budget (ptone/scion#4596). Reads and writes nothing
 - [chat.attachment.download.project](#chatattachmentdownloadproject) — Download a chat attachment of a project. Needs project:read on the project; a session also reads its own uploads and files attached to messages it can read
-- [chat.conversation.promote](#chatconversationpromote) — Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation and project:read on the agent's project; a token also needs inbox:write under the DM rule
+- [chat.conversation.promote](#chatconversationpromote) — Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation, and project:read and project.chat_post on the agent's project (403 chat_post_denied without project.chat_post); a token also needs inbox:write under the DM rule, and project.chat_post is checked on its holder's account (the project:chat_post selector is not needed)
 - [role.definition.create](#roledefinitioncreate) — Create a custom role definition (create, import, duplicate). A token needs role:create and role:read on a hub boundary and the holder's live role.create authority; the holder must hold every permission of the role within the token's selectors. A project-scoped definition can be bound in every project, so it is judged on the holder's system-scope authority; a system-scoped definition is refused to every token
 - [role.definition.update](#roledefinitionupdate) — Update a custom role definition. A token needs role:update and role:read on a hub boundary and the holder's live role.update authority; the holder must hold every permission of the updated role within the token's selectors, judged as for create
 - [role.definition.delete](#roledefinitiondelete) — Delete a custom role definition. A token needs role:delete and role:read on a hub boundary and the holder's live role.delete authority; system roles and roles that are still bound are kept
 - [role.binding.create](#rolebindingcreate) — Create a role binding (grant authority to a principal) for a custom project role or at system scope. A token needs role_binding:create on a hub boundary and the holder's live role_binding.create authority. A system-scoped binding is refused to every token. For a custom project role the holder must also have current project.manage access to the binding's project and hold every permission of the role in that project within the token's selectors
 - [role.binding.delete](#rolebindingdelete) — Delete a system-scoped role binding (revoke authority from a principal). A token needs role_binding:delete on a hub boundary and the holder's live role_binding.delete authority; the constraint-admin lockout guard applies. Deleting a super-admin binding is refused to every token (session only)
 - [group.member.add](#groupmemberadd) — Add a member to a group. A user access token needs group:addMember on a hub boundary, and the group's closure may carry no authority beyond the token's own
-- [group.member.remove](#groupmemberremove) — Remove a member from a group
-- [group.delete](#groupdelete) — Delete a group
+- [group.member.remove](#groupmemberremove) — Remove a member from a group. A user access token needs group:removeMember on a hub boundary. Removing a member from a group that is the subject of an access constraint is session only
+- [group.delete](#groupdelete) — Delete a group. A user access token needs group:delete on a hub boundary. Deleting a group that is the subject of an access constraint is session only
 - [access.constraint.create](#accessconstraintcreate) — Create an access constraint (tighten boundary). A token needs access_constraint:admin and access_constraint:read on a hub boundary and the holder's live access_constraint.admin authority; the preview token and governance checks apply, and the commit re-checks judge the holder's authority within the token's selectors
 - [access.constraint.update](#accessconstraintupdate) — Update an access constraint (may relax or tighten boundary). A token needs access_constraint:admin and access_constraint:read on a hub boundary and the holder's live access_constraint.admin authority, and may only tighten: an update that relaxes the boundary (adds permissions, changes subject or scope, or narrows or adds its time window) is session only. The commit re-checks judge the holder's authority within the token's selectors
 - [access.constraint.delete](#accessconstraintdelete) — Delete an access constraint (relax boundary). Session only: deleting a boundary relaxes it, and a user access token is refused before the preview token is used
@@ -203,9 +213,10 @@
 - [federation.token.mint](#federationtokenmint) — Obtain a short-lived user access credential for the caller, signed with the hub's OIDC key, for one peer hub audience listed in server.oidc.user_token_audiences. Only a local human user with status active; a user access token needs federation_token:mint on a hub boundary. 404 while federation.project_visitors is off
 - [user.admin.suspend](#useradminsuspend) — Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present). A token needs user:suspend on a hub boundary, checked on the hub-level user record. The caller's own status and activating an invited user are refused for every credential
 - [user.admin.invite](#useradmininvite) — Invite users to the platform (single or bulk) and manage invitation codes (list, create, read stats, read, revoke, delete). The invited record has status invited, the placeholder role member and no role binding or group membership; an invitation code names no role. A token needs user:invite on the hub boundary and the holder's live user.invite authority
-- [user.admin.provision](#useradminprovision) — Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants
+- [user.admin.provision](#useradminprovision) — Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants. A token needs user:invite on the hub boundary and the holder's live user.invite authority, checked at the hub user collection; the user_provision audit records the token as the credential. Refused for every caller on a hub running with dev authentication
 - [user.admin.promote](#useradminpromote) — Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present)
 - [user.admin.delete](#useradmindelete) — Delete a user account
+- [user.admin.deleteblockers](#useradmindeleteblockers) — List what blocks deleting a user (agents and active delegations), without deleting
 - [group.read](#groupread) — Read group details
 - [group.list](#grouplist) — List groups. Each row is shown only when the caller may read it (group.read); a user access token needs group:read on a hub boundary, and a group with no project resolves to the hub
 - [group.create](#groupcreate) — Create a new group. A user access token needs group:create on a hub boundary; the target is the hub's group collection. Creating under a parent group runs the member-add delegation check on the parent
@@ -322,11 +333,12 @@
 - [broker.heartbeat](#brokerheartbeat) — Record a broker heartbeat: broker liveness and the state of the agents it runs. The broker sends its own; a user needs an interactive session and broker.update on the broker from a role binding (the owner relationship does not apply)
 - [broker.agent.launchreport](#brokeragentlaunchreport) — Record a broker's launch report for an agent it runs
 - [broker.messagefailures.report](#brokermessagefailuresreport) — Record buffered message delivery failures reported by a broker
+- [broker.attachment.redeem](#brokerattachmentredeem) — Redeem an attachment delivery capability (ptone/scion#4596): the broker the hub issued it to downloads one attachment, once, before it expires, to write it into the recipient agent's home
 - [broker.controlchannel.call](#brokercontrolchannelcall) — Carry a call between the hub and a connected broker over the control channel; each call runs under the operation that initiated it
 - [gcp.identity.create](#gcpidentitycreate) — Create a GCP service account binding
 - [gcp.identity.delete](#gcpidentitydelete) — Delete a GCP service account binding
 - [gcp.identity.assign](#gcpidentityassign) — Assign a GCP service account to an agent
-- [gcp.identity.mint](#gcpidentitymint) — Mint a GCP access token for a service account
+- [gcp.identity.mint](#gcpidentitymint) — Mint a GCP access or identity token for the agent's assigned service account
 - [secret.read](#secretread) — Read project secrets or environment variables containing secrets
 - [secret.write](#secretwrite) — Create, update or delete secrets. At user scope, the default, the secrets are the caller's own and a federated caller is refused (requireProfileWriter)
 - [gcp.identity.read](#gcpidentityread) — Read GCP service account details or list accounts. A project's list requires project.read on it (members, and agents of that project only); the hub-scoped list requires gcp_service_account.list at hub scope (hub members)
@@ -352,6 +364,7 @@
 - [agent.delegation.credential.revoke](#agentdelegationcredentialrevoke) — Revoke one delegated credential exchanged from an agent delegation grant
 - [agent.delegation.list](#agentdelegationlist) — List agent delegation grants: those bound to one agent, or those the caller issued; grants outside the caller's authority are left out
 - [agent.delegation.read](#agentdelegationread) — Read one agent delegation grant; a grant outside the caller's authority answers as missing
+- [agent.delegation.revokeall](#agentdelegationrevokeall) — Revoke every unrevoked agent delegation grant the caller issued, or every one bound to an agent, with the credentials exchanged from them; grants outside the caller's authority are skipped and reported
 
 ---
 
@@ -807,6 +820,39 @@
 
 ---
 
+## agent.update.pendingconfig.delete
+
+**Domain:** agent
+
+**Description:** Discard an agent's pending config edits (behind hub.agent_edit_held; 404 while it is off)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/agents/{id}/pending-config` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `agent.update`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestAgentSubRoute_CatalogDrift`
+- `pkg/hub:TestAgentPendingConfig_DiscardClearsAndAudits`
+
+---
+
 ## agent.status.update
 
 **Domain:** agent
@@ -1058,9 +1104,9 @@
 | http_route | POST | `/api/v1/agents/{id}/message` |
 | http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/message` |
 
-**Principals:** `user`, `agent`
+**Principals:** `user`, `agent`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `delegated_agent`
 
 **Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
 
@@ -1106,9 +1152,9 @@
 |------|--------|---------|
 | websocket | GET | `/api/v1/agents/{id}/pty` |
 
-**Principals:** `user`, `agent`
+**Principals:** `user`, `agent`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `delegated_agent`
 
 **Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
 
@@ -2488,9 +2534,9 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/projects/{id}` |
 
-**Principals:** `user`, `agent`
+**Principals:** `user`, `agent`, `agent_delegated`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`, `delegated_agent`
 
 **Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
 
@@ -4341,18 +4387,13 @@
 
 **Domain:** project
 
-**Description:** Read a project's workspace: WebDAV reads, sync status, cache status, archive and file reads
+**Description:** Read a project's workspace: archive and file reads
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | GET | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | HEAD | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | OPTIONS | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | GET | `/api/v1/projects/{id}/sync/status` |
 | http_route | GET | `/api/v1/projects/{id}/workspace/archive` |
-| http_route | GET | `/api/v1/projects/{id}/workspace/cache/status` |
 | http_route | GET | `/api/v1/projects/{id}/workspace/files` |
 | http_route | GET | `/api/v1/projects/{id}/workspace/files/{path}` |
 
@@ -4380,24 +4421,12 @@
 
 **Domain:** project
 
-**Description:** Change a project's workspace: WebDAV writes, cache refresh and notify, file upload, write and delete, and git pull
+**Description:** Change a project's workspace: file upload, write and delete, and git pull
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | PROPPATCH | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | LOCK | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | UNLOCK | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | COPY | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | MOVE | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | POST | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | PROPFIND | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | DELETE | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | MKCOL | `/api/v1/projects/{id}/dav/{path}` |
-| http_route | POST | `/api/v1/projects/{id}/workspace/cache/notify` |
-| http_route | POST | `/api/v1/projects/{id}/workspace/cache/refresh` |
 | http_route | POST | `/api/v1/projects/{id}/workspace/files` |
 | http_route | PUT | `/api/v1/projects/{id}/workspace/files/{path}` |
 | http_route | DELETE | `/api/v1/projects/{id}/workspace/files/{path}` |
@@ -5925,7 +5954,7 @@
 
 **Domain:** chat
 
-**Description:** Read the messages of a chat thread. Needs project:read on the thread's project
+**Description:** Read the messages of a chat thread. Needs project:read on the thread's project; canPost reports whether the caller's account holds project.chat_post on it
 
 ### Entry Points
 
@@ -5990,7 +6019,7 @@
 
 **Domain:** chat
 
-**Description:** Post a message to a chat thread. Needs project:read on the thread's project; a token also needs inbox:write for it. Agent recipients need agent:message
+**Description:** Post a message to a chat thread. Needs project:read and project.chat_post on the thread's project; a caller that reads the thread but lacks project.chat_post gets 403 chat_post_denied. A token also needs inbox:write for it; project.chat_post is checked on the token holder's account, and the project:chat_post selector is not needed (it only lets a token delegate roles that include project.chat_post). Agent recipients need agent:message
 
 ### Entry Points
 
@@ -6031,6 +6060,7 @@
 ### Tests
 
 - `pkg/hub:TestChatWriteToken_RequiresInboxWrite`
+- `pkg/hub:TestChatSendTopic_RequiresChatPost`
 
 ---
 
@@ -6852,6 +6882,241 @@
 
 ---
 
+## chat.star.add
+
+**Domain:** chat
+
+**Description:** Star a message for the caller (private). The message must be a live message of the conversation named in the body. A thread needs project:read on its project; a DM needs the caller in a user slot of its key. A token also needs inbox:write: a thread's project, or an agent DM's peer agent project with agent:read on the agent, inside its boundary; a DM between users needs a hub boundary. 404 while web.chat_starred_messages is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/chat/stars/{messageId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatStars_TokenSelectors`
+- `pkg/hub:TestChatStars_PutIdempotentAndPrivate`
+- `pkg/hub:TestChatStars_DMTokenBoundaries`
+
+---
+
+## chat.star.read
+
+**Domain:** chat
+
+**Description:** Read the current detail of one of the caller's stars. Needs read access to the star's conversation now (project:read for a thread; the caller in a user slot of a DM key); a token also needs inbox:read under the same rule (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users). 404 while web.chat_starred_messages is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/stars/{messageId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatStars_TokenSelectors`
+- `pkg/hub:TestChatStars_DetailAndListHideUnreadable`
+- `pkg/hub:TestChatStars_DMTokenBoundaries`
+
+---
+
+## chat.star.state
+
+**Domain:** chat
+
+**Description:** Report which of up to 200 messages the caller starred, keeping only live messages in conversations the caller can read now (threads by project:read, DMs by participation); a token keeps only conversations it may read under inbox:read (a thread's or agent DM's project inside its boundary; a hub boundary for a DM between users). 404 while web.chat_starred_messages is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/stars/state` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatStars_TokenSelectors`
+- `pkg/hub:TestChatStars_StateFiltersByAccess`
+- `pkg/hub:TestChatStars_DMTokenBoundaries`
+
+---
+
+## chat.star.list
+
+**Domain:** chat
+
+**Description:** List the caller's stars in one conversation (a thread or a DM), newest first, with a sealed cursor. Needs read access to it (project:read for a thread; the caller in a user slot of a DM key); a token also needs inbox:read under the same rule (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users). 404 while web.chat_starred_messages is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/stars` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatStars_TokenSelectors`
+- `pkg/hub:TestChatStars_ListPaginates`
+- `pkg/hub:TestChatStars_DMTokenBoundaries`
+
+---
+
+## chat.star.conversations
+
+**Domain:** chat
+
+**Description:** List the conversations in which the caller has at least one live star (the Starred rail): one row per conversation with its current name, activity and project, no excerpt or count, sorted by activity or name, with a sealed cursor. Each conversation is kept only while the caller can read it now (project:read for a thread; the caller in a user slot of a DM key); a token keeps only conversations it may read under inbox:read (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users). An optional projectId must be a project the caller can read. 404 while web.chat_starred_messages is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/starred-conversations` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatStarredConversations_TokenSelectors`
+- `pkg/hub:TestChatStarredConversations_GroupsAndPaginates`
+
+---
+
+## chat.conversation.history.starred
+
+**Domain:** chat
+
+**Description:** Read only the caller's starred messages of one conversation (?starred=true), in history order with a sealed cursor bound to the conversation, the caller and the filter. Needs the conversation's normal read access (project:read on a thread's project, participation in a DM) and inbox:read: a token needs inbox:read for the thread's or peer agent's project, or a hub boundary for a DM between users. An around target must itself be starred. 404 while web.chat_starred_messages is off, never unfiltered history
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/conversations/{id}/messages` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatStarredHistory_TokenSelectors`
+- `pkg/hub:TestChatStarredHistory_GateAndValidation`
+
+---
+
+## chat.star.remove
+
+**Domain:** chat
+
+**Description:** Remove the caller's own star of a message; always 204. No message or conversation lookup; a project token removes only a star whose stored project is inside its boundary. 404 while web.chat_starred_messages is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/chat/stars/{messageId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatStars_TokenSelectors`
+- `pkg/hub:TestChatStars_DeleteAlways204`
+
+---
+
 ## chat.attachment.upload.project
 
 **Domain:** chat
@@ -6917,6 +7182,75 @@
 
 ---
 
+## chat.attachment.upload.agent
+
+**Domain:** chat
+
+**Description:** Upload attachments as the calling agent, stored as artifacts in the agent's own upload scope (ptone/scion#4596). The agent must be in good standing (agentMaySend); the upload is readable only by the agent until a send binds it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/chat/attachments` |
+
+**Principals:** `agent`
+
+**Credentials:** `agent_jwt`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** agent-self
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestAgentUpload_RefusedWhenAgentMaySendFalse`
+- `pkg/hub:TestAgentUpload_NotInStandingRefused`
+
+### Exemptions
+
+- **internal_only:** The agent uploads into its own upload scope with its own agent JWT; the gate is the agent's standing (the target-independent part of sending), no user permission applies (scope: agent self access) — waives: `base_permission`
+
+---
+
+## chat.attachment.probe
+
+**Domain:** chat
+
+**Description:** Answer where the caller's attachment uploads go (artifact or legacy) and the delivery budget (ptone/scion#4596). Reads and writes nothing
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/attachments` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestAttachmentProbe_AnyTokenReads`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAttachmentProbe_AnswersPerCredential`
+
+### Exemptions
+
+- **authentication_only:** Describes the caller's own upload capability (the experiment state for its credential class and the delivery budget); carries no user records (scope: caller self description only) — waives: `base_permission`
+
+---
+
 ## chat.attachment.download.project
 
 **Domain:** chat
@@ -6953,7 +7287,7 @@
 
 **Domain:** chat
 
-**Description:** Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation and project:read on the agent's project; a token also needs inbox:write under the DM rule
+**Description:** Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation, and project:read and project.chat_post on the agent's project (403 chat_post_denied without project.chat_post); a token also needs inbox:write under the DM rule, and project.chat_post is checked on its holder's account (the project:chat_post selector is not needed)
 
 ### Entry Points
 
@@ -7246,7 +7580,7 @@
 
 **Domain:** group
 
-**Description:** Remove a member from a group
+**Description:** Remove a member from a group. A user access token needs group:removeMember on a hub boundary. Removing a member from a group that is the subject of an access constraint is session only
 
 ### Entry Points
 
@@ -7284,6 +7618,8 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestGroupChangeToken_SelectorAndBoundaryPerRoute`
+- `pkg/hub:TestConstraintSubjectGroupToken_MemberRemoveSessionOnly`
+- `pkg/hub:TestConstraintSubjectGroupSession_MemberRemoveAndDeleteAdmitted`
 
 ---
 
@@ -7291,7 +7627,7 @@
 
 **Domain:** group
 
-**Description:** Delete a group
+**Description:** Delete a group. A user access token needs group:delete on a hub boundary. Deleting a group that is the subject of an access constraint is session only
 
 ### Entry Points
 
@@ -7324,6 +7660,8 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestGroupChangeToken_SelectorAndBoundaryPerRoute`
+- `pkg/hub:TestConstraintSubjectGroupToken_DeleteSessionOnly`
+- `pkg/hub:TestConstraintSubjectGroupSession_MemberRemoveAndDeleteAdmitted`
 
 ---
 
@@ -7798,7 +8136,7 @@
 
 **Domain:** user.admin
 
-**Description:** Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants
+**Description:** Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants. A token needs user:invite on the hub boundary and the holder's live user.invite authority, checked at the hub user collection; the user_provision audit records the token as the credential. Refused for every caller on a hub running with dev authentication
 
 ### Entry Points
 
@@ -7808,9 +8146,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `session_only` (reason `GOV_PENDING`)
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
 
 **Base Permission:** `user.invite`
 
@@ -7830,12 +8168,16 @@
 - **After Fields:** target_user_id, email, status, display_name
 - **Atomic:** Yes
 
-**Denial Codes:** `forbidden`, `user_suspended`, `conflict`, `role_assignment_forbidden`
+**Denial Codes:** `forbidden`, `credential_insufficient`, `user_suspended`, `conflict`, `role_assignment_forbidden`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestHandleProvisionUser`
+- `pkg/hub:TestProvisionToken_RequiresInviteSelectorAndHubBoundary`
+- `pkg/hub:TestProvisionToken_DetailViewNeedsReadSelector`
+- `pkg/hub:TestProvisionToken_RecordOutlivesTokenAndHolderAuthority`
+- `pkg/hub:TestInvitationToken_CreatesNoRoleBindingOrGroupMembership`
 
 ---
 
@@ -7917,11 +8259,46 @@
 - **Before Fields:** target_user_id, email, role, status
 - **Atomic:** Yes
 
-**Denial Codes:** `forbidden`, `last_owner`, `conflict`
+**Denial Codes:** `forbidden`, `last_owner`, `user_delete_blocked`, `conflict`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestDeleteUser_GuardOrder`
+
+---
+
+## user.admin.deleteblockers
+
+**Domain:** user.admin
+
+**Description:** List what blocks deleting a user (agents and active delegations), without deleting
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users/{id}/delete-blockers` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `user.delete`
+
+**Resource Resolver:** user-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserDeleteBlockers_RequiresUserDelete`
+- `pkg/hub:TestSessionOnlyGate_ReasonIsReported`
 
 ---
 
@@ -9373,6 +9750,7 @@
 | http_route | POST | `/api/v1/admin/maintenance/migrations/{id}/run` |
 | http_route | GET | `/api/v1/admin/maintenance/update-available` |
 | http_route | DELETE | `/api/v1/admin/maintenance/update-available` |
+| http_route | GET | `/api/v1/admin/maintenance/update-status` |
 
 **Principals:** `user`
 
@@ -9512,7 +9890,7 @@
 
 **Effects:** `update-resource`
 
-**Denial Codes:** `forbidden`, `last_owner`, `conflict`
+**Denial Codes:** `forbidden`, `last_owner`, `user_delete_blocked`, `conflict`
 
 ### Tests
 
@@ -11966,6 +12344,41 @@
 
 ---
 
+## broker.attachment.redeem
+
+**Domain:** broker
+
+**Description:** Redeem an attachment delivery capability (ptone/scion#4596): the broker the hub issued it to downloads one attachment, once, before it expires, to write it into the recipient agent's home
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/attachment-deliveries/{token}` |
+
+**Principals:** `broker`
+
+**Credentials:** `broker_token`
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** broker-self
+
+**Effects:** `read-one`
+
+**Denial Codes:** `not_found`
+
+### Tests
+
+- `pkg/hub:TestDeliveryRedemption_WrongBrokerRefused`
+- `pkg/hub:TestDeliveryRedemption_UniformRefusal`
+
+### Exemptions
+
+- **internal_only:** The broker authenticates with its own HMAC credential and presents a capability the hub signed for that broker and recipient under the attachment read decision; no user permission applies (scope: broker capability redemption) — waives: `base_permission`
+
+---
+
 ## broker.controlchannel.call
 
 **Domain:** broker
@@ -12134,19 +12547,20 @@
 
 **Domain:** gcp.identity
 
-**Description:** Mint a GCP access token for a service account
+**Description:** Mint a GCP access or identity token for the agent's assigned service account
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | POST | `/api/v1/agent/gcp-token` |
+| http_route | POST | `/api/v1/agent/gcp-identity-token` |
 
 **Principals:** `agent`
 
 **Credentials:** `agent_jwt`
 
-**Base Permission:** `gcp_service_account.mint`
+**Base Permission:** `gcp_service_account.use`
 
 **Resource Resolver:** agent-gcp-service-account
 
@@ -12155,7 +12569,7 @@
 ### Governance
 
 - **Kind:** issuer_credential
-- Agent mints GCP tokens scoped to its assigned service account
+- Agent mints GCP tokens for its assigned service account while the principal recorded as the assignment's source holds gcp_service_account.assign on it (and passes actAs in enforce mode)
 
 ### Audit
 
@@ -12597,7 +13011,7 @@
 - **Before Fields:** user_id, role, issued_by, purpose, expires_at
 - **Atomic:** Yes
 
-**Denial Codes:** `forbidden`, `not_found`, `conflict`
+**Denial Codes:** `forbidden`, `not_found`, `user_delete_blocked`, `conflict`
 
 ### Tests
 
@@ -13215,6 +13629,53 @@
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestAgentDelegationManagement_ControlAuthority`
 - `pkg/hub:TestAgentDelegationManagement_NoSecretFieldsInResponses`
+
+---
+
+## agent.delegation.revokeall
+
+**Domain:** agent.delegation
+
+**Description:** Revoke every unrevoked agent delegation grant the caller issued, or every one bound to an agent, with the credentials exchanged from them; grants outside the caller's authority are skipped and reported
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/users/me/delegations/revoke-all` |
+| http_route | POST | `/api/v1/agents/{id}/delegations/revoke-all` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `CREDENTIAL_MANAGEMENT`)
+
+**Base Permission:** `agent.delegation.revoke_all`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `revoke-authority`
+
+### Governance
+
+- **Kind:** issuer_credential
+- Session only. On /users/me/delegations/revoke-all, the caller's own issued grants. On /agents/{id}/delegations/revoke-all, per grant: the issuer; the agent's current owner; holders of agent.delegation.revoke_all on the hub (hub admins), for any grant; holders of it on project P, for project(P)-bounded grants only. A dev session counts only as hub authority. Grants outside the caller's authority are skipped and reported, never revoked. Delegated credentials, agent tokens and user access tokens are refused
+
+### Audit
+
+- **Event Type:** `agent_delegation_grant_revoke`
+- **Context Fields:** actor_id, grant_id
+- **Before Fields:** grant_id, revoke_reason, revoked_credential_ids
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `credential_not_admitted`, `audit_failed`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestAgentDelegationRevokeAll_CallerGrants`
+- `pkg/hub:TestAgentDelegationRevokeAll_AgentGrantsSkipsOutsideAuthority`
 
 ---
 

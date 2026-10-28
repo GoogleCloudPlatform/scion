@@ -51,7 +51,7 @@ func (s *Server) listProjectAgentsSortedAgentJWT(w http.ResponseWriter, r *http.
 	if p.cursor != "" {
 		decoded, err := store.DecodeAgentCursor(p.cursor, p.sort, p.dir, binding)
 		if err != nil {
-			BadRequest(w, "invalid cursor")
+			writeInvalidCursor(w)
 			return
 		}
 		cur = &decoded
@@ -149,7 +149,7 @@ func (s *Server) listProjectAgentsSortedAgentJWT(w http.ResponseWriter, r *http.
 	agents := make([]AgentWithCapabilities, len(plainAgents))
 	for i := range plainAgents {
 		item := plainAgents[i]
-		item.AppliedConfig = redactAppliedConfigEnvForResponse(item.AppliedConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
+		item.AppliedConfig, item.PendingConfig = redactAgentConfigsForResponse(item.AppliedConfig, item.PendingConfig, s.envViewAllowed(ctx, identity, &item, caps[i]))
 		agents[i] = AgentWithCapabilities{Agent: item, Cap: caps[i]}
 	}
 

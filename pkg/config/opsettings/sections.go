@@ -481,6 +481,19 @@ type MessagingSettings struct {
 	// Phase 3.
 	OffloadThresholdRunes *int `json:"offload_threshold_runes,omitempty"`
 
+	// AttachmentDeliveryMaxBytes is the total size of the attachments of one
+	// message that has an agent recipient (ptone/scion#4596). A send over it
+	// is refused; 0 turns delivery off, and a send with attachments to an
+	// agent is then refused. Compiled default 33554432 (32 MiB); negative
+	// values are treated as the default.
+	AttachmentDeliveryMaxBytes *int64 `json:"attachment_delivery_max_bytes,omitempty"`
+
+	// AttachmentInboxRetentionDays is how long a broker keeps delivered
+	// attachments in an agent's ~/.scion/inbox before pruning them
+	// (ptone/scion#4596). Compiled default 7; values below 1 are treated
+	// as the default.
+	AttachmentInboxRetentionDays *int `json:"attachment_inbox_retention_days,omitempty"`
+
 	// Stale fields — kept for backward-compatible deserialization only.
 	// New code must not read or write these.
 	ConversationReadSwitch      *bool `json:"conversation_read_switch,omitempty"`

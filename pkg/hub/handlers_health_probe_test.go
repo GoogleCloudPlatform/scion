@@ -38,7 +38,7 @@ func TestCheckWorkspaceStorageHealth_DedupesInFlightStat(t *testing.T) {
 
 	mountRoot := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share1"), 0755))
-	srv.config.WorkspaceStorageConfig = &config.V1WorkspaceStorageConfig{
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
 		Backend: "nfs",
 		NFS: &config.V1NFSConfig{
 			MountRoot: mountRoot,

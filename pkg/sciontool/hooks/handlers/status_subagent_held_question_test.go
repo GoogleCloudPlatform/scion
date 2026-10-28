@@ -175,8 +175,9 @@ func TestSubagentHeldQuestion_LegitimateTransitions(t *testing.T) {
 
 			info := readAgentInfoMap(t, sh.StatusPath)
 			assert.Equal(t, "waiting_for_input", info["activity"])
-			assert.NotContains(t, info, activitySourceKey)
-			assert.NotContains(t, info, notificationWaitAgentsKey)
+			assert.Equal(t, activitySourceNotification, info[activitySourceKey])
+			assert.Equal(t, []string{subagentID(event)}, waitOwnersOf(info))
+			assert.Equal(t, parentWaitAgent, info[parentWaitKey], "the agent-set wait is kept")
 			assert.Empty(t, sent(), "no hub update replaces the agent-set wait")
 		})
 	}

@@ -80,7 +80,11 @@ server:
     # server.hub.write_timeout above is raised.
     write_timeout: ${broker_write_timeout}
     auto_provide: true
-  workspace_storage:
+  # The one storage block (workspace, shared dirs and homes; homes stay
+  # local in the agent pod). It replaces workspace_storage,
+  # shared_dir_storage and home_storage; the hub refuses to start with it
+  # and any of those together.
+  project_storage:
     backend: nfs
     nfs:
       mount_root: ${nfs_mount_root}

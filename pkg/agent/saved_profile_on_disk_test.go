@@ -42,7 +42,7 @@ func savedProfileFixture(t *testing.T, name string) (projectScionDir, agentInfo 
 }
 
 func TestSavedProfileOnDisk(t *testing.T) {
-	t.Run("found matches GetSavedProfile", func(t *testing.T) {
+	t.Run("found matches the agent-info.json profile", func(t *testing.T) {
 		dir, info := savedProfileFixture(t, "a1")
 		if err := os.WriteFile(info, []byte(`{"profile":"local"}`), 0o644); err != nil {
 			t.Fatal(err)
@@ -51,8 +51,8 @@ func TestSavedProfileOnDisk(t *testing.T) {
 		if got != "local" || state != SavedProfileFound {
 			t.Fatalf("SavedProfileOnDisk = (%q, %v), want (local, Found)", got, state)
 		}
-		if want := GetSavedProfile("a1", dir); got != want {
-			t.Fatalf("SavedProfileOnDisk %q differs from GetSavedProfile %q", got, want)
+		if want := savedInfoProfile("a1", dir); got != want {
+			t.Fatalf("SavedProfileOnDisk %q differs from the agent-info.json profile %q", got, want)
 		}
 	})
 	t.Run("found with an empty profile", func(t *testing.T) {

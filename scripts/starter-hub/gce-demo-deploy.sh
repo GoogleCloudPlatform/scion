@@ -22,9 +22,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/hub-config.sh"
 
 # Fail before provisioning anything if certificates are needed but
-# CERT_EMAIL is not set.
+# CERT_EMAIL is not set, or, without TLS (SKIP_TLS=true), if the base URL
+# that will take effect is not the https:// URL of an upstream terminator.
 if [[ "${SKIP_TLS}" != "true" ]]; then
     require_cert_email
+else
+    require_no_tls_https_base_url
+    export HUB_BASE_URL
 fi
 
 echo "=== Scion Hub Full Deployment: ${HUB_NAME} ==="
@@ -70,7 +74,7 @@ fi
 echo ""
 echo "=== Full Deployment Complete ==="
 if [[ "${SKIP_TLS}" == "true" ]]; then
-    echo "Your Scion Hub is running without TLS on ${INSTANCE_NAME}, port 8080."
+    echo "Your Scion Hub runs on ${INSTANCE_NAME}, port 8080, behind your TLS terminator at ${HUB_BASE_URL}."
 else
     echo "Your Scion Hub should now be available at https://${HUB_DOMAIN}"
 fi

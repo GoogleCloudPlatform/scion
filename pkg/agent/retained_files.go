@@ -18,11 +18,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agenthome"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -99,17 +99,10 @@ func CheckRetainedAgentFiles(agentName, projectPath string) error {
 // retainedAgentInfoMarked reports whether path is a regular file holding an
 // agent-info.json with the soft-delete phase.
 func retainedAgentInfoMarked(path string) bool {
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() {
-		return false
-	}
-	f, err := os.Open(path)
+	// Read confined to the agent home, path's directory
+	// (agenthome.ReadFileAt).
+	data, err := agenthome.ReadFileAt(filepath.Dir(path), filepath.Base(path), retainedAgentInfoMaxSize)
 	if err != nil {
-		return false
-	}
-	defer func() { _ = f.Close() }()
-	data, err := io.ReadAll(io.LimitReader(f, retainedAgentInfoMaxSize+1))
-	if err != nil || len(data) > retainedAgentInfoMaxSize {
 		return false
 	}
 	var ai api.AgentInfo

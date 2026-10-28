@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -65,7 +66,7 @@ func newRefFixture(t *testing.T) *refFixture {
 	t.Helper()
 	srv, st, _, _, projA, faults, fault := setupDemoPolicyTestWithFault(t,
 		func(inner store.Store, fault *storeFaultSwitch) *refFaultStore {
-			return &refFaultStore{Store: inner, fault: fault}
+			return &refFaultStore{Store: inner, fault: fault, gets: map[string]int{}, creates: map[string]int{}}
 		})
 	db := openTestMemorySQLite(t, "sqlite")
 	wcs := NewWebChatStore(db, "sqlite")
@@ -346,8 +347,56 @@ type refFaultStore struct {
 	conversationCalls   int
 	// failGetAgent fails GetAgent while the switch is armed.
 	failGetAgent bool
+	// nilGetAgent answers GetAgent with (nil, nil) while the switch is armed,
+	// which no real store does; with nilGetAgentMax > 0 only the first
+	// nilGetAgentMax armed calls do (nilGetAgentN counts them).
+	// Neither nil switch is scoped to an id: while armed, every GetAgent
+	// (or GetConversation) answers (nil, nil), whatever the id, and
+	// nilGetAgentMax is the only narrowing. Arm them only around a call
+	// that makes the one lookup the test means.
+	nilGetAgent    bool
+	nilGetAgentMax int
+	nilGetAgentN   int
+	// nilGetConversation answers GetConversation with (nil, nil) while the
+	// switch is armed.
+	nilGetConversation bool
+	// failUpsertConv fails UpsertConversationByExternalRef while the switch
+	// is armed.
+	failUpsertConv bool
 	// failGetProjectID, when set, fails GetProject for that project only.
 	failGetProjectID string
+	// getsMu guards gets, which counts GetMessage calls by message id; it is
+	// set when the fixture is built, so tests read it without swapping the
+	// server's store.
+	getsMu sync.Mutex
+	gets   map[string]int
+	// creates counts CreateMessage calls by message body (guarded by
+	// getsMu), set when the fixture is built.
+	creates map[string]int
+}
+
+// messageCreates returns how many times CreateMessage was called for a
+// message with body text.
+func (r *refFaultStore) messageCreates(text string) int {
+	r.getsMu.Lock()
+	defer r.getsMu.Unlock()
+	return r.creates[text]
+}
+
+func (r *refFaultStore) CreateMessage(ctx context.Context, m *store.Message) error {
+	r.getsMu.Lock()
+	if r.creates != nil && m != nil {
+		r.creates[m.Msg]++
+	}
+	r.getsMu.Unlock()
+	return r.Store.CreateMessage(ctx, m)
+}
+
+// messageGets returns how many times GetMessage was called for id.
+func (r *refFaultStore) messageGets(id string) int {
+	r.getsMu.Lock()
+	defer r.getsMu.Unlock()
+	return r.gets[id]
 }
 
 func dmKeyFor(t *testing.T, kindA, idA, kindB, idB string) string {
@@ -372,6 +421,11 @@ func postAgentMessageAs(t *testing.T, srv *Server, withCtx func(context.Context)
 }
 
 func (r *refFaultStore) GetMessage(ctx context.Context, id string) (*store.Message, error) {
+	r.getsMu.Lock()
+	if r.gets != nil {
+		r.gets[id]++
+	}
+	r.getsMu.Unlock()
 	if r.failGetMessage && r.fault.Active() {
 		return nil, errRefStoreFault
 	}
@@ -385,6 +439,13 @@ func (r *refFaultStore) GetConversationByExternalRef(ctx context.Context, surfac
 	return r.Store.GetConversationByExternalRef(ctx, surface, ref)
 }
 
+func (r *refFaultStore) UpsertConversationByExternalRef(ctx context.Context, c *store.Conversation) (*store.Conversation, error) {
+	if r.failUpsertConv && r.fault.Active() {
+		return nil, errRefStoreFault
+	}
+	return r.Store.UpsertConversationByExternalRef(ctx, c)
+}
+
 func (r *refFaultStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
 	if (r.failGetProject || (r.failGetProjectID != "" && id == r.failGetProjectID)) && r.fault.Active() {
 		return nil, errRefStoreFault
@@ -393,6 +454,9 @@ func (r *refFaultStore) GetProject(ctx context.Context, id string) (*store.Proje
 }
 
 func (r *refFaultStore) GetConversation(ctx context.Context, id string) (*store.Conversation, error) {
+	if r.nilGetConversation && r.fault.Active() {
+		return nil, nil
+	}
 	if r.failGetConversation && r.fault.Active() {
 		r.conversationCalls++
 		if r.conversationCalls > r.conversationCallsOK {
@@ -403,6 +467,10 @@ func (r *refFaultStore) GetConversation(ctx context.Context, id string) (*store.
 }
 
 func (r *refFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if r.nilGetAgent && r.fault.Active() && (r.nilGetAgentMax == 0 || r.nilGetAgentN < r.nilGetAgentMax) {
+		r.nilGetAgentN++
+		return nil, nil
+	}
 	if r.failGetAgent && r.fault.Active() {
 		return nil, errRefStoreFault
 	}

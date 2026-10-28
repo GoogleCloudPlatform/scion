@@ -74,8 +74,13 @@ func TestSchedule_CreateDispatchAgentRequiresAgentCreateScope(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 }
 
-func TestSchedule_UpdateToDispatchAgentRequiresAgentCreateScope(t *testing.T) {
-	srv, _, projectID := setupScheduleTest(t)
+// An agent caller's PATCH converting a message schedule to dispatch_agent
+// is refused, and the schedule keeps its type. Agent callers do not edit
+// schedule definitions; the agent:create gate on this conversion is
+// covered for user callers by
+// TestSchedule_UpdateDispatchAgentScopedUATNeedsUpdateAndAgentCreate.
+func TestSchedule_UpdateToDispatchAgentRefusedForAgentCaller(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
 
 	createRec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/schedules",
 		CreateScheduleRequest{
@@ -92,7 +97,10 @@ func TestSchedule_UpdateToDispatchAgentRequiresAgentCreateScope(t *testing.T) {
 	rec := doScheduleAgentRequest(t, srv, authzHelperAgent(projectID, ScopeProjectRead), projectID, sched.ID, http.MethodPatch,
 		UpdateScheduleRequest{EventType: "dispatch_agent", Payload: `{"agentName":"scheduled-worker"}`})
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), string(ScopeAgentCreate))
+	assert.JSONEq(t, agentScopeForbiddenBody, rec.Body.String())
+	stored, err := s.GetSchedule(context.Background(), sched.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "message", stored.EventType)
 }
 
 // TestSchedule_CreateDispatchAgentScopedUATNeedsBothSelectors covers

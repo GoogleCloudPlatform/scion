@@ -78,7 +78,7 @@ scion harness-config install file:///path/to/my-harness
 When a Hub is available, `install` registers the config **on the Hub** (project scope by default,
 or global with `--global`); otherwise it installs it locally. The output shows the Hub scope the
 config was created or updated in. A project-scoped config and a global config with the same name
-are separate configs, so check the printed scope to see which one you changed.
+are separate configs, so check the printed scope to see which one you changed. When the Hub bootstraps or imports a harness-config directory, it opens the collected directory as a root, reads only the regular files recorded during collection without following symlinks or replaced directories, verifies each file's size and SHA-256 digest on every read (`config.yaml` and uploaded files), and requires any config whose name was taken from `config.yaml` during discovery to carry that same `name` in the collected `config.yaml`.
 
 ### Source-URL tracking and "Refresh from Source"
 
@@ -387,11 +387,12 @@ file, and both readers use those values: `sciontool init`, which reports the age
 when it is ready, and the broker, which waits before pasting a held message. A
 `SCION_HARNESS_READY` value in a caller's `env` cannot override it (a template cannot set `SCION_*` keys).
 
-The built-in bundles use `hook` (settle 1.5s, timeout 90s) for claude, gemini-cli, copilot and
-grok-build, and `delay` 8s for every other harness. A harness-config without the block (for
-example one installed before the block existed) uses the block of the built-in bundle for its
-`harness` type, so an older claude config keeps `hook`; a harness with no built-in bundle uses
-`delay` 8s.
+The built-in bundles use `hook` (settle 1.5s, timeout 90s) for claude, gemini-cli and
+grok-build, and `delay` 8s for every other harness. Copilot uses `delay`: its `sessionStart`
+hook fires only when the first prompt is submitted, not at startup. A harness-config without
+the block (for example one installed before the block existed) uses the block of the built-in
+bundle for its `harness` type, so an older claude config keeps `hook`; a harness with no
+built-in bundle uses `delay` 8s.
 
 A harness-config without a provisioner that declares a `ready` or `delivery` block, in
 `config.yaml` or in an override, is treated like a harness-config with `command` or

@@ -422,7 +422,7 @@ func TestResolveManagerForOpts_OperatorDefinedSubstrateProfilesSelectedByProject
 		if len(agents) != 1 {
 			t.Fatalf("List() for agent %q = %v, want exactly one match", slug, agents)
 		}
-		if _, err := foundMgr.Delete(context.Background(), slug, false, "", false); err != nil {
+		if _, err := foundMgr.Delete(context.Background(), slug, false, "", "", false); err != nil {
 			t.Fatalf("Delete(%q) error = %v", slug, err)
 		}
 	}

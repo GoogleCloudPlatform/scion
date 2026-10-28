@@ -28,7 +28,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -354,7 +353,13 @@ func TestConduitScopeOfTestUnsetInProduction(t *testing.T) {
 	assert.Nil(t, srv.conduitAuthorizeActionTestHook)
 	assert.Nil(t, srv.conduitRouteCanRenewTest)
 
-	files, err := filepath.Glob("*.go")
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards assignments of the conduit test seams.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards assignments of the conduit test seams.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards assignments of the conduit test seams.
+	files, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
@@ -429,7 +434,13 @@ func TestConduitGrantRequestCallersSetOrigin(t *testing.T) {
 	}
 	got := map[string][]string{}
 	calls := 0
-	files, err := filepath.Glob("*.go")
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards conduitGrantRequest callers.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards conduitGrantRequest callers.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards conduitGrantRequest callers.
+	files, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {

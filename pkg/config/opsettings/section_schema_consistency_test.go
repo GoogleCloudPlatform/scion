@@ -144,9 +144,6 @@ func sectionKoanfPath(section, key string) string {
 	if kp := KoanfPathFromSectionKey(section, key); kp != "" {
 		return kp
 	}
-	if section == "notifications" {
-		return "server." + key
-	}
 	return key // agent_defaults: top-level keys
 }
 

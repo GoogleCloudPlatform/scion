@@ -17,7 +17,6 @@
 package hub
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -58,17 +57,12 @@ func answerBrokerUploadWith(t *testing.T, broker *fakeBroker, status int, body [
 
 // ptone/scion#4245: a broker that answers the sync-from upload with a 2xx
 // status but no manifest gets a 502 with a clear message, not a handler
-// panic, and the hub workspace is not synced back from it.
+// panic.
 func TestWorkspaceSyncFrom_BrokerReplyWithoutManifest_BadGateway(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	srv, s, project := setupCreateAgentServer(t, &slowLaunchDispatcher{})
 	shortenSyncDispatchTimeout(t, 3*time.Second)
 	srv.SetStorage(newContentMockStorage("test-bucket"))
-	var downloaded bool
-	srv.setHubWorkspaceDownloader(func(context.Context, string, string, string) error {
-		downloaded = true
-		return nil
-	})
 	agent := createSiteAgent(t, s, project, "sync-from-no-manifest", state.PhaseRunning, store.RunIntentRunning)
 	broker := connectFakeBroker(t, srv, agent.RuntimeBrokerID)
 	uploaded := answerBrokerUploadWith(t, broker, http.StatusOK, []byte(`{}`))
@@ -84,5 +78,4 @@ func TestWorkspaceSyncFrom_BrokerReplyWithoutManifest_BadGateway(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp), rec.Body.String())
 	assert.Equal(t, ErrCodeRuntimeError, errResp.Error.Code)
 	assert.Contains(t, errResp.Error.Message, "no workspace manifest")
-	assert.False(t, downloaded, "no sync-back after a broker reply without a manifest")
 }

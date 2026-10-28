@@ -19,6 +19,9 @@
 // depends on sciontool, and a rename on one side fails the contract test
 // on the other (see ptone/scion#2053, design §3.6 "Contract pinning").
 //
+// It also holds the shared structured analytics event envelope (envelope.go)
+// that agent.lifecycle, agent.usage and telemetry.health events embed.
+//
 // Design references in this package (section N, Dn) are to
 // .design/hosted/usage-telemetry.md.
 package telemetrycontract
@@ -88,9 +91,11 @@ type LabelKV struct{ Key, Value string }
 // worst). token_type is per-point (one of the TokenType* values) and added
 // by the caller alongside these.
 //
-// Unlike MetricAPICalls, which keeps agent_id/project_id for Cloud
-// descriptor compatibility, MetricUsageTokens's GCP allowlist does not
-// permit them: a point carrying any key outside {harness, model, token_type}
+// Neither MetricUsageTokens nor MetricAPICalls carries the unprefixed
+// agent_id/project_id point labels (calls dropped them in ptone/scion#3668);
+// identity comes from the exporter-stamped scion_* labels. For
+// MetricUsageTokens the GCP allowlist does not permit them at all: a point
+// carrying any key outside {harness, model, token_type}
 // gets the whole OTLP request rejected, taking the rest of that flush (calls,
 // tool and session metrics included) with it. This function is the single
 // place the hook handler (pkg/sciontool/hooks/handlers) and its admission

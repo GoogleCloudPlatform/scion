@@ -44,6 +44,7 @@ import {
   getTestInfraStatus,
   loadTestInfraStatus,
 } from './test-infra-status.js';
+import { noteShownEntry } from './navigation.js';
 
 interface RailEntry {
   session: TerminalSession;
@@ -2154,6 +2155,7 @@ export class TerminalWorkspaceRoot {
     // Only update if URL actually changed
     if (newUrl !== window.location.pathname + window.location.search) {
       window.history.replaceState(window.history.state, '', newUrl);
+      noteShownEntry();
     }
   }
 

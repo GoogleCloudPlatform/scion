@@ -21,10 +21,10 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
-	"sort"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -55,15 +55,14 @@ type ReincarnateAgentRequest struct {
 	// TargetBroker. Never downgrades a move the export mode can carry.
 	ForceMove bool `json:"forceMove,omitempty"`
 
-	// SharedDirBackends changes the recorded shared-dir storage backend of
-	// the named shared dirs (dir name to "nfs" or "local"). Only the
-	// agent's record on its broker changes; no data is copied, moved or
-	// deleted. Not accepted for a self-reincarnation.
-	SharedDirBackends map[string]string `json:"sharedDirBackends,omitempty"`
-	// AllowEmptySharedDir, with SharedDirBackends, skips the start check
-	// that refuses an empty directory on the new backend while the dir's
-	// directory on its previous backend is not empty.
-	AllowEmptySharedDir bool `json:"allowEmptySharedDir,omitempty"`
+	// SharedDirBackends and AllowEmptySharedDir are the removed per-agent
+	// shared dir backend change (`scion reincarnate --shared-dir-backend`,
+	// `--allow-empty-shared-dir`). They stay on the wire only so a request
+	// from an older client that sets them gets a 400
+	// (removedSharedDirBackendOptionError) rather than being silently
+	// ignored: server.project_storage now places every agent's shared dirs.
+	SharedDirBackends   map[string]string `json:"sharedDirBackends,omitempty"`
+	AllowEmptySharedDir bool              `json:"allowEmptySharedDir,omitempty"`
 
 	// Patch fields (ptone/scion#3302): each changes the next generation's
 	// setting and is kept by later reincarnations. Empty (nil for
@@ -148,38 +147,17 @@ type ReincarnationPlan struct {
 	ServiceAccount *FieldChange `json:"serviceAccount,omitempty"`
 	ThinkingLevel  *FieldChange `json:"thinkingLevel,omitempty"`
 	HarnessAuth    *FieldChange `json:"harnessAuth,omitempty"`
-	// SharedDirBackends and AllowEmptySharedDir echo the request's explicit
-	// shared dir backend change.
-	SharedDirBackends   map[string]string `json:"sharedDirBackends,omitempty"`
-	AllowEmptySharedDir bool              `json:"allowEmptySharedDir,omitempty"`
 }
 
-// validateSharedDirBackendRequest checks a reincarnate request's explicit
-// shared dir backend change: each target must be "nfs" or "local". Whether
-// each dir is one of the agent's shared dirs, and whether the broker has a
-// complete nfs block, is checked by the broker, which holds the project
-// settings and the agent's record.
-func validateSharedDirBackendRequest(req ReincarnateAgentRequest) error {
-	if len(req.SharedDirBackends) == 0 {
-		if req.AllowEmptySharedDir {
-			return fmt.Errorf("allowEmptySharedDir needs a shared dir backend change")
-		}
-		return nil
+// removedSharedDirBackendOptionError is the 400 message for a reincarnate
+// request that still carries the removed per-agent shared dir backend
+// change, or "" when it carries none.
+func removedSharedDirBackendOptionError(req ReincarnateAgentRequest) string {
+	if len(req.SharedDirBackends) == 0 && !req.AllowEmptySharedDir {
+		return ""
 	}
-	names := make([]string, 0, len(req.SharedDirBackends))
-	for name := range req.SharedDirBackends {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		if err := api.ValidateSharedDirs([]api.SharedDir{{Name: name}}); err != nil {
-			return fmt.Errorf("sharedDirBackends: invalid shared dir name %q", name)
-		}
-		if backend := req.SharedDirBackends[name]; backend != "nfs" && backend != "local" {
-			return fmt.Errorf("sharedDirBackends: shared dir %q: only a change to the nfs or local backend is supported (got %q)", name, backend)
-		}
-	}
-	return nil
+	return "sharedDirBackends and allowEmptySharedDir (--shared-dir-backend, --allow-empty-shared-dir) were removed: " +
+		"server.project_storage places every agent's shared dirs. Existing node-local shared dirs: " + config.ProjectStorageMigrationText
 }
 
 // authorizeAgentReincarnate gates POST .../reincarnate for every caller kind
@@ -259,15 +237,8 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 			"config overrides are not yet supported for scion reincarnate", nil)
 		return
 	}
-	if err := validateSharedDirBackendRequest(req); err != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeValidationError, err.Error(), nil)
-		return
-	}
-	// A shared dir backend change is an operator action: the self
-	// exemption in authorizeAgentReincarnate does not cover it.
-	if (len(req.SharedDirBackends) > 0 || req.AllowEmptySharedDir) && isSelfRequest(ctx, agent) {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"an agent cannot change its own shared dir backend; ask a user or another agent with lifecycle access", nil)
+	if msg := removedSharedDirBackendOptionError(req); msg != "" {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError, msg, nil)
 		return
 	}
 	if !validateReincarnatePatchRequest(w, req) {
@@ -368,11 +339,6 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	}
-	if moveTarget != nil && (len(req.SharedDirBackends) > 0 || req.AllowEmptySharedDir) {
-		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-			"a shared dir backend change cannot be combined with a move to another broker", nil)
-		return
-	}
 	gate := s.reincarnateWorkspaceGate(ctx, agent, project, moveTarget, req.ForceMove)
 	workspaceModeErr, sameBrokerEmptyPerAgent := gate.workspaceModeErr, gate.sameBrokerEmptyPerAgent
 	if moveTarget != nil {
@@ -469,10 +435,6 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	imageRegistry := resolveRegistry(fresh.Profile)
-	if len(req.SharedDirBackends) > 0 {
-		fresh.SharedDirBackendChanges = req.SharedDirBackends
-		fresh.AllowEmptySharedDir = req.AllowEmptySharedDir
-	}
 	// Fail fast, as start and restart do, when the GCP identity the fresh
 	// config will run with is no longer allowed for this agent. Checked
 	// before the claim and the worker's stop, so a refused request leaves

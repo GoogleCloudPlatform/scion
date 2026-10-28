@@ -211,6 +211,11 @@ func TestAsyncStartGuard0f_RunlessSelfReportDuringStartLaunch(t *testing.T) {
 			Created: time.Now(), Updated: time.Now(),
 		}
 		require.NoError(t, s.CreateAgent(ctx, a))
+		// CreateAgent does not record a run: the hub records it with
+		// SetAgentRunID before a start's send (beginRun).
+		_, err := s.SetAgentRunID(ctx, a.ID, "run-new", nil)
+		require.NoError(t, err)
+		require.Equal(t, "run-new", getAgent(t, s, a.ID).RunID)
 		return a
 	}
 	const report = `{"phase":"stopped","activity":"completed","message":"Agent shutting down"}`

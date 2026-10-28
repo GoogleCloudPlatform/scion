@@ -115,6 +115,12 @@ func (d *resolveAtDispatchDispatcher) DispatchAgentCreateWithGather(ctx context.
 // resolve at that dispatch, not only after the next count.
 func TestProfileReferences_AutoLinkCreateRetainsFirstTime(t *testing.T) {
 	f := brokerLinkAuthzSetup(t)
+	// The auto-linked broker is remote and has no checkout of the project,
+	// so the project is a git project (clone-per-agent, the default): a
+	// hub-managed project's workspace cannot reach such a broker and that
+	// create is refused (ptone/scion#5813).
+	f.proj.GitRemote = "github.com/test/link-authz"
+	require.NoError(t, f.store.UpdateProject(context.Background(), f.proj))
 	ctx := context.Background()
 	if f.proj.Annotations == nil {
 		f.proj.Annotations = map[string]string{}

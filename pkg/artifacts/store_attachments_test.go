@@ -124,10 +124,10 @@ func TestStoreBindAttachment(t *testing.T) {
 		ctx := context.Background()
 		up := seedUpload(t, st, "user-1")
 
-		if err := st.BindAttachment(ctx, up.ID, PrincipalKindUser, "user-2", "msg-1", time.Now()); !errors.Is(err, ErrAttachmentNotOwned) {
+		if err := st.BindAttachment(ctx, up.ID, PrincipalKindUser, "user-2", "msg-1", "", time.Now()); !errors.Is(err, ErrAttachmentNotOwned) {
 			t.Errorf("bind by another user = %v, want ErrAttachmentNotOwned", err)
 		}
-		if err := st.BindAttachment(ctx, up.ID, PrincipalKindAgent, "user-1", "msg-1", time.Now()); !errors.Is(err, ErrAttachmentNotOwned) {
+		if err := st.BindAttachment(ctx, up.ID, PrincipalKindAgent, "user-1", "msg-1", "", time.Now()); !errors.Is(err, ErrAttachmentNotOwned) {
 			t.Errorf("bind by a principal of another kind = %v, want ErrAttachmentNotOwned", err)
 		}
 		got, err := st.GetAttachment(ctx, up.ID)
@@ -135,7 +135,7 @@ func TestStoreBindAttachment(t *testing.T) {
 			t.Fatalf("after refused binds: %+v, %v; want still an upload", got, err)
 		}
 
-		if err := st.BindAttachment(ctx, up.ID, PrincipalKindUser, "user-1", "msg-1", time.Now()); err != nil {
+		if err := st.BindAttachment(ctx, up.ID, PrincipalKindUser, "user-1", "msg-1", "", time.Now()); err != nil {
 			t.Fatalf("bind by the uploader: %v", err)
 		}
 		got, err = st.GetAttachment(ctx, up.ID)
@@ -143,18 +143,18 @@ func TestStoreBindAttachment(t *testing.T) {
 			t.Fatalf("bound row = %+v, %v; want message:msg-1 owned by user-1", got, err)
 		}
 
-		if err := st.BindAttachment(ctx, up.ID, PrincipalKindUser, "user-1", "msg-2", time.Now()); !errors.Is(err, ErrAttachmentBound) {
+		if err := st.BindAttachment(ctx, up.ID, PrincipalKindUser, "user-1", "msg-2", "", time.Now()); !errors.Is(err, ErrAttachmentBound) {
 			t.Errorf("second bind = %v, want ErrAttachmentBound", err)
 		}
 		if got, _ := st.GetAttachment(ctx, up.ID); got == nil || got.ScopeRef != "msg-1" {
 			t.Errorf("after the second bind the row is %+v; want still message msg-1", got)
 		}
 
-		if err := st.BindAttachment(ctx, uuid.NewString(), PrincipalKindUser, "user-1", "msg-1", time.Now()); !errors.Is(err, ErrNotFound) {
+		if err := st.BindAttachment(ctx, uuid.NewString(), PrincipalKindUser, "user-1", "msg-1", "", time.Now()); !errors.Is(err, ErrNotFound) {
 			t.Errorf("bind of an unknown id = %v, want ErrNotFound", err)
 		}
 		project := seedOwned(t, st, PrincipalKindUser, "user-1")
-		if err := st.BindAttachment(ctx, project.ID, PrincipalKindUser, "user-1", "msg-1", time.Now()); !errors.Is(err, ErrNotFound) {
+		if err := st.BindAttachment(ctx, project.ID, PrincipalKindUser, "user-1", "msg-1", "", time.Now()); !errors.Is(err, ErrNotFound) {
 			t.Errorf("bind of a project artifact = %v, want ErrNotFound", err)
 		}
 		if got, err := st.GetArtifact(ctx, project.ID); err != nil || got.ScopeKind != ScopeKindProject {
@@ -180,7 +180,7 @@ func TestStoreBindAttachmentConcurrent(t *testing.T) {
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
-				errs[i] = stores[i].BindAttachment(ctx, up.ID, PrincipalKindUser, "user-1", []string{"msg-a", "msg-b"}[i], time.Now())
+				errs[i] = stores[i].BindAttachment(ctx, up.ID, PrincipalKindUser, "user-1", []string{"msg-a", "msg-b"}[i], "", time.Now())
 			}(i)
 		}
 		wg.Wait()
@@ -440,6 +440,280 @@ func TestStoreReconcilerSkipsAttachments(t *testing.T) {
 		}
 		if got, err := st.GetArtifact(ctx, owned.ID); err != nil || got.OrphanedAt == nil {
 			t.Errorf("project artifact = %+v, %v; want marked", got, err)
+		}
+	})
+}
+
+// migrateTo brings a fresh database to just before the migration named
+// stop, recording each applied step in the ledger, as an older binary
+// would have left it.
+func migrateTo(t *testing.T, db *sql.DB, st *sqlStore, stop string) {
+	t.Helper()
+	ledger := ledgerSQLite
+	if st.dialect == dialectPostgres {
+		ledger = ledgerPostgres
+	}
+	if _, err := db.Exec(ledger); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range migrations {
+		if m.name == stop {
+			return
+		}
+		ddl := m.sqlite
+		if st.dialect == dialectPostgres {
+			ddl = m.postgres
+		}
+		if _, err := db.Exec(ddl); err != nil {
+			t.Fatalf("%s: %v", m.name, err)
+		}
+		if _, err := db.Exec(st.rebind("INSERT INTO artifact_migrations (name, applied_at) VALUES (?, ?)"), m.name, st.timeArg(time.Now())); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Fatalf("migration %q not found", stop)
+}
+
+// TestMigration0010_AddsNullableMessageProject: a database at 0009 migrates
+// to message_project_id; rows bound before read NULL, the ledger records
+// 0010_attachment_project once, and a second Init changes nothing.
+func TestMigration0010_AddsNullableMessageProject(t *testing.T) {
+	if i := migrationIndex(migrationAttachmentProject); i < 1 || migrations[i-1].name != migrationAttachments {
+		t.Fatalf("migration %q is not right after %q", migrationAttachmentProject, migrationAttachments)
+	}
+	if got := migrationAttachmentProject; got != "0010_attachment_project" {
+		t.Fatalf("migrationAttachmentProject = %q", got)
+	}
+	for _, b := range testBackends() {
+		t.Run(b.name, func(t *testing.T) {
+			db, _ := b.open(t)
+			st := NewStore(db, b.driver).(*sqlStore)
+			migrateTo(t, db, st, migrationAttachmentProject)
+			ctx := context.Background()
+			// A row bound under 0009: the column does not exist yet.
+			old := seedAttachment(t, st, PrincipalKindUser, "user-1", ScopeKindMessage, "msg-old", time.Now())
+			if err := st.Init(ctx); err != nil {
+				t.Fatalf("Init over 0009: %v", err)
+			}
+			got, err := st.GetAttachment(ctx, old.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.MessageProjectID != nil {
+				t.Errorf("a row bound before 0010 reads %q, want NULL", *got.MessageProjectID)
+			}
+			rows, err := st.ListMessageAttachments(ctx, []string{"msg-old"})
+			if err != nil || len(rows["msg-old"]) != 1 || rows["msg-old"][0].Artifact.MessageProjectID != nil {
+				t.Errorf("listed row = %+v, %v; want one row with NULL project", rows, err)
+			}
+			count := func() int {
+				var n int
+				if err := db.QueryRow(st.rebind("SELECT COUNT(*) FROM artifact_migrations WHERE name = ?"), migrationAttachmentProject).Scan(&n); err != nil {
+					t.Fatal(err)
+				}
+				return n
+			}
+			if n := count(); n != 1 {
+				t.Errorf("ledger rows for 0010 = %d, want 1", n)
+			}
+			if err := st.Init(ctx); err != nil {
+				t.Errorf("Init again: %v", err)
+			}
+			if n := count(); n != 1 {
+				t.Errorf("ledger rows for 0010 after a second Init = %d, want 1", n)
+			}
+		})
+	}
+}
+
+// TestBindAttachment_WritesMessageProject: "" and a project id both round
+// trip through the bind, on the single and the list lookup; an unbound
+// upload stays NULL.
+func TestBindAttachment_WritesMessageProject(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
+		ctx := context.Background()
+		for _, project := range []string{"", "project-1"} {
+			up := seedUpload(t, st, "user-1")
+			msgID := "msg-" + uuid.NewString()
+			if err := st.BindAttachment(ctx, up.ID, PrincipalKindUser, "user-1", msgID, project, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			got, err := st.GetAttachment(ctx, up.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.MessageProjectID == nil || *got.MessageProjectID != project {
+				t.Errorf("bound with %q: GetAttachment project = %v", project, got.MessageProjectID)
+			}
+			rows, err := st.ListMessageAttachments(ctx, []string{msgID})
+			if err != nil || len(rows[msgID]) != 1 {
+				t.Fatalf("list = %+v, %v", rows, err)
+			}
+			if p := rows[msgID][0].Artifact.MessageProjectID; p == nil || *p != project {
+				t.Errorf("bound with %q: listed project = %v", project, p)
+			}
+		}
+		unbound := seedUpload(t, st, "user-1")
+		got, err := st.GetAttachment(ctx, unbound.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.MessageProjectID != nil {
+			t.Errorf("an unbound upload reads %q, want NULL", *got.MessageProjectID)
+		}
+	})
+}
+
+// TestBindAttachment_ProjectNotWrittenWithoutBind: a refused bind (not
+// owned, already bound) leaves message_project_id as it was.
+func TestBindAttachment_ProjectNotWrittenWithoutBind(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
+		ctx := context.Background()
+		up := seedUpload(t, st, "user-1")
+		if err := st.BindAttachment(ctx, up.ID, PrincipalKindUser, "user-2", "msg-1", "project-x", time.Now()); !errors.Is(err, ErrAttachmentNotOwned) {
+			t.Fatalf("bind by another user: %v", err)
+		}
+		got, err := st.GetAttachment(ctx, up.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.MessageProjectID != nil {
+			t.Errorf("a refused bind wrote project %q", *got.MessageProjectID)
+		}
+		if err := st.BindAttachment(ctx, up.ID, PrincipalKindUser, "user-1", "msg-1", "project-1", time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.BindAttachment(ctx, up.ID, PrincipalKindUser, "user-1", "msg-2", "project-2", time.Now()); !errors.Is(err, ErrAttachmentBound) {
+			t.Fatalf("second bind: %v", err)
+		}
+		got, err = st.GetAttachment(ctx, up.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.MessageProjectID == nil || *got.MessageProjectID != "project-1" || got.ScopeRef != "msg-1" {
+			t.Errorf("after a refused second bind: scope %q project %v", got.ScopeRef, got.MessageProjectID)
+		}
+	})
+}
+
+// TestMigration0011_DeliveryRedemptions: a database at 0010 migrates to
+// the redemption table; a nonce is recorded once, a second record reports
+// a repeated use, the sweep deletes old rows, and a second Init is a no-op.
+func TestMigration0011_DeliveryRedemptions(t *testing.T) {
+	if i := migrationIndex(migrationDeliveryRedemptions); i < 1 || migrations[i-1].name != migrationAttachmentProject {
+		t.Fatalf("migration %q is not right after %q", migrationDeliveryRedemptions, migrationAttachmentProject)
+	}
+	if got := migrationDeliveryRedemptions; got != "0011_delivery_redemptions" {
+		t.Fatalf("migrationDeliveryRedemptions = %q", got)
+	}
+	for _, b := range testBackends() {
+		t.Run(b.name, func(t *testing.T) {
+			db, _ := b.open(t)
+			st := NewStore(db, b.driver).(*sqlStore)
+			migrateTo(t, db, st, migrationDeliveryRedemptions)
+			ctx := context.Background()
+			if err := st.Init(ctx); err != nil {
+				t.Fatalf("Init over 0010: %v", err)
+			}
+			old := time.Now().Add(-48 * time.Hour)
+			if first, err := st.RecordDeliveryRedemption(ctx, "nonce-old", old); err != nil || !first {
+				t.Fatalf("first record = %v, %v", first, err)
+			}
+			if first, err := st.RecordDeliveryRedemption(ctx, "nonce-new", time.Now()); err != nil || !first {
+				t.Fatalf("first record = %v, %v", first, err)
+			}
+			if again, err := st.RecordDeliveryRedemption(ctx, "nonce-new", time.Now()); err != nil || again {
+				t.Fatalf("second record of one nonce = %v, %v; want false", again, err)
+			}
+			n, err := st.SweepDeliveryRedemptions(ctx, time.Now().Add(-24*time.Hour))
+			if err != nil || n != 1 {
+				t.Fatalf("sweep = %d, %v; want 1", n, err)
+			}
+			if first, err := st.RecordDeliveryRedemption(ctx, "nonce-old", time.Now()); err != nil || !first {
+				t.Errorf("a swept nonce records again: %v, %v", first, err)
+			}
+			if err := st.Init(ctx); err != nil {
+				t.Errorf("Init again: %v", err)
+			}
+		})
+	}
+}
+
+// TestRecordDeliveryRedemption_HeldRedeemerLoses (K31): one redeemer is
+// held immediately before its nonce insert while a second records the same
+// nonce; when released, the held one is answered "not first" with no error.
+// The conflict is answered by the insert itself, so a check made before the
+// insert cannot decide it.
+func TestRecordDeliveryRedemption_HeldRedeemerLoses(t *testing.T) {
+	type heldKey struct{}
+	forEachBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
+		reached := make(chan struct{})
+		release := make(chan struct{})
+		redemptionInsertHook = func(ctx context.Context) {
+			if ctx.Value(heldKey{}) != nil {
+				close(reached)
+				<-release
+			}
+		}
+		t.Cleanup(func() { redemptionInsertHook = nil })
+		type result struct {
+			first bool
+			err   error
+		}
+		held := make(chan result, 1)
+		go func() {
+			ctx := context.WithValue(context.Background(), heldKey{}, true)
+			first, err := st.RecordDeliveryRedemption(ctx, "held-nonce", time.Now())
+			held <- result{first, err}
+		}()
+		<-reached
+		first, err := st.RecordDeliveryRedemption(context.Background(), "held-nonce", time.Now())
+		if err != nil || !first {
+			close(release)
+			t.Fatalf("second redeemer: first=%v err=%v, want the first use", first, err)
+		}
+		close(release)
+		got := <-held
+		if got.err != nil {
+			t.Fatalf("held redeemer: %v (a repeated nonce is a normal answer, never an error)", got.err)
+		}
+		if got.first {
+			t.Fatal("held redeemer was answered as the first use after the nonce was recorded")
+		}
+	})
+}
+
+// TestRecordDeliveryRedemption_Concurrent: concurrent records of one
+// nonce, released together: exactly one is a first use, and none is an
+// error (the conflict is answered by the insert itself).
+func TestRecordDeliveryRedemption_Concurrent(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
+		ctx := context.Background()
+		var wg sync.WaitGroup
+		results := make([]bool, 8)
+		errs := make([]error, 8)
+		start := make(chan struct{})
+		for i := range results {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				results[i], errs[i] = st.RecordDeliveryRedemption(ctx, "shared-nonce", time.Now())
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+		firsts := 0
+		for i := range results {
+			if errs[i] != nil {
+				t.Fatalf("record %d: %v (a repeated nonce is a normal answer, never an error)", i, errs[i])
+			}
+			if results[i] {
+				firsts++
+			}
+		}
+		if firsts != 1 {
+			t.Fatalf("first uses = %d, want exactly 1", firsts)
 		}
 	})
 }

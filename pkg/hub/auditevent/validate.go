@@ -138,39 +138,45 @@ func validateSnapshot(event EnvelopeV1, payload map[string]any, hasPayload bool)
 	if slices.Contains(entry.RequiredEnvelopeLeaves, "principal") && event.Principal == nil {
 		return invalid("principal", "is required by the catalog")
 	}
-	if event.Resource == nil {
+	// resource is required only where the catalog entry lists it in
+	// RequiredEnvelopeLeaves; every entry before the broker family lists it.
+	// An entry that omits it (broker/auth_failure, broker/join, whose
+	// caller-claimed broker ID may be unrepresentable) admits an event
+	// without one. The payload checks below run either way.
+	if event.Resource != nil {
+		if event.Resource.Kind != entry.ResourceKind && !slices.Contains(entry.AdditionalResourceKinds, event.Resource.Kind) {
+			return invalid("resource.kind", "must match the catalog entry")
+		}
+		if err := validateBoundedString("resource.id", event.Resource.ID, 128); err != nil {
+			return err
+		}
+		var scopeSchema *ResourceScopeSchema
+		for i := range entry.ResourceScopes {
+			if entry.ResourceScopes[i].Scope == event.Resource.Scope {
+				scopeSchema = &entry.ResourceScopes[i]
+				break
+			}
+		}
+		if scopeSchema == nil {
+			return invalid("resource.scope", "must be declared by the catalog")
+		}
+		switch scopeSchema.ProjectID {
+		case ResourceProjectIDOmitted:
+			if event.Resource.ProjectID != "" {
+				return invalid("resource.project_id", "must be omitted for the resource scope")
+			}
+		case ResourceProjectIDRequired:
+			if event.Resource.ProjectID == "" {
+				return invalid("resource.project_id", "is required for the resource scope")
+			}
+		default:
+			return invalid("resource.project_id", "has an undeclared catalog rule")
+		}
+		if err := validateOptionalBoundedString("resource.project_id", event.Resource.ProjectID, 128); err != nil {
+			return err
+		}
+	} else if slices.Contains(entry.RequiredEnvelopeLeaves, "resource") {
 		return invalid("resource", "is required by the catalog")
-	}
-	if event.Resource.Kind != entry.ResourceKind && !slices.Contains(entry.AdditionalResourceKinds, event.Resource.Kind) {
-		return invalid("resource.kind", "must match the catalog entry")
-	}
-	if err := validateBoundedString("resource.id", event.Resource.ID, 128); err != nil {
-		return err
-	}
-	var scopeSchema *ResourceScopeSchema
-	for i := range entry.ResourceScopes {
-		if entry.ResourceScopes[i].Scope == event.Resource.Scope {
-			scopeSchema = &entry.ResourceScopes[i]
-			break
-		}
-	}
-	if scopeSchema == nil {
-		return invalid("resource.scope", "must be declared by the catalog")
-	}
-	switch scopeSchema.ProjectID {
-	case ResourceProjectIDOmitted:
-		if event.Resource.ProjectID != "" {
-			return invalid("resource.project_id", "must be omitted for the resource scope")
-		}
-	case ResourceProjectIDRequired:
-		if event.Resource.ProjectID == "" {
-			return invalid("resource.project_id", "is required for the resource scope")
-		}
-	default:
-		return invalid("resource.project_id", "has an undeclared catalog rule")
-	}
-	if err := validateOptionalBoundedString("resource.project_id", event.Resource.ProjectID, 128); err != nil {
-		return err
 	}
 	if !hasPayload {
 		return invalid("payload", "is required")

@@ -176,6 +176,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "GET /api/v1/test-infra/status", RouteID: "testInfra.status",
 		Classification: RoutePublic,
 	},
+	"POST /api/v1/csp-reports": {
+		Pattern: "POST /api/v1/csp-reports", RouteID: "cspReports.create",
+		Classification: RoutePublic,
+	},
 	"/github-app/setup": {
 		Pattern: "/github-app/setup", RouteID: "github-app.setup",
 		Classification: RoutePublic,
@@ -276,6 +280,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/users/me/delegations": {
 		Pattern: "/api/v1/users/me/delegations", RouteID: "users.me.delegations",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/users/me/delegations/revoke-all": {
+		Pattern: "/api/v1/users/me/delegations/revoke-all", RouteID: "users.me.delegations.revokeAll",
 		Classification: RouteAuthenticated,
 	},
 	"/api/v1/users/me/terminal-workspace": {
@@ -694,6 +702,34 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
 	},
+	// chat.stars and chat.stars.byId serve the caller's own starred
+	// messages; every read and add also needs read access to the message's
+	// thread (project.read), checked per conversation by the handler.
+	"/api/v1/chat/stars": {
+		Pattern: "/api/v1/chat/stars", RouteID: "chat.stars",
+		Classification: RoutePolicy,
+		Permission:     "project.read", Resource: "project", Action: "read",
+	},
+	"/api/v1/chat/stars/": {
+		Pattern: "/api/v1/chat/stars/", RouteID: "chat.stars.byId",
+		Classification: RoutePolicy,
+		Permission:     "project.read", Resource: "project", Action: "read",
+	},
+	// chat.starredConversations is the Starred rail: the caller's own
+	// conversations with stars, each kept only while the caller can read
+	// it (project.read for a thread), checked per conversation by the
+	// handler.
+	"/api/v1/chat/starred-conversations": {
+		Pattern: "/api/v1/chat/starred-conversations", RouteID: "chat.starredConversations",
+		Classification: RoutePolicy,
+		Permission:     "project.read", Resource: "project", Action: "read",
+	},
+	// chat.attachments.list and chat.attachments.byId are wrapped by
+	// chatAttachmentRoute: an agent credential is admitted on the collection
+	// only, for POST (upload) and GET (the capability probe), and must pass
+	// agentMaySend there; the by-id route stays session and token only
+	// (ptone/scion#4596). Neither route is on the delegated-agent admission
+	// list.
 	"/api/v1/chat/attachments": {
 		Pattern: "/api/v1/chat/attachments", RouteID: "chat.attachments.list",
 		Classification: RoutePolicy,
@@ -785,6 +821,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/admin/maintenance/restart": {
 		Pattern: "/api/v1/admin/maintenance/restart", RouteID: "admin.maintenance.restart",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
+	},
+	"/api/v1/admin/maintenance/update-status": {
+		Pattern: "/api/v1/admin/maintenance/update-status", RouteID: "admin.maintenance.updateStatus",
 		Classification: RouteHubAdmin,
 		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
 	},
@@ -1344,6 +1385,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/runtime-brokers/connect": {
 		Pattern: "/api/v1/runtime-brokers/connect", RouteID: "runtimeBrokers.connect",
+		Classification: RouteBrokerHMAC,
+	},
+	// Attachment delivery capability redemption (ptone/scion#4596): the
+	// handler requires the broker credential whose broker id the capability
+	// names, and answers every refusal with one 404.
+	"/api/v1/attachment-deliveries/": {
+		Pattern: "/api/v1/attachment-deliveries/", RouteID: "attachmentDeliveries.redeem",
 		Classification: RouteBrokerHMAC,
 	},
 

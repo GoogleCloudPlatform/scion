@@ -432,9 +432,10 @@ func (s *Server) hubOwnedBrokerChanges(ctx context.Context, ops *OperationalSett
 //   - schema_version "1" is the value GET reports for a file without the
 //     key, so it is not written as an edit; the editor adds it when needed.
 //   - Creating a server.hub.cors / server.broker.cors block without an
-//     explicit enabled also writes enabled with its current effective value:
-//     inside the block a missing enabled means "off", while a missing block
-//     means "on", so creating the block must not silently turn CORS off.
+//     explicit enabled also writes enabled with its current effective value
+//     (inside the block a missing enabled means off, while a missing block
+//     means the component's default), so creating the block never silently
+//     changes whether CORS is on.
 func workstationFileEdits(req *ServerConfigUpdateDBRequest, leaves []bodyLeaf, origEffective *config.GlobalConfig, origTyped *config.VersionedSettings) []config.SettingsPathEdit {
 	root := reflect.ValueOf(req).Elem()
 	edits := make([]config.SettingsPathEdit, 0, len(leaves))
@@ -636,14 +637,6 @@ func validateServerConfigFileKeys(req *ServerConfigUpdateRequest, fileKeys []str
 			return &serverConfigFileValidationError{err.Error()}
 		}
 	}
-	if under("server.home_storage") && req.Server != nil && req.Server.HomeStorage != nil {
-		// Same check as the file-mode handler: backend, leaf and
-		// stop_grace_seconds must hold known values. A null home_storage
-		// (nil pointer) removes the block and has nothing to check.
-		if err := req.Server.HomeStorage.Validate(); err != nil {
-			return &serverConfigFileValidationError{err.Error()}
-		}
-	}
 	if under("server.broker.instances") && req.Server != nil && req.Server.Broker != nil {
 		// Flat Runtime Broker instances: validated before anything is
 		// written; a null leaf removes them.
@@ -655,18 +648,16 @@ func validateServerConfigFileKeys(req *ServerConfigUpdateRequest, fileKeys []str
 			return &serverConfigFileValidationError{errors.Join(all...).Error()}
 		}
 	}
-	if under("server.shared_dir_storage") && req.Server != nil {
-		runtimes, profiles := req.Runtimes, req.Profiles
-		snap := ops.Snapshot()
-		if runtimes == nil {
-			runtimes = snap.Runtimes
+	if req.Server != nil && (under("server.project_storage") || under("server.workspace_storage") ||
+		under("server.shared_dir_storage") || under("server.home_storage")) {
+		// Same check as the file-mode handler: the storage blocks must
+		// resolve to one server.project_storage.
+		if _, _, err := config.SynthesizeProjectStorage(req.Server.ProjectStorage, req.Server.WorkspaceStorage, req.Server.SharedDirStorage, req.Server.HomeStorage); err != nil {
+			return &serverConfigFileValidationError{err.Error()}
 		}
-		if profiles == nil {
-			profiles = snap.Profiles
-		}
-		if errs := config.ValidateSharedDirStorageBackends(runtimes, profiles, req.Server.SharedDirStorage); len(errs) > 0 {
-			return &serverConfigFileValidationError{errs[0].Error()}
-		}
+	}
+	if errs := config.RemovedStorageOverrideErrors(req.Runtimes, req.Profiles, nil); len(errs) > 0 {
+		return &serverConfigFileValidationError{errs[0].Error()}
 	}
 	return validateStartupCheckedFileBlocks(req, fileKeys)
 }

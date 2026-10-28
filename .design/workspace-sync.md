@@ -1,5 +1,7 @@
 # Grove-Level Workspace Sync
 
+> **Superseded (ptone/scion#5547):** the hub WebDAV endpoint (`/api/v1/projects/{id}/dav/`) and project-level `scion sync` (bare, `push`, `pull`, `--force`) described here were removed, along with `pkg/projectsync`. Requests to the endpoint now get a 404, and the removed `scion sync` forms exit with an error. Agent sync (`scion sync to|from <agent>`) is unchanged. The linked-project cache relay (sections 4.5 and 4.6, Phase 3) and the sync-status endpoint still exist: the path resolver is now `resolveProjectWorkspacePath` (`pkg/hub/project_workspace_handlers.go`) and the cache walk lives in `pkg/hub/project_cache.go`. Read the rest as history.
+
 > **Note (local-only mode removed):** this document describes the CLI-only mode with no Hub ("solo" or "local" mode) as current. That mode was removed; every agent now runs through a Hub (the workstation server on a single machine). See `docs-site/src/content/docs/reference/local-mode-removal.md`.
 
 **Created:** 2026-03-29

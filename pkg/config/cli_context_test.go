@@ -469,6 +469,60 @@ func TestCLIContextSelectAndClear(t *testing.T) {
 	}
 }
 
+// TestCLIContextUnverifiedProject: a current project marked unverified is
+// read from the unverified key, kept by an update that does not touch it,
+// and cleared by the next selection; without the mark the key is not
+// written.
+func TestCLIContextUnverifiedProject(t *testing.T) {
+	path := cliContextTestHome(t)
+	writeCLIContextFile(t, path, `version: 1
+current_hub: prod
+hubs:
+  prod:
+    endpoint: https://hub.example.com
+    current_project: {id: p1, slug: foo, unverified: true}
+`)
+	c, err := LoadCLIContext()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := c.ProjectFor("https://hub.example.com"); p == nil || p.ID != "p1" || !p.Unverified {
+		t.Fatalf("current project = %+v, want p1 unverified", p)
+	}
+
+	if err := UpdateCLIContext(func(c *CLIContext) error {
+		c.EnsureHub("https://other.example.com", "other")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if c, err = LoadCLIContext(); err != nil {
+		t.Fatal(err)
+	}
+	if p := c.ProjectFor("https://hub.example.com"); p == nil || !p.Unverified {
+		t.Fatalf("after an unrelated update: %+v, want still unverified", p)
+	}
+
+	if err := UpdateCLIContext(func(c *CLIContext) error {
+		return c.SelectProject("prod", KnownProject{ID: "p1", Slug: "foo"}, time.Now())
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if c, err = LoadCLIContext(); err != nil {
+		t.Fatal(err)
+	}
+	if p := c.ProjectFor("https://hub.example.com"); p == nil || p.Unverified {
+		t.Fatalf("after a new selection: %+v, want verified", p)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "unverified") {
+		t.Errorf("written file keeps the unverified key:\n%s", data)
+	}
+}
+
 // TestCLIContextOptionalV1Fields: the optional version-1 fields (a project's
 // local_path, a hub's transport, the imported record) are read from the
 // documented YAML keys and survive an update that does not touch them.

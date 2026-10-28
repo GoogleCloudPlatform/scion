@@ -22,6 +22,8 @@
     "shared/chat/chat-thread-peer-project.test.ts",
     "shared/chat/chat-space-rail-unread-dms.test.ts",
     "shared/chat/chat-space-rail-refresh-item.test.ts",
+    "shared/chat/chat-space-rail-badge-invariant.test.ts",
+    "shared/chat/chat-message-links-dom.test.ts",
     "pages/chat-unread-dms.test.ts",
     "pages/graph-palette-hosts.test.ts",
     "terminal/terminal-pane.test.ts",
@@ -40,7 +42,9 @@
     "shared/log-viewer-batching.test.ts",
     "shared/access-boundary-preview-expiry.test.ts",
     "shared/code-editor-language.test.ts",
-    "shared/code-editor-language-race.test.ts"
+    "shared/code-editor-language-race.test.ts",
+    "shared/resource-list-refresh.test.ts",
+    "pages/harness-config-detail-source.test.ts"
   ],
   "exclude": []
 }

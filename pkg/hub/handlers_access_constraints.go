@@ -393,11 +393,23 @@ type affectedPrincipalsResponse struct {
 // mutationResponse is the response for create/update mutations.
 type mutationResponse struct {
 	accessBoundaryDetail
+	// AuditID is the event ID (a UUID) of the access_constraint_history row
+	// written in the same transaction as the create or update. It is listed
+	// by the constraint's audit endpoint while the constraint exists and its
+	// row is within the per-constraint retention cap.
 	AuditID string `json:"auditId"`
 }
 
 // deleteResponse is the response for delete mutations.
 type deleteResponse struct {
+	// AuditID is the event ID (a UUID) assigned to the access_boundary/delete
+	// structured-log event for this delete. It identifies a best-effort log
+	// event only: it is not retrievable through any API and is not backed by
+	// history (the constraint's history is deleted with it). A non-empty value
+	// does not guarantee the event was written: a dispatch failure is logged
+	// with this event_id, and the event is silently dropped when the process
+	// log level is above info. Empty if the event could not be built or no
+	// sink is configured.
 	AuditID string `json:"auditId"`
 }
 
@@ -646,7 +658,7 @@ func (s *Server) getAffectedPrincipals(w http.ResponseWriter, r *http.Request, i
 	if rawToken := r.URL.Query().Get("pageToken"); rawToken != "" {
 		decoded, err := base64.RawURLEncoding.DecodeString(rawToken)
 		if err != nil {
-			BadRequest(w, "invalid pageToken")
+			writeInvalidCursor(w)
 			return
 		}
 		cursorID = string(decoded)
@@ -738,7 +750,7 @@ func (s *Server) getConstraintAudit(w http.ResponseWriter, r *http.Request, id s
 
 	cursor, err := decodeConstraintAuditCursor(r.URL.Query().Get("pageToken"), id)
 	if err != nil {
-		BadRequest(w, "invalid pageToken")
+		writeInvalidCursor(w)
 		return
 	}
 
@@ -1386,14 +1398,23 @@ func (s *Server) deleteAccessConstraint(w http.ResponseWriter, r *http.Request, 
 		ID:   user.ID(),
 	}
 
-	result, err := s.governanceService.CommitBoundaryChange(r.Context(), CommitRequest{
+	commitRequest := CommitRequest{
 		Operation:    "delete",
 		ConstraintID: id,
 		BaseRevision: existing.Revision,
 		PreviewToken: previewToken,
 		Actor:        actor,
 		Credential:   user,
-	})
+	}
+	if requestID := logging.RequestIDFromContext(r.Context()); requestID != "" {
+		commitRequest.AuditRequest = &auditevent.RequestRef{
+			ID:      requestID,
+			Method:  r.Method,
+			Route:   "/api/v1/admin/access-constraints/{id}",
+			Surface: "api",
+		}
+	}
+	result, err := s.governanceService.CommitBoundaryChange(r.Context(), commitRequest)
 	if err != nil {
 		s.handleGovernanceError(w, err)
 		return
@@ -2060,6 +2081,21 @@ func parseIntOr(s string, defaultVal int) int {
 // capabilitiesService provides access to the capabilities service.
 // Set via initBoundaryServices().
 
+// sharedAuditLogSink returns the structured-log audit sink over the server's
+// shared asynchronous audit writer (s.auditWriter, built by
+// initDecisionAuditLog). Records through it are async and best-effort, not
+// persisted records: queue-full, oversize and closed-writer rejections are
+// counted, but a record is silently not emitted (and not counted) when the
+// process log level is above info. It is not gated by the decision-audit
+// experiment, which applies only to decision records. Nil when the writer
+// was not initialized.
+func (s *Server) sharedAuditLogSink() auditevent.Sink {
+	if s.auditWriter == nil || s.decisionAuditLogger == nil || s.decisionAuditLogger.sink == nil {
+		return nil
+	}
+	return s.decisionAuditLogger.sink
+}
+
 // initBoundaryServices initializes the preview, governance and
 // capabilities services on the Server.
 // Called during server startup after authzService is available.
@@ -2072,12 +2108,10 @@ func (s *Server) initBoundaryServices() {
 	s.previewService = NewPreviewService(s.store, s.authzService, logger)
 	s.capabilitiesService = NewCapabilitiesService(s.store, s.authzService, logger)
 
-	// Create audit writer and event bus.
-	auditWriter := NewBoundaryAuditWriter(logger)
 	eventBus := NewInvalidationEventBus(logger)
 
 	gs := NewGovernanceService(s.store, s.previewService, s.authzService, logger)
-	gs.auditWriter = auditWriter
+	gs.deleteAuditSink = s.sharedAuditLogSink()
 	gs.eventBus = eventBus
 	s.governanceService = gs
 

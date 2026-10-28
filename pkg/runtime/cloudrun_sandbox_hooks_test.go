@@ -17,6 +17,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -368,7 +369,7 @@ func TestCloudRunSandboxHooks_NeverStartedNoDelete(t *testing.T) {
 
 // Fault check S10eA (async tail of S10e): grace and horizon terms are ms
 // and ctx has no deadline, so only the in-flight rule keeps the entry. A
-// blocking `run` with the hooks active; a reconcile with a not-found probe
+// blocking `run` with the hooks active; a reconcile with a not-running probe
 // keeps the entry; then `run` is killed: Run deletes nothing, and the
 // cleanup issues `delete --force dev` and removes the entry.
 func TestCloudRunSandboxHooks_InFlightReconcileThenCleanup(t *testing.T) {
@@ -386,7 +387,8 @@ func TestCloudRunSandboxHooks_InFlightReconcileThenCleanup(t *testing.T) {
 	waitForFile(t, env.mark)
 	time.Sleep(50 * time.Millisecond) // past StartingAt + grace and StartingUntil
 
-	reconcileNow(env.state, goneBin(t))
+	bin, _ := notRunningBin(t)
+	reconcileNow(env.state, bin)
 	if e := fileEntry(t, env.state); e == nil || !e.Starting || e.Labels[api.LabelRunID] != "run-a" {
 		t.Errorf("entry after reconcile = %+v, want run A's in-flight Starting entry kept", e)
 	}
@@ -492,6 +494,24 @@ func TestCloudRunSandboxDeleteResource_FailedDeleteKeepsEntry(t *testing.T) {
 	}
 	wantDeletes(t, env.log, 1)
 	wantEntryOf(t, env.state, "run-a")
+}
+
+// ptone/scion#4776: a cleanup delete that fails with a generic "no such
+// file or directory" (not a missing sandbox) counts as a failure on both
+// delete paths: an error is returned and the entry is kept.
+func TestCloudRunSandboxDeleteResource_GenericNoSuchFileKeepsEntry(t *testing.T) {
+	for _, workaround := range []bool{true, false} {
+		t.Run(fmt.Sprintf("workaround=%v", workaround), func(t *testing.T) {
+			withDeleteWorkaround(t, workaround)
+			rt, env := newStartingRuntime(t, startScripts{del: `echo "exec: /opt/sandbox/root: no such file or directory" >&2; exit 1`})
+			rt.state.add(runEntry("dev", "run-a"))
+			if err := rt.DeleteResource(context.Background(), sandboxHandle("run-a")); err == nil {
+				t.Error("DeleteResource = nil after a generic file error, want an error")
+			}
+			wantDeletes(t, env.log, 1)
+			wantEntryOf(t, env.state, "run-a")
+		})
+	}
 }
 
 // Fault check S11: an empty UID is accepted. The cleanup refuses it with an

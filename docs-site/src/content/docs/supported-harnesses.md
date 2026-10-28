@@ -192,6 +192,7 @@ An active GitHub Copilot subscription is required at runtime.
 
 ### Configuration
 - **Config directory**: `~/.copilot/` (settings in `settings.json`, trusted folders in `config.json`).
+- **Remote control**: off. The provisioner adds `"remoteSessions": false` to `~/.copilot/settings.json` when the key is absent (an existing value is kept), and the image's seeded `settings.json` carries it too. The bundle does not pass `--no-remote`, which Copilot CLI 1.0.103 removed.
 - **Instructions**: `agent_instructions` and `system_prompt` are projected into `.github/copilot-instructions.md`. Copilot has no native system-prompt flag, so the system prompt is *prepended to the instructions file*.
 - **MCP**: `~/.copilot/mcp-config.json`. Project-scoped MCP servers are not supported (they are demoted to global).
 - **Hooks**: Copilot lifecycle hooks (`sessionStart`, `userPromptSubmitted`, `preToolUse`, `postToolUse` and others) are wired to `sciontool hook --dialect=copilot`, mapped by the harness's `dialect.yaml`.

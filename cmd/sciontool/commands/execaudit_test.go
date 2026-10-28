@@ -80,6 +80,20 @@ var execAuditFileAllowlist = map[string]string{
 		"init.go's own use of this package is restricted to the pure string/error-" +
 		"classification identifiers in execAuditSymbolAllowlist below, none of which touch " +
 		"exec.Cmd",
+	"pkg/util/git_host.go": "host-side git invocation helpers (HostGitCommand, HostGitEnv, " +
+		"ScopedCredentialHelperEnv and the hostGit runner). Their callers are the broker-side " +
+		"provisioning paths (pkg/agent/provision.go, pkg/runtimebroker/start_context.go, and " +
+		"pkg/provision/provision.go at :901, :2238 and :2843) via HostGitCommand/HostGitEnv/" +
+		"ScopedCredentialHelperEnv/CreateWorktree/RemoveWorktree/PullSharedWorkspace. " +
+		"pkg/provision/provision.go also runs under the `sciontool provision` subcommand (its own " +
+		"init container), which is a separate command, not runInit. None of these are reached from " +
+		"runInit, whose pkg/util use is pinned to the pure symbols in execAuditSymbolAllowlist below. " +
+		"Verify: grep cmd/sciontool for HostGitCommand/HostGitEnv/ScopedCredentialHelperEnv finds none.",
+	"pkg/util/git_config_policy.go": "the host-side repository-config policy check " +
+		"(checkRepoConfigPolicy/crossCheckAgainstGit). It is reached only from pkg/util/git_host.go's " +
+		"HostGitCommand, i.e. the same broker-side provisioning callers above, never from runInit; " +
+		"init's pkg/util use is pinned by execAuditSymbolAllowlist below. Verify: grep cmd/sciontool " +
+		"for checkRepoConfigPolicy/crossCheckAgainstGit/SafeGitCommand finds none.",
 }
 
 // execAuditSymbolAllowlist closes a gap a per-file allowlist alone leaves
@@ -103,8 +117,11 @@ var execAuditSymbolAllowlist = map[string]map[string]bool{
 	// pkg/sciontool/{hub,telemetry,autoexpose}) only reads an environment
 	// variable and parses it, with no exec.Cmd. The package's actual
 	// exec.Command call sites (pkg/util/git.go) are listed in
-	// execAuditFileAllowlist above.
-	"pkg/util": {"NormalizeGitRemote": true, "ClassifyGitError": true, "GitErrAuth": true, "GetHomeDir": true, "ParseBoolEnv": true},
+	// execAuditFileAllowlist above. HostGitArgs (pkg/util/git_host.go) returns a
+	// fresh []string of `-c` config arguments and makes no exec.Cmd call and does
+	// no I/O; pkg/provision/host_git.go's HostCloneGitArgs delegates to it (the K1
+	// consolidation), so that pure symbol is allowed here too.
+	"pkg/util": {"NormalizeGitRemote": true, "ClassifyGitError": true, "GitErrAuth": true, "GetHomeDir": true, "ParseBoolEnv": true, "HostGitArgs": true},
 	// init.go's only use of pkg/provision: GitTokenCredentialHelper is a
 	// string constant (the git credential helper value it writes to the
 	// agent's gitconfig); no exec.Cmd is reachable through it.

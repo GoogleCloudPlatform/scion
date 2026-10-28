@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -131,4 +132,115 @@ func TestContention_HubSettingCreateOnly(t *testing.T) {
 // (handles wrapped errors).
 func isRevisionConflict(err error) bool {
 	return errors.Is(err, store.ErrRevisionConflict)
+}
+
+// TestContention_HubSettingsRevision races N goroutines writing operational
+// sections (several per section, unconditional upserts) on Postgres, where
+// the revision row is upserted under its row lock after the section row
+// lock. Every write must get a distinct operational-settings revision, the
+// revision must count every write, and no writer may deadlock or fail
+// (ptone/scion#4457).
+func TestContention_HubSettingsRevision(t *testing.T) {
+	cs := newStore(t)
+	ctx := context.Background()
+	n := concurrency(t)
+
+	sections := []string{"access", "lifecycle", "maintenance", "quotas"}
+	// Create the rows first: concurrent creates of one section race on the
+	// unique index, which is the create-only contention test's subject.
+	for _, sec := range sections {
+		_, err := cs.UpsertHubSetting(ctx, sec, json.RawMessage(`{}`), "setup", 0, "seeded")
+		require.NoError(t, err)
+	}
+	base := int64(len(sections))
+	var (
+		mu   sync.Mutex
+		revs = map[int64]bool{}
+	)
+	errs := make(chan error, n)
+	runConcurrently(n, func(i int) {
+		sec := sections[i%len(sections)]
+		got, err := cs.UpsertHubSetting(ctx, sec, json.RawMessage(`{}`), fmt.Sprintf("writer-%d", i), -1, "seeded")
+		if err != nil {
+			errs <- err
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if revs[got.SettingsRevision] {
+			errs <- fmt.Errorf("revision %d returned twice", got.SettingsRevision)
+		}
+		revs[got.SettingsRevision] = true
+	})
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err, "unexpected error during settings-revision contention")
+	}
+
+	assert.Len(t, revs, n)
+	row, err := cs.GetHubSetting(ctx, store.HubSettingsRevisionSection)
+	require.NoError(t, err)
+	assert.Equal(t, base+int64(n), row.Revision, "the revision counts every operational write")
+	for r := base + 1; r <= base+int64(n); r++ {
+		assert.True(t, revs[r], "revision %d missing", r)
+	}
+}
+
+// TestContention_HubSettingUnconditionalCreateRace races N goroutines doing
+// unconditional (-1) upserts of operational sections that do not exist yet.
+// Concurrent creates of one section collide on the section's unique key;
+// every loser must retry in a fresh transaction and take the update path.
+// So every writer succeeds, each gets a distinct operational-settings
+// revision, and the revisions are exactly 1..N with no gaps
+// (ptone/scion#5772). A unique violation that is not recognised as a lost
+// create race (for example an unexpected constraint name) surfaces here as
+// an error.
+func TestContention_HubSettingUnconditionalCreateRace(t *testing.T) {
+	cs := newStore(t)
+	ctx := context.Background()
+	n := concurrency(t)
+
+	sections := []string{"access", "lifecycle", "maintenance", "quotas"}
+	for _, sec := range sections {
+		_, err := cs.GetHubSetting(ctx, sec)
+		require.ErrorIs(t, err, store.ErrNotFound, "section %q must not exist before the race", sec)
+	}
+	var (
+		mu   sync.Mutex
+		revs = map[int64]bool{}
+	)
+	errs := make(chan error, n)
+	runConcurrently(n, func(i int) {
+		sec := sections[i%len(sections)]
+		got, err := cs.UpsertHubSetting(ctx, sec, json.RawMessage(fmt.Sprintf(`{"w":%d}`, i)), fmt.Sprintf("writer-%d", i), -1, "managed")
+		if err != nil {
+			errs <- fmt.Errorf("writer %d (%s): %w", i, sec, err)
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if revs[got.SettingsRevision] {
+			errs <- fmt.Errorf("revision %d returned twice", got.SettingsRevision)
+		}
+		revs[got.SettingsRevision] = true
+	})
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err, "every unconditional upsert must succeed")
+	}
+
+	assert.Len(t, revs, n)
+	for r := int64(1); r <= int64(n); r++ {
+		assert.True(t, revs[r], "revision %d missing", r)
+	}
+	row, err := cs.GetHubSetting(ctx, store.HubSettingsRevisionSection)
+	require.NoError(t, err)
+	assert.Equal(t, int64(n), row.Revision, "the revision counts every write, losers' aborted attempts not included")
+	var total int64
+	for _, sec := range sections {
+		got, err := cs.GetHubSetting(ctx, sec)
+		require.NoError(t, err)
+		total += got.Revision
+	}
+	assert.Equal(t, int64(n), total, "the section revisions count every write once")
 }

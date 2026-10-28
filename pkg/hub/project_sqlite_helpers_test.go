@@ -696,20 +696,6 @@ func assertNoProjectWithSlug(t *testing.T, s store.Store, slug string) {
 	assert.ErrorIs(t, err, store.ErrNotFound, "no project may hold slug %q", slug)
 }
 
-// doDavRequest issues a WebDAV request with a raw body and optional headers.
-// The JSON-encoding doRequest helper cannot express these verbs.
-func doDavRequest(t *testing.T, srv *Server, method, urlPath string, body []byte, headers map[string]string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest(method, urlPath, bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+testDevToken)
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
-
 // workspaceSecret is planted in a victim project's workspace. No response to a
 // non-member may contain it.
 const workspaceSecret = "PRIVATE-WORKSPACE-BYTES-do-not-serve-this"
@@ -750,7 +736,7 @@ func createTestHubManagedProject(t *testing.T, srv *Server, name string) (*store
 	var project store.Project
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
 
-	workspacePath, err := hubManagedProjectPath(project.Slug)
+	workspacePath, err := localProjectPath(project.Slug)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
@@ -814,6 +800,9 @@ func addSharedDirToProject(t *testing.T, srv *Server, projectID, dirName string)
 // resolved host base (<mount_root>/<share id>) so the caller can
 // pre-populate/inspect the export directly. Must be called BEFORE
 // testServer(t), since HOME must be set before any settings are read.
+// The hub's shared-dir browser reads the block from its in-memory server
+// config, so tests of it also call useNFSSharedDirStorage on the server;
+// the file is still read by the project deletion service.
 func setNFSSharedDirStorageGlobalSettings(t *testing.T) (hostBase string) {
 	t.Helper()
 	tmpHome := t.TempDir()
@@ -836,6 +825,41 @@ server:
 `
 	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settingsYAML), 0644))
 	return hostBase
+}
+
+// useNFSSharedDirStorage gives srv the storage configuration a hub with
+// only the server.shared_dir_storage nfs block (the one
+// setNFSSharedDirStorageGlobalSettings writes) resolves to at startup: the
+// transitional split, with shared dirs on that export and workspaces on the
+// local backend (config.SynthesizeProjectStorage). The shared-dir browser
+// reads only this in-memory ServerConfig, never the settings file per
+// request.
+func useNFSSharedDirStorage(srv *Server, hostBase string) {
+	srv.config.ProjectStorageConfig = &config.V1ProjectStorageConfig{
+		LegacySharedDirsNFS: nfsSharedDirStorageTestConfig(hostBase).NFS,
+	}
+}
+
+// nfsSharedDirStorageTestConfig is the in-memory form of the block
+// setNFSSharedDirStorageGlobalSettings writes for hostBase.
+func nfsSharedDirStorageTestConfig(hostBase string) *config.V1SharedDirStorageConfig {
+	return &config.V1SharedDirStorageConfig{
+		Backend: "nfs",
+		NFS: &config.V1NFSConfig{
+			MountRoot: filepath.Dir(hostBase),
+			Shares:    []config.V1NFSShare{{ID: filepath.Base(hostBase), PVName: "pv"}},
+		},
+	}
+}
+
+// invalidNFSSharedDirStorageTestConfig is a server.project_storage nfs block
+// the hub cannot build a Layout from (no mount_root, so the share's host
+// base is relative).
+func invalidNFSSharedDirStorageTestConfig() *config.V1ProjectStorageConfig {
+	return &config.V1ProjectStorageConfig{
+		Backend: "nfs",
+		NFS:     &config.V1NFSConfig{Shares: []config.V1NFSShare{{ID: "nfs-export"}}},
+	}
 }
 
 // outsideSecret is the content the handlers must never read out of the tree

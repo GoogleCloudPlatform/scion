@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -90,7 +91,7 @@ profiles:
   local:
     runtime: docker
 `, nfsMountRoot, subPathRoot)
-	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil || writeGlobalStorageSettings(t, settingsYAML) != nil {
 		t.Fatalf("failed to write settings: %v", err)
 	}
 
@@ -235,7 +236,7 @@ profiles:
   local:
     runtime: docker
 `, nfsMountRoot)
-	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil || writeGlobalStorageSettings(t, settingsYAML) != nil {
 		t.Fatalf("failed to write settings: %v", err)
 	}
 
@@ -332,7 +333,7 @@ profiles:
   local:
     runtime: docker
 `, nfsMountRoot)
-	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil || writeGlobalStorageSettings(t, settingsYAML) != nil {
 		t.Fatalf("failed to write settings: %v", err)
 	}
 
@@ -426,7 +427,7 @@ profiles:
   local:
     runtime: docker
 `, nfsMountRoot)
-	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil || writeGlobalStorageSettings(t, settingsYAML) != nil {
 		t.Fatal(err)
 	}
 
@@ -528,7 +529,7 @@ profiles:
   local:
     runtime: kubernetes
 `, nfsMountRoot)
-		if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(settingsYAML), 0644); err != nil || writeGlobalStorageSettings(t, settingsYAML) != nil {
 			t.Fatalf("failed to write settings: %v", err)
 		}
 
@@ -595,15 +596,20 @@ profiles:
 		if want := "/repo-root/worktrees/agent-a"; capturedConfig.ContainerWorkspace != want {
 			t.Fatalf("ContainerWorkspace = %q, want %q", capturedConfig.ContainerWorkspace, want)
 		}
-		// The detectRepoRoot fallback resolves effectiveWorkspace (the real
-		// git base) to a non-empty RepoRoot. The Kubernetes runtime builds
-		// its mounts from ContainerWorkspace and the NFS* fields, not
-		// RepoRoot — see the comment on the backend re-validation in run.go.
+		// A Kubernetes dispatch has no broker signal and no record, so the root
+		// is the detectRepoRoot fallback, which resolves effectiveWorkspace
+		// (the real git base) to a non-empty RepoRoot. The Kubernetes runtime
+		// builds its mounts from ContainerWorkspace and the NFS* fields, not
+		// RepoRoot; RepoRoot only decides whether the in-project agents dir is
+		// masked out of the pod.
 		if capturedConfig.RepoRoot != base {
 			t.Fatalf("RepoRoot = %q, want %q (the detectRepoRoot fallback)", capturedConfig.RepoRoot, base)
 		}
+		// As strong as main's check: nothing with a root is written to the
+		// broker-owned repo-root file for a Kubernetes dispatch, regardless of
+		// source (Source no longer gates the read path).
 		if got := readProvisionedWorktreeRepoRoot(agentDir); got != "" {
-			t.Fatalf("persisted repo root = %q, want \"\" — nothing should be written to the broker-owned repo-root file for a Kubernetes dispatch", got)
+			t.Fatalf("persisted repo root = %q, want \"\" — nothing should be written for a Kubernetes dispatch", got)
 		}
 	}
 
@@ -616,4 +622,21 @@ profiles:
 		capturedConfig, agentDir, base := run(t, true)
 		assertOutcomes(t, capturedConfig, agentDir, base)
 	})
+}
+
+// writeGlobalStorageSettings writes settingsYAML as the global settings file
+// of the test's HOME (a temporary directory): the storage blocks are
+// Layer-0, read from global settings only, never from a project's
+// settings.yaml.
+func writeGlobalStorageSettings(t *testing.T, settingsYAML string) error {
+	t.Helper()
+	home := os.Getenv("HOME")
+	if home == "" || !strings.HasPrefix(home, os.TempDir()) {
+		t.Fatalf("HOME %q is not a test temporary directory", home)
+	}
+	dir := filepath.Join(home, ".scion")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(settingsYAML), 0o644)
 }

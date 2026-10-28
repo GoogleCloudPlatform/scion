@@ -39,9 +39,15 @@
  *   its source, never as the control's value.
  *
  * Create mode renders every field in the five Additional Options tabs. Edit
- * mode renders the fields named by fieldKeys (or every field that has edit
- * semantics) as sections, with a summary strip counting the fields by what
- * the agent's phase does with an edit.
+ * mode renders every field that has edit semantics (or the fields named by
+ * fieldKeys) as sections, in one of two groupings of the same table: by
+ * function (an Agent group for the edit-only identity fields, then the
+ * create form's tabs) or by tier (what the agent's phase does with an
+ * edit). A summary strip counts the fields by disposition.
+ *
+ * Which dispositions can be saved today is decided in one place,
+ * SAVEABLE_DISPOSITIONS: held and reincarnate-only edits are shown with
+ * their badge but disabled until the hub stores them.
  */
 
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
@@ -62,26 +68,54 @@ import type {
 import type { AgentConfigPlaceholder } from '../../shared/agent-config-inherited.js';
 import type { GcpIdentityState, GcpMetadataMode } from '../../shared/gcp-identity-state.js';
 import { MESSAGE_MODE_DISPLAY } from '../../shared/message-mode.js';
+import { isValidTimeZone } from '../../utils/time.js';
 import {
   assignStatusStyles,
   renderAssignStatusHelp,
   renderServiceAccountOption,
 } from './gcp-sa-picker-options.js';
 import type { EnvEntry } from './env-editor.js';
+import type { TimezoneChangeDetail } from './timezone-picker.js';
 import './env-editor.js';
+import './message-mode-badge.js';
+import './timezone-picker.js';
 
 export type { AgentConfigPlaceholder } from '../../shared/agent-config-inherited.js';
 
-/** The function groups of the form: the create form's Additional Options tabs. */
-export type AgentConfigTab = 'general' | 'auth' | 'prompts' | 'limits' | 'environment';
+/**
+ * The function groups of the form: the create form's Additional Options
+ * tabs, and in edit mode the Agent group first (name, next task and the
+ * fields fixed at creation).
+ */
+export type AgentConfigTab = 'agent' | 'general' | 'auth' | 'prompts' | 'limits' | 'environment';
 
 export const AGENT_CONFIG_TABS: ReadonlyArray<{ id: AgentConfigTab; label: string }> = [
+  { id: 'agent', label: 'Agent' },
   { id: 'general', label: 'General' },
   { id: 'auth', label: 'Auth & Security' },
   { id: 'prompts', label: 'Prompts' },
   { id: 'limits', label: 'Limits & Resources' },
   { id: 'environment', label: 'Environment & Labels' },
 ];
+
+/** The function groups create mode shows as tabs: every group but Agent. */
+const CREATE_TABS = AGENT_CONFIG_TABS.filter((t) => t.id !== 'agent');
+
+/** How the edit form groups its fields. */
+export type AgentConfigGrouping = 'function' | 'tier';
+
+/**
+ * Dispositions an edit can be saved with today. A held edit (a running
+ * agent's container-creation fields) and a reincarnate-only edit (prompts,
+ * role, GCP identity after creation) are rendered with their badge but
+ * disabled, and never emitted, until the hub stores held edits
+ * (ptone/scion#3976) and a reincarnation applies them (ptone/scion#3978);
+ * those changes add 'held' and 'reincarnate' here.
+ */
+export const SAVEABLE_DISPOSITIONS: ReadonlySet<AgentEditDisposition> = new Set([
+  'now',
+  'immediate',
+]);
 
 /** How a field is edited and emitted. */
 export type AgentConfigControl = AgentConfigFieldDef['control'];
@@ -105,13 +139,53 @@ export type AgentConfigPatch = {
   [K in keyof AgentInlineConfig]?: NonNullable<AgentInlineConfig[K]> | null;
 };
 
-/** The create request's top-level keys the form owns. */
+/** The create or PATCH request's top-level keys the form owns. */
 export interface AgentConfigTopLevel {
+  /** Edit mode only. */
+  name?: string;
   branch?: string;
   agentRole?: string;
   messageMode?: string;
   labels?: Record<string, string>;
   gcp_identity?: { metadata_mode: GcpMetadataMode; service_account_id?: string };
+  /** Edit mode only: a zone name pins it, "" unpins it. */
+  explicitTimezone?: string;
+}
+
+/**
+ * The agent's current values outside its inline config, for edit mode:
+ * the top-level fields, the live env, and the display values of the fields
+ * fixed at creation.
+ */
+export interface AgentConfigEditValues {
+  name?: string | undefined;
+  labels?: Record<string, string> | undefined;
+  explicitTimezone?: string | undefined;
+  /** The pin was adopted from a TZ an older hub saved in env. */
+  explicitTimezoneLegacy?: boolean | undefined;
+  messageMode?: string | undefined;
+  agentRole?: string | undefined;
+  /** The agent's live env (AppliedConfig.Env). */
+  env?: Record<string, string> | undefined;
+  /**
+   * False when the hub withheld the agent's env from the caller (it is
+   * returned only with attach access). The env fields are then locked: a
+   * PATCH env replaces the whole env, so an edit made without seeing it
+   * would drop the keys the caller cannot see.
+   */
+  envVisible?: boolean | undefined;
+  /**
+   * The requester's explicit env record (CreateInputs.InlineConfig.Env when
+   * the agent has CreateInputs, else InlineConfig.Env): tells an explicit
+   * auto-expose choice from a project-derived one in env.
+   */
+  explicitEnv?: Record<string, string> | undefined;
+  /** The hub's default for auto-expose ports (public settings). */
+  autoExposeHubDefault?: boolean | undefined;
+  /** Display values of the fixed fields, by field key (projectId, template, branch, ...). */
+  fixed?: Record<string, string> | undefined;
+  /** The agent's detail page, linked from read-only fields. */
+  detailHref?: string | undefined;
 }
 
 /** A choice of a select control. */
@@ -128,17 +202,29 @@ interface AgentConfigFieldBase {
   key: string;
   tab: AgentConfigTab;
   label: string;
+  /**
+   * The hub editability key the field follows, when it is not key (the
+   * auto-expose control writes env keys, so it follows config.env).
+   */
+  editabilityKey?: string;
   /** The field's tier; used when the hub sends no editability (create mode). */
   tier: AgentEditTier;
   help: string;
   /** The harness capability that gates the field, if any. */
   capability?: (caps: HarnessAdvancedCapabilities) => CapabilityField | undefined;
+  /** The field exists in edit mode only (the create page has its own control, or none). */
+  editOnly?: boolean;
   /**
-   * The field has create semantics only: it is not rendered in edit mode.
-   * Its edit semantics (what a clear or a removed entry sends) arrive with
-   * the Edit page's full field set.
+   * Edit mode shows the field read-only, with a pointer to where it is
+   * changed (the message mode has its own endpoint and card).
    */
-  createOnly?: boolean;
+  readOnlyInEdit?: boolean;
+  /**
+   * Edit mode cannot clear the field: the hub ignores an empty value (it
+   * keeps the stored one), so the field can only be replaced. No Clear is
+   * offered and an emptied control sends nothing.
+   */
+  replaceOnlyInEdit?: boolean;
 }
 
 /** One row of the field table. control decides how it is edited and emitted. */
@@ -156,7 +242,17 @@ export type AgentConfigFieldDef = AgentConfigFieldBase &
       }
     | { control: 'telemetry'; configKey: 'telemetry' }
     | { control: 'resources'; configKey: 'resources' }
-    | { control: 'branch' | 'auto-expose' | 'env' | 'labels' | 'gcp-identity' }
+    | {
+        control:
+          | 'branch'
+          | 'auto-expose'
+          | 'env'
+          | 'labels'
+          | 'gcp-identity'
+          | 'name'
+          | 'timezone'
+          | 'fixed';
+      }
   );
 
 /** Model size aliases the harnesses resolve. */
@@ -223,6 +319,73 @@ const RESOURCE_FIELDS: ReadonlyArray<{
 ];
 
 export const AGENT_CONFIG_FIELDS: ReadonlyArray<AgentConfigFieldDef> = [
+  // Agent (edit mode)
+  {
+    key: 'name',
+    control: 'name',
+    tab: 'agent',
+    label: 'Agent name',
+    tier: 'T0',
+    help: 'The display name. It can be replaced, not emptied.',
+    editOnly: true,
+    replaceOnlyInEdit: true,
+  },
+  {
+    key: 'config.task',
+    configKey: 'task',
+    control: 'textarea',
+    tab: 'agent',
+    label: 'Next task',
+    tier: 'T1',
+    help: 'Given to the agent when it starts fresh; a resume continues the conversation and does not send it. It can be replaced, not emptied.',
+    editOnly: true,
+    replaceOnlyInEdit: true,
+  },
+  {
+    key: 'projectId',
+    control: 'fixed',
+    tab: 'agent',
+    label: 'Project',
+    tier: 'TX',
+    help: '',
+    editOnly: true,
+  },
+  {
+    key: 'template',
+    control: 'fixed',
+    tab: 'agent',
+    label: 'Template',
+    tier: 'TX',
+    help: '',
+    editOnly: true,
+  },
+  {
+    key: 'harnessConfig',
+    control: 'fixed',
+    tab: 'agent',
+    label: 'Harness config',
+    tier: 'TX',
+    help: '',
+    editOnly: true,
+  },
+  {
+    key: 'runtimeBrokerId',
+    control: 'fixed',
+    tab: 'agent',
+    label: 'Runtime broker',
+    tier: 'TX',
+    help: '',
+    editOnly: true,
+  },
+  {
+    key: 'profile',
+    control: 'fixed',
+    tab: 'agent',
+    label: 'Runtime profile',
+    tier: 'TX',
+    help: '',
+    editOnly: true,
+  },
   // General
   {
     key: 'branch',
@@ -231,7 +394,6 @@ export const AGENT_CONFIG_FIELDS: ReadonlyArray<AgentConfigFieldDef> = [
     label: 'Branch',
     tier: 'TX',
     help: "Git branch for this agent's workspace; defaults to the agent name.",
-    createOnly: true,
   },
   {
     key: 'config.model',
@@ -284,9 +446,18 @@ export const AGENT_CONFIG_FIELDS: ReadonlyArray<AgentConfigFieldDef> = [
     control: 'auto-expose',
     tab: 'general',
     label: 'Auto-expose ports',
+    editabilityKey: 'config.env',
     tier: 'T1',
     help: "Detect and expose TCP listening ports from this agent's container.",
-    createOnly: true,
+  },
+  {
+    key: 'explicitTimezone',
+    control: 'timezone',
+    tab: 'general',
+    label: 'Timezone',
+    tier: 'T1',
+    help: "Pins the container's timezone. Clear unpins it.",
+    editOnly: true,
   },
   // Auth & Security
   {
@@ -298,7 +469,6 @@ export const AGENT_CONFIG_FIELDS: ReadonlyArray<AgentConfigFieldDef> = [
     label: 'Agent role',
     tier: 'T3',
     help: 'Authorization role for hub API access.',
-    createOnly: true,
   },
   {
     key: 'messageMode',
@@ -309,7 +479,7 @@ export const AGENT_CONFIG_FIELDS: ReadonlyArray<AgentConfigFieldDef> = [
     label: 'Message mode',
     tier: 'T0',
     help: 'Who this agent can message and be messaged by.',
-    createOnly: true,
+    readOnlyInEdit: true,
   },
   {
     key: 'config.auth_selectedType',
@@ -328,7 +498,6 @@ export const AGENT_CONFIG_FIELDS: ReadonlyArray<AgentConfigFieldDef> = [
     label: 'GCP Identity',
     tier: 'T3',
     help: '',
-    createOnly: true,
   },
   // Prompts
   {
@@ -399,7 +568,6 @@ export const AGENT_CONFIG_FIELDS: ReadonlyArray<AgentConfigFieldDef> = [
     label: 'Environment variables',
     tier: 'T1',
     help: '',
-    createOnly: true,
   },
   {
     key: 'labels',
@@ -408,7 +576,6 @@ export const AGENT_CONFIG_FIELDS: ReadonlyArray<AgentConfigFieldDef> = [
     label: 'Labels',
     tier: 'T0',
     help: 'Optional key-value labels to organize agents (max 16).',
-    createOnly: true,
   },
 ];
 
@@ -440,6 +607,119 @@ const DURATION_RE = /^(\d+(\.\d+)?(ns|us|µs|ms|s|m|h))+$/;
 
 /** The disposition of a field the hub gave no editability for (create mode). */
 const CREATE_MODE_STATE: AgentFieldEditState = { tier: 'T1', disposition: 'now' };
+
+/** The env keys the auto-expose control owns, rather than the env editor. */
+const AUTO_EXPOSE_ENV_KEYS: ReadonlySet<string> = new Set([
+  'SCION_AUTO_EXPOSE_PORTS',
+  'SCION_AUTO_EXPOSE_MODE',
+  'SCION_AUTO_EXPOSE_PORTS_LIST',
+  'SCION_AUTO_EXPOSE_INTERVAL',
+]);
+
+/**
+ * The agent's timezone is not an env entry: the hub keeps it in
+ * explicitTimezone (the Timezone field) and ignores config.env.TZ, so the
+ * env editor never shows, sends or removes it.
+ */
+const TZ_ENV_KEY = 'TZ';
+
+/** Why the env fields are locked for a caller the hub does not show the env to. */
+export const ENV_HIDDEN_REASON =
+  "You cannot see this agent's environment, so it cannot be edited here.";
+
+/**
+ * Where an agent's auto-expose value comes from: the requester set it
+ * (explicit record), the hub derived it from the project or a template
+ * config (in the live env only), or it is inherited (absent from the live
+ * env: a template's value, if any, applies, otherwise the hub default).
+ */
+export type AutoExposeSource = 'explicit' | 'project/template' | 'inherited';
+
+/** The source label of each AutoExposeSource. */
+export const AUTO_EXPOSE_SOURCE_LABELS: Record<AutoExposeSource, string> = {
+  explicit: 'explicit',
+  'project/template': 'project/template',
+  inherited: 'inherited (hub default shown; template may override)',
+};
+
+/**
+ * The effective SCION_AUTO_EXPOSE_PORTS of an agent and its source. The
+ * live env holds the explicit or project-derived value; when it lacks the
+ * key the value is inherited, and the hub default is shown (the page cannot
+ * see a template's value, which the broker applies first).
+ */
+export function effectiveAutoExposePorts(
+  liveEnv: Record<string, string> | undefined,
+  explicitEnv: Record<string, string> | undefined,
+  hubDefault: boolean
+): { enabled: boolean; source: AutoExposeSource } {
+  const value = liveEnv?.SCION_AUTO_EXPOSE_PORTS;
+  if (value === undefined) return { enabled: hubDefault, source: 'inherited' };
+  const source: AutoExposeSource =
+    explicitEnv?.SCION_AUTO_EXPOSE_PORTS !== undefined ? 'explicit' : 'project/template';
+  return { enabled: value === 'true', source };
+}
+
+/** The sections of the by-tier grouping, in display order. */
+export type AgentTierSection = 'container' | 'reincarnate' | 'immediate' | 'fixed';
+
+export const AGENT_TIER_SECTIONS: readonly AgentTierSection[] = [
+  'container',
+  'reincarnate',
+  'immediate',
+  'fixed',
+];
+
+/**
+ * The by-tier section of a field: its tier, except that a principal field
+ * the phase lets the user write now (the GCP identity of a created agent)
+ * sits with the fields that apply at the next start.
+ */
+export function tierSectionOf(st: AgentFieldEditState): AgentTierSection {
+  switch (st.tier) {
+    case 'T0':
+      return 'immediate';
+    case 'T1':
+      return 'container';
+    case 'T2':
+    case 'T3':
+      return st.disposition === 'now' ? 'container' : 'reincarnate';
+    default:
+      return 'fixed';
+  }
+}
+
+/** Phases with a live container, or one being created or removed. */
+const LIVE_PHASES: ReadonlySet<string> = new Set([
+  'provisioning',
+  'cloning',
+  'starting',
+  'running',
+  'stopping',
+]);
+
+/** The title of a by-tier section: what the agent's phase does with an edit there. */
+export function tierSectionTitle(section: AgentTierSection, phase: string | undefined): string {
+  switch (section) {
+    case 'container':
+      if (phase === 'suspended') return 'Applies at resume';
+      if (phase && LIVE_PHASES.has(phase)) return 'Held until the next start';
+      return 'Applies at next start';
+    case 'reincarnate':
+      return 'Needs reincarnation';
+    case 'immediate':
+      return 'Takes effect immediately';
+    case 'fixed':
+      return 'Fixed';
+  }
+}
+
+/** One rendered section of the edit form. */
+export interface AgentConfigSection {
+  id: string;
+  title: string;
+  fields: ReadonlyArray<AgentConfigFieldDef>;
+}
 
 /** Event detail of `agent-config-change`, fired on every edit. */
 export interface AgentConfigChangeDetail {
@@ -479,6 +759,15 @@ export class ScionAgentConfigForm extends LitElement {
   /** The GCP identity picker's state, owned by the page. */
   @property({ attribute: false }) gcpIdentity: GcpIdentityState | null = null;
 
+  /** Edit mode: the agent's values outside its inline config. */
+  @property({ attribute: false }) editValues: AgentConfigEditValues = {};
+
+  /** Edit mode: group the sections by function (the default) or by tier. */
+  @property() grouping: AgentConfigGrouping = 'function';
+
+  /** Edit mode: show the summary strip counting the fields by disposition. */
+  @property({ type: Boolean }) showTierSummary = true;
+
   @state() private drafts: Record<string, FieldDraft> = {};
   @state() private resourceDrafts: Record<string, string> = {};
   @state() private autoExpose: AutoExposeDraft | null = null;
@@ -491,13 +780,45 @@ export class ScionAgentConfigForm extends LitElement {
 
   /** The rendered fields. */
   get fields(): ReadonlyArray<AgentConfigFieldDef> {
+    const edit = this.mode === 'edit';
     return AGENT_CONFIG_FIELDS.filter((f) => {
       if (this.fieldKeys) return this.fieldKeys.includes(f.key);
-      if (this.mode === 'edit' && f.createOnly) return false;
-      if (f.control === 'branch' && !this.branchAvailable) return false;
+      if (!edit && f.editOnly) return false;
+      // An agent's branch is shown read-only in edit mode whatever its project.
+      if (!edit && f.control === 'branch' && !this.branchAvailable) return false;
       if (f.control === 'gcp-identity' && !this.gcpIdentity) return false;
       return true;
     });
+  }
+
+  /**
+   * The edit form's sections in the current grouping. Grouping is a
+   * partition key over the rendered fields, so every field is in exactly
+   * one section of either grouping.
+   */
+  get sections(): AgentConfigSection[] {
+    const fields = this.fields;
+    if (this.grouping === 'tier') {
+      const phase = this.editability?.phase;
+      return AGENT_TIER_SECTIONS.map((id) => ({
+        id,
+        title: tierSectionTitle(id, phase),
+        fields: fields.filter((f) => tierSectionOf(this.fieldState(f)) === id),
+      })).filter((g) => g.fields.length > 0);
+    }
+    return AGENT_CONFIG_TABS.map((t) => ({
+      id: t.id,
+      title: t.label,
+      fields: fields.filter((f) => f.tab === t.id),
+    })).filter((g) => g.fields.length > 0);
+  }
+
+  /** Whether an edit of f can be saved now; see SAVEABLE_DISPOSITIONS. */
+  fieldSaveable(f: AgentConfigFieldDef): boolean {
+    if (this.mode === 'edit' && f.readOnlyInEdit) return false;
+    if (f.control === 'fixed') return false;
+    if (this.mode === 'edit' && f.control === 'branch') return false;
+    return SAVEABLE_DISPOSITIONS.has(this.fieldState(f).disposition);
   }
 
   /** Keys of the fields the user touched. */
@@ -515,10 +836,17 @@ export class ScionAgentConfigForm extends LitElement {
         return this.envEntries !== null;
       case 'labels':
         return this.labelEntries !== null;
+      case 'fixed':
+        return false;
       case 'gcp-identity':
         return !!this.gcpIdentity?.gcpIdentityUserSet;
-      default:
-        return isTouched(this.drafts[f.key]);
+      default: {
+        const d = this.drafts[f.key];
+        // A replace-only field emptied in edit mode is not an edit: the hub
+        // would keep the stored value, so nothing is pending.
+        if (this.mode === 'edit' && f.replaceOnlyInEdit && d && d.text.trim() === '') return false;
+        return isTouched(d);
+      }
     }
   }
 
@@ -536,7 +864,7 @@ export class ScionAgentConfigForm extends LitElement {
     const autoExposeEnv: Record<string, string> = {};
     let envTouched = false;
     for (const f of this.fields) {
-      if (!this.fieldTouched(f) || !editableNow(this.fieldState(f))) continue;
+      if (!this.fieldTouched(f) || !this.fieldSaveable(f)) continue;
       const d = this.drafts[f.key];
       switch (f.control) {
         case 'limit-count': {
@@ -550,6 +878,8 @@ export class ScionAgentConfigForm extends LitElement {
         case 'choice':
         case 'model': {
           const v = emitString(f.control, d);
+          // A replace-only field's emptied control is not a clear: nothing is sent.
+          if (v === null && f.replaceOnlyInEdit) break;
           if (v !== null || !create) out[f.configKey] = v;
           break;
         }
@@ -582,6 +912,10 @@ export class ScionAgentConfigForm extends LitElement {
           break;
         }
         case 'env':
+          if (!create) {
+            envTouched = true;
+            break;
+          }
           for (const e of this.envEntries ?? []) {
             if (e.key) {
               env[e.key] = e.value;
@@ -593,16 +927,41 @@ export class ScionAgentConfigForm extends LitElement {
           break;
       }
     }
-    if (envTouched) out.env = { ...env, ...autoExposeEnv };
+    if (!envTouched) return out;
+    if (create) {
+      out.env = { ...env, ...autoExposeEnv };
+      return out;
+    }
+    // Edit mode: the hub replaces the agent's env with the one sent, so the
+    // whole env goes: every row, shown or edited, minus TZ. The auto-expose
+    // keys go only when that control was used; the hub keeps the agent's
+    // auto-expose keys a request leaves out.
+    const rows = this.envEntries ?? this.storedEnvEntries();
+    for (const e of rows) {
+      if (e.key && e.key !== TZ_ENV_KEY && !AUTO_EXPOSE_ENV_KEYS.has(e.key)) env[e.key] = e.value;
+    }
+    out.env = { ...env, ...autoExposeEnv };
     return out;
   }
 
-  /** The create request's top-level keys: only touched fields. */
+  /** The request's top-level keys: only touched fields. */
   collectTopLevel(): AgentConfigTopLevel {
     const out: AgentConfigTopLevel = {};
+    const create = this.mode === 'create';
     for (const f of this.fields) {
-      if (!this.fieldTouched(f) || !editableNow(this.fieldState(f))) continue;
+      if (!this.fieldTouched(f) || !this.fieldSaveable(f)) continue;
       switch (f.control) {
+        case 'name': {
+          const v = this.drafts[f.key].text.trim();
+          if (v) out.name = v;
+          break;
+        }
+        case 'timezone': {
+          const d = this.drafts[f.key];
+          // Clear unpins: "" reverts to the zone resolved at start.
+          out.explicitTimezone = d.cleared ? '' : d.text.trim();
+          break;
+        }
         case 'branch': {
           const v = emitString('text', this.drafts[f.key]);
           if (v) out.branch = v;
@@ -615,7 +974,9 @@ export class ScionAgentConfigForm extends LitElement {
         }
         case 'labels': {
           const valid = (this.labelEntries ?? []).filter((l) => l.key.trim());
-          if (valid.length > 0) {
+          // The hub replaces the agent's labels with the map sent, so edit
+          // mode sends the whole map, empty when every label was removed.
+          if (valid.length > 0 || !create) {
             out.labels = Object.fromEntries(valid.map((l) => [l.key.trim(), l.value.trim()]));
           }
           break;
@@ -645,6 +1006,9 @@ export class ScionAgentConfigForm extends LitElement {
       if (!isTouched(d) || d.cleared || d.unlimited) continue;
       const text = d.text.trim();
       if (text === '') continue;
+      if (f.control === 'timezone' && !isValidTimeZone(text)) {
+        errors.push(`"${text}" is not a valid IANA timezone name.`);
+      }
       if (f.control === 'limit-count' && !/^[1-9]\d*$/.test(text)) {
         errors.push(`${f.label} must be a whole number greater than 0, or Unlimited.`);
       }
@@ -653,6 +1017,16 @@ export class ScionAgentConfigForm extends LitElement {
       }
     }
     return errors;
+  }
+
+  /**
+   * Required env keys still without a value (edit mode): rows the agent's
+   * env lists with an empty value, which a start refuses.
+   */
+  missingRequiredEnv(): string[] {
+    if (this.mode !== 'edit') return [];
+    const rows = this.envEntries ?? this.storedEnvEntries();
+    return this.requiredEnvKeys().filter((k) => !rows.find((e) => e.key === k)?.value);
   }
 
   /** Forgets every edit, e.g. after a successful save. */
@@ -678,11 +1052,19 @@ export class ScionAgentConfigForm extends LitElement {
     let st: AgentFieldEditState =
       this.mode === 'create'
         ? { ...CREATE_MODE_STATE, tier: f.tier }
-        : (this.editability?.fields[f.key] ?? {
+        : (this.editability?.fields[f.editabilityKey ?? f.key] ?? {
             tier: f.tier,
             disposition: 'locked',
             reason: 'The hub did not report whether this field can be edited.',
           });
+    if (
+      this.mode === 'edit' &&
+      this.editValues.envVisible === false &&
+      (f.control === 'env' || f.control === 'auto-expose') &&
+      st.disposition !== 'locked'
+    ) {
+      st = { ...st, disposition: 'locked', reason: ENV_HIDDEN_REASON };
+    }
     const cap =
       f.capability && this.harnessCapabilities ? f.capability(this.harnessCapabilities) : undefined;
     if (cap?.support === 'no' && st.disposition !== 'locked') {
@@ -717,6 +1099,21 @@ export class ScionAgentConfigForm extends LitElement {
   }
 
   private storedText(f: AgentConfigFieldDef): string {
+    if (this.mode === 'edit') {
+      switch (f.control) {
+        case 'name':
+          return this.editValues.name ?? '';
+        case 'timezone':
+          return this.editValues.explicitTimezone ?? '';
+        case 'top-choice':
+          return (
+            (f.topKey === 'agentRole' ? this.editValues.agentRole : this.editValues.messageMode) ??
+            ''
+          );
+        default:
+          break;
+      }
+    }
     if (!('configKey' in f)) return '';
     const v = this.values?.[f.configKey];
     if (v === undefined || v === null || v === '' || v === 0) return '';
@@ -729,6 +1126,54 @@ export class ScionAgentConfigForm extends LitElement {
     }
     if (this.storedUnlimited(f)) return '';
     return String(v);
+  }
+
+  /** Edit mode: the agent's env rows the env editor owns (not auto-expose, not TZ). */
+  private storedEnvEntries(): EnvEntry[] {
+    if (this.mode !== 'edit') return [];
+    return Object.entries(this.editValues.env ?? {})
+      .filter(([key]) => !AUTO_EXPOSE_ENV_KEYS.has(key) && key !== TZ_ENV_KEY)
+      .map(([key, value]) => ({ key, value }));
+  }
+
+  /** Env keys the agent lists with an empty value: required, to be filled before a start. */
+  private requiredEnvKeys(): string[] {
+    return this.storedEnvEntries()
+      .filter((e) => e.key && !e.value)
+      .map((e) => e.key);
+  }
+
+  /** Edit mode: the agent's effective auto-expose value and its source. */
+  private autoExposeEffective(): { enabled: boolean; source: AutoExposeSource } {
+    return effectiveAutoExposePorts(
+      this.editValues.env,
+      this.editValues.explicitEnv,
+      this.editValues.autoExposeHubDefault ?? false
+    );
+  }
+
+  /**
+   * Edit mode: the auto-expose control's starting state. The value shows
+   * only when it is the agent's explicit choice; a project-derived or
+   * inherited value starts blank (shown as the placeholder), so picking it
+   * is a change. The sub-fields start from the live env.
+   */
+  private storedAutoExpose(): AutoExposeDraft {
+    const env = this.mode === 'edit' ? (this.editValues.env ?? {}) : {};
+    const explicit = this.mode === 'edit' && this.autoExposeEffective().source === 'explicit';
+    const ports = explicit ? env.SCION_AUTO_EXPOSE_PORTS : undefined;
+    return {
+      enabled: ports === 'true' || ports === 'false' ? ports : '',
+      mode: env.SCION_AUTO_EXPOSE_MODE || 'allowlist',
+      list: env.SCION_AUTO_EXPOSE_PORTS_LIST ?? '',
+      interval: env.SCION_AUTO_EXPOSE_INTERVAL || '3s',
+    };
+  }
+
+  /** Edit mode: the agent's labels as editor rows. */
+  private storedLabelEntries(): Array<{ key: string; value: string }> {
+    if (this.mode !== 'edit') return [];
+    return Object.entries(this.editValues.labels ?? {}).map(([key, value]) => ({ key, value }));
   }
 
   /**
@@ -756,7 +1201,10 @@ export class ScionAgentConfigForm extends LitElement {
    * (nothing stored to clear); in edit mode it is sent as null.
    */
   private clearField(f: AgentConfigFieldDef): void {
-    if (this.mode === 'create') {
+    // Nothing stored on the agent (create mode, or an edit-mode field that
+    // only inherits): there is nothing to revert, so Clear just drops the
+    // user's edit and nothing is sent.
+    if (this.mode === 'create' || !this.hasStoredValue(f)) {
       const next = { ...this.drafts };
       delete next[f.key];
       this.drafts = next;
@@ -795,7 +1243,8 @@ export class ScionAgentConfigForm extends LitElement {
     return Object.keys(spec).length > 0 ? spec : null;
   }
 
-  private applyText(): string {
+  private applyText(st: AgentFieldEditState): string {
+    if (st.disposition === 'immediate') return 'Takes effect immediately';
     const phase = this.editability?.phase;
     if (this.mode === 'create' || phase === 'created') return 'Applies at first start';
     if (phase === 'suspended') return 'Applies at resume';
@@ -849,12 +1298,15 @@ export class ScionAgentConfigForm extends LitElement {
           <sl-badge variant="warning" pill
             ><sl-icon name="hourglass-split"></sl-icon> Held — applies at next start</sl-badge
           >
+          ${this.notSaveableNote(st)}
         </div>`;
       case 'reincarnate':
         return html`<div class="status">
-          <sl-badge variant="neutral" pill
-            ><sl-icon name="arrow-repeat"></sl-icon> Needs reincarnation</sl-badge
+          <sl-badge variant="neutral" pill data-testid="reincarnate-badge"
+            ><sl-icon name="arrow-repeat"></sl-icon> Needs reincarnation
+            ${st.tier === 'T3' ? '(changes identity)' : '(re-renders prompts)'}</sl-badge
           >
+          ${this.notSaveableNote(st)}
         </div>`;
       default: {
         const session = st.note === 'session' ? ' (the conversation continues)' : '';
@@ -871,10 +1323,18 @@ export class ScionAgentConfigForm extends LitElement {
             : nothing;
         const help = f.help ? `${f.help} ` : '';
         return html`<div class="status help">
-          <span>${help}${this.applyText()}${session}.</span>${clearNote}
+          <span>${help}${this.applyText(st)}${session}.</span>${clearNote}
         </div>`;
       }
     }
+  }
+
+  /** Under a held or reincarnate-only field whose disposition cannot be saved yet. */
+  private notSaveableNote(st: AgentFieldEditState) {
+    if (SAVEABLE_DISPOSITIONS.has(st.disposition)) return nothing;
+    return html`<span class="not-saveable" data-testid="not-saveable"
+      >Saving this edit is not available yet.</span
+    >`;
   }
 
   /** How an inherited value reads in a control: an option's label, else the value. */
@@ -897,8 +1357,17 @@ export class ScionAgentConfigForm extends LitElement {
       : `Inherited from ${p.source}`;
   }
 
+  /** Edit mode: the agent stores its own value for f (not only an inherited one). */
+  private hasStoredValue(f: AgentConfigFieldDef): boolean {
+    return this.storedText(f) !== '' || this.storedUnlimited(f);
+  }
+
   private renderClear(f: AgentConfigFieldDef, off: boolean, d: FieldDraft | undefined) {
-    const nothingToClear = this.mode === 'create' ? !isTouched(d) : !!d?.cleared;
+    if (this.mode === 'edit' && f.replaceOnlyInEdit) return nothing;
+    // Edit mode: Clear reverts a value the agent stores to the inherited
+    // one, so a field that only inherits offers it only to drop an edit.
+    const nothingToClear =
+      this.mode === 'create' || !this.hasStoredValue(f) ? !isTouched(d) : !!d?.cleared;
     return html`<sl-button
       size="small"
       class="clear"
@@ -923,22 +1392,27 @@ export class ScionAgentConfigForm extends LitElement {
   private renderField(f: AgentConfigFieldDef): TemplateResult {
     const st = this.fieldState(f);
     const d = this.drafts[f.key];
-    // Held and reincarnate-only edits are shown but not yet editable here:
-    // saving them needs held edits on the hub, which this form does not
-    // send yet.
-    const locked =
-      st.disposition === 'locked' || st.disposition === 'held' || st.disposition === 'reincarnate';
-    const off = this.disabled || locked;
+    const off = this.disabled || !this.fieldSaveable(f);
     const id = `input-${f.key.replace(/[^a-zA-Z0-9]+/g, '-')}`;
+    if (this.mode === 'edit' && f.readOnlyInEdit) return this.renderMessageModeReadOnly(f, st);
     let control: TemplateResult;
     switch (f.control) {
       case 'gcp-identity':
-        return this.renderGcpIdentity(f);
+        return this.renderGcpIdentity(f, st, off);
       case 'env':
-        control = this.renderEnv();
+        control = this.renderEnv(off);
         break;
       case 'labels':
         control = this.renderLabels(off);
+        break;
+      case 'fixed':
+        control = this.renderFixed(f, id);
+        break;
+      case 'branch':
+        control = this.mode === 'edit' ? this.renderFixed(f, id) : this.renderText(f, off, d, id);
+        break;
+      case 'timezone':
+        control = this.renderTimezone(f, off, d, id);
         break;
       case 'resources':
         control = this.renderResources(off);
@@ -966,6 +1440,84 @@ export class ScionAgentConfigForm extends LitElement {
         ${this.renderStatus(f, st, d)}
       </div>
     `;
+  }
+
+  /** A field fixed at creation: its value, read-only. */
+  private renderFixed(f: AgentConfigFieldDef, id: string) {
+    const value = this.editValues.fixed?.[f.key] ?? '';
+    return html`<div class="row">
+      <sl-input
+        id=${id}
+        size="small"
+        readonly
+        .value=${value}
+        placeholder=${f.control === 'branch' ? "The agent's own branch" : 'Not set'}
+      ></sl-input>
+    </div>`;
+  }
+
+  /**
+   * The message mode in edit mode: read-only. It changes through its own
+   * endpoint, with its own permission, from the Messaging card.
+   */
+  private renderMessageModeReadOnly(f: AgentConfigFieldDef, st: AgentFieldEditState) {
+    const mode = this.editValues.messageMode || 'project';
+    const href = this.editValues.detailHref;
+    return html`<div
+      class="field"
+      data-key=${f.key}
+      data-disposition=${st.disposition}
+      data-tier=${st.tier}
+      data-testid="message-mode-readonly"
+    >
+      <span class="label">${f.label}</span>
+      <scion-message-mode-badge mode=${mode} size="medium"></scion-message-mode-badge>
+      <div class="status help">
+        <span
+          >Changed on the Messaging card of the
+          ${href
+            ? html`<a href=${href} data-testid="message-mode-detail-link">agent's page</a>`
+            : "agent's page"}
+          (Configuration tab), which takes effect immediately.</span
+        >
+      </div>
+    </div>`;
+  }
+
+  /**
+   * Timezone: the agent's pin, edited with the shared picker. Clear unpins
+   * it, so the zone is resolved at start again.
+   */
+  private renderTimezone(
+    f: AgentConfigFieldDef,
+    off: boolean,
+    d: FieldDraft | undefined,
+    id: string
+  ) {
+    const text = d ? d.text : this.storedText(f);
+    const unpinned =
+      'Not pinned: resolved at start from a TZ setting (user, project, hub or broker), then the hub default, then UTC';
+    const legacy =
+      !d && this.editValues.explicitTimezoneLegacy && text
+        ? html`<div class="inherited" data-testid="timezone-legacy">
+            Pinned from an earlier TZ setting.
+          </div>`
+        : nothing;
+    return html`<div class="row">
+        <scion-timezone-picker
+          id=${id}
+          label=""
+          .value=${text}
+          placeholder=${d?.cleared ? `Unpinned — ${unpinned}` : text ? text : unpinned}
+          ?disabled=${off}
+          @timezone-change=${(e: CustomEvent<TimezoneChangeDetail>) => {
+            const zone = e.detail.timezone;
+            if (zone) this.editField(f.key, { typed: true, cleared: false, text: zone }, f);
+          }}
+        ></scion-timezone-picker>
+        ${this.renderClear(f, off || (!d && !this.storedText(f)), d)}
+      </div>
+      ${legacy}`;
   }
 
   /** A choice that an override setting will replace today is still recorded. */
@@ -1157,58 +1709,88 @@ export class ScionAgentConfigForm extends LitElement {
 
   private renderResources(off: boolean) {
     return html`<div class="grid">
-      ${RESOURCE_FIELDS.map((r) => {
-        const key = `config.resources.${r.sub}`;
-        const text = this.resourceDrafts[r.sub] ?? r.get(this.values?.resources) ?? '';
-        const p = this.placeholders?.[key];
-        const placeholder = p?.value ? `${p.value} (${p.source})` : `Inherited (${r.example})`;
-        return html`<div class="sub" data-sub=${r.sub}>
-          <span class="sub-label">${r.label}</span>
-          <sl-input
-            size="small"
-            .value=${text}
-            placeholder=${placeholder}
-            ?disabled=${off}
-            @sl-input=${(e: Event) => {
-              this.resourceDrafts = {
-                ...this.resourceDrafts,
-                [r.sub]: (e.target as HTMLInputElement).value,
-              };
-              this.emitChange();
-            }}
-          ></sl-input>
-        </div>`;
-      })}
-      ${Object.keys(this.resourceDrafts).length > 0
-        ? html`<sl-button
-            size="small"
-            class="clear"
-            ?disabled=${off}
-            @click=${() => {
-              this.resourceDrafts = {};
-              this.emitChange();
-            }}
-            >Clear</sl-button
-          >`
-        : nothing}
-    </div>`;
+        ${RESOURCE_FIELDS.map((r) => {
+          const key = `config.resources.${r.sub}`;
+          const text = this.resourceDrafts[r.sub] ?? r.get(this.values?.resources) ?? '';
+          const p = this.placeholders?.[key];
+          const placeholder = p?.value ? `${p.value} (${p.source})` : `Inherited (${r.example})`;
+          return html`<div class="sub" data-sub=${r.sub}>
+            <span class="sub-label">${r.label}</span>
+            <sl-input
+              size="small"
+              .value=${text}
+              placeholder=${placeholder}
+              ?disabled=${off}
+              @sl-input=${(e: Event) => {
+                this.resourceDrafts = {
+                  ...this.resourceDrafts,
+                  [r.sub]: (e.target as HTMLInputElement).value,
+                };
+                this.emitChange();
+              }}
+            ></sl-input>
+          </div>`;
+        })}
+        ${Object.keys(this.resourceDrafts).length > 0
+          ? html`<sl-button
+              size="small"
+              class=${this.mode === 'edit' ? 'undo' : 'clear'}
+              ?disabled=${off}
+              @click=${() => {
+                this.resourceDrafts = {};
+                this.emitChange();
+              }}
+              >${this.mode === 'edit' ? 'Undo' : 'Clear'}</sl-button
+            >`
+          : nothing}
+      </div>
+      ${this.resourcesRemoveStored()
+        ? html`<div class="status">
+            <span class="clear-note" data-testid="clear-note"
+              >Removing a value takes effect at the next reincarnation; a plain start keeps the
+              previous value.</span
+            >
+          </div>`
+        : nothing}`;
+  }
+
+  /**
+   * Edit mode: the user emptied a resource value the agent stores. A start
+   * merges resources value by value and keeps one the request leaves out, so
+   * the removal reaches the agent only at its next reincarnation.
+   */
+  private resourcesRemoveStored(): boolean {
+    if (this.mode !== 'edit') return false;
+    return RESOURCE_FIELDS.some((r) => {
+      const draft = this.resourceDrafts[r.sub];
+      return draft !== undefined && draft.trim() === '' && !!r.get(this.values?.resources);
+    });
   }
 
   private renderAutoExpose(f: AgentConfigFieldDef, off: boolean, id: string) {
     const a = this.autoExpose;
+    // What the control shows: the user's edit, else (edit mode) the agent's
+    // stored keys. The first edit starts from the stored state.
+    const shown = a ?? (this.mode === 'edit' ? this.storedAutoExpose() : null);
     const update = (patch: Partial<AutoExposeDraft>) => {
       this.autoExpose = {
-        ...(a ?? { enabled: '', mode: 'allowlist', list: '', interval: '3s' }),
+        ...(shown ?? { enabled: '', mode: 'allowlist', list: '', interval: '3s' }),
         ...patch,
       };
       this.emitChange();
     };
+    const edit = this.mode === 'edit';
+    const eff = edit ? this.autoExposeEffective() : null;
+    const placeholder =
+      eff && eff.source !== 'explicit'
+        ? `${eff.enabled ? 'Enabled' : 'Disabled'} (${AUTO_EXPOSE_SOURCE_LABELS[eff.source]})`
+        : this.placeholderFor(f);
     return html`<div class="row">
         <sl-select
           id=${id}
           size="small"
-          .value=${a?.enabled ?? ''}
-          placeholder=${this.placeholderFor(f)}
+          .value=${shown?.enabled ?? ''}
+          placeholder=${placeholder}
           ?disabled=${off}
           @sl-change=${(e: Event) => {
             const v = (e.target as HTMLElement & { value: string })
@@ -1220,23 +1802,32 @@ export class ScionAgentConfigForm extends LitElement {
         </sl-select>
         <sl-button
           size="small"
-          class="clear"
+          class=${edit ? 'undo' : 'clear'}
           ?disabled=${off || !a}
           @click=${() => {
             this.autoExpose = null;
             this.emitChange();
           }}
-          >Clear</sl-button
+          >${edit ? 'Undo' : 'Clear'}</sl-button
         >
       </div>
-      ${a?.enabled === 'true'
+      ${eff
+        ? html`<div class="inherited" data-testid="auto-expose-source">
+            Source:
+            ${a ? 'explicit (unsaved)' : AUTO_EXPOSE_SOURCE_LABELS[eff.source]}${eff.source ===
+              'explicit' || a
+              ? nothing
+              : '. Pick a value to set it on this agent.'}
+          </div>`
+        : nothing}
+      ${shown?.enabled === 'true'
         ? html`<div class="grid auto-expose-sub">
             <div class="sub">
               <span class="sub-label">Port filter mode</span>
               <sl-select
                 size="small"
                 class="ae-mode"
-                .value=${a.mode}
+                .value=${shown.mode}
                 ?disabled=${off}
                 @sl-change=${(e: Event) =>
                   update({ mode: (e.target as HTMLElement & { value: string }).value })}
@@ -1251,7 +1842,7 @@ export class ScionAgentConfigForm extends LitElement {
                 size="small"
                 class="ae-list"
                 placeholder="e.g. 3000,5173,8080"
-                .value=${a.list}
+                .value=${shown.list}
                 ?disabled=${off}
                 @sl-input=${(e: Event) => update({ list: (e.target as HTMLInputElement).value })}
               ></sl-input>
@@ -1262,7 +1853,7 @@ export class ScionAgentConfigForm extends LitElement {
                 size="small"
                 class="ae-interval"
                 placeholder="3s"
-                .value=${a.interval}
+                .value=${shown.interval}
                 ?disabled=${off}
                 @sl-input=${(e: Event) =>
                   update({ interval: (e.target as HTMLInputElement).value })}
@@ -1272,19 +1863,46 @@ export class ScionAgentConfigForm extends LitElement {
         : nothing}`;
   }
 
-  /** The env editor has no disabled state; a locked field is never emitted. */
-  private renderEnv() {
-    return html`<scion-env-editor
-      .entries=${this.envEntries ?? []}
-      @env-change=${(e: CustomEvent<{ entries: EnvEntry[] }>) => {
-        this.envEntries = e.detail.entries;
-        this.emitChange();
-      }}
-    ></scion-env-editor>`;
+  /**
+   * The env editor. It has no disabled state, so a field that cannot be
+   * saved shows its rows read-only instead; a locked field is never emitted.
+   * Edit mode starts from the agent's env (without the auto-expose keys and
+   * TZ, which other fields own).
+   */
+  private renderEnv(off: boolean) {
+    const entries = this.envEntries ?? this.storedEnvEntries();
+    if (this.mode === 'edit' && this.editValues.envVisible === false) {
+      // The hub withheld the env: say so, and claim nothing about it.
+      return html`<div class="inherited" data-testid="env-hidden">
+        The environment is hidden from you.
+      </div>`;
+    }
+    if (off && this.mode === 'edit') {
+      return html`<div class="env-readonly" data-testid="env-readonly">
+        ${entries.length === 0
+          ? html`<span class="inherited">No environment variables.</span>`
+          : entries.map((e) => html`<div><code>${e.key}</code>=${e.value}</div>`)}
+      </div>`;
+    }
+    return html`${this.mode === 'edit'
+        ? html`<div class="hint">TZ is not set here: the Timezone field pins the timezone.</div>
+            <div class="hint" data-testid="env-replace-note">
+              Saving a change here replaces the agent's stored environment with this list. Values
+              this page cannot show you, such as GITHUB_TOKEN, are not kept.
+            </div>`
+        : nothing}
+      <scion-env-editor
+        .entries=${entries}
+        .requiredKeys=${this.requiredEnvKeys()}
+        @env-change=${(e: CustomEvent<{ entries: EnvEntry[] }>) => {
+          this.envEntries = e.detail.entries;
+          this.emitChange();
+        }}
+      ></scion-env-editor>`;
   }
 
   private renderLabels(off: boolean) {
-    const entries = this.labelEntries ?? [];
+    const entries = this.labelEntries ?? this.storedLabelEntries();
     const set = (next: Array<{ key: string; value: string }>) => {
       this.labelEntries = next;
       this.emitChange();
@@ -1346,14 +1964,23 @@ export class ScionAgentConfigForm extends LitElement {
    * (unless an applied project default is the outcome); any pick, including
    * Block, is a choice. The rules live in GcpIdentityState.
    */
-  private renderGcpIdentity(f: AgentConfigFieldDef): TemplateResult {
+  private renderGcpIdentity(
+    f: AgentConfigFieldDef,
+    st: AgentFieldEditState,
+    off: boolean
+  ): TemplateResult {
     const g = this.gcpIdentity!;
     void this.gcpVersion;
-    const off = this.disabled;
     return html`
-      <div class="field form-field" data-key=${f.key} data-disposition="now" data-tier=${f.tier}>
-        <label class="label">GCP Identity</label>
+      <div
+        class="field form-field"
+        data-key=${f.key}
+        data-disposition=${st.disposition}
+        data-tier=${st.tier}
+      >
+        ${this.renderLabel(f, st, 'input-gcp_identity')}
         <sl-select
+          id="input-gcp_identity"
           placeholder="Choose an identity..."
           .value=${g.pickerBlank ? '' : g.gcpMetadataMode}
           ?disabled=${off}
@@ -1370,6 +1997,7 @@ export class ScionAgentConfigForm extends LitElement {
           <sl-option value="passthrough">Passthrough</sl-option>
         </sl-select>
         <div class="hint">${g.hint}</div>
+        ${this.mode === 'edit' ? this.renderStatus(f, st, undefined) : nothing}
       </div>
       ${g.gcpMetadataMode === 'assign' && !g.noIdentityModeChosen
         ? html`
@@ -1403,11 +2031,11 @@ export class ScionAgentConfigForm extends LitElement {
   }
 
   override render() {
-    const groups = AGENT_CONFIG_TABS.map((t) => ({
-      ...t,
-      fields: this.fields.filter((f) => f.tab === t.id),
-    }));
     if (this.mode === 'create') {
+      const groups = CREATE_TABS.map((t) => ({
+        ...t,
+        fields: this.fields.filter((f) => f.tab === t.id),
+      }));
       return html`
         <sl-tab-group>
           ${groups.map(
@@ -1425,19 +2053,36 @@ export class ScionAgentConfigForm extends LitElement {
         </sl-tab-group>
       `;
     }
+    const tier = this.grouping === 'tier';
     return html`
-      ${this.renderSummary()}
-      ${groups
-        .filter((g) => g.fields.length > 0)
-        .map(
-          (g) => html`
-            <section class="group" data-tab=${g.id}>
-              <h3>${g.label}</h3>
-              ${g.fields.map((f) => this.renderField(f))}
-            </section>
-          `
-        )}
+      ${this.showTierSummary ? this.renderSummary() : nothing}
+      ${this.sections.map(
+        (g) => html`
+          <section
+            class="group"
+            data-grouping=${this.grouping}
+            data-section=${g.id}
+            data-tab=${tier ? nothing : g.id}
+          >
+            <h3>${g.title}</h3>
+            ${tier && g.id === 'reincarnate'
+              ? this.renderReincarnateSection(g.fields)
+              : g.fields.map((f) => this.renderField(f))}
+          </section>
+        `
+      )}
     `;
+  }
+
+  /** The Needs reincarnation section: the identity fields under their own sub-heading. */
+  private renderReincarnateSection(fields: ReadonlyArray<AgentConfigFieldDef>) {
+    const identity = fields.filter((f) => this.fieldState(f).tier === 'T3');
+    const rest = fields.filter((f) => this.fieldState(f).tier !== 'T3');
+    return html`${rest.map((f) => this.renderField(f))}
+    ${identity.length > 0
+      ? html`<h4 class="subhead" data-testid="identity-subhead">Changes identity</h4>
+          ${identity.map((f) => this.renderField(f))}`
+      : nothing}`;
   }
 
   static override styles = css`
@@ -1565,15 +2210,27 @@ export class ScionAgentConfigForm extends LitElement {
       gap: 0.375rem;
     }
     .clear-note,
-    .override-note {
+    .override-note,
+    .not-saveable {
       color: var(--sl-color-warning-700, #b45309);
     }
+    .subhead {
+      font-size: var(--sl-font-size-small);
+      font-weight: var(--sl-font-weight-semibold);
+      color: var(--sl-color-neutral-700);
+      margin: 0.5rem 0 0.75rem;
+    }
+    .env-readonly {
+      font-size: var(--sl-font-size-small);
+      display: flex;
+      flex-direction: column;
+      gap: 0.125rem;
+    }
+    scion-timezone-picker {
+      flex: 1 1 auto;
+      max-width: 28rem;
+    }
   `;
-}
-
-/** Whether an edit of the field is sent now (not held, not locked). */
-function editableNow(st: AgentFieldEditState): boolean {
-  return st.disposition === 'now' || st.disposition === 'immediate';
 }
 
 /** The value of a touched count limit: null clears, 0 is Unlimited. */

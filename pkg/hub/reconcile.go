@@ -260,6 +260,8 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 		task = args.Task
 		resume = args.Resume
 		opts.Async = args.Async
+		opts.Kind = args.Kind
+		opts.PriorPhase = args.PriorPhase
 	}
 	ctx, warns := withDispatchWarnings(ctx)
 	// A dispatcher that takes start options gets the intent's options (and

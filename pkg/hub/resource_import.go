@@ -53,7 +53,13 @@ const resourceImportConcurrency = 6
 // naming, the create-or-sync loop — is shared here.
 
 // resourceDir pairs a derived resource name with its on-disk directory.
-type resourceDir struct{ name, path, sourceURL string }
+type resourceDir struct {
+	name, path, sourceURL string
+	// nameFromConfig is set when name was read from the directory's
+	// config.yaml before collection; the import then requires the collected
+	// config.yaml to carry the same name.
+	nameFromConfig bool
+}
 
 // skippedDir pairs a child directory name with the reason it was skipped during
 // discovery (e.g. it lacks the kind's marker file, so it is not a resource).
@@ -245,29 +251,13 @@ func (s *Server) importFromWorkspace(ctx context.Context, project *store.Project
 		return nil, fmt.Errorf("%s storage is not configured", kind.noun)
 	}
 
-	// Resolve the project's workspace root on disk.
-	projectRoot, err := s.resolveProjectWebDAVPath(ctx, project)
+	// Snapshot the workspace path through a confined root (the workspace
+	// can be agent-writable; see snapshotWorkspaceDir).
+	resourcesDir, cleanup, err := s.snapshotWorkspaceDir(ctx, project, workspacePath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve project workspace: %w", err)
+		return nil, err
 	}
-
-	// Clean and join the workspace path to the project root. Strip the leading
-	// slash so it joins relative to the root.
-	rel := strings.TrimPrefix(filepath.Clean(workspacePath), "/")
-	resourcesDir := filepath.Join(projectRoot, rel)
-
-	// Validate the resolved path is within the project root.
-	absRoot, _ := filepath.Abs(projectRoot)
-	absDir, _ := filepath.Abs(resourcesDir)
-	relPath, err := filepath.Rel(absRoot, absDir)
-	if err != nil || strings.HasPrefix(relPath, "..") {
-		return nil, fmt.Errorf("workspace path must be within the project workspace")
-	}
-
-	info, err := os.Stat(resourcesDir)
-	if err != nil || !info.IsDir() {
-		return nil, fmt.Errorf("workspace path not found or not a directory: %s", workspacePath)
-	}
+	defer cleanup()
 
 	// Workspace dirs are real directories, so pass "" as sourceURL: the leaf's
 	// own base name is correct (no content-hash cache directory in play).
@@ -446,12 +436,14 @@ func discoverResourceDirs(root, sourceURL string, kind resourceImportKind) ([]re
 				name = derived
 			}
 		}
+		nameFromConfig := false
 		if kind.marker == "config.yaml" {
 			if hcDir, err := config.LoadHarnessConfigDir(root); err == nil && hcDir.Config.Name != "" {
 				name = hcDir.Config.Name
+				nameFromConfig = true
 			}
 		}
-		return []resourceDir{{name, root, sourceURL}}, nil, nil
+		return []resourceDir{{name: name, path: root, sourceURL: sourceURL, nameFromConfig: nameFromConfig}}, nil, nil
 	}
 
 	entries, err := os.ReadDir(root)
@@ -473,16 +465,18 @@ func discoverResourceDirs(root, sourceURL string, kind resourceImportKind) ([]re
 		dir := filepath.Join(root, entry.Name())
 		if kind.isResourceDir(dir) {
 			childName := entry.Name()
+			nameFromConfig := false
 			if kind.marker == "config.yaml" {
 				if hcDir, err := config.LoadHarnessConfigDir(dir); err == nil && hcDir.Config.Name != "" {
 					childName = hcDir.Config.Name
+					nameFromConfig = true
 				}
 			}
 			childSourceURL := sourceURL
 			if sourceURL != "" {
 				childSourceURL = strings.TrimRight(sourceURL, "/") + "/" + entry.Name()
 			}
-			dirs = append(dirs, resourceDir{childName, dir, childSourceURL})
+			dirs = append(dirs, resourceDir{name: childName, path: dir, sourceURL: childSourceURL, nameFromConfig: nameFromConfig})
 		} else {
 			skipped = append(skipped, skippedDir{entry.Name(), "no " + kind.marker})
 		}
@@ -552,6 +546,9 @@ func (s *Server) importResourceDirs(ctx context.Context, dirs []resourceDir, ski
 
 			rstore, err := kind.newStore(rd.path)
 			if err == nil {
+				if rd.nameFromConfig {
+					rstore.requireConfigName()
+				}
 				_, err = rstore.Bootstrap(ctx, rd.name, rd.path, scope, scopeID, rd.sourceURL, true)
 			}
 			done := int(completed.Add(1))
@@ -680,25 +677,11 @@ func (s *Server) discoverFromWorkspace(ctx context.Context, project *store.Proje
 		return nil, nil, fmt.Errorf("%s storage is not configured", kind.noun)
 	}
 
-	projectRoot, err := s.resolveProjectWebDAVPath(ctx, project)
+	resourcesDir, cleanup, err := s.snapshotWorkspaceDir(ctx, project, workspacePath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to resolve project workspace: %w", err)
+		return nil, nil, err
 	}
-
-	rel := strings.TrimPrefix(filepath.Clean(workspacePath), "/")
-	resourcesDir := filepath.Join(projectRoot, rel)
-
-	absRoot, _ := filepath.Abs(projectRoot)
-	absDir, _ := filepath.Abs(resourcesDir)
-	relPath, err := filepath.Rel(absRoot, absDir)
-	if err != nil || strings.HasPrefix(relPath, "..") {
-		return nil, nil, fmt.Errorf("workspace path must be within the project workspace")
-	}
-
-	info, err := os.Stat(resourcesDir)
-	if err != nil || !info.IsDir() {
-		return nil, nil, fmt.Errorf("workspace path not found or not a directory: %s", workspacePath)
-	}
+	defer cleanup()
 
 	dirs, skipped, err := discoverResourceDirs(resourcesDir, "", kind)
 	if err != nil {
@@ -718,3 +701,12 @@ func (s *Server) discoverFromWorkspace(ctx context.Context, project *store.Proje
 	}
 	return names, skippedNames, nil
 }
+
+// Bounds of a workspace snapshot for resource import.
+var (
+	workspaceSnapshotMaxFiles = 10000
+	workspaceSnapshotMaxBytes = int64(256 << 20)
+)
+
+// errWorkspaceSnapshotTooLarge refuses a workspace import over the bounds.
+var errWorkspaceSnapshotTooLarge = errors.New("workspace path is too large to import")

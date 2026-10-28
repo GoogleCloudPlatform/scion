@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 // The schedules section of the health summary (ptone/scion#5404): active
@@ -50,9 +51,12 @@ var healthSummaryScheduleScanLimit = 2000
 const healthScheduleLastErrorMaxRunes = 300
 
 // HealthSummarySchedules is the schedules section of the health summary.
-// The failing and paused lists each hold only schedules in projects where
-// the caller holds scheduled_event.read, so two callers can see different
-// lists; the section never changes the overall status.
+// For a user caller, the failing and paused lists each hold only schedules
+// in projects where the caller holds scheduled_event.read (decided once per
+// project). For an agent caller, each row is decided on its own: only
+// schedules in the agent's own project that the agent holds are listed. Two
+// callers can see different lists; the section never changes the overall
+// status.
 type HealthSummarySchedules struct {
 	// Failing lists active schedules whose last run failed, most recent
 	// failure first, capped at healthSummaryScheduleLimit. Never null.
@@ -138,18 +142,35 @@ func (s *Server) healthSummarySchedules(r *http.Request) (*HealthSummarySchedule
 	ctx := r.Context()
 	out := &HealthSummarySchedules{Failing: []HealthFailingSchedule{}, Paused: []HealthPausedSchedule{}}
 	allowed := map[string]bool{}
+	failingFilter := store.ScheduleFilter{Status: store.ScheduleStatusActive, LastRunStatus: store.ScheduleRunError}
+	pausedFilter := store.ScheduleFilter{Status: store.ScheduleStatusPaused, SystemPausedOnly: true}
+	if isAgentCaller(ctx) {
+		// An agent caller's scans read only the rows it holds, in its own
+		// project, so rows it cannot see do not use up the scan limit.
+		agentID, ok := agentListFilter(ctx)
+		if !ok {
+			return out, nil
+		}
+		failingFilter.InitiatorAgentID = agentID
+		pausedFilter.InitiatorAgentID = agentID
+		if agent := GetAgentIdentityFromContext(ctx); agent != nil {
+			if _, err := uuid.Parse(agent.ProjectID()); err != nil {
+				// A project claim that is not a project ID names no
+				// schedules the agent may read.
+				return out, nil
+			}
+			failingFilter.ProjectID = agent.ProjectID()
+			pausedFilter.ProjectID = agent.ProjectID()
+		}
+	}
 
-	visible, scanLimited, err := s.healthSummaryScanSchedules(r, allowed,
-		store.ScheduleFilter{Status: store.ScheduleStatusActive, LastRunStatus: store.ScheduleRunError},
-		isFailingSchedule)
+	visible, scanLimited, err := s.healthSummaryScanSchedules(r, allowed, failingFilter, isFailingSchedule)
 	if err != nil {
 		return nil, err
 	}
 	// The paused list is read on its own: a failed read leaves the failing
 	// list in place and marks only the paused list as not reported.
-	paused, pausedScanLimited, pausedErr := s.healthSummaryScanSchedules(r, allowed,
-		store.ScheduleFilter{Status: store.ScheduleStatusPaused, SystemPausedOnly: true},
-		isSystemPausedSchedule)
+	paused, pausedScanLimited, pausedErr := s.healthSummaryScanSchedules(r, allowed, pausedFilter, isSystemPausedSchedule)
 	if pausedErr != nil {
 		slog.Error("health summary: failed to list hub-paused schedules", "error", pausedErr)
 		paused, pausedScanLimited = nil, false
@@ -233,9 +254,11 @@ func (s *Server) healthSummarySchedules(r *http.Request) (*HealthSummarySchedule
 // reading at most healthSummaryScheduleScanLimit rows, and returns those
 // that keep accepts and whose project the caller may read. keep re-checks
 // the filter, so a store that ignores a field never widens the list.
-// allowed caches the per-project read decision across calls. scanLimited
-// is true when rows were left unread.
+// allowed caches a user caller's per-project read decision across calls;
+// an agent caller's decision depends on each row, so it is made per row.
+// scanLimited is true when rows were left unread.
 func (s *Server) healthSummaryScanSchedules(r *http.Request, allowed map[string]bool, filter store.ScheduleFilter, keep func(store.Schedule) bool) (visible []store.Schedule, scanLimited bool, err error) {
+	agentCaller := isAgentCaller(r.Context())
 	scanned := 0
 	opts := store.ListOptions{Limit: healthSummarySchedulePageSize}
 	for {
@@ -252,8 +275,10 @@ func (s *Server) healthSummaryScanSchedules(r *http.Request, allowed map[string]
 				continue
 			}
 			ok, seen := allowed[sc.ProjectID]
-			if !seen {
-				ok = s.healthSummaryCanReadSchedules(r, sc.ProjectID)
+			if agentCaller {
+				ok = s.healthSummaryCanReadSchedules(r, &sc)
+			} else if !seen {
+				ok = s.healthSummaryCanReadSchedules(r, &sc)
 				allowed[sc.ProjectID] = ok
 			}
 			if ok {
@@ -318,16 +343,17 @@ func healthScheduleReasonText(code string) string {
 }
 
 // healthSummaryCanReadSchedules reports whether the caller of r may read
-// the schedules of projectID: the decision the schedules API makes for a
-// read (scheduledEventAccessDecision), plus, for an agent, the project
-// isolation and project:read scope that API's router checks first. It
-// fails closed and logs nothing, since it runs on every poll.
-func (s *Server) healthSummaryCanReadSchedules(r *http.Request, projectID string) bool {
-	if projectID == "" {
+// schedule sc: the decision the schedules API makes for a read of that row
+// (scheduledEventAccessDecision), plus, for an agent, the project isolation
+// and project:read scope that API's router checks first. An agent sees only
+// the schedules it holds authority for. It fails closed and logs nothing,
+// since it runs on every poll.
+func (s *Server) healthSummaryCanReadSchedules(r *http.Request, sc *store.Schedule) bool {
+	if sc == nil || sc.ProjectID == "" {
 		return false
 	}
 	if agent := GetAgentIdentityFromContext(r.Context()); agent != nil {
-		if !agent.HasScope(ScopeProjectRead) || agent.ProjectID() != projectID {
+		if !agent.HasScope(ScopeProjectRead) || agent.ProjectID() != sc.ProjectID {
 			return false
 		}
 	} else if id := GetIdentityFromContext(r.Context()); id != nil && id.Type() == "agent" {
@@ -335,7 +361,7 @@ func (s *Server) healthSummaryCanReadSchedules(r *http.Request, projectID string
 		// checked for project isolation: deny.
 		return false
 	}
-	return s.scheduledEventAccessDecision(r.Context(), projectID, ActionRead).allowed
+	return s.scheduledEventAccessDecision(r.Context(), sc.ProjectID, ActionRead, scheduleRow(sc)).allowed
 }
 
 // scheduleLastRunAt is the schedule's last run time, or the zero time.

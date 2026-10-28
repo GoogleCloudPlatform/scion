@@ -32,6 +32,10 @@ import (
 //
 // See design §3.1 "Two tiers" table for the full rationale.
 var layer0Prefixes = []string{
+	// Server keyring file path (ptone/scion#1530): read once at startup.
+	"server.keyring_file",
+	// Operator override for a world-readable keyring file: restart-bound.
+	"server.keyring_file_allow_world_readable",
 	// Database
 	"server.database",
 	// Listeners
@@ -52,6 +56,7 @@ var layer0Prefixes = []string{
 	// Secrets/storage
 	"server.secrets",
 	"server.storage",
+	"server.project_storage",
 	"server.workspace_storage",
 	"server.shared_dir_storage",
 	"server.home_storage",
@@ -86,6 +91,9 @@ var layer0Prefixes = []string{
 	// Request performance tracing — the middleware and the authorization
 	// store and audit-emitter decorators are installed at startup.
 	"server.hub.perf_trace",
+	// Browser policy report samples — the report handler is built at
+	// startup.
+	"server.hub.csp_report_raw_samples",
 	// Membership-standing sweep report-only mode — the sweep reads it from
 	// ServerConfig, set at startup.
 	"server.hub.membership_sweep_report_only",
@@ -174,6 +182,9 @@ var koanfPathToJSONField = map[string]map[string]string{
 		"server.federation.refresh_interval":  "refresh_interval",
 		"server.federation.debounce_interval": "debounce_interval",
 	},
+	"notifications": {
+		"server.notification_channels": "notification_channels",
+	},
 }
 
 // jsonFieldToKoanfPaths maps section name → json field → koanf path for the
@@ -235,6 +246,9 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 		"refresh_interval":  "server.federation.refresh_interval",
 		"debounce_interval": "server.federation.debounce_interval",
 	},
+	"notifications": {
+		"notification_channels": "server.notification_channels",
+	},
 }
 
 // ExtractSectionFromKoanf extracts a section's JSON document from a koanf
@@ -263,8 +277,6 @@ func ExtractSectionFromKoanf(k *koanf.Koanf, sectionName string) (json.RawMessag
 		return extractAgentDefaults(k)
 	case "github_app":
 		return extractGitHubApp(k)
-	case "notifications":
-		return extractNotifications(k)
 	default:
 		return extractMappedSection(k, sectionName)
 	}
@@ -300,14 +312,6 @@ func extractAgentDefaults(k *koanf.Koanf) (json.RawMessage, error) {
 
 func extractGitHubApp(k *koanf.Koanf) (json.RawMessage, error) {
 	return extractMappedSection(k, "github_app")
-}
-
-func extractNotifications(k *koanf.Koanf) (json.RawMessage, error) {
-	doc := make(map[string]interface{})
-	if k.Exists("server.notification_channels") {
-		doc["notification_channels"] = k.Get("server.notification_channels")
-	}
-	return json.Marshal(doc)
 }
 
 func extractMappedSection(k *koanf.Koanf, sectionName string) (json.RawMessage, error) {
@@ -364,12 +368,6 @@ func loadSectionIntoKoanf(k *koanf.Koanf, sectionName string, doc json.RawMessag
 		return k.Load(confmap.Provider(raw, "."), nil)
 	case "github_app":
 		return loadMappedSection(k, "github_app", raw)
-	case "notifications":
-		flat := make(map[string]interface{})
-		for key, val := range raw {
-			flat["server."+key] = val
-		}
-		return k.Load(confmap.Provider(flat, "."), nil)
 	default:
 		return loadMappedSection(k, sectionName, raw)
 	}

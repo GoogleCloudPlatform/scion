@@ -183,7 +183,7 @@ describe('AgentListWindow — mode filter', () => {
         lastActivityEvent: i % 3 === 0 ? `2026-03-0${(i % 9) + 1}T00:00:00Z` : undefined,
         labels: i % 2 === 0 ? { env: i % 4 === 0 ? 'prod' : 'dev' } : { team: 'x' },
         _messageability: i % 5 === 0 ? undefined : { canMessage: i % 2 === 0 },
-      } as Partial<Agent>)
+      } as unknown as Partial<Agent>)
     );
     const { win, setHeld } = setup({ pageSize: 100 });
     setHeld(held);

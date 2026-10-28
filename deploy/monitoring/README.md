@@ -43,7 +43,7 @@ Use the `gcp.monitoring.AlertPolicy`, `gcp.monitoring.UptimeCheckConfig`, and
 
 `dashboards/scion-hub.json` is a native Cloud Monitoring dashboard (unlike the
 YAML files above, it needs no conversion). It charts the Hub's DB pool,
-dispatch, notification and launch reaper metrics, with one line per Hub
+dispatch, notification, launch reaper and events stream metrics, with one line per Hub
 replica (`service_instance_id`) and a filter for the Hub deployment
 (`scion_hub_id`). It contains no project ID:
 

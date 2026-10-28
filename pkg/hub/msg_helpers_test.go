@@ -140,6 +140,11 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	// user→agent).
 	{file: "start_claim.go", function: "startAgentCore", symbol: "DispatchAgentStart",
 		class: "guarded", reason: "every caller authorizes before calling: lifecycle and create-on-existing routers' authz; wake after DM admission checks"},
+	// The same start through the start-options entry point, for an
+	// opted-in asynchronous start (ptone/scion#4669); classified with the
+	// plain call above.
+	{file: "start_claim.go", function: "startAgentCore", symbol: "DispatchAgentStartWithOptions",
+		class: "guarded", reason: "every caller authorizes before calling: lifecycle and create-on-existing routers' authz; wake after DM admission checks"},
 
 	// reincarnate_worker.go: DispatchAgentStart in runReincarnationWorker —
 	// the detached background worker for `scion reincarnate` (design §3.1).
@@ -180,6 +185,10 @@ var sharedClassificationSites = []struct {
 	{
 		site:   effectCallSiteKey{"reconcile.go", "execDispatchStart", "DispatchAgentStartWithOptions"},
 		sameAs: effectCallSiteKey{"reconcile.go", "execDispatchStart", "DispatchAgentStart"},
+	},
+	{
+		site:   effectCallSiteKey{"start_claim.go", "startAgentCore", "DispatchAgentStartWithOptions"},
+		sameAs: effectCallSiteKey{"start_claim.go", "startAgentCore", "DispatchAgentStart"},
 	},
 }
 

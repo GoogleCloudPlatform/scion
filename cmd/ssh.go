@@ -23,8 +23,9 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
-	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -57,7 +58,10 @@ remote command and is passed to ssh unchanged, flags included.
 
 scion ssh never prompts for authentication, registration or sync. It returns
 the remote command's exit status, or 255 for a local or connection failure,
-including a usage or flag error, with the reason on one stderr line.`,
+including a usage or flag error, with the reason on one stderr line.
+
+A hangup (SIGHUP) or termination request (SIGTERM) sent to scion ssh is
+passed on to ssh, and scion ssh exits with ssh, with status 129 or 143.`,
 	Args: cobra.ArbitraryArgs,
 	RunE: runSSHCommand,
 }
@@ -129,22 +133,67 @@ func runSSH(ctx context.Context, env *sshCommandEnv, args []string) int {
 	c.Stdin = env.stdin
 	c.Stdout = env.stdout
 	c.Stderr = env.stderr
+	// Bound the wait for output a leftover ProxyCommand still holds open
+	// after ssh has exited.
+	c.WaitDelay = time.Second
 
-	// The terminal's interrupt goes to ssh, which forwards it to the remote
-	// session; scion stays alive to return ssh's status.
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGQUIT)
+	// Signals are caught before ssh starts, so none can end scion while
+	// ssh outlives it.
+	sigs := make(chan os.Signal, 4)
+	signal.Notify(sigs, append(append([]os.Signal{}, sshTerminalSignals...), sshEndSignals...)...)
 	defer signal.Stop(sigs)
 
-	if err := c.Run(); err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() >= 0 {
-			return exitErr.ExitCode()
-		}
+	if err := c.Start(); err != nil {
 		_, _ = fmt.Fprintf(env.stderr, "scion ssh: running ssh: %s\n", sshOneLine(err.Error()))
 		return sshExitFailure
 	}
-	return tunnelclient.ExitOK
+	return waitSSH(c, sigs, env.stderr)
+}
+
+// sshSignalGrace is how long ssh has to exit after a passed-on signal before
+// it is killed.
+var sshSignalGrace = 5 * time.Second
+
+// waitSSH waits for the started ssh process and returns scion ssh's exit
+// code. A terminal signal is left to ssh, which forwards it to the remote
+// session, and scion returns ssh's status. A hangup or termination request
+// is passed on to ssh, which is killed if it has not exited within
+// sshSignalGrace, and scion returns 128 plus the signal number of the first
+// one (129 or 143).
+func waitSSH(c *exec.Cmd, sigs <-chan os.Signal, stderr io.Writer) int {
+	done := make(chan error, 1)
+	go func() { done <- c.Wait() }()
+	var ended os.Signal
+	var kill <-chan time.Time
+	for {
+		select {
+		case err := <-done:
+			if ended != nil {
+				return tunnelclient.SignalExit(ended)
+			}
+			if err != nil {
+				var exitErr *exec.ExitError
+				if errors.As(err, &exitErr) && exitErr.ExitCode() >= 0 {
+					return exitErr.ExitCode()
+				}
+				_, _ = fmt.Fprintf(stderr, "scion ssh: running ssh: %s\n", sshOneLine(err.Error()))
+				return sshExitFailure
+			}
+			return tunnelclient.ExitOK
+		case sig := <-sigs:
+			if !slices.Contains(sshEndSignals, sig) {
+				continue
+			}
+			forwardSSHSignal(c.Process, sig)
+			if ended == nil {
+				ended = sig
+				kill = time.After(sshSignalGrace)
+			}
+		case <-kill:
+			_ = c.Process.Kill()
+			kill = nil
+		}
+	}
 }
 
 // prepareSSH resolves the agent and its host key and returns the ssh
@@ -178,6 +227,12 @@ func prepareSSH(ctx context.Context, env *sshCommandEnv, ref string, remote []st
 		return nil, nil, tunnelclient.Errorf(tunnelclient.ExitError, "scion executable path %q is not a clean absolute path", env.exe)
 	}
 	host := sshHostName(hub.label, entry.projectSlug, entry.agentSlug)
+	// Every ProxyCommand word is checked before the temporary directory is
+	// made.
+	proxy, err := sshProxyCommand(env.exe, hub.hubArg, entry.projectSlug, entry.agentSlug, "", "")
+	if err != nil {
+		return nil, nil, tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
+	}
 
 	dir, err := os.MkdirTemp("", "scion-ssh-")
 	if err != nil {
@@ -185,24 +240,25 @@ func prepareSSH(ctx context.Context, env *sshCommandEnv, ref string, remote []st
 	}
 	cleanup := func() { _ = os.RemoveAll(dir) }
 	knownHosts := filepath.Join(dir, "known_hosts")
-	// ssh splits UserKnownHostsFile on whitespace and expands % tokens in it.
-	if hasSpaceOrControl(knownHosts) || strings.Contains(knownHosts, "%") {
-		return nil, cleanup, tunnelclient.Errorf(tunnelclient.ExitError, "temporary directory %s contains whitespace or %%; set TMPDIR to a plain path", dir)
+	knownHostsArg, err := sshKnownHostsOptionValue(knownHosts)
+	if err != nil {
+		return nil, cleanup, tunnelclient.Errorf(tunnelclient.ExitError, "temporary directory %s %v", dir, err)
 	}
-	if err := os.WriteFile(knownHosts, []byte(host+" "+norm+"\n"), sshFileMode); err != nil {
+	// The shared atomic writer: a new private file in
+	// the fresh temporary directory.
+	if err := writeFileAtomic(knownHosts, []byte(host+" "+norm+"\n"), sshFileMode); err != nil {
 		return nil, cleanup, tunnelclient.Errorf(tunnelclient.ExitError, "writing known hosts: %v", err)
 	}
 
-	proxy := strings.Join([]string{
-		sshShellQuote(env.exe), "tunnel", "--stdio", "--ssh",
-		"--hub", sshShellQuote(hub.hubArg),
-		"--project", sshShellQuote(entry.projectSlug),
-		sshShellQuote(entry.agentSlug),
-	}, " ")
 	sshArgs := []string{
 		"-o", "ProxyCommand=" + proxy,
 		"-o", "HostKeyAlias=" + host,
-		"-o", "UserKnownHostsFile=" + knownHosts,
+		"-o", "UserKnownHostsFile=" + knownHostsArg,
+		// /dev/null on every OS: Win32-OpenSSH maps it to NUL when it opens
+		// a file (contrib/win32/win32compat/misc.c w32_fopen_utf8 and
+		// fileio.c fileio_open, NULL_DEVICE in misc_internal.h,
+		// PowerShell/openssh-portable latestw_all 274893f8), and Git for
+		// Windows' ssh (MSYS) has /dev/null natively.
 		"-o", "GlobalKnownHostsFile=/dev/null",
 		"-o", "StrictHostKeyChecking=yes",
 		"-o", "BatchMode=yes",
@@ -212,4 +268,36 @@ func prepareSSH(ctx context.Context, env *sshCommandEnv, ref string, remote []st
 	// ssh stops option parsing at the host, so the rest is the remote command.
 	sshArgs = append(sshArgs, remote...)
 	return sshArgs, cleanup, nil
+}
+
+// sshKnownHostsOptionValue returns path as the value of ssh's
+// UserKnownHostsFile option. ssh splits that value into words (it may list
+// several files) and expands % tokens in it.
+//
+// On unix a path with whitespace, a control character or '%' is refused,
+// as before, and the hint names TMPDIR (os.TempDir).
+//
+// On Windows (sshQuoteForWindows) the temp directory is under %TMP% or
+// %TEMP%, typically C:\Users\<account>\AppData\Local\Temp, and account
+// names with spaces are common. So the path is written with forward
+// slashes (ssh's word splitter treats a backslash as an escape; both
+// Win32-OpenSSH and Git for Windows' ssh accept C:/ paths) and wrapped in
+// double quotes when it has a space, which ssh's option parser reads as
+// one word. Only a control character, '%' or '"' is refused there, and the
+// hint names TMP and TEMP.
+func sshKnownHostsOptionValue(path string) (string, error) {
+	if !sshQuoteForWindows {
+		if hasSpaceOrControl(path) || strings.Contains(path, "%") {
+			return "", errors.New("contains whitespace or %; set TMPDIR to a plain path")
+		}
+		return path, nil
+	}
+	if hasControl(path) || strings.ContainsAny(path, `%"`) {
+		return "", errors.New(`contains a control character, % or "; set TMP and TEMP to a plain path`)
+	}
+	v := strings.ReplaceAll(path, `\`, "/")
+	if strings.ContainsAny(v, " \t") {
+		v = `"` + v + `"`
+	}
+	return v, nil
 }

@@ -71,11 +71,20 @@ func (d *ClaudeDialect) Parse(data map[string]interface{}) (*hooks.Event, error)
 	if val, ok := data["success"]; ok {
 		if b, ok := val.(bool); ok {
 			event.Data.Success = b
+			event.Data.Failed = !b
 		}
 	}
 	if val, ok := data["error"]; ok {
 		if str, ok := val.(string); ok {
 			event.Data.Error = str
+		}
+	}
+	// A PostToolUseFailure is a failed tool call even when its error string
+	// is empty. is_interrupt marks a call the user interrupted.
+	if rawName == "PostToolUseFailure" {
+		event.Data.Failed = true
+		if b, ok := data["is_interrupt"].(bool); ok && b {
+			event.Data.Interrupted = true
 		}
 	}
 

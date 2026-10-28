@@ -42,19 +42,19 @@ func TestInitWebServer_ProxyDriverPrincipals(t *testing.T) {
 	}
 
 	for _, mode := range []string{"", "oauth"} {
-		_, err := initWebServer(context.Background(), newCfg(mode, drivers), nil, "", false, "", nil, nil)
+		_, err := initWebServer(context.Background(), newCfg(mode, drivers), nil, "", resolvedWebBaseURL{URL: "http://localhost:8080", Source: "default"}, false, "", nil, nil)
 		require.Error(t, err, "mode %q", mode)
 		assert.ErrorIs(t, err, config.ErrProxyDriverPrincipalsWithoutProxyAuth, "mode %q", mode)
 	}
 
-	_, err := initWebServer(context.Background(), newCfg("proxy", []string{"*@ti-test.iam.gserviceaccount.com"}), nil, "", false, "", nil, nil)
+	_, err := initWebServer(context.Background(), newCfg("proxy", []string{"*@ti-test.iam.gserviceaccount.com"}), nil, "", resolvedWebBaseURL{URL: "http://localhost:8080", Source: "default"}, false, "", nil, nil)
 	assert.ErrorIs(t, err, config.ErrInvalidProxyDriverPrincipal)
 
 	// A valid list in proxy mode, and no list outside it, are not refused
 	// for driver reasons (initWebServer may still fail on other missing
 	// dependencies here).
 	for _, cfg := range []*config.GlobalConfig{newCfg("proxy", drivers), newCfg("proxy", nil), newCfg("", nil)} {
-		_, err := initWebServer(context.Background(), cfg, nil, "", false, "", nil, nil)
+		_, err := initWebServer(context.Background(), cfg, nil, "", resolvedWebBaseURL{URL: "http://localhost:8080", Source: "default"}, false, "", nil, nil)
 		assert.NotErrorIs(t, err, config.ErrProxyDriverPrincipalsWithoutProxyAuth)
 		assert.NotErrorIs(t, err, config.ErrInvalidProxyDriverPrincipal)
 	}

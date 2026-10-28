@@ -81,6 +81,21 @@ const (
 	LaunchErrorDispatchFailed = api.LaunchCodeDispatchFailed
 )
 
+// IsUnconfirmedLaunchError reports whether launchError is a launch outcome
+// the Hub declared on its own, without the broker confirming how the launch
+// ended (the launch reaper's timeout and lost codes). The agent's runtime
+// state is unknown after such an end, so these codes are kept until a later
+// launch or a running write replaces them: the start claim does not clear
+// them (ptone/scion#5273), and a later start reads them.
+func IsUnconfirmedLaunchError(launchError string) bool {
+	switch launchError {
+	case LaunchErrorLaunchTimeout, LaunchErrorBrokerLost:
+		return true
+	default:
+		return false
+	}
+}
+
 // LaunchReport report-state values (mirrors the broker->Hub wire report's
 // State field, design §3.2 AgentLaunchReport; defined here rather than
 // imported from pkg/runtimebroker so the store package incurs no dependency
@@ -109,6 +124,10 @@ type LaunchReport struct {
 	// failed report's runtime_error, or "" (ptone/scion#4666). The hub
 	// filters it before it gets here; it is stored with ErrorCode.
 	Cause string
+	// RunID is the run the launch started (the hub-minted run ID the broker
+	// echoes); empty when the broker does not send it. The store only
+	// compares it with the row's run ID; it is never stored.
+	RunID string
 
 	// AgentConfig is applied on a succeeded terminal with
 	// ApplyBrokerAgentConfig, the same rules a synchronous dispatch uses

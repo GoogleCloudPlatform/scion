@@ -853,9 +853,8 @@ harness_configs:
 // TestStart_RestartWithNoProfile_ResolvesSettingsAgainstCreatedWithProfile
 // pins ptone/scion#2156: a local restart with no --profile must resolve the
 // Hub-settings tier against the profile the agent was actually CREATED with
-// (finalScionCfg.Info.Profile), not whatever settings.active_profile happens
-// to be — matching the broker's own restart-dispatch behavior
-// (agent.GetSavedProfile). The agent here is created under "staging" (whose
+// (recorded in broker-side image provenance), not whatever
+// settings.active_profile happens to be. The agent here is created under "staging" (whose
 // harness_overrides pins an image) while active_profile is a different
 // profile with no such override; restarting with Profile: "" must still
 // resolve to the staging image, not fall through to active_profile's.

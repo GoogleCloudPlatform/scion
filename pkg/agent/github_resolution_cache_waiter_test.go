@@ -16,7 +16,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -146,8 +145,8 @@ func TestGitHubSkillResolver_WaiterReportsUpstreamCause(t *testing.T) {
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "unavailable", http.StatusServiceUnavailable)
 	})
-	mux.HandleFunc("/repos/acme/flaky/contents/skills/s", func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode([]githubContentEntry{})
+	mux.HandleFunc("/repos/acme/flaky/git/trees/"+testCommitSHA+":skills/s", func(w http.ResponseWriter, _ *http.Request) {
+		_ = writeTestTree(w, []fakeTreeFile{})
 	})
 	t.Cleanup(func() { gone.Store(true) })
 
@@ -199,7 +198,8 @@ func TestGitHubSkillResolver_WaiterAfterRecoveryIsTimeout(t *testing.T) {
 	})
 	listing := make(chan struct{}, 1)
 	release := make(chan struct{})
-	mux.HandleFunc("/repos/acme/flaky/contents/skills/s", func(w http.ResponseWriter, _ *http.Request) {
+	// The tree is listed at the sha the commits fake answers, not testCommitSHA.
+	mux.HandleFunc("/repos/acme/flaky/git/trees/"+strings.Repeat("a", 40)+":skills/s", func(w http.ResponseWriter, _ *http.Request) {
 		select {
 		case listing <- struct{}{}:
 		default:

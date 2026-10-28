@@ -18,6 +18,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 var validGitHubComponent = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
@@ -50,7 +52,7 @@ func ParseGitHubSkillURI(uri string) (*GitHubSkillRef, error) {
 	case strings.HasPrefix(lower, "http://github.com/"):
 		normalized = "http://github.com/" + uri[len("http://github.com/"):]
 	default:
-		return nil, fmt.Errorf("not a GitHub skill URI: %q", uri)
+		return nil, fmt.Errorf("not a GitHub skill URI: %q", api.SkillURIWithoutQuery(uri))
 	}
 
 	var ref *GitHubSkillRef
@@ -67,6 +69,9 @@ func ParseGitHubSkillURI(uri string) (*GitHubSkillRef, error) {
 }
 
 func parseGHShorthand(uri string) (*GitHubSkillRef, error) {
+	// Error texts quote the URI without its query: whatever the caller put
+	// there (a pasted credential instead of a secret name) is never echoed.
+	shown := api.SkillURIWithoutQuery(uri)
 	rest := strings.TrimPrefix(uri, "gh://")
 
 	// Extract ?token=SECRET_NAME query param if present.
@@ -78,14 +83,14 @@ func parseGHShorthand(uri string) (*GitHubSkillRef, error) {
 		rest = rest[:qIdx]
 		// Only support a single ?token= param; anything else is invalid.
 		if !strings.HasPrefix(query, "token=") {
-			return nil, fmt.Errorf("invalid gh:// URI %q: unsupported query parameter %q; only ?token=SECRET_NAME is supported", uri, query)
+			return nil, fmt.Errorf("invalid gh:// URI %q: unsupported query parameter; only ?token=SECRET_NAME is supported", shown)
 		}
 		tokenSecretName = query[len("token="):]
 		if tokenSecretName == "" {
-			return nil, fmt.Errorf("invalid gh:// URI %q: empty ?token= value", uri)
+			return nil, fmt.Errorf("invalid gh:// URI %q: empty ?token= value", shown)
 		}
 		if !validTokenSecretName.MatchString(tokenSecretName) {
-			return nil, fmt.Errorf("invalid gh:// URI %q: ?token= value %q must match [A-Z][A-Z0-9_]* (uppercase env-var style)", uri, tokenSecretName)
+			return nil, fmt.Errorf("invalid gh:// URI %q: the token secret name must match [A-Z][A-Z0-9_]* (uppercase env-var style)", shown)
 		}
 	}
 
@@ -95,30 +100,30 @@ func parseGHShorthand(uri string) (*GitHubSkillRef, error) {
 		ref = rest[idx+1:]
 		rest = rest[:idx]
 		if ref == "" || ref == "." || ref == ".." {
-			return nil, fmt.Errorf("invalid gh:// URI %q: invalid ref %q", uri, ref)
+			return nil, fmt.Errorf("invalid gh:// URI %q: invalid ref %q", shown, ref)
 		}
 	}
 
 	parts := strings.Split(rest, "/")
 	if len(parts) != 3 {
-		return nil, fmt.Errorf("invalid gh:// URI %q: expected gh://owner/repo/skill-name[@ref][?token=SECRET_NAME]", uri)
+		return nil, fmt.Errorf("invalid gh:// URI %q: expected gh://owner/repo/skill-name[@ref][?token=SECRET_NAME]", shown)
 	}
 	for _, p := range parts {
 		if p == "" {
-			return nil, fmt.Errorf("invalid gh:// URI %q: empty path component", uri)
+			return nil, fmt.Errorf("invalid gh:// URI %q: empty path component", shown)
 		}
 	}
 	if !validGitHubComponent.MatchString(parts[0]) || parts[0] == "." || parts[0] == ".." {
-		return nil, fmt.Errorf("invalid gh:// URI %q: invalid owner %q", uri, parts[0])
+		return nil, fmt.Errorf("invalid gh:// URI %q: invalid owner %q", shown, parts[0])
 	}
 	if !validGitHubComponent.MatchString(parts[1]) || parts[1] == "." || parts[1] == ".." {
-		return nil, fmt.Errorf("invalid gh:// URI %q: invalid repo %q", uri, parts[1])
+		return nil, fmt.Errorf("invalid gh:// URI %q: invalid repo %q", shown, parts[1])
 	}
 	if parts[2] == "." || strings.Contains(parts[2], "..") {
-		return nil, fmt.Errorf("invalid gh:// URI %q: skill name must not contain '.' or '..'", uri)
+		return nil, fmt.Errorf("invalid gh:// URI %q: skill name must not contain '.' or '..'", shown)
 	}
 	if strings.ContainsAny(parts[2], "?#&=") {
-		return nil, fmt.Errorf("invalid gh:// URI %q: skill name contains invalid characters", uri)
+		return nil, fmt.Errorf("invalid gh:// URI %q: skill name contains invalid characters", shown)
 	}
 
 	return &GitHubSkillRef{
@@ -138,6 +143,9 @@ func parseGHShorthand(uri string) (*GitHubSkillRef, error) {
 //	https://github.com/owner/repo/tree/ref/path/to/skill-name
 //	https://github.com/owner/repo/tree/ref/skills/skill-name
 func parseGitHubFullURL(uri string) (*GitHubSkillRef, error) {
+	// Error texts quote the URI without its query: whatever the caller put
+	// there (a pasted credential instead of a secret name) is never echoed.
+	shown := api.SkillURIWithoutQuery(uri)
 	rest := uri
 	for _, prefix := range []string{"https://github.com/", "http://github.com/"} {
 		if strings.HasPrefix(rest, prefix) {
@@ -154,30 +162,30 @@ func parseGitHubFullURL(uri string) (*GitHubSkillRef, error) {
 		query := rest[qIdx+1:]
 		rest = rest[:qIdx]
 		if !strings.HasPrefix(query, "token=") {
-			return nil, fmt.Errorf("invalid GitHub URL %q: unsupported query parameter %q; only ?token=SECRET_NAME is supported", uri, query)
+			return nil, fmt.Errorf("invalid GitHub URL %q: unsupported query parameter; only ?token=SECRET_NAME is supported", shown)
 		}
 		tokenSecretName = query[len("token="):]
 		if tokenSecretName == "" {
-			return nil, fmt.Errorf("invalid GitHub URL %q: empty ?token= value", uri)
+			return nil, fmt.Errorf("invalid GitHub URL %q: empty ?token= value", shown)
 		}
 		if !validTokenSecretName.MatchString(tokenSecretName) {
-			return nil, fmt.Errorf("invalid GitHub URL %q: ?token= value %q must match [A-Z][A-Z0-9_]* (uppercase env-var style)", uri, tokenSecretName)
+			return nil, fmt.Errorf("invalid GitHub URL %q: the token secret name must match [A-Z][A-Z0-9_]* (uppercase env-var style)", shown)
 		}
 	}
 
 	// Expected: owner/repo/tree/ref/path/to/skill-name
 	parts := strings.SplitN(rest, "/", 5)
 	if len(parts) < 5 || parts[2] != "tree" {
-		return nil, fmt.Errorf("invalid GitHub URL %q: expected https://github.com/owner/repo/tree/ref/path/to/skill", uri)
+		return nil, fmt.Errorf("invalid GitHub URL %q: expected https://github.com/owner/repo/tree/ref/path/to/skill", shown)
 	}
 
 	owner := parts[0]
 	repo := parts[1]
 	if !validGitHubComponent.MatchString(owner) || owner == "." || owner == ".." {
-		return nil, fmt.Errorf("invalid GitHub URL %q: invalid owner %q", uri, owner)
+		return nil, fmt.Errorf("invalid GitHub URL %q: invalid owner %q", shown, owner)
 	}
 	if !validGitHubComponent.MatchString(repo) || repo == "." || repo == ".." {
-		return nil, fmt.Errorf("invalid GitHub URL %q: invalid repo %q", uri, repo)
+		return nil, fmt.Errorf("invalid GitHub URL %q: invalid repo %q", shown, repo)
 	}
 	refAndPath := parts[3] + "/" + parts[4]
 
@@ -185,21 +193,21 @@ func parseGitHubFullURL(uri string) (*GitHubSkillRef, error) {
 	// For ambiguous cases (multi-segment refs), use gh:// shorthand with @ref.
 	refParts := strings.SplitN(refAndPath, "/", 2)
 	if len(refParts) < 2 {
-		return nil, fmt.Errorf("invalid GitHub URL %q: missing skill path after ref", uri)
+		return nil, fmt.Errorf("invalid GitHub URL %q: missing skill path after ref", shown)
 	}
 	ref := refParts[0]
 	if ref == "." || ref == ".." {
-		return nil, fmt.Errorf("invalid GitHub URL %q: invalid ref %q", uri, ref)
+		return nil, fmt.Errorf("invalid GitHub URL %q: invalid ref %q", shown, ref)
 	}
 	skillFullPath := refParts[1]
 
 	pathParts := strings.Split(skillFullPath, "/")
 	skillName := pathParts[len(pathParts)-1]
 	if skillName == "" {
-		return nil, fmt.Errorf("invalid GitHub URL %q: empty skill name", uri)
+		return nil, fmt.Errorf("invalid GitHub URL %q: empty skill name", shown)
 	}
 	if strings.Contains(skillFullPath, "..") {
-		return nil, fmt.Errorf("invalid GitHub URL %q: path must not contain '..'", uri)
+		return nil, fmt.Errorf("invalid GitHub URL %q: path must not contain '..'", shown)
 	}
 
 	return &GitHubSkillRef{

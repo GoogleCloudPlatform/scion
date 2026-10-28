@@ -268,6 +268,15 @@ func TestListPagination(t *testing.T) {
 		if rec.Code != http.StatusBadRequest || errCode(t, rec) != "invalid_cursor" {
 			t.Errorf("%s: %d %s, want 400 invalid_cursor", name, rec.Code, rec.Body.String())
 		}
+		// The same message every hub list sends for a bad cursor
+		// (ptone/scion#3062).
+		var e errorResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
+			t.Fatalf("%s: not a JSON error: %q", name, rec.Body.String())
+		}
+		if want := "invalid cursor: restart pagination from the first page"; e.Error.Message != want {
+			t.Errorf("%s: message %q, want %q", name, e.Error.Message, want)
+		}
 	}
 	// A different page size keeps the walk valid.
 	if rec := f.do(&userU, http.MethodGet, listPath+"&limit=3&cursor="+cursor, nil, nil); rec.Code != http.StatusOK {

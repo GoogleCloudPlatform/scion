@@ -94,15 +94,16 @@ func runManagedViolations(src []byte, funcName string) ([]string, error) {
 	return violations, nil
 }
 
-// TestRunExec_WaitsThroughRunManaged applies the guard to the real exec.go.
+// TestRunExec_WaitsThroughRunManaged applies the guard to the real runExec,
+// which lives in exec_run_unix.go (exec_run_other.go runs nothing).
 func TestRunExec_WaitsThroughRunManaged(t *testing.T) {
-	src, err := os.ReadFile("exec.go")
+	src, err := os.ReadFile("exec_run_unix.go")
 	if err != nil {
-		t.Fatalf("read exec.go: %v", err)
+		t.Fatalf("read exec_run_unix.go: %v", err)
 	}
 	violations, err := runManagedViolations(src, "runExec")
 	if err != nil {
-		t.Fatalf("parse exec.go: %v", err)
+		t.Fatalf("parse exec_run_unix.go: %v", err)
 	}
 	if len(violations) > 0 {
 		t.Errorf("runExec must run its command only through procreap.RunManaged:\n%s", strings.Join(violations, "\n"))

@@ -138,13 +138,13 @@ func TestFlatProfileResolution_StartAndRestartSkipProfileTier(t *testing.T) {
 	r := newFlatResolutionRun(t)
 	cfg := r.start(t, flatCtx(), "flat-agent")
 	assertNoProfileTier(t, cfg)
-	assert.Empty(t, GetSavedProfile("flat-agent", r.fixture.projectScionDir), "no profile is recorded for a flat agent")
+	assert.Empty(t, savedInfoProfile("flat-agent", r.fixture.projectScionDir), "no profile is recorded for a flat agent")
 
 	// A later start (and the start leg of a restart) re-reads settings and
 	// still skips the profile tier.
 	cfg = r.start(t, flatCtx(), "flat-agent")
 	assertNoProfileTier(t, cfg)
-	assert.Empty(t, GetSavedProfile("flat-agent", r.fixture.projectScionDir))
+	assert.Empty(t, savedInfoProfile("flat-agent", r.fixture.projectScionDir))
 }
 
 func TestFlatProfileResolution_LegacyStartStillAppliesActiveProfile(t *testing.T) {
@@ -156,7 +156,7 @@ func TestFlatProfileResolution_LegacyStartStillAppliesActiveProfile(t *testing.T
 	require.NotNil(t, cfg.Resources, "legacy resolution applies the active profile's resources")
 	assert.Equal(t, "7777Mi", cfg.Resources.Requests.Memory)
 	assert.Equal(t, "from-settings-harness-config", env["GLOBAL_HC_ENV"])
-	assert.Equal(t, "batch", GetSavedProfile("legacy-agent", r.fixture.projectScionDir))
+	assert.Equal(t, "batch", savedInfoProfile("legacy-agent", r.fixture.projectScionDir))
 }
 
 func TestFlatProfileResolution_ProvisionSkipsProfileTier(t *testing.T) {
@@ -174,7 +174,7 @@ func TestFlatProfileResolution_ProvisionSkipsProfileTier(t *testing.T) {
 	// and the harness config's own image.
 	assert.Equal(t, "from-settings-harness-config", flatCfg.Env["GLOBAL_HC_ENV"], "the non-profile settings harness config still applies")
 	assert.Equal(t, "test-image:latest", flatCfg.Image, "the harness config's own image still applies")
-	assert.Empty(t, GetSavedProfile("flat-prov", r.fixture.projectScionDir))
+	assert.Empty(t, savedInfoProfile("flat-prov", r.fixture.projectScionDir))
 
 	// Legacy provisioning is unchanged.
 	_, _, legacyCfg, err := ProvisionAgent(context.Background(), "legacy-prov", "", "", "", r.fixture.projectScionDir, "", "created", "", "")

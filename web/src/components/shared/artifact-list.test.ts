@@ -113,6 +113,31 @@ describe('artifact list', () => {
     expect(el.shadowRoot!.querySelectorAll('tbody tr')).toHaveLength(3);
   });
 
+  it('S1: a row whose owner was deleted has the Owner deleted badge and a struck owner', async () => {
+    const { el } = await mountList({
+      'mine=1': {
+        artifacts: [item('a', { ownerDeleted: true, reviewPending: true }), item('b')],
+      },
+    });
+    const [gone, live] = Array.from(el.shadowRoot!.querySelectorAll('tbody tr'));
+    expect(el.shadowRoot!.querySelectorAll('thead th')[4]!.textContent).toBe('Status');
+    const badge = gone!.querySelector('sl-badge.owner-deleted')!;
+    expect(badge.textContent).toContain('Owner deleted');
+    expect(badge.querySelector('sl-icon')!.getAttribute('name')).toBe('person-x');
+    // Beside Review pending, not instead of it.
+    expect(gone!.textContent).toContain('Review pending');
+    // The deleted agent's name cannot be looked up: its short id, struck through.
+    // Only the name is struck through; the (agent) tag stays outside (mock S1).
+    expect(gone!.querySelector('.owner-gone')!.textContent).toBe('agent-01…');
+    expect((gone as HTMLTableRowElement).cells[1]!.textContent).toContain('agent-01… (agent)');
+    // The badge's explanation is reachable by keyboard and screen readers.
+    const b = gone!.querySelector('sl-badge.owner-deleted')!;
+    expect(b.getAttribute('tabindex')).toBe('0');
+    expect(b.getAttribute('aria-label')).toContain('stays readable until a custodian deletes it');
+    expect(live!.querySelector('sl-badge.owner-deleted')).toBeNull();
+    expect(live!.querySelector('.owner-gone')).toBeNull();
+  });
+
   it('opens the artifact page when a row is clicked', async () => {
     const { el } = await mountList({ 'mine=1': { artifacts: [item('a')] } });
     const nav = vi.fn();

@@ -53,10 +53,10 @@ import {
   type RawPaletteSpace,
   type RawPaletteThread,
 } from './chat-palette-data.js';
-import type { RawPaletteAgent } from './palette-types.js';
+import type { PaletteTarget, RawPaletteAgent } from './palette-types.js';
 import type { RecentFile } from './chat-recent-files.js';
 import type { AgentListSnapshot } from './agent-store.js';
-import type { Agent } from '../shared/types.js';
+import type { Agent, AgentMessageability } from '../shared/types.js';
 import { agent as harnessAgent, createHarness } from './__fixtures__/agent-store-harness.js';
 import {
   RECENT_USERS_LIMIT,
@@ -64,6 +64,11 @@ import {
   USER_SEARCH_TIMEOUT_MS,
   resetUserDirectory,
 } from './user-directory.js';
+
+/** A target's thread id; undefined for a target that is not a thread. */
+function threadIdOf(target: PaletteTarget): string | undefined {
+  return target.kind === 'thread' ? target.threadId : undefined;
+}
 
 const apiFetchMock = vi.mocked(apiFetch);
 
@@ -204,7 +209,7 @@ describe('isPaletteAgentViable: messageability and capability fallback', () => {
     expect(
       isPaletteAgentViable({
         id: 'a',
-        _messageability: { canReachViewer: true } as unknown as { canMessage: boolean },
+        _messageability: { canReachViewer: true } as unknown as AgentMessageability,
         _capabilities: { actions: ['attach'] },
       })
     ).toBe(true);
@@ -1922,7 +1927,7 @@ describe('ChatPaletteDataController: Threads group', () => {
 
     await expect(firstLoad).rejects.toMatchObject({ name: 'AbortError' });
     const secondResult = await secondLoad;
-    expect(secondResult.candidates.map((c) => c.target.threadId)).toEqual(['t2']);
+    expect(secondResult.candidates.map((c) => threadIdOf(c.target))).toEqual(['t2']);
   });
 
   it("a stale first load's per-space write never lands in a later read of shared state (the generation check runs before applying results)", async () => {
@@ -1950,7 +1955,7 @@ describe('ChatPaletteDataController: Threads group', () => {
     await vi.waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(2));
     const secondLoad = controller.loadThreadsGroup();
     const secondResult = await secondLoad;
-    expect(secondResult.candidates.map((c) => c.target.threadId)).toEqual(['t2']);
+    expect(secondResult.candidates.map((c) => threadIdOf(c.target))).toEqual(['t2']);
     expect(secondResult.incomplete).toBe(false);
 
     // Now resolve the stale first load's per-space fetch as a *failure*,
@@ -1974,7 +1979,7 @@ describe('ChatPaletteDataController: Threads group', () => {
     const thirdResult = await controller.retryThreadsGroup();
 
     expect(thirdResult.incomplete).toBe(false);
-    expect(thirdResult.candidates.map((c) => c.target.threadId)).toEqual(['t2']);
+    expect(thirdResult.candidates.map((c) => threadIdOf(c.target))).toEqual(['t2']);
   });
 
   describe('retryThreadsGroup: only the failed spaces', () => {
@@ -2003,7 +2008,7 @@ describe('ChatPaletteDataController: Threads group', () => {
       expect(apiFetchMock).toHaveBeenCalledTimes(4);
       expect(apiFetchMock.mock.calls[3][0]).toContain('/chat/spaces/p2/threads');
       expect(retried.incomplete).toBe(false);
-      expect(retried.candidates.map((c) => c.target.threadId).sort()).toEqual(['t1', 't2']);
+      expect(retried.candidates.map((c) => threadIdOf(c.target)).sort()).toEqual(['t1', 't2']);
     });
 
     it('falls back to a full load when nothing failed (or nothing has loaded yet)', async () => {
@@ -2034,7 +2039,7 @@ describe('ChatPaletteDataController: Threads group', () => {
       const retried = await controller.retryThreadsGroup();
 
       expect(retried.incomplete).toBe(true);
-      expect(retried.candidates.map((c) => c.target.threadId)).toEqual(['t1']);
+      expect(retried.candidates.map((c) => threadIdOf(c.target))).toEqual(['t1']);
     });
 
     it("a supersede during retry's own per-space fetch rejects with an AbortError, not stale retry data", async () => {
@@ -2071,7 +2076,7 @@ describe('ChatPaletteDataController: Threads group', () => {
       await expect(firstRetry).rejects.toMatchObject({ name: 'AbortError' });
       const secondResult = await secondRetry;
       expect(secondResult.incomplete).toBe(false);
-      expect(secondResult.candidates.map((c) => c.target.threadId).sort()).toEqual([
+      expect(secondResult.candidates.map((c) => threadIdOf(c.target)).sort()).toEqual([
         't1',
         't2-fresh',
       ]);
@@ -2116,7 +2121,7 @@ describe('ChatPaletteDataController: Threads group', () => {
       const freshLoad = controller.loadThreadsGroup();
       const freshResult = await freshLoad;
       expect(freshResult.incomplete).toBe(false);
-      expect(freshResult.candidates.map((c) => c.target.threadId)).toEqual(['t3']);
+      expect(freshResult.candidates.map((c) => threadIdOf(c.target))).toEqual(['t3']);
 
       // Now resolve the stale retry's per-space fetch as a *failure*, well
       // after the fresh load has cleared and repopulated shared state with
@@ -2139,7 +2144,7 @@ describe('ChatPaletteDataController: Threads group', () => {
       const finalResult = await controller.retryThreadsGroup();
 
       expect(finalResult.incomplete).toBe(false);
-      expect(finalResult.candidates.map((c) => c.target.threadId)).toEqual(['t3']);
+      expect(finalResult.candidates.map((c) => threadIdOf(c.target))).toEqual(['t3']);
     });
   });
 });

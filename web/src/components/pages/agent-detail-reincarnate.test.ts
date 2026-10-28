@@ -90,7 +90,7 @@ vi.mock('../../utils/toast.js', () => ({
 
 await import('./agent-detail.js');
 import { showConfirm } from '../shared/confirm-dialog.js';
-import { REINCARNATE_CONFIRM_MESSAGE } from './agent-detail.js';
+import { REINCARNATE_CONFIRM_MESSAGE } from '../../shared/agent-reincarnate.js';
 type ScionPageAgentDetail = import('./agent-detail.js').ScionPageAgentDetail;
 type Agent = import('../../shared/types.js').Agent;
 

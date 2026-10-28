@@ -55,12 +55,93 @@ func BuildAccessBoundaryCreate(ctx context.Context, input AccessBoundaryCreateIn
 }
 
 func buildAccessBoundaryCreate(operation AuditOperationContext, input AccessBoundaryCreateInput, eventID string, occurredAt time.Time) (EnvelopeV1, error) {
+	return buildAccessBoundaryEvent("create", operation, input, eventID, occurredAt)
+}
+
+// AccessBoundaryHistoryAction names an access-boundary action whose catalog
+// destination is history only. Its envelope is never dispatched to a sink.
+type AccessBoundaryHistoryAction string
+
+const (
+	AccessBoundaryUpdate          AccessBoundaryHistoryAction = "update"
+	AccessBoundaryRecoveryDisable AccessBoundaryHistoryAction = "recovery_disable"
+	AccessBoundaryRecoveryEnable  AccessBoundaryHistoryAction = "recovery_enable"
+)
+
+// AccessBoundaryHistoryInput contains the approved identity, resource, and
+// payload leaves for a history-only access-boundary event. It has the same
+// shape as the create input.
+type AccessBoundaryHistoryInput = AccessBoundaryCreateInput
+
+// BuildAccessBoundaryHistory builds the validated commit/succeeded event for
+// a history-only access-boundary action (update, recovery_disable,
+// recovery_enable). The caller maps it to an access_constraint_history row in
+// the same transaction as the mutation. The catalog declares no log
+// destination for these actions, so the event must not be passed to a Sink.
+func BuildAccessBoundaryHistory(ctx context.Context, action AccessBoundaryHistoryAction, input AccessBoundaryHistoryInput) (EnvelopeV1, error) {
+	switch action {
+	case AccessBoundaryUpdate, AccessBoundaryRecoveryDisable, AccessBoundaryRecoveryEnable:
+	default:
+		return EnvelopeV1{}, invalid("action", "must be a history-only access-boundary action")
+	}
+	operation, err := requireOperation(ctx)
+	if err != nil {
+		return EnvelopeV1{}, err
+	}
+	return buildAccessBoundaryEvent(string(action), operation, input, uuid.NewString(), time.Now().UTC())
+}
+
+// AccessBoundaryDeleteInput contains the approved leaves for a committed
+// access-boundary deletion. The payload is limited to the classification and
+// the revision that was deleted; names, subjects and email addresses are not
+// part of the contract.
+type AccessBoundaryDeleteInput struct {
+	Request        *RequestRef
+	Initiator      *IdentityRef
+	Principal      IdentityRef
+	Executor       *IdentityRef
+	Credential     *CredentialRef
+	ConstraintID   string
+	Scope          ResourceScope
+	ProjectID      string
+	BeforeRevision *int64
+	Classification BoundaryClassification
+}
+
+// BuildAccessBoundaryDelete builds the single commit/succeeded structured-log
+// event for a committed access-boundary deletion. The caller dispatches it to
+// a log sink only after the delete commits. It is a best-effort log event:
+// the deleted constraint's history is cascaded, so no history row backs it.
+func BuildAccessBoundaryDelete(ctx context.Context, input AccessBoundaryDeleteInput) (EnvelopeV1, error) {
+	operation, err := requireOperation(ctx)
+	if err != nil {
+		return EnvelopeV1{}, err
+	}
+	return buildAccessBoundaryDelete(operation, input, uuid.NewString(), time.Now().UTC())
+}
+
+func buildAccessBoundaryDelete(operation AuditOperationContext, input AccessBoundaryDeleteInput, eventID string, occurredAt time.Time) (EnvelopeV1, error) {
+	return buildAccessBoundaryEvent("delete", operation, AccessBoundaryCreateInput{
+		Request:        input.Request,
+		Initiator:      input.Initiator,
+		Principal:      input.Principal,
+		Executor:       input.Executor,
+		Credential:     input.Credential,
+		ConstraintID:   input.ConstraintID,
+		Scope:          input.Scope,
+		ProjectID:      input.ProjectID,
+		BeforeRevision: input.BeforeRevision,
+		Classification: input.Classification,
+	}, eventID, occurredAt)
+}
+
+func buildAccessBoundaryEvent(action string, operation AuditOperationContext, input AccessBoundaryCreateInput, eventID string, occurredAt time.Time) (EnvelopeV1, error) {
 	event := EnvelopeV1{
 		SchemaVersion: SchemaVersion,
 		EventID:       eventID,
 		OccurredAt:    occurredAt,
 		Family:        "access_boundary",
-		Action:        "create",
+		Action:        action,
 		Phase:         PhaseCommit,
 		Outcome:       OutcomeSucceeded,
 		Severity:      SeverityInfo,

@@ -44,6 +44,10 @@ import (
 // and must be carried over during reconfigure (they are not in config files).
 var pluginBrokerNS = uuid.MustParse("5c104390-a1d0-5e9a-9b1e-5c104390a1d0")
 
+// hubKeys lists the hub wiring keys that getPluginHubCreds supplies. It has
+// two uses: resolveIntegrationMergedConfig keeps these keys out of the
+// cached-config carry-over (the live hub values override them), and
+// filterSensitiveConfig omits them from integration settings responses.
 var hubKeys = map[string]bool{
 	"hub_url": true, "broker_id": true, "hmac_key": true,
 	"plugin_name": true, "project_slug_map": true,
@@ -287,18 +291,18 @@ func (s *Server) handleAdminIntegrationByName(w http.ResponseWriter, r *http.Req
 		}
 		s.handleIntegrationHealth(w, r, name)
 	case "update":
-		if actionSub != "" && r.Method == http.MethodGet {
+		// .../update/{id} is the status lookup and accepts only GET; only a
+		// POST to the bare .../update starts an update (ptone/scion#2422).
+		if actionSub != "" {
+			if r.Method != http.MethodGet {
+				MethodNotAllowed(w, http.MethodGet)
+				return
+			}
 			s.handleGetUpdateStatus(w, r, name, actionSub)
 			return
 		}
 		if r.Method != http.MethodPost {
-			// .../update/{id} also accepts GET (status lookup, handled above);
-			// only the no-actionSub form is POST-only.
-			if actionSub != "" {
-				MethodNotAllowed(w, http.MethodGet, http.MethodPost)
-			} else {
-				MethodNotAllowed(w, http.MethodPost)
-			}
+			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		s.handleUpdateIntegration(w, r, name)
@@ -1443,22 +1447,19 @@ func (s *Server) checkIntegrationSecrets(ctx context.Context, name string) map[s
 	return result
 }
 
-// filterSensitiveConfig returns a copy of the config map with secret values
-// and internal runtime keys removed.
+// filterSensitiveConfig returns a copy of the config map with secret values,
+// hub wiring keys (hubKeys) and internal runtime keys removed.
 func filterSensitiveConfig(name string, cfg map[string]string) map[string]string {
 	filtered := make(map[string]string, len(cfg))
 
 	secretKeys := allSecretConfigKeys(name)
 	internalKeys := map[string]bool{
-		"hub_url":     true,
-		"hmac_key":    true,
-		"broker_id":   true,
 		"bot_id":      true,
 		"config_file": true,
 	}
 
 	for k, v := range cfg {
-		if secretKeys[k] || internalKeys[k] {
+		if secretKeys[k] || hubKeys[k] || internalKeys[k] {
 			continue
 		}
 		filtered[k] = v

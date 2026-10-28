@@ -266,6 +266,7 @@ func newTxCompositeStore(tx *ent.Tx) *CompositeStore {
 	txStore.AgentHoldStore.inTx = true
 	txStore.ConversationStore.inTx = true
 	txStore.ThreadGroupStore.inTx = true
+	txStore.SecretStore.inTx = true
 	return txStore
 }
 

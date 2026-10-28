@@ -27,8 +27,8 @@ Everything below the UI already exists:
 - **Link API** — `POST /api/v1/projects/{projectId}/providers` →
   `addProjectProvider` (`pkg/hub/handlers.go:7980-8043`), request shape
   `AddProviderRequest{ BrokerID, LocalPath }` (`pkg/hub/handlers.go:3211-3215`).
-- **WebDAV/file resolution** honors a co-located broker's `LocalPath` directly
-  (`pkg/hub/project_webdav.go:136-190`).
+- **Workspace file resolution** honors a co-located broker's `LocalPath` directly
+  (`resolveProjectWorkspacePath` in `pkg/hub/project_workspace_handlers.go`).
 - **CLI precedent** — `scion hub link` ensures the project exists, then adds the
   local broker as a provider with `LocalPath: resolvedPath`
   (`cmd/hub.go:2376-2388`, full command `runHubLink` at `cmd/hub.go:2172`).
@@ -426,8 +426,8 @@ need an embedded-broker shortcut.
   is non-loopback. `fs/list` is non-recursive; `fs/mkdir` rejects names with
   separators/`.`/`..` and refuses managed-path parents.
 - **Integration** — two-step create: project + provider, assert resulting
-  `ProjectType == "linked"` (`models.go:186-246`) and WebDAV resolves to the local
-  path (`project_webdav.go:136-190`).
+  `ProjectType == "linked"` (`models.go:186-246`) and the workspace path resolves to the
+  local path (`resolveProjectWorkspacePath`).
 - **Frontend** — mode switch hides git fields; debounced validation renders
   pass/warn/fail; submit issues the two calls in order with the resolved path.
 

@@ -318,7 +318,7 @@ func (c *client) openTunnel(ctx context.Context) (conduit.Stream, *tunnelEntry, 
 	// two fresh sessions), and one transient retry on the same session.
 	drainUsed, authUsed, transientUsed := false, false, false
 	for {
-		st, entry, out, reason, err := c.tryOpen(ctx, c.current(), body)
+		st, entry, out, reason, err := c.tryOpen(ctx, c.acquireCurrent(), body)
 		switch out {
 		case outOK:
 			return st, entry, nil
@@ -353,11 +353,11 @@ func (c *client) openTunnel(ctx context.Context) (conduit.Stream, *tunnelEntry, 
 	}
 }
 
-// tryOpen makes one tunnel request on s. The session is counted as in use
-// for the request; on success the count passes to the returned tunnel.
+// tryOpen makes one tunnel request on s, which the caller has counted as
+// in use (acquireCurrent); on success the count passes to the returned
+// tunnel, otherwise tryOpen releases it.
 // For outFail the error is final; for a transient fault reason names it.
 func (c *client) tryOpen(ctx context.Context, s *session, body []byte) (conduit.Stream, *tunnelEntry, outcome, string, error) {
-	c.acquire(s)
 	keep := false
 	defer func() {
 		if !keep {

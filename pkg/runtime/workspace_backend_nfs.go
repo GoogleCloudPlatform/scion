@@ -16,9 +16,10 @@ package runtime
 
 import (
 	"fmt"
-	"path/filepath"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 )
 
 // nfsBackend resolves workspace and shared-dir paths onto an NFS-backed
@@ -56,42 +57,37 @@ func (b *nfsBackend) Resolve(in ResolveInput) (ResolvedWorkspace, error) {
 	if in.ProjectID == "" {
 		return ResolvedWorkspace{}, fmt.Errorf("nfsBackend.Resolve: ProjectID is required")
 	}
-	if b.cfg == nil {
-		return ResolvedWorkspace{}, fmt.Errorf("nfsBackend.Resolve: NFS config is nil")
+	// The layout itself lives in pkg/projectfs (the project storage layout
+	// authority); this method only adapts its result to ResolvedWorkspace.
+	layout, err := config.NFSLayout(b.cfg)
+	if err != nil {
+		return ResolvedWorkspace{}, fmt.Errorf("nfsBackend.Resolve: %w", err)
 	}
-	if len(b.cfg.Shares) == 0 {
-		return ResolvedWorkspace{}, fmt.Errorf("nfsBackend.Resolve: no NFS shares configured")
-	}
+	project := projectfs.Project{ID: in.ProjectID}
 
-	share := b.cfg.Shares[0]
-	subPathRoot, err := config.ResolveSubPathRoot(b.cfg.SubPathRoot)
+	// Workspace: <SubPathRoot>/<projectID>/workspace under <MountRoot>/<shareID>.
+	ws, err := layout.Resolve(project, "", projectfs.WorkspaceMount(projectfs.Mode(in.Mode), ""))
 	if err != nil {
 		return ResolvedWorkspace{}, fmt.Errorf("nfsBackend.Resolve: %w", err)
 	}
 
-	// Server-relative workspace path: <SubPathRoot>/<projectID>/workspace
-	workspaceRelPath := filepath.Join(subPathRoot, in.ProjectID, "workspace")
-
-	// Host base: <MountRoot>/<shareID>
-	hostBase := filepath.Join(b.cfg.MountRoot, share.ID)
-
-	// Full host path: <MountRoot>/<shareID>/<SubPathRoot>/<projectID>/workspace
-	hostPath := filepath.Join(hostBase, workspaceRelPath)
-
 	res := ResolvedWorkspace{
-		HostPath:           hostPath,
-		ServerRelativePath: workspaceRelPath,
-		HostBase:           hostBase,
+		HostPath:           ws.HostPath,
+		ServerRelativePath: ws.RelPath,
+		HostBase:           ws.HostBase,
 		Backend:            "nfs",
 		SharedDirs:         make(map[string]ResolvedSharedDir, len(in.SharedDirNames)),
 	}
 
-	// Resolve shared dirs on NFS: <SubPathRoot>/<projectID>/shared-dirs/<name>
+	// Shared dirs: <SubPathRoot>/<projectID>/shared-dirs/<name>.
 	for _, name := range in.SharedDirNames {
-		sdRelPath := filepath.Join(subPathRoot, in.ProjectID, "shared-dirs", name)
+		sd, err := layout.Resolve(project, "", projectfs.SharedDirMount(api.SharedDir{Name: name}, ""))
+		if err != nil {
+			return ResolvedWorkspace{}, fmt.Errorf("nfsBackend.Resolve: %w", err)
+		}
 		res.SharedDirs[name] = ResolvedSharedDir{
-			HostPath:           filepath.Join(hostBase, sdRelPath),
-			ServerRelativePath: sdRelPath,
+			HostPath:           sd.HostPath,
+			ServerRelativePath: sd.RelPath,
 		}
 	}
 

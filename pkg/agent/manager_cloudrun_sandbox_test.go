@@ -46,7 +46,7 @@ func TestAgentManagerDelete_CloudRunSandbox_AgentName(t *testing.T) {
 	rt := runtime.NewCloudRunSandboxRuntimeForTest(bin, statePath, filepath.Join(dir, "scion"))
 	mgr := &AgentManager{Runtime: rt}
 
-	if _, err := mgr.Delete(context.Background(), "dev", false, "", false); err != nil {
+	if _, err := mgr.Delete(context.Background(), "dev", false, "", "", false); err != nil {
 		t.Fatalf("Delete() error = %v", err)
 	}
 

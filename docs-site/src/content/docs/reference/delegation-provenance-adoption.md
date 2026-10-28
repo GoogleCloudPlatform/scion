@@ -164,6 +164,41 @@ with the new `retry_version` and counts. No new snapshot is taken and no
 admin step or database edit is needed. If a hop write fails during the pass,
 the marker is left as it was and the next start runs the pass again.
 
+## Service-account assignment backfill
+
+The GCP token mint and the GCS link proxy also require the agent's active
+**service-account assignment**: the row that records who authorized the
+agent's `assign`-mode service account, with that principal's frozen ceiling.
+Agent create, a service-account PATCH and reincarnation write it. An agent
+created before assignment rows were recorded has none, and its token
+requests are refused with `ceiling_provenance_missing`.
+
+A one-shot data migration at Hub start (marker
+`sa_assignment_legacy_backfill`, after schema migration and so after
+adoption) writes the missing row for every live `assign`-mode agent that has
+no active row. It copies the agent's single active delegation edge in its
+project, because agent create records the same provenance and ceiling on
+the edge and on the assignment:
+
+- An edge recorded from a session, access token, agent, local development
+  or schedule credential is copied as is.
+- An edge recorded by adoption (`system_migration`) is not an accepted
+  assignment source. The row records the edge's delegator as the source,
+  with credential kind `agent` for an agent and `session` for a user, and
+  the edge's ceiling.
+
+Rows carry origin `legacy_backfill`. The migration never replaces an existing
+row. It skips an agent, logging a warning with the reason, when the agent
+has no active edge or more than one (`no_active_edge`, `ambiguous_edges`),
+the edge is the migration sentinel or unrecorded
+(`migration_sentinel_edge`, `unrecorded_edge`), the edge's ceiling does not
+allow `gcp_service_account.assign` (`ceiling_lacks_assign`), or the delegator
+is deleted or not an active user (`delegator_missing`,
+`delegator_inactive`). A skipped agent keeps its denial. The usual
+remediation is to reincarnate it with the same role, as a user who holds
+`gcp_service_account.assign`. Skips do not block the marker, and a store
+error leaves the marker unwritten so the next start retries.
+
 ## Denial details
 
 A request denied because a hop is unrecorded keeps its existing message and

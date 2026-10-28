@@ -92,16 +92,19 @@ type oidcKeyRecord struct {
 // It loads or generates keys on initialization and provides thread-safe
 // access to the jose.Signer and JWKS for downstream consumers.
 type OIDCKeyManager struct {
-	mu            sync.RWMutex
-	activeKey     *OIDCSigningKey
-	allKeys       []*OIDCSigningKey
-	signer        jose.Signer
-	store         store.Store
-	backend       secret.SecretBackend
-	hubID         string
-	issuerURL     string
-	log           *slog.Logger
-	encryptionKey []byte // AES-256 key for encrypting backup secrets; nil disables encryption
+	mu        sync.RWMutex
+	activeKey *OIDCSigningKey
+	allKeys   []*OIDCSigningKey
+	signer    jose.Signer
+	store     store.Store
+	backend   secret.SecretBackend
+	hubID     string
+	issuerURL string
+	log       *slog.Logger
+	cipher    *secret.ValueCipher // shared encryption object for stored backups
+	// flagged reports a record the startup encryption audit found
+	// unreadable (nil: none); such a record is never overwritten.
+	flagged func(key, scope, scopeID string) bool
 	// source is the signingKeySource* label of the startup key (set once by
 	// loadOrCreateKey, never key material).
 	source string
@@ -115,7 +118,13 @@ type OIDCKeyManagerConfig struct {
 	IssuerURL               string
 	RequireStableSigningKey bool
 	Log                     *slog.Logger
-	EncryptionKey           []byte // AES-256 key for encrypting backup secrets; nil disables encryption
+	// ValueCipher is the server's shared encryption object
+	// (ptone/scion#1530 §5). Required: NewOIDCKeyManager refuses nil (the
+	// disabled plaintext mode is secret.NewLegacyValueCipher("")).
+	ValueCipher *secret.ValueCipher
+	// ExistingRecordFlagged reports a record the startup encryption audit
+	// found unreadable; the manager never overwrites such a record.
+	ExistingRecordFlagged func(key, scope, scopeID string) bool
 }
 
 // NewOIDCKeyManager creates a new OIDCKeyManager, loading or generating
@@ -133,13 +142,20 @@ func NewOIDCKeyManager(ctx context.Context, cfg OIDCKeyManagerConfig) (*OIDCKeyM
 		log = slog.Default()
 	}
 
+	if cfg.ValueCipher == nil {
+		// Fail closed: a missed wiring must never store key material in
+		// cleartext. The disabled cipher (secret.NewLegacyValueCipher(""))
+		// is the explicit plaintext choice for an unencrypted hub.
+		return nil, errors.New("OIDC key manager: a ValueCipher is required")
+	}
 	mgr := &OIDCKeyManager{
-		store:         cfg.Store,
-		backend:       cfg.Backend,
-		hubID:         cfg.HubID,
-		issuerURL:     cfg.IssuerURL,
-		log:           log,
-		encryptionKey: cfg.EncryptionKey,
+		store:     cfg.Store,
+		backend:   cfg.Backend,
+		hubID:     cfg.HubID,
+		issuerURL: cfg.IssuerURL,
+		log:       log,
+		cipher:    cfg.ValueCipher,
+		flagged:   cfg.ExistingRecordFlagged,
 	}
 
 	privKey, err := mgr.loadOrCreateKey(ctx, cfg)
@@ -174,10 +190,11 @@ func NewOIDCKeyManager(ctx context.Context, cfg OIDCKeyManagerConfig) (*OIDCKeyM
 	// survives hub restarts and is consistent across instances.
 	if cfg.Store != nil {
 		if restoreErr := mgr.restoreRotatedKeysFromDB(ctx); restoreErr != nil {
-			log.Warn("Failed to restore rotated OIDC keys from DB keyset", "error", restoreErr)
-		}
-		// Persist the current keyset (active + any restored rotated keys) to DB.
-		if saveErr := mgr.saveKeysetToDB(ctx); saveErr != nil {
+			// The stored keyset is preserved: saving now would replace
+			// rotated keys this instance cannot read (ptone/scion#1530 §5).
+			log.Warn("Failed to restore rotated OIDC keys from DB keyset; the stored keyset is preserved and not rewritten", "error", restoreErr)
+		} else if saveErr := mgr.saveKeysetToDB(ctx); saveErr != nil {
+			// Persist the current keyset (active + any restored rotated keys) to DB.
 			log.Warn("Failed to save OIDC keyset to DB", "error", saveErr)
 		}
 	}
@@ -265,15 +282,9 @@ func (m *OIDCKeyManager) RotateKey(ctx context.Context) error {
 	keyName := SecretKeyOIDCSigningKey
 	persisted := false
 	if m.backend != nil {
-		input := &secret.SetSecretInput{
-			Name:        keyName,
-			Value:       pemStr,
-			SecretType:  store.SecretTypeInternal,
-			Scope:       store.ScopeHub,
-			ScopeID:     m.hubID,
-			Description: "OIDC identity token signing key (RSA-2048)",
-		}
-		if _, _, setErr := m.backend.Set(ctx, input); setErr != nil {
+		// Through syncKeyToBackend, so a non-GCP backend never writes over
+		// a record this instance cannot read (ptone/scion#1530 §5).
+		if setErr := m.syncKeyToBackend(ctx, keyName, pemStr, m.hubID); setErr != nil {
 			m.log.Warn("Failed to persist rotated OIDC key to secret backend",
 				"kid", newKID, "error", setErr)
 		} else {
@@ -466,14 +477,12 @@ func (m *OIDCKeyManager) loadOrCreateKey(ctx context.Context, cfg OIDCKeyManager
 	if cfg.Store != nil {
 		val, err := cfg.Store.GetSecretValue(ctx, keyName, store.ScopeHub, hubID)
 		if err == nil && val != "" {
-			// Decrypt if the stored value is AES-256-GCM encrypted.
-			if m.encryptionKey != nil {
-				plaintext, _, decErr := secret.DecryptValue(val, m.encryptionKey)
-				if decErr != nil {
-					return nil, fmt.Errorf("failed to decrypt OIDC signing key from store: %w", decErr)
-				}
-				val = plaintext
+			// Decrypt with the shared cipher; a failure is a typed error.
+			plaintext, decErr := m.cipher.Decrypt(val)
+			if decErr != nil {
+				return nil, fmt.Errorf("failed to decrypt OIDC signing key from store: %w", decErr)
 			}
+			val = plaintext
 			m.log.Info("Loading OIDC signing key from store", "key", keyName)
 			privKey, parseErr := decodePEMPrivateKey([]byte(val))
 			if parseErr != nil {
@@ -516,7 +525,10 @@ func (m *OIDCKeyManager) loadOrCreateKey(ctx context.Context, cfg OIDCKeyManager
 	// simultaneously, only the first writer's key is used. The loser
 	// reloads the winner's key from the store.
 	if cfg.Store != nil {
-		casKey := m.casCreateKeyInStore(ctx, keyName, pemStr, hubID)
+		casKey, casErr := m.casCreateKeyInStore(ctx, keyName, pemStr, hubID)
+		if casErr != nil {
+			return nil, casErr
+		}
 		if casKey != nil {
 			// Another instance created a key first — use theirs.
 			m.log.Info("Another instance already created OIDC signing key, using theirs", "key", keyName)
@@ -552,19 +564,19 @@ func (m *OIDCKeyManager) loadOrCreateKey(ctx context.Context, cfg OIDCKeyManager
 }
 
 // backupKeyToStore saves the PEM-encoded key to SQLite as a local backup.
+// It refuses (errExistingRecordUnreadable) to overwrite an existing record
+// that is unreadable with the configured keys (ptone/scion#1530 §5).
 func (m *OIDCKeyManager) backupKeyToStore(ctx context.Context, keyName, pemValue, hubID string) error {
 	if m.store == nil {
 		return nil
 	}
-	// Encrypt the value before writing to SQLite so that OIDC key material
-	// is stored at rest under AES-256-GCM, consistent with LocalBackend.Set().
-	valueToStore := pemValue
-	if m.encryptionKey != nil {
-		encrypted, err := secret.EncryptValue(pemValue, m.encryptionKey)
-		if err != nil {
-			return fmt.Errorf("encrypting OIDC key backup: %w", err)
-		}
-		valueToStore = encrypted
+	if err := guardOverwrite(ctx, m.store, m.cipher, m.flagged, keyName, store.ScopeHub, hubID); err != nil {
+		return err
+	}
+	// Encrypt with the shared cipher, consistent with LocalBackend.Set().
+	valueToStore, err := m.cipher.Encrypt(pemValue)
+	if err != nil {
+		return fmt.Errorf("encrypting OIDC key backup: %w", err)
 	}
 
 	existing, err := m.store.GetSecret(ctx, keyName, store.ScopeHub, hubID)
@@ -589,9 +601,16 @@ func (m *OIDCKeyManager) backupKeyToStore(ctx context.Context, keyName, pemValue
 }
 
 // syncKeyToBackend syncs a PEM-encoded key to the secret backend.
+// A non-GCP backend writes the same row as the local backup, so the sync
+// is refused when that row is unreadable (ptone/scion#1530 §5).
 func (m *OIDCKeyManager) syncKeyToBackend(ctx context.Context, keyName, pemValue, hubID string) error {
 	if m.backend == nil {
 		return nil
+	}
+	if _, isGCP := m.backend.(*secret.GCPBackend); !isGCP {
+		if err := guardOverwrite(ctx, m.store, m.cipher, m.flagged, keyName, store.ScopeHub, hubID); err != nil {
+			return err
+		}
 	}
 	input := &secret.SetSecretInput{
 		Name:        keyName,
@@ -614,20 +633,21 @@ func oidcSigningKeySecretID(hubID string) string {
 // casCreateKeyInStore attempts to create the signing key in the store using
 // CreateSecret (which returns ErrAlreadyExists if the key already exists).
 // If another instance already created a key, it loads and returns that key.
-// Returns nil if our key was successfully created (caller should use theirs).
-func (m *OIDCKeyManager) casCreateKeyInStore(ctx context.Context, keyName, pemValue, hubID string) *rsa.PrivateKey {
-	// Encrypt the value before writing to SQLite.
-	valueToStore := pemValue
-	if m.encryptionKey != nil {
-		encrypted, encErr := secret.EncryptValue(pemValue, m.encryptionKey)
-		if encErr != nil {
-			// Encryption failed — skip the backup path since backupKeyToStore
-			// would attempt the same encryption and fail again.
-			m.log.Warn("Failed to encrypt OIDC key for CAS create, skipping backup",
-				"key", keyName, "error", encErr)
-			return nil
-		}
-		valueToStore = encrypted
+// It returns (nil, nil) when our key was created (or the CAS could not run
+// and the plain backup path was used), so the caller uses its own key.
+//
+// When another instance won but its key cannot be loaded, decrypted or
+// parsed, it returns an error: continuing with our own key would overwrite
+// the winner's record through the secret backend (ptone/scion#1530 §5: a
+// wrong or missing key never overwrites an existing record).
+func (m *OIDCKeyManager) casCreateKeyInStore(ctx context.Context, keyName, pemValue, hubID string) (*rsa.PrivateKey, error) {
+	valueToStore, encErr := m.cipher.Encrypt(pemValue)
+	if encErr != nil {
+		// Encryption failed: skip the backup path, since backupKeyToStore
+		// would attempt the same encryption and fail again.
+		m.log.Warn("Failed to encrypt OIDC key for CAS create, skipping backup",
+			"key", keyName, "error", encErr)
+		return nil, nil
 	}
 
 	sec := &store.Secret{
@@ -643,7 +663,7 @@ func (m *OIDCKeyManager) casCreateKeyInStore(ctx context.Context, keyName, pemVa
 	if err == nil {
 		// We won the race — our key was created.
 		m.log.Info("Persisted OIDC signing key to store via CAS", "key", keyName)
-		return nil
+		return nil, nil
 	}
 	if !errors.Is(err, store.ErrAlreadyExists) {
 		// Unexpected error — fall through to existing UpsertSecret path.
@@ -652,33 +672,30 @@ func (m *OIDCKeyManager) casCreateKeyInStore(ctx context.Context, keyName, pemVa
 		if persistErr := m.backupKeyToStore(ctx, keyName, pemValue, hubID); persistErr != nil {
 			m.log.Warn("Failed to persist OIDC signing key to store", "key", keyName, "error", persistErr)
 		}
-		return nil
+		return nil, nil
 	}
 
-	// Another instance won. Load their key.
+	// Another instance won. Load their key; any failure is fatal, never a
+	// reason to use (and later persist) ours.
 	val, getErr := m.store.GetSecretValue(ctx, keyName, store.ScopeHub, hubID)
-	if getErr != nil || val == "" {
-		m.log.Warn("CAS lost but could not load winner's OIDC key from store, using ours",
-			"key", keyName, "error", getErr)
-		return nil
+	if getErr != nil {
+		return nil, fmt.Errorf("another instance created the OIDC signing key but it could not be loaded: %w", getErr)
 	}
-	// Decrypt if the stored value is encrypted.
-	if m.encryptionKey != nil {
-		plaintext, _, decErr := secret.DecryptValue(val, m.encryptionKey)
-		if decErr != nil {
-			m.log.Warn("CAS lost but could not decrypt winner's OIDC key, using ours",
-				"key", keyName, "error", decErr)
-			return nil
-		}
-		val = plaintext
+	if val == "" {
+		// A reference-only row (GCP backend) holds no local key material;
+		// using ours destroys nothing.
+		m.log.Warn("Existing OIDC signing key row holds no local value (reference only), using ours", "key", keyName)
+		return nil, nil
 	}
-	existingKey, parseErr := decodePEMPrivateKey([]byte(val))
+	plaintext, decErr := m.cipher.Decrypt(val)
+	if decErr != nil {
+		return nil, fmt.Errorf("another instance created the OIDC signing key but it could not be decrypted: %w", decErr)
+	}
+	existingKey, parseErr := decodePEMPrivateKey([]byte(plaintext))
 	if parseErr != nil {
-		m.log.Warn("CAS lost but could not parse winner's OIDC key, using ours",
-			"key", keyName, "error", parseErr)
-		return nil
+		return nil, fmt.Errorf("another instance created the OIDC signing key but it could not be parsed: %w", parseErr)
 	}
-	return existingKey
+	return existingKey, nil
 }
 
 // saveKeysetToDB persists the full keyset (active + rotated keys) to the
@@ -712,13 +729,12 @@ func (m *OIDCKeyManager) saveKeysetToDB(ctx context.Context) error {
 		return fmt.Errorf("marshaling OIDC keyset: %w", err)
 	}
 
-	valueToStore := string(data)
-	if m.encryptionKey != nil {
-		encrypted, encErr := secret.EncryptValue(valueToStore, m.encryptionKey)
-		if encErr != nil {
-			return fmt.Errorf("encrypting OIDC keyset: %w", encErr)
-		}
-		valueToStore = encrypted
+	if err := guardOverwrite(ctx, m.store, m.cipher, m.flagged, SecretKeyOIDCKeyset, store.ScopeHub, m.hubID); err != nil {
+		return err
+	}
+	valueToStore, encErr := m.cipher.Encrypt(string(data))
+	if encErr != nil {
+		return fmt.Errorf("encrypting OIDC keyset: %w", encErr)
 	}
 
 	sec := &store.Secret{
@@ -750,14 +766,12 @@ func (m *OIDCKeyManager) loadKeysetFromDB(ctx context.Context) ([]*OIDCSigningKe
 	if val == "" {
 		return nil, store.ErrNotFound
 	}
-	// Decrypt if the stored value is AES-256-GCM encrypted.
-	if m.encryptionKey != nil {
-		plaintext, _, decErr := secret.DecryptValue(val, m.encryptionKey)
-		if decErr != nil {
-			return nil, fmt.Errorf("decrypting OIDC keyset: %w", decErr)
-		}
-		val = plaintext
+	// Decrypt with the shared cipher; a failure is a typed error.
+	plaintext, decErr := m.cipher.Decrypt(val)
+	if decErr != nil {
+		return nil, fmt.Errorf("decrypting OIDC keyset: %w", decErr)
 	}
+	val = plaintext
 
 	var records []oidcKeyRecord
 	if err := json.Unmarshal([]byte(val), &records); err != nil {

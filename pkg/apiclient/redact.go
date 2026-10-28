@@ -19,34 +19,25 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact"
 )
 
-// urlUserInfoRe matches the user info of a URL that url.Parse rejects: up
-// to the last '@' before the path, query or fragment.
-var urlUserInfoRe = regexp.MustCompile("^(" + urlSchemePrefix + ")?[^/?#]*@")
-
-// redactedSecret replaces each credential redactURLCredentials masks.
+// redactedSecret replaces each credential parameter value
+// redactURLCredentials masks.
 const redactedSecret = "xxxxx"
 
 // redactURLCredentials returns raw with its credentials redacted as
-// config.RedactURL does: the user info, and the value of every query or
-// fragment parameter with a credential-like name. It is a copy of those
-// rules (this package imports no scion package); change both together.
+// config.RedactURL does: the user info by the shared rule
+// (urlredact.RedactUserInfo), or all but the scheme when the user info
+// cannot be delimited, and the value of every query or fragment parameter
+// with a credential-like name. The parameter rules below are a copy of
+// pkg/config's; change both together.
 func redactURLCredentials(raw string) string {
-	s := raw
-	if u, err := url.Parse(raw); err == nil {
-		if u.User != nil {
-			if _, hasPassword := u.User.Password(); hasPassword {
-				s = u.Redacted()
-			} else {
-				u.User = url.User(redactedSecret)
-				s = u.String()
-			}
-		}
-	} else {
-		s = urlUserInfoRe.ReplaceAllString(raw, "${1}"+redactedSecret+"@")
+	if urlredact.Undelimited(raw) {
+		return urlredact.MaskWhole(raw, urlredact.Mask)
 	}
-	return redactURLParams(s)
+	return redactURLParams(urlredact.RedactUserInfo(raw))
 }
 
 // The rules below are a copy of pkg/config/url_redact.go; change both
@@ -159,12 +150,9 @@ func redactURLParams(raw string) string {
 	return out
 }
 
-// urlSchemePrefix is a URL's scheme and "://", the anchored prefix the
-// user info rules (userInfoRe) also start with.
-const urlSchemePrefix = `[A-Za-z][A-Za-z0-9+.-]*://`
-
-// urlSchemePrefixRe matches urlSchemePrefix at the start of a string only.
-var urlSchemePrefixRe = regexp.MustCompile("^" + urlSchemePrefix)
+// urlSchemePrefixRe matches a URL's scheme and "://" at the start of a
+// string only.
+var urlSchemePrefixRe = regexp.MustCompile("^" + urlredact.SchemePrefix)
 
 // redactPathParams masks the credential values of the path parameters in
 // base (a URL up to its query, or only its path): each ";name=value" in a
@@ -256,7 +244,46 @@ func redactParam(pair string, depth int) string {
 func redactURLError(err error) error {
 	var ue *url.Error
 	if errors.As(err, &ue) {
+		if urlredact.Undelimited(ue.URL) {
+			// The parse or dial error may quote a part of such a URL.
+			ue.Err = &urlDetailsHidden{err: ue.Err}
+		}
 		ue.URL = redactURLCredentials(ue.URL)
 	}
 	return err
+}
+
+// urlDetailsHidden replaces the error of a *url.Error whose URL
+// redactURLError masks whole. Its message is fixed, so no part of the URL
+// that the original error quotes is shown. It does not unwrap to the
+// original (code that walks to the innermost error and prints it would
+// show that text again), and so errors.As does not reach it; errors.Is,
+// and the Timeout and Temporary methods url.Error asks its Err for, are
+// answered from the original, through any wrapping it has.
+//
+// Not reaching the concrete original with errors.As is safe for retry and
+// timeout handling: *url.Error itself satisfies net.Error and asks its Err
+// (this type) for Timeout and Temporary, so errors.As(err, &netErr) still
+// finds the *url.Error and reports the original's answer. There is
+// deliberately no As method, which would hand out the original.
+type urlDetailsHidden struct{ err error }
+
+func (e *urlDetailsHidden) Error() string { return "details not shown for a masked URL" }
+
+// Is reports whether the original error matches target (see errors.Is),
+// so checks such as errors.Is(err, context.DeadlineExceeded) still work.
+func (e *urlDetailsHidden) Is(target error) bool { return errors.Is(e.err, target) }
+
+// Timeout reports whether the original error, or an error it wraps, is a
+// timeout.
+func (e *urlDetailsHidden) Timeout() bool {
+	var t interface{ Timeout() bool }
+	return errors.As(e.err, &t) && t.Timeout()
+}
+
+// Temporary reports whether the original error, or an error it wraps, is
+// temporary.
+func (e *urlDetailsHidden) Temporary() bool {
+	var t interface{ Temporary() bool }
+	return errors.As(e.err, &t) && t.Temporary()
 }

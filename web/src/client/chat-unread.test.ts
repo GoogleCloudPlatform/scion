@@ -485,10 +485,18 @@ describe('ChatUnreadCounter cost control', () => {
 
   describe('across tabs', () => {
     /** A one-holder-at-a-time stand-in for navigator.locks that reports whether it is held. */
-    function fakeLocks(): { request: ReturnType<typeof vi.fn>; held: () => boolean } {
+    type LockRequest = (
+      name: string,
+      opts: unknown,
+      cb: () => Promise<unknown>
+    ) => Promise<unknown>;
+    function fakeLocks(): {
+      request: ReturnType<typeof vi.fn<LockRequest>>;
+      held: () => boolean;
+    } {
       let holders = 0;
       let tail: Promise<unknown> = Promise.resolve();
-      const request = vi.fn(
+      const request = vi.fn<LockRequest>(
         (_name: string, _opts: unknown, cb: () => Promise<unknown>): Promise<unknown> => {
           const run = tail.then(async () => {
             holders++;

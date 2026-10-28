@@ -20,6 +20,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -487,8 +488,31 @@ func TestAttachViaHub_UnsupportedBrokerAgentPath_Attaches(t *testing.T) {
 	client, err := hubclient.New(h.srv.URL)
 	require.NoError(t, err)
 
-	err = attachViaHub(&HubContext{Client: client, Endpoint: h.srv.URL, ProjectID: "proj-agent-path"}, "agent-path")
+	// Under go test, stdin is empty, so the PTY client's stdin reaches EOF
+	// at once and can end the attach before the mock's data frame is read.
+	// The frame is then written after the test. Give the client a stdin
+	// that stays open, so the attach ends only on the hub's close, which
+	// comes after the frame. The client keeps its own reference to stdin,
+	// so os.Stdin can be restored when the call returns.
+	stdinR, stdinW, err := os.Pipe()
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = stdinW.Close()
+		_ = stdinR.Close()
+	})
+
+	// The PTY client writes terminal data to os.Stdout. Capture it so the
+	// mock's prompt frame stays out of the shared test output, and check
+	// that the frame is all the attach wrote. os.Stdin is swapped inside
+	// the captured call, so it is restored on every path out of it.
+	stdout, _ := captureStdoutStderr(t, func() {
+		oldStdin := os.Stdin
+		os.Stdin = stdinR
+		defer func() { os.Stdin = oldStdin }()
+		err = attachViaHub(&HubContext{Client: client, Endpoint: h.srv.URL, ProjectID: "proj-agent-path"}, "agent-path")
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "$ ", stdout, "the attach writes the terminal data frame, and nothing else, to stdout")
 	assert.EqualValues(t, 1, h.preflights.Load())
 	assert.EqualValues(t, 1, h.upgrades.Load(), "the attach dials after the preflight")
 	assert.EqualValues(t, 0, h.brokerGets.Load(), "the CLI does not read the broker record")

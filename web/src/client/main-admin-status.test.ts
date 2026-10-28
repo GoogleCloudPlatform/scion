@@ -125,10 +125,14 @@ describe('main.ts admin-status wiring', () => {
 
     // The shared value is warm now; entering another admin route still sends
     // a request of its own.
+    // The shell's navs may still run their own first-page check around
+    // the navigation; theirs are shared (non-fresh) reads of the warm value
+    // and send no request, so they can interleave with the guard's call.
     const before = adminStatusRequests;
+    const mark = calls.length;
     main.navigateTo('/admin/groups');
     await vi.waitFor(() => expect(adminStatusRequests).toBe(before + 1), WAIT);
-    expect(calls.at(-1)).toEqual({ userId: 'u1', fresh: true });
+    expect(calls.slice(mark).filter((c) => c.fresh)).toEqual([{ userId: 'u1', fresh: true }]);
 
     // A warm, non-fresh read is served without a request ...
     const warm = adminStatusRequests;

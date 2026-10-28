@@ -289,8 +289,8 @@ func TestGitHubResolutionCache_StaleBranchServedAfterReload(t *testing.T) {
 		t.Fatalf("got %q, want the stale value %q", skill.Name, "old")
 	}
 	<-refreshed
-	// Join the background refresh so it has finished before the test ends.
-	_, _, _ = cache.flight.Do("flight-reload", func() (interface{}, error) { return nil, nil })
+	// Wait for the background refresh to finish before the test ends.
+	cache.refreshWG.Wait()
 }
 
 // TestGitHubResolutionCache_BurstCoalescesWrites checks that many Puts
@@ -459,7 +459,7 @@ func TestGitHubSkillResolver_MarksContentlessCacheHit(t *testing.T) {
 	key := resolutionCacheKey(ghRef, credential)
 	now := time.Now()
 	writeCacheFile(t, dir, map[string]*resolutionCacheEntry{
-		key: {Skill: ResolvedSkill{Name: "s", URI: uri, Files: []ResolvedFile{{Path: "SKILL.md", URL: "https://raw.githubusercontent.com/acme/private/x/SKILL.md"}}},
+		key: {Skill: ResolvedSkill{Name: "s", URI: uri, Files: []ResolvedFile{{Path: "SKILL.md", URL: "https://raw.githubusercontent.com/acme/private/x/SKILL.md", Mode: "0644"}}},
 			CachedAt: now, ExpiresAt: now.Add(time.Hour), IsBranchRef: true},
 	})
 	cache, err := newTestResolutionCache(dir, time.Hour)
@@ -488,7 +488,7 @@ func TestGitHubSkillResolver_MarksContentlessCacheHit(t *testing.T) {
 	}
 
 	// An entry that still has its content is not marked.
-	cache.putEntry(key, ResolvedSkill{Name: "s", URI: uri, Files: []ResolvedFile{{Path: "SKILL.md", Content: []byte("x")}}}, true)
+	cache.putEntry(key, ResolvedSkill{Name: "s", URI: uri, Files: []ResolvedFile{{Path: "SKILL.md", Mode: "0644", Content: []byte("x")}}}, true)
 	res, err = r.Resolve(ctx, []api.SkillReference{{URI: uri}}, ResolveOpts{})
 	if err != nil || len(res.Resolved) != 1 {
 		t.Fatalf("Resolve: err=%v result=%+v", err, res)

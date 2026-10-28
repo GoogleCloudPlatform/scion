@@ -307,6 +307,15 @@ func (b *GCPBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *Sec
 	secret := toStoreSecret(input)
 	secret.EncryptedValue = "" // Don't store value in DB
 	secret.SecretRef = "gcpsm:" + fullName
+	// A reference-only update of a Hub-internal record keeps its existing
+	// local backup ciphertext (ptone/scion#1530 §6): the Hub maintains that
+	// backup itself, and erasing it here would leave the key with no local
+	// copy until the Hub rewrites it. User secrets stay reference-only.
+	if secret.SecretType == store.SecretTypeInternal {
+		if existing, err := b.store.GetSecret(ctx, input.Name, input.Scope, input.ScopeID); err == nil && existing.EncryptedValue != "" {
+			secret.EncryptedValue = existing.EncryptedValue
+		}
+	}
 
 	created, err := b.store.UpsertSecret(ctx, secret)
 	if err != nil {
@@ -523,6 +532,13 @@ func (b *GCPBackend) Resolve(ctx context.Context, userID, projectID, brokerID st
 			// Never project hub-internal infrastructure secrets (e.g. signing keys)
 			// into agent environments.
 			if s.SecretType == store.SecretTypeInternal {
+				continue
+			}
+			// The owner path: a user-scope row of userID is held to the
+			// caller's UserScopeCheck before its value is read. A rejected
+			// row is skipped, so a lower-scope row with the same key stays
+			// in effect.
+			if sc.scope == store.ScopeUser && opts != nil && opts.UserScopeCheck != nil && !opts.UserScopeCheck(*fromStoreSecretMeta(&s)) {
 				continue
 			}
 

@@ -302,8 +302,10 @@ func TestHandleProvisionUser(t *testing.T) {
 			return rec
 		}
 
-		// Row 5: user identities presented with a non-session credential
-		// are refused by the session-only gate with its reason.
+		// A user identity presented with a credential kind other than a
+		// session, or with the user access token kind but no token
+		// identity, is refused by the credential gate with the
+		// session-only reason.
 		for _, kind := range []CredentialKind{CredentialKindUAT, CredentialKindAgentJWT, CredentialKindBroker, CredentialKindFederation, CredentialKindHubDelivery, ""} {
 			rec := call(user, kind)
 			requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "credential kind "+string(kind))
@@ -326,7 +328,7 @@ func TestHandleProvisionUser(t *testing.T) {
 	t.Run("row04a_dev_auth_mode_refused", func(t *testing.T) {
 		// Dev auth is single-user local mode: on a hub running with dev
 		// auth, provisioning is refused for every caller, before any body
-		// check: the dev credential, the session the web dev auto-login
+		// check: the dev credential, the session a web dev sign-in link
 		// mints for the dev user, and any other admin's session.
 		srv, s := testServer(t)
 		require.True(t, srv.authConfig.DevAuthEnabled)
@@ -360,8 +362,8 @@ func TestHandleProvisionUser(t *testing.T) {
 		assert.Empty(t, provisionAudits(t, s, ""))
 
 		// Row 4a is evaluated before row 8: on a dev-auth hub, a caller
-		// without user.invite also gets dev_auth_not_supported. (Tokens get
-		// the session-only refusal first, row 5.)
+		// without user.invite also gets dev_auth_not_supported, and so does
+		// a user access token (row04a_hub_token_with_user_invite_refused_on_dev_auth_hub).
 		rec := provisionAs(t, srv, f.member, map[string]interface{}{"email": "x@example.com"})
 		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 		_, details := provisionErr(t, rec)
@@ -391,13 +393,21 @@ func TestHandleProvisionUser(t *testing.T) {
 		assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	})
 
-	t.Run("row05_real_hub_token_with_user_invite_refused", func(t *testing.T) {
+	t.Run("row04a_hub_token_with_user_invite_refused_on_dev_auth_hub", func(t *testing.T) {
+		// Dev authentication refuses provisioning for a user access token
+		// too: a real hub token with user:invite, whose holder holds
+		// user.invite, gets dev_auth_not_supported and creates nothing.
 		m := newBearerMatrixFixture(t)
+		require.True(t, m.srv.authConfig.DevAuthEnabled)
 		key := m.mint(t, hubBoundary(), []string{"user:invite"})
 		rec := doRequestWithUAT(t, m.srv, key, http.MethodPost, provisionPath, map[string]interface{}{"email": "via-token@example.com"})
-		requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "hub token with user:invite")
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		code, details := provisionErr(t, rec)
+		assert.Equal(t, ErrCodeForbidden, code)
+		assert.Equal(t, provisionReasonDevAuthNotSupported, details["reason"])
 		_, err := m.store.GetUserByEmail(ctx, "via-token@example.com")
 		assert.ErrorIs(t, err, store.ErrNotFound)
+		assert.Empty(t, provisionAudits(t, m.store, ""))
 	})
 
 	t.Run("row08_callers_without_user_invite", func(t *testing.T) {
@@ -853,10 +863,11 @@ func TestAdminUserInvite_CharacterizationOnSharedCore(t *testing.T) {
 	// The mutation audit table is not written by invite.
 	assert.Empty(t, provisionAudits(t, s, ""))
 
-	// Bulk invite (only its email rule moved to NormalizeInviteEmail):
-	// response shape, counts, the user_invited_bulk event and the
-	// bulk_invited publication are unchanged. Invalid emails are skipped
-	// silently, as before.
+	// Bulk invite shares the core and the email rule. Since the batch
+	// invite change (ptone/scion#4952) it reports one result per input
+	// entry, counts invalid entries in total, and records one user_invited
+	// per created row before its user_invited_bulk event; the bulk_invited
+	// publication is unchanged.
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/admin/users/invite/bulk", map[string]interface{}{"emails": []map[string]string{
 		{"email": " Bob@Example.com "}, {"email": "alice@example.com"}, {"email": "not-an-email"}, {"email": "carol@example.com", "note": "n"},
 	}})
@@ -868,18 +879,24 @@ func TestAdminUserInvite_CharacterizationOnSharedCore(t *testing.T) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	assert.Equal(t, []string{"errors", "invited", "skipped", "total"}, keys, "bulk response shape unchanged")
+	assert.Equal(t, []string{"batchId", "complete", "counts", "invited", "results", "skipped", "total"}, keys, "bulk response shape")
 	assert.Equal(t, float64(2), raw["invited"])
 	assert.Equal(t, float64(1), raw["skipped"])
-	assert.Equal(t, float64(3), raw["total"])
+	assert.Equal(t, float64(4), raw["total"])
 	assert.Equal(t, store.UserStatusInvited, userByEmail(t, s, "bob@example.com").Status)
 	logger.mu.Lock()
-	require.Len(t, logger.invite, 2)
-	bulkEv := logger.invite[1]
+	require.Len(t, logger.invite, 4)
+	perUser := []*InviteAuditEvent{logger.invite[1], logger.invite[2]}
+	bulkEv := logger.invite[3]
 	logger.mu.Unlock()
+	for i, email := range []string{"bob@example.com", "carol@example.com"} {
+		assert.Equal(t, InviteAuditUserInvited, perUser[i].EventType)
+		assert.Equal(t, email, perUser[i].Email)
+	}
 	assert.Equal(t, InviteAuditUserInvitedBulk, bulkEv.EventType)
 	assert.Equal(t, 2, bulkEv.Count)
-	assert.Equal(t, map[string]string{"skipped": "1"}, bulkEv.Details)
+	assert.Equal(t, "1", bulkEv.Details["already_invited"])
+	assert.Equal(t, "1", bulkEv.Details["invalid"])
 	assert.Equal(t, []string{"invited:alice@example.com", "bulk_invited:"}, spy.actions())
 }
 

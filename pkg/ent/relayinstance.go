@@ -30,6 +30,8 @@ type RelayInstance struct {
 	LastSeen time.Time `json:"last_seen,omitempty"`
 	// Draining holds the value of the "draining" field.
 	Draining bool `json:"draining,omitempty"`
+	// JSON array of relay feature strings, set at registration and fixed per generation; NULL = none (design v2.21.54)
+	Features *string `json:"features,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the RelayInstanceQuery when eager-loading is set.
 	Edges        RelayInstanceEdges `json:"edges"`
@@ -63,7 +65,7 @@ func (*RelayInstance) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case relayinstance.FieldGeneration:
 			values[i] = new(sql.NullInt64)
-		case relayinstance.FieldID, relayinstance.FieldInternalEndpoint, relayinstance.FieldPublicEndpoint:
+		case relayinstance.FieldID, relayinstance.FieldInternalEndpoint, relayinstance.FieldPublicEndpoint, relayinstance.FieldFeatures:
 			values[i] = new(sql.NullString)
 		case relayinstance.FieldStartedAt, relayinstance.FieldLastSeen:
 			values[i] = new(sql.NullTime)
@@ -125,6 +127,13 @@ func (_m *RelayInstance) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.Draining = value.Bool
 			}
+		case relayinstance.FieldFeatures:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field features", values[i])
+			} else if value.Valid {
+				_m.Features = new(string)
+				*_m.Features = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -185,6 +194,11 @@ func (_m *RelayInstance) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("draining=")
 	builder.WriteString(fmt.Sprintf("%v", _m.Draining))
+	builder.WriteString(", ")
+	if v := _m.Features; v != nil {
+		builder.WriteString("features=")
+		builder.WriteString(*v)
+	}
 	builder.WriteByte(')')
 	return builder.String()
 }

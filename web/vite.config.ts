@@ -15,6 +15,7 @@
  */
 
 import { defineConfig, type Plugin } from 'vite';
+import { readFileSync } from 'fs';
 import { resolve } from 'path';
 
 /**
@@ -148,6 +149,52 @@ function codemirrorChunk(id: string): string | undefined {
     return undefined;
 }
 
+/**
+ * Packages placed in named chunks, from bundle-budget.json (manualChunks),
+ * where the bundle check reads the same list: for example the graphical
+ * review editor's Milkdown, ProseMirror and remark stack.
+ */
+const PACKAGE_CHUNKS: [string, RegExp][] = Object.entries(
+    (JSON.parse(readFileSync(resolve(__dirname, 'bundle-budget.json'), 'utf-8')) as {
+        manualChunks?: Record<string, string>;
+    }).manualChunks ?? {}
+)
+    .filter(([name]) => !name.startsWith('$'))
+    .map(([name, pattern]) => [name, new RegExp(pattern)]);
+
+/** The named package chunk of a module, or undefined. */
+function packageChunk(id: string): string | undefined {
+    return PACKAGE_CHUNKS.find(([, re]) => re.test(id))?.[0];
+}
+
+/**
+ * Milkdown's plugin factories (@milkdown/utils), and withMeta, which only
+ * labels a plugin for Milkdown's inspector: each returns a plugin object
+ * and has no other effect, so Rollup may drop a call whose plugin nothing
+ * uses. Milkdown's presets are one module each, and without this every
+ * command, keymap and input rule they define stays in the review editor's
+ * chunk. Rollup matches these names in every module, so add a name only
+ * after checking that no package uses it for a call with an effect; and
+ * any plugin the editor needs must be reached by a use, not by a side
+ * effect, or it is dropped. bundle-budget.json requiredStrings checks that
+ * the editor's rendering and input modules are in the built chunk.
+ */
+const MILKDOWN_PLUGIN_FACTORIES = [
+    '$command',
+    '$ctx',
+    '$inputRule',
+    '$markAttr',
+    '$markSchema',
+    '$node',
+    '$nodeAttr',
+    '$nodeSchema',
+    '$pasteRule',
+    '$prose',
+    '$remark',
+    '$useKeymap',
+    'withMeta',
+];
+
 export default defineConfig({
     root: '.',
     publicDir: 'public',
@@ -170,6 +217,12 @@ export default defineConfig({
             input: {
                 main: resolve(__dirname, 'src/client/main.ts'),
             },
+            // Milkdown's plugin factories build a plugin object and nothing
+            // else, so a plugin the review editor does not use (the presets'
+            // commands, keymaps and input rules) is left out of its chunk.
+            treeshake: {
+                manualPureFunctions: MILKDOWN_PLUGIN_FACTORIES,
+            },
             output: {
                 // Use consistent naming for SSR compatibility
                 entryFileNames: 'assets/[name].js',
@@ -190,8 +243,28 @@ export default defineConfig({
                     if (cmChunk) {
                         return cmChunk;
                     }
+                    // Rollup's CommonJS interop helpers, used by packages of
+                    // several lazy chunks (the terminal's and the review
+                    // editor's): their own small chunk, so no lazy chunk loads
+                    // another just for them.
+                    if (id.includes('commonjsHelpers')) {
+                        return 'commonjs-helpers';
+                    }
+                    // Key names, used by both CodeMirror and the review editor's
+                    // ProseMirror keymaps: its own small chunk, so neither editor
+                    // chunk has to load the other.
+                    if (id.includes('node_modules/w3c-keyname/')) {
+                        return 'w3c-keyname';
+                    }
                     if (id.includes('node_modules/@codemirror') || id.includes('node_modules/@lezer')) {
                         return 'codemirror';
+                    }
+                    // Package chunks listed in bundle-budget.json, such as the
+                    // graphical review editor's stack (loaded only when a review
+                    // opens in the graphical view, review-editor-loader.ts).
+                    const named = packageChunk(id);
+                    if (named) {
+                        return named;
                     }
                     if (id.includes('node_modules/marked') || id.includes('node_modules/dompurify')) {
                         return 'markdown';

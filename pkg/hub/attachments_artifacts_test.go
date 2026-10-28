@@ -21,6 +21,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"log/slog"
+	"maps"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -36,6 +38,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -237,7 +240,7 @@ func TestAttachmentArtifacts_ProjectlessGroupJoinAndLeave(t *testing.T) {
 	// A message of a group without a project carries the nil project id.
 	msgID := f.seedMessage(t, uuid.Nil.String(), "group-thread-"+conv.ID, conv.ID, "in a group without a project")
 	id := f.uploadAs(t, f.ua, "", "notes.txt", "group bytes")
-	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, id, artifacts.PrincipalKindUser, f.ua.ID, msgID))
+	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, id, artifacts.PrincipalKindUser, f.ua.ID, msgID, ""))
 
 	missing := f.download(t, f.ub, uuid.NewString())
 	require.Equal(t, http.StatusOK, f.download(t, f.uc, id).status, "a participant reads it")
@@ -321,7 +324,7 @@ func TestAttachmentArtifacts_CrossProjectAddressee(t *testing.T) {
 	require.NoError(t, err)
 	msgID := f.seedMessage(t, f.projA.ID, f.topicA, convID, "for bob too")
 	id := f.uploadAs(t, f.ua, "", "brief.txt", "addressed")
-	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, id, artifacts.PrincipalKindUser, f.ua.ID, msgID))
+	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, id, artifacts.PrincipalKindUser, f.ua.ID, msgID, f.projA.ID))
 
 	missing := f.download(t, f.ub, uuid.NewString())
 	requireSameAnswer(t, missing, f.download(t, f.ub, id))
@@ -455,9 +458,12 @@ func TestAttachmentArtifacts_ArtifactRoutesAnswerNotFound(t *testing.T) {
 	require.Equal(t, http.StatusOK, f.download(t, f.uc, id).status, "still readable through the chat route")
 }
 
-// An attachment sent to an agent reaches the project's staging directory
-// from its stored bytes.
-func TestAttachmentArtifacts_StagedForAgent(t *testing.T) {
+// While the experiment is on, an attachment stored as an artifact sent to
+// an agent reaches it by delivery into its home (ptone/scion#4596), and is
+// additionally projected into the project's scratchpad through the layout
+// authority so sibling agents find it (ptone/scion#5827): the
+// projection holds the stored bytes under .attachments/_webchat/<id>/.
+func TestAttachmentArtifacts_ProjectedForSiblings(t *testing.T) {
 	f := newRefFixture(t)
 	enableAttachmentArtifacts(t, f)
 	stagingDir := f.enableScratchpad(t)
@@ -466,8 +472,163 @@ func TestAttachmentArtifacts_StagedForAgent(t *testing.T) {
 	id := f.uploadAs(t, f.ua, f.projA.ID, "log.txt", "agent bytes")
 	f.sendWith(t, f.ua, f.topicA, id)
 	got, err := os.ReadFile(filepath.Join(stagingDir, id, "log.txt"))
-	require.NoError(t, err, "the attachment is staged for the agent")
+	require.NoError(t, err, "the attachment is projected into the scratchpad")
 	assert.Equal(t, "agent bytes", string(got))
+}
+
+// stageChatAttachments records an artifact attachment's projection on its
+// reference (experiment on, project topic thread) and adds no legacy entry
+// for it; the delivery built from the reference carries the projection after
+// the inbox path. On a direct conversation's key the same attachment is not
+// projected.
+func TestStageChatAttachments_ArtifactProjectionOnRef(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	stagingDir := f.enableScratchpad(t)
+	dm := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
+	id := f.uploadAs(t, f.ua, f.projA.ID, "p.txt", "projected")
+	resp := f.sendWith(t, f.ua, dm, id)
+
+	info, err := f.srv.attachmentService().MessageAttachments(context.Background(), []string{resp.ID})
+	require.NoError(t, err)
+	require.Len(t, info[resp.ID], 1)
+
+	// Direct conversation key: inbox only.
+	refs := []AttachmentRef{newArtifactAttachmentRef(info[resp.ID][0])}
+	paths, mounts := f.srv.stageChatAttachments(context.Background(), dm, f.projA.ID, resp.ID, refs)
+	assert.Empty(t, paths)
+	assert.Empty(t, mounts)
+	assert.Empty(t, refs[0].projectedPath, "a DM attachment is never projected")
+	assert.NoDirExists(t, filepath.Join(stagingDir, id))
+
+	// Project topic thread key: projected.
+	refs = []AttachmentRef{newArtifactAttachmentRef(info[resp.ID][0])}
+	paths, mounts = f.srv.stageChatAttachments(context.Background(), f.topicA, f.projA.ID, resp.ID, refs)
+	assert.Empty(t, paths, "a delivered artifact attachment adds no legacy entry")
+	assert.Empty(t, mounts)
+	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat/"+id+"/p.txt", refs[0].projectedPath)
+	assert.Equal(t, attachmentSharedDirName, refs[0].projectedMount)
+	assert.FileExists(t, filepath.Join(stagingDir, id, "p.txt"))
+
+	dels := attachmentDeliveries(resp.ID, refs)
+	require.Len(t, dels, 1)
+	assert.Equal(t, refs[0].projectedPath, dels[0].ProjectedPath)
+	assert.Equal(t, attachmentSharedDirName, dels[0].ProjectedMount)
+}
+
+// TestAttachmentArtifacts_DMToAgentNotProjected: with artifacts on, an
+// attachment sent to an agent in a direct conversation is delivered to the
+// inbox only and never projected into the scratchpad.
+// The experiment is read at send time: once it is off, the same kind of
+// send stages the legacy attachment for the agent (T1 behaviour, the
+// documented T1-only Low).
+func TestAttachmentArtifacts_DMToAgentNotProjected(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	stagingDir := f.enableScratchpad(t)
+	dm := dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID)
+
+	id := f.uploadAs(t, f.ua, "", "secret.txt", "dm bytes")
+	f.sendWith(t, f.ua, dm, id)
+	assert.NoDirExists(t, filepath.Join(stagingDir, id), "a DM attachment is not projected while artifacts are on")
+
+	setAttachmentExperiments(t, f.srv, false, false)
+	legacy := f.uploadAs(t, f.ua, "", "legacy.txt", "legacy bytes")
+	f.sendWith(t, f.ua, dm, legacy)
+	got, err := os.ReadFile(filepath.Join(stagingDir, legacy, "legacy.txt"))
+	require.NoError(t, err, "with artifacts off a DM attachment is staged (no inbox delivery exists)")
+	assert.Equal(t, "legacy bytes", string(got))
+}
+
+// TestAttachmentArtifacts_UploadedOnSentOffNotProjectedInDM: an attachment
+// uploaded as an artifact while the experiment was on, and sent after it
+// was turned off, is still delivered into the recipient's inbox, so in a
+// direct conversation it gets no scratchpad copy either; in a project topic
+// thread it is staged as before.
+func TestAttachmentArtifacts_UploadedOnSentOffNotProjectedInDM(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	stagingDir := f.enableScratchpad(t)
+	require.NoError(t, f.wcs.UpdateTopic(context.Background(), f.topicA, TopicUpdate{DefaultAgent: &f.aa.Slug}))
+	dm := dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID)
+
+	inDM := f.uploadAs(t, f.ua, "", "dm.txt", "dm bytes")
+	inTopic := f.uploadAs(t, f.ua, f.projA.ID, "topic.txt", "topic bytes")
+	setAttachmentExperiments(t, f.srv, false, false)
+
+	resp := f.sendWith(t, f.ua, dm, inDM)
+	assert.NoDirExists(t, filepath.Join(stagingDir, inDM), "an artifact attachment in a DM gets no scratchpad copy, experiment on or off")
+
+	// It is still delivered: bound to the message, and planned for the
+	// agent recipient with an inbox path and no scratchpad copy.
+	info, err := f.srv.attachmentService().MessageAttachments(context.Background(), []string{resp.ID})
+	require.NoError(t, err)
+	require.Len(t, info[resp.ID], 1, "the attachment is bound to the DM message")
+	assert.Equal(t, inDM, info[resp.ID][0].ID)
+	dels := attachmentDeliveries(resp.ID, []AttachmentRef{newArtifactAttachmentRef(info[resp.ID][0])})
+	require.Len(t, dels, 1)
+	plan := f.srv.attachmentDelivery().Plan(context.Background(), f.aa, dels)
+	require.Len(t, plan, 1)
+	assert.NotEqual(t, messages.AttachmentWithheld, plan[0].State, "the recipient reads the attachment")
+	assert.Equal(t, attachmentInboxPath(resp.ID, "dm.txt"), plan[0].InboxPath)
+	assert.Empty(t, plan[0].ProjectedPath)
+
+	f.sendWith(t, f.ua, f.topicA, inTopic)
+	got, err := os.ReadFile(filepath.Join(stagingDir, inTopic, "topic.txt"))
+	require.NoError(t, err, "a project topic thread still gets the copy")
+	assert.Equal(t, "topic bytes", string(got))
+}
+
+// TestChatKeyReadAudience: the classification the send authorization, the
+// conversation access check and the projection decision share. A native
+// project group conversation is a topic, read by project membership; a DM
+// is read by its participants; a key that names no topic (a
+// participant-list group conversation is not a chat v2 key) is none.
+func TestChatKeyReadAudience(t *testing.T) {
+	f := newRefFixture(t)
+	ctx := context.Background()
+	group := seedGroupConversation(t, f.st, f.projA.ID, "classify")
+
+	aud, topic := chatKeyReadAudience(ctx, f.wcs, f.topicA)
+	assert.Equal(t, chatAudienceProject, aud)
+	require.NotNil(t, topic)
+	assert.Equal(t, f.projA.ID, topic.ProjectID)
+
+	aud, topic = chatKeyReadAudience(ctx, f.wcs, dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID))
+	assert.Equal(t, chatAudienceParticipants, aud)
+	assert.Nil(t, topic)
+
+	for _, key := range []string{group, "group:" + f.projA.ID + ":classify", uuid.NewString(), ""} {
+		aud, topic = chatKeyReadAudience(ctx, f.wcs, key)
+		assert.Equal(t, chatAudienceNone, aud, key)
+		assert.Nil(t, topic, key)
+	}
+	aud, _ = chatKeyReadAudience(ctx, nil, f.topicA)
+	assert.Equal(t, chatAudienceNone, aud, "no chat store")
+}
+
+// TestProjectionAudienceIsProject: only a project topic thread of the
+// message's own project counts as a whole-project audience.
+func TestProjectionAudienceIsProject(t *testing.T) {
+	f := newRefFixture(t)
+	ctx := context.Background()
+	group := seedGroupConversation(t, f.st, f.projA.ID, "audience")
+	for _, c := range []struct {
+		name, key, project string
+		want               bool
+	}{
+		{"own topic", f.topicA, f.projA.ID, true},
+		{"topic of another project", f.topicB, f.projA.ID, false},
+		{"user-agent dm", dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID), f.projA.ID, false},
+		{"user-user dm", dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID), f.projA.ID, false},
+		{"group conversation id", group, f.projA.ID, false},
+		{"group conversation ref", "group:" + f.projA.ID + ":audience", f.projA.ID, false},
+		{"unknown key", uuid.NewString(), f.projA.ID, false},
+		{"empty key", "", f.projA.ID, false},
+		{"no project", f.topicA, "", false},
+	} {
+		assert.Equal(t, c.want, f.srv.projectionAudienceIsProject(ctx, c.key, c.project), c.name)
+	}
 }
 
 // A retry of a send whose upload the first send already bound, with the
@@ -510,61 +671,6 @@ func (f *refFixture) downloadAs(t *testing.T, identity Identity, id string) refA
 	return refAnswer{status: rec.Code, body: rec.Body.String()}
 }
 
-// User access tokens read no attachment stored as an artifact: whatever the
-// token carries and whatever the conversation, including an upload not sent
-// yet, a token gets the answer of an unknown id, while the session of the
-// same user reads the attachment. Token access comes with its own design
-// (ptone/scion#4596).
-func TestAttachmentArtifacts_TokensReadNoArtifactAttachments(t *testing.T) {
-	f := newRefFixture(t)
-	enableAttachmentArtifacts(t, f)
-	ctx := context.Background()
-
-	threadFile := f.uploadAs(t, f.ua, f.projA.ID, "thread.txt", "in project A")
-	f.sendWith(t, f.ua, f.topicA, threadFile)
-	unsent := f.uploadAs(t, f.ua, f.projA.ID, "unsent.txt", "not sent yet")
-	userDM := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
-	dmFile := f.uploadAs(t, f.ua, "", "dm.txt", "between users")
-	f.sendWith(t, f.ua, userDM, dmFile)
-	agentDM := dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID)
-	agentMsg := f.seedMessage(t, f.projA.ID, agentDM, "", "for the agent")
-	agentFile := f.uploadAs(t, f.ua, f.projA.ID, "agent.txt", "agent dm")
-	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, agentFile, artifacts.PrincipalKindUser, f.ua.ID, agentMsg))
-	conv, err := f.st.UpsertConversationByExternalRef(ctx, &store.Conversation{
-		Kind: "group", Surface: "native", ExternalRef: "group:none:" + uuid.NewString(), DriftState: "active",
-	})
-	require.NoError(t, err)
-	require.NoError(t, f.st.AddParticipant(ctx, &store.ConversationParticipant{ID: uuid.NewString(),
-		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: f.ua.ID, Role: "member", JoinedAt: time.Now()}))
-	groupMsg := f.seedMessage(t, uuid.Nil.String(), "group-thread-"+conv.ID, conv.ID, "in a group without a project")
-	groupFile := f.uploadAs(t, f.ua, "", "group.txt", "projectless group")
-	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, groupFile, artifacts.PrincipalKindUser, f.ua.ID, groupMsg))
-
-	hubToken := selfToken(t, f.ua.ID, hubBoundary(), "project:read", "inbox:read", "agent:read")
-	missing := f.downloadAs(t, hubToken, uuid.NewString())
-	require.Equal(t, http.StatusNotFound, missing.status, missing.body)
-	tokens := []struct {
-		name  string
-		token *ScopedUserIdentity
-	}{
-		{"hub boundary", hubToken},
-		{"project A boundary", selfToken(t, f.ua.ID, projectBoundary(f.projA.ID), "project:read", "inbox:read", "agent:read")},
-	}
-	files := []struct{ name, id string }{
-		{"project thread", threadFile},
-		{"upload not sent", unsent},
-		{"direct message between users", dmFile},
-		{"direct message with an agent", agentFile},
-		{"group without a project", groupFile},
-	}
-	for _, file := range files {
-		require.Equal(t, http.StatusOK, f.download(t, f.ua, file.id).status, "session: %s", file.name)
-		for _, tk := range tokens {
-			require.Equal(t, missing, f.downloadAs(t, tk.token, file.id), "%s token: %s", tk.name, file.name)
-		}
-	}
-}
-
 // tokenRequest serves the chat conversation routes for a user access token:
 // the chat route wrapper and the handler, with token as the request's caller.
 func (f *refFixture) tokenRequest(t *testing.T, token *ScopedUserIdentity, method, path string, body interface{}) refAnswer {
@@ -584,32 +690,10 @@ func (f *refFixture) tokenRequest(t *testing.T, token *ScopedUserIdentity, metho
 	return refAnswer{status: rec.Code, body: rec.Body.String()}
 }
 
-// A user access token cannot send an attachment stored as an artifact: an
-// upload its holder made in a session gets the same answer as an unknown id
-// when the token names it, and stays an unsent upload the session can send.
-func TestAttachmentArtifacts_TokenCannotSendArtifactAttachment(t *testing.T) {
-	f := newRefFixture(t)
-	enableAttachmentArtifacts(t, f)
-	id := f.uploadAs(t, f.ua, f.projA.ID, "draft.txt", "session upload")
-	token := selfToken(t, f.ua.ID, projectBoundary(f.projA.ID), "project:read", "inbox:read", "inbox:write")
-	path := "/api/v1/chat/conversations/" + f.topicA + "/messages"
-
-	unknown := uuid.NewString()
-	missing := f.tokenRequest(t, token, http.MethodPost, path, map[string]interface{}{"content": "see file", "attachments": []string{unknown}})
-	require.Equal(t, http.StatusBadRequest, missing.status, missing.body)
-	require.Contains(t, missing.body, "not available in this conversation")
-	got := f.tokenRequest(t, token, http.MethodPost, path, map[string]interface{}{"content": "see file", "attachments": []string{id}})
-	require.Equal(t, missing.status, got.status, got.body)
-	require.Equal(t, strings.ReplaceAll(missing.body, unknown, "ID"), strings.ReplaceAll(got.body, id, "ID"), "the same answer as an unknown id")
-
-	// Still an unsent upload of alice: her session sends it.
-	resp := f.sendWith(t, f.ua, f.topicA, id)
-	require.Len(t, resp.Attachments, 1)
-}
-
-// A user access token's history of a conversation does not list attachments
-// stored as artifacts; the session's history of the same message does.
-func TestAttachmentArtifacts_TokenHistoryOmitsArtifactAttachments(t *testing.T) {
+// A user access token's history of a conversation lists the attachments
+// stored as artifacts it may read under the token rule (ptone/scion#4596,
+// section 9), as the session's history does.
+func TestAttachmentArtifacts_TokenHistoryListsReadableArtifactAttachments(t *testing.T) {
 	f := newRefFixture(t)
 	enableAttachmentArtifacts(t, f)
 	dm := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
@@ -623,7 +707,7 @@ func TestAttachmentArtifacts_TokenHistoryOmitsArtifactAttachments(t *testing.T) 
 	var hist chatHistoryResponse
 	require.NoError(t, json.Unmarshal([]byte(got.body), &hist))
 	require.NotEmpty(t, hist.Messages, "the token reads the conversation")
-	require.Empty(t, hist.MessageAttachments[resp.ID], "the token's history lists no attachment stored as an artifact")
+	require.Len(t, hist.MessageAttachments[resp.ID], 1, "the token's history lists the attachment it may read")
 }
 
 // streamPublishedAs opens the agent messages stream of agentID as identity,
@@ -704,37 +788,10 @@ func TestAttachmentArtifacts_AgentStreamOmitsArtifactAttachmentsForTokens(t *tes
 	require.NotContains(t, body, "artifact-file.txt")
 }
 
-// With the experiment on, a user access token's upload is stored in the
-// AttachmentStore, not in the artifact service, and the token reads it back
-// under the AttachmentStore's rule, as with the experiment off.
-func TestAttachmentArtifacts_TokenUploadsUseAttachmentStore(t *testing.T) {
-	f := newRefFixture(t)
-	st := enableAttachmentArtifacts(t, f)
-	ctx := context.Background()
-	token := selfToken(t, f.ua.ID, projectBoundary(f.projA.ID), "project:read", "inbox:read", "inbox:write")
-
-	req := attachmentUploadRequest(t, f.projA.ID, "token.txt", "from a token")
-	rec := httptest.NewRecorder()
-	f.srv.chatRoute(f.srv.handleChatAttachments)(rec, req.WithContext(contextWithIdentity(req.Context(), token)))
-	id := uploadedAttachmentID(t, rec, "token.txt")
-
-	meta, err := f.wcs.GetAttachment(ctx, id)
-	require.NoError(t, err)
-	require.NotNil(t, meta, "the upload is a row of the AttachmentStore")
-	assert.Equal(t, f.ua.ID, meta.UploadedBy)
-	assert.Equal(t, f.projA.ID, meta.ProjectID)
-	_, err = st.GetAttachment(ctx, id)
-	require.ErrorIs(t, err, artifacts.ErrNotFound, "nothing is stored in the artifact service")
-
-	got := f.downloadAs(t, token, id)
-	require.Equal(t, http.StatusOK, got.status, got.body)
-	assert.Equal(t, "from a token", got.body)
-}
-
-// With the experiment on, uploads go to the artifact service only for a
-// caller it lets read attachments: a session. A user access token and a
-// federated user upload to the AttachmentStore as with the experiment off,
-// instead of storing a file they could not read back (or failing).
+// With the experiment on, uploads go to the artifact service for a session
+// and a user access token (ptone/scion#4596, section 9). A federated user
+// uploads to the AttachmentStore as with the experiment off, instead of
+// storing a file it could not read back (or failing).
 func TestAttachmentArtifacts_NonSessionUploadsUseAttachmentStore(t *testing.T) {
 	f := newRefFixture(t)
 	enableAttachmentArtifacts(t, f)
@@ -742,7 +799,7 @@ func TestAttachmentArtifacts_NonSessionUploadsUseAttachmentStore(t *testing.T) {
 
 	require.True(t, f.srv.attachmentUploadsToArtifacts(f.sessionContext(f.ua)), "session")
 	token := selfToken(t, f.ua.ID, projectBoundary(f.projA.ID), "project:read", "inbox:write")
-	require.False(t, f.srv.attachmentUploadsToArtifacts(contextWithIdentity(ctx, token)), "user access token")
+	require.True(t, f.srv.attachmentUploadsToArtifacts(contextWithIdentity(ctx, token)), "user access token")
 
 	fed := NewFederatedUserIdentity("https://issuer.attachments.test", "att-fed", "att-fed@test.com", "Fed", "member", nil)
 	fedCtx := contextWithCredentialContext(contextWithIdentity(ctx, fed), CredentialContext{Kind: CredentialKindFederation})
@@ -821,7 +878,7 @@ func TestAttachmentArtifacts_SettingsSectionDisabled(t *testing.T) {
 // to a concurrent send of the same upload.
 type failBindStore struct{ artifacts.Store }
 
-func (failBindStore) BindAttachment(context.Context, string, string, string, string, time.Time) error {
+func (failBindStore) BindAttachment(context.Context, string, string, string, string, string, time.Time) error {
 	return artifacts.ErrAttachmentBound
 }
 
@@ -857,4 +914,93 @@ func TestAttachmentArtifacts_NoLegacyStoreAnswersNotFound(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, missing.status, missing.body)
 	requireSameAnswer(t, missing, f.download(t, f.ub, id))
 	require.Equal(t, http.StatusOK, f.download(t, f.uc, id).status)
+}
+
+// TestArtifactAttachmentRef_HistoryNeverFlags: the history merge builds
+// plain references (design section 3); history applies the read decision
+// itself, and its refs never reach the chat subjects or the bind step.
+func TestArtifactAttachmentRef_HistoryNeverFlags(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	id := f.uploadAs(t, f.ua, f.projA.ID, "notes.txt", "history")
+	resp := f.sendWith(t, f.ua, f.topicA, id)
+	merged := f.srv.mergeArtifactAttachments(f.sessionContext(f.ua), []string{resp.ID}, nil)
+	require.Len(t, merged[resp.ID], 1)
+	require.Equal(t, id, merged[resp.ID][0].ID)
+	require.False(t, merged[resp.ID][0].artifact, "history references are never flagged")
+}
+
+// TestDeliverToUser_RepublishCarriesNoArtifactAttachments pins the attachment
+// handling of deliverToUser's re-publish path (design section 4,
+// ptone/scion#5504): a bus message whose transport metadata names a legacy
+// attachment of the sender and an artifact attachment id links the legacy
+// one, leaves the artifact row in its upload scope, carries exactly the
+// linked file on the SSE event and the member fan-out (never the artifact id,
+// never a flagged reference), and leaves the shared message unchanged.
+func TestDeliverToUser_RepublishCarriesNoArtifactAttachments(t *testing.T) {
+	f := newRefFixture(t)
+	st := enableAttachmentArtifacts(t, f)
+	ctx := context.Background()
+	legacy := f.attach(t, f.projA.ID, f.aa.ID, "legacy.txt")
+	artifactID := f.uploadAs(t, f.ua, f.projA.ID, "stored.txt", "stored as an artifact")
+	encoded, ok := attachmentRefsMetadata([]AttachmentRef{
+		{ID: legacy, Name: "legacy.txt"},
+		{ID: artifactID, Name: "stored.txt"},
+	})
+	require.True(t, ok)
+
+	events := NewChannelEventPublisher()
+	t.Cleanup(events.Close)
+	ch, unsubscribe := events.Subscribe("user." + f.ub.ID + ".message")
+	t.Cleanup(unsubscribe)
+	proxy := NewMessageBrokerProxy(nil, f.st, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
+	proxy.webChatStore = f.wcs
+	// A message log, so the record branch runs on this path too.
+	logger, logBuf := newCapturingMessageLogger()
+	proxy.messageLog = logger
+	var fanned [][]AttachmentRef
+	proxy.memberFanout = func(_ context.Context, _ *store.Message, refs []AttachmentRef, _ []artifacts.MessageRef) {
+		fanned = append(fanned, refs)
+	}
+
+	msg := messages.NewInstruction("agent:aa", "user:bob", "here are the files")
+	msg.SenderID = f.aa.ID
+	msg.RecipientID = f.ub.ID
+	msg.Metadata = map[string]string{attachmentsMetadataKey: encoded}
+	before := *msg
+	before.Metadata = maps.Clone(msg.Metadata)
+	proxy.deliverToUser(ctx, f.projA.ID, "project."+f.projA.ID+".user.message", msg)
+
+	result, err := f.st.ListMessages(ctx, store.MessageFilter{RecipientID: f.ub.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, result.Items, 1)
+	// The message has a conversation, and the record names it, so a record
+	// that set it on the shared message instead of a copy shows in the
+	// unchanged-message check below.
+	require.NotEmpty(t, result.Items[0].ConversationID, "the re-published message has a conversation")
+	assertLogHasConversationID(t, logBuf, "user message delivered via broker", result.Items[0].ConversationID)
+	linked, err := f.wcs.GetAttachmentsByMessage(ctx, result.Items[0].ID)
+	require.NoError(t, err)
+	require.Len(t, linked, 1)
+	require.Equal(t, legacy, linked[0].ID, "the sender's legacy attachment is linked")
+
+	a, err := st.GetAttachment(ctx, artifactID)
+	require.NoError(t, err)
+	require.Equal(t, artifacts.ScopeKindUpload, a.ScopeKind, "this path never binds an artifact attachment")
+
+	select {
+	case evt := <-ch:
+		require.NotContains(t, string(evt.Data), artifactID, "the SSE event names no artifact attachment")
+		var payload UserMessageEvent
+		require.NoError(t, json.Unmarshal(evt.Data, &payload))
+		require.Len(t, payload.Attachments, 1, "the SSE event carries the linked file (ptone/scion#5504)")
+		require.Equal(t, legacy, payload.Attachments[0].ID)
+	case <-time.After(5 * time.Second):
+		t.Fatal("no SSE event")
+	}
+	require.Len(t, fanned, 1, "one member fan-out")
+	require.Len(t, fanned[0], 1, "the member fan-out carries the linked file only")
+	require.Equal(t, legacy, fanned[0][0].ID)
+	require.False(t, fanned[0][0].artifact)
+	require.Equal(t, before, *msg, "the shared message, its metadata included, is unchanged")
 }

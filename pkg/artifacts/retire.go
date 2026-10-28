@@ -47,17 +47,29 @@ func writeRetireForbidden(w http.ResponseWriter) {
 // home project. "" means it may not.
 func (s *Service) retireAuthority(ctx context.Context, b backend, a *Artifact) (string, error) {
 	authority, err := s.adminAuthorityWith(ctx, a, func() ([]Grant, error) { return b.store.ListGrants(ctx, a.ID) })
-	if err != nil || authority != "" {
-		return authority, err
+	if err != nil {
+		return "", err
+	}
+	return s.retireAuthorityFrom(ctx, a, authority), nil
+}
+
+// retireAuthorityFrom completes retireAuthority from admin, the caller's
+// adminAuthorityWith on a: admin itself when set, else
+// AuthorityCustodianProjectAdmin when the caller administers a's home
+// project, else "". The delete route and the canRetire capability both
+// decide through it, so they cannot disagree.
+func (s *Service) retireAuthorityFrom(ctx context.Context, a *Artifact, admin string) string {
+	if admin != "" {
+		return admin
 	}
 	kind, _, _, ok := s.host.Principal(ctx)
 	if !ok || kind != PrincipalKindUser || !s.host.Permits(ctx, a.ScopeRef, PermissionManage) {
-		return "", nil
+		return ""
 	}
-	if admin, ok := s.host.(ScopeAdministrator); ok && admin.AdministersScope(ctx, a.ScopeRef) {
-		return AuthorityCustodianProjectAdmin, nil
+	if sa, ok := s.host.(ScopeAdministrator); ok && sa.AdministersScope(ctx, a.ScopeRef) {
+		return AuthorityCustodianProjectAdmin
 	}
-	return "", nil
+	return ""
 }
 
 // handleDeleteArtifact implements DELETE /{id}: a soft delete through

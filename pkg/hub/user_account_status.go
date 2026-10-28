@@ -16,9 +16,11 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"reflect"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -36,11 +38,12 @@ import (
 //     handler serves it;
 //   - the user access token checks (ValidateToken, bearerStillValid);
 //   - the live-connection checks (conduitUserStatus, relayUserIdentity,
-//     conduitRenewalIdentity).
+//     conduitRenewalIdentity);
+//   - the scheduled-run principal check (scheduledUserAccount, called by
+//     resolveScheduledUser).
 //
-// Code that reads a users row for its own purpose may still apply the same
-// status rule inline (for example resolveScheduledUser, which maps every
-// non-active outcome, including a nil row, to reasonPrincipalInactive).
+// For the checks listed above, checkUserAccount is the one implementation
+// of the rule: none of them reads the account status itself.
 //
 // The rule: an existing users row with status active passes. A missing row
 // denies a local user (user, dev); a federated user with no row passes
@@ -57,7 +60,9 @@ type userRowReader interface {
 // activeUserPredicate to it. It returns the row when the lookup found one
 // (even when the rule denies it, so a caller can tell a suspended account
 // from another refusal) and the predicate's error. A nil users reader, and
-// a lookup that returns neither a row nor an error, is a lookup fault. Principals that are not users pass with no lookup.
+// a lookup that returns neither a row nor an error, is a lookup fault; the
+// latter also wraps errUserLookupNoRow. Principals that are not users pass
+// with no lookup.
 func checkUserAccount(ctx context.Context, users userRowReader, principal PrincipalContext) (*store.User, error) {
 	if NormalizePrincipalType(string(principal.Kind)) != store.RoleBindingPrincipalUser {
 		return nil, nil
@@ -69,7 +74,7 @@ func checkUserAccount(ctx context.Context, users userRowReader, principal Princi
 	if err == nil && user == nil {
 		// Neither a row nor an error: a store inconsistency, not a
 		// decision about the account.
-		return nil, projectAccessLookupFault(fmt.Errorf("%w: user lookup returned no user", ErrProjectAccessDenied))
+		return nil, projectAccessLookupFault(fmt.Errorf("%w: %w", ErrProjectAccessDenied, errUserLookupNoRow))
 	}
 	if err != nil {
 		user = nil
@@ -77,14 +82,26 @@ func checkUserAccount(ctx context.Context, users userRowReader, principal Princi
 	return user, activeUserPredicate(principal, user, err)
 }
 
+// errUserLookupNoRow is wrapped by checkUserAccount's fault for a lookup
+// that returned neither a row nor an error.
+var errUserLookupNoRow = errors.New("user lookup returned no user")
+
 // isNilUserRowReader reports whether r is nil, including a typed nil
-// store.UserStore held in the interface.
+// pointer (or other nilable value) held in the interface. Comparing the
+// interface, or an interface it is asserted to, with nil does not detect a
+// typed nil, because the interface still carries the dynamic type; the
+// readers passed here are of arbitrary concrete types, so reflection is
+// used rather than a list of known types. reflect.ValueOf yields the
+// dynamic (concrete) kind, never reflect.Interface, so that kind is not
+// listed.
 func isNilUserRowReader(r userRowReader) bool {
 	if r == nil {
 		return true
 	}
-	if s, ok := r.(store.UserStore); ok && s == nil {
-		return true
+	v := reflect.ValueOf(r)
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan:
+		return v.IsNil()
 	}
 	return false
 }

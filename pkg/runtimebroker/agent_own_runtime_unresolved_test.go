@@ -93,7 +93,8 @@ func (f *unresolvedFixture) editSettings(t *testing.T, old, repl string) {
 	}
 }
 
-// addAgent adds another agent with savedProfile to the fixture's project.
+// addAgent adds another agent provisioned with savedProfile to the
+// fixture's project.
 func (f *unresolvedFixture) addAgent(t *testing.T, name, savedProfile string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(f.projectDir, "agents", name), 0o755); err != nil {
@@ -106,6 +107,9 @@ func (f *unresolvedFixture) addAgent(t *testing.T, name, savedProfile string) {
 	info, _ := json.Marshal(api.AgentInfo{Name: name, Profile: savedProfile, HarnessConfig: "default"})
 	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), info, 0o644); err != nil {
 		t.Fatal(err)
+	}
+	if savedProfile != "" {
+		writeProvisionedProfile(t, f.projectDir, name, savedProfile)
 	}
 }
 

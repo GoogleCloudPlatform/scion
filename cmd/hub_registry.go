@@ -160,6 +160,12 @@ var hubResponds = func(endpoint string, fanOut bool) error {
 	return hubclient.HintProxyError(err)
 }
 
+// printUnreachableHub prints the warning for a hub at endpoint that did not
+// respond to the health check of 'hub add' or 'config set hub.endpoint'.
+func printUnreachableHub(stderr io.Writer, endpoint string, err error) {
+	_, _ = fmt.Fprintf(stderr, "Warning: the hub at %s did not respond: %v\n", endpoint, err)
+}
+
 // hubAuthLabel is the AUTH column of 'hub list' for info, one of the four
 // labels: "oauth (<user>)", "dev", "env token" or "none". A token that is
 // not a login (SCION_HUB_TOKEN, SCION_AUTH_TOKEN or the agent token file)
@@ -281,7 +287,7 @@ func hubAdd(out, stderr io.Writer, name, url string, use bool) error {
 		_, _ = fmt.Fprintf(out, "Now using hub '%s'.\n", name)
 	}
 	if healthErr != nil {
-		_, _ = fmt.Fprintf(stderr, "Warning: the hub at %s did not respond: %v\n", endpoint, healthErr)
+		printUnreachableHub(stderr, endpoint, healthErr)
 	}
 	if info.MethodType == "none" {
 		_, _ = fmt.Fprintf(out, "Not logged in to hub '%s'. Run: scion hub auth login --hub %s\n", name, name)

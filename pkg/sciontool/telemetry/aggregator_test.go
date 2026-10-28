@@ -56,10 +56,10 @@ func TestAggregator_BasicFlow(t *testing.T) {
 	a.StartSession("session-abc")
 
 	// Record some tool calls
-	a.RecordToolEnd("read_file", "")
-	a.RecordToolEnd("read_file", "")
-	a.RecordToolEnd("write_file", "")
-	a.RecordToolEnd("shell_execute", "command failed")
+	a.RecordToolEnd("read_file", ToolSucceeded)
+	a.RecordToolEnd("read_file", ToolSucceeded)
+	a.RecordToolEnd("write_file", ToolSucceeded)
+	a.RecordToolEnd("shell_execute", ToolFailed)
 
 	// Record model calls
 	a.RecordModelEnd(1000, 200, 500, 0)
@@ -165,7 +165,7 @@ func TestAggregator_StartSessionResets(t *testing.T) {
 	}
 
 	a.StartSession("session-1")
-	a.RecordToolEnd("read_file", "")
+	a.RecordToolEnd("read_file", ToolSucceeded)
 	a.RecordModelEnd(1000, 200, 500, 0)
 
 	// Start a new session — should reset
@@ -256,7 +256,7 @@ func TestAggregator_Concurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < opsPerGoroutine; j++ {
-				a.RecordToolEnd("read_file", "")
+				a.RecordToolEnd("read_file", ToolSucceeded)
 			}
 		}()
 	}
@@ -317,7 +317,7 @@ func TestAggregator_MissedSessionStart(t *testing.T) {
 	a := newTestAggregator()
 
 	a.ObserveSession("session-late")
-	a.RecordToolEnd("read_file", "")
+	a.RecordToolEnd("read_file", ToolSucceeded)
 	a.ObserveSession("session-late")
 	a.RecordModelEnd(100, 20, 0, 0)
 	a.ObserveSession("session-late")
@@ -452,7 +452,7 @@ func TestAggregator_RepeatedSessionStartSameIDKeepsCounts(t *testing.T) {
 	a.StartSession("s1")
 	started := a.startedAt
 	a.RecordModelEnd(100, 10, 0, 0)
-	a.RecordToolEnd("Bash", "")
+	a.RecordToolEnd("Bash", ToolSucceeded)
 	a.RecordTurn()
 	a.StartSession("s1")
 	a.RecordModelEnd(5, 1, 0, 0)
@@ -492,7 +492,7 @@ func TestAggregator_RepeatedSessionStartEmptyIDResets(t *testing.T) {
 
 	a.StartSession("")
 	a.RecordModelEnd(100, 10, 0, 0)
-	a.RecordToolEnd("Bash", "")
+	a.RecordToolEnd("Bash", ToolSucceeded)
 	a.RecordTurn()
 	a.StartSession("")
 	summary := a.Finalize(0, 0, 0, 0, "")

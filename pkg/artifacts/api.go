@@ -81,6 +81,12 @@ type ArtifactResponse struct {
 	// names the steward clause: "project_owner" (an owner of the home
 	// project) or "delegator" (the user who delegated to the owning agent).
 	ShareAuthority string `json:"shareAuthority,omitempty"`
+	// CanRetire, on a GET of the artifact or of one of its versions, is
+	// true when the caller may delete it: the decision DELETE /{id} makes
+	// for the same request (retireAuthority): the owner, an admin grantee,
+	// a steward, or an owner or admin of its home project (the custodian
+	// clause), each a user whose credential permits artifact.manage there.
+	CanRetire bool `json:"canRetire,omitempty"`
 	// CanPublish, on a GET of the artifact or of one of its versions, is
 	// true when the caller may publish new versions of it of any kind
 	// (edit, upload or review; see canWriteErr): the decision POST

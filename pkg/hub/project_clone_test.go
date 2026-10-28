@@ -662,6 +662,8 @@ func TestProjectClone_GitRemoteOverride_NonGitTemplate(t *testing.T) {
 		store.LabelCloneURL:      "https://github.com/acme/notebooks.git",
 		store.LabelSourceURL:     overrideURL,
 		store.LabelDefaultBranch: "main",
+		// A clone is created on the hub (server-owned origin label).
+		store.LabelProjectOrigin: store.ProjectOriginHub,
 	}, clone.Labels)
 
 	stored, err := s.GetProject(ctx, clone.ID)

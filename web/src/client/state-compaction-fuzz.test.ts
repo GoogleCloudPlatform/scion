@@ -142,7 +142,7 @@ function makeGenerators(rand: () => number) {
     const c = pick([MISSING, { r: 1 }]);
     if (c !== MISSING) o._capabilities = c;
     if (rand() < 0.5) o.message = 'rest';
-    return o as Agent;
+    return o as unknown as Agent;
   }
 
   return { genDelta, genRest };

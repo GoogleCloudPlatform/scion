@@ -637,9 +637,9 @@ func TestDeriveTemplateIndexFromDir_NameBased(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			got := deriveTemplateIndexFromDir(dir, tt.name)
+			got := deriveTemplateIndexForTest(t, dir, tt.name)
 			if got.Harness != tt.expected {
-				t.Errorf("deriveTemplateIndexFromDir(%q, %q).Harness = %q, want %q", dir, tt.name, got.Harness, tt.expected)
+				t.Errorf("deriveTemplateIndexFromCollected(%q, %q).Harness = %q, want %q", dir, tt.name, got.Harness, tt.expected)
 			}
 			if got.DefaultHarnessConfig != "" {
 				t.Errorf("expected empty DefaultHarnessConfig for name-based, got %q", got.DefaultHarnessConfig)
@@ -657,7 +657,7 @@ func TestDeriveTemplateIndexFromDir_FromConfigFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := deriveTemplateIndexFromDir(dir, "my-template")
+	got := deriveTemplateIndexForTest(t, dir, "my-template")
 	if got.Harness != "claude" {
 		t.Errorf("expected Harness 'claude' from config, got %q", got.Harness)
 	}
@@ -675,7 +675,7 @@ func TestDeriveTemplateIndexFromDir_DefaultHarnessConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := deriveTemplateIndexFromDir(dir, "my-template")
+	got := deriveTemplateIndexForTest(t, dir, "my-template")
 	if got.Harness != "gemini-cli" {
 		t.Errorf("expected Harness 'gemini-cli', got %q", got.Harness)
 	}
@@ -693,7 +693,7 @@ func TestDeriveTemplateIndexFromDir_HarnessField(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := deriveTemplateIndexFromDir(dir, "my-template")
+	got := deriveTemplateIndexForTest(t, dir, "my-template")
 	if got.Harness != "codex" {
 		t.Errorf("expected Harness 'codex' from config, got %q", got.Harness)
 	}
@@ -711,7 +711,7 @@ func TestDeriveTemplateIndexFromDir_CustomDefaultHarnessConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := deriveTemplateIndexFromDir(dir, "my-template")
+	got := deriveTemplateIndexForTest(t, dir, "my-template")
 	if got.Harness != "" {
 		t.Errorf("expected empty Harness for unknown config name 'adk', got %q", got.Harness)
 	}
@@ -756,6 +756,57 @@ func TestImportTemplatesFromWorkspace_ImportsTemplates(t *testing.T) {
 	}
 	if result.Items[0].Scope != store.TemplateScopeProject {
 		t.Errorf("expected project scope, got %q", result.Items[0].Scope)
+	}
+}
+
+func TestImportTemplatesFromWorkspace_LinkedProject(t *testing.T) {
+	for _, scionDir := range []bool{false, true} {
+		t.Run(fmt.Sprintf("scionDir=%t", scionDir), func(t *testing.T) {
+			f := newWorkspaceLayoutFixture(t)
+			f.srv.SetStorage(newMockStorage("test-bucket"))
+			ctx := context.Background()
+			project := createTestGitProject(t, f.srv, "Linked Import", "github.com/test/linked-import")
+			b := addProviderBroker(t, f.s, project.ID, "embedded")
+			f.srv.SetEmbeddedBrokerID(b.ID)
+			checkout := t.TempDir()
+			templateDir := filepath.Join(checkout, config.DotScion, "templates", "example")
+			if err := os.MkdirAll(templateDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(templateDir, "scion-agent.yaml"), []byte("harness: claude\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			localPath := checkout
+			if scionDir {
+				localPath = filepath.Join(checkout, config.DotScion) + string(os.PathSeparator)
+			}
+			if err := f.s.AddProjectProvider(ctx, &store.ProjectProvider{
+				ProjectID: project.ID, BrokerID: b.ID, BrokerName: b.Name, Status: b.Status, LocalPath: localPath,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			discovered, _, err := f.srv.discoverFromWorkspace(ctx, project, "/.scion/templates", f.srv.templateImportKind())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(discovered, []string{"example"}) {
+				t.Fatalf("expected discovery [example], got %v", discovered)
+			}
+			imported, err := f.srv.importTemplatesFromWorkspace(ctx, project, "/.scion/templates")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(imported, []string{"example"}) {
+				t.Fatalf("expected import [example], got %v", imported)
+			}
+			tmpl, err := f.s.GetTemplateBySlug(ctx, "example", store.TemplateScopeProject, project.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tmpl.Scope != store.TemplateScopeProject || tmpl.ProjectID != project.ID {
+				t.Fatalf("unexpected template scope: %q, project: %q", tmpl.Scope, tmpl.ProjectID)
+			}
+		})
 	}
 }
 
@@ -1384,13 +1435,17 @@ const testLsRemoteHeads = "1111111111111111111111111111111111111111\trefs/heads/
 	"3333333333333333333333333333333333333333\trefs/heads/feature/x\n"
 
 // assertLsRemoteCalledWithToken checks that branch resolution went through the
-// stubbed ls-remote seam exactly once, authenticated with the project token.
-// If a regression bypassed the seam, real git would run and this fails.
+// stubbed ls-remote seam exactly once, for the anonymous repository URL, and
+// was given the project token separately. If a regression bypassed the seam,
+// real git would run and this fails.
 func assertLsRemoteCalledWithToken(t *testing.T, stub *gitLsRemoteStub) {
 	t.Helper()
-	want := "https://x-access-token:my-secret-token-12345@github.com/chiefkarlin/scion-experiments.git"
-	if got := stub.URLs(); len(got) != 1 || got[0] != want {
-		t.Errorf("expected exactly one stubbed ls-remote call for %q, got %q", want, got)
+	wantURL := "https://github.com/chiefkarlin/scion-experiments.git"
+	if got := stub.URLs(); len(got) != 1 || got[0] != wantURL {
+		t.Errorf("expected exactly one stubbed ls-remote call for %q, got %q", wantURL, got)
+	}
+	if got := stub.Tokens(); len(got) != 1 || got[0] != "my-secret-token-12345" {
+		t.Errorf("expected the project token to be passed to ls-remote once, got %d token(s)", len(got))
 	}
 }
 

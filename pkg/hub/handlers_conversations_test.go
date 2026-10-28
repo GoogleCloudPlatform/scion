@@ -1258,6 +1258,44 @@ func TestAddParticipant_AgentNotFound(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, rr.Code)
 }
 
+// TestAddParticipant_SoftDeletedAgentRefused: adding a soft-deleted agent
+// of the conversation's own project is refused like an unknown agent, and
+// no participant row is written.
+func TestAddParticipant_SoftDeletedAgentRefused(t *testing.T) {
+	srv, s := testServer(t)
+	_, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+
+	deletedAgent := &store.Agent{
+		ID:        api.NewUUID(),
+		Name:      "soft-deleted-participant",
+		Slug:      "soft-deleted-participant",
+		ProjectID: *conv.ProjectID,
+		Phase:     "terminated",
+		DeletedAt: time.Now().UTC(),
+	}
+	require.NoError(t, s.CreateAgent(context.Background(), deletedAgent))
+
+	body := addParticipantRequest{
+		PrincipalKind: "agent",
+		PrincipalID:   deletedAgent.ID,
+	}
+	bodyBytes, _ := json.Marshal(body)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/conversations/"+conv.ID+"/participants", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(agentContextWithScopes(agent.ID, convProjectID(conv), []AgentTokenScope{ScopeProjectRead}))
+	rr := httptest.NewRecorder()
+	srv.handleAddParticipant(rr, req, conv.ID)
+
+	require.Equal(t, http.StatusNotFound, rr.Code, "body: %s", rr.Body.String())
+	require.Contains(t, rr.Body.String(), "agent not found")
+
+	isParticipant, err := isConversationParticipant(context.Background(), s, conv.ID, "agent", deletedAgent.ID)
+	require.NoError(t, err)
+	require.False(t, isParticipant, "a soft-deleted agent must not become a participant")
+}
+
 func TestLeaveConversation_HappyPath(t *testing.T) {
 	srv, s := testServer(t)
 	_, agent, conv := setupConvTestData(t, s)

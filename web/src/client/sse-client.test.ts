@@ -337,8 +337,10 @@ describe('SSEClient connection events', () => {
     const disconnected = vi.fn();
     client.addEventListener('disconnected', disconnected);
 
-    // The hub asks the client to reconnect before a clean shutdown.
+    // The hub asks the client to reconnect before a clean shutdown; the
+    // reopen waits the first reconnect's jitter (2 s x 0.5 here).
     latest().dispatchEvent(new Event('reconnect'));
+    vi.advanceTimersByTime(1_000);
     expect(FakeEventSource.instances).toHaveLength(2);
     latest().simulateDrop();
 
@@ -358,16 +360,20 @@ describe('SSEClient connection events', () => {
 });
 
 describe('SSEClient jitter', () => {
-  it('spreads retries so open tabs do not reconnect in lockstep', () => {
+  it('spreads later retries so open tabs do not reconnect in lockstep', async () => {
     vi.spyOn(Math, 'random').mockReturnValue(1);
     const client = connectAndOpen();
     latest().simulateDrop();
-
-    // 1s base plus the full +10% of proportional jitter.
-    vi.advanceTimersByTime(1_099);
-    expect(FakeEventSource.instances).toHaveLength(1);
-    vi.advanceTimersByTime(1);
+    // The first retry is full jitter: 2 s x 1.
+    vi.advanceTimersByTime(2_000);
     expect(FakeEventSource.instances).toHaveLength(2);
+    await failHandshake();
+
+    // The second keeps the proportional jitter: 2 s base plus the full +10%.
+    vi.advanceTimersByTime(2_199);
+    expect(FakeEventSource.instances).toHaveLength(2);
+    vi.advanceTimersByTime(1);
+    expect(FakeEventSource.instances).toHaveLength(3);
     client.disconnect();
   });
 });
@@ -474,6 +480,7 @@ it('reports a server reconnect gap before the replacement is ready', () => {
   latest().dispatchEvent(new Event('reconnect'));
   expect(disconnected).toHaveBeenCalledTimes(1);
   expect(connected).not.toHaveBeenCalled();
+  vi.advanceTimersByTime(1_000);
   latest().simulateOpen();
   expect(connected).toHaveBeenCalledTimes(1);
   client.disconnect();
@@ -806,5 +813,327 @@ describe('SSEClient stale connection detection', () => {
     setVisibility('visible');
     window.dispatchEvent(new Event('online'));
     expect(FakeEventSource.instances).toHaveLength(1);
+  });
+});
+
+describe('SSEClient hidden-tab close (ptone/scion#5235)', () => {
+  /** A client with the hidden-tab close on, connected and live. */
+  function hiddenCloseClient(enabled = true): SSEClient {
+    const client = new SSEClient('/events', { hiddenCloseEnabled: (): boolean => enabled });
+    client.connect(['agent.>']);
+    latest().simulateOpen();
+    return client;
+  }
+
+  it('closes the stream after 60 s hidden, reports the drop and does not reconnect', () => {
+    const client = hiddenCloseClient();
+    const disconnected = vi.fn();
+    client.addEventListener('disconnected', disconnected);
+
+    setVisibility('hidden');
+    vi.advanceTimersByTime(59_999);
+    expect(latest().closed).toBe(false);
+    vi.advanceTimersByTime(1);
+
+    expect(latest().closed).toBe(true);
+    expect(client.connected).toBe(false);
+    expect(disconnected).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(30 * 60_000);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    client.disconnect();
+  });
+
+  it('keeps the stream when the tab is shown again before 60 s', () => {
+    const client = hiddenCloseClient();
+    setVisibility('hidden');
+    vi.advanceTimersByTime(59_000);
+    setVisibility('visible');
+
+    // Past the 60 s mark, and short of the resume staleness check, which
+    // would replace a connection silent for 75 s.
+    vi.advanceTimersByTime(10_000);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(latest().closed).toBe(false);
+    client.disconnect();
+  });
+
+  it('does not restart the countdown when hidden twice', () => {
+    const client = hiddenCloseClient();
+    setVisibility('hidden');
+    vi.advanceTimersByTime(30_000);
+    document.dispatchEvent(new Event('visibilitychange'));
+    vi.advanceTimersByTime(30_000);
+    expect(latest().closed).toBe(true);
+    client.disconnect();
+  });
+
+  it('reconnects at once when shown after the close, and reports the recovery', () => {
+    const client = hiddenCloseClient();
+    const connected = vi.fn();
+    client.addEventListener('connected', connected);
+    setVisibility('hidden');
+    vi.advanceTimersByTime(60_000);
+
+    setVisibility('visible');
+
+    // No timer advanced: the reopen happened on the transition.
+    expect(FakeEventSource.instances).toHaveLength(2);
+    expect(client.reconnectAttemptCount).toBe(0);
+    latest().simulateOpen();
+    expect(connected).toHaveBeenCalledTimes(1);
+    client.disconnect();
+  });
+
+  it('cancels a retry pending when the countdown expires', () => {
+    const client = hiddenCloseClient();
+    setVisibility('hidden');
+    vi.advanceTimersByTime(59_500);
+    latest().simulateDrop();
+
+    vi.advanceTimersByTime(500);
+    vi.advanceTimersByTime(10 * 60_000);
+    expect(FakeEventSource.instances).toHaveLength(1);
+
+    setVisibility('visible');
+    expect(FakeEventSource.instances).toHaveLength(2);
+    client.disconnect();
+  });
+
+  it('cancels an auth probe in flight when the countdown expires', async () => {
+    let settle: (v: unknown) => void = () => {};
+    vi.stubGlobal('fetch', vi.fn().mockReturnValue(new Promise((res) => (settle = res))));
+    const client = new SSEClient('/events', { hiddenCloseEnabled: (): boolean => true });
+    client.connect(['agent.>']);
+    setVisibility('hidden');
+    latest().simulateHandshakeFailure();
+
+    vi.advanceTimersByTime(60_000);
+    settle({ status: 200, redirected: false });
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    client.disconnect();
+  });
+
+  it('a bfcache restore after the close reopens, and later drops retry again', () => {
+    const client = hiddenCloseClient();
+    setVisibility('hidden');
+    vi.advanceTimersByTime(60_000);
+
+    // The page comes back from the back/forward cache with no
+    // visibilitychange of its own.
+    visibility = 'visible';
+    window.dispatchEvent(pageShow(true));
+    expect(FakeEventSource.instances).toHaveLength(2);
+    latest().simulateOpen();
+
+    latest().simulateDrop();
+    vi.advanceTimersByTime(2_000);
+    expect(FakeEventSource.instances).toHaveLength(3);
+    client.disconnect();
+  });
+
+  it('applies the countdown to a connection opened while hidden', () => {
+    setVisibility('hidden');
+    const client = new SSEClient('/events', { hiddenCloseEnabled: (): boolean => true });
+    client.connect(['agent.>']);
+    latest().simulateOpen();
+
+    vi.advanceTimersByTime(60_000);
+    expect(latest().closed).toBe(true);
+    client.disconnect();
+  });
+
+  it('keeps the stream while hidden when the experiment is off', () => {
+    const client = hiddenCloseClient(false);
+    setVisibility('hidden');
+    vi.advanceTimersByTime(10 * 60_000);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(latest().closed).toBe(false);
+    client.disconnect();
+  });
+
+  it('follows the web.sse_hidden_tab_close experiment by default', () => {
+    window.__SCION_FEATURES__ = { 'web.sse_hidden_tab_close': true };
+    try {
+      const client = connectAndOpen();
+      setVisibility('hidden');
+      vi.advanceTimersByTime(60_000);
+      expect(latest().closed).toBe(true);
+      client.disconnect();
+    } finally {
+      delete window.__SCION_FEATURES__;
+    }
+  });
+
+  it('a disconnect cancels the countdown, and a later connect starts clean', () => {
+    const client = hiddenCloseClient();
+    setVisibility('hidden');
+    client.disconnect();
+    vi.advanceTimersByTime(60_000);
+
+    setVisibility('visible');
+    client.connect(['agent.>']);
+    latest().simulateOpen();
+    vi.advanceTimersByTime(10 * 60_000);
+    expect(FakeEventSource.instances).toHaveLength(2);
+    expect(latest().closed).toBe(false);
+    client.disconnect();
+  });
+});
+
+describe('SSEClient first reconnect full jitter (ptone/scion#5236)', () => {
+  /** A live client whose jitter draws come from `draws`, in order. */
+  function jitterClient(draws: number[]): SSEClient {
+    let i = 0;
+    const client = new SSEClient('/events', {
+      random: (): number => {
+        const r = draws[i++];
+        if (r === undefined) throw new Error('jitter draws exhausted');
+        return r;
+      },
+      hiddenCloseEnabled: (): boolean => false,
+    });
+    client.connect(['agent.>']);
+    latest().simulateOpen();
+    return client;
+  }
+
+  /** Assert the next EventSource opens exactly `ms` from now, not a tick sooner. */
+  function expectReopenAfter(ms: number): void {
+    const before = FakeEventSource.instances.length;
+    if (ms > 0) {
+      vi.advanceTimersByTime(ms - 1);
+      expect(FakeEventSource.instances).toHaveLength(before);
+    }
+    vi.advanceTimersByTime(1);
+    expect(FakeEventSource.instances).toHaveLength(before + 1);
+  }
+
+  it.each([
+    [0, 0],
+    [0.25, 500],
+    [0.5, 1_000],
+    [0.75, 1_500],
+  ])('waits random(0, 2 s) after a server reconnect event (draw %s -> %s ms)', (draw, ms) => {
+    const client = jitterClient([draw]);
+    latest().dispatchEvent(new Event('reconnect'));
+    expectReopenAfter(ms);
+    client.disconnect();
+  });
+
+  it.each([
+    [0, 0],
+    [0.25, 500],
+    [0.5, 1_000],
+    [0.75, 1_500],
+  ])('waits random(0, 2 s) after a mid-stream drop (draw %s -> %s ms)', (draw, ms) => {
+    const client = jitterClient([draw]);
+    latest().simulateDrop();
+    expectReopenAfter(ms);
+    client.disconnect();
+  });
+
+  it.each([
+    [0, 0],
+    [0.5, 1_000],
+    [0.75, 1_500],
+  ])('waits random(0, 2 s) after superseded with reason max_age (draw %s -> %s ms)', (draw, ms) => {
+    const client = jitterClient([draw]);
+    const disconnected = vi.fn();
+    client.addEventListener('disconnected', disconnected);
+    const old = latest();
+    old.dispatchEvent(new MessageEvent('superseded', { data: '{"reason":"max_age"}' }));
+    expect(old.closed).toBe(true);
+    expect(disconnected).toHaveBeenCalledTimes(1);
+    expectReopenAfter(ms);
+    client.disconnect();
+  });
+
+  it('leaves a superseded stream with another reason, or unparsable data, alone', () => {
+    const client = jitterClient([]);
+    latest().dispatchEvent(new MessageEvent('superseded', { data: '{"reason":"tab"}' }));
+    latest().dispatchEvent(new MessageEvent('superseded', { data: 'not json' }));
+    expect(latest().closed).toBe(false);
+    vi.advanceTimersByTime(5_000);
+    expect(FakeEventSource.instances).toHaveLength(1);
+    client.disconnect();
+  });
+
+  it('keeps proportional jitter for the attempts after the first', async () => {
+    // Draw 0.5 feeds the full jitter, then 0 and 1 are the -10 % and +10 %
+    // ends of the proportional jitter on the 2 s and 4 s backoffs.
+    const client = jitterClient([0.5, 0, 1]);
+    latest().simulateDrop();
+    expectReopenAfter(1_000);
+    await failHandshake();
+    expectReopenAfter(1_800);
+    await failHandshake();
+    expectReopenAfter(4_400);
+    client.disconnect();
+  });
+
+  it('keeps the 1 s proportional backoff for a first connect that never opened', async () => {
+    const client = new SSEClient('/events', {
+      random: (): number => 0,
+      hiddenCloseEnabled: (): boolean => false,
+    });
+    client.connect(['agent.>']);
+    await failHandshake();
+    expectReopenAfter(900);
+    client.disconnect();
+  });
+
+  it('uses Math.random by default', () => {
+    for (const [draw, ms] of [
+      [0.25, 500],
+      [0.75, 1_500],
+    ]) {
+      vi.spyOn(Math, 'random').mockReturnValue(draw);
+      const client = connectAndOpen();
+      latest().simulateDrop();
+      expectReopenAfter(ms);
+      client.disconnect();
+    }
+  });
+
+  it('spreads the reconnects of many clients after a server close over the jitter window', () => {
+    // 50 clients of one instance with a seeded, uniform RNG: the reconnects
+    // land across [0, 2 s), not in one tick.
+    let seed = 42;
+    const rng = (): number => {
+      seed = (seed * 1_103_515_245 + 12_345) % 2 ** 31;
+      return seed / 2 ** 31;
+    };
+    const clients: SSEClient[] = [];
+    const opened: number[] = [];
+    for (let n = 0; n < 50; n++) {
+      const client = new SSEClient('/events', {
+        random: rng,
+        hiddenCloseEnabled: (): boolean => false,
+      });
+      client.connect([`agent.a${n}.>`]);
+      latest().simulateOpen();
+      clients.push(client);
+    }
+    const start = Date.now();
+    const live = [...FakeEventSource.instances];
+    for (const es of live) es.dispatchEvent(new Event('reconnect'));
+    const seen = FakeEventSource.instances.length;
+    for (let ms = 0; ms < 2_000; ms++) {
+      vi.advanceTimersByTime(1);
+      for (let k = seen + opened.length; k < FakeEventSource.instances.length; k++) {
+        opened.push(Date.now() - start);
+      }
+    }
+
+    expect(opened).toHaveLength(50);
+    expect(Math.min(...opened)).toBeLessThan(400);
+    expect(Math.max(...opened)).toBeGreaterThan(1_600);
+    // No 100 ms bucket holds more than 20 % of the clients.
+    const buckets = new Map<number, number>();
+    for (const t of opened)
+      buckets.set(Math.floor(t / 100), (buckets.get(Math.floor(t / 100)) ?? 0) + 1);
+    expect(Math.max(...buckets.values())).toBeLessThanOrEqual(10);
+    for (const client of clients) client.disconnect();
   });
 });

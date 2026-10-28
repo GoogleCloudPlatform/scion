@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -181,7 +182,7 @@ func TestBrokerJoinToken_MintThenJoinWithoutUserAuth(t *testing.T) {
 	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/runtime-brokers/"+minted.BrokerID+"/heartbeat", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	require.NoError(t, srv.brokerAuthService.SignRequest(req, minted.BrokerID, key))
+	require.NoError(t, (&apiclient.HMACAuth{BrokerID: minted.BrokerID, SecretKey: key}).ApplyAuth(req))
 	hb := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(hb, req)
 	assert.Equal(t, http.StatusOK, hb.Code, "HMAC with the joined secret should authenticate; body: %s", hb.Body.String())

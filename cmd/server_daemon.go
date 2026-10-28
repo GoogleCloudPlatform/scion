@@ -144,6 +144,15 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	if cmd.Flags().Changed("base-url") {
 		daemonArgs = append(daemonArgs, fmt.Sprintf("--base-url=%s", webBaseURL))
 	}
+	// --keyring-file is a path, not key material: the foreground child
+	// reads the file itself (loadServerKeyring), so forwarding the path
+	// exposes nothing in the process list or server-args.json.
+	if cmd.Flags().Changed("keyring-file") {
+		daemonArgs = append(daemonArgs, fmt.Sprintf("--keyring-file=%s", serverKeyringFile))
+	}
+	if cmd.Flags().Changed("keyring-file-allow-world-readable") {
+		daemonArgs = append(daemonArgs, fmt.Sprintf("--keyring-file-allow-world-readable=%t", serverKeyringAllowWorldReadable))
+	}
 	if cmd.Flags().Changed("admin-emails") {
 		// Forwarded as a single comma-joined value rather than repeated flags:
 		// the daemon argv is persisted to server-args.json for restart, and the
@@ -570,9 +579,27 @@ func runServerRestart(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Server restarted (PID: %d)\n", pid)
 	fmt.Printf("Log file: %s\n", daemon.GetLogPathComponent(serverDaemonComponent, globalDir))
+	if restartedWorkstation(daemonArgs, config.LoadServerMode()) {
+		// A restarted workstation server may not accept the browser's
+		// old session; the web UI signs in only from a sign-in link.
+		fmt.Println("To sign in to the web UI, run: scion server open")
+	}
 	fmt.Println()
 
 	return nil
+}
+
+// restartedWorkstation reports whether a server restarted with daemonArgs
+// runs in workstation mode: neither its args nor the settings' server mode
+// (settingsMode, as config.LoadServerMode returns it) select hosted mode.
+func restartedWorkstation(daemonArgs []string, settingsMode string) bool {
+	for _, a := range daemonArgs {
+		switch a {
+		case "--hosted", "--hosted=true", "--production", "--production=true":
+			return false
+		}
+	}
+	return settingsMode != "hosted"
 }
 
 // Composite /healthz status values (see pkg/hub HealthStatus* constants;
@@ -1142,24 +1169,41 @@ func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir strin
 		// then the hub is not asked and nothing is opened.
 		msg, serverUp := quickstartReadyMessage(quickstartWaitReady(displayHost, wPort, quickstartReadyTimeout))
 		status, statusErr := onboardingStatusResult{}, errOnboardingStatusNotAsked
+		// The token is sent only to the local server (the status and
+		// sign-in link endpoints), never printed: the settings token if
+		// one is set, else the token file's contents.
+		serverToken := serverDevToken(serverCfg, globalDir)
 		if serverUp && hubEnabled {
-			// The token is sent only to the local server's status endpoint,
-			// never printed: the settings token if one is set, else the
-			// token file's contents.
-			statusToken := serverCfg.Auth.Token
-			if statusToken == "" {
-				statusToken = readDevTokenFile(tokenFile)
-			}
-			status, statusErr = quickstartOnboardingStatus(baseURL, statusToken)
+			status, statusErr = quickstartOnboardingStatus(baseURL, serverToken)
 		}
 		if statusErr != nil {
 			slog.Debug("Onboarding status unavailable; using the settings-file signal", "error", statusErr)
 		}
 
-		url := baseURL + quickstartWebPath(status, statusErr, settingsMissingBeforeStart)
+		webPath := quickstartWebPath(status, statusErr, settingsMissingBeforeStart)
+		url := baseURL + webPath
 		fmt.Printf("Web UI:  %s\n", url)
 		if msg != "" {
 			fmt.Println(msg)
+		}
+		// With dev auth the web UI signs a browser in only from a
+		// single-use sign-in link: open that instead of the bare URL.
+		openURL := url
+		if devAuth && serverUp {
+			if link, err := quickstartDevSignIn(baseURL, serverToken, webPath); err == nil {
+				openURL = link.URL
+				// The link is printed only to a terminal, so a redirected
+				// stdout or a log never records the code.
+				if quickstartStdoutIsTerminal() {
+					fmt.Printf("Sign in: %s\n", link.URL)
+					fmt.Printf("         (%s; run 'scion server open' for a new one)\n", link.expiresInText())
+				} else {
+					fmt.Println("To sign in to the web UI, run: scion server open")
+				}
+			} else {
+				slog.Debug("Dev sign-in link unavailable", "error", err)
+				fmt.Println("To sign in to the web UI, run: scion server open")
+			}
 		}
 		// The server runs in the global directory, so check the registry
 		// there: a registry set only in the current project does not keep
@@ -1170,7 +1214,7 @@ func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir strin
 
 		// Auto-open the browser in interactive terminals once the server is ready.
 		if serverUp && quickstartBrowserAllowed() {
-			_ = quickstartOpenBrowser(url)
+			_ = quickstartOpenBrowser(openURL)
 		}
 	}
 

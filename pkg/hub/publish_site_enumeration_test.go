@@ -138,6 +138,10 @@ func TestPersistedRowEffectEnumeration(t *testing.T) {
 	proxyExcluded := map[proxyCallKey]int{
 		// bp.PublishUserMessage: broker path to a user.
 		{"handlers_agent_messaging.go", "handleAgentOutboundMessage", "bp"}: 1,
+		// bp.PublishUserMessage after the handler stored the message (D2,
+		// ptone/scion#4596): deliverToUser sees StoredMessageID and runs only
+		// its post-persist steps.
+		{"attachments_send.go", "storeOutboundBeforeBroker", "bp"}: 1,
 		// nd.brokerProxy.PublishUserMessage: notification delivery.
 		{"notifications.go", "publishToBroker", "nd.brokerProxy"}: 1,
 		// p.PublishUserMessage: group fan-out to user recipients.

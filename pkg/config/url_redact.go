@@ -18,11 +18,14 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/urlredact"
 )
 
-// The query and fragment rules of RedactURL. pkg/apiclient keeps a copy of
-// them (redact.go), since it imports no scion package; change both
-// together.
+// The query, fragment and path parameter rules of RedactURL. pkg/apiclient
+// keeps a copy of them (redact.go), since it imports no scion package but
+// pkg/util/urlredact; change both together. The user info rule is not
+// copied: both use pkg/util/urlredact.
 
 // urlCredentialParamNames are query and fragment parameter names whose
 // value RedactURL masks, compared lower-cased. A name that contains
@@ -131,12 +134,9 @@ func redactURLParams(raw string) string {
 	return out
 }
 
-// urlSchemePrefix is a URL's scheme and "://", the anchored prefix the
-// user info rules (userInfoRe) also start with.
-const urlSchemePrefix = `[A-Za-z][A-Za-z0-9+.-]*://`
-
-// urlSchemePrefixRe matches urlSchemePrefix at the start of a string only.
-var urlSchemePrefixRe = regexp.MustCompile("^" + urlSchemePrefix)
+// urlSchemePrefixRe matches a URL's scheme and "://" at the start of a
+// string only.
+var urlSchemePrefixRe = regexp.MustCompile("^" + urlredact.SchemePrefix)
 
 // redactPathParams masks the credential values of the path parameters in
 // base (a URL up to its query, or only its path): each ";name=value" in a

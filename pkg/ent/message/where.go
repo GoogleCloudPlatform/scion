@@ -155,6 +155,16 @@ func RecipientProjectID(v uuid.UUID) predicate.Message {
 	return predicate.Message(sql.FieldEQ(FieldRecipientProjectID, v))
 }
 
+// AuthorizingUserID applies equality check predicate on the "authorizing_user_id" field. It's identical to AuthorizingUserIDEQ.
+func AuthorizingUserID(v string) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldAuthorizingUserID, v))
+}
+
+// DelegationGrantID applies equality check predicate on the "delegation_grant_id" field. It's identical to DelegationGrantIDEQ.
+func DelegationGrantID(v string) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldDelegationGrantID, v))
+}
+
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
 func Created(v time.Time) predicate.Message {
 	return predicate.Message(sql.FieldEQ(FieldCreated, v))
@@ -1278,6 +1288,156 @@ func RecipientProjectIDIsNil() predicate.Message {
 // RecipientProjectIDNotNil applies the NotNil predicate on the "recipient_project_id" field.
 func RecipientProjectIDNotNil() predicate.Message {
 	return predicate.Message(sql.FieldNotNull(FieldRecipientProjectID))
+}
+
+// AuthorizingUserIDEQ applies the EQ predicate on the "authorizing_user_id" field.
+func AuthorizingUserIDEQ(v string) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldAuthorizingUserID, v))
+}
+
+// AuthorizingUserIDNEQ applies the NEQ predicate on the "authorizing_user_id" field.
+func AuthorizingUserIDNEQ(v string) predicate.Message {
+	return predicate.Message(sql.FieldNEQ(FieldAuthorizingUserID, v))
+}
+
+// AuthorizingUserIDIn applies the In predicate on the "authorizing_user_id" field.
+func AuthorizingUserIDIn(vs ...string) predicate.Message {
+	return predicate.Message(sql.FieldIn(FieldAuthorizingUserID, vs...))
+}
+
+// AuthorizingUserIDNotIn applies the NotIn predicate on the "authorizing_user_id" field.
+func AuthorizingUserIDNotIn(vs ...string) predicate.Message {
+	return predicate.Message(sql.FieldNotIn(FieldAuthorizingUserID, vs...))
+}
+
+// AuthorizingUserIDGT applies the GT predicate on the "authorizing_user_id" field.
+func AuthorizingUserIDGT(v string) predicate.Message {
+	return predicate.Message(sql.FieldGT(FieldAuthorizingUserID, v))
+}
+
+// AuthorizingUserIDGTE applies the GTE predicate on the "authorizing_user_id" field.
+func AuthorizingUserIDGTE(v string) predicate.Message {
+	return predicate.Message(sql.FieldGTE(FieldAuthorizingUserID, v))
+}
+
+// AuthorizingUserIDLT applies the LT predicate on the "authorizing_user_id" field.
+func AuthorizingUserIDLT(v string) predicate.Message {
+	return predicate.Message(sql.FieldLT(FieldAuthorizingUserID, v))
+}
+
+// AuthorizingUserIDLTE applies the LTE predicate on the "authorizing_user_id" field.
+func AuthorizingUserIDLTE(v string) predicate.Message {
+	return predicate.Message(sql.FieldLTE(FieldAuthorizingUserID, v))
+}
+
+// AuthorizingUserIDContains applies the Contains predicate on the "authorizing_user_id" field.
+func AuthorizingUserIDContains(v string) predicate.Message {
+	return predicate.Message(sql.FieldContains(FieldAuthorizingUserID, v))
+}
+
+// AuthorizingUserIDHasPrefix applies the HasPrefix predicate on the "authorizing_user_id" field.
+func AuthorizingUserIDHasPrefix(v string) predicate.Message {
+	return predicate.Message(sql.FieldHasPrefix(FieldAuthorizingUserID, v))
+}
+
+// AuthorizingUserIDHasSuffix applies the HasSuffix predicate on the "authorizing_user_id" field.
+func AuthorizingUserIDHasSuffix(v string) predicate.Message {
+	return predicate.Message(sql.FieldHasSuffix(FieldAuthorizingUserID, v))
+}
+
+// AuthorizingUserIDIsNil applies the IsNil predicate on the "authorizing_user_id" field.
+func AuthorizingUserIDIsNil() predicate.Message {
+	return predicate.Message(sql.FieldIsNull(FieldAuthorizingUserID))
+}
+
+// AuthorizingUserIDNotNil applies the NotNil predicate on the "authorizing_user_id" field.
+func AuthorizingUserIDNotNil() predicate.Message {
+	return predicate.Message(sql.FieldNotNull(FieldAuthorizingUserID))
+}
+
+// AuthorizingUserIDEqualFold applies the EqualFold predicate on the "authorizing_user_id" field.
+func AuthorizingUserIDEqualFold(v string) predicate.Message {
+	return predicate.Message(sql.FieldEqualFold(FieldAuthorizingUserID, v))
+}
+
+// AuthorizingUserIDContainsFold applies the ContainsFold predicate on the "authorizing_user_id" field.
+func AuthorizingUserIDContainsFold(v string) predicate.Message {
+	return predicate.Message(sql.FieldContainsFold(FieldAuthorizingUserID, v))
+}
+
+// DelegationGrantIDEQ applies the EQ predicate on the "delegation_grant_id" field.
+func DelegationGrantIDEQ(v string) predicate.Message {
+	return predicate.Message(sql.FieldEQ(FieldDelegationGrantID, v))
+}
+
+// DelegationGrantIDNEQ applies the NEQ predicate on the "delegation_grant_id" field.
+func DelegationGrantIDNEQ(v string) predicate.Message {
+	return predicate.Message(sql.FieldNEQ(FieldDelegationGrantID, v))
+}
+
+// DelegationGrantIDIn applies the In predicate on the "delegation_grant_id" field.
+func DelegationGrantIDIn(vs ...string) predicate.Message {
+	return predicate.Message(sql.FieldIn(FieldDelegationGrantID, vs...))
+}
+
+// DelegationGrantIDNotIn applies the NotIn predicate on the "delegation_grant_id" field.
+func DelegationGrantIDNotIn(vs ...string) predicate.Message {
+	return predicate.Message(sql.FieldNotIn(FieldDelegationGrantID, vs...))
+}
+
+// DelegationGrantIDGT applies the GT predicate on the "delegation_grant_id" field.
+func DelegationGrantIDGT(v string) predicate.Message {
+	return predicate.Message(sql.FieldGT(FieldDelegationGrantID, v))
+}
+
+// DelegationGrantIDGTE applies the GTE predicate on the "delegation_grant_id" field.
+func DelegationGrantIDGTE(v string) predicate.Message {
+	return predicate.Message(sql.FieldGTE(FieldDelegationGrantID, v))
+}
+
+// DelegationGrantIDLT applies the LT predicate on the "delegation_grant_id" field.
+func DelegationGrantIDLT(v string) predicate.Message {
+	return predicate.Message(sql.FieldLT(FieldDelegationGrantID, v))
+}
+
+// DelegationGrantIDLTE applies the LTE predicate on the "delegation_grant_id" field.
+func DelegationGrantIDLTE(v string) predicate.Message {
+	return predicate.Message(sql.FieldLTE(FieldDelegationGrantID, v))
+}
+
+// DelegationGrantIDContains applies the Contains predicate on the "delegation_grant_id" field.
+func DelegationGrantIDContains(v string) predicate.Message {
+	return predicate.Message(sql.FieldContains(FieldDelegationGrantID, v))
+}
+
+// DelegationGrantIDHasPrefix applies the HasPrefix predicate on the "delegation_grant_id" field.
+func DelegationGrantIDHasPrefix(v string) predicate.Message {
+	return predicate.Message(sql.FieldHasPrefix(FieldDelegationGrantID, v))
+}
+
+// DelegationGrantIDHasSuffix applies the HasSuffix predicate on the "delegation_grant_id" field.
+func DelegationGrantIDHasSuffix(v string) predicate.Message {
+	return predicate.Message(sql.FieldHasSuffix(FieldDelegationGrantID, v))
+}
+
+// DelegationGrantIDIsNil applies the IsNil predicate on the "delegation_grant_id" field.
+func DelegationGrantIDIsNil() predicate.Message {
+	return predicate.Message(sql.FieldIsNull(FieldDelegationGrantID))
+}
+
+// DelegationGrantIDNotNil applies the NotNil predicate on the "delegation_grant_id" field.
+func DelegationGrantIDNotNil() predicate.Message {
+	return predicate.Message(sql.FieldNotNull(FieldDelegationGrantID))
+}
+
+// DelegationGrantIDEqualFold applies the EqualFold predicate on the "delegation_grant_id" field.
+func DelegationGrantIDEqualFold(v string) predicate.Message {
+	return predicate.Message(sql.FieldEqualFold(FieldDelegationGrantID, v))
+}
+
+// DelegationGrantIDContainsFold applies the ContainsFold predicate on the "delegation_grant_id" field.
+func DelegationGrantIDContainsFold(v string) predicate.Message {
+	return predicate.Message(sql.FieldContainsFold(FieldDelegationGrantID, v))
 }
 
 // CreatedEQ applies the EQ predicate on the "created" field.

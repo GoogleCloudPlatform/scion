@@ -37,6 +37,59 @@ import (
 // against a real directory chain without constructing thousands of levels.
 var maxDeleteTreeDepth = 4096
 
+// DeleteProjectRoot removes <hostBase>/<subPathRoot>/<projectID> and
+// everything under it (workspace, provisioning state, configuration, shared
+// dirs), via the same symlink-safe, fd-based openat/unlinkat walk as
+// DeleteProjectTree. It is for a project root its caller has just created
+// and must roll back (a failed shared workspace provisioning at project
+// create), not for project deletion, which keeps everything but shared-dirs.
+//
+// Errors and tolerated cases are as for DeleteProjectTree: an unusable
+// hostBase is an error; an absent subPathRoot or project dir is nothing to
+// do; a structural component (subPathRoot or projectID) that is not a plain
+// directory, most notably a symlink, is refused. Entries under the project
+// dir are removed regardless of type, and a symlink there is unlinked, never
+// followed.
+func DeleteProjectRoot(hostBase, subPathRoot, projectID string) error {
+	if !ValidProjectID(projectID) {
+		return fmt.Errorf("invalid project ID %q", projectID)
+	}
+	baseFd, err := unix.Open(hostBase, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return fmt.Errorf("host base %q does not exist", hostBase)
+		}
+		return fmt.Errorf("open host base %q: %w", hostBase, err)
+	}
+	defer func() { _ = unix.Close(baseFd) }()
+
+	subRootFd, existed, err := openExistingDirPathNoFollow(baseFd, subPathRoot)
+	if err != nil {
+		return fmt.Errorf("subpath_root %q: %w", subPathRoot, err)
+	}
+	if !existed {
+		return nil
+	}
+	defer func() { _ = unix.Close(subRootFd) }()
+
+	projectFd, existed, err := openExistingDirNoFollow(subRootFd, projectID)
+	if err != nil {
+		return fmt.Errorf("project dir %q: %w", projectID, err)
+	}
+	if !existed {
+		return nil
+	}
+	walkErr := removeTreeContents(projectFd, 0)
+	_ = unix.Close(projectFd)
+	if walkErr != nil {
+		return fmt.Errorf("remove contents of project %q: %w", projectID, walkErr)
+	}
+	if err := unix.Unlinkat(subRootFd, projectID, unix.AT_REMOVEDIR); err != nil && !errors.Is(err, unix.ENOENT) {
+		return fmt.Errorf("remove project dir %q: %w", projectID, err)
+	}
+	return nil
+}
+
 // DeleteProjectTree removes <hostBase>/<subPathRoot>/<projectID>/shared-dirs
 // entirely (every shared dir and its contents), then removes
 // <subPathRoot>/<projectID> itself if it is left empty afterward, via a

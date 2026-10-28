@@ -45,6 +45,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -54,6 +55,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -119,7 +121,10 @@ type ServerConfig struct {
 	// HubEnabled indicates whether this Runtime Broker should connect to a Hub
 	// for template hydration and other centralized services.
 	HubEnabled bool
-	// HubToken is the authentication token for the Hub API.
+	// HubToken is an operator-configured bearer token for the Hub API. It is
+	// not the dev token: in dev-auth mode the broker authenticates with the
+	// dev token through DevAuthHubOptions, which sends it only to a loopback
+	// hub (a HubToken that is the dev token gets the same rule).
 	HubToken string
 	// HostCredentials makes a co-located broker eligible to give its agents
 	// the host's harness-declared credential files. The caller sets it only
@@ -205,11 +210,27 @@ type ServerConfig struct {
 	// NFS-backed agent dispatches. Nil leaves all NFS handling off.
 	NFSConfig *config.V1NFSConfig
 
+	// StorageOverridesCheck, when set, reports whether the settings this
+	// broker starts agents with still carry a removed per-runtime or
+	// per-profile storage override (config.RemovedStorageOverridesError):
+	// /healthz then shows storage_overrides and the broker is degraded
+	// (ptone/scion#6371). The process keeps serving; agent starts of the
+	// affected profiles are refused. Nil disables the check.
+	StorageOverridesCheck func() error
+
 	// WorkspaceStorageBackend is the configured server.workspace_storage
 	// backend name ("" means "local"). It is reported to the hub, with
 	// NFSConfig's first share, as the broker's workspace storage descriptor
 	// (see BuildWorkspaceStorageDescriptor).
 	WorkspaceStorageBackend string
+
+	// StorageLayout is the broker's projectfs Layout, built at startup from
+	// the same server.project_storage struct the hub builds its own from
+	// (config.ResolveProjectStorage, config.ProjectStorageLayout). Its
+	// Homes is reported in the workspace storage descriptor, so the hub
+	// can refuse shared-mode dispatch to a broker whose layout disagrees
+	// with its own (projectfs.Layout.DescriptorDiff).
+	StorageLayout projectfs.Layout
 
 	// DefaultProfile is the broker's default (active) profile name from its
 	// settings (active_profile), reported to the hub on every heartbeat. A
@@ -259,8 +280,8 @@ func DefaultServerConfig() ServerConfig {
 		Host:                 "0.0.0.0",
 		ReadTimeout:          30 * time.Second,
 		WriteTimeout:         120 * time.Second,
-		CORSEnabled:          true,
-		CORSAllowedOrigins:   []string{"*"},
+		CORSEnabled:          false, // off by default: nothing calls the broker from a browser (opt in with server.broker.cors)
+		CORSAllowedOrigins:   []string{},
 		CORSAllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		CORSAllowedHeaders:   []string{"Authorization", "Content-Type", "X-Scion-Broker-Token", "X-API-Key", "X-Scion-Broker-ID", "X-Scion-Timestamp", "X-Scion-Nonce", "X-Scion-Signature", "X-Scion-Signed-Headers"},
 		CORSMaxAge:           3600,
@@ -301,10 +322,9 @@ type Server struct {
 	// each replaces its real implementation when set (see the setters in
 	// workspace_handlers.go), per Server, so tests can fake one without
 	// racing parallel tests. Guarded by mu.
-	workspaceUpload      func(ctx context.Context, localPath, bucket, prefix string) error
-	manifestUpload       func(ctx context.Context, bucket, storagePath string, manifest *transfer.Manifest) error
-	projectWorkspaceStat func(path string) (os.FileInfo, error)
-	projectPathAbs       func(path string) (string, error)
+	workspaceUpload func(ctx context.Context, localPath, bucket, prefix string) error
+	manifestUpload  func(ctx context.Context, bucket, storagePath string, manifest *transfer.Manifest) error
+	projectPathAbs  func(path string) (string, error)
 	// projectConfigsRemove, when set (tests), replaces
 	// removeProjectConfigsSubtree for a project delete's project-configs
 	// entry (removeProjectConfigs).
@@ -404,12 +424,21 @@ type Server struct {
 
 	stateDir string
 
+	// inbox holds the attachment delivery state (ptone/scion#4596): the
+	// spool root downloads are verified in, and the last inbox prune per
+	// agent.
+	inbox inboxState
+
 	// ownership is a flat instance's durable ownership record store
 	// (ownership.go); nil for a legacy Runtime Broker.
 	ownership *OwnershipStore
 	// ownedStarts maps a run ID to its in-flight ownership mirror
 	// (installOwnedStart / completeOwnedStart).
 	ownedStarts sync.Map
+	// ownedHolds counts the in-flight holds on each owned run
+	// (holdOwnedRun), guarded by ownedHoldsMu.
+	ownedHoldsMu sync.Mutex
+	ownedHolds   map[ownedRunKey]int
 	// unmirroredUIDs holds the object UIDs from the journals of this
 	// instance's launches whose ownership recording failed; launch cleanup
 	// may delete them although the record may lack them (launchHandleOwned).
@@ -520,6 +549,8 @@ type Server struct {
 
 	// NFS mount reconciler (nil when backend != "nfs")
 	nfsMountReconciler *NFSMountReconciler
+	// storageOverrides caches the StorageOverridesCheck result for /healthz.
+	storageOverrides storageOverridesCache
 	// nfsHostOwned is set when nfsMountReconciler is the host mounter's:
 	// the host runs its loop, this server never does.
 	nfsHostOwned bool
@@ -535,7 +566,10 @@ type Server struct {
 	nfsStartupReconcileDone chan struct{}
 	nfsReconcileStopped     chan struct{}
 	nfsReconcileOnce        sync.Once
-	nfsReconcileCancel      context.CancelFunc
+	// sharedDirsMigrateOnce runs the node-local shared-dir migration hook
+	// once per process (startSharedDirsMigrationHook).
+	sharedDirsMigrateOnce sync.Once
+	nfsReconcileCancel    context.CancelFunc
 	// nfsReconcileInterval overrides DefaultNFSReconcileInterval (tests).
 	nfsReconcileInterval time.Duration
 
@@ -591,7 +625,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime, rec config.Run
 		runtimeRecord:     rec,
 		mux:               http.NewServeMux(),
 		startTime:         time.Now(),
-		version:           "0.1.0", // TODO: Get from build info
+		version:           version.Short(),
 		hubConnections:    make(map[string]*HubConnection),
 		dispatchAttempts:  make(map[string]*dispatchAttempt),
 		auxiliaryRuntimes: make(map[string]auxiliaryRuntime),
@@ -681,6 +715,9 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime, rec config.Run
 			slog.Warn("Failed to initialize runtime broker state store", "error", err, "stateDir", srv.stateDir)
 		}
 	}
+	// Remove attachment spools a crash left behind, before any message is
+	// accepted (ptone/scion#4596).
+	srv.initInboxSpool()
 
 	// A host-bind instance of a host with a single NFS mount owner uses
 	// that owner's reconciler (registered requirement, shared status, one
@@ -1033,7 +1070,7 @@ func (s *Server) createHubConnection(name string, creds *brokercredentials.Broke
 	}
 
 	// Build hub client options
-	opts := buildHubClientOpts(creds, secretKey)
+	opts := buildHubClientOpts(creds, secretKey, hubEndpoint)
 
 	// Resolve transport auth once and share between REST client and control channel
 	var transportSrc transportauth.TokenSource
@@ -1083,16 +1120,24 @@ func (s *Server) createHubConnection(name string, creds *brokercredentials.Broke
 }
 
 // createHubConnectionFromConfig creates a HubConnection from server config
-// (bearer token or dev-auth), without file-based credentials.
+// (bearer token or dev-auth), without file-based credentials. HubToken is an
+// operator-configured bearer and is sent as configured. The server's dev
+// token reaches the hub only through DevAuthHubOptions (loopback hubs only);
+// a HubToken that is the dev token gets the same loopback rule.
 func (s *Server) createHubConnectionFromConfig() (*HubConnection, error) {
 	var opts []hubclient.Option
 
-	if s.config.HubToken != "" {
+	switch {
+	case s.config.HubToken != "" && isDevAuthToken(s.config.HubToken):
+		if devTokenAllowedFor(s.config.HubEndpoint, "config") {
+			opts = append(opts, hubclient.WithBearerToken(s.config.HubToken))
+			slog.Info("Hub client using dev token authentication")
+		}
+	case s.config.HubToken != "":
 		opts = append(opts, hubclient.WithBearerToken(s.config.HubToken))
 		slog.Info("Hub client using bearer token authentication")
-	} else {
-		opts = append(opts, hubclient.WithAutoDevAuth())
-		slog.Info("Hub client using auto dev authentication")
+	default:
+		opts = append(opts, DevAuthHubOptions(s.config.HubEndpoint, "config")...)
 	}
 
 	// Resolve transport auth once from env and share between REST client and control channel
@@ -1285,10 +1330,11 @@ func (s *Server) validateBrokerAuthStartup() error {
 		if !loopbackOnly {
 			return fmt.Errorf("runtime broker API bound to %q in hub mode requires HMAC auth keys; register first on loopback or provide credentials", s.config.Host)
 		}
-		slog.Warn("Runtime Broker starting in hub mode without HMAC keys — pending registration",
+		slog.Warn("Runtime Broker starting in hub mode without HMAC keys — pending registration; only health endpoints are served until keys are loaded",
 			"host", s.config.Host,
 			"hint", "run 'scion runtime-broker register' to complete setup",
 		)
+		s.warnCORSWildcard()
 		return nil
 	}
 
@@ -1297,8 +1343,16 @@ func (s *Server) validateBrokerAuthStartup() error {
 		return fmt.Errorf("runtime broker API bound to %q requires strict broker auth with valid HMAC keys", s.config.Host)
 	}
 
-	// Loopback-only listeners may be temporarily permissive, but emit a warning.
-	if loopbackOnly && (!strictAuthConfigured || !hasKeys) {
+	// Loopback-only listeners may start without keys or strict auth, but emit
+	// a warning. With broker auth enabled and no keys, the auth gate serves
+	// only the health endpoints.
+	switch {
+	case loopbackOnly && s.config.BrokerAuthEnabled && !hasKeys:
+		slog.Warn("Runtime Broker has no HMAC keys; only health endpoints are served until keys are loaded",
+			"host", s.config.Host,
+			"brokerAuthStrictMode", s.config.BrokerAuthStrictMode,
+		)
+	case loopbackOnly && (!strictAuthConfigured || !hasKeys):
 		slog.Warn("Runtime Broker API is loopback-only and running without strict broker auth",
 			"host", s.config.Host,
 			"brokerAuthEnabled", s.config.BrokerAuthEnabled,
@@ -1307,7 +1361,24 @@ func (s *Server) validateBrokerAuthStartup() error {
 		)
 	}
 
+	s.warnCORSWildcard()
 	return nil
+}
+
+// warnCORSWildcard logs a warning when the broker's CORS settings allow
+// every origin. CORS is off by default; a wildcard is only ever set
+// explicitly by the operator.
+func (s *Server) warnCORSWildcard() {
+	if !s.config.CORSEnabled {
+		return
+	}
+	for _, o := range s.config.CORSAllowedOrigins {
+		if o == "*" {
+			slog.Warn("Runtime Broker CORS allows every origin (server.broker.cors.allowed_origins contains \"*\"); list the origins that need cross-origin access instead",
+				"host", s.config.Host)
+			return
+		}
+	}
 }
 
 // SetWorkspaceDownloader replaces the GCS download used to bootstrap an
@@ -1543,6 +1614,10 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 	// NFS. Until the first pass finishes, /healthz reports the shares as not
 	// reconciled.
 	s.startNFSReconcileLoop(ctx)
+
+	// Move shared dirs this broker kept node-local onto the shared tree
+	// its Layout now places them on (background, once per process).
+	s.startSharedDirsMigrationHook(ctx)
 
 	// Start all hub connections' services. Start is called without
 	// s.hubMu held: it takes the connection's lifecycle lock and, inside,
@@ -1804,6 +1879,10 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 			}
 		}
 	}
+
+	// Hub-managed projects on shared project storage that this broker has
+	// agent state for (sharedProjectsWithLocalAgents).
+	projectPaths = append(projectPaths, s.sharedProjectsWithLocalAgents()...)
 
 	// Current project dir
 	if pd, _ := config.GetResolvedProjectDir(""); pd != "" {
@@ -2095,8 +2174,9 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 //
 //  1. a project-scoped search (scion.name plus the project label);
 //  2. only when projectID is set and stage 1 found nothing, a slug-only
-//     search that accepts just containers carrying no project label at all
-//     (pre-label or solo/CLI containers — see agentsWithoutProjectLabel).
+//     search that accepts just containers carrying no project identity
+//     whose recorded path identifies as projectID (pre-label containers —
+//     see legacyAgentsInProject; the same rule delete applies).
 //
 // Errors:
 //   - a default-runtime List failure, in either stage, wraps
@@ -2196,9 +2276,10 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 	}
 
 	// Backward compatibility: retry without project filter, but only accept
-	// containers that lack a project label (pre-existing agents or solo/CLI
-	// mode). A container labeled for a different project must not match a
-	// project-scoped request, or same-slug agents across projects would collide.
+	// containers that carry no project identity and whose recorded path
+	// identifies as projectID (legacyAgentsInProject). A container of a
+	// different project must not match a project-scoped request, or same-slug
+	// agents across projects would collide.
 	if len(agents) == 0 && projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
 		if useDefault {
@@ -2206,13 +2287,13 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 			if err != nil {
 				return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 			}
-			agents = agentsWithoutProjectLabel(agents)
+			agents = legacyAgentsInProject(agents, projectID)
 		}
 		matchManager = defMgr
 		matchRuntime = defRT
 		matchRecord = defRec
 		if len(agents) == 0 {
-			auxAgents, aux, auxErr := s.auxListAgentsSorted(ctx, slug, true, fallbackFilter, agentsWithoutProjectLabel)
+			auxAgents, aux, auxErr := s.auxListAgentsSorted(ctx, slug, true, fallbackFilter, func(a []api.AgentInfo) []api.AgentInfo { return legacyAgentsInProject(a, projectID) })
 			if auxErr != nil {
 				return agentMatch{}, auxErr
 			}
@@ -2297,7 +2378,8 @@ func (e *otherRunsHoldNameError) Error() string {
 
 // listInOwnRuntime lists agent slug in the agent's own runtime with the
 // project scoping lookupAgentMatch and LookupAgent use: entries labelled for
-// projectID, else (with a projectID) entries carrying no project label. A
+// projectID, else (with a projectID) entries carrying no project identity
+// whose recorded path identifies as projectID (legacyAgentsInProject). A
 // failed List wraps ErrAgentListUnavailable.
 func listInOwnRuntime(ctx context.Context, own *agentOwnRuntime, slug, projectID string) ([]api.AgentInfo, error) {
 	agents, err := own.mgr.List(ctx, scopedNameFilter(slug, projectID))
@@ -2310,7 +2392,7 @@ func listInOwnRuntime(ctx context.Context, own *agentOwnRuntime, slug, projectID
 		if err != nil {
 			return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 		}
-		agents = agentsWithoutProjectLabel(agents)
+		agents = legacyAgentsInProject(agents, projectID)
 	}
 	return agents, nil
 }
@@ -2479,8 +2561,9 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	}
 
 	// Backward compatibility: retry without project filter, but only accept
-	// containers that lack a project label (pre-existing agents or solo/CLI
-	// mode). A container labeled for a different project must not match a
+	// containers that carry no project identity and whose recorded path
+	// identifies as projectID (legacyAgentsInProject), as lookupAgentMatch
+	// does. A container of a different project must not match a
 	// project-scoped request, or same-slug agents across projects would collide.
 	if len(agents) == 0 && projectID != "" && own == nil {
 		fallbackFilter := map[string]string{"scion.name": slug}
@@ -2488,7 +2571,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 		if err != nil {
 			return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 		}
-		agents = agentsWithoutProjectLabel(agents)
+		agents = legacyAgentsInProject(agents, projectID)
 		if len(agents) == 0 {
 			for _, aux := range s.sortedAuxiliaryRuntimes() {
 				auxAgents, auxErr := aux.Manager.List(ctx, fallbackFilter)
@@ -2496,7 +2579,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 					listUnavailable = true
 					continue
 				}
-				auxAgents = agentsWithoutProjectLabel(auxAgents)
+				auxAgents = legacyAgentsInProject(auxAgents, projectID)
 				if len(auxAgents) > 0 {
 					agents = auxAgents
 					// See the identity note above: use the runtime's own
@@ -2921,7 +3004,7 @@ func (s *Server) buildProjectFilterForHub(hubEndpoint string) func(string) bool 
 				continue
 			}
 
-			projectSettings, err := config.LoadSettingsFromDir(ag.ProjectPath)
+			projectSettings, err := config.LoadSettingsFromDir(resolveProjectSettingsDir(ag.ProjectPath))
 			if err != nil {
 				continue
 			}
@@ -3109,7 +3192,6 @@ func (s *Server) registerRoutes() {
 	// Workspace sync routes (for Hub-initiated sync via control channel)
 	s.mux.HandleFunc("/api/v1/workspace/upload", s.handleWorkspaceUpload)
 	s.mux.HandleFunc("/api/v1/workspace/apply", s.handleWorkspaceApply)
-	s.mux.HandleFunc("/api/v1/workspace/project-upload", s.handleProjectWorkspaceUpload)
 }
 
 // applyMiddleware wraps the handler with middleware.
@@ -3149,16 +3231,37 @@ func (s *Server) outerMiddleware(h http.Handler) http.Handler {
 }
 
 // currentMiddlewareGate passes each request through the component that
-// buildAuthMiddleware has in place at the time, or straight to next when
-// there is none.
+// buildAuthMiddleware has in place at the time. When broker auth is enabled
+// but no hub keys are loaded yet (pending registration, or a credential
+// that failed to load), only the health endpoints are served and every
+// other request is refused, so the API is never served without auth. With
+// broker auth disabled, requests go straight to next.
 func (s *Server) currentMiddlewareGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if mw := s.loadBrokerMiddleware(); mw != nil {
 			mw.ServeWith(w, r, next)
 			return
 		}
+		if s.config.BrokerAuthEnabled && !isHealthPath(r.URL.Path) {
+			writeBrokerAuthUnavailable(w)
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isHealthPath reports whether path is one of the broker's unauthenticated
+// health endpoints.
+func isHealthPath(path string) bool {
+	return path == "/healthz" || path == "/readyz"
+}
+
+// writeBrokerAuthUnavailable answers a request that arrived while broker
+// auth is enabled but no hub keys are loaded.
+func writeBrokerAuthUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = fmt.Fprint(w, `{"error":{"code":"broker_auth_unavailable","message":"no hub keys are loaded; only health endpoints are served until keys are loaded"}}`)
 }
 
 // loadBrokerMiddleware returns the middleware in place now, or nil.

@@ -1,0 +1,5 @@
+== skipped tests: 4
+  TestSkipEmpty: (toy_test.go:56)
+  TestSkipNow: (no reason)
+  TestSkipSub: subtest TestSkipSub/three: no k8s (toy_test.go:47) (and 1 more skipped subtests)
+  TestSkipTop: needs postgres (toy_test.go:42)

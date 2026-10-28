@@ -85,6 +85,7 @@ var wantEditTier = map[string]EditTier{
 	"config.detached":                  EditTierImmutable,
 	"config.hub":                       EditTierImmutable,
 	"config.cleared_fields":            EditTierImmutable,
+	"config.changed_fields":            EditTierImmutable,
 	"config.message_mode":              EditTierImmutable,
 }
 

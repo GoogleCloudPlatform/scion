@@ -16,10 +16,9 @@ package runtime
 
 import (
 	"fmt"
-	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 )
 
 // localBackend wraps today's node-local workspace behavior. Resolve delegates
@@ -42,22 +41,24 @@ func (b *localBackend) Resolve(in ResolveInput) (ResolvedWorkspace, error) {
 		return ResolvedWorkspace{}, fmt.Errorf("localBackend.Resolve: ProjectDir is required")
 	}
 
-	hostPath := in.ProjectDir
-	// For worktree-per-agent mode, the shared base checkout lives under a
-	// "workspace" subdirectory within the project dir. This gives
+	// The layout lives in pkg/projectfs. For worktree-per-agent mode the
+	// shared base checkout is <ProjectDir>/workspace, which gives
 	// ProvisionShared a per-project sentinel dir (filepath.Dir(HostPath)
 	// == ProjectDir) so different projects don't collide.
-	if in.Mode == store.SharingModeWorktreePerAgent {
-		hostPath = filepath.Join(in.ProjectDir, "workspace")
+	ws, err := projectfs.Layout{Backend: projectfs.BackendLocal}.Resolve(
+		projectfs.Project{Dir: in.ProjectDir}, "", projectfs.WorkspaceMount(projectfs.Mode(in.Mode), ""))
+	if err != nil {
+		return ResolvedWorkspace{}, fmt.Errorf("localBackend.Resolve: %w", err)
 	}
 
 	res := ResolvedWorkspace{
-		HostPath:   hostPath,
+		HostPath:   ws.HostPath,
 		Backend:    "local",
 		SharedDirs: make(map[string]ResolvedSharedDir, len(in.SharedDirNames)),
 	}
 
-	// Resolve shared dirs using the existing config helpers.
+	// Shared dirs: config.GetSharedDirPath finds the project-config root
+	// from the project's marker and resolves the leaf through projectfs.
 	for _, name := range in.SharedDirNames {
 		hostPath, err := config.GetSharedDirPath(in.ProjectDir, name)
 		if err != nil {

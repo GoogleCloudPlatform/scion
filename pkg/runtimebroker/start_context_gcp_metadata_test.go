@@ -698,7 +698,7 @@ func TestBuildStartContext_GCPIdentityCreateIgnoresSavedProfile(t *testing.T) {
 
 // TestBuildStartContext_GCPIdentityUsesDispatchProfile_Start covers the HTTP
 // start path, where there is no Config.Profile — the profile comes from the
-// agent's own saved profile (agent.GetSavedProfile), the same source
+// agent's provisioned profile (image provenance), the same source
 // handlers.go's startAgent already uses for manager resolution.
 func TestBuildStartContext_GCPIdentityUsesDispatchProfile_Start(t *testing.T) {
 	for _, tt := range gcpIdentityDispatchProfileCases {

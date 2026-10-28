@@ -249,12 +249,12 @@ func TestRelayServerConfigValidate(t *testing.T) {
 func TestRelaySettingsRoundTrip(t *testing.T) {
 	v1 := &V1ServerConfig{
 		Hub:   &V1ServerHubConfig{Conduit: &V1ServerHubConduitConfig{RelayMode: "external", PeerSecret: testPeerSecret}},
-		Relay: &V1ServerRelayConfig{HubInternalURL: "http://hub:9811", PublicURL: "https://relay.example.com"},
+		Relay: &V1ServerRelayConfig{HubInternalURL: "http://hub:9811", PublicURL: "https://relay.example.com", Singleton: true},
 	}
 	gc := ConvertV1ServerToGlobalConfig(v1)
 	assert.Equal(t, "external", gc.Hub.Conduit.RelayMode)
 	assert.Equal(t, testPeerSecret, gc.Hub.Conduit.PeerSecret)
-	assert.Equal(t, RelayServerConfig{HubInternalURL: "http://hub:9811", PublicURL: "https://relay.example.com"}, gc.Relay)
+	assert.Equal(t, RelayServerConfig{HubInternalURL: "http://hub:9811", PublicURL: "https://relay.example.com", Singleton: true}, gc.Relay)
 	back := ConvertGlobalToV1ServerConfig(gc)
 	require.NotNil(t, back.Hub)
 	require.NotNil(t, back.Hub.Conduit)
@@ -421,4 +421,32 @@ func TestHubConduitIngress(t *testing.T) {
 	assert.True(t, ok)
 	assert.False(t, alias)
 	assert.Equal(t, "server.hub.conduit.ingress", path)
+}
+
+// TestRelaySingletonSetting (design §3.9 "Cloud Run singleton"):
+// server.relay.singleton reads from the settings file and from
+// SCION_SERVER_RELAY_SINGLETON, and alone makes the relay block non-empty.
+func TestRelaySingletonSetting(t *testing.T) {
+	assert.False(t, RelayServerConfig{Singleton: true}.IsZero())
+	for name, setup := range map[string]func(t *testing.T, home string) string{
+		"file": func(t *testing.T, home string) string {
+			p := filepath.Join(home, "settings.yaml")
+			require.NoError(t, os.WriteFile(p, []byte("schema_version: \"1\"\nserver:\n  relay:\n    singleton: true\n"), 0o644))
+			return p
+		},
+		"env": func(t *testing.T, home string) string {
+			t.Setenv("SCION_SERVER_RELAY_SINGLETON", "true")
+			p := filepath.Join(home, "settings.yaml")
+			require.NoError(t, os.WriteFile(p, []byte("schema_version: \"1\"\n"), 0o644))
+			return p
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			gc, err := LoadGlobalConfig(setup(t, home))
+			require.NoError(t, err)
+			assert.True(t, gc.Relay.Singleton)
+		})
+	}
 }
