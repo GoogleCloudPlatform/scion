@@ -20,7 +20,7 @@ the values. Read them there.
 | `UBUNTU_IMAGE` | Base image, `ubuntu:24.04@sha256:<index digest>` | Docker Hub `library/ubuntu` tag `24.04`, top-level (multi-arch index) digest |
 | `ACTIONS_RUNNER_VERSION` / `ACTIONS_RUNNER_SHA256` | GitHub Actions runner, `actions-runner-linux-x64-<v>.tar.gz` | The release notes of <https://github.com/actions/runner/releases> list the SHA-256 of each tarball |
 | `GO_VERSION` / `GO_SHA256` | Go toolchain, `go<v>.linux-amd64.tar.gz` | <https://go.dev/dl/> (keep it in step with the repo's `go.mod`) |
-| `GIT_VERSION` / `GIT_SHA256` | git, `git-<v>.tar.xz`, built from source in the `git` stage (gcc only there) | `sha256sums.asc` in <https://mirrors.edge.kernel.org/pub/software/scm/git/>; also check the tarball against Junio C Hamano's `git-<v>.tar.sign` (key `96E07AF25771955980DAD10020D04E5A713660A7`). Must be 2.48 or newer: the build asserts it |
+| `GIT_VERSION` / `GIT_SHA256` | git, `git-<v>.tar.xz`, built from source in the `git` stage (gcc only there) | `sha256sums.asc` in <https://mirrors.edge.kernel.org/pub/software/scm/git/>; also check the tarball against Junio C Hamano's `git-<v>.tar.sign` (key `96E07AF25771955980DAD10020D04E5A713660A7`). Must be 2.48 or newer: the build asserts it. git is built with `NO_RUST=YesPlease` (2.55+ builds Rust parts by default, which needs cargo); git 3.0 makes Rust mandatory, so a bump to 3.x must revisit the git stage |
 
 golangci-lint is not a download: the `golangci-lint` stage builds it with
 [`golangci-lint/build.sh`](golangci-lint/README.md), the same script, pins

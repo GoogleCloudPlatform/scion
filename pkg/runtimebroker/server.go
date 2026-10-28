@@ -210,6 +210,14 @@ type ServerConfig struct {
 	// NFS-backed agent dispatches. Nil leaves all NFS handling off.
 	NFSConfig *config.V1NFSConfig
 
+	// StorageOverridesCheck, when set, reports whether the settings this
+	// broker starts agents with still carry a removed per-runtime or
+	// per-profile storage override (config.RemovedStorageOverridesError):
+	// /healthz then shows storage_overrides and the broker is degraded
+	// (ptone/scion#6371). The process keeps serving; agent starts of the
+	// affected profiles are refused. Nil disables the check.
+	StorageOverridesCheck func() error
+
 	// WorkspaceStorageBackend is the configured server.workspace_storage
 	// backend name ("" means "local"). It is reported to the hub, with
 	// NFSConfig's first share, as the broker's workspace storage descriptor
@@ -541,6 +549,8 @@ type Server struct {
 
 	// NFS mount reconciler (nil when backend != "nfs")
 	nfsMountReconciler *NFSMountReconciler
+	// storageOverrides caches the StorageOverridesCheck result for /healthz.
+	storageOverrides storageOverridesCache
 	// nfsHostOwned is set when nfsMountReconciler is the host mounter's:
 	// the host runs its loop, this server never does.
 	nfsHostOwned bool

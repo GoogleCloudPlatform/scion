@@ -962,6 +962,7 @@ func (s *Server) handleTopicDelete(w http.ResponseWriter, r *http.Request, topic
 
 	s.events.PublishChatTopicEvent(r.Context(), topic.ProjectID, "deleted", *topic)
 	s.deleteScheduledMessagesOfConversation(r.Context(), topicID)
+	s.deleteMessageStarsOfConversation(r.Context(), topicID)
 	s.removeDeletedTopicFromThreadGroups(r.Context(), topic)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
@@ -1797,7 +1798,7 @@ func (s *Server) sendAgentRouted(ctx context.Context, key, projectID string, use
 
 	// Validate through the messaging choke point (AC-8).
 	// Runs after authorization so unauthorized users see 403, not 400.
-	if err := messaging.ValidateLegacyMessage(msg); err != nil {
+	if err := messaging.ValidateLegacyMessage(chatSendValidationEnvelope(msg, attachmentRefs)); err != nil {
 		return nil, chatSendValidationError(err.Error())
 	}
 
@@ -2720,6 +2721,10 @@ func (s *Server) handleMessageEdit(w http.ResponseWriter, r *http.Request, key, 
 		NotFound(w, "Message")
 		return
 	}
+	// From here on use the stored, canonical ID: the path may spell the same
+	// UUID another way (upper case, braces), and the edit marker, content
+	// write and event are keyed by the canonical form.
+	messageID = msg.ID
 
 	// Verify the caller is the message sender.
 	if msg.SenderID != user.ID() {
@@ -2833,6 +2838,10 @@ func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key
 		NotFound(w, "Message")
 		return
 	}
+	// From here on use the stored, canonical ID: the path may spell the same
+	// UUID another way (upper case, braces), and the deletion, its mention
+	// and star cleanup and the event are all keyed by the canonical form.
+	messageID = msg.ID
 
 	// Verify the caller is the message sender.
 	if msg.SenderID != user.ID() {
@@ -2866,7 +2875,10 @@ func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key
 	// Soft-delete: set deleted_at in extension table and redact content
 	// in the main messages table so no other component can read it.
 	now := time.Now().UTC()
-	if err := wcs.SetMessageDeleted(ctx, messageID, now); err != nil {
+	// The stars of the message go in the same transaction; their owners
+	// are told to refetch after the commit (markChatMessageDeleted).
+	starOwners, err := markChatMessageDeleted(ctx, wcs, messageID, now)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete message", nil)
 		return
 	}
@@ -2882,6 +2894,7 @@ func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key
 		MessageID:       messageID,
 		DeletedAt:       now.Format(time.RFC3339Nano),
 	})
+	s.publishStarsChangedTo(ctx, starOwners)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"messageId": messageID,
@@ -2938,7 +2951,13 @@ func hasAgentReplyAfter(ctx context.Context, s store.Store, threadID string, aft
 //   - limit: page size (default 50, max 200)
 //   - cursor: keyset pagination cursor from the previous page's nextCursor (optional)
 //   - around: message ID to center the page around (optional)
+//   - starred: "true" lists only the caller's starred messages
+//     (handleStarredHistory); any other value is a 400
 func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Request, key string) {
+	if rawQueryHasKey(r.URL.RawQuery, "starred") {
+		s.handleStarredHistory(w, r, key)
+		return
+	}
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {
 		Forbidden(w)
@@ -3105,6 +3124,16 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	writeJSON(w, http.StatusOK, s.chatHistoryPage(ctx, wcs, key, historyConvID, result, canPost))
+}
+
+// chatHistoryPage enriches one page of conversation history for the
+// response: attachment metadata, the extension data (reply-to, edited,
+// deleted; a deleted message's text is stripped), reply previews of this
+// conversation's messages and the viewer's artifact references. Ordinary
+// history and the starred-only variant (handleStarredHistory) share it,
+// so the filtered page carries everything a normal page does.
+func (s *Server) chatHistoryPage(ctx context.Context, wcs WebChatStore, key, historyConvID string, result *store.ListResult[store.Message], canPost *bool) chatHistoryResponse {
 	if result.Items == nil {
 		result.Items = []store.Message{}
 	}
@@ -3142,12 +3171,16 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	// and generate reply previews using a single batch query.
 	var messageExtensions map[string]*WebChatMessageExt
 	var replyPreviews map[string]chatReplyPreview
+	// extsKnown records that the extension rows were read, so
+	// messageExtensions tells which messages are soft-deleted.
+	extsKnown := false
 	if wcs != nil && len(result.Items) > 0 {
 		msgIDs2 := make([]string, len(result.Items))
 		for i, msg := range result.Items {
 			msgIDs2[i] = msg.ID
 		}
 		exts, err := wcs.GetMessageExts(ctx, msgIDs2)
+		extsKnown = err == nil
 		if err == nil && len(exts) > 0 {
 			messageExtensions = exts
 
@@ -3169,7 +3202,10 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 			if len(replyToIDs) > 0 {
 				// Also fetch extensions for the referenced messages so
 				// we can detect deleted reply parents.
-				replyExts, _ := wcs.GetMessageExts(ctx, replyToIDs)
+				replyExts, replyExtsErr := wcs.GetMessageExts(ctx, replyToIDs)
+				if replyExtsErr != nil {
+					slog.Warn("chat v2 reply preview extension lookup failed", "key", key, "error", replyExtsErr)
+				}
 
 				refMsgs, err := s.store.GetMessagesByIDs(ctx, replyToIDs)
 				if err == nil && len(refMsgs) > 0 {
@@ -3188,6 +3224,13 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 							if rExt, ok := replyExts[id]; ok && rExt.DeletedAt != nil {
 								content = "[deleted]"
 							}
+						}
+						// No text: an attachment-only message. (A deleted
+						// message has no text either, but its extension
+						// row marked it above; if that lookup failed, its
+						// text is gone all the same.)
+						if content == "" {
+							content = chatAttachmentOnlyPreview
 						}
 						if content != "[deleted]" && len([]rune(content)) > 100 {
 							content = string([]rune(content)[:100]) + "..."
@@ -3213,7 +3256,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	if len(result.Items) > 0 {
 		msgIDs := make([]string, 0, len(result.Items))
 		for _, msg := range result.Items {
-			if msg.Msg != "" { // soft-deleted messages show no references
+			if !chatHistoryMessageDeleted(msg, messageExtensions, extsKnown) { // soft-deleted messages show no references
 				msgIDs = append(msgIDs, msg.ID)
 			}
 		}
@@ -3224,7 +3267,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	writeJSON(w, http.StatusOK, chatHistoryResponse{
+	return chatHistoryResponse{
 		Messages:                    result.Items,
 		NextCursor:                  result.NextCursor,
 		TotalCount:                  result.TotalCount,
@@ -3234,7 +3277,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		MessageArtifactsUnavailable: messageArtifactsUnavailable,
 		MessageExtensions:           messageExtensions,
 		ReplyPreviews:               replyPreviews,
-	})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -4124,6 +4167,9 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 	// 14. Publish SSE events (outside transaction — best-effort)
 	s.events.PublishChatTopicEvent(ctx, projectID, "created", *result)
 	s.events.PublishDMPromotedEvent(ctx, key, *result)
+	// Stars of the moved messages now belong to the new thread: the DM's
+	// users refetch their collections (content-free, own subjects only).
+	s.publishStarsChangedTo(ctx, dmUserParticipants(key))
 
 	// 15. Return created topic
 	writeJSON(w, http.StatusCreated, promoteResponse{

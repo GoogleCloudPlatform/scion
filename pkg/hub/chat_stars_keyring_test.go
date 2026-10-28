@@ -179,15 +179,23 @@ func TestCapabilityKeyring_ChatStarsCursor(t *testing.T) {
 	assert.NotEqual(t, l1.Items[0].MessageID, l2.Items[0].MessageID)
 	assert.True(t, strings.HasPrefix(l2.NextCursor, "c2.gen2."), l2.NextCursor)
 
-	// Issuance closed: no cursor is minted, and the page is refused.
-	cclk := &krClock{t: krT0.Add(time.Hour)}
+	// Issuance closed: no cursor is minted, and the page is refused. An
+	// existing session, with capability issuance closed: the user JWT is
+	// signed by the same ring, so it is minted just before sign_until (T0+1h)
+	// on the ring clock and stays valid at T0+1h (15 min on the same clock).
+	cclk := &krClock{t: krT0.Add(59 * time.Minute)}
 	c := starRingReplica(t, f, capClosing(t), cclk)
-	rec, _ = getStarPage(t, f, c, f.admin, f.topicA, "limit=1")
+	admin, err := f.s.GetUser(context.Background(), f.admin)
+	require.NoError(t, err)
+	session := keyringSessionToken(t, c, admin)
+	cclk.t = krT0.Add(time.Hour)
+	rec = requestWithToken(t, c, session, http.MethodGet, starListPath(f.topicA, "limit=1"), nil)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), "c2.")
 	out := rec.Body.String()
-	rec, all := getStarPage(t, f, c, f.admin, f.topicA, "limit=10")
+	rec = requestWithToken(t, c, session, http.MethodGet, starListPath(f.topicA, "limit=10"), nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	all := decodeStarPage(t, rec)
 	assert.Len(t, all.Items, 3)
 	assert.Empty(t, all.NextCursor)
 	assert.NotContains(t, rec.Body.String(), `"nextCursor"`, "a complete page carries no cursor key")

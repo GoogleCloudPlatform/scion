@@ -30,14 +30,16 @@ import (
 // private .git/config so a copy of a linked checkout's host config does not carry
 // the host user's credentials into the agent.
 //
+// The key policy is data, in gitConfigDropRules, gitConfigURLRules and
+// gitConfigRemoteRefRules; the tests enumerate those tables, so a key added to
+// the policy without a test case fails the test suite.
+//
 // It strips:
-//   - every credential.* key (the git credential-helper configuration),
-//   - every http.<url>.extraheader (authorization headers),
-//   - every http.<url>.cookiefile (a path to stored session cookies),
-//   - every sendemail.smtppass (an SMTP password),
-//   - userinfo from URL values in remote.*.url / pushurl / lfsurl / lfspushurl,
-//     lfs.url / lfs.pushurl, url.*.insteadof / pushinsteadof, http.proxy and
-//     remote.*.proxy; from url.<base>.*, http.<base>.* and lfs.<base>.* subsection
+//   - every key in gitConfigDropRules, with or without a subsection,
+//   - userinfo from the values of the keys in gitConfigURLRules, and of the keys
+//     in gitConfigRemoteRefRules when the value is a URL or a remote-helper form
+//     rather than a remote name (a remote name is kept unchanged); from
+//     url.<base>.*, http.<base>.* and lfs.<base>.* subsection
 //     headers; and from the <url> in an includeIf "hasconfig:remote.*.url:<url>"
 //     subsection (http/https/ftp/ftps userinfo removed; any other scheme with a
 //     password has all userinfo removed, username-only kept; remote-helper
@@ -70,26 +72,18 @@ func RedactGitConfigSecrets(raw []byte) (out []byte, stripped []string, err erro
 		}
 	}
 	for _, v := range vars {
-		// credential.* — drop entirely.
-		if v.Section == "credential" {
+		// Keys in gitConfigDropRules — drop entirely.
+		if isDroppedKey(v) {
 			note(notedKeyName(v))
 			continue
 		}
-		// http.<url>.extraheader / http.<url>.cookiefile — drop entirely.
-		if v.Section == "http" && (v.Name == "extraheader" || v.Name == "cookiefile") {
-			note(notedKeyName(v))
-			continue
-		}
-		// sendemail.smtppass (with or without an identity subsection) — a plaintext
-		// password; drop entirely.
-		if v.Section == "sendemail" && v.Name == "smtppass" {
-			note(notedKeyName(v))
-			continue
-		}
-		// Userinfo in URL-valued keys — rewrite the value, or drop the key when the
-		// value is URL-shaped, cannot be parsed, but still carries userinfo. For the
-		// proxy keys only, also drop the schemeless proxy form user:password@host.
-		if isURLValuedKey(v) {
+		// Userinfo in the keys of gitConfigURLRules — rewrite the value, or drop the
+		// key when the value is URL-shaped, cannot be parsed, but still carries
+		// userinfo. For the proxy keys only, also drop the schemeless proxy form
+		// user:password@host. The keys of gitConfigRemoteRefRules take the same path
+		// only when the value is a URL or remote-helper form (see remoteRefIsURL); a
+		// remote name never does.
+		if isURLValuedKey(v) || (isRemoteRefKey(v) && remoteRefIsURL(v.Value)) {
 			clean, changed, drop := sanitizeURLUserinfo(v.Value)
 			if !drop && isProxyKey(v) && dropSchemelessProxyUserinfo(v.Value) {
 				drop = true
@@ -156,22 +150,104 @@ func StripGitConfigKeys(raw []byte, drop func(section, subsection string, hasSub
 	return serializeGitConfig(kept), nil
 }
 
+// gitConfigKeyRule names a config key by its lower-cased section and variable
+// name, with or without a subsection; Name "*" matches every variable of the
+// section.
+type gitConfigKeyRule struct {
+	Section string
+	Name    string
+}
+
+// matches reports whether v is the key r names.
+func (r gitConfigKeyRule) matches(v gitConfigVar) bool {
+	return v.Section == r.Section && (r.Name == "*" || v.Name == r.Name)
+}
+
+// gitConfigDropRules are the keys dropped entirely: credential-helper
+// configuration, authorization headers, cookie files, client TLS key and
+// certificate paths, and plaintext passwords. The CA trust settings
+// (http.sslCAInfo, http.sslCAPath) are deliberately kept.
+// The matching username keys (imap.user, sendemail.smtpuser, git-p4.user,
+// gitcvs.dbuser) are deliberately kept.
+var gitConfigDropRules = []gitConfigKeyRule{
+	{"credential", "*"},
+	{"http", "extraheader"},
+	{"http", "cookiefile"},
+	{"http", "sslkey"},  // http.sslKey and http.<url>.sslKey: the client TLS private key path
+	{"http", "sslcert"}, // http.sslCert and http.<url>.sslCert: the client certificate path
+	{"sendemail", "smtppass"},
+	{"imap", "pass"},
+	{"git-p4", "password"},
+	{"gitcvs", "dbpass"}, // gitcvs.dbPass and gitcvs.<access method>.dbPass
+}
+
+// gitConfigURLRules are the keys whose value is, or may be, a URL (or a proxy
+// address); userinfo in that value is scrubbed.
+var gitConfigURLRules = []gitConfigKeyRule{
+	{"remote", "url"},
+	{"remote", "pushurl"},
+	{"remote", "lfsurl"},
+	{"remote", "lfspushurl"},
+	{"lfs", "url"},
+	{"lfs", "pushurl"},
+	{"url", "insteadof"},
+	{"url", "pushinsteadof"},
+	{"http", "proxy"},   // http.proxy and http.<url>.proxy
+	{"remote", "proxy"}, // remote.<name>.proxy
+	{"submodule", "url"},
+	{"bundle", "uri"},      // bundle.<id>.uri
+	{"fetch", "bundleuri"}, // fetch.bundleURI
+	{"imap", "host"},       // imap.host: an imap:// or imaps:// URL, or a bare host name (kept)
+	{"svn-remote", "url"},  // git-svn
+	{"svn-remote", "pushurl"},
+	{"svn-remote", "commiturl"},   // git-svn: svn-remote.<name>.commiturl
+	{"svn", "commiturl"},          // git-svn: svn.commiturl (no subsection)
+	{"svn-remote", "rewriteroot"}, // git-svn: svn-remote.<name>.rewriteRoot
+}
+
+// gitConfigRemoteRefRules are the keys whose value names a remote but may
+// instead be a URL (git accepts either); they are scrubbed like a URL-valued
+// key only when remoteRefIsURL reports a URL.
+var gitConfigRemoteRefRules = []gitConfigKeyRule{
+	{"branch", "remote"},
+	{"branch", "pushremote"},
+	{"remote", "pushdefault"},
+}
+
+// keyMatchesAny reports whether v is named by any rule in rules.
+func keyMatchesAny(rules []gitConfigKeyRule, v gitConfigVar) bool {
+	for _, r := range rules {
+		if r.matches(v) {
+			return true
+		}
+	}
+	return false
+}
+
+// isDroppedKey reports whether a config variable is dropped entirely.
+func isDroppedKey(v gitConfigVar) bool {
+	return keyMatchesAny(gitConfigDropRules, v)
+}
+
 // isURLValuedKey reports whether a config variable's value is a URL whose
 // userinfo should be scrubbed.
 func isURLValuedKey(v gitConfigVar) bool {
-	switch {
-	case v.Section == "remote" && (v.Name == "url" || v.Name == "pushurl" || v.Name == "lfsurl" || v.Name == "lfspushurl"):
-		return true
-	case v.Section == "lfs" && (v.Name == "url" || v.Name == "pushurl"):
-		return true
-	case v.Section == "url" && (v.Name == "insteadof" || v.Name == "pushinsteadof"):
-		return true
-	case v.Section == "http" && v.Name == "proxy": // http.proxy and http.<url>.proxy
-		return true
-	case v.Section == "remote" && v.Name == "proxy": // remote.<name>.proxy
-		return true
-	}
-	return false
+	return keyMatchesAny(gitConfigURLRules, v)
+}
+
+// isRemoteRefKey reports whether a config variable names a remote that may be
+// given as a URL instead (gitConfigRemoteRefRules).
+func isRemoteRefKey(v gitConfigVar) bool {
+	return keyMatchesAny(gitConfigRemoteRefRules, v)
+}
+
+// remoteRefIsURL reports whether a remote-reference value is a URL or a
+// remote-helper form rather than a remote name: it contains "://" or starts
+// with a "<transport>::" prefix. A remote name contains neither, so it is kept
+// unchanged; an scp-style host:path value is not touched either.
+func remoteRefIsURL(s string) bool {
+	t := strings.TrimSpace(s)
+	return strings.Contains(t, "://") || helperPrefixRe.MatchString(t)
 }
 
 // isProxyKey reports whether v is a proxy key (http.proxy, http.<url>.proxy or

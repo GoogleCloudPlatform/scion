@@ -142,13 +142,22 @@ func (s *Server) recoverInstance(id string) {
 
 // recoverLaunch sends one recovered launch's terminal under the instance ID
 // it was journalled with (design wave 3 §1 C-b: the hub fences reports by
-// that ID), cleans up on a confirming answer with the existing predicates,
-// and removes the record (or keeps it as cleanup_pending if the clean-up
+// that ID), cleans up on a confirming answer with the existing predicates
+// (or startFailureCleanup for a StartFailed terminal, see below), and
+// removes the record (or keeps it as cleanup_pending if the clean-up
 // fails, ptone/scion#5177). With no definitive answer by its TTL, the
 // record is kept for the next boot to resend, up to a bound, after which it
 // is removed with no cleanup and `scion delete` removes what is left
 // (ptone/scion#5186). If the broker shuts down first, the record stays for
 // the next boot.
+//
+// A terminal journalled StartFailed (the live broker saw this attempt's
+// Start fail) is classified with startFailureCleanup, as on the live path
+// (ptone/scion#5368): a resources-only outcome removes the recorded
+// resources and keeps the files, and when that clean-up fails the
+// cleanup_pending record is scoped to the resources. A PostCompleted one
+// that gets no answer has its resources removed now and is kept for the
+// resend; no clean-up scope is carried into that terminal_pending record.
 func (s *Server) recoverLaunch(path string, jr *journalRecord) {
 	ctx := s.recoveryContext()
 	if ctx.Err() != nil {
@@ -175,7 +184,7 @@ func (s *Server) recoverLaunch(path string, jr *journalRecord) {
 	if jr.State == journalCleanupPending.String() {
 		// The hub already confirmed the launch is over and asked for
 		// clean-up; only the clean-up is left (ptone/scion#5177).
-		s.finishRecoveredCleanup(ctx, path, jr, s.recoveryCleanup(ctx, jr, rec))
+		s.finishRecoveredCleanup(ctx, path, jr, s.recoveryCleanup(ctx, jr, rec, jr.CleanupScope == cleanupScopeResources))
 		return
 	}
 	// A decided terminal is resent unchanged, so a succeeded is never
@@ -197,31 +206,59 @@ func (s *Server) recoverLaunch(path string, jr *journalRecord) {
 			// The broker is shutting down: the next boot tries again.
 			return
 		}
+		if t.StartFailed && startFailureCleanup(nil, err, t.PostCompleted) == launchCleanupResources {
+			// The hub had already answered completed, so nothing else
+			// removes this attempt's objects: remove them now, with the
+			// recovery context, and leave the files to a later boot's
+			// answer. A failure is retried at the next boot's resend.
+			s.agentLifecycleLog.Warn("Launch recovery: a failed start's report got no hub answer after the launch had completed; removing its recorded resources and keeping the record for a retry",
+				"agent_id", jr.AgentID, "launch_id", jr.LaunchID, "run_id", jr.RunID, "instance_id", jr.InstanceID)
+			if cleanupErr := s.recoveryCleanup(ctx, jr, rec, true); cleanupErr != nil {
+				s.agentLifecycleLog.Warn("Launch recovery: resource clean-up failed; it is retried at the next broker start",
+					"agent_id", jr.AgentID, "launch_id", jr.LaunchID, "error_class", string(cleanupFailureClassOf(cleanupErr)))
+			}
+		}
 		// No definitive answer: keep the record for the next boot to
 		// resend, up to the bound (ptone/scion#5186).
 		s.keepRecoveredReport(path, jr, t)
 		return
 	}
-	// The existing predicates decide cleanup, unchanged.
-	cleanup := shouldCleanupAfterFailureReport(result)
-	if t.Succeeded {
-		cleanup = shouldCleanupAfterSucceededReport(result)
+	action := launchCleanupNone
+	switch {
+	case t.Succeeded:
+		if shouldCleanupAfterSucceededReport(result) {
+			action = launchCleanupFull
+		}
+	case t.StartFailed:
+		action = startFailureCleanup(result, nil, t.PostCompleted)
+	case shouldCleanupAfterFailureReport(result):
+		action = launchCleanupFull
 	}
 	s.agentLifecycleLog.Info("Launch recovery: reported a launch an earlier broker process left unfinished",
 		"agent_id", jr.AgentID, "launch_id", jr.LaunchID, "instance_id", jr.InstanceID,
-		"state", jr.State, "succeeded", t.Succeeded, "error_code", t.ErrorCode, "cleanup", cleanup)
+		"state", jr.State, "succeeded", t.Succeeded, "error_code", t.ErrorCode,
+		"cleanup", action != launchCleanupNone, "resources_only", action == launchCleanupResources)
 	var cleanupErr error
-	if cleanup {
-		cleanupErr = s.recoveryCleanup(ctx, jr, rec)
+	switch action {
+	case launchCleanupFull:
+		cleanupErr = s.recoveryCleanup(ctx, jr, rec, false)
+	case launchCleanupResources:
+		cleanupErr = s.recoveryCleanup(ctx, jr, rec, true)
+		if cleanupErr != nil {
+			// The cleanup_pending record finishRecoveredCleanup writes
+			// retries the resources only, never the files.
+			jr.CleanupScope = cleanupScopeResources
+		}
 	}
 	s.finishRecoveredCleanup(ctx, path, jr, cleanupErr)
 }
 
-// recoveryCleanup removes a recovered launch's resources on a confirming
-// answer: its journalled handles (each delete preconditioned on the UID
-// recorded at create time, so a newer launch's objects are untouched), then
-// its name-addressed leftovers inside a registry slot.
-func (s *Server) recoveryCleanup(ctx context.Context, jr *journalRecord, rec *launchRecord) error {
+// recoveryCleanup removes a recovered launch's resources (on a confirming
+// answer, or resources-only as startFailureCleanup decides): its journalled
+// handles (each delete preconditioned on the UID recorded at create time, so
+// a newer launch's objects are untouched), then, unless resourcesOnly, its
+// name-addressed leftovers inside a registry slot.
+func (s *Server) recoveryCleanup(ctx context.Context, jr *journalRecord, rec *launchRecord, resourcesOnly bool) error {
 	mgr := s.recoveryManager(jr)
 	if mgr == nil && jr.RuntimeIdentity == "" {
 		s.agentLifecycleLog.Warn("Launch recovery: the launch's runtime identity was not recorded; its resources are left for `scion delete`",
@@ -233,9 +270,10 @@ func (s *Server) recoveryCleanup(ctx context.Context, jr *journalRecord, rec *la
 			"agent_id", jr.AgentID, "launch_id", jr.LaunchID, "runtime", jr.RuntimeName, "runtime_identity", jr.RuntimeIdentity)
 		return failCleanup(rec, cleanupFailRuntimeUnavailable)
 	}
-	if jr.State == journalCleanupPending.String() && jr.CleanupScope == cleanupScopeResources {
-		// A local stop or delete owned the files: retry only the
-		// recorded resources, as the live clean-up did.
+	if resourcesOnly {
+		// The files are not this clean-up's (a local stop or delete owns
+		// them, or the hub has not confirmed this run's failure): only the
+		// recorded resources, as the live clean-up does.
 		return s.cleanupLaunchResources(mgr, rec)
 	}
 	err := errors.Join(

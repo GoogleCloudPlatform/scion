@@ -60,6 +60,11 @@ RUN GOCACHE=/tmp/gocache GOMODCACHE=/tmp/gomodcache bash /src/golangci-lint/buil
 # --- git, built from the pinned source ------------------------------------------
 # gcc, make and the -dev libraries exist only in this stage; the runner image gets the
 # installed tree (/usr/local), never a compiler. No Perl, Python, gettext or Tk parts.
+# No Rust: git 2.55+ builds its Rust parts (libgitcore.a, via cargo) unless NO_RUST is
+# set (git's Makefile, "Optional Rust support"; mandatory only from git 3.0). Without
+# them git uses its C code; the only feature lost is the compatibility hash algorithm
+# (extensions.compatObjectFormat, SHA-1/SHA-256 interop), which nothing here uses. The
+# stage asserts that the build reports "rust: disabled".
 FROM ${UBUNTU_IMAGE} AS git
 ARG GIT_VERSION
 ARG GIT_SHA256
@@ -73,11 +78,12 @@ RUN apt-get update \
  && mkdir /tmp/git-src \
  && tar -C /tmp/git-src --strip-components=1 -xJf /tmp/git.tar.xz \
  && make -C /tmp/git-src -j"$(nproc)" prefix=/usr/local NO_TCLTK=YesPlease NO_GETTEXT=YesPlease \
-      NO_PERL=YesPlease NO_PYTHON=YesPlease NO_GITWEB=YesPlease INSTALL_SYMLINKS=YesPlease all \
+      NO_PERL=YesPlease NO_PYTHON=YesPlease NO_GITWEB=YesPlease NO_RUST=YesPlease INSTALL_SYMLINKS=YesPlease all \
  && make -C /tmp/git-src prefix=/usr/local NO_TCLTK=YesPlease NO_GETTEXT=YesPlease \
-      NO_PERL=YesPlease NO_PYTHON=YesPlease NO_GITWEB=YesPlease INSTALL_SYMLINKS=YesPlease \
+      NO_PERL=YesPlease NO_PYTHON=YesPlease NO_GITWEB=YesPlease NO_RUST=YesPlease INSTALL_SYMLINKS=YesPlease \
       DESTDIR=/out install \
- && /out/usr/local/bin/git --version | grep -qx "git version ${GIT_VERSION}"
+ && /out/usr/local/bin/git --version | grep -qx "git version ${GIT_VERSION}" \
+ && /out/usr/local/bin/git version --build-options | grep -qx 'rust: disabled'
 
 # --- The runner image ------------------------------------------------------------
 FROM ${UBUNTU_IMAGE}
