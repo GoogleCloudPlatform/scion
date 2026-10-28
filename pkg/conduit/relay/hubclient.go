@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
@@ -87,7 +88,9 @@ func (e *HubRefusal) Error() string {
 type HubClient struct {
 	// BaseURL is server.relay.hub_internal_url.
 	BaseURL string
-	// HTTP performs the calls (nil: http.DefaultClient).
+	// HTTP performs the calls (nil: a hop client with the system roots,
+	// NewHopHTTPClientWithTimeout). Whatever it is, it is used without
+	// redirects (hopClientWithoutRedirects).
 	HTTP *http.Client
 	// Auth signs every call. Required.
 	Auth PeerAuth
@@ -128,6 +131,12 @@ func (c *HubClient) post(ctx context.Context, path string, body []byte) ([]byte,
 	if timeout <= 0 {
 		timeout = DefaultHubCallTimeout
 	}
+	// The relay internal hop rule, before anything is sent: the hub
+	// internal API carries user and agent credentials. Permanent, so it
+	// is not marked ErrHubUnavailable.
+	if err := config.CheckRelayTransport(c.BaseURL); err != nil {
+		return nil, fmt.Errorf("conduit relay: refusing the hub internal API: %w", err)
+	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimSuffix(c.BaseURL, "/")+path, bytes.NewReader(body))
@@ -141,9 +150,9 @@ func (c *HubClient) post(ctx context.Context, path string, body []byte) ([]byte,
 	if err := c.Auth.Sign(req); err != nil {
 		return nil, err
 	}
-	hc := c.HTTP
-	if hc == nil {
-		hc = http.DefaultClient
+	hc := defaultHopHTTPClient
+	if c.HTTP != nil {
+		hc = hopClientWithoutRedirects(c.HTTP)
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
