@@ -69,6 +69,8 @@ let broker: RuntimeBroker;
 let summaryStatus = 200;
 let summaryItems: HealthSummaryItem[] = [];
 let summaryTruncated = false;
+/** The summary answers 200 with a body that is not JSON. */
+let summaryBadJson = false;
 let patchResponse: Partial<RuntimeBroker> = {};
 /** What GET returns after a PATCH (the stored record); null = unchanged. */
 let afterPatch: RuntimeBroker | null = null;
@@ -107,6 +109,7 @@ describe('scion-page-broker-area-detail', () => {
     summaryStatus = 200;
     summaryItems = [];
     summaryTruncated = false;
+    summaryBadJson = false;
     patchResponse = {};
     afterPatch = null;
     providerProjects = [];
@@ -125,6 +128,12 @@ describe('scion-page-broker-area-detail', () => {
       if (url === '/api/v1/admin/health/summary') {
         if (summaryStatus !== 200) {
           return jsonResponse({ error: { code: 'forbidden', message: 'no' } }, summaryStatus);
+        }
+        if (summaryBadJson) {
+          return new Response('not json', {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
         }
         return jsonResponse(healthSummary(summaryItems, summaryTruncated));
       }
@@ -234,6 +243,44 @@ describe('scion-page-broker-area-detail', () => {
     await card.updateComplete;
     expect(card.shadowRoot!.querySelector('.storage-mismatch-alert')).toBeNull();
     expect(card.shadowRoot!.querySelector('.storage-compare-note')).not.toBeNull();
+  });
+
+  it('Project storage: comparison not available when the summary row has no workspace storage', async () => {
+    vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
+    summaryItems = [{ id: FLAT_K8S.id, no_workspace_storage: true }];
+    const el = await mount({ ...FLAT_K8S });
+    const card = el.shadowRoot!.querySelector('scion-broker-storage-card') as Page;
+    await card.updateComplete;
+    expect(card.shadowRoot!.querySelector('.storage-none')).not.toBeNull();
+    expect(card.shadowRoot!.querySelector('.storage-mismatch-alert')).toBeNull();
+    expect(card.shadowRoot!.querySelector('.storage-compare-note')).not.toBeNull();
+  });
+
+  it('Project storage: comparison not available when the summary request fails', async () => {
+    vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
+    summaryItems = [{ id: FLAT_K8S.id, layout_mismatch: LAYOUT_MISMATCH }];
+    summaryStatus = 500;
+    const el = await mount({ ...FLAT_K8S, workspaceStorage: nfsStorage() });
+    expect(fetchMock.mock.calls.some(([u]) => u === '/api/v1/admin/health/summary')).toBe(true);
+    const card = el.shadowRoot!.querySelector('scion-broker-storage-card') as Page;
+    await card.updateComplete;
+    expect(card.shadowRoot!.querySelector('.storage-mismatch-alert')).toBeNull();
+    expect(card.shadowRoot!.querySelector('.storage-compare-note')).not.toBeNull();
+  });
+
+  it('Project storage: comparison not available when the summary body is not JSON', async () => {
+    vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
+    summaryBadJson = true;
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const el = await mount({ ...FLAT_K8S, workspaceStorage: nfsStorage() });
+      const card = el.shadowRoot!.querySelector('scion-broker-storage-card') as Page;
+      await card.updateComplete;
+      expect(card.shadowRoot!.querySelector('.storage-mismatch-alert')).toBeNull();
+      expect(card.shadowRoot!.querySelector('.storage-compare-note')).not.toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it('Default for project: taken from isDefault in the providers listing, with no project reads', async () => {

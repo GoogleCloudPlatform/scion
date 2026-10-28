@@ -191,13 +191,17 @@ export class ScionPageBrokerAreaDetail extends LitElement {
   }
 
   /**
-   * The hub's layout comparison for this broker: null when the health
-   * summary is not available to this user or has no row for this broker
-   * (for example a truncated summary), [] when it lists no difference.
+   * The hub's layout comparison for this broker. null when the comparison is
+   * not available: the health summary is not available to this user, has no
+   * row for this broker (for example a truncated summary), or the row has no
+   * workspace storage (the hub compares only a reported layout). [] when the
+   * hub lists no difference; that is not a confirmed match, because the
+   * summary also omits the list when the hub's own layout is not shared or
+   * could not be read.
    */
   private get storageMismatch(): string[] | null {
-    if (!this.healthAvailable || !this.healthRow) return null;
-    return this.healthRow.workspace_storage?.layout_mismatch ?? [];
+    if (!this.healthAvailable || !this.healthRow?.workspace_storage) return null;
+    return this.healthRow.workspace_storage.layout_mismatch ?? [];
   }
 
   private get configureVisible(): boolean {

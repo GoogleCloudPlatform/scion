@@ -129,6 +129,8 @@ export interface HealthSummaryItem {
   id: string;
   checks?: Record<string, string>;
   layout_mismatch?: string[];
+  /** The row carries workspace_storage: null (the broker reported no layout). */
+  no_workspace_storage?: boolean;
 }
 
 /** A health summary listing the given brokers' health. */
@@ -142,9 +144,11 @@ export function healthSummary(items: HealthSummaryItem[], truncated = false) {
         status: 'online',
         last_heartbeat: '2026-10-20T00:00:00Z',
         runtime: null,
-        workspace_storage: i.layout_mismatch
-          ? { backend: 'nfs', nfs_healthy: true, layout_mismatch: i.layout_mismatch }
-          : { backend: 'local' },
+        workspace_storage: i.no_workspace_storage
+          ? null
+          : i.layout_mismatch
+            ? { backend: 'nfs', nfs_healthy: true, layout_mismatch: i.layout_mismatch }
+            : { backend: 'local' },
         health: { status: 'healthy', checks: i.checks ?? { runtime: 'available' } },
         agents: { running: 1, attention: 0 },
       })),
