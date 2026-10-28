@@ -15,9 +15,11 @@
 //go:build !no_sqlite
 
 // Package hub — start-time delivery of user-scope secrets
-// (startSecretResolveOpts) against the runtime read (check 8). Both start
-// sites are driven, resolveSecrets (Dispatch, Restart and Probe) and
-// resolveAsNeededForKeys, over both user-scope paths:
+// (startSecretResolveOpts) against the runtime read (check 8). The start
+// sites are driven, resolveSecrets (the create-time dispatch paths),
+// resolveAsNeededForKeys and the start and restart launch selection
+// (selectDeliverySecrets, which must deliver exactly what resolveSecrets
+// does of the owner's user-scope rows), over both user-scope paths:
 //   - the progeny path (an agent created by an agent): start delivery
 //     equals the runtime read;
 //   - the owner path (an agent created by a user, whose OwnerID is that
@@ -92,7 +94,9 @@ func sdDispatcher(srv *Server, s store.Store) *HTTPAgentDispatcher {
 // sdDelivery is what start time delivers of the owner's user-scope secrets:
 // always is sdAlwaysKey from resolveSecrets, asNeeded is sdAsNeededKey from
 // resolveAsNeededForKeys, private is sdPrivateKey from resolveSecrets. Each
-// counts only the user-scope row's value.
+// counts only the user-scope row's value. sdStartDelivery also checks that
+// the start and restart launch selection deliver always and private
+// exactly as resolveSecrets does (as-needed rows are never part of it).
 type sdDelivery struct {
 	always   bool
 	asNeeded bool
@@ -121,6 +125,27 @@ func sdStartDelivery(t *testing.T, d *HTTPAgentDispatcher, s store.Store, agentI
 	got, err := d.resolveAsNeededForKeys(ctx, agent, []string{sdAsNeededKey}, nil)
 	require.NoError(t, err)
 	out.asNeeded = got[sdAsNeededKey] == sdAsNeededValue
+
+	for _, purpose := range []MaterialPurpose{PurposeDispatch, PurposeRestart} {
+		selected, err := d.selectDeliverySecrets(ctx, newDeliverySelector(d.authzService, agent, purpose), agent)
+		require.NoError(t, err)
+		var always, private bool
+		for _, r := range selected {
+			if r.Source != store.ScopeUser {
+				continue
+			}
+			switch r.Name {
+			case sdAlwaysKey:
+				always = r.Value == sdAlwaysValue
+			case sdAsNeededKey:
+				assert.Fail(t, "an as-needed row is never part of the launch selection", "purpose %s", purpose)
+			case sdPrivateKey:
+				private = r.Value == sdPrivateValue
+			}
+		}
+		assert.Equal(t, out.always, always, "launch selection (%s) delivers %s as resolveSecrets does", purpose, sdAlwaysKey)
+		assert.Equal(t, out.private, private, "launch selection (%s) delivers %s as resolveSecrets does", purpose, sdPrivateKey)
+	}
 	return out
 }
 
@@ -309,6 +334,21 @@ func TestStartDelivery_OwnerRowDeniedFallsBackToLowerScope(t *testing.T) {
 	require.NotNil(t, got, "the project row with the same key is still delivered")
 	assert.Equal(t, store.ScopeProject, got.Source)
 	assert.Equal(t, "sd-project-value", got.Value)
+
+	// The start and restart launch selection skip the refused owner row the
+	// same way, before its value is read. The project row is still subject
+	// to its own delivery decision there, so only the owner row's absence
+	// and, when the key is delivered, its source are asserted.
+	for _, purpose := range []MaterialPurpose{PurposeDispatch, PurposeRestart} {
+		selected, err := f.disp.selectDeliverySecrets(context.Background(), newDeliverySelector(f.disp.authzService, agent, purpose), agent)
+		require.NoError(t, err)
+		for _, r := range selected {
+			if r.Name == sdAlwaysKey {
+				assert.Equal(t, store.ScopeProject, r.Source, "launch selection (%s): the refused owner row is not delivered", purpose)
+				assert.Equal(t, "sd-project-value", r.Value)
+			}
+		}
+	}
 }
 
 // TestStartDelivery_ParityWithRuntimeRead runs one chain matrix through

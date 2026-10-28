@@ -3209,21 +3209,33 @@ type startEnvResult struct {
 // mintSiteRestart; it names the site in the mint audit record and gives the
 // verb of the secrets-resolution failure (the agent was not <verb>). Any
 // other site is an error before any work is done. It returns an error only
-// for such a site, when the stored env settings read fails or the secret
-// backend returns a resolution error (a *secretResolutionError; absence of
-// stored settings or secrets is not an error), when the
+// for such a site, when the stored env settings read fails, the secret
+// backend returns a resolution error, or the delivery credential an
+// associated item needs cannot be minted (a *secretResolutionError; absence
+// of stored settings or secrets is not an error, and an item the delivery
+// decision refuses is simply not delivered), when the
 // agent's project cannot be loaded (both checked before any token is
 // minted), or when the agent token is not issued.
 func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Agent, caller string, site mintSite) (startEnvResult, error) {
 	var startedVerb string
+	var purpose MaterialPurpose
 	switch site {
 	case mintSiteStart:
 		startedVerb = "started"
+		purpose = PurposeDispatch
 	case mintSiteRestart:
 		startedVerb = "restarted"
+		purpose = PurposeRestart
 	default:
 		return startEnvResult{}, fmt.Errorf("%s: unsupported mint site %q for a start", caller, site)
 	}
+	// Launch material is selected under the delivery credential: every
+	// project-, hub- and broker-scope env var and secret is authorized
+	// (Decide *.deliver) before it is used, and no secret value is read
+	// before the credential is minted and the item admitted
+	// (material_delivery.go). The selector is per start, so nothing is
+	// cached from an earlier start.
+	sel := newDeliverySelector(d.authzService, agent, purpose)
 	resolvedEnv := make(map[string]string)
 	var envClassifications map[string]api.EnvKind
 
@@ -3257,7 +3269,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// A read error (not an absence) fails the start/restart here, like a
 	// secret resolution error below: before any token is minted and before
 	// anything reaches the broker. Only the fixed message leaves the hub.
-	envFromStorage, envFromStoragePlain, err := d.resolveEnvFromStorage(ctx, agent)
+	envFromStorage, envFromStoragePlain, err := d.selectDeliveryEnv(ctx, sel, agent)
 	if err != nil {
 		d.log.WarnContext(ctx, caller+": failed to read stored env settings; agent not "+startedVerb,
 			"agent_id", agent.ID, "error", err)
@@ -3284,7 +3296,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// lookup and before any agent or transport token is minted below, so
 	// nothing reaches the broker and there is nothing to revoke. Absence is
 	// not an error: an agent with no secrets resolves to an empty list.
-	resolvedSecrets, _, err := d.resolveSecrets(ctx, agent)
+	resolvedSecrets, err := d.selectDeliverySecrets(ctx, sel, agent)
 	if err != nil {
 		d.log.WarnContext(ctx, caller+": failed to resolve secrets; agent not "+startedVerb,
 			"agent_id", agent.ID, "error", err)
@@ -4762,11 +4774,11 @@ func (d *HTTPAgentDispatcher) deferredLifecycleResult(
 }
 
 // startSecretResolveOpts builds the resolve options for a start-time
-// secret resolution. resolveSecrets (Dispatch, Restart and Probe) and
-// resolveAsNeededForKeys both use it, so the two authorize a user-scope
-// secret the same way. It returns nil when no authorization service is
-// configured; nothing is then resolved through the progeny path and the
-// owner path is unchecked.
+// secret resolution. resolveSecrets, resolveAsNeededForKeys and the start
+// and restart launch selection (selectDeliverySecrets) all use it, so they
+// authorize a user-scope secret the same way. It returns nil when no
+// authorization service is configured; nothing is then resolved through
+// the progeny path and the owner path is unchecked.
 //
 // Two user-scope paths are checked, both for one synthetic identity built
 // from the agent's stored role, scopes and ancestry:
