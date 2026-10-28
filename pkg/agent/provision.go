@@ -209,6 +209,11 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 	var repoRoot string
 	var externalAgentDir string
 	var hubAgentDir string // state dir resolved from hubProjectID, when distinct
+	// legacyAgentDir is the in-project state dir an agent of a shared
+	// project configuration had before the configuration moved to the
+	// project root (config.LegacySharedProjectAgentDir); removed with the
+	// agent so a later agent of the same name never resolves to it.
+	var legacyAgentDir string
 	var worktreeDir string // worktree-per-agent: agent's worktree path
 	// ownWorktreePaths lists the paths where this agent's own worktree may
 	// be registered. Only these entries are removed from git's worktree
@@ -231,7 +236,15 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 	var layout agentProjectLayout
 	if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
 		resolvedProjectDir = projectDir
-		agentsDirs = append(agentsDirs, filepath.Join(projectDir, "agents"))
+		// A shared project configuration's in-project agents root is on
+		// the share, in the hub-owned configuration: never a delete target.
+		if !config.IsSharedProjectConfigDir(projectDir) {
+			agentsDirs = append(agentsDirs, filepath.Join(projectDir, "agents"))
+		}
+		if legacy := config.LegacySharedProjectAgentDir(projectDir, agentName); legacy != "" {
+			legacyAgentDir = legacy
+			agentsDirs = append(agentsDirs, filepath.Dir(legacy))
+		}
 
 		// The global project's own per-agent workspace
 		// (~/.scion/workspace/<agentName>, see ProvisionAgent's Case 3) is
@@ -280,10 +293,10 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 	// A sharer key other than the name owns its worktree under the shared
 	// base too, so that path is one of the agent's own. hubAgentDir (when
 	// set) is one of the agent's own directories, the state dir
-	// ProvisionAgent's guard also trusts; it is verified like an extra root
-	// (anchored at its parent, not trusted when it resolves elsewhere). An
-	// empty extra root is ignored.
-	keyRoots := []string{hubAgentDir}
+	// ProvisionAgent's guard also trusts, and so is legacyAgentDir (when
+	// set); each is verified like an extra root (anchored at its parent, not
+	// trusted when it resolves elsewhere). An empty extra root is ignored.
+	keyRoots := []string{hubAgentDir, legacyAgentDir}
 	if sharerKey != agentName && layout.sharedBaseIsRepo {
 		keyRoots = append(keyRoots, filepath.Join(layout.sharedBase, "worktrees", sharerKey))
 	}
@@ -1687,6 +1700,12 @@ func agentStateDir(projectDir, agentName string, sharedWorkspace bool, hubProjec
 func effectiveSharedWorkspace(projectDir, agentName string, sharedWorkspace bool, hubProjectID string) bool {
 	if sharedWorkspace {
 		return true
+	}
+	// A shared project configuration keeps every agent's state in the
+	// external root (config.AgentsRootForProject), so its presence there
+	// says nothing about the workspace mode.
+	if config.IsSharedProjectConfigDir(projectDir) {
+		return false
 	}
 	ext, err := config.AgentDirForProject(projectDir, agentName, true, hubProjectID)
 	if err != nil {
@@ -3526,6 +3545,43 @@ func UpdateAgentConfig(agentName string, projectPath string, status string, runt
 			info.Profile = profile
 		}
 	})
+}
+
+// afterAdvanceRead, when set (tests only), runs in advanceAgentPhase between
+// its first read of agent-info.json and the locked update, so a test can
+// change the phase in that gap.
+var afterAdvanceRead func()
+
+// advanceAgentPhase sets the agent-info.json phase to "to" only while it is
+// still "from" (compare-and-set), so a phase another writer recorded in the
+// meantime, such as a stop or soft-delete mark, is kept. It reads the file
+// first and writes nothing unless the phase matches, because an update
+// through updateSavedAgentInfo always rewrites the file; the update then
+// checks "from" again under the agent-info lock. A missing file is left
+// missing. Best effort: a failure is logged, not returned.
+func advanceAgentPhase(agentName, projectPath, from, to string) {
+	info := getSavedAgentInfo(agentName, projectPath)
+	if info == nil {
+		slog.Debug("Start: agent-info.json is missing or unreadable after the runtime launch; not advancing the phase",
+			"agent", agentName, "from", from, "to", to)
+		return
+	}
+	if info.Phase != from {
+		slog.Debug("Start: agent phase changed during the runtime launch; not advancing it",
+			"agent", agentName, "want", from, "phase", info.Phase, "to", to)
+		return
+	}
+	if afterAdvanceRead != nil {
+		afterAdvanceRead()
+	}
+	if err := updateSavedAgentInfo(agentName, projectPath, func(cur *api.AgentInfo) {
+		if cur.Phase == from {
+			cur.Phase = to
+		}
+	}); err != nil {
+		slog.Warn("Start: failed to record the agent phase after the runtime launch; list may show a stale phase",
+			"agent", agentName, "phase", to, "error", err)
+	}
 }
 
 // MarkAgentSoftDeleted sets Phase "deleted" and, when deletedAt is not

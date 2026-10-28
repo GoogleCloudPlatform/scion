@@ -272,7 +272,8 @@ func TestChatStars_PutValidation(t *testing.T) {
 		{"unknown field", f.admin, starPath(msg), json.RawMessage(`{"conversationKey":"` + f.topicA + `","userId":"x"}`), http.StatusBadRequest},
 		{"not an object", f.admin, starPath(msg), "text", http.StatusBadRequest},
 		{"unknown query", f.admin, starPath(msg) + "?x=1", map[string]string{"conversationKey": f.topicA}, http.StatusBadRequest},
-		{"DM key (phase 1)", f.admin, starPath(msg), map[string]string{"conversationKey": "dm:user:" + f.admin + ":agent:" + f.agentA.ID}, http.StatusNotFound},
+		{"thread message under a DM key", f.admin, starPath(msg), map[string]string{"conversationKey": "dm:user:" + f.admin + ":agent:" + f.agentA.ID}, http.StatusNotFound},
+		{"malformed DM key", f.admin, starPath(msg), map[string]string{"conversationKey": "dm:user:a:user:b"}, http.StatusBadRequest},
 		{"missing thread", f.admin, starPath(msg), map[string]string{"conversationKey": uuid.NewString()}, http.StatusNotFound},
 		{"wrong conversation", f.admin, starPath(msgB), map[string]string{"conversationKey": f.topicA}, http.StatusNotFound},
 		{"missing message", f.admin, starPath(uuid.NewString()), map[string]string{"conversationKey": f.topicA}, http.StatusNotFound},
@@ -416,7 +417,7 @@ func TestChatStars_ListPaginates(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, f.session(t, f.admin, http.MethodGet, bad, nil).Code, bad)
 	}
 	assert.Equal(t, http.StatusNotFound, f.session(t, f.member, http.MethodGet, starListPath(f.topicB), nil).Code, "unreadable thread")
-	assert.Equal(t, http.StatusNotFound, f.session(t, f.admin, http.MethodGet, starListPath("dm:user:a:user:b"), nil).Code)
+	assert.Equal(t, http.StatusBadRequest, f.session(t, f.admin, http.MethodGet, starListPath("dm:user:a:user:b"), nil).Code, "malformed DM key")
 }
 
 func TestChatStars_StateFiltersByAccess(t *testing.T) {
@@ -555,6 +556,7 @@ func TestChatHistory_ReadTargetResolverRegression(t *testing.T) {
 			}
 			assert.Equal(t, []string{web}, got, "web channel only")
 
+			var threadBodies []string
 			for _, c := range []struct {
 				user, path string
 			}{
@@ -565,12 +567,19 @@ func TestChatHistory_ReadTargetResolverRegression(t *testing.T) {
 			} {
 				rec := f.session(t, c.user, http.MethodGet, c.path, nil)
 				assert.Equal(t, http.StatusNotFound, rec.Code, c.path)
+				// A refused read never says whether the caller could post.
+				assert.NotContains(t, rec.Body.String(), "canPost", c.path)
 				if strings.Contains(c.path, "around") {
 					assert.Contains(t, rec.Body.String(), "Message")
 				} else {
 					assert.Contains(t, rec.Body.String(), "Thread")
+					threadBodies = append(threadBodies, rec.Body.String())
 				}
 			}
+			// An unreadable thread and a missing one answer byte-identical
+			// bodies, so the answer does not disclose which it was.
+			require.Len(t, threadBodies, 2)
+			assert.Equal(t, threadBodies[1], threadBodies[0], "unreadable and missing threads answer the same body")
 			rec = f.session(t, f.admin, http.MethodGet, path+"?around="+web, nil)
 			assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		})

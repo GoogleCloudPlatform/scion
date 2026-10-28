@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -379,8 +380,18 @@ func NFSHomeSubPaths(subPathRoot, projectID, slug, agentID string) (agentDir, ho
 	if !validHomeAgentID(agentID) || agentID == slug {
 		return "", "", fmt.Errorf("home storage nfs: invalid agent ID %q", agentID)
 	}
-	agentDir = filepath.Join(subPathRoot, projectID, "agents", slug)
-	return agentDir, filepath.Join(agentDir, "home-"+agentID), nil
+	// The layout authority places homes (ptone/scion#5825): the Cloud Run
+	// agent runtime resolves the same path for the same (project, agent).
+	layout := projectfs.Layout{Backend: projectfs.BackendNFS, SubPathRoot: subPathRoot}
+	ar, err := layout.AgentRoot(projectID, slug)
+	if err != nil {
+		return "", "", fmt.Errorf("home storage nfs: %w", err)
+	}
+	h, err := layout.AgentHome(projectID, slug, agentID)
+	if err != nil {
+		return "", "", fmt.Errorf("home storage nfs: %w", err)
+	}
+	return ar.RelPath, h.RelPath, nil
 }
 
 // homeInitCommand wraps a sciontool home command in a check that the

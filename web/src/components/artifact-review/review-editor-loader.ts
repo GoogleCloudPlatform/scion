@@ -28,6 +28,8 @@ export interface ReviewEditorElement extends HTMLElement {
   comment(): Promise<void>;
   /** Whether the reviewer has made a suggestion or comment in this view since it opened. */
   hasOwnMarks(): boolean;
+  /** Whether an input method composition is still running (its text cannot be written yet). */
+  isComposing(): boolean;
 }
 
 /*

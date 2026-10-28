@@ -16,7 +16,7 @@ harnesses/copilot/
   home/
     .bashrc             # Shell initialization
     .copilot/
-      settings.json     # Default settings (auto-update off)
+      settings.json     # Default settings (auto-update and remote control off)
 ```
 
 ## Installation

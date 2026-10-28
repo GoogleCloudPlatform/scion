@@ -63,9 +63,10 @@ afterEach(() => {
 });
 
 describe('conversationSupportsStars', () => {
-  it('serves project threads only in phase 1', () => {
+  it('serves project threads and both DM kinds', () => {
     expect(conversationSupportsStars('topic-1')).toBe(true);
-    expect(conversationSupportsStars('dm:user:a:agent:b')).toBe(false);
+    expect(conversationSupportsStars('dm:agent:a:user:b')).toBe(true);
+    expect(conversationSupportsStars('dm:user:a:user:b')).toBe(true);
     expect(conversationSupportsStars('')).toBe(false);
   });
 });
@@ -73,6 +74,68 @@ describe('conversationSupportsStars', () => {
 describe('ChatStarsController', () => {
   const M1 = mid(1);
   const M2 = mid(2);
+
+  it('marks a starred-only page starred without a request, leaving pending and deleted IDs', async () => {
+    const fetchState = vi.fn(() => Promise.resolve([]));
+    let releasePut!: () => void;
+    const put = vi.fn(() => new Promise<void>((r) => (releasePut = r)));
+    const c = new ChatStarsController(fakeApi({ fetchStarState: fetchState, deleteStar: put }));
+    c.setConversation('topic-1');
+    const events: string[] = [];
+    c.addEventListener('change', () => events.push('change'));
+    c.evict(M2);
+    const pending = c.setStarred(mid(3), 'topic-1', false);
+    events.length = 0;
+    c.markStarred([M1, M2, mid(3), 'local-row']);
+    expect(c.state(M1)).toBe('starred');
+    expect(c.state(M2)).toBe('unstarred');
+    expect(c.state(mid(3))).toBe('unstarred');
+    expect(events).toEqual(['change']);
+    // Already known as starred: no change event.
+    c.markStarred([M1]);
+    expect(events).toEqual(['change']);
+    expect(fetchState).not.toHaveBeenCalled();
+    releasePut();
+    await pending;
+  });
+
+  it('evicts a deleted message: unstarred at once, lists refetch, no request', async () => {
+    const fetchState = vi.fn((ids: readonly string[]) => Promise.resolve([...ids]));
+    const c = new ChatStarsController(fakeApi({ fetchStarState: fetchState }));
+    c.setConversation('dm:agent:a:user:b');
+    await c.load([M1, M2]);
+    expect(c.state(M1)).toBe('starred');
+    const events: string[] = [];
+    c.addEventListener('change', () => events.push('change'));
+    c.addEventListener('collection-changed', () => events.push('collection-changed'));
+    c.evict(M1);
+    expect(c.state(M1)).toBe('unstarred');
+    expect(c.state(M2)).toBe('starred');
+    expect(events).toEqual(['change', 'collection-changed']);
+    expect(fetchState).toHaveBeenCalledTimes(1);
+    // A later answer that still lists it (a request that raced the
+    // deletion) cannot restore the star.
+    await c.invalidate();
+    expect(c.state(M1)).toBe('unstarred');
+    // Evicting an unknown or unstarrable ID is harmless.
+    c.evict('local-row');
+    c.evict(mid(99));
+    expect(c.state(mid(99))).toBe('unstarred');
+  });
+
+  it('a star request in flight when the message is deleted does not leave it starred', async () => {
+    const put = deferred<string>();
+    const c = new ChatStarsController(fakeApi({ putStar: vi.fn(() => put.promise) }));
+    c.setConversation('t1');
+    await c.load([M1]);
+    const pending = c.setStarred(M1, 't1', true);
+    expect(c.state(M1)).toBe('starred');
+    c.evict(M1);
+    expect(c.state(M1)).toBe('unstarred');
+    put.resolve('2026-10-22T10:00:00Z');
+    await pending;
+    expect(c.state(M1)).toBe('unstarred');
+  });
 
   it('loads unknown IDs in batches of 200 and never refetches known ones', async () => {
     const starredSet = new Set([mid(7)]);

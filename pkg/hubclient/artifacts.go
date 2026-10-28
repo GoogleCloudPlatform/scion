@@ -429,7 +429,10 @@ func (s *artifactService) OpenFile(ctx context.Context, id string, seq int, file
 		}
 		return s.fetchObject(ctx, loc.String())
 	default:
-		return nil, apiclient.CheckResponse(resp)
+		if err := apiclient.CheckResponse(resp); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("artifact file: unexpected status %d", resp.StatusCode)
 	}
 }
 

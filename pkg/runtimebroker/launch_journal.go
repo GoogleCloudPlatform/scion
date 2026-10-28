@@ -97,14 +97,21 @@ func (s journalState) String() string {
 
 // journalTerminal is the terminal report a launch has decided to send.
 // AgentInfo is the identifier-only echo of a succeeded launch
-// (hubclient.AgentLaunchReportInfo, built in runLaunch).
+// (hubclient.AgentLaunchReportInfo, built in runLaunch). StartFailed marks a
+// failed terminal whose launch's Start failed on this broker, and
+// PostCompleted one sent after the hub had already answered completed
+// (ptone/scion#5368); recovery classifies their answers with
+// startFailureCleanup. Both are omitted when false, so a record from an
+// older broker reads them as false and journalVersion stays 1.
 type journalTerminal struct {
-	Succeeded bool                             `json:"succeeded"`
-	Step      string                           `json:"step,omitempty"`
-	ErrorCode string                           `json:"errorCode,omitempty"`
-	Message   string                           `json:"message,omitempty"`
-	Cause     string                           `json:"cause,omitempty"`
-	AgentInfo *hubclient.AgentLaunchReportInfo `json:"agentInfo,omitempty"`
+	Succeeded     bool                             `json:"succeeded"`
+	Step          string                           `json:"step,omitempty"`
+	ErrorCode     string                           `json:"errorCode,omitempty"`
+	Message       string                           `json:"message,omitempty"`
+	Cause         string                           `json:"cause,omitempty"`
+	StartFailed   bool                             `json:"startFailed,omitempty"`
+	PostCompleted bool                             `json:"postCompleted,omitempty"`
+	AgentInfo     *hubclient.AgentLaunchReportInfo `json:"agentInfo,omitempty"`
 }
 
 // journalOwnedRun is a flat instance's ownership key of the launch's run
