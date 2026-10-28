@@ -61,8 +61,10 @@ export interface HealthSummaryBroker {
     backend: string;
     nfs_healthy?: boolean;
     /**
-     * How the broker's reported storage layout differs from the hub's;
-     * absent when they match or the hub's layout is not shared.
+     * How the broker's reported storage layout differs from the hub's.
+     * Absent when the hub lists no difference; that is not a confirmed
+     * match (it is also absent when the hub's layout is not shared or could
+     * not be read).
      */
     layout_mismatch?: string[];
   } | null;
