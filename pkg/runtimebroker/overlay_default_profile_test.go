@@ -374,7 +374,7 @@ func TestOverlayProfiles_KubernetesOnlyBrokerWithoutActiveProfileStarts(t *testi
 		"        type: kubernetes\n")
 	installStoredProfilesOverlay(t)
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.StateDir = t.TempDir()

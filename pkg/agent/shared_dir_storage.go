@@ -468,6 +468,6 @@ func retireSharedDirRecord(agentDir string, sdLayout projectfs.Layout, dirs []ap
 		return ""
 	}
 	return fmt.Sprintf("Warning: this agent's shared dirs %s were pinned to another storage backend by an earlier version; "+
-		"they now follow the project's storage layout (server.project_storage), and earlier content stays where it was until the storage migration copies it",
-		strings.Join(changed, ", "))
+		"they now follow the project's storage layout (server.project_storage), and earlier content stays where it was until it is moved: %s",
+		strings.Join(changed, ", "), config.ProjectStorageMigrationText)
 }

@@ -432,9 +432,10 @@ func (s *Server) hubOwnedBrokerChanges(ctx context.Context, ops *OperationalSett
 //   - schema_version "1" is the value GET reports for a file without the
 //     key, so it is not written as an edit; the editor adds it when needed.
 //   - Creating a server.hub.cors / server.broker.cors block without an
-//     explicit enabled also writes enabled with its current effective value:
-//     inside the block a missing enabled means "off", while a missing block
-//     means "on", so creating the block must not silently turn CORS off.
+//     explicit enabled also writes enabled with its current effective value
+//     (inside the block a missing enabled means off, while a missing block
+//     means the component's default), so creating the block never silently
+//     changes whether CORS is on.
 func workstationFileEdits(req *ServerConfigUpdateDBRequest, leaves []bodyLeaf, origEffective *config.GlobalConfig, origTyped *config.VersionedSettings) []config.SettingsPathEdit {
 	root := reflect.ValueOf(req).Elem()
 	edits := make([]config.SettingsPathEdit, 0, len(leaves))

@@ -632,9 +632,10 @@ func (c *Client) DeletePort(ctx context.Context, port int) error {
 	return nil
 }
 
-// StatusError is returned by the port API methods when the hub answers
-// with an unexpected HTTP status. Its message keeps the
-// "hub returned error <code>: <body>" form used by the other methods.
+// StatusError is returned by the port API methods and the GCP credential
+// fetches when the hub answers with an unexpected HTTP status. Its message
+// keeps the "hub returned error <code>: <body>" form used by the other
+// methods.
 type StatusError struct {
 	StatusCode int
 	Body       string
@@ -642,6 +643,17 @@ type StatusError struct {
 
 func (e *StatusError) Error() string {
 	return fmt.Sprintf("hub returned error %d: %s", e.StatusCode, e.Body)
+}
+
+// HTTPStatusCode returns the hub's HTTP status. Packages that cannot import
+// this one (the metadata server) classify hub errors through it.
+func (e *StatusError) HTTPStatusCode() int { return e.StatusCode }
+
+// IsForbidden reports whether err carries an HTTP 403 from the hub, meaning
+// the hub refused the request for this agent.
+func IsForbidden(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.StatusCode == http.StatusForbidden
 }
 
 // IsUnauthorized reports whether err carries an HTTP 401 from the hub,
@@ -2572,7 +2584,7 @@ func (c *Client) FetchGCPToken(ctx context.Context, scopes []string) (*GCPAccess
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("hub returned %d: %s", resp.StatusCode, string(respBody))
+		return nil, &StatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 
 	var token GCPAccessTokenResponse
@@ -2616,7 +2628,7 @@ func (c *Client) FetchGCPIdentityToken(ctx context.Context, audience string) (st
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("hub returned %d: %s", resp.StatusCode, string(respBody))
+		return "", &StatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 
 	var result struct {

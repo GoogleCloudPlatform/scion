@@ -626,6 +626,84 @@ func newRingListCursorSealer(keys capabilityKeys) *listCursorSealer {
 // active generation reached its sign_until) it returns
 // errCapabilityIssuanceClosed and no cursor.
 func (l *listCursorSealer) Seal(inner, binding string) (string, error) {
+	return l.seal(listCursorScheme, inner, binding)
+}
+
+// Open recovers the plaintext inner cursor Seal produced under binding, and
+// additionally re-validates it with validateAuthorizedListCursor as a
+// structural sanity check on the decrypted plaintext. It returns
+// errInvalidCursor -- never a partially authenticated value, and never a
+// logged one -- for anything else: a missing or unrecognized version
+// prefix, a malformed or unknown key ID, malformed base64, truncation, a
+// flipped byte, a binding that does not match the query or caller the
+// cursor was sealed under, a legacy (pre-sealing) plaintext cursor, or a
+// cursor sealed under a key this sealer does not currently hold or that
+// has been retired (for example after key rotation). Called on a nil
+// sealer, it also returns errInvalidCursor rather than panicking, matching
+// Seal's fail-closed behavior; openAndValidateListCursor also rejects a
+// non-empty cursor when the sealer is nil.
+func (l *listCursorSealer) Open(sealed, binding string) (string, error) {
+	return l.open(listCursorScheme, sealed, binding, func(inner string) bool {
+		return validateAuthorizedListCursor(inner, binding) == nil
+	})
+}
+
+// listPositionSealDomain/listPositionPrefix and their V2 pair are
+// SealPosition's AAD domains and wire markers, in the same two forms as the
+// list cursor's (listCursorSealer):
+//
+//	p1.<base64url(nonce+ciphertext)>        AAD "scion-list-position-v1:" + binding
+//	p2.<kid>.<base64url(nonce+ciphertext)>  AAD "scion-list-position-v2:" + kid + ":" + binding
+//
+// Every domain and marker differs from the list cursor's, so a position
+// cursor never opens as a list cursor and a list cursor never opens as a
+// position cursor, although both use the same keys.
+const (
+	listPositionSealDomain   = "scion-list-position-v1:"
+	listPositionPrefix       = "p1."
+	listPositionSealDomainV2 = "scion-list-position-v2:"
+	listPositionPrefixV2     = "p2."
+)
+
+// listSealScheme is one sealed-cursor scheme's wire markers and AAD
+// domains, legacy (key-ID-less) and versioned. Seal/Open and
+// SealPosition/OpenPosition share seal and open and differ only in their
+// scheme, and in that Open checks the plaintext's shape.
+type listSealScheme struct {
+	prefixV1, domainV1, prefixV2, domainV2 string
+}
+
+var (
+	listCursorScheme   = listSealScheme{listCursorPrefix, listCursorSealDomain, listCursorPrefixV2, listCursorSealDomainV2}
+	listPositionScheme = listSealScheme{listPositionPrefix, listPositionSealDomain, listPositionPrefixV2, listPositionSealDomainV2}
+)
+
+// SealPosition seals an opaque resume position for a list whose position
+// does not fit authorizedList's "created,id" form (for example a sort
+// value and a conversation key). It seals exactly as Seal does (the ring's
+// active generation, the form the ring's emit setting selects, the same
+// binding and failures) under its own scheme (listPositionScheme). The
+// caller validates the position OpenPosition returns: unlike Open, it does
+// not check the plaintext's shape.
+func (l *listCursorSealer) SealPosition(position, binding string) (string, error) {
+	return l.seal(listPositionScheme, position, binding)
+}
+
+// OpenPosition recovers the position SealPosition sealed under binding, as
+// Open does for a list cursor (a p2 cursor with generation kid only, while
+// it is before verify_until; a p1 cursor with the ring's legacy readers).
+// Any failure (an empty or unrecognized cursor, a malformed or unknown key
+// ID, malformed base64, truncation, a flipped byte, another binding, a
+// list cursor, a retired generation, or a nil sealer) is errInvalidCursor.
+func (l *listCursorSealer) OpenPosition(sealed, binding string) (string, error) {
+	return l.open(listPositionScheme, sealed, binding, nil)
+}
+
+// seal seals plaintext under binding in scheme: with the ring's active key,
+// in the versioned form when the ring emits it. A nil sealer fails closed
+// with errListCursorSealerUnavailable; a ring that may not issue now
+// returns errCapabilityIssuanceClosed.
+func (l *listCursorSealer) seal(scheme listSealScheme, plaintext, binding string) (string, error) {
 	if l == nil {
 		return "", errListCursorSealerUnavailable
 	}
@@ -643,39 +721,30 @@ func (l *listCursorSealer) Seal(inner, binding string) (string, error) {
 		// safe cursor left to hand back, sealed or otherwise.
 		panic("list cursor sealer: generating nonce: " + err.Error())
 	}
-	prefix, aad := listCursorPrefix, listCursorSealDomain+binding
+	prefix, aad := scheme.prefixV1, scheme.domainV1+binding
 	if versioned {
-		prefix, aad = listCursorPrefixV2+key.ID+".", listCursorSealDomainV2+key.ID+":"+binding
+		prefix, aad = scheme.prefixV2+key.ID+".", scheme.domainV2+key.ID+":"+binding
 	}
-	ciphertext := aead.Seal(nil, nonce, []byte(inner), []byte(aad))
+	ciphertext := aead.Seal(nil, nonce, []byte(plaintext), []byte(aad))
 	return prefix + base64.RawURLEncoding.EncodeToString(append(nonce, ciphertext...)), nil
 }
 
-// Open recovers the plaintext inner cursor Seal produced under binding, and
-// additionally re-validates it with validateAuthorizedListCursor as a
-// structural sanity check on the decrypted plaintext. It returns
-// errInvalidCursor -- never a partially authenticated value, and never a
-// logged one -- for anything else: a missing or unrecognized version
-// prefix, a malformed or unknown key ID, malformed base64, truncation, a
-// flipped byte, a binding that does not match the query or caller the
-// cursor was sealed under, a legacy (pre-sealing) plaintext cursor, or a
-// cursor sealed under a key this sealer does not currently hold or that
-// has been retired (for example after key rotation). Called on a nil
-// sealer, it also returns errInvalidCursor rather than panicking, matching
-// Seal's fail-closed behavior; openAndValidateListCursor also rejects a
-// non-empty cursor when the sealer is nil.
-func (l *listCursorSealer) Open(sealed, binding string) (string, error) {
+// open recovers what seal sealed under binding in scheme, trying the keys
+// that may have sealed it (the cursor's generation only, or the legacy
+// readers for the key-ID-less form). check, when set, must accept the
+// plaintext. Every failure is errInvalidCursor.
+func (l *listCursorSealer) open(scheme listSealScheme, sealed, binding string, check func(string) bool) (string, error) {
 	if l == nil {
 		return "", errInvalidCursor
 	}
 	kid, body := "", ""
-	if rest, ok := strings.CutPrefix(sealed, listCursorPrefixV2); ok {
+	if rest, ok := strings.CutPrefix(sealed, scheme.prefixV2); ok {
 		var found bool
 		kid, body, found = strings.Cut(rest, ".")
 		if !found || !capabilityKeyIDPattern.MatchString(kid) {
 			return "", errInvalidCursor
 		}
-	} else if rest, ok := strings.CutPrefix(sealed, listCursorPrefix); ok {
+	} else if rest, ok := strings.CutPrefix(sealed, scheme.prefixV1); ok {
 		body = rest
 	} else {
 		return "", errInvalidCursor
@@ -684,9 +753,9 @@ func (l *listCursorSealer) Open(sealed, binding string) (string, error) {
 	if err != nil {
 		return "", errInvalidCursor
 	}
-	aad := listCursorSealDomain + binding
+	aad := scheme.domainV1 + binding
 	if kid != "" {
-		aad = listCursorSealDomainV2 + kid + ":" + binding
+		aad = scheme.domainV2 + kid + ":" + binding
 	}
 	for _, k := range l.keys.candidates(kid) {
 		aead, err := listCursorAEAD(k.Bytes())
@@ -701,11 +770,11 @@ func (l *listCursorSealer) Open(sealed, binding string) (string, error) {
 		if err != nil {
 			continue
 		}
-		inner := string(plaintext)
-		if err := validateAuthorizedListCursor(inner, binding); err != nil {
+		out := string(plaintext)
+		if check != nil && !check(out) {
 			return "", errInvalidCursor
 		}
-		return inner, nil
+		return out, nil
 	}
 	return "", errInvalidCursor
 }

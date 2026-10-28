@@ -294,12 +294,12 @@ func SynthesizeProjectStorage(ps *V1ProjectStorageConfig, ws *V1WorkspaceStorage
 			sharedDirStorageKey, out.Backend, ProjectStorageKey))
 	} else if sd == nil && out.Backend == WorkspaceStorageBackendNFS {
 		warnings = append(warnings, fmt.Sprintf("%s is not set and the workspace is on nfs: shared dirs now follow the workspace onto the nfs export "+
-			"on every runtime (Docker, Podman and Apple agents kept them node-local before; the project-storage migration moves node-local shared-dir trees)",
-			sharedDirStorageKey))
+			"on every runtime (Docker, Podman and Apple agents kept them node-local before). Existing data: %s",
+			sharedDirStorageKey, ProjectStorageMigrationText))
 	} else if sd != nil && sd.Backend == WorkspaceStorageBackendLocal && out.Backend == WorkspaceStorageBackendNFS {
 		warnings = append(warnings, fmt.Sprintf("%s.backend is \"local\" but the workspace is on nfs: "+
-			"shared dirs are now placed on the nfs export with the workspace (node-local shared-dir trees are moved by the project-storage migration)",
-			sharedDirStorageKey))
+			"shared dirs are now placed on the nfs export with the workspace. Existing data: %s",
+			sharedDirStorageKey, ProjectStorageMigrationText))
 	}
 	if out.Homes == HomeStorageBackendNFS && out.Backend != WorkspaceStorageBackendNFS && out.LegacySharedDirsNFS == nil {
 		return nil, nil, fmt.Errorf("%s.backend is \"nfs\" but no nfs share is configured (%s and %s are not nfs): "+
@@ -332,8 +332,8 @@ func placeLegacySharedDirs(ps *V1ProjectStorageConfig, sd *V1SharedDirStorageCon
 		ps.LegacySharedDirsNFS = &nfs
 		return []string{fmt.Sprintf("%s is nfs but the workspace is %q (from %s): shared dirs stay on the shared_dir_storage export "+
 			"and workspaces stay where they are until %s is written. Writing it with backend \"nfs\" moves workspaces onto the export too "+
-			"(one backend for workspaces and shared dirs); run the project-storage migration afterwards to move existing workspaces",
-			sharedDirStorageKey, ps.EffectiveBackend(), workspaceStorageKey, ProjectStorageKey)}, nil
+			"(one backend for workspaces and shared dirs). Existing data, afterwards: %s",
+			sharedDirStorageKey, ps.EffectiveBackend(), workspaceStorageKey, ProjectStorageKey, ProjectStorageMigrationText)}, nil
 	}
 	psLayout, err := NFSLayout(ps.NFS)
 	if err != nil {
@@ -372,8 +372,9 @@ func placeLegacySharedDirs(ps *V1ProjectStorageConfig, sd *V1SharedDirStorageCon
 // paste. For a split synthesis the suggested block is backend "nfs" on the
 // shared-dir export, which also moves workspaces there.
 func legacyStorageWarning(legacy []string, ps *V1ProjectStorageConfig) string {
-	return fmt.Sprintf("legacy storage blocks in use (%s); write server.project_storage instead, then run the project-storage migration:\n%s",
-		strings.Join(legacy, ", "), SuggestedProjectStorageYAML(ps))
+	return fmt.Sprintf("legacy storage blocks in use (%s); write server.project_storage instead and check the file with scion config validate. "+
+		"Existing data the new block places elsewhere: %s. The block to write:\n%s",
+		strings.Join(legacy, ", "), ProjectStorageMigrationText, SuggestedProjectStorageYAML(ps))
 }
 
 // SuggestedProjectStorageYAML renders the server.project_storage block an

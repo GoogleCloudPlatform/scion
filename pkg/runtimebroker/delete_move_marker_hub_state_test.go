@@ -95,7 +95,7 @@ func newHubIDMoveFixture(t *testing.T, mgr *hubIDMoveManager) (*Server, string, 
 	t.Chdir(t.TempDir())
 	scionDir, _ := makeHubProject(t, home, "proj-b", scopeProjB, "dev")
 	mgr.agents = []api.AgentInfo{labelled("dev", "cid-dev", scopeProjB, scionDir)}
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
@@ -245,7 +245,7 @@ func TestDeleteAgent_ForcedMoveRollback_NonCanonicalMarkerHubDirRefused(t *testi
 		t.Fatal(err)
 	}
 	mgr.agents = []api.AgentInfo{labelled("dev", "cid-dev", scopeProjB, extScion)}
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})

@@ -26,6 +26,7 @@ import { createHash } from 'node:crypto';
 import { expect } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
+import { devSignInURL } from '../harness/auth.js';
 import { readHubState } from '../harness/hub.js';
 import type { HubState } from '../harness/hub.js';
 import { solidPng } from '../artifacts-access/render-fixtures.js';
@@ -195,9 +196,14 @@ export function artifactPage(project: string, id: string): string {
   return `/projects/${encodeURIComponent(project)}/artifacts/${encodeURIComponent(id)}`;
 }
 
-/** Opens the app once so dev-auth signs the browser in, then the artifact page. */
+/**
+ * Signs the browser in as the dev admin from a dev sign-in link, which then
+ * opens the artifact page (a dev-auth hub signs no browser in without one).
+ */
 export async function openArtifact(page: Page, project: string, id: string): Promise<void> {
-  await page.goto(new URL(artifactPage(project, id), hub().baseURL).href, {
+  const h = hub();
+  const signInURL = await devSignInURL(h.baseURL, h.devToken);
+  await page.goto(`${signInURL}&next=${encodeURIComponent(artifactPage(project, id))}`, {
     waitUntil: 'domcontentloaded',
   });
   await expect(page.locator('scion-page-artifact-detail')).toBeAttached({ timeout: 30_000 });

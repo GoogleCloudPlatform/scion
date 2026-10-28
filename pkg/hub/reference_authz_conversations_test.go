@@ -583,6 +583,29 @@ func TestRefusalReasonsLoggedNotReturned_Conversations(t *testing.T) {
 	})
 }
 
+// TestAddParticipant_SoftDeletedAgentOfOtherProjectLogsReason: adding a
+// soft-deleted agent of another project answers exactly like an unknown
+// agent (404), and writes the other-project reason to the hub log.
+func TestAddParticipant_SoftDeletedAgentOfOtherProjectLogsReason(t *testing.T) {
+	f := newRefFixture(t)
+	groupA := seedGroupConversation(t, f.st, f.projA.ID, "deleted-other-project")
+	addUserParticipant(t, f.st, groupA, f.ua.ID)
+
+	deleted := &store.Agent{ID: tid("ref-agent-b-deleted"), ProjectID: f.projB.ID, Name: "bb-deleted", Slug: "bb-deleted",
+		Phase: "terminated", OwnerID: f.ub.ID, CreatedBy: f.ub.ID, DeletedAt: time.Now().UTC()}
+	require.NoError(t, f.st.CreateAgent(context.Background(), deleted))
+
+	unknown := f.addParticipantAnswer(t, f.ua, groupA, "agent", tid("ref-agent-nosuch"))
+	require.Equal(t, http.StatusNotFound, unknown.status, unknown.body)
+
+	logs := captureSlog(t)
+	got := f.addParticipantAnswer(t, f.ua, groupA, "agent", deleted.ID)
+	require.Equal(t, http.StatusNotFound, got.status, got.body)
+	requireSameAnswer(t, unknown, got)
+	assert.Contains(t, logs.String(), "reference refused")
+	assert.Contains(t, logs.String(), "agent belongs to another project than the conversation")
+}
+
 // disableCrossProjectMessaging turns messaging between projects off on srv.
 func disableCrossProjectMessaging(t *testing.T, srv *Server) {
 	t.Helper()

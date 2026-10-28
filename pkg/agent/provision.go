@@ -3558,6 +3558,43 @@ func UpdateAgentConfig(agentName string, projectPath string, status string, runt
 	})
 }
 
+// afterAdvanceRead, when set (tests only), runs in advanceAgentPhase between
+// its first read of agent-info.json and the locked update, so a test can
+// change the phase in that gap.
+var afterAdvanceRead func()
+
+// advanceAgentPhase sets the agent-info.json phase to "to" only while it is
+// still "from" (compare-and-set), so a phase another writer recorded in the
+// meantime, such as a stop or soft-delete mark, is kept. It reads the file
+// first and writes nothing unless the phase matches, because an update
+// through updateSavedAgentInfo always rewrites the file; the update then
+// checks "from" again under the agent-info lock. A missing file is left
+// missing. Best effort: a failure is logged, not returned.
+func advanceAgentPhase(agentName, projectPath, from, to string) {
+	info := getSavedAgentInfo(agentName, projectPath)
+	if info == nil {
+		slog.Debug("Start: agent-info.json is missing or unreadable after the runtime launch; not advancing the phase",
+			"agent", agentName, "from", from, "to", to)
+		return
+	}
+	if info.Phase != from {
+		slog.Debug("Start: agent phase changed during the runtime launch; not advancing it",
+			"agent", agentName, "want", from, "phase", info.Phase, "to", to)
+		return
+	}
+	if afterAdvanceRead != nil {
+		afterAdvanceRead()
+	}
+	if err := updateSavedAgentInfo(agentName, projectPath, func(cur *api.AgentInfo) {
+		if cur.Phase == from {
+			cur.Phase = to
+		}
+	}); err != nil {
+		slog.Warn("Start: failed to record the agent phase after the runtime launch; list may show a stale phase",
+			"agent", agentName, "phase", to, "error", err)
+	}
+}
+
 // MarkAgentSoftDeleted sets Phase "deleted" and, when deletedAt is not
 // zero, DeletedAt in one locked update of agent-info.json, so a concurrent
 // writer never sees or keeps only half of the soft-delete mark.

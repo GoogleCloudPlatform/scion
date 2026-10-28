@@ -90,7 +90,7 @@ Each project [shared directory](/scion/local/workspace/#5-project-shared-directo
 
 | Key | Default | Description |
 |---|---|---|
-| `shared_dir_storage_class` | cluster default class | StorageClass for new shared-dir PVCs. It must support `ReadWriteMany`. |
+| `shared_dir_storage_class` | none (required to create a claim) | StorageClass for new shared-dir PVCs. It must support `ReadWriteMany`. |
 | `shared_dir_size` | `10Gi` | Requested size for each new shared-dir PVC. |
 
 You can set them in three places. Each key is resolved separately, and the first source that sets it wins:
@@ -99,7 +99,7 @@ You can set them in three places. Each key is resolved separately, and the first
 2. The profile entry in `settings.yaml`.
 3. The profile's runtime entry in `settings.yaml`.
 
-If none of them sets a key, the cluster's default StorageClass and `10Gi` are used.
+If none of them sets `shared_dir_size`, `10Gi` is used. If none of them sets `shared_dir_storage_class`, Scion does not create shared-dir claims (see [Starts that need a new claim](#starts-that-need-a-new-claim)).
 
 An empty value means "not set", so it does not override a lower source. Once a runtime entry or profile sets a class, an agent cannot reset it to the cluster default; name the class explicitly instead.
 
@@ -107,7 +107,7 @@ An empty value means "not set", so it does not override a lower source. Once a r
 
 The settings values are read every time an agent starts. They apply only on the Kubernetes runtime.
 
-On GKE Autopilot the default class (`standard-rwo`) cannot provision `ReadWriteMany` volumes. The claim stays unbound and the agent pod stays `Pending`. To avoid this, set an RWX class such as `standard-rwx` (Filestore CSI) on the runtime or the profile:
+On GKE Autopilot the default class (`standard-rwo`) cannot provision `ReadWriteMany` volumes, so set an RWX class such as `standard-rwx` (Filestore CSI) on the runtime or the profile:
 
 ```yaml
 runtimes:
@@ -133,6 +133,23 @@ kubernetes:
   shared_dir_size: 10Gi
 ```
 
+#### Starts that need a new claim
+
+When a shared directory's claim does not exist yet and no `shared_dir_storage_class` is set, the agent start fails before its pod is created, and no claim is created. The cluster's default class usually cannot provide `ReadWriteMany` volumes, so such a claim would stay `Pending`, and the agent pod with it. The error names the shared directory and the claim, and the fixes:
+
+- configure [`server.project_storage`](/scion/reference/server-config/#project-storage-serverproject_storage) with `backend: nfs` (one share for all projects; recommended), or
+- set `shared_dir_storage_class` to a `ReadWriteMany` class, in any of the places listed above.
+
+This applies only when a claim must be created. Existing claims, including claims you made by hand, are reused as they are, with no class needed.
+
+#### Claims of another project
+
+A shared-dir claim is named `scion-shared-<project>-<dir>`, so two projects with the same name can collide in one namespace. If an existing claim's `scion.project_id` label names a different project, the start fails with an error naming both projects, and the claim is left unchanged. Delete or rename that claim if the other project no longer uses it. A claim without a `scion.project_id` label (for example one you made by hand) is reused, and Scion logs a warning.
+
+#### Upgrading
+
+Earlier versions created shared-dir claims in the cluster's default class when no class was set. If your cluster's default class already supports `ReadWriteMany`, starts that need a new claim now fail until you set `shared_dir_storage_class` to that class, or configure `server.project_storage` backend `nfs`. Existing claims keep working unchanged.
+
 :::note
 Existing PVCs are reused as they are and never changed. A new class or size only applies to claims created after the change. To move an existing shared directory to a new class, delete its PVC (`scion-shared-…`, labelled `scion.shared-dir=<name>`) after copying out its data. When an agent reuses a claim whose class differs from the requested one, Scion logs a warning naming the claim and both classes.
 :::
@@ -140,6 +157,20 @@ Existing PVCs are reused as they are and never changed. A new class or size only
 :::caution[Cost with many projects]
 Each dynamically provisioned RWX PVC can be its own backing volume. On GKE, every `standard-rwx` claim is a separate Filestore instance, with that tier's minimum capacity. With many projects or shared directories this adds up quickly. For larger fleets, use the NFS backend instead: one pre-provisioned RWX export, mounted by every pod with a `subPath` per project and directory, and no per-directory PVCs. See [`server.project_storage`](/scion/reference/server-config/#project-storage-serverproject_storage) (`backend: nfs`), which serves shared directories from the workspace export.
 :::
+
+### Claim Check Before the Pod
+
+Before it creates an agent pod, the Kubernetes runtime checks every PersistentVolumeClaim the pod mounts: the shared-dir claims, the claim of the NFS share (`server.project_storage` `nfs.shares[0].pv_name`), and any other claim in the pod spec. The check only reads.
+
+| Claim state | Result |
+|---|---|
+| Does not exist | The start fails at once. The error names the claim and, where known, the setting that names it. |
+| `Bound` | The start continues. |
+| Newest event is `ProvisioningFailed` | The start fails at once. The error quotes the event. A newer event after a `ProvisioningFailed` one means the provisioner is retrying, and the claim is treated as `Pending`. |
+| A `WaitForFirstConsumer` event | The start continues: the claim is bound once the pod is scheduled. |
+| Other (`Pending`, `Lost`) | The runtime re-reads the claim every 2 seconds, for up to 30 seconds in total across all the pod's claims. If it is still not bound, the runtime logs a warning and creates the pod anyway. |
+
+The events need `list` on `events` in the agent namespace. Without them, the check uses the claim phase only and logs that once: a provisioning failure is then not detected early, and the first start that uses a new claim of a `WaitForFirstConsumer` class waits the full 30 seconds before its pod is created. Without `get` on `persistentvolumeclaims`, the check is skipped, and that is logged once too.
 
 ### Resource Configuration
 
@@ -857,9 +888,9 @@ To keep the work, push it before stopping the agent, or use [NFS workspace stora
 
 ### Persistent Agent Home (NFS)
 
-With [`server.project_storage.homes: nfs`](/scion/reference/server-config/#project-storage-serverproject_storage) and the `hub.k8s_nfs_home` experiment, a Kubernetes agent keeps its home directory on the NFS export of `server.project_storage` (which needs `backend: nfs`). Files, harness sessions and credentials the harness writes into the home then survive stops, restarts and pod replacements. The feature is in development and also needs `server.project_storage.homes_options.allow_incomplete_phases`. Homes are placed for the whole deployment; there is no per-profile or per-runtime home setting.
+With [`server.project_storage.homes: nfs`](/scion/reference/server-config/#project-storage-serverproject_storage) and the `hub.k8s_nfs_home` experiment, a Kubernetes agent keeps its home directory on the NFS export of `server.project_storage` (which needs `backend: nfs`). Files, harness sessions and credentials the harness writes into the home then survive stops, restarts and pod replacements. The feature is in development and also needs `server.project_storage.homes_options.allow_incomplete_phases`. Homes are placed for the whole deployment; the former per-profile and per-runtime `home_storage_backend`, `home_storage_leaf`, `shared_dir_storage_backend` and `shared_dir_storage_backends` keys are removed, flagged as `storage_overrides` at startup (`storage_override_errors` on `GET /api/v1/admin/server-config`), and refused at agent start with `422 storage_migration_required`.
 
-- **Layout**: each agent's home is `<subpath_root>/<project id>/agents/<agent slug>/home-<agent id>` on the export, mounted by `subPath` at the agent's home directory. It is named after the hub agent ID, so a new agent with the same name gets a new, empty home.
+- **Layout**: each agent's home is `<subpath_root>/<project id>/agents/<agent slug>/home-<agent id>` on the export (the same unified path shape used on Cloud Run), mounted by `subPath` at the agent's home directory. It is named after the hub agent ID, so a new agent with the same name gets a new, empty home.
 - **Export requirements**: the export's group must be the pod group, gid 1000. The home directory is mode 2771 and owned by that group, and the agent writes through the group. A start whose home is not writable by uid 1000 fails with `home_storage_unavailable` and names the requirement.
 - **Creating the home directory** (`homes_options.leaf`):
   - `pod` (default): a `home-leaf` init container in the agent's pod creates it. The container runs as root with only the `CHOWN`, `FOWNER` and `DAC_OVERRIDE` capabilities and mounts only the agent's directory. This needs an export without root squashing; on a squashed export the start fails with `home_leaf_failed`. The broker does nothing on its host.
@@ -956,6 +987,13 @@ When Scion runs on GCE or GKE and the kubeconfig's exec credential plugin fails 
 | pods/log | get |
 | secrets | create, list, delete |
 
+Recommended, for the [claim check before the pod](#claim-check-before-the-pod) and shared-dir claims:
+
+| Resource | Verbs |
+|---|---|
+| persistentvolumeclaims | get (create, to create shared-dir claims on the local backend) |
+| events | list |
+
 ### Additional for GKE Mode
 
 | Resource | Verbs |
@@ -1038,9 +1076,9 @@ rules:
 
 ## Execution Flow
 
-1. **Start**: `scion start` creates a Pod with the configured image, resources, and secrets. Pods don't keep a workspace across a stop, so when the Hub starts an existing agent it sends the same git clone config, branch, and workspace mode that it sends on create. This lets the agent's workspace be recreated on the new Pod.
-2. **Sync**: Workspace and agent home are transferred to the Pod via tar streaming over `pods/exec`.
-3. **Ready**: Pod readiness is polled with detailed error classification (image pull, scheduling, config errors).
+1. **Start**: `scion start` creates a Pod with the configured image, resources, and secrets. Pods don't keep a workspace across a stop, so when the Hub starts an existing agent it sends the same git clone config, branch, and workspace mode that it sends on create. This lets the agent's workspace be recreated on the new Pod. Because the Runtime Broker copies the agent home into the Pod after creation, it writes the agent's local phase in `agent-info.json` as `starting` before `Run` and advances it to `running` (via compare-and-set so a concurrent phase change is not overwritten) only after `Run` returns.
+2. **Sync**: Workspace and agent home are transferred to the Pod via tar streaming over `pods/exec`. When placing individual files in the container, the placement script re-verifies each path component immediately after `mkdir` and aborts before writing any file if a component is a symlink or not a directory.
+3. **Ready**: Pod readiness is polled with detailed error classification (image pull, scheduling, config errors). If the Pod is preempted or evicted while waiting to become ready, the start error names whether it was preempted or evicted along with the Kubernetes disruption reason (`: it was preempted (<reason>)` or `: it was evicted (<reason>)`).
 4. **Attach**: `scion attach` connects to the tmux session inside the Pod via `pods/exec`.
 5. **Sync back**: the Kubernetes runtime copies files only to the Pod, never back from it. With the default (emptyDir) workspace, an agent's changes reach the host only when the agent commits and pushes them to the remote. The CLI's `scion sync from <agent>` does not read the Pod: it goes through the Hub, which returns the broker's copy of the workspace.
 6. **Delete**: `scion rm <agent>` deletes the Pod and associated Secrets/SecretProviderClasses. `scion stop` uses the same deletion path, so the per-agent Secret and, in GKE mode, the SecretProviderClass are deleted when the agent is stopped or deleted. If the Pod is removed outside scion, the objects are removed on the next stop/delete or start of that agent.
@@ -1089,6 +1127,10 @@ The Kubernetes runtime provides structured error messages with remediation hints
 | CrashLoopBackOff | Check container logs with `scion logs` |
 | Unschedulable | Check node selectors, tolerations, and resource availability |
 | Invalid resource values | Error includes the field name and invalid value |
+| Shared dir claim does not exist and no `shared_dir_storage_class` is set | Configure `server.project_storage` backend `nfs`, or set `shared_dir_storage_class` to a `ReadWriteMany` class. See [Starts that need a new claim](#starts-that-need-a-new-claim) |
+| Claim is labelled for another project | Delete or rename that claim if the other project no longer uses it |
+| Claim does not exist (before the pod) | Create the claim in the agent namespace, or correct the setting the error names |
+| Claim cannot be provisioned (`ProvisioningFailed`) | Fix the cause the event names, for example the claim's StorageClass |
 
 When an agent create fails on Kubernetes, the Runtime Broker's answer stays generic (`500 runtime_error`), but it keeps the cause: when the Kubernetes API refused the Runtime Broker's own credentials, `error.details.cause` is `runtime_forbidden` (its credentials may not perform the operation) or `runtime_unauthorized` (its credentials were rejected). The Hub relays it as `502 runtime_error` with the same `error.details.cause`. The Runtime Broker's server log records the full cause, with `k8s_reason` (the Kubernetes status reason) and `cause_code` fields. Namespace, ServiceAccount and object names appear only in the log, never in the answer.
 

@@ -1554,6 +1554,7 @@ func TestCreateSharedDirPVCs_LocalBackend_CreatesPVCs(t *testing.T) {
 			{Name: "build-cache"},
 			{Name: "logs"},
 		},
+		Kubernetes: &api.KubernetesConfig{SharedDirStorageClass: "standard-rwx"},
 	}
 
 	err := r.createSharedDirPVCs(context.Background(), "default", config)

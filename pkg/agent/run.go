@@ -163,11 +163,31 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// GetAgent will use (AgentStateDir, including its effective
 	// shared-workspace detection). The record is read again, from that same
 	// dir, where image selection uses it.
-	if preDir, _, dirErr := AgentStateDir(projectDir, opts.Name, opts.SharedWorkspace, opts.HubProjectID, opts.BrokerMode || opts.HubProjectID != ""); dirErr == nil {
-		if _, provErr := readImageProvenance(preDir); provErr != nil {
+	preDir, _, dirErr := AgentStateDir(projectDir, opts.Name, opts.SharedWorkspace, opts.HubProjectID, opts.BrokerMode || opts.HubProjectID != "")
+	if dirErr != nil {
+		preDir = ""
+	}
+	var preProvenance *imageProvenance
+	if preDir != "" {
+		prov, provErr := readImageProvenance(preDir)
+		if provErr != nil {
 			logImageProvenanceError(opts.Name, provErr)
 			return nil, provErr
 		}
+		preProvenance = prov
+	}
+	// Refuse, before any side effect, a start whose storage would be
+	// placed differently than configured before server.project_storage: a
+	// removed storage override on the start's profile chain, or a
+	// per-agent record pinning shared dirs to nfs while the layout is not
+	// shared (ptone/scion#6371). The profile is chosen as startProfile is
+	// below.
+	refusalProfile := opts.Profile
+	if refusalProfile == "" && preProvenance != nil {
+		refusalProfile = preProvenance.Profile
+	}
+	if err := checkStartStorageRefusals(ctx, preDir, refusalProfile); err != nil {
+		return nil, err
 	}
 
 	// Every new runtime entry carries a run ID (ptone/scion#2550). The hub
@@ -911,6 +931,11 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// if any (for restaging capture-auth assets after a bundle clear).
 	var resolvedHCDir *config.HarnessConfigDir
 	var noAuthConfig *config.HarnessNoAuthConfig
+	// aliasHarness keys the built-in model-alias fallback
+	// (resolveEffectiveModel): the declared harness of the harness-config
+	// this launch resolved, or the stored name when none was resolved (the
+	// harness.New paths, where h is built from that same name).
+	aliasHarness := harnessName
 	if harnessConfigName != "" {
 		var resolveTemplatePaths []string
 		if opts.Template != "" && (filepath.IsAbs(opts.Template) || !hydrated) {
@@ -985,6 +1010,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 			h = fallback
 		} else {
 			h = resolved.Harness
+			aliasHarness = resolved.Config.Harness
 			noAuthConfig = resolved.Config.NoAuthConfig
 			resolvedHCDir = resolved.ConfigDir
 			if resolved.ConfigDir != nil {
@@ -1401,8 +1427,11 @@ authDone:
 		opts.Env["SCION_BROKER_NAME"] = "local"
 	}
 	// Inject harness and model identifiers for telemetry labeling.
-	if _, ok := opts.Env["SCION_HARNESS"]; !ok && harnessName != "" {
-		opts.Env["SCION_HARNESS"] = harnessName
+	// SCION_HARNESS is the harness this launch resolved (ptone/scion#5946),
+	// not the stored name read before resolution; an explicit SCION_HARNESS
+	// already in opts.Env wins (containerHarnessEnv).
+	if v, set := containerHarnessEnv(ctx, opts.Env, launchedHarnessName(h)); set {
+		opts.Env["SCION_HARNESS"] = v
 	}
 	// The resolved ready spec for sciontool init, which records it in the
 	// init-run file for the host's readiness wait. Always written: the
@@ -1417,7 +1446,7 @@ authDone:
 	// env (the hub-resolved model, or an explicit --env) wins over the
 	// broker's own config, so a broker template or harness-config default
 	// cannot override the hub's request > project > template > hub order.
-	effectiveModel := resolveEffectiveModel(opts.Env["SCION_MODEL"], finalScionCfg, hcModelAliases, harnessName)
+	effectiveModel := resolveEffectiveModel(opts.Env["SCION_MODEL"], finalScionCfg, hcModelAliases, aliasHarness)
 	if effectiveModel != "" {
 		if prev := opts.Env["SCION_MODEL"]; prev != "" && prev != effectiveModel {
 			util.Debugf("RunAgent: resolved model alias %q → %q", prev, effectiveModel)
@@ -2644,25 +2673,41 @@ authDone:
 	}
 	slog.Info("agent start: pre-runtime provisioning complete", "agent", opts.Name,
 		"elapsed_ms", time.Since(startEntry).Milliseconds())
-	// Record the running phase, runtime and profile before the container
-	// starts rather than after it: some runtimes do not let the host write
-	// files in the container (ptone/scion#4766). Once up, the container
-	// reports its own phase (sciontool init writes "running"). A failed
-	// launch is recorded in the host-owned host state file
-	// (ptone/scion#4815, see setStartFailedRunID); the record is cleared
-	// here, before Run, and set below when Run fails. (The run ID record
-	// after the create, when the pre-start List failed, goes to the same
-	// file, ptone/scion#4771.)
+	// Record the phase, runtime and profile before the container starts
+	// rather than after it: some runtimes do not let the host write files in
+	// the container (ptone/scion#4766). Once up, the container reports its
+	// own phase (sciontool init writes "running"). A failed launch is
+	// recorded in the host-owned host state file (ptone/scion#4815, see
+	// setStartFailedRunID); the record is cleared here, before Run, and set
+	// below when Run fails. (The run ID record after the create, when the
+	// pre-start List failed, goes to the same file, ptone/scion#4771.)
 	//
-	// Phase is always "running" here, for both a fresh start and a resume:
-	// state.Phase has no "resumed" value, and a non-standard phase string
-	// confuses readers that only understand the canonical lifecycle phases
-	// (e.g. the hub's post-wake readiness wait). Resume-specific display
-	// text is derived independently at the CLI layer (see displayStatus in
-	// cmd/common.go), so it does not need to be encoded in Phase.
-	status := string(state.PhaseRunning)
-	if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, status, m.Runtime.Name(), profileName); updateErr != nil {
-		util.Debugf("Start: failed to update local agent status to %q: %v", status, updateErr)
+	// The phase written here is "running" for both a fresh start and a
+	// resume: state.Phase has no "resumed" value, and a non-standard phase
+	// string confuses readers that only understand the canonical lifecycle
+	// phases (e.g. the hub's post-wake readiness wait). Resume-specific
+	// display text is derived independently at the CLI layer (see
+	// displayStatus in cmd/common.go), so it does not need to be encoded in
+	// Phase.
+	//
+	// A runtime whose agent home is a one-way copy made during Run, and
+	// whose harness cannot start before Run returns
+	// (runtime.CopiesAgentHome, e.g. Kubernetes), gets "starting" here
+	// instead, and "running" once Run has returned successfully: Run can
+	// take minutes (scheduling, home and workspace sync), and the list and
+	// the broker heartbeat must not report the agent running before the
+	// harness can start (ptone/scion#5368). The host may write
+	// agent-info.json after Run only on such a runtime, because there the
+	// file is not shared with the container.
+	successPhase := string(state.PhaseRunning)
+	preRunPhase := successPhase
+	copiedHome := runtime.CopiesAgentHome(m.Runtime)
+	if copiedHome {
+		preRunPhase = string(state.PhaseStarting)
+	}
+	if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, preRunPhase, m.Runtime.Name(), profileName); updateErr != nil {
+		slog.Warn("Start: failed to record the agent phase before the runtime launch; list may show a stale phase",
+			"agent", opts.Name, "phase", preRunPhase, "error", updateErr)
 	}
 	if err := setStartFailedRunID(RunOwnerTargetFor(opts), ""); err != nil {
 		slog.Warn("Start: failed to clear the failed-start record in the host state file; list may show this agent as errored",
@@ -2680,8 +2725,8 @@ authDone:
 	}
 	id, err := m.Runtime.Run(ctx, runCfg)
 	if err != nil {
-		// agent-info.json was set to "running" above, before the runtime
-		// launch. If the launch itself fails, keep the provisioned
+		// agent-info.json was set to the pre-run phase above, before the
+		// runtime launch. If the launch itself fails, keep the provisioned
 		// workspace but record the error so list/status do not report a
 		// phantom agent forever. Some runtimes do not let the host write
 		// files in the container, so the failed start is also recorded in
@@ -2700,6 +2745,15 @@ authDone:
 	}
 	slog.Info("agent start: runtime.Run complete", "agent", opts.Name,
 		"total_elapsed_ms", time.Since(startEntry).Milliseconds())
+	if copiedHome {
+		// Run has returned, so the harness may now start. On this runtime
+		// the host's agent-info.json is a host-only copy, not shared with
+		// the container (runtime.CopiesAgentHome), so writing it now keeps
+		// the ptone/scion#4766 invariant (no host write while the container
+		// may read the file). Compare-and-set: a stop or delete mark
+		// written while Run was in progress wins.
+		advanceAgentPhase(opts.Name, opts.ProjectPath, preRunPhase, successPhase)
+	}
 	// The run is recorded after the create when the pre-start List failed
 	// (see recordAfterCreate). It goes to the host-owned HostStateFile, so
 	// it does not matter that the container may be up; a failure is logged
@@ -2727,13 +2781,25 @@ authDone:
 					// Try to get logs for diagnosis
 					logs, _ := m.Runtime.GetLogs(ctx, id)
 					_ = m.Runtime.Delete(ctx, runtime.RunRef{ID: id, RunID: runID})
+					// Record the failed start as the Run error path does, so
+					// list shows error rather than the pre-run phase. The
+					// container is gone, so the host write keeps the
+					// ptone/scion#4766 invariant (no host write while the
+					// container may read the file).
+					if recErr := setStartFailedRunID(RunOwnerTargetFor(opts), runID); recErr != nil {
+						slog.Warn("Start: failed to record the failed start in the host state file",
+							"agent", opts.Name, "run_id", runID, "error", recErr)
+					}
+					if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, string(state.PhaseError), m.Runtime.Name(), profileName); updateErr != nil {
+						util.Debugf("Start: failed to mark agent error in local config: %v", updateErr)
+					}
 					return nil, fmt.Errorf("container started but exited immediately (status: %s). Container logs:\n%s", a.ContainerStatus, logs)
 				}
 				a.Detached = detached
 				a.Warnings = warnings
 				a.HubOnlyEnvWarnings = hubOnlyEnvWarnings
 				a.RelayedWarnings = relayedWarnings
-				a.Phase = status
+				a.Phase = successPhase
 				a.HarnessConfig = harnessConfigName
 				a.HarnessConfigRevision = harnessConfigRevision
 				a.HarnessConfigSource = harnessConfigSource
@@ -2751,7 +2817,7 @@ authDone:
 		ID:                    id,
 		RunID:                 runID,
 		Name:                  opts.Name,
-		Phase:                 status,
+		Phase:                 successPhase,
 		Detached:              detached,
 		Warnings:              warnings,
 		HubOnlyEnvWarnings:    hubOnlyEnvWarnings,
@@ -4067,6 +4133,40 @@ func mergeExtraHosts(a, b []string) []string {
 	return result
 }
 
+// launchedHarnessName is the name of the harness implementation this launch
+// resolved: the harness-config's declared harness for a declarative or
+// container-script harness, an embedded harness's name, or "generic" for the
+// plain Generic implementation. It is the container's SCION_HARNESS
+// (containerHarnessEnv).
+func launchedHarnessName(h api.Harness) string {
+	if h == nil {
+		return ""
+	}
+	return h.Name()
+}
+
+// containerHarnessEnv decides the container's SCION_HARNESS. It returns the
+// value to set and true when env has no SCION_HARNESS and launched is
+// non-empty. An SCION_HARNESS already in env (the caller's env, or the
+// settings harness_configs.<name>.env merged into it earlier) is an explicit
+// override and is kept; since an intentional parser override cannot be told
+// apart from a stale name, a fixed warning names both harnesses when they
+// differ. sciontool selects its usage-parsing rules and labels usage with
+// this value.
+func containerHarnessEnv(ctx context.Context, env map[string]string, launched string) (string, bool) {
+	if override, ok := env["SCION_HARNESS"]; ok {
+		if override != launched {
+			slog.WarnContext(ctx, "Start: SCION_HARNESS override differs from the launched harness",
+				"override", override, "launched", launched)
+		}
+		return "", false
+	}
+	if launched == "" {
+		return "", false
+	}
+	return launched, true
+}
+
 // resolveEffectiveModel returns the agent's one effective model: SCION_MODEL
 // from the start env when set (the hub-resolved model, or an explicit
 // --env), else the broker's own config model (an agent with no hub-resolved
@@ -4075,7 +4175,11 @@ func mergeExtraHosts(a, b []string) []string {
 // harness-config's model_aliases, else the harness's built-in table
 // (harnesses/<harnessName>/config.yaml), so a bare alias never reaches the
 // harness verbatim. An alias neither table resolves is returned in its
-// normalized form (e.g. "large" for "L").
+// normalized form (e.g. "large" for "L"). harnessName is the declared harness
+// of the harness-config this launch resolved (the stored name when no
+// harness-config resolved), not the stored name of a resolved launch, which a
+// harness-config switch leaves stale (ptone/scion#5946); empty means no
+// built-in table.
 //
 // The broker's config model never replaces a SCION_MODEL value, alias or
 // not: that model may be a broker template or harness-config default, which

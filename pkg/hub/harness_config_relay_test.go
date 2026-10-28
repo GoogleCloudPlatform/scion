@@ -32,8 +32,9 @@ import (
 // Broker harness-config refusals relayed by the hub (ptone/scion#3132).
 
 const (
-	harnessUnusableMessage = `Failed to create agent: harness-config "scripted" provisioner is not usable: missing script; fix the harness-config`
-	harnessPolicyMessage   = `harness-config "scripted" uses scripted provisioning but this broker has allow_container_script_harnesses=false.`
+	harnessUnusableMessage  = `Failed to create agent: harness-config "scripted" provisioner is not usable: missing script; fix the harness-config`
+	storageMigrationMessage = `Failed to start agent: the global settings file sets a removed storage override: profiles.p1.shared_dir_storage_backend ("nfs").`
+	harnessPolicyMessage    = `harness-config "scripted" uses scripted provisioning but this broker has allow_container_script_harnesses=false.`
 )
 
 // brokerHarnessConfigErr is a broker error answer as it reaches the hub.
@@ -55,6 +56,9 @@ var brokerRefusals = []struct {
 	message string
 }{
 	{name: "422 unusable", status: http.StatusUnprocessableEntity, code: "harness_config_unusable", message: harnessUnusableMessage},
+	// The broker's refusal of a start whose storage would be placed
+	// differently than configured (ptone/scion#6371) is relayed the same way.
+	{name: "422 storage migration", status: http.StatusUnprocessableEntity, code: "storage_migration_required", message: storageMigrationMessage},
 	{name: "403 policy", status: http.StatusForbidden, code: "forbidden", message: harnessPolicyMessage},
 	// A broker 400 validation_error is relayed by the same helper
 	// (ptone/scion#2666).
@@ -81,6 +85,7 @@ func TestDispatchCreateErrorResponse_OtherBrokerErrorsStay502(t *testing.T) {
 	}{
 		{name: "500 runtime_error", err: brokerHarnessConfigErr(http.StatusInternalServerError, "runtime_error", "boom")},
 		{name: "500 harness_config_unusable", err: brokerHarnessConfigErr(http.StatusInternalServerError, "harness_config_unusable", "boom")},
+		{name: "500 storage_migration_required", err: brokerHarnessConfigErr(http.StatusInternalServerError, "storage_migration_required", "boom")},
 		{name: "503 forbidden", err: brokerHarnessConfigErr(http.StatusServiceUnavailable, "forbidden", "boom")},
 		{name: "403 without broker envelope", err: &brokerStatusError{StatusCode: http.StatusForbidden, Body: "<html>Forbidden</html>"}},
 		{name: "422 other code", err: brokerHarnessConfigErr(http.StatusUnprocessableEntity, "validation_error", "boom")},

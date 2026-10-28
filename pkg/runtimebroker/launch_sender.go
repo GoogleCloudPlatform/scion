@@ -203,8 +203,10 @@ func (s *launchSender) markTerminalStarted() {
 }
 
 // recordKeepaliveCompleted marks that a keepalive answer was "completed"
-// (design: skip remaining checkpoints, Run continues; a later failure sends
-// nothing and never cleans up). It does not stop the keepalive loop.
+// (design: skip remaining checkpoints, Run continues; a later failure
+// before Start sends nothing and never cleans up, and a Start failure is
+// reported and cleaned up as failLaunch describes). It does not stop the
+// keepalive loop.
 func (s *launchSender) recordKeepaliveCompleted() {
 	s.mu.Lock()
 	s.completed = true
@@ -873,6 +875,11 @@ func (s *launchSender) SendTerminal(ctx context.Context, succeeded bool, step, e
 		Cause:      cause,
 		Agent:      agentInfo,
 		At:         time.Now(),
+	}
+	if !succeeded {
+		// The hub applies a failed report after running_observed only for
+		// the run it names (ptone/scion#5368).
+		report.RunID = s.rec.RunID
 	}
 	return s.sendReportBlocking(ctx, report, s.timings.reportMinBackoff, s.timings.reportMaxBackoff, terminalAttemptTimeout, false)
 }

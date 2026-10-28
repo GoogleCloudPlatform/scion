@@ -783,7 +783,7 @@ func TestCreateAgentStartFailure_CleansUpFiles(t *testing.T) {
 		t.Fatalf("failed to write scion-agent.yaml: %v", err)
 	}
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	mgr := &provisionCapturingManager{}

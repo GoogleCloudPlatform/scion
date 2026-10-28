@@ -195,7 +195,11 @@ func (s *Server) deleteAfterFailure(repo githubapp.Repo, runnerID int64, attrs [
 type stopResult struct {
 	busy                bool // registration busy and left alone (requireIdle)
 	registrationDeleted bool // registration deleted or already absent
-	ref                 string
+	// registrationErr is GitHub's refusal when a hijacked (not requireIdle) runner's
+	// registration could not be deleted because it is busy (422): GitHub keeps it
+	// until it times the untrusted job out, about 10 minutes (D11 live test).
+	registrationErr string
+	ref             string
 }
 
 // stopRunner deletes runner `name`'s registration and cancels its
@@ -233,6 +237,7 @@ func (s *Server) stopRunner(repo githubapp.Repo, name string, requireIdle bool) 
 					res.busy = true
 					return res, nil
 				}
+				res.registrationErr = err.Error()
 			default:
 				errs = append(errs, err)
 			}

@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -188,9 +189,10 @@ func TestBrokerCreateGate_SuperAdminUATCannotRotate(t *testing.T) {
 // authenticated broker's own HMAC identity only satisfies the self shortcut
 // for ITS OWN id: broker A's credential must not rotate broker B's secret.
 // Driven through real middleware — the request is HMAC-signed with broker
-// A's actual stored secret via BrokerAuthService.SignRequest, and dispatched
-// through srv.Handler().ServeHTTP, the same as a real broker's outbound
-// call, rather than constructing the broker identity by hand.
+// A's actual stored secret via apiclient.HMACAuth.ApplyAuth (the signer
+// real brokers use), and dispatched through srv.Handler().ServeHTTP, the
+// same as a real broker's outbound call, rather than constructing the
+// broker identity by hand.
 func TestBrokerRotateSecret_UnrelatedBrokerSelfDenied(t *testing.T) {
 	t.Parallel()
 	srv, s := testServer(t)
@@ -205,7 +207,7 @@ func TestBrokerRotateSecret_UnrelatedBrokerSelfDenied(t *testing.T) {
 	callerKey := seedBrokerSecret(t, s, caller.ID)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/brokers/"+target.ID+"/rotate-secret", nil)
-	require.NoError(t, srv.brokerAuthService.SignRequest(req, caller.ID, callerKey))
+	require.NoError(t, (&apiclient.HMACAuth{BrokerID: caller.ID, SecretKey: callerKey}).ApplyAuth(req))
 	rec := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(rec, req)

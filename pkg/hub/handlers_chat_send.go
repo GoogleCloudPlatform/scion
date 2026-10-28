@@ -550,6 +550,24 @@ func (s *Server) validateChatSendInputMode(ctx context.Context, user UserIdentit
 	return content, attachmentRefs, nil
 }
 
+// chatSendValidationEnvelope returns the message that a chat v2 send to
+// agents passes to messaging.ValidateLegacyMessage. The attachment files are
+// staged into msg.Attachments only after the message is stored
+// (stageChatAttachments), so an attachment-only send, whose body is empty
+// (ptone/scion#6146), is validated on a copy that names its attachment ids
+// in their place. msg itself is never changed.
+func chatSendValidationEnvelope(msg *messages.StructuredMessage, refs []AttachmentRef) *messages.StructuredMessage {
+	if msg == nil || msg.Msg != "" || len(msg.Attachments) > 0 || len(refs) == 0 {
+		return msg
+	}
+	v := *msg
+	v.Attachments = make([]string, 0, len(refs))
+	for _, ref := range refs {
+		v.Attachments = append(v.Attachments, ref.ID)
+	}
+	return &v
+}
+
 // sendChatMessage is the single chat v2 send path: conversation access
 // check, validation, routing, persistence, publish and dispatch, for a
 // message sent by user to the conversation key. It is used by the HTTP

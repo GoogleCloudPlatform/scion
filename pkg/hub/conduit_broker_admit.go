@@ -61,6 +61,10 @@ func (s *Server) authenticateBrokerUpgrade(w http.ResponseWriter, r *http.Reques
 	}
 	if _, err := s.brokerAuthService.ValidateBrokerSignature(r.Context(), r); err != nil {
 		slog.Error("HMAC validation failed for broker", "brokerID", brokerID, "error", err)
+		if errors.Is(err, errBrokerAuthBodyTooLarge) {
+			writeBrokerAuthFailure(w, err)
+			return "", false
+		}
 		writeError(w, http.StatusUnauthorized, ErrCodeBrokerAuthFailed, "Invalid broker signature", nil)
 		return "", false
 	}

@@ -461,7 +461,7 @@ func newGateServer(t *testing.T, nfs *config.V1NFSConfig, brokerRuntime, dispatc
 
 	mc := newSyncMountChecker()
 	mc.mountErr = errors.New("mount failed")
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.NFSConfig = nfs
 	cfg.NFSMountChecker = mc
 	cfg.ForceRuntime = dispatchRuntime

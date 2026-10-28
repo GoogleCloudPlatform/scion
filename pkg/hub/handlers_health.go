@@ -196,6 +196,9 @@ func (s *Server) healthChecks(ctx context.Context) map[string]string {
 	// The project tree on a shared backend's mount (non-critical).
 	s.checkProjectStorageTree(checks)
 
+	// Removed per-runtime/per-profile storage overrides (non-critical).
+	s.checkRemovedStorageOverrides(checks)
+
 	return checks
 }
 
