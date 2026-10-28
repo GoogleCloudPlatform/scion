@@ -240,6 +240,11 @@ job's volume mount must match:
   layout (check the warm-up log and a routed job's "Check cr-ci cache parity"
   step for `real directory` lines and no `old cr-ci runner layout` note), delete
   the `if [ -L /home/runner/work ]` branch from that step in a cr-ci change.
+- **Live verification after the switch** (on a named companion GO): a routed
+  diagnostic job checks `pwd -P`, actions/setup-node's npm cache, a temp-directory
+  ancestor check, and single-node-vm's tests, and ii3 reads its memory and disk.
+  Also check the **peak memory of a routed extras-ci.yml `build-and-test`** run: with
+  `TMPDIR` unset its `t.TempDir()` files are in RAM.
 - After the switch, the first start logs `volume root /home/runner: owner uid N,
   mode M`. Record it: if the runner's uid (1001) owns the root, the entrypoint
   has set it to 0755; otherwise HOME stays world-writable (a documented residual).

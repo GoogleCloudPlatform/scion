@@ -402,7 +402,11 @@ uid, or passing the JIT config by file and deleting it once the listener has sta
   - **Temp files are in RAM.** `/tmp` is on the in-memory root filesystem, so Go
     tests' `t.TempDir()` and other temp files count against `RUNNER_MEMORY`. Go's
     build and test temp work is on the disk (`GOTMPDIR`). Measure peak memory
-    before routing temp-heavy jobs (build-and-test).
+    before routing temp-heavy jobs such as ci.yml's `build-and-test` (not routed).
+    extras-ci.yml's `build-and-test` (a per-module `go test -count=1 ./...` matrix)
+    **is** already routed, so its `t.TempDir()` files are now in RAM too: its fixtures
+    are small, but check its peak memory in the live verification job after the
+    layout switch ([operations.md, "Runner layout switch"](operations.md#runner-layout-switch)).
 - **Shape limits:** at most 8 vCPU / 32 GiB, and memory must fit the CPU count
   (4 vCPU up to 16 GiB, 6 up to 24 GiB, 8 up to 32 GiB). The loader enforces
   this. The design's "> 16 GiB needs 4 vCPU" statement is wrong (see the
