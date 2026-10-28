@@ -1040,3 +1040,45 @@ func TestForceDeleteUser_CompletionSweepsDelegatorEdges(t *testing.T) {
 	requireEdgeCause(t, f.s, edge.ID, store.EdgeDeactivationDelegatorDeleted, d.ID)
 	assert.True(t, mustGetAgent(t, f.s, other.ID).DeletedAt.IsZero(), "the other user's agent is not stopped")
 }
+
+// A finalize that commits between the completion's re-listing of the
+// blockers and its lock on their agent rows wins: the completion re-reads
+// the agent under the lock, finds it gone, and keeps the stopped record
+// instead of reopening it. The next completion counts it stopped.
+func TestForceDeleteUser_CompletionKeepsStoppedOfFinalizeCommittedFirst(t *testing.T) {
+	f := newForceDelFixture(t, time.Hour)
+	ctx := context.Background()
+	d := stoppedDeletionReadyToComplete(t, f)
+	live := f.agent(t, "finalized-first", nil)
+	require.NoError(t, f.s.UpsertUserDeletionAgent(ctx, &store.UserDeletionAgent{
+		DeletionID: d.ID, AgentID: live.ID, Slug: live.Slug, ProjectID: live.ProjectID,
+		Outcome: store.UserDeletionOutcomeStopped, Attempts: 1,
+	}))
+	var seen []string
+	completeUserDeletionBeforeAgentLock = func(ctx context.Context, tx store.Store, agents []store.Agent) {
+		for _, a := range agents {
+			seen = append(seen, a.ID)
+		}
+		// The finalize of a non-force delete with no retention: the row
+		// is removed; its record already reads stopped.
+		require.NoError(t, tx.DeleteAgent(ctx, live.ID))
+	}
+	t.Cleanup(func() { completeUserDeletionBeforeAgentLock = nil })
+
+	completed, err := f.srv.completeUserDeletion(ctx, d)
+	require.NoError(t, err)
+	assert.False(t, completed, "the pass that saw a blocker does not complete")
+	assert.Equal(t, []string{live.ID}, seen, "the agent was listed as a blocker before the lock")
+	recs, err := f.s.ListUserDeletionAgents(ctx, d.ID)
+	require.NoError(t, err)
+	require.Len(t, recs, 2)
+	for _, r := range recs {
+		assert.Equal(t, store.UserDeletionOutcomeStopped, r.Outcome, "agent %s keeps stopped", r.AgentID)
+	}
+
+	completeUserDeletionBeforeAgentLock = nil
+	completed, err = f.srv.completeUserDeletion(ctx, d)
+	require.NoError(t, err)
+	require.True(t, completed)
+	assert.Equal(t, userDeletionCounts{Stopped: 2}, f.getDeletion(t).Counts)
+}

@@ -150,9 +150,13 @@ type UserDeletionStore interface {
 
 	// ReopenUserDeletionAgent creates or replaces the record of one agent
 	// of a deletion whatever its outcome, including stopped and removed.
-	// It is meant only for the completion of a deletion, under the user
-	// row lock, for an agent that blocks the user again. Errors are as for
-	// UpsertUserDeletionAgent.
+	// It is meant only for the completion of a deletion, for an agent that
+	// blocks the user again. Lock order: the caller holds the user row
+	// lock, then locks the agent row (LockAgentRows) and re-reads it, and
+	// reopens only an agent that is present and not soft-deleted. The delete
+	// engine's finalize takes the agent row and then the records, so a
+	// finalize that commits first keeps its stopped record. Errors are as
+	// for UpsertUserDeletionAgent.
 	ReopenUserDeletionAgent(ctx context.Context, a *UserDeletionAgent) error
 
 	// ListUserDeletionAgents returns the agents of a deletion, by agent ID.

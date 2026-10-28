@@ -493,9 +493,34 @@ func (s *Server) completeUserDeletion(ctx context.Context, d *store.UserDeletion
 				return err
 			}
 			if len(cur.agents) > 0 {
+				if completeUserDeletionBeforeAgentLock != nil {
+					completeUserDeletionBeforeAgentLock(ctx, tx, cur.agents)
+				}
+				// Lock order: user row (above), then the agent rows, then
+				// the agents' records. A finalize takes the agent row and
+				// then the records, so it either commits before this lock
+				// (the re-read below sees the row gone or soft-deleted, and
+				// its stopped record stays) or waits for this transaction.
+				ids := make([]string, 0, len(cur.agents))
+				for i := range cur.agents {
+					ids = append(ids, cur.agents[i].ID)
+				}
+				if err := tx.LockAgentRows(ctx, ids); err != nil {
+					return fmt.Errorf("lock blocking agents: %w", err)
+				}
 				deact := store.Deactivation{Cause: store.EdgeDeactivationUserDeleteCascade, OpID: d.ID}
 				for i := range cur.agents {
 					a := &cur.agents[i]
+					live, err := tx.GetAgent(ctx, a.ID)
+					if errors.Is(err, store.ErrNotFound) {
+						continue
+					}
+					if err != nil {
+						return fmt.Errorf("re-read blocking agent %s: %w", a.ID, err)
+					}
+					if !live.DeletedAt.IsZero() {
+						continue
+					}
 					if _, err := tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, a.ID, deact); err != nil {
 						return fmt.Errorf("deactivate delegation edges of agent %s: %w", a.ID, err)
 					}
@@ -576,6 +601,11 @@ func (s *Server) completeUserDeletion(ctx context.Context, d *store.UserDeletion
 	s.afterUserDeleted(ctx, d.UserID)
 	return true, nil
 }
+
+// completeUserDeletionBeforeAgentLock is a test seam. When set, it runs in
+// the completion transaction after the blockers are re-listed and before
+// their agent rows are locked. Production code leaves it nil.
+var completeUserDeletionBeforeAgentLock func(ctx context.Context, tx store.Store, agents []store.Agent)
 
 // errUserDeletionNotStopping rolls back a completion that lost the
 // compare-and-set to a concurrent one.
