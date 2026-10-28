@@ -282,6 +282,33 @@ Under the hood, `scion secret` and `sciontool` interact with the Hub's agent-spe
 *   **Fail-Closed Reads**: Every runtime secret read goes through one check sequence: project permission, then an originating user who is still active and either an active member of the project (any active project role binding counts, built-in or custom, direct or through a group, except `project-visitor`) or holds system-level authority for the exact `secret.use` permission, then progeny sharing. For an agent whose delegation chain carries recorded delegation provenance, a user-scoped secret shared with progeny is also bounded by that chain: every recorded delegation on the chain must allow secret use (`secret.use`), every agent on the chain must be live and hold `project:secret:read`, and the user at the root of the chain must be the secret's owner, active, admitted to the project and not restricted from `secret.use` by an access constraint. The agent secret list applies the same rule, so it lists a user-scoped key exactly when a read of that key would return it. Membership alone does not grant reads: the project permission check (`project.secret_read`) still applies. A value is fetched only for the version recorded in the secret's metadata. If a value cannot be retrieved, that key is reported as unavailable in the response rather than returned as an empty value; other keys in the same request are unaffected. When the Hub itself cannot resolve an agent's secrets, or cannot read its stored environment settings, create, start, restart, resume and waking an agent for a direct message answer `503` (`agent secrets could not be resolved; the agent was not started`, `... not created` for a create, or the environment settings equivalent) instead of starting the agent without them: a start leaves the agent as it was, a restart (which stops the agent first) leaves it stopped, and a failed create is rolled back. A provision-only create still succeeds, and the agent's later start fails closed. A reincarnation answers `202` and then fails at its start leg; it is recorded as failed with the same message and the previous config is restored. The message names no secret or value. Having no secrets or settings is not an error.
 *   **Audit Trail**: To ensure accountability, every runtime read and write operation is fully audited on the Hub. Each retrieval request logs one audit event (`agent_secret_read`) identifying the calling agent, the requested keys, and the outcome.
 
+#### User secrets captured by an agent before 2026-09-12
+
+A user-scoped secret shared with progeny reaches an agent with a recorded delegation chain only when the secret's author is its owner. Before 2026-09-12 (ptone/scion#1557), a credential an agent captured into its user's scope (for example by harness credential capture) was recorded as written by the agent (`created_by` `agent:<id>`). A later capture of the same key kept that author. The Hub withheld such a secret from every agent of its owner whose delegation chain is recorded: the agent started without it, and a runtime read was refused.
+
+A one-shot data migration at Hub start (marker `user_secret_attribution_repair`) records the owner as the author of these secrets where that is certain. An agent could only capture into the scope of the user at the root of its own ancestry, so the migration accepts:
+
+- a capturing agent that still exists (or is soft-deleted) and whose ancestry root is the owner;
+- a capturing agent with no stored ancestry whose owner or creator is the owner;
+- a capturing agent that no longer exists, when the owner's user record does.
+
+Each repaired secret gets a mutation audit record (`user_secret_attribution_repair`, actor `system`) whose before summary keeps the original `created_by`. The secret's value, version and update time are not changed, and a value written while the migration runs (for example a credential refresh) does not stop the repair. Any other secret is left as it was, and the migration logs a warning that names it and gives the reason:
+
+| Reason | Meaning |
+|---|---|
+| `agent_not_linked_to_scope_user` | The capturing agent exists, but its ancestry root is another user, or it has no ancestry and belongs to another user. |
+| `agent_gone_scope_user_missing` | Neither the capturing agent nor the owner's user record exists. |
+| `federated_agent_ref` | The secret was captured by a federated agent (`agent:<issuer>:<id>`), which this Hub cannot check. |
+| `agent_ref_invalid` | The recorded agent ID is not a valid ID. |
+| `scope_owner_empty` | The secret has no owner. |
+| `row_changed` | The secret's author kept changing while the migration ran. The marker is not written, so the next Hub start runs the migration again. |
+
+Setting a skipped secret again does not change its author, because an update keeps `created_by`. To deliver it, clear it and set it again as its owner (`scion hub secret clear`, then `scion hub secret set`). Skips other than `row_changed` do not block the marker. A store error leaves the marker unwritten, so the next start runs the migration again.
+
+A repaired secret that is shared with progeny becomes readable at runtime (`scion secret get` inside an agent) by the owner's agents with a recorded delegation chain, in every project, as a secret written after 2026-09-12 already is. Before the repair, these secrets were never readable at runtime.
+
+Whenever authorization withholds a user-scoped secret at start or restart, or refuses a runtime read of one, the Hub logs a warning that names the agent, the secret and the cause, never the value: `start-time user secret withheld by authorization` and `runtime user secret read withheld by authorization`. The warning is logged at most once every 10 minutes for the same agent, secret and cause, and the next one reports how many were suppressed.
+
 ---
 
 ## GitHub Multi-Repo Credentials
