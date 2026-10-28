@@ -22,7 +22,7 @@ On Windows these set an owner-only DACL. `os.WriteFile(p, b, 0o600)`, `os.MkdirA
 
 ## Command gate
 
-New cobra commands are hidden and refused on Windows until added to `windowsAllowed` in `cmd/platform_gate.go` (dot-separated paths such as `hub.env.set`; list each parent too). Add one only if it runs entirely client-side (hub API calls; no server, broker or provisioning work) and every local write goes through privatefs, pathcanon or filelock. That is a product decision: say so in the PR. `cmd/platform_gate_test.go` guards the gate (stale entries fail `TestWindowsGate_AllowlistEntriesExist`). This is separate from `agentAllowed` (`cmd/cli_mode.go`).
+New cobra commands are hidden and refused on Windows until added to `windowsAllowed` in `cmd/platform_gate.go` (dot-separated paths such as `hub.env.set`; list each parent too). Add one only if it runs entirely client-side (hub API calls; no server, broker or provisioning work) and every local write goes through `privatefs`, `pathcanon` or `filelock`. That is a product decision: say so in the PR. `cmd/platform_gate_test.go` guards the gate (stale entries fail `TestWindowsGate_AllowlistEntriesExist`). This is separate from `agentAllowed` (`cmd/cli_mode.go`).
 
 ## `hack/winsec-guard.sh` (CI)
 
