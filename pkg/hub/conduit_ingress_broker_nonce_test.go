@@ -676,3 +676,117 @@ func TestNew_BrokerAuthDefersConduitIngressNonce(t *testing.T) {
 	assert.False(t, ext.brokerAuthService.defersNonce(dial.WithContext(withConduitAdmitNonce(dial.Context()))))
 	assert.False(t, srv.brokerAuthService.defersNonce(dial), "each hub's service reads its own mode")
 }
+
+// overCapBrokerRequest returns a copy of the signed request r whose declared
+// body is one byte over apiclient.MaxSignedRequestBodyBytes, and the body,
+// which counts the bytes read from it. The signature does not cover the body.
+func overCapBrokerRequest(r *http.Request) (*http.Request, *bodyLimitCountingBody) {
+	over := r.Clone(r.Context())
+	body := &bodyLimitCountingBody{size: apiclient.MaxSignedRequestBodyBytes + 1}
+	over.Body = body
+	over.ContentLength = body.size
+	return over, body
+}
+
+// TestValidateBrokerSignature_OverCapBodyKeepsNonce: a signed request whose
+// declared body is over the signed body limit is refused (413 through the
+// broker middleware) before any of its body is read, so before its
+// signature is checked, and records no nonce: the same nonce on a request
+// within the limit is still accepted once. With the in-memory and the
+// database nonce store.
+func TestValidateBrokerSignature_OverCapBodyKeepsNonce(t *testing.T) {
+	for _, db := range []bool{false, true} {
+		t.Run("db="+strconv.FormatBool(db), func(t *testing.T) {
+			svc, s := setupTestBrokerAuthService(t)
+			if db {
+				svc.SetNonceCacheStore(NewNonceCacheStore(enttest.NewClient(t)))
+			}
+			_, signReq := setupSignedBrokerRequest(t, svc, s)
+			ctx := context.Background()
+			legit := signReq(http.MethodGet, "/api/v1/conduit", nil)
+
+			nextCalled := false
+			mw := BrokerAuthMiddleware(svc)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { nextCalled = true }))
+			req, body := overCapBrokerRequest(legit)
+			rec := httptest.NewRecorder()
+			mw.ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, "body %s", rec.Body.String())
+			assert.False(t, nextCalled, "the over-cap request reaches no handler")
+			assert.Zero(t, body.read, "no body byte read: the canonical string and its HMAC were not computed")
+
+			req, body = overCapBrokerRequest(legit)
+			_, err := svc.ValidateBrokerSignature(ctx, req)
+			require.ErrorIs(t, err, errBrokerAuthBodyTooLarge)
+			assert.Zero(t, body.read)
+
+			_, err = svc.ValidateBrokerSignature(ctx, legit)
+			require.NoError(t, err, "the over-cap requests left the nonce unused")
+			_, err = svc.ValidateBrokerSignature(ctx, legit)
+			require.ErrorIs(t, err, errBrokerAuthReplay, "the nonce cache is on")
+		})
+	}
+}
+
+// TestConduitIngress_AdmitReplayPassesBodyLimit: Admit's replayed handshake
+// (hubAdmit) is a GET without a body, so the signed body limit admits it:
+// the broker dial through the ingress is admitted, Admit authenticates the
+// broker once and records the nonce.
+func TestConduitIngress_AdmitReplayPassesBodyLimit(t *testing.T) {
+	var mu sync.Mutex
+	var replays []*http.Request
+	prev := conduitRelayAdmitObserve
+	conduitRelayAdmitObserve = func(r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		replays = append(replays, r)
+	}
+	t.Cleanup(func() { conduitRelayAdmitObserve = prev })
+
+	bw := newBrokerIngressWorld(t, true)
+	h := bw.signedDial(t)
+	_, err := bw.dialThroughHubB(t, h)
+	require.NoError(t, err, "the dial is admitted through Admit's replayed handshake")
+	assert.True(t, nonceRecorded(t, bw.nonces, h.Get(HeaderNonce)), "Admit records the nonce")
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, replays, 1, "Admit replays the handshake once")
+	fwd := replays[0]
+	assert.Equal(t, http.MethodGet, fwd.Method)
+	assert.Zero(t, fwd.ContentLength, "the replayed handshake declares no body")
+	assert.True(t, fwd.Body == nil || fwd.Body == http.NoBody, "the replayed handshake carries no body")
+	admit := bw.audit[bw.srv].forBroker(bw.brokerID)
+	require.Len(t, admit, 1, "Admit authenticates the broker once")
+	assert.Equal(t, BrokerAuthEventAuthSuccess, admit[0].EventType)
+	assert.Empty(t, admit[0].FailureCode)
+}
+
+// TestConduitIngress_OverCapDeferredDialKeepsNonce: on an external-mode hub,
+// a broker conduit dial, whose nonce the ingress leaves to Admit, with a
+// declared body over the signed body limit is refused 413 before any of its
+// body is read, so before its signature is checked, and its nonce stays
+// unrecorded.
+func TestConduitIngress_OverCapDeferredDialKeepsNonce(t *testing.T) {
+	nonces := NewNonceCacheStore(enttest.NewClient(t))
+	srv, s, public := startBrokerAuthExternal(t, false, nonces)
+	brokerID, secret := addNonceTestBroker(t, s, srv.brokerAuthService, "over-cap-dial-broker")
+	h := brokerSignedHeader(t, http.MethodGet, public.URL+"/api/v1/conduit", brokerID, secret)
+	dial := httptest.NewRequest(http.MethodGet, "/api/v1/conduit", nil)
+	dial.Header = h.Clone()
+	dial.Header.Set("Connection", "Upgrade")
+	dial.Header.Set("Upgrade", "websocket")
+	require.True(t, srv.brokerAuthService.defersNonce(dial), "the dial is on the deferred verify-only path")
+
+	req, body := overCapBrokerRequest(dial)
+	_, err := srv.brokerAuthService.ValidateBrokerSignature(context.Background(), req)
+	require.ErrorIs(t, err, errBrokerAuthBodyTooLarge)
+	assert.Zero(t, body.read, "no body byte read: the signature was not checked")
+
+	req, body = overCapBrokerRequest(dial)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, "body %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"payload_too_large"`)
+	assert.Zero(t, body.read)
+	assert.False(t, nonceRecorded(t, nonces, h.Get(HeaderNonce)), "the refused dial records no nonce")
+}
