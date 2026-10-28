@@ -225,6 +225,10 @@ func (s *Server) forceDeleteUser(w http.ResponseWriter, r *http.Request, actor U
 		// The user's authority changed: sessions and live connections
 		// re-check it.
 		s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID})
+		// The user is deleting, so every fire under the user's recorded
+		// authority would be refused: pause those schedules with
+		// creator_deleted (they do not block the delete).
+		s.pauseSchedulesAuthoredByUser(ctx, user.ID)
 	}
 	s.kickUserDeletion(d.ID, joined)
 	s.writeUserDeletion(w, ctx, http.StatusAccepted, d)
