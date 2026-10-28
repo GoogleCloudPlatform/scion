@@ -138,8 +138,8 @@ func TestConduitIngress_AgentDialsAfterNoRelayPeriod(t *testing.T) {
 
 	// The only relay goes away.
 	sctx, scancel := context.WithTimeout(ctx, 10*time.Second)
+	defer scancel()
 	require.NoError(t, w.relay.Shutdown(sctx, true, time.Second))
-	scancel()
 	reg := registry.New(entadapter.NewConduitRegistryStore(w.regClient), registry.Config{})
 	require.Eventually(t, func() bool {
 		rs, err := reg.EligibleRelays(ctx, registry.TransportWS, time.Now())
