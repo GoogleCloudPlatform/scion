@@ -108,6 +108,9 @@ func reconcileMessageStars(ctx context.Context, stars MessageStarStore, lim mess
 		report.Repaired += sw.Repaired
 		report.Purged += sw.Purged
 		if err != nil {
+			if ctx.Err() != nil {
+				return report, messageStarReconcileStopped(ctx, report)
+			}
 			return report, err
 		}
 		report.Sweeps++
@@ -120,6 +123,18 @@ func reconcileMessageStars(ctx context.Context, stars MessageStarStore, lim mess
 		}
 	}
 	return report, errMessageStarReconcileNotExhausted
+}
+
+// messageStarReconcileStopped is the error of a run that ctx stopped (its
+// time limit, or the hub shutting down): it says so, gives the totals so
+// far and asks for another run, which starts over. It wraps ctx's error.
+func messageStarReconcileStopped(ctx context.Context, report messageStarReconcileReport) error {
+	why := "the run was stopped"
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		why = "the run hit its time limit"
+	}
+	return fmt.Errorf("%s after examining %d stars (repaired %d, purged %d); run the operation again: %w",
+		why, report.Examined, report.Repaired, report.Purged, ctx.Err())
 }
 
 // sweepMessageStars runs the scanner from the start of the table until it

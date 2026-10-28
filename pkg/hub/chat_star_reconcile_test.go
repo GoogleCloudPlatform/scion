@@ -121,6 +121,40 @@ func TestReconcileMessageStars_StoreErrorKeepsCountsSoFar(t *testing.T) {
 	assert.Equal(t, messageStarReconcileReport{Examined: 4}, report)
 }
 
+// deadlineScanner is a scripted scanner whose second batch runs until the
+// run's deadline passes.
+type deadlineScanner struct {
+	scriptedStarScanner
+}
+
+func (s *deadlineScanner) PurgeMessageStarCandidates(ctx context.Context, after StarCleanupPosition, limit int) (StarCleanupResult, error) {
+	if len(s.calls) == 1 {
+		s.calls = append(s.calls, after)
+		<-ctx.Done()
+		return StarCleanupResult{}, ctx.Err()
+	}
+	return s.scriptedStarScanner.PurgeMessageStarCandidates(ctx, after, limit)
+}
+
+func TestReconcileMessageStars_TimeLimitSaysRunAgain(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	scan := &deadlineScanner{scriptedStarScanner{rows: 6}}
+	lim := messageStarReconcileLimits{Batch: 2, BatchTimeout: time.Minute, MaxSweeps: 3}
+	report, err := reconcileMessageStars(ctx, scan, lim, nil)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Equal(t, messageStarReconcileReport{Examined: 2}, report)
+	assert.Equal(t, "the run hit its time limit after examining 2 stars (repaired 0, purged 0); run the operation again: context deadline exceeded", err.Error())
+
+	// Stopped another way (the hub shutting down): no time-limit claim.
+	stopped, stop := context.WithCancel(context.Background())
+	stop()
+	_, err = reconcileMessageStars(stopped, &scriptedStarScanner{rows: 1}, lim, nil)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Contains(t, err.Error(), "the run was stopped after examining 0 stars")
+	assert.Contains(t, err.Error(), "run the operation again")
+}
+
 func TestReconcileMessageStars_CancelledAndInvalid(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
