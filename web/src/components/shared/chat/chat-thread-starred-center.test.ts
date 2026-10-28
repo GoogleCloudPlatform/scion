@@ -572,6 +572,96 @@ describe('scion-chat-thread starred-only center', () => {
     expect(el.shadowRoot?.querySelector('.jump-to-latest')).toBeNull();
   });
 
+  // Up to the history limit a refresh reloads every loaded row; past it, it
+  // refetches around the reader. Both end in the empty state.
+  it.each([
+    { size: 80, first: 'limit=80' },
+    { size: 260, first: 'around=' },
+  ])(
+    'a refresh far up a starred list of $size that leaves nothing starred shows the empty state',
+    async ({ size, first }) => {
+      const many = Array.from({ length: size }, (_, i) =>
+        message(`00000000-0000-4000-8000-${(3000 + i).toString(16).padStart(12, '0')}`, 0)
+      );
+      many.forEach((m, i) => {
+        m.createdAt = new Date(Date.parse('2026-10-20T00:00:00Z') + i * 60_000).toISOString();
+      });
+      let starred = many;
+      apiFetch.mockImplementation((url: string) => {
+        if (url.includes('/messages?')) {
+          const params = new URL(url, 'http://x').searchParams;
+          const around = params.get('around');
+          if (around) {
+            const at = starred.findIndex((m) => m.id === around);
+            if (at < 0) return Promise.resolve(json({}, 404));
+            return Promise.resolve(
+              json({ messages: starred.slice(Math.max(0, at - 25), at + 25).reverse() })
+            );
+          }
+          const cursor = params.get('cursor');
+          const limit = Number(params.get('limit') ?? 50);
+          const end = cursor ? Number(cursor.slice(2)) : starred.length;
+          const page = starred.slice(Math.max(0, end - limit), end);
+          return Promise.resolve(
+            json({
+              messages: [...page].reverse(),
+              ...(end - limit > 0 ? { nextCursor: `c-${end - limit}` } : {}),
+            })
+          );
+        }
+        return Promise.resolve(json({ starredMessageIds: [] }));
+      });
+      const el = await mount();
+      const internals = el as unknown as {
+        loadOlderMessagesV2(scroller: HTMLElement): Promise<void>;
+        _scrollAnchor: {
+          conversationKey: string;
+          messageId: string;
+          offset: number;
+          pinnedToBottom: boolean;
+        } | null;
+        pinnedToBottom: boolean;
+        viewingAroundMessage: boolean;
+        captureScrollAnchor(): void;
+      };
+      const scroller = el.shadowRoot?.querySelector('.messages-scroll') as HTMLElement;
+      while (renderedIds(el).length < size) {
+        const loaded = renderedIds(el).length;
+        await internals.loadOlderMessagesV2(scroller);
+        await vi.waitFor(() => expect(renderedIds(el).length).toBeGreaterThan(loaded));
+      }
+      expect(renderedIds(el).length).toBe(size);
+      // The reader sits far up the list when every star is removed elsewhere.
+      const target = many[5].id;
+      internals.captureScrollAnchor = (): void => {
+        internals._scrollAnchor = {
+          conversationKey: TOPIC,
+          messageId: target,
+          offset: 0,
+          pinnedToBottom: false,
+        };
+      };
+      internals.pinnedToBottom = false;
+      starred = [];
+      const seen = filterEvents(el);
+      const before = historyCalls().length;
+      fakeStateManager.dispatchEvent(new CustomEvent('chat-stars-updated', { detail: {} }));
+      await vi.waitFor(() => expect(renderedIds(el)).toEqual([]));
+      await el.updateComplete;
+      const refetch = historyCalls().slice(before);
+      expect(refetch[0]).toContain(first === 'around=' ? `around=${target}` : first);
+      expect(refetch.every((u) => u.includes('starred=true'))).toBe(true);
+      expect(internals.viewingAroundMessage).toBe(false);
+      expect(el.shadowRoot?.querySelector('.jump-to-latest')).toBeNull();
+      const empty = el.shadowRoot?.querySelector('.star-filter-empty');
+      expect(empty?.textContent).toContain('No starred messages in this conversation');
+      expect(el.shadowRoot?.querySelector('sl-spinner')).toBeNull();
+      // Show all still leaves the filter.
+      (empty?.querySelector('sl-button') as HTMLElement).click();
+      expect(seen).toEqual([{ filter: '' }]);
+    }
+  );
+
   it('a filtered page arriving after the filter changed is dropped', async () => {
     let releaseFiltered!: () => void;
     const gate = new Promise<void>((r) => (releaseFiltered = r));

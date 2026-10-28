@@ -95,15 +95,21 @@ func sharedDirRecordPinRefusal(agentDir string, layout projectfs.Layout, sd *con
 	for _, name := range []string{legacySharedDirStorageRecordFile, legacySharedDirStorageRecordFile + retiredSharedDirRecordSuffix} {
 		pinned, ok, err := nfsPinnedSharedDirs(filepath.Join(agentDir, name))
 		if err != nil {
-			// A link, a non-regular file or an oversized record: fail closed.
-			return fmt.Errorf("cannot check this agent's shared-dir storage record: %w", err)
+			// A link, a non-regular file or an oversized record: fail closed,
+			// with a fixed public text (the full error, with the path, is for
+			// the broker log only).
+			return config.NewStorageMigrationRequiredError(
+				fmt.Sprintf("cannot check this agent's shared-dir storage record: %v", err),
+				"cannot check this agent's shared-dir storage record from an earlier version (it is not a regular file, "+
+					"is a link, or is too large); the broker log names it. Repair or remove the record, then start the agent again")
 		}
 		if !ok {
 			continue
 		}
 		head := fmt.Sprintf("this agent's shared dirs (%s) were pinned to the nfs export by an earlier version (record %s, kept), "+
 			"but the shared-dir layout is now %q: they would resolve to local storage and their data on the export would not be visible, "+
-			"so the start is refused. ", pinned, name, layout.Backend)
+			"so the start is refused. If the data was deliberately left behind or copied elsewhere, removing the record "+
+			"also lets the agent start on the current layout. ", pinned, name, layout.Backend)
 		return config.NewStorageMigrationRequiredError(
 			head+config.SharedDirMigrationText(sd),
 			head+config.SharedDirMigrationText(nil))

@@ -98,6 +98,11 @@ type UserSecretAttributionRepairResult struct {
 	Skipped  []UserSecretAttributionSkip
 	// Vanished counts examined rows deleted before they could be repaired.
 	Vanished int
+	// AuthorChanged counts examined rows that another writer gave an author
+	// that is not an agent reference (and not the owner) before they could
+	// be repaired; they are no longer this migration's to decide. No
+	// current writer does this (UpsertSecret keeps created_by).
+	AuthorChanged int
 }
 
 // RowChanged reports whether a skip is row_changed, which is not a final
@@ -218,6 +223,7 @@ func repairOneUserSecretAttribution(ctx context.Context, s store.Store, row stor
 		case !strings.HasPrefix(cur.CreatedBy, userSecretAttrAgentRefPrefix):
 			// Another writer gave the row an author that is not an agent
 			// reference; it is no longer this migration's to decide.
+			res.AuthorChanged++
 			return nil
 		case attempt >= userSecretAttrMaxAttempts:
 			skip(*cur, userSecretAttrSkipRowChanged)

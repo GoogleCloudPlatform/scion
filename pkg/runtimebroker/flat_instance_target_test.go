@@ -42,6 +42,16 @@ func (p *policyInstance) onlyPod(t *testing.T) *corev1.Pod {
 	return p.pods[0]
 }
 
+// newPodPolicyInstance is newPolicyInstance with the project's shared-dir
+// claim already present (seedSharedDirClaim): these tests check the pod,
+// not the claim, so their starts reuse it and need no storage class.
+func newPodPolicyInstance(t *testing.T, inst *config.V1RuntimeBrokerInstanceConfig) *policyInstance {
+	t.Helper()
+	p := newPolicyInstance(t, inst)
+	p.seedSharedDirClaim(t)
+	return p
+}
+
 // loadTargetInstances writes settings whose active profile sets its own
 // safe_to_evict and priority class, and strictly loads the instances.
 func loadTargetInstances(t *testing.T, instances string) []config.V1RuntimeBrokerInstanceConfig {
@@ -79,7 +89,7 @@ func TestFlatPolicy_SafeToEvictFalseOnPod(t *testing.T) {
           namespace: agents
           safe_to_evict: false
 `)
-	flat := newPolicyInstance(t, &inst[0])
+	flat := newPodPolicyInstance(t, &inst[0])
 	if err := flat.start("evict-false"); err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +108,7 @@ func TestFlatPolicy_SafeToEvictUnsetAddsNothing(t *testing.T) {
           type: kubernetes
           namespace: agents
 `)
-	flat := newPolicyInstance(t, &inst[0])
+	flat := newPodPolicyInstance(t, &inst[0])
 	if err := flat.start("evict-unset"); err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +131,7 @@ func TestFlatPolicy_AgentSafeToEvictWins(t *testing.T) {
           namespace: agents
           safe_to_evict: false
 `)
-	flat := newPolicyInstance(t, &inst[0])
+	flat := newPodPolicyInstance(t, &inst[0])
 	safe := true
 	if err := flat.startWith("evict-agent-true", func(o *api.StartOptions) {
 		o.InlineConfig = &api.ScionConfig{Kubernetes: &api.KubernetesConfig{SafeToEvict: &safe}}
@@ -145,7 +155,7 @@ func TestFlatPolicy_PriorityClassOnPod(t *testing.T) {
           namespace: agents
           priority_class_name: instance-priority
 `)
-	flat := newPolicyInstance(t, &inst[0])
+	flat := newPodPolicyInstance(t, &inst[0])
 	if err := flat.start("priority-instance"); err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +163,7 @@ func TestFlatPolicy_PriorityClassOnPod(t *testing.T) {
 		t.Fatalf("pod priorityClassName %q, want instance-priority", got)
 	}
 
-	own := newPolicyInstance(t, &inst[0])
+	own := newPodPolicyInstance(t, &inst[0])
 	if err := own.startWith("priority-agent", func(o *api.StartOptions) {
 		o.InlineConfig = &api.ScionConfig{Kubernetes: &api.KubernetesConfig{PriorityClassName: "agent-priority"}}
 	}); err != nil {

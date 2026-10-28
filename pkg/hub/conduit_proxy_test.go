@@ -97,7 +97,8 @@ func TestConduitProxyThroughSession(t *testing.T) {
 	assert.Equal(t, "hello /hello?x=1", string(body))
 	assert.Equal(t, "ok", resp.Header.Get("X-App"))
 	assert.Empty(t, resp.Header.Get("Set-Cookie"), "the app cannot set hub-origin cookies")
-	assert.Equal(t, untrustedContentSandboxCSP, resp.Header.Get("Content-Security-Policy"))
+	assert.Equal(t, agentServedPageSandboxCSP, resp.Header.Get("Content-Security-Policy"))
+	assert.Equal(t, untrustedContentPermissionsPolicy, resp.Header.Get("Permissions-Policy"))
 	assert.Equal(t, "nosniff", resp.Header.Get("X-Content-Type-Options"))
 
 	got := <-f.app.got
@@ -110,7 +111,8 @@ func TestConduitProxyThroughSession(t *testing.T) {
 // TestConduitProxyReplacesThePagePolicy: behind the web server's security
 // headers, which set the web pages' policy on every response, a page
 // served from an agent's port carries exactly one policy, the sandbox
-// one, and one nosniff header, as on the tunnel path.
+// one, one Permissions-Policy, the untrusted-content one, and one nosniff
+// header, as on the tunnel path.
 func TestConduitProxyReplacesThePagePolicy(t *testing.T) {
 	f := newConduitProxyFixture(t, nil)
 	f.startAgent(t)
@@ -122,7 +124,8 @@ func TestConduitProxyReplacesThePagePolicy(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
-	assert.Equal(t, []string{untrustedContentSandboxCSP}, resp.Header.Values("Content-Security-Policy"), "conduit response policies")
+	assert.Equal(t, []string{agentServedPageSandboxCSP}, resp.Header.Values("Content-Security-Policy"), "conduit response policies")
+	assert.Equal(t, []string{untrustedContentPermissionsPolicy}, resp.Header.Values("Permissions-Policy"), "conduit response Permissions-Policy headers")
 	assert.Equal(t, []string{"nosniff"}, resp.Header.Values("X-Content-Type-Options"), "conduit response nosniff headers")
 
 	// Positive control: the same wrapper does put the page policy on a hub
@@ -156,7 +159,7 @@ func TestConduitProxyKeepsHubPageHeaders(t *testing.T) {
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
-	hub := hubPageHeaderValues(t)
+	hub := proxiedPageHeaderValues(t)
 	for _, name := range hubPageHeaderNames {
 		assert.Equal(t, []string{hub[name]}, resp.Header.Values(name), "conduit page header "+name)
 	}
@@ -403,7 +406,7 @@ func TestConduitProxyBareURLRedirect(t *testing.T) {
 		require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
 		assert.Equal(t, "hello /?x=1", string(body))
 		assert.Equal(t, bare+"/?x=1", resp.Request.URL.String())
-		assert.Equal(t, untrustedContentSandboxCSP, resp.Header.Get("Content-Security-Policy"))
+		assert.Equal(t, agentServedPageSandboxCSP, resp.Header.Get("Content-Security-Policy"))
 	})
 
 	t.Run("caller_without_access_unchanged", func(t *testing.T) {
