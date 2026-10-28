@@ -164,6 +164,23 @@ describe('load-time safety net', () => {
 // The two invariants are tested against deliberately broken parts (a
 // parser that moves text, a serializer that rewrites an earlier mark), not
 // only against the constructs known today.
+/**
+ * core with a broken Markdown parser: every document it reads is built by
+ * parse (the trees and definitions are the real parser's).
+ */
+const brokenParse = (parse: (t: string) => Node): Core => ({
+  ...core,
+  parse,
+  read: (t: string) => ({ ...core.read(t), doc: parse(t) }),
+});
+
+/** core whose readings find no link reference definitions (the definition check off). */
+const noDefinitions = (): Core => ({
+  ...core,
+  parseMdRaw: (): MdNode => ({ type: 'root', children: [] }),
+  read: (t: string) => ({ ...core.read(t), definitions: [] }),
+});
+
 describe('load invariant (I1)', () => {
   const md = 'one {==a==}{>>A<<}\n\ntwo {==b==}{>>B<<}\n';
 
@@ -177,7 +194,7 @@ describe('load invariant (I1)', () => {
       [parts[0], parts[1]] = [parts[1], parts[0]];
       return core.parse(parts.join('\n\n'));
     };
-    expect(new ReviewSession({ ...core, parse: swap }).load(md)).toBe(false);
+    expect(new ReviewSession(brokenParse(swap)).load(md)).toBe(false);
   });
 
   it('refuses when a broken parser moves a mark token into another block', () => {
@@ -188,7 +205,7 @@ describe('load invariant (I1)', () => {
       if (i < 1) return core.parse(t);
       return core.parse(t.slice(0, i - 1) + t.slice(i) + t[i - 1]);
     };
-    expect(new ReviewSession({ ...core, parse: move }).load(md)).toBe(false);
+    expect(new ReviewSession(brokenParse(move)).load(md)).toBe(false);
   });
 
   it('refuses when what the pass consumed differs from the source in any way', () => {
@@ -224,12 +241,12 @@ describe('load invariant (I1), read-only units', () => {
   it('refuses when a broken parser changes the text of a mark in an editable unit', () => {
     const src = 'one {++real++} two\n';
     expect(new ReviewSession(core).load(src)).toBe(true);
-    const broken = { ...core, parse: (t: string): Node => core.parse(t.replace('real', 'fake')) };
+    const broken = brokenParse((t: string): Node => core.parse(t.replace('real', 'fake')));
     expect(new ReviewSession(broken).load(src)).toBe(false);
   });
 
   it('refuses when a broken parser changes another mark of that unit', () => {
-    const broken = { ...core, parse: (t: string): Node => core.parse(t.replace('real', 'fake')) };
+    const broken = brokenParse((t: string): Node => core.parse(t.replace('real', 'fake')));
     expect(new ReviewSession(broken).load(md)).toBe(false);
   });
 });
@@ -251,19 +268,13 @@ describe('load invariant (I1), notes by place', () => {
     // An unused definition holding an insertion's opening token.
     const md = '[u]: /x "{++"\n\nhello ++} world\n';
     expect(new ReviewSession(core).load(md)).toBe(false);
-    const s = new ReviewSession({
-      ...core,
-      parseMdRaw: (): MdNode => ({ type: 'root', children: [] }),
-    });
+    const s = new ReviewSession(noDefinitions());
     expect(s.load(md)).toBe(false);
   });
 
   it('refuses the same documents by the note ordinals alone (definition check off)', () => {
     for (const md of nested) {
-      const s = new ReviewSession({
-        ...core,
-        parseMdRaw: (): MdNode => ({ type: 'root', children: [] }),
-      });
+      const s = new ReviewSession(noDefinitions());
       expect(s.load(md), md).toBe(false);
     }
   });

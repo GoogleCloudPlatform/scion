@@ -155,6 +155,13 @@ func (m *BrokerAuthMiddleware) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// A signed body must declare its length. BuildCanonicalString
+		// covers the body either way; this refuses unsized framing early.
+		if err := apiclient.CheckSignedBodyFraming(r); err != nil {
+			m.writeError(w, err.Error())
+			return
+		}
+
 		// Build canonical string and verify signature
 		canonical := apiclient.BuildCanonicalString(r, timestamp, nonce)
 		if !apiclient.VerifyHMAC(m.config.SecretKey, canonical, sigBytes) {
@@ -317,6 +324,13 @@ func (m *MultiKeyBrokerAuthMiddleware) ServeWith(w http.ResponseWriter, r *http.
 	sigBytes, err := base64.StdEncoding.DecodeString(signature)
 	if err != nil {
 		m.writeError(w, "invalid signature encoding")
+		return
+	}
+
+	// A signed body must declare its length. BuildCanonicalString
+	// covers the body either way; this refuses unsized framing early.
+	if err := apiclient.CheckSignedBodyFraming(r); err != nil {
+		m.writeError(w, err.Error())
 		return
 	}
 

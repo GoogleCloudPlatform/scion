@@ -75,7 +75,7 @@ func (r *execIDRecorder) got() []string {
 func legacyScopeServer(t *testing.T, mgr *filteringMockManager) (*Server, *execIDRecorder) {
 	t.Helper()
 	setupTestScionEnv(t)
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.ForceRuntime = "mock"

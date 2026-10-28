@@ -48,6 +48,8 @@ import {
 } from '@milkdown/preset-commonmark';
 import { autoInsertSpanPlugin, remarkGFMPlugin, schema as gfmSchema } from '@milkdown/preset-gfm';
 import type { MilkdownPlugin } from '@milkdown/ctx';
+import { ParserState } from '@milkdown/transformer';
+import type { MarkdownNode } from '@milkdown/transformer';
 import { history } from '@milkdown/plugin-history';
 import type { Node, Schema } from '@milkdown/prose/model';
 import type { Plugin } from '@milkdown/prose/state';
@@ -69,6 +71,36 @@ export interface MdNode {
   children?: MdNode[];
 }
 
+/** One reading of Markdown, for the checks that need its trees and its document. */
+export interface MdRead {
+  /**
+   * The link reference definitions at any depth, as the parser reads them
+   * before its transforms (which copy them onto references and drop them).
+   */
+  definitions: MdNode[];
+  /** The parser's tree after its transforms (what parseMd gives). */
+  tree: MdRoot;
+  /** The document built from that tree, as parse builds it. */
+  doc: Node;
+}
+
+/**
+ * The link reference definitions of a tree read before the transforms, at
+ * any depth, in document order (a definition's own children are not read).
+ */
+export function definitionNodes(root: MdNode): MdNode[] {
+  const out: MdNode[] = [];
+  const walk = (n: MdNode): void => {
+    if (n.type === 'definition') {
+      out.push(n);
+      return;
+    }
+    for (const k of n.children ?? []) walk(k);
+  };
+  walk(root);
+  return out;
+}
+
 export interface Core {
   view: EditorView;
   schema: Schema;
@@ -79,6 +111,12 @@ export interface Core {
   parseMd(md: string): MdRoot;
   /** The Markdown parser's tree before its transforms (link reference definitions still in place). */
   parseMdRaw(md: string): MdNode;
+  /**
+   * parse, parseMd and the definitions of parseMdRaw from one parse of md:
+   * the tree is transformed and the document built from it exactly as
+   * parse does.
+   */
+  read(md: string): MdRead;
   destroy(): Promise<void>;
 }
 
@@ -151,9 +189,10 @@ export async function createCore(opts: CoreOptions): Promise<Core> {
     const remark = ctx.get(remarkCtx);
     const parser = ctx.get(parserCtx);
     const serializer = ctx.get(serializerCtx);
+    const schema = ctx.get(schemaCtx);
     core = {
       view: ctx.get(editorViewCtx),
-      schema: ctx.get(schemaCtx),
+      schema,
       parse: (md: string): Node => parser(md),
       serialize: (doc: Node): string => serializer(doc),
       // A leading word keeps line-start syntax (list markers, headings,
@@ -161,6 +200,16 @@ export async function createCore(opts: CoreOptions): Promise<Core> {
       plain: (md: string): string => parser(`a ${md}`).textContent.slice(2),
       parseMd: (md: string): MdRoot => remark.runSync(remark.parse(md), md) as unknown as MdRoot,
       parseMdRaw: (md: string): MdNode => remark.parse(md) as unknown as MdNode,
+      read: (md: string): MdRead => {
+        // As Milkdown's parser: runSync(parse(md)), then ParserState builds
+        // the document from that tree. The definitions are read first, as
+        // the transforms drop them from the tree.
+        const raw = remark.parse(md);
+        const definitions = definitionNodes(raw as unknown as MdNode);
+        const tree = remark.runSync(raw, md);
+        const doc = new ParserState(schema).next(tree as MarkdownNode).toDoc();
+        return { definitions, tree: tree as unknown as MdRoot, doc };
+      },
       destroy: async (): Promise<void> => {
         await editor.destroy();
       },
