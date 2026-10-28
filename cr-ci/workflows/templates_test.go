@@ -178,7 +178,6 @@ func TestCacheParityCheck(t *testing.T) {
 			// The volume is mounted at HOME: real directories, so ".." from the workspace
 			// resolves to them physically, and whole-directory archives restore in place.
 			`check "real directory /home/runner/work" "$(readlink -f /home/runner/work)" /home/runner/work`,
-			`check "real directory ~/.cache" "$(readlink -f "$HOME/.cache")" /home/runner/.cache`,
 			`check "real directory ~/go" "$(readlink -f "$HOME/go")" /home/runner/go`,
 			`check "HOME not on the root filesystem"`,
 			`check "go env GOCACHE" "$(go env GOCACHE)" /home/runner/.cache/go-build`,
@@ -191,6 +190,7 @@ func TestCacheParityCheck(t *testing.T) {
 				t.Errorf("%s: parity check lacks %q", f, want)
 			}
 		}
+		requireRAMBranch(t, f, s)
 		// Verify only: the templates create nothing.
 		for _, banned := range []string{"ln -s", "GITHUB_ENV", "/scratch", "rm -rf"} {
 			if strings.Contains(s, banned) {
@@ -288,4 +288,45 @@ func TestManifestMatchesMatrix(t *testing.T) {
 	if !strings.Contains(matrix, want) {
 		t.Errorf("permissions-matrix.md no longer states the repo-scope set the manifest encodes:\n%s", want)
 	}
+}
+
+// ramBranch is the ~/.cache check both cache parity checks must share: a real
+// directory, or, with RUNNER_BUILD_CACHE_IN_RAM=true, a link that resolves exactly to
+// the entrypoint's RAM directory (cr-ci/runner/entrypoint.sh, CR_RAM_CACHE_DIR's
+// default).
+var ramBranch = []string{
+	`if [ "${RUNNER_BUILD_CACHE_IN_RAM:-false}" = true ] && [ -L "$HOME/.cache" ]; then`,
+	`check "HOME/.cache (RAM build cache)" "$(readlink -f "$HOME/.cache")" /tmp/cr-ci-build-cache`,
+	`check "real directory ~/.cache" "$(readlink -f "$HOME/.cache")" /home/runner/.cache`,
+}
+
+func requireRAMBranch(t *testing.T, name, content string) {
+	t.Helper()
+	for _, want := range ramBranch {
+		if !strings.Contains(content, want) {
+			t.Errorf("%s: cache parity check lacks the RAM-mode line %q", name, want)
+		}
+	}
+}
+
+// TestCacheParityRAMBranchInSync: the live parity check (.github/actions/setup-go-cache,
+// outside this module) has the same RAM-mode branch as the PoC template, so the two
+// cannot drift apart. The action is read from the repository checkout; an archive of
+// cr-ci/ alone (the gate windows) does not contain it, and then only the PoC side is
+// checked, by TestCacheParityCheck. The RAM directory both checks expect must be the
+// entrypoint's default.
+func TestCacheParityRAMBranchInSync(t *testing.T) {
+	if want := "/tmp/cr-ci-build-cache"; !strings.Contains(readFile(t, "../runner/entrypoint.sh"), "ram_cache_dir=${CR_RAM_CACHE_DIR:-"+want+"}") {
+		t.Errorf("runner/entrypoint.sh no longer defaults the RAM cache directory to %s; update both parity checks", want)
+	}
+	const action = "../../.github/actions/setup-go-cache/action.yml"
+	b, err := os.ReadFile(action)
+	if os.IsNotExist(err) {
+		t.Logf("%s is not in this tree (a cr-ci-only archive); the PoC side is checked by TestCacheParityCheck", action)
+		return
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireRAMBranch(t, action, string(b))
 }

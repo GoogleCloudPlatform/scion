@@ -83,7 +83,14 @@ jobs:
           }
           check HOME "$HOME" /home/runner
           check "real directory /home/runner/work" "$(readlink -f /home/runner/work)" /home/runner/work
-          check "real directory ~/.cache" "$(readlink -f "$HOME/.cache")" /home/runner/.cache
+          # RAM build cache (RUNNER_BUILD_CACHE_IN_RAM=true): ~/.cache is then a link to the
+          # entrypoint's RAM directory. The same branch as .github/actions/setup-go-cache
+          # (templates_test.go keeps the two in step).
+          if [ "${RUNNER_BUILD_CACHE_IN_RAM:-false}" = true ] && [ -L "$HOME/.cache" ]; then
+            check "HOME/.cache (RAM build cache)" "$(readlink -f "$HOME/.cache")" /tmp/cr-ci-build-cache
+          else
+            check "real directory ~/.cache" "$(readlink -f "$HOME/.cache")" /home/runner/.cache
+          fi
           check "real directory ~/go" "$(readlink -f "$HOME/go")" /home/runner/go
           check "HOME not on the root filesystem" "$([ "$(stat -c %d "$HOME")" != "$(stat -c %d /)" ] && echo volume)" volume
           check "go env GOCACHE" "$(go env GOCACHE)" /home/runner/.cache/go-build

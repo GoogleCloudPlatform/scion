@@ -201,14 +201,16 @@ runs:
           check "HOME/go" "$(readlink -f "$HOME/go")" "$(readlink -f /scratch/go)"
         else
           # Real directories: each resolves to itself. ~/.cache may instead be a link to
-          # RAM when the job sets RUNNER_BUILD_CACHE_IN_RAM=true.
+          # the entrypoint's RAM directory when the job sets RUNNER_BUILD_CACHE_IN_RAM=true
+          # (the same branch as cr-ci/workflows/cr-runner-poc.yml; templates_test.go keeps
+          # the two in step).
           for d in /home/runner/work "$HOME/go" "$HOME/.npm"; do
             check "real directory $d" "$(readlink -f "$d")" "$d"
           done
           if [ "${RUNNER_BUILD_CACHE_IN_RAM:-false}" = true ] && [ -L "$HOME/.cache" ]; then
-            echo "ok   HOME/.cache: a link to $(readlink -f "$HOME/.cache") (RAM build cache)"
+            check "HOME/.cache (RAM build cache)" "$(readlink -f "$HOME/.cache")" /tmp/cr-ci-build-cache
           else
-            check "real directory $HOME/.cache" "$(readlink -f "$HOME/.cache")" "$HOME/.cache"
+            check "real directory ~/.cache" "$(readlink -f "$HOME/.cache")" /home/runner/.cache
           fi
           # On the volume, not on the root filesystem (in memory on Cloud Run).
           home_dev=$(stat -c %d "$HOME" 2>/dev/null)
