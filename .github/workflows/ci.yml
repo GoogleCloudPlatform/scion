@@ -189,6 +189,11 @@ jobs:
 
   build-and-test:
     name: Build & Test
+    # Stays on ubuntu-latest for now. Routed, it would add 15-20 runner-minutes
+    # to every run, more than the cr-ci runners (MAX_CONCURRENT_RUNNERS 4)
+    # absorb at the fork's peak hours. It moves to the cr-ci runner in its own
+    # change once capacity is raised (the 15-runner quota), with a warm-cache
+    # timing measurement (cr-ci-rev-16 O1).
     runs-on: ubuntu-latest
     # Sized from data (ptone/scion#3183): over the 267 successful upstream
     # runs of this job on 2026-10-04/05, the job took p50 13.4m / p95 14.4m /
@@ -1625,17 +1630,22 @@ jobs:
 
   shellcheck:
     name: shellcheck
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
 
+      # The cr-ci runner image has no sudo and ships Ubuntu 24.04's shellcheck,
+      # the version apt installs here; install only when it is missing.
       - name: Install shellcheck
         run: |
-          sudo apt-get update
-          sudo apt-get install -y shellcheck
+          if ! command -v shellcheck >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y shellcheck
+          fi
           shellcheck --version
 
       # Positive control -- this gate is not a no-op.
@@ -1756,7 +1766,7 @@ jobs:
 
   ent-generate-check:
     name: ent generated code drift
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - name: Checkout code
@@ -1825,7 +1835,7 @@ jobs:
     # always on push to main. Fails open: if the changes job did not succeed,
     # the harness runs anyway.
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.single_node_vm == 'true') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Checkout code
