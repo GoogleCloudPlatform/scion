@@ -396,3 +396,39 @@ func TestIdentityKeysFor(t *testing.T) {
 		})
 	}
 }
+
+func BenchmarkSlugify(b *testing.B) {
+	input := "Hello World - An Agent 007!"
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = Slugify(input)
+	}
+}
+
+func BenchmarkValidateDisplayName_ASCII(b *testing.B) {
+	name := "Builder Prime"
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = ValidateDisplayName(name)
+	}
+}
+
+func BenchmarkValidateDisplayName_Separators(b *testing.B) {
+	name := "under_score.dot-dash"
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = ValidateDisplayName(name)
+	}
+}
+
+func BenchmarkValidateDisplayName_Diacritics(b *testing.B) {
+	name := "Café Bot"
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = ValidateDisplayName(name)
+	}
+}
