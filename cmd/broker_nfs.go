@@ -259,9 +259,24 @@ func checkDoctorNFSMounts(vs *config.VersionedSettings, probe nfsDoctorProbe) sc
 		verifyOnlyRuntime = rtType
 	}
 
+	// Inline pod volumes are selected by shares[0] alone, as in the
+	// project-storage Layout and the runtime: no shares[0].pv_name on a
+	// Kubernetes default runtime.
+	inline := verifyOnlyRuntime != "" && kubernetesRuntimeType(verifyOnlyRuntime) &&
+		len(nfsCfg.Shares) > 0 && nfsCfg.Shares[0].PVName == ""
+
 	mode := "auto_mount off"
 	remediation := "Mount each export at <mount_root>/<share id> on this host, or set server.workspace_storage.nfs.auto_mount: true on a broker that runs as root"
 	switch {
+	case inline:
+		// Agent starts need the broker's mount of shares[0], so every
+		// failure of it points there, whatever the cause.
+		if nfsCfg.AutoMount {
+			mode = "auto_mount on, verify only"
+		}
+		first := nfsCfg.Shares[0]
+		remediation = fmt.Sprintf("Mount %s at %s on this host, writable by the broker (no pv_name: agent pods mount the share inline and the broker creates each directory first), or set nfs.shares[0].pv_name",
+			first.Server+":"+first.Export, filepath.Join(nfsCfg.MountRoot, first.ID))
 	case nfsCfg.AutoMount && verifyOnlyRuntime != "":
 		mode = "auto_mount on, verify only"
 		remediation = "The default runtime mounts the export into each agent; mount it on this host only if host-side tools need it"
@@ -269,12 +284,6 @@ func checkDoctorNFSMounts(vs *config.VersionedSettings, probe nfsDoctorProbe) sc
 		mode = "auto_mount on"
 		remediation = "The broker mounts the shares itself: check the broker log (broker.nfs-mount) and that the broker runs as root"
 	}
-
-	// Inline pod volumes are selected by shares[0] alone, as in the
-	// project-storage Layout and the runtime: no shares[0].pv_name on a
-	// Kubernetes default runtime.
-	inline := verifyOnlyRuntime != "" && kubernetesRuntimeType(verifyOnlyRuntime) &&
-		len(nfsCfg.Shares) > 0 && nfsCfg.Shares[0].PVName == ""
 
 	// A missing mount is a failure only where the broker is expected to
 	// mount it: with auto_mount on, no pv_name, and a local-container
@@ -303,7 +312,6 @@ func checkDoctorNFSMounts(vs *config.VersionedSettings, probe nfsDoctorProbe) sc
 			// No pv_name on Kubernetes: pods mount each directory inline,
 			// and the broker must create it first through this mount.
 			issues = append(issues, fmt.Sprintf("not mounted at %s (no pv_name: Kubernetes pods mount the share inline, and this broker must mount the export, writable, to create each directory first)", target))
-			remediation = fmt.Sprintf("Mount %s at %s on this host, writable by the broker (no pv_name: agent pods mount the share inline and the broker creates each directory first), or set nfs.shares[0].pv_name", want, target)
 			failed = true
 		case !mounted && !nfsCfg.AutoMount:
 			issues = append(issues, fmt.Sprintf("not mounted at %s (auto_mount is off, so the broker does not mount it)", target))
