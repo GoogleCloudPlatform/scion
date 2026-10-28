@@ -182,15 +182,27 @@ func TestListCursorSealer_PositionRingAAD(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, positionSealTestPosition, got)
 	for name, c := range map[string]string{
-		"v1 AAD under p2":         sealCustom("p2.gen1.", "scion-list-position-v1:binding-x"),
-		"AAD without kid":         sealCustom("p2.gen1.", "scion-list-position-v2:binding-x"),
-		"kid in AAD, not in wire": sealCustom("p1.", "scion-list-position-v2:gen1:binding-x"),
-		"other kid in AAD":        sealCustom("p2.gen1.", "scion-list-position-v2:legacy:binding-x"),
-		"list cursor AAD":         sealCustom("p2.gen1.", "scion-list-cursor-v2:gen1:binding-x"),
+		"v1 AAD under p2":  sealCustom("p2.gen1.", "scion-list-position-v1:binding-x"),
+		"AAD without kid":  sealCustom("p2.gen1.", "scion-list-position-v2:binding-x"),
+		"other kid in AAD": sealCustom("p2.gen1.", "scion-list-position-v2:legacy:binding-x"),
+		"list cursor AAD":  sealCustom("p2.gen1.", "scion-list-cursor-v2:gen1:binding-x"),
 	} {
 		_, err := sealer.OpenPosition(c, "binding-x")
 		assert.ErrorIs(t, err, errInvalidCursor, name)
 	}
+
+	// A p1 cursor opens with the legacy readers, which on the versioned
+	// ring above do not include gen1, so a gen1 p1 cursor would fail on
+	// the key alone. On the legacy-emit ring gen1 is a legacy reader: the
+	// p1 form under the v1 AAD opens, and the same body under the v2 AAD
+	// (the kid in the AAD but not on the wire) fails on the AAD alone.
+	lka, _ := capRollout(t, "legacy")
+	legacyReads := positionRingSealer(lka, clk)
+	got, err = legacyReads.OpenPosition(sealCustom("p1.", "scion-list-position-v1:binding-x"), "binding-x")
+	require.NoError(t, err, "gen1 opens a p1 cursor on this ring")
+	assert.Equal(t, positionSealTestPosition, got)
+	_, err = legacyReads.OpenPosition(sealCustom("p1.", "scion-list-position-v2:gen1:binding-x"), "binding-x")
+	assert.ErrorIs(t, err, errInvalidCursor, "kid in AAD, not in wire")
 }
 
 // With emit "legacy" the ring seals the key-ID-less p1 form, which opens

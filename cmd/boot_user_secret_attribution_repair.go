@@ -38,39 +38,40 @@ import (
 func runUserSecretAttributionRepair(ctx context.Context, s store.Store) {
 	done, err := IsMigrationComplete(ctx, s, MigrationUserSecretAttributionRepair)
 	if err != nil {
-		slog.Error("User secret attribution repair: failed to check completion marker; will attempt migration",
+		slog.ErrorContext(ctx, "User secret attribution repair: failed to check completion marker; will attempt migration",
 			"error", err)
 	} else if done {
-		slog.Debug("User secret attribution repair: already complete, skipping")
+		slog.DebugContext(ctx, "User secret attribution repair: already complete, skipping")
 		return
 	}
 
 	res, err := hub.RepairLegacyUserSecretAttribution(ctx, s)
 	for _, r := range res.Repaired {
-		slog.Info("User secret attribution repair: attributed secret to its owner",
+		slog.InfoContext(ctx, "User secret attribution repair: attributed secret to its owner",
 			"secret", r.Name, "secret_id", r.SecretID, "user_id", r.ScopeID,
 			"original_created_by", r.OriginalCreatedBy, "basis", r.Basis)
 	}
 	for _, skip := range res.Skipped {
-		slog.Warn("User secret attribution repair: secret left attributed to an agent; the owner's agents with a recorded delegation chain do not receive it",
+		slog.WarnContext(ctx, "User secret attribution repair: secret left attributed to an agent; the owner's agents with a recorded delegation chain do not receive it",
 			"secret", skip.Name, "secret_id", skip.SecretID, "user_id", skip.ScopeID,
 			"created_by", skip.CreatedBy, "reason", skip.Reason)
 	}
 	if err != nil {
-		slog.Error("User secret attribution repair: pass did not complete; will retry next boot",
+		slog.ErrorContext(ctx, "User secret attribution repair: pass did not complete; will retry next boot",
 			"repaired", len(res.Repaired), "error", err)
 		return
 	}
-	slog.Info("User secret attribution repair: pass completed",
-		"examined", res.Examined, "repaired", len(res.Repaired), "skipped", len(res.Skipped), "vanished", res.Vanished)
+	slog.InfoContext(ctx, "User secret attribution repair: pass completed",
+		"examined", res.Examined, "repaired", len(res.Repaired), "skipped", len(res.Skipped), "vanished", res.Vanished,
+		"author_changed", res.AuthorChanged)
 	if n := res.RowChanged(); n > 0 {
-		slog.Warn("User secret attribution repair: rows changed during the repair; marker not written, will retry next boot",
+		slog.WarnContext(ctx, "User secret attribution repair: rows changed during the repair; marker not written, will retry next boot",
 			"row_changed", n)
 		return
 	}
 
 	if markErr := MarkMigrationComplete(ctx, s, MigrationUserSecretAttributionRepair, len(res.Skipped)); markErr != nil {
-		slog.Error("User secret attribution repair: failed to write completion marker; will retry next boot",
+		slog.ErrorContext(ctx, "User secret attribution repair: failed to write completion marker; will retry next boot",
 			"error", markErr)
 	}
 }
