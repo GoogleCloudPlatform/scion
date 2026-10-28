@@ -9,16 +9,22 @@ import (
 
 // dockerfileStage returns the instruction lines of the Dockerfile's stage that
 // starts with the FROM line from, up to the next FROM: CRLF normalised to LF,
-// backslash continuations joined (so each RUN step is one line), and comment
-// lines dropped, so that commented-out text can never satisfy a check.
+// comment lines dropped BEFORE backslash continuations are joined (as Docker does,
+// so a comment inside a continued RUN can neither satisfy a check nor end the
+// instruction), then continuations joined, so each RUN step is one line.
 func dockerfileStage(t *testing.T, from string) []string {
 	t.Helper()
 	b, err := os.ReadFile("Dockerfile")
 	if err != nil {
 		t.Fatal(err)
 	}
-	df := strings.ReplaceAll(string(b), "\r\n", "\n")
-	df = strings.ReplaceAll(df, "\\\n", " ")
+	var kept []string
+	for _, l := range strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(l), "#") {
+			kept = append(kept, l)
+		}
+	}
+	df := strings.ReplaceAll(strings.Join(kept, "\n"), "\\\n", " ")
 	start := strings.Index(df, from+"\n")
 	if start < 0 {
 		t.Fatalf("Dockerfile has no %q line", from)
@@ -29,7 +35,7 @@ func dockerfileStage(t *testing.T, from string) []string {
 	}
 	var lines []string
 	for _, l := range strings.Split(stage, "\n") {
-		if s := strings.TrimSpace(l); s != "" && !strings.HasPrefix(s, "#") {
+		if strings.TrimSpace(l) != "" {
 			lines = append(lines, l)
 		}
 	}
@@ -56,7 +62,8 @@ func TestDockerfileGitStage(t *testing.T) {
 			t.Errorf("git stage make call lacks NO_RUST=YesPlease: %q", m)
 		}
 	}
-	if tool := regexp.MustCompile(`\b(cargo|rustc|rustup)\b`).FindString(body); tool != "" {
+	// The tools, and Debian/Ubuntu's Rust packages (rust-all, rust-src, librust-*-dev, ...).
+	if tool := regexp.MustCompile(`\b(cargo|rustc|rustup)\b|\b(lib)?rust-[a-z0-9]`).FindString(body); tool != "" {
 		t.Errorf("git stage uses %s; build git with NO_RUST instead of a Rust toolchain", tool)
 	}
 
@@ -73,9 +80,16 @@ func TestDockerfileGitStage(t *testing.T) {
 		t.Errorf("git stage's last RUN does not end with %q: %q", assert, lastRun)
 	}
 
-	final := strings.Join(dockerfileStage(t, "FROM ${UBUNTU_IMAGE}"), "\n")
+	finalLines := dockerfileStage(t, "FROM ${UBUNTU_IMAGE}")
+	copied := false
+	for _, l := range finalLines {
+		copied = copied || strings.TrimSpace(l) == "COPY --from=git /out/usr/local/ /usr/local/"
+	}
+	if !copied {
+		t.Error("final stage lacks the line COPY --from=git /out/usr/local/ /usr/local/")
+	}
+	final := strings.Join(finalLines, "\n")
 	for _, want := range []string{
-		"COPY --from=git /out/usr/local/ /usr/local/",
 		`printf '%s\n%s\n' 2.48 "$v" | sort -V -C`,
 		"for b in git-remote-https git-http-push; do",
 		`grep 'not found' <<<"$libs"`,

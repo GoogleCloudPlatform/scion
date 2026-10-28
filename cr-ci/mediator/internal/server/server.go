@@ -150,6 +150,11 @@ type Server struct {
 	cancelled   map[string]time.Time     // execution refs this process cancelled
 	offlineSeen map[string]time.Time     // runner name -> first seen offline
 	noticed     map[string]bool          // reconcile notices already logged (pruned each pass)
+	// hijacked: runners killed as hijacked whose registration GitHub has not let go
+	// yet (busy while it still shows the untrusted job running), -> first kill time.
+	// Later kills of the same runner log at WARNING; cleared once the registration is
+	// gone, or by reconcile after cancelledTTL.
+	hijacked map[string]time.Time
 }
 
 // New returns a Server.
@@ -175,6 +180,7 @@ func New(o Options) *Server {
 		cancelled:   map[string]time.Time{},
 		offlineSeen: map[string]time.Time{},
 		noticed:     map[string]bool{},
+		hijacked:    map[string]time.Time{},
 	}
 }
 

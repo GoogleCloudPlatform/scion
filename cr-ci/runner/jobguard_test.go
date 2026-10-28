@@ -182,6 +182,7 @@ func TestJobGuardRefuses(t *testing.T) {
 	}{
 		{"fork pull_request", "pull_request", prPayload("contributor/example-repo"), testRepoFull, "reason=head_repository_differs"},
 		{"pull_request without head", "pull_request", `{"pull_request":{}}`, testRepoFull, "reason=head_repository_missing"},
+		{"pull_request, head repository null (fork deleted)", "pull_request", `{"pull_request":{"head":{"repo":null}}}`, testRepoFull, "reason=head_repository_missing"},
 		{"pull_request, payload unparsable", "pull_request", `{not json`, testRepoFull, "reason=payload_unparsable"},
 		{"pull_request, payload missing", "pull_request", "-", testRepoFull, "reason=payload_missing"},
 		{"pull_request_target", "pull_request_target", prPayload(testRepoFull), testRepoFull, "reason=event_not_allowed event=pull_request_target"},

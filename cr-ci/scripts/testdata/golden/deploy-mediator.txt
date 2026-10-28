@@ -1,6 +1,6 @@
 # cr-ci deploy-mediator.sh (dry-run) project=example-project region=us-central1
 # dry-run: nothing is changed; '?' lines are read-only checks, assumed to find nothing
-# check: the runner job runs the current runner image (deploy it before the mediator)
+# check: which runner image the job runs (upgrade order: the mediator first, then deploy-job.sh)
 ? gcloud run jobs describe cr-gh-runner-8c32g --region=us-central1 --project=example-project '--format=value(metadata.name)'
 # mediator image cr-runner-mediator:golden
 ? gcloud artifacts docker images describe us-central1-docker.pkg.dev/example-project/cr-runners/cr-runner-mediator:golden --project=example-project '--format=value(image_summary.digest)'

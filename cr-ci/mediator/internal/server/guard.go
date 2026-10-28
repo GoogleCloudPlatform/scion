@@ -107,13 +107,31 @@ func (s *Server) checkRunnerJobLocked(ctx context.Context, v *view, repoFull str
 	if rec != nil {
 		servedRunID = rec.runID
 	}
+	_, repeat := s.hijacked[runnerName]
 	res, err := s.stopRunner(serveRepo, runnerName, false)
 	if err != nil {
 		s.log().Error("runner hijacked by an untrusted job; stopping it failed", append(kill, "error", err.Error())...)
 		return "", err
 	}
-	s.log().Error("runner hijacked by an untrusted job; execution cancelled",
-		append(kill, "execution", res.ref, "registration_deleted", res.registrationDeleted)...)
+	fields := append(kill, "execution", res.ref, "registration_deleted", res.registrationDeleted)
+	if res.registrationErr != "" {
+		fields = append(fields, "registration_error", res.registrationErr)
+	}
+	switch {
+	case !repeat:
+		s.log().Error("runner hijacked by an untrusted job; execution cancelled", fields...)
+	case res.registrationDeleted:
+		s.log().Warn("hijacked runner's registration deleted", append(fields, "repeat", true)...)
+	default:
+		// GitHub still shows the untrusted job running on it, so the registration is
+		// busy and every guard pass finds it again; the execution is already gone.
+		s.log().Warn("hijacked runner's registration still busy; deletion retried", append(fields, "repeat", true)...)
+	}
+	if res.registrationDeleted {
+		delete(s.hijacked, runnerName)
+	} else if !repeat {
+		s.hijacked[runnerName] = s.o.Now()
+	}
 
 	// Serve the displaced job again, with a runner named after the
 	// hijacking job (which never gets a runner of its own). Reusing the
