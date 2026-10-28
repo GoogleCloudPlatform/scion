@@ -233,12 +233,10 @@ type Server struct {
 	fetchDone     chan struct{}
 	fetchErr      error
 
-	// Singleflight for identity token fetches
-	idFetchMu       sync.Mutex
-	idFetchInFlight bool
-	idFetchDone     chan struct{}
-	idFetchErr      error
-	idFetchAudience string
+	// Singleflight for identity token fetches: the done channel of the
+	// in-flight fetch for each audience, guarded by idFetchMu.
+	idFetchMu sync.Mutex
+	idFetches map[string]chan struct{}
 
 	cancel             context.CancelFunc
 	iptablesConfigured bool        // whether iptables redirect was successfully set up
@@ -406,6 +404,7 @@ func New(cfg Config) *Server {
 		config:         cfg,
 		client:         &http.Client{Timeout: 10 * time.Second},
 		cachedIDTokens: make(map[string]*cachedIDToken),
+		idFetches:      make(map[string]chan struct{}),
 		accessRefusal:  newRefusalState(),
 		idRefusal:      newRefusalState(),
 	}
@@ -1143,15 +1142,20 @@ func (s *Server) handleIdentityToken(w http.ResponseWriter, r *http.Request) {
 		s.afterRefusalCheck()
 	}
 
-	// Singleflight: collapse concurrent fetches for the same audience
+	// Singleflight: collapse concurrent fetches for the same audience. Each
+	// audience has its own in-flight entry, so fetches for different
+	// audiences run independently.
 	s.idFetchMu.Lock()
-	if s.idFetchInFlight && s.idFetchAudience == audience {
-		done := s.idFetchDone
+	if done, ok := s.idFetches[audience]; ok {
 		s.idFetchMu.Unlock()
 		if s.afterFollowerJoin != nil {
 			s.afterFollowerJoin(audience)
 		}
-		<-done
+		select {
+		case <-done:
+		case <-r.Context().Done():
+			return // the client has gone; the leader still caches the token
+		}
 		if s.serveCachedIDToken(w, audience) {
 			return
 		}
@@ -1174,17 +1178,16 @@ func (s *Server) handleIdentityToken(w http.ResponseWriter, r *http.Request) {
 		writeCachedIDToken(w, tok)
 		return
 	}
-	s.idFetchInFlight = true
-	s.idFetchAudience = audience
-	s.idFetchDone = make(chan struct{})
+	done := make(chan struct{})
+	s.idFetches[audience] = done
 	s.idFetchMu.Unlock()
 
 	token, err := s.fetchIdentityToken(r.Context(), audience)
 
+	// Close only this leader's own channel and remove only its own entry.
 	s.idFetchMu.Lock()
-	s.idFetchInFlight = false
-	s.idFetchErr = err
-	close(s.idFetchDone)
+	delete(s.idFetches, audience)
+	close(done)
 	s.idFetchMu.Unlock()
 
 	if err != nil {
