@@ -220,6 +220,10 @@ export function parseUserDeletion(value: unknown): UserDeletion | null {
 /** How often an open deletion panel reloads a deletion in state stopping. */
 export const DELETION_POLL_INTERVAL_MS = 5000;
 
+/** The deletion panel's error when its deletion cannot be loaded. */
+const DELETION_STATUS_UNAVAILABLE =
+  'The deletion status is not available. Use Refresh to try again.';
+
 /** The deletion panel's state. */
 interface DeletionPanel {
   user: AdminUser;
@@ -435,6 +439,9 @@ export class ScionPageAdminUsers extends LitElement {
 
   /** The next reload of an open deletion panel in state stopping. */
   private deletionPollTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Counts deletion panel sessions: each open, close and page removal starts a new one. */
+  private deletionPanelSession = 0;
 
   static override styles = css`
     :host {
@@ -1032,7 +1039,9 @@ export class ScionPageAdminUsers extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    this.stopDeletionPoll();
+    // Ends the panel session too, so a request in flight that answers
+    // after the page is removed neither changes the panel nor polls again.
+    this.closeDeletionPanel();
   }
 
   private async loadCurrentUser(): Promise<void> {
@@ -1435,11 +1444,12 @@ export class ScionPageAdminUsers extends LitElement {
       (current.blockers?.agents ?? []).map((a): [string, string] => [a.id, a.slug])
     );
     this.actionInProgress = true;
+    let failed = false;
     try {
       const deletion = await this.requestForceDelete(user, slugs);
       if (this.confirmAction === current) this.confirmAction = null;
       if (deletion) {
-        this.deletionPanel = { user, deletion, loading: false, error: null };
+        this.showDeletionPanel({ user, deletion, loading: false, error: null });
         this.scheduleDeletionPoll();
         this.showFeedback('primary', `Deleting ${label}: stopping the user's agents.`);
       } else {
@@ -1447,22 +1457,49 @@ export class ScionPageAdminUsers extends LitElement {
       }
       this.reloadUsersPage();
     } catch (err) {
+      failed = true;
       this.showFeedback('danger', err instanceof Error ? err.message : 'Force delete failed');
     } finally {
       this.actionInProgress = false;
     }
+    if (failed && this.confirmAction === current) {
+      // The confirmation named the agents as they were; ask again, with
+      // the blockers reloaded, before another force request.
+      const reset: ConfirmAction = { ...current, forceConfirm: false };
+      this.confirmAction = reset;
+      void this.loadDeleteBlockers(reset);
+    }
+  }
+
+  /**
+   * Shows a deletion panel, starting a new panel session: a request of an
+   * earlier session that answers late changes nothing.
+   */
+  private showDeletionPanel(panel: DeletionPanel): void {
+    this.stopDeletionPoll();
+    this.deletionPanelSession += 1;
+    this.deletionPanel = panel;
+  }
+
+  /**
+   * Whether the panel of session is the one shown on a connected page. Every
+   * step that resumes after a request checks it before changing the panel
+   * or arming the poll.
+   */
+  private deletionPanelCurrent(session: number): boolean {
+    return this.isConnected && this.deletionPanel !== null && this.deletionPanelSession === session;
   }
 
   /** Opens the deletion panel of a user and loads its deletion. */
   private async openDeletionPanel(user: AdminUser): Promise<void> {
-    this.stopDeletionPoll();
-    this.deletionPanel = { user, deletion: null, loading: true, error: null };
+    this.showDeletionPanel({ user, deletion: null, loading: true, error: null });
     await this.refreshDeletionPanel();
   }
 
   /** Closes the deletion panel and stops reloading it. */
   private closeDeletionPanel(): void {
     this.stopDeletionPoll();
+    this.deletionPanelSession += 1;
     this.deletionPanel = null;
   }
 
@@ -1475,45 +1512,56 @@ export class ScionPageAdminUsers extends LitElement {
 
   /**
    * Reloads the open panel after DELETION_POLL_INTERVAL_MS while its
-   * deletion is stopping. Stops on a terminal state or when it closes.
+   * deletion is stopping. Stops on a terminal state, when the panel closes
+   * and when the page is removed.
    */
   private scheduleDeletionPoll(): void {
     this.stopDeletionPoll();
+    const session = this.deletionPanelSession;
+    if (!this.deletionPanelCurrent(session)) return;
     if (this.deletionPanel?.deletion?.state !== 'stopping') return;
     this.deletionPollTimer = setTimeout(() => {
       this.deletionPollTimer = null;
-      void this.refreshDeletionPanel(true);
+      if (this.deletionPanelCurrent(session)) void this.refreshDeletionPanel(true);
     }, DELETION_POLL_INTERVAL_MS);
   }
 
   /**
    * Reloads the open deletion panel from GET /api/v1/users/{id}/deletion.
    * quiet (a poll) keeps the buttons as they are. When the deletion turns
-   * completed, the users list is reloaded.
+   * completed, the users list is reloaded. A failed load shows the error
+   * and stops the poll; Refresh tries again and resumes it.
    */
   private async refreshDeletionPanel(quiet = false): Promise<void> {
     const panel = this.deletionPanel;
     if (!panel) return;
+    const session = this.deletionPanelSession;
     if (!quiet) this.deletionPanel = { ...panel, loading: true, error: null };
     let next: DeletionPanel;
+    let loaded = false;
     try {
       const res = await apiFetch(`/api/v1/users/${panel.user.id}/deletion`, {
         suppressAccessDeniedToast: true,
       });
       const body: unknown = await res.json().catch(() => null);
       const deletion = res.ok ? parseUserDeletion(body) : null;
+      loaded = deletion !== null;
       next = deletion
         ? { ...panel, deletion, loading: false, error: null }
-        : { ...panel, loading: false, error: 'The deletion status is not available.' };
+        : { ...panel, loading: false, error: DELETION_STATUS_UNAVAILABLE };
     } catch {
-      next = { ...panel, loading: false, error: 'The deletion status is not available.' };
+      next = { ...panel, loading: false, error: DELETION_STATUS_UNAVAILABLE };
     }
-    if (this.deletionPanel?.user.id !== panel.user.id) return;
+    if (!this.deletionPanelCurrent(session)) return;
     this.deletionPanel = next;
     if (panel.deletion?.state !== 'completed' && next.deletion?.state === 'completed') {
       this.reloadUsersPage();
     }
-    this.scheduleDeletionPoll();
+    if (loaded) {
+      this.scheduleDeletionPoll();
+    } else {
+      this.stopDeletionPoll();
+    }
   }
 
   /**
@@ -1526,6 +1574,7 @@ export class ScionPageAdminUsers extends LitElement {
   private async retryDeletion(): Promise<void> {
     const panel = this.deletionPanel;
     if (!panel) return;
+    const session = this.deletionPanelSession;
     this.deletionPanel = { ...panel, loading: true, error: null };
     const slugs = new Map<string, string>(
       (panel.deletion?.agents ?? []).map((a): [string, string] => [a.id, a.slug])
@@ -1533,7 +1582,7 @@ export class ScionPageAdminUsers extends LitElement {
     let retryError: string | null = null;
     try {
       const deletion = await this.requestForceDelete(panel.user, slugs);
-      if (this.deletionPanel?.user.id !== panel.user.id) return;
+      if (!this.deletionPanelCurrent(session)) return;
       if (deletion) {
         this.deletionPanel = { ...panel, deletion, loading: false, error: null };
         this.scheduleDeletionPoll();
@@ -1542,10 +1591,15 @@ export class ScionPageAdminUsers extends LitElement {
     } catch (err) {
       retryError = err instanceof Error ? err.message : 'Retry failed';
     }
-    if (this.deletionPanel?.user.id !== panel.user.id) return;
+    if (!this.deletionPanelCurrent(session)) return;
     await this.refreshDeletionPanel(true);
     const latest = this.deletionPanel;
-    if (retryError && latest?.user.id === panel.user.id && latest.deletion?.state !== 'completed') {
+    if (
+      retryError &&
+      latest &&
+      this.deletionPanelCurrent(session) &&
+      latest.deletion?.state !== 'completed'
+    ) {
       this.deletionPanel = { ...latest, error: retryError };
     }
   }

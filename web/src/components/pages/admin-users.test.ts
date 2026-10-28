@@ -1473,6 +1473,18 @@ describe('scion-page-admin-users — forced delete and deletion panel', () => {
     expect(alert?.textContent).not.toContain('a-1');
     expect(denied).not.toHaveBeenCalled();
     expect(element.shadowRoot!.querySelector('sl-dialog.deletion-panel')).toBeNull();
+
+    // The failed request ends the confirmation: the next click asks again,
+    // with the blockers reloaded.
+    const dialog = element.shadowRoot!.querySelector('sl-dialog[label="Delete user"]')!;
+    expect(dialog.querySelector('.force-delete-confirm')).toBeNull();
+    const button = dialog.querySelector('.force-delete-button') as HTMLElement;
+    expect(button.textContent?.trim()).toBe('Force delete');
+    expect(fetchUrls('/u-target/delete-blockers')).toHaveLength(2);
+    button.click();
+    await settle(element);
+    expect(deleteUrls()).toHaveLength(1);
+    expect(dialog.querySelector('.force-delete-confirm')).not.toBeNull();
   });
 
   it('force-deletes at once on a 204: success, no panel, list reloaded', async () => {
@@ -1722,5 +1734,111 @@ describe('scion-page-admin-users — forced delete and deletion panel', () => {
     await settle(element);
     expect(element.shadowRoot!.querySelector('sl-dialog[label="Delete user"]')).toBeNull();
     expect(element.shadowRoot!.querySelector('sl-dialog.deletion-panel')).not.toBeNull();
+  });
+
+  /** A request to hold: the next deletion GET, or the next force DELETE. */
+  interface Hold {
+    on: boolean;
+    what: 'get' | 'delete';
+    release?: () => void;
+  }
+
+  /**
+   * A fetch handler that, while hold.on is set, holds the next request of
+   * kind hold.what until hold.release is called.
+   */
+  function holdingHandler(
+    users: AdminUser[],
+    hold: Hold
+  ): (url: string | URL | Request, init?: RequestInit) => Promise<Response> {
+    const base = handler(users, () => jsonResponse(DELETION, 202));
+    return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+      const isDelete = init?.method === 'DELETE' && path.includes('/api/v1/users/u-target');
+      const isGet = path.endsWith('/api/v1/users/u-target/deletion');
+      if (hold.on && ((hold.what === 'get' && isGet) || (hold.what === 'delete' && isDelete))) {
+        hold.on = false;
+        return new Promise<Response>((resolve) => {
+          hold.release = () => resolve(base(url, init));
+        });
+      }
+      return base(url, init);
+    };
+  }
+
+  for (const what of ['get', 'delete'] as const) {
+    it(`polls no more once the page is removed while a ${what} is in flight`, async () => {
+      const deleting = makeUser({ status: 'deleting' });
+      element = (await createComponent([deleting])) as PageEl;
+      const hold: Hold = { on: false, what };
+      vi.stubGlobal('fetch', vi.fn(holdingHandler([deleting], hold)));
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const el = element;
+        queryAll(el, 'sl-menu-item.menu-item-deletion')[0].click();
+        await vi.advanceTimersByTimeAsync(50);
+        await el.updateComplete;
+        hold.on = true;
+        if (what === 'get') {
+          // The next poll's GET is held.
+          await vi.advanceTimersByTimeAsync(mod.DELETION_POLL_INTERVAL_MS);
+        } else {
+          const panel = el.shadowRoot!.querySelector('sl-dialog.deletion-panel')!;
+          (panel.querySelector('.retry-deletion-button') as HTMLElement).click();
+          await vi.advanceTimersByTimeAsync(0);
+        }
+        expect(hold.release).toBeDefined();
+        const calls = vi.mocked(fetch).mock.calls.length;
+
+        el.remove();
+        element = null;
+        hold.release?.();
+        await vi.advanceTimersByTimeAsync(mod.DELETION_POLL_INTERVAL_MS * 3);
+        expect(vi.mocked(fetch).mock.calls.length).toBe(calls);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  }
+
+  it('stops polling after a failed load until Refresh succeeds', async () => {
+    const deleting = makeUser({ status: 'deleting' });
+    element = (await createComponent([deleting])) as PageEl;
+    let fail = false;
+    const notFound = (): Response => new Response(null, { status: 404 });
+    const current = (): Response =>
+      fail ? new Response(null, { status: 500 }) : jsonResponse(DELETION);
+    vi.stubGlobal('fetch', vi.fn(handler([deleting], notFound, current)));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const el = element;
+      const flush = async (ms: number): Promise<void> => {
+        await vi.advanceTimersByTimeAsync(ms);
+        await el.updateComplete;
+      };
+      queryAll(el, 'sl-menu-item.menu-item-deletion')[0].click();
+      await flush(50);
+      expect(fetchUrls('/u-target/deletion')).toHaveLength(1);
+
+      fail = true;
+      await flush(mod.DELETION_POLL_INTERVAL_MS);
+      expect(fetchUrls('/u-target/deletion')).toHaveLength(2);
+      const panel = el.shadowRoot!.querySelector('sl-dialog.deletion-panel')!;
+      expect(panel.textContent).toContain('Use Refresh to try again');
+      await flush(mod.DELETION_POLL_INTERVAL_MS * 3);
+      expect(fetchUrls('/u-target/deletion')).toHaveLength(2);
+
+      fail = false;
+      const refresh = Array.from(panel.querySelectorAll('sl-button')).find(
+        (b) => b.textContent?.trim() === 'Refresh'
+      ) as HTMLElement;
+      refresh.click();
+      await flush(50);
+      expect(fetchUrls('/u-target/deletion')).toHaveLength(3);
+      await flush(mod.DELETION_POLL_INTERVAL_MS);
+      expect(fetchUrls('/u-target/deletion')).toHaveLength(4);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
