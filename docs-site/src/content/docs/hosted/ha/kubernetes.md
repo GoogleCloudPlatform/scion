@@ -166,11 +166,11 @@ Before it creates an agent pod, the Kubernetes runtime checks every PersistentVo
 |---|---|
 | Does not exist | The start fails at once. The error names the claim and, where known, the setting that names it. |
 | `Bound` | The start continues. |
-| A `ProvisioningFailed` event | The start fails at once. The error quotes the event. |
+| Newest event is `ProvisioningFailed` | The start fails at once. The error quotes the event. A newer event after a `ProvisioningFailed` one means the provisioner is retrying, and the claim is treated as `Pending`. |
 | A `WaitForFirstConsumer` event | The start continues: the claim is bound once the pod is scheduled. |
-| Other (`Pending`, `Lost`) | The runtime re-reads the claim every 2 seconds for up to 30 seconds. If it is still not bound, the runtime logs a warning and creates the pod anyway. |
+| Other (`Pending`, `Lost`) | The runtime re-reads the claim every 2 seconds, for up to 30 seconds in total across all the pod's claims. If it is still not bound, the runtime logs a warning and creates the pod anyway. |
 
-The events need `get` and `list` on `events` in the agent namespace. Without them, the check uses the claim phase only and logs that once: a provisioning failure is then not detected early, and the first start that uses a new claim of a `WaitForFirstConsumer` class waits the full 30 seconds before its pod is created. Without `get` on `persistentvolumeclaims`, the check is skipped, and that is logged once too.
+The events need `list` on `events` in the agent namespace. Without them, the check uses the claim phase only and logs that once: a provisioning failure is then not detected early, and the first start that uses a new claim of a `WaitForFirstConsumer` class waits the full 30 seconds before its pod is created. Without `get` on `persistentvolumeclaims`, the check is skipped, and that is logged once too.
 
 ### Resource Configuration
 
@@ -992,7 +992,7 @@ Recommended, for the [claim check before the pod](#claim-check-before-the-pod) a
 | Resource | Verbs |
 |---|---|
 | persistentvolumeclaims | get (create, to create shared-dir claims on the local backend) |
-| events | get, list |
+| events | list |
 
 ### Additional for GKE Mode
 
