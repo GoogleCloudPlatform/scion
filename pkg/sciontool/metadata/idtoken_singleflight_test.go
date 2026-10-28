@@ -20,6 +20,7 @@ type idFlightHarness struct {
 	joined   chan string // one value per follower parked on a leader
 	mu       sync.Mutex
 	releases map[string]chan struct{}
+	panics   map[string]int // fetches still to panic, per audience
 }
 
 type idFlightResult struct {
@@ -34,6 +35,7 @@ func newIDFlightHarness(t *testing.T) *idFlightHarness {
 		entered:  make(chan string, 8),
 		joined:   make(chan string, 8),
 		releases: map[string]chan struct{}{},
+		panics:   map[string]int{},
 	}
 	h.srv = New(Config{
 		Mode:      "assign",
@@ -41,6 +43,9 @@ func newIDFlightHarness(t *testing.T) *idFlightHarness {
 		TokenFunc: func() string { return "credential-1" },
 		FetchGCPIdentityToken: func(ctx context.Context, audience string) (string, error) {
 			h.calls.Add(1)
+			if h.takePanic(audience) {
+				panic("hub fetch stub panics for " + audience)
+			}
 			release := h.release(audience)
 			h.entered <- audience
 			<-release
@@ -65,6 +70,23 @@ func (h *idFlightHarness) release(audience string) chan struct{} {
 }
 
 func (h *idFlightHarness) releaseAudience(audience string) { close(h.release(audience)) }
+
+// panicNext makes the next fetch for audience panic before it blocks.
+func (h *idFlightHarness) panicNext(audience string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.panics[audience]++
+}
+
+func (h *idFlightHarness) takePanic(audience string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.panics[audience] == 0 {
+		return false
+	}
+	h.panics[audience]--
+	return true
+}
 
 // start runs one identity-token request in its own goroutine. The handler is
 // called directly, so a panic is reported in the result instead of being
@@ -228,5 +250,39 @@ func TestIDTokenSingleflight_SameAudienceOneCall(t *testing.T) {
 	wantToken(t, "follower", waitResult(t, "follower", a2), "aud-a")
 	if got := h.calls.Load(); got != 1 {
 		t.Fatalf("hub calls: %d, want 1", got)
+	}
+}
+
+// A leader whose fetch panics still removes its in-flight entry, so the next
+// request for that audience leads a new fetch instead of waiting on a leader
+// that will never finish.
+func TestIDTokenSingleflight_LeaderPanicLeavesNoEntry(t *testing.T) {
+	h := newIDFlightHarness(t)
+	ctx := context.Background()
+	h.panicNext("aud-a")
+	select {
+	case res := <-h.start(ctx, "aud-a"):
+		if res.panicked == nil {
+			t.Fatal("the first aud-a request did not panic (stub)")
+		}
+	case <-time.After(idFlightWait):
+		t.Fatal("the panicking aud-a request did not return")
+	}
+
+	a := h.start(ctx, "aud-a")
+	select {
+	case got := <-h.entered:
+		if got != "aud-a" {
+			t.Fatalf("hub fetch for %q, want aud-a", got)
+		}
+	case got := <-h.joined:
+		t.Fatalf("the next %s request waited on the dead leader instead of leading", got)
+	case <-time.After(idFlightWait):
+		t.Fatal("the next aud-a request neither led nor followed")
+	}
+	h.releaseAudience("aud-a")
+	wantToken(t, "aud-a after the panic", waitResult(t, "aud-a after the panic", a), "aud-a")
+	if got := h.calls.Load(); got != 2 {
+		t.Fatalf("hub calls: %d, want 2", got)
 	}
 }

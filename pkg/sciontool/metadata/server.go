@@ -1182,13 +1182,18 @@ func (s *Server) handleIdentityToken(w http.ResponseWriter, r *http.Request) {
 	s.idFetches[audience] = done
 	s.idFetchMu.Unlock()
 
-	token, err := s.fetchIdentityToken(r.Context(), audience)
-
-	// Close only this leader's own channel and remove only its own entry.
-	s.idFetchMu.Lock()
-	delete(s.idFetches, audience)
-	close(done)
-	s.idFetchMu.Unlock()
+	token, err := func() (*cachedIDToken, error) {
+		// Close only this leader's own channel and remove only its own
+		// entry, also when the fetch panics, so the audience never keeps a
+		// dead leader that later requests would wait on.
+		defer func() {
+			s.idFetchMu.Lock()
+			delete(s.idFetches, audience)
+			close(done)
+			s.idFetchMu.Unlock()
+		}()
+		return s.fetchIdentityToken(r.Context(), audience)
+	}()
 
 	if err != nil {
 		if isHubRefusal(err) && s.serveRefusal(w, s.idRefusal) {
