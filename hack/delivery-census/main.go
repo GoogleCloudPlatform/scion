@@ -14,10 +14,14 @@
 
 // Command delivery-census reports, READ-ONLY, which live agents on a hub
 // database the launch material delivery admission would refuse at start or
-// restart, grouped by cohort (no edge, sentinel edge, unadopted edge, adopted
-// baseline/readonly, UAT-created, deleted or held parent, ...) and by deny
-// cause. It runs hub.(*AuthzService).LaunchDeliveryCensus, the same admission
-// a start runs, and reads no secret or env value. Not part of the product.
+// restart, which of those the legacy fallback still serves (legacy_* cohorts:
+// no edge, sentinel edge, unadopted edge, adopted baseline/readonly,
+// UAT-created; see pkg/hub/material_delivery_legacy.go), and which stay
+// withheld (deleted or held parent, held agent, duplicate edges, recorded
+// ceiling, ...), with counts by cohort and by deny cause with and without
+// the fallback. It runs hub.(*AuthzService).LaunchDeliveryCensus, the same
+// admission and fallback a start runs, and reads no secret or env value.
+// Not part of the product.
 //
 // The database is opened read-only: sqlite with mode=ro and query_only(1)
 // (entc.OpenSQLiteReadOnly), postgres with default_transaction_read_only=on
@@ -29,7 +33,8 @@
 // Pass -dev-auth when the hub runs with dev auth (the workstation server),
 // because the admission refuses local-development provenance without it.
 // Output: a summary (counts by cohort and cause) on stdout, then one TSV row
-// per withheld agent; -all adds the agents that deliver; -json prints the
+// per agent not served by the strict admission (legacy_* and withheld); -all
+// adds the agents that deliver; -json prints the
 // whole report as JSON instead.
 package main
 
@@ -131,7 +136,7 @@ func withQueryParam(dsn, key, value string) string {
 
 func writeText(w io.Writer, rep *hub.LaunchDeliveryCensusReport, devAuth, all bool) {
 	fmt.Fprintf(w, "# launch delivery census (read-only), dev_auth=%t\n", devAuth)
-	fmt.Fprintf(w, "agents\t%d\nwithheld\t%d\n", rep.Agents, rep.Withheld)
+	fmt.Fprintf(w, "agents\t%d\nwithheld\t%d\nlegacy_fallback\t%d\nstrict_withheld\t%d\n", rep.Agents, rep.Withheld, rep.Fallback, rep.StrictWithheld)
 	fmt.Fprintln(w, "# by cohort")
 	for _, k := range sortedKeys(rep.ByCohort) {
 		fmt.Fprintf(w, "cohort\t%s\t%d\n", k, rep.ByCohort[k])
@@ -140,8 +145,12 @@ func writeText(w io.Writer, rep *hub.LaunchDeliveryCensusReport, devAuth, all bo
 	for _, k := range sortedKeys(rep.ByCause) {
 		fmt.Fprintf(w, "cause\t%s\t%d\n", k, rep.ByCause[k])
 	}
+	fmt.Fprintln(w, "# by permission:cause without the legacy fallback")
+	for _, k := range sortedKeys(rep.ByStrictCause) {
+		fmt.Fprintf(w, "strict_cause\t%s\t%d\n", k, rep.ByStrictCause[k])
+	}
 	fmt.Fprintln(w, "# rows")
-	cols := []string{"agent_id", "project_id", "owner_id", "phase", "cohort", "edges", "delegator", "role", "prov_version", "source_kind", "ceiling_kind"}
+	cols := []string{"agent_id", "project_id", "owner_id", "phase", "cohort", "strict_cohort", "edges", "delegator", "role", "prov_version", "source_kind", "ceiling_kind"}
 	cols = append(cols, hub.LaunchDeliveryCensusPermissions...)
 	cols = append(cols, "first_reason")
 	fmt.Fprintln(w, strings.Join(cols, "\t"))
@@ -154,7 +163,7 @@ func writeText(w io.Writer, rep *hub.LaunchDeliveryCensusReport, devAuth, all bo
 		if e.DelegatorType != "" {
 			delegator = e.DelegatorType + ":" + e.DelegatorID
 		}
-		f := []string{r.AgentID, r.ProjectID, r.OwnerID, r.Phase, r.Cohort, fmt.Sprint(e.ActiveEdges), delegator, e.Role,
+		f := []string{r.AgentID, r.ProjectID, r.OwnerID, r.Phase, r.Cohort, r.StrictCohort, fmt.Sprint(e.ActiveEdges), delegator, e.Role,
 			fmt.Sprint(e.ProvenanceVersion), e.SourceCredentialKind, e.CeilingKind}
 		reason := r.MintError
 		for _, p := range hub.LaunchDeliveryCensusPermissions {
@@ -162,6 +171,8 @@ func writeText(w io.Writer, rep *hub.LaunchDeliveryCensusReport, devAuth, all bo
 			switch {
 			case !ok:
 				f = append(f, "-")
+			case v.Allowed && v.LegacyCohort != "":
+				f = append(f, "legacy:"+v.LegacyCohort)
 			case v.Allowed:
 				f = append(f, "allow")
 			default:

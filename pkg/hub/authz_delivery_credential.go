@@ -78,6 +78,13 @@ type hubDeliveryIdentity struct {
 	// start or restart and then drops; a credential without it re-runs the
 	// walk on every decision.
 	admission *hubDeliveryAdmissionMemo
+	// legacyFallback, when set, lets the admission admit a chain the walk
+	// refuses only because of legacy provenance (hubDeliveryLegacyFallback,
+	// material_delivery_legacy.go). It is hub-internal state, not request
+	// data. Only launch selection sets it (deliverySelector.mint), for the
+	// purposes legacyDeliveryFallbackPurpose names; every other credential
+	// enforces the walk strictly.
+	legacyFallback bool
 }
 
 // hubDeliveryAdmissionMemo holds the outcome of hubDeliveryAdmission's
@@ -96,6 +103,9 @@ type hubDeliveryAdmissionOutcome struct {
 	ok     bool
 	reason string
 	cause  DenyCause
+	// legacyCohort is set when the outcome is an allow by the legacy
+	// fallback: the cohort (legacyDeliveryCohort*) of the first legacy hop.
+	legacyCohort string
 }
 
 func newHubDeliveryAdmissionMemo() *hubDeliveryAdmissionMemo {
@@ -328,7 +338,7 @@ func (a *AuthzService) hubDeliveryAdmission(
 		o, cached = memo.load(permissionID)
 	}
 	if !cached {
-		o = a.hubDeliveryChainAdmission(ctx, h, permissionID, agentID, explain)
+		o = a.hubDeliveryAdmissionOutcomeFor(ctx, h, permissionID, agentID, explain)
 		if memo != nil {
 			memo.save(permissionID, o)
 		}
@@ -340,6 +350,24 @@ func (a *AuthzService) hubDeliveryAdmission(
 		return false, o.reason, nil
 	}
 	return true, o.reason, nil
+}
+
+// hubDeliveryAdmissionOutcomeFor is the admission outcome for one
+// permission: hubDeliveryChainAdmission, and, when that denies and the
+// credential carries legacyFallback, the legacy fallback
+// (hubDeliveryLegacyFallback).
+func (a *AuthzService) hubDeliveryAdmissionOutcomeFor(
+	ctx context.Context,
+	h *hubDeliveryIdentity,
+	permissionID string,
+	agentID string,
+	explain *[]DecisionStep,
+) hubDeliveryAdmissionOutcome {
+	o := a.hubDeliveryChainAdmission(ctx, h, permissionID, agentID, explain)
+	if o.ok || !h.legacyFallback {
+		return o
+	}
+	return a.hubDeliveryLegacyFallback(ctx, h, permissionID, agentID, o, explain)
 }
 
 // hubDeliveryChainAdmission runs hubDeliveryChainWalk and then
@@ -474,6 +502,15 @@ func (a *AuthzService) hubDeliveryDelegatorLiveness(ctx context.Context, delegat
 // for a non-live agent link (checkAgentHoldsPermission); a hold lookup
 // error denies with cause ceiling_error.
 func (a *AuthzService) hubDeliveryChainWalk(ctx context.Context, startAgentID, scopeProjectID, permissionID string, explain *[]DecisionStep) (bool, string, DenyCause) {
+	return a.hubDeliveryWalk(ctx, startAgentID, scopeProjectID, permissionID, explain, nil)
+}
+
+// hubDeliveryWalk is hubDeliveryChainWalk. With legacy nil it is exactly
+// the strict walk. With legacy set it is the legacy-tolerant walk of the
+// fallback (material_delivery_legacy.go): at the legacy points named
+// there it records the hop's cohort in legacy and goes on instead of
+// denying; every other check is unchanged.
+func (a *AuthzService) hubDeliveryWalk(ctx context.Context, startAgentID, scopeProjectID, permissionID string, explain *[]DecisionStep, legacy *hubDeliveryLegacyNote) (bool, string, DenyCause) {
 	addStep := func(step, detail string) {
 		if explain != nil {
 			*explain = append(*explain, DecisionStep{Step: step, Detail: detail})
@@ -528,6 +565,10 @@ func (a *AuthzService) hubDeliveryChainWalk(ctx context.Context, startAgentID, s
 		}
 		if len(active) == 0 {
 			addStep("delegation_ceiling_delivery_hop", fmt.Sprintf("agent:%s has no active edge in project %s", delegateID, scopeProjectID))
+			if legacy != nil {
+				legacy.note(legacyDeliveryCohortNoEdge, depth)
+				return a.hubDeliveryLegacyAncestry(ctx, delegateID, deny, failClosed)
+			}
 			return deny("no active delegation edge", DenyCauseCeilingProvenanceMissing)
 		}
 		if len(active) > 1 {
@@ -540,6 +581,10 @@ func (a *AuthzService) hubDeliveryChainWalk(ctx context.Context, startAgentID, s
 				edge.ID, edge.DelegatorType, edge.DelegatorID, delegateID, edge.Kind, edge.ProvenanceVersion))
 
 		if isMigrationSentinel(edge) {
+			if legacy != nil {
+				legacy.note(legacyDeliveryCohortSentinelEdge, depth)
+				return a.hubDeliveryLegacyAncestry(ctx, delegateID, deny, failClosed)
+			}
 			return deny("migration-provenance delegation supplies no delivery authority", DenyCauseCeilingOrphaned)
 		}
 		if edgeHasDevLocalProvenance(edge) {
@@ -550,17 +595,23 @@ func (a *AuthzService) hubDeliveryChainWalk(ctx context.Context, startAgentID, s
 				return deny("delegation ceiling: local development provenance with another delegator", DenyCauseCeilingSourceNotAllowed)
 			}
 		}
-		if !knownProvenanceVersion(edge.ProvenanceVersion) {
-			return deny(fmt.Sprintf("delegation ceiling: %s requires recorded provenance", permissionID), DenyCauseCeilingUnrecorded)
-		}
-		switch edge.Kind {
-		case store.EffectCeilingPrincipal:
-		case store.EffectCeilingBounded:
-			if !EffectCeilingAllows(edge.EffectCeiling, permissionID, false) {
+		switch {
+		case !knownProvenanceVersion(edge.ProvenanceVersion) || (edge.Kind != store.EffectCeilingPrincipal && edge.Kind != store.EffectCeilingBounded):
+			if legacy == nil {
+				return deny(fmt.Sprintf("delegation ceiling: %s requires recorded provenance", permissionID), DenyCauseCeilingUnrecorded)
+			}
+			// An unrecorded edge has no ceiling to apply; its delegator is
+			// still checked below and the walk goes on.
+			legacy.note(legacyDeliveryCohortUnadoptedEdge, depth)
+		case edge.Kind == store.EffectCeilingBounded && !EffectCeilingAllows(edge.EffectCeiling, permissionID, false):
+			cohort := ""
+			if legacy != nil {
+				cohort = legacyBoundedEdgeCohort(edge, permissionID)
+			}
+			if cohort == "" {
 				return deny(fmt.Sprintf("delegation ceiling: %s is outside the frozen effect ceiling", permissionID), DenyCauseCeilingEffectExceeded)
 			}
-		default:
-			return deny(fmt.Sprintf("delegation ceiling: %s requires recorded provenance", permissionID), DenyCauseCeilingUnrecorded)
+			legacy.note(cohort, depth)
 		}
 
 		live, status, err := a.hubDeliveryDelegatorLiveness(ctx, edge.DelegatorType, edge.DelegatorID)

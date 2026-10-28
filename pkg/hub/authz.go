@@ -546,6 +546,10 @@ type AuthzService struct {
 	// latch catches up as soon as the backfill completes.
 	backfillDone atomic.Bool
 
+	// legacyDeliveryLog rate-limits the launch legacy fallback Warn
+	// (deliverySelector.warnLegacyFallback). Nil logs every line.
+	legacyDeliveryLog *runScopeLogDedup
+
 	// relationshipResolver handles progeny relationship grants. Lazily
 	// initialized on first use.
 	relationshipResolver *RelationshipGrantResolver
@@ -598,6 +602,7 @@ func NewAuthzService(s store.Store, logger *slog.Logger) *AuthzService {
 		logger:                  logger,
 		DecisionAuditSampleRate: 1.0,
 		relationshipResolver:    NewRelationshipGrantResolver(s),
+		legacyDeliveryLog:       newRunScopeLogDedup(legacyDeliveryLogDedupSize, legacyDeliveryLogDedupWindow),
 	}
 	// ptone/scion#2128: personal (user-scoped) skills are a progeny sharing
 	// source keyed on the owning user's bucket (see authz_skill_progeny.go).

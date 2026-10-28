@@ -74,7 +74,20 @@ func TestLaunchDeliveryCensus_Cohorts(t *testing.T) {
 	devLocal := tid("census-dev-local")
 	hdDevLocalAgent(t, f, devLocal, nil)
 
+	// What a start delivers (legacy fallback included), and the strict
+	// classification without it.
 	want := map[string]string{
+		ok:        "delivers",
+		noEdge:    legacyDeliveryCohortNoEdge,
+		sentinel:  legacyDeliveryCohortSentinelEdge,
+		unadopted: legacyDeliveryCohortUnadoptedEdge,
+		adopted:   legacyDeliveryCohortAdoptedReadOnly,
+		uat:       legacyDeliveryCohortUATCreated,
+		parent:    legacyDeliveryCohortNoEdge,
+		child:     legacyDeliveryCohortNoEdge,
+		devLocal:  "dev_local_edge",
+	}
+	wantStrict := map[string]string{
 		ok:        "delivers",
 		noEdge:    "no_edge",
 		sentinel:  "sentinel_edge",
@@ -97,20 +110,30 @@ func TestLaunchDeliveryCensus_Cohorts(t *testing.T) {
 		r, found := rows[id]
 		require.True(t, found, "agent %s missing from the census", id)
 		assert.Equal(t, cohort, r.Cohort, "agent %s: %+v", id, r)
+		assert.Equal(t, wantStrict[id], r.StrictCohort, "agent %s: %+v", id, r)
 		counts[cohort]++
-		// The census verdicts are the admission's own outcomes.
+		// The census verdicts are the admission's own outcomes: strict, and
+		// with the fallback a launch selection credential carries.
 		h := hdIdentity(t, f.authz, id)
+		lh := hdIdentity(t, f.authz, id)
+		lh.legacyFallback = true
 		for _, p := range LaunchDeliveryCensusPermissions {
 			o := f.authz.hubDeliveryChainAdmission(ctx, h, p, id, nil)
-			assert.Equal(t, o.ok, r.Verdicts[p].Allowed, "agent %s %s", id, p)
-			assert.Equal(t, o.cause, r.Verdicts[p].Cause, "agent %s %s", id, p)
+			assert.Equal(t, o.ok, r.Verdicts[p].StrictAllowed, "agent %s %s", id, p)
+			assert.Equal(t, o.cause, r.Verdicts[p].StrictCause, "agent %s %s", id, p)
+			lo := f.authz.hubDeliveryAdmissionOutcomeFor(ctx, lh, p, id, nil)
+			assert.Equal(t, lo.ok, r.Verdicts[p].Allowed, "agent %s %s", id, p)
+			assert.Equal(t, lo.cause, r.Verdicts[p].Cause, "agent %s %s", id, p)
+			assert.Equal(t, lo.legacyCohort, r.Verdicts[p].LegacyCohort, "agent %s %s", id, p)
 		}
 	}
 	for cohort, n := range counts {
 		assert.GreaterOrEqual(t, rep.ByCohort[cohort], n, "cohort %s", cohort)
 	}
 	assert.Equal(t, len(rep.Rows), rep.Agents)
-	assert.Equal(t, rep.Agents-rep.ByCohort["delivers"], rep.Withheld)
+	assert.Equal(t, rep.Agents-rep.ByCohort["delivers"], rep.StrictWithheld)
+	assert.Equal(t, rep.StrictWithheld, rep.Withheld+rep.Fallback)
+	assert.GreaterOrEqual(t, rep.Fallback, 7, "the seven legacy agents above")
 
 	// With dev auth on (the workstation hub), the dev_local agent delivers.
 	rep, err = f.authz.LaunchDeliveryCensus(ctx, true)

@@ -54,6 +54,12 @@ Hub-scoped and Broker-scoped variables and secrets are shared credentials. Every
 Store sensitive secrets at **User** scope, so that only your own agents receive them, or at **Project** scope. A Project-scoped secret is shared with every member of the Project: their agents receive it, and those agents can also read it at runtime (see [Agent Runtime Secret Retrieval](#agent-runtime-secret-retrieval)).
 :::
 
+### Start-Time Authorization
+
+When the Hub starts or restarts an agent, it authorizes each Project, Hub and Broker variable and secret for that agent before it reads any value. The check follows the agent's recorded delegation chain: the user or agent that delegated authority to it, and so on up to a user. An item the check refuses is left out of the start, and the start itself goes ahead. The Hub log has a `Warn` line for each item left out, with its name, scope and the reason, never its value.
+
+Agents created by older Hub versions may not have the recorded chain this check needs. The Hub keeps giving those agents their Project, Hub and Broker values, and logs a rate-limited `Warn` line naming the agent, the item and the legacy group the agent falls in. The groups, and the cases that are still refused, are listed under [Launch material for legacy agents](/scion/reference/delegation-provenance-adoption/#launch-material-for-legacy-agents).
+
 ### Reserved Names
 
 Names beginning with `SCION_` or `GCE_METADATA_` (case-sensitive prefix match) are reserved for Scion's own control-plane variables. The Hub rejects with a validation error any environment variable, or `environment`-type secret, whose key or target uses one of these prefixes. `file` and `variable` secrets are not affected.

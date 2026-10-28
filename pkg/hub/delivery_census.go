@@ -16,8 +16,10 @@ package hub
 
 // Launch delivery census: a READ-ONLY report of which live agents the launch
 // material delivery admission (material_delivery.go, hubDeliveryChainAdmission)
-// would refuse at start or restart, and why. It runs the same admission a start
-// runs, for each deliver permission, without reading any secret or env value,
+// would refuse at start or restart, which of those the legacy fallback
+// (material_delivery_legacy.go) still serves, and why. It runs the same
+// admission and fallback a start runs, for each deliver permission, without
+// reading any secret or env value,
 // and writes nothing: it only lists agents and reads the records the admission
 // reads (agents, delegation edges, holds, users, role bindings). Callers should
 // still open the store read-only (hack/fland-delivery-census does).
@@ -39,11 +41,17 @@ var LaunchDeliveryCensusPermissions = []string{
 	"skill_injection.deliver",
 }
 
-// LaunchDeliveryVerdict is the admission outcome for one deliver permission.
+// LaunchDeliveryVerdict is the admission outcome a start or restart gets for
+// one deliver permission, legacy fallback (material_delivery_legacy.go)
+// included. StrictAllowed and StrictCause are the outcome without the
+// fallback; LegacyCohort is set when the fallback admits it.
 type LaunchDeliveryVerdict struct {
-	Allowed bool      `json:"allowed"`
-	Cause   DenyCause `json:"cause,omitempty"`
-	Reason  string    `json:"reason,omitempty"`
+	Allowed       bool      `json:"allowed"`
+	Cause         DenyCause `json:"cause,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
+	StrictAllowed bool      `json:"strictAllowed"`
+	StrictCause   DenyCause `json:"strictCause,omitempty"`
+	LegacyCohort  string    `json:"legacyCohort,omitempty"`
 }
 
 // LaunchDeliveryEdgeFacts are the facts of the agent's own active edges in its
@@ -60,26 +68,37 @@ type LaunchDeliveryEdgeFacts struct {
 	DelegatorAgentGone   bool   `json:"delegatorAgentGone"`
 }
 
-// LaunchDeliveryCensusRow is one live agent's census result. Cohort is
-// "delivers" when every deliver permission is admitted.
+// LaunchDeliveryCensusRow is one live agent's census result. Cohort is what
+// a start delivers: "delivers" when the strict admission admits every
+// deliver permission; a legacy_* cohort when every permission is admitted
+// and at least one only through the legacy fallback (the first such
+// cohort); otherwise the withheld cohort of the first refused permission.
+// StrictCohort is the same classification without the fallback.
 type LaunchDeliveryCensusRow struct {
-	AgentID   string                           `json:"agentId"`
-	ProjectID string                           `json:"projectId"`
-	OwnerID   string                           `json:"ownerId"`
-	Phase     string                           `json:"phase"`
-	Cohort    string                           `json:"cohort"`
-	MintError string                           `json:"mintError,omitempty"`
-	Edge      LaunchDeliveryEdgeFacts          `json:"edge"`
-	Verdicts  map[string]LaunchDeliveryVerdict `json:"verdicts"`
+	AgentID      string                           `json:"agentId"`
+	ProjectID    string                           `json:"projectId"`
+	OwnerID      string                           `json:"ownerId"`
+	Phase        string                           `json:"phase"`
+	Cohort       string                           `json:"cohort"`
+	StrictCohort string                           `json:"strictCohort"`
+	MintError    string                           `json:"mintError,omitempty"`
+	Edge         LaunchDeliveryEdgeFacts          `json:"edge"`
+	Verdicts     map[string]LaunchDeliveryVerdict `json:"verdicts"`
 }
 
-// LaunchDeliveryCensusReport is the whole census.
+// LaunchDeliveryCensusReport is the whole census. Withheld counts agents a
+// start refuses at least one deliver permission; Fallback counts agents
+// served only through the legacy fallback; StrictWithheld counts agents the
+// strict admission refuses (Withheld + Fallback).
 type LaunchDeliveryCensusReport struct {
-	Agents   int                       `json:"agents"`
-	Withheld int                       `json:"withheld"`
-	ByCohort map[string]int            `json:"byCohort"`
-	ByCause  map[string]int            `json:"byCause"`
-	Rows     []LaunchDeliveryCensusRow `json:"rows"`
+	Agents         int                       `json:"agents"`
+	Withheld       int                       `json:"withheld"`
+	Fallback       int                       `json:"fallback"`
+	StrictWithheld int                       `json:"strictWithheld"`
+	ByCohort       map[string]int            `json:"byCohort"`
+	ByCause        map[string]int            `json:"byCause"`
+	ByStrictCause  map[string]int            `json:"byStrictCause"`
+	Rows           []LaunchDeliveryCensusRow `json:"rows"`
 }
 
 // LaunchDeliveryCensus runs the launch delivery admission for every live agent
@@ -91,7 +110,7 @@ func (a *AuthzService) LaunchDeliveryCensus(ctx context.Context, devLocal bool) 
 		return nil, fmt.Errorf("census: no authorization service or store")
 	}
 	a.setDevLocalAuthorityEnabled(devLocal)
-	rep := &LaunchDeliveryCensusReport{ByCohort: map[string]int{}, ByCause: map[string]int{}}
+	rep := &LaunchDeliveryCensusReport{ByCohort: map[string]int{}, ByCause: map[string]int{}, ByStrictCause: map[string]int{}}
 	cursor := ""
 	for {
 		page, err := a.store.ListAgents(ctx, store.AgentFilter{}, store.ListOptions{Limit: 200, Cursor: cursor, SkipTotalCount: true})
@@ -103,12 +122,25 @@ func (a *AuthzService) LaunchDeliveryCensus(ctx context.Context, devLocal bool) 
 			rep.Rows = append(rep.Rows, row)
 			rep.Agents++
 			rep.ByCohort[row.Cohort]++
-			if row.Cohort != "delivers" {
+			switch {
+			case row.Cohort == "delivers":
+			case strings.HasPrefix(row.Cohort, "legacy_"):
+				rep.Fallback++
+				rep.StrictWithheld++
+			default:
 				rep.Withheld++
+				rep.StrictWithheld++
 			}
 			for _, p := range LaunchDeliveryCensusPermissions {
-				if v, ok := row.Verdicts[p]; ok && !v.Allowed {
+				v, ok := row.Verdicts[p]
+				if !ok {
+					continue
+				}
+				if !v.Allowed {
 					rep.ByCause[p+":"+string(v.Cause)]++
+				}
+				if !v.StrictAllowed {
+					rep.ByStrictCause[p+":"+string(v.StrictCause)]++
 				}
 			}
 		}
@@ -129,30 +161,53 @@ func (a *AuthzService) launchDeliveryCensusRow(ctx context.Context, ag *store.Ag
 	if err != nil {
 		// A start of this agent fails hard (the credential cannot be minted).
 		row.MintError = err.Error()
-		row.Cohort = "mint_error"
+		row.Cohort, row.StrictCohort = "mint_error", "mint_error"
 		return row
 	}
-	var firstDeny *LaunchDeliveryVerdict
-	walkPassed, targetHeld := false, false
+	var strictDeny, deny *hubDeliveryAdmissionOutcome
+	legacy := ""
 	for _, p := range LaunchDeliveryCensusPermissions {
-		o := a.hubDeliveryChainAdmission(ctx, h, p, ag.ID, nil)
-		v := LaunchDeliveryVerdict{Allowed: o.ok, Cause: o.cause, Reason: o.reason}
-		row.Verdicts[p] = v
-		if !o.ok && firstDeny == nil {
-			vv := v
-			firstDeny = &vv
-			// hubDeliveryChainAdmission prefixes a provenance-root refusal
-			// (the walk passed) with this text.
-			walkPassed = strings.HasPrefix(o.reason, "delivery provenance root denied")
-			targetHeld = o.reason == "agent "+ag.ID+" is held"
+		strict := a.hubDeliveryChainAdmission(ctx, h, p, ag.ID, nil)
+		eff := strict
+		if !strict.ok {
+			eff = a.hubDeliveryLegacyFallback(ctx, h, p, ag.ID, strict, nil)
+		}
+		row.Verdicts[p] = LaunchDeliveryVerdict{
+			Allowed: eff.ok, Cause: eff.cause, Reason: eff.reason,
+			StrictAllowed: strict.ok, StrictCause: strict.cause, LegacyCohort: eff.legacyCohort,
+		}
+		if !strict.ok && strictDeny == nil {
+			strictDeny = &strict
+		}
+		if !eff.ok && deny == nil {
+			deny = &eff
+		}
+		if eff.legacyCohort != "" && legacy == "" {
+			legacy = eff.legacyCohort
 		}
 	}
-	if firstDeny == nil {
-		row.Cohort = "delivers"
-		return row
+	row.StrictCohort = "delivers"
+	if strictDeny != nil {
+		row.StrictCohort = launchDeliveryOutcomeCohort(row.Edge, *strictDeny, ag.ID)
 	}
-	row.Cohort = launchDeliveryCohort(row.Edge, firstDeny.Cause, walkPassed, targetHeld)
+	switch {
+	case deny != nil:
+		row.Cohort = launchDeliveryOutcomeCohort(row.Edge, *deny, ag.ID)
+	case legacy != "":
+		row.Cohort = legacy
+	default:
+		row.Cohort = "delivers"
+	}
 	return row
+}
+
+// launchDeliveryOutcomeCohort names the cohort of a refused admission.
+func launchDeliveryOutcomeCohort(f LaunchDeliveryEdgeFacts, o hubDeliveryAdmissionOutcome, agentID string) string {
+	// hubDeliveryChainAdmission prefixes a provenance-root refusal (the walk
+	// passed) with this text.
+	walkPassed := strings.HasPrefix(o.reason, "delivery provenance root denied")
+	targetHeld := o.reason == "agent "+agentID+" is held"
+	return launchDeliveryCohort(f, o.cause, walkPassed, targetHeld)
 }
 
 // launchDeliveryEdgeFacts reads the agent's own active edges in its project.

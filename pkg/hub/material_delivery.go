@@ -30,7 +30,10 @@ package hub
 //     failure fails the whole start;
 //  3. authorize: each associated item through Decide; a denied item is
 //     not delivered and does not mask a lower-scope item for the same key
-//     or target (precedence runs after authorization);
+//     or target (precedence runs after authorization). An agent whose
+//     delegation chain fails the admission walk only because of legacy
+//     provenance is admitted by the legacy fallback, with a rate-limited
+//     Warn per item (material_delivery_legacy.go);
 //  4. fetch: secret values only for authorized items, by recorded metadata
 //     (FetchValues), so no value is read before the credential is minted
 //     and the item admitted;
@@ -47,6 +50,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -109,6 +113,7 @@ func (s *deliverySelector) mint(ctx context.Context) error {
 	// permission (hubDeliveryAdmissionMemo); the credential, and so the
 	// memo, is dropped with the selector.
 	h.admission = newHubDeliveryAdmissionMemo()
+	h.legacyFallback = legacyDeliveryFallbackPurpose(s.purpose)
 	s.ident = h
 	return nil
 }
@@ -139,7 +144,33 @@ func (s *deliverySelector) authorize(ctx context.Context, kind MaterialKind, rec
 				"deny_cause", string(d.DenyCause), "reason", d.Reason)
 		}
 	}
+	if d.Allowed {
+		s.warnLegacyFallback(ctx, kind, key, scope, scopeID)
+	}
 	return d.Allowed, nil
+}
+
+// warnLegacyFallback logs, at Warn and rate-limited per agent, cohort and
+// item (AuthzService.legacyDeliveryLog), an item delivered only through the legacy
+// fallback (material_delivery_legacy.go): names and cohort, never a value.
+// The admission memo holds the outcome step 10 used for this permission.
+// The availability probe delivers nothing and stays quiet.
+func (s *deliverySelector) warnLegacyFallback(ctx context.Context, kind MaterialKind, key, scope, scopeID string) {
+	if s.purpose == PurposeAvailabilityProbe || s.ident == nil || s.ident.admission == nil {
+		return
+	}
+	o, ok := s.ident.admission.load(deliverPermissionForKind(kind))
+	if !ok || !o.ok || o.legacyCohort == "" {
+		return
+	}
+	dedupKey := s.agent.ID + "\x00" + o.legacyCohort + "\x00" + string(kind) + "\x00" + scope + "\x00" + scopeID + "\x00" + key
+	if dl := s.authz.legacyDeliveryLog; dl != nil && !dl.first(dedupKey, time.Now()) {
+		return
+	}
+	s.logger().WarnContext(ctx, "launch material delivered through the legacy fallback",
+		"agent_id", s.agent.ID, "purpose", string(s.purpose), "cohort", o.legacyCohort,
+		"kind", string(kind), "key", key, "scope", scope, "scope_id", scopeID,
+		"reason", o.reason)
 }
 
 // deliveryAuthzRequest is the Decide request for one launch item. Explain

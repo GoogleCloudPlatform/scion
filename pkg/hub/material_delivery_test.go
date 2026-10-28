@@ -684,11 +684,12 @@ func TestDispatchDelivery_RestartDeliversAssociatedMaterial(t *testing.T) {
 }
 
 // TestDispatchDelivery_UnadmittedAgentGetsOnlyUserMaterial: the same agent
-// with no delegation edge (a single fault) receives none of its project,
-// hub or broker material; its owner-scope rows, whose selection this change
-// does not touch, still arrive.
+// with a recorded ceiling that lacks the deliver permissions (a single
+// fault, and not a legacy shape, so the legacy fallback does not apply)
+// receives none of its project, hub or broker material; its owner-scope
+// rows, whose selection this change does not touch, still arrive.
 func TestDispatchDelivery_UnadmittedAgentGetsOnlyUserMaterial(t *testing.T) {
-	m := newLDFixture(t, "no-edge", ldOptions{noEdge: true})
+	m := newLDFixture(t, "bounded-no-deliver", ldOptions{edge: withBoundedCeiling("agent.read")})
 	rec := &ldRecordingSecretBackend{SecretBackend: m.backend}
 	m.d.SetSecretBackend(rec)
 	var denied []string
@@ -918,13 +919,22 @@ func TestDeliveryProbe_AuthorizesStoredAgent(t *testing.T) {
 		}
 	})
 	t.Run("stored_agent_not_admitted", func(t *testing.T) {
-		m := newLDFixture(t, "probe-noedge", ldOptions{noEdge: true})
+		m := newLDFixture(t, "probe-bounded", ldOptions{edge: withBoundedCeiling("agent.read")})
 		m.env(t, "MD_PROBE_PROJECT", "p", store.ScopeProject, m.agent.ProjectID, false)
 		m.secret(t, "MD_PROBE_HUB", "h", store.SecretTypeEnvironment, store.ScopeHub, m.hubID)
 		s := probeServer(m)
 		found, err := s.hasAnyKey(context.Background(), m.agent, []string{"MD_PROBE_PROJECT", "MD_PROBE_HUB"})
 		require.NoError(t, err)
 		assert.False(t, found, "a record that would not be delivered does not count")
+	})
+	t.Run("legacy_agent_counts_what_a_start_delivers", func(t *testing.T) {
+		// A legacy agent (no edge) is served by the legacy fallback at start,
+		// so the probe agrees and counts the record.
+		m := newLDFixture(t, "probe-noedge", ldOptions{noEdge: true})
+		m.env(t, "MD_PROBE_PROJECT", "p", store.ScopeProject, m.agent.ProjectID, false)
+		found, err := probeServer(m).hasAnyKey(context.Background(), m.agent, []string{"MD_PROBE_PROJECT"})
+		require.NoError(t, err)
+		assert.True(t, found)
 	})
 	t.Run("create_time_probe_counts_existence", func(t *testing.T) {
 		m := newLDFixture(t, "probe-create", ldOptions{noEdge: true})
@@ -1754,12 +1764,13 @@ func warnRecords(t *testing.T, raw []byte, msg string) []map[string]any {
 }
 
 // TestDispatchDelivery_WithheldItemsLoggedAtWarn: a restart of an agent the
-// delivery decision refuses (no delegation edge) withholds its project, hub and
+// delivery decision refuses (a recorded ceiling without the deliver
+// permissions, which the legacy fallback does not serve) withholds its project, hub and
 // broker items and says so at Warn: one record per item with the key, scope,
 // kind and deny cause, and one per-start summary with the count. No value is
 // logged.
 func TestDispatchDelivery_WithheldItemsLoggedAtWarn(t *testing.T) {
-	m := newLDFixture(t, "warn-withheld", ldOptions{noEdge: true})
+	m := newLDFixture(t, "warn-withheld", ldOptions{edge: withBoundedCeiling("agent.read")})
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	m.authz.logger = logger

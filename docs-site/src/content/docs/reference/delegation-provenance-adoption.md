@@ -233,6 +233,34 @@ without these keys, because adoption does not apply to it. So does a denial
 of a permission that no adopted ceiling carries, such as the artifact
 permissions, which unrecorded chains never held.
 
+## Launch material for legacy agents
+
+When the Hub starts or restarts an agent, it authorizes each Project, Hub and Broker variable and secret with the delivery permissions above (`secret.deliver`, `env_var.deliver`, `skill_injection.deliver`), walking the agent's delegation chain. Agents whose chain fails that walk only because of legacy data keep receiving that material, as they did before the check existed. A hop is legacy when it is one of:
+
+| Group (`cohort` in the log) | The hop's agent has |
+| :--- | :--- |
+| `legacy_no_edge` | no active edge in the project |
+| `legacy_sentinel_edge` | only the backfill's migration edge (`user:system/migration`) |
+| `legacy_unadopted_edge` | only an edge with unrecorded provenance, including scheduled children with role `none`, which adoption skips |
+| `legacy_adopted_baseline`, `legacy_adopted_readonly` | only an adopted edge at role `baseline` or `readonly`, whose policy V1 ceiling has no delivery permissions |
+| `legacy_uat_created` | only an edge recorded from a user access token, whose ceiling cannot hold the delivery permissions because no token scope grants them |
+
+Each item delivered this way is logged once an hour per agent and item at `Warn`, as `launch material delivered through the legacy fallback`, with the agent ID, the group, and the item's name and scope.
+
+The fallback never applies when:
+
+- any agent on the chain is held;
+- a delegator or ancestor agent is deleted, missing or held, or the root user is not active;
+- the agent has more than one active edge in the project;
+- a hop has local-development provenance and the Hub does not run dev auth;
+- a recorded hop that is not one of the groups above has a ceiling without the permission, for example the child of an agent created from a user access token;
+- an earlier check (the item's association with the agent, an access constraint, the test-admin policy) refuses the item;
+- the chain is fully recorded, which leaves the root user's project admission as the deciding check.
+
+When the walk cannot follow edges past a hop (`legacy_no_edge`, `legacy_sentinel_edge`), the agent's stored ancestry stands in for the rest of the chain: its root user must be active and every ancestor agent must exist, not be deleted and not be held. An agent with no stored ancestry is refused. The root user's project membership is not checked for these agents, which is the behaviour before the check existed.
+
+The fallback applies to start and restart selection and to the create-time check for whether a requested key exists. Other users of the delivery permissions get the strict walk. To find the affected agents before or after an upgrade, run the read-only census against a copy of the Hub database or a read replica: `go run ./hack/delivery-census -driver sqlite -db <hub.db>` (add `-dev-auth` for a workstation Hub), or `-driver postgres -db <url>`. It opens the database read-only and reports, per agent, the group it falls in and what a start delivers, with counts by group and by deny cause.
+
 ## Admin recovery API
 
 All routes require a Hub system admin on an interactive or dev credential: an

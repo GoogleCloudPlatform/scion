@@ -1,0 +1,401 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+import (
+	"bytes"
+	"context"
+	"log/slog"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+const lgFallbackMsg = "launch material delivered through the legacy fallback"
+
+// lgItems stores one plain env var and one secret per project, hub and
+// broker scope for the fixture agent and returns their keys.
+func lgItems(t *testing.T, m *ldFixture) []string {
+	t.Helper()
+	var keys []string
+	for _, scope := range []string{store.ScopeProject, store.ScopeHub, store.ScopeRuntimeBroker} {
+		up := strings.ToUpper(scope)
+		m.env(t, "LG_ENV_"+up, "lg-env-value-"+scope, scope, m.scopeID(scope), false)
+		m.secret(t, "LG_SECRET_"+up, "lg-secret-value-"+scope, store.SecretTypeEnvironment, scope, m.scopeID(scope))
+		keys = append(keys, "LG_ENV_"+up, "LG_SECRET_"+up)
+	}
+	return keys
+}
+
+// lgLogger points the fixture's authorization service and dispatcher at a
+// JSON log buffer.
+func lgLogger(m *ldFixture) *bytes.Buffer {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	m.authz.logger = logger
+	m.d.log = logger
+	return &buf
+}
+
+// lgSetAncestry rewrites the stored agent's ancestry (and the fixture copy).
+func lgSetAncestry(t *testing.T, m *ldFixture, ancestry []string) {
+	t.Helper()
+	ag, err := m.store.GetAgent(context.Background(), m.agent.ID)
+	require.NoError(t, err)
+	ag.Ancestry = ancestry
+	require.NoError(t, m.store.UpdateAgent(context.Background(), ag))
+	m.agent.Ancestry = ancestry
+}
+
+// lgParent stores a parent agent in the fixture's project with ancestry
+// [project owner] and returns its ID.
+func lgParent(t *testing.T, m *ldFixture, name string) string {
+	t.Helper()
+	p := tid("lg-parent-" + name)
+	hdAgent(t, m.store, p, m.agent.ProjectID, []string{m.projectOwnerID})
+	return p
+}
+
+// lgSoftDelete marks a stored agent deleted.
+func lgSoftDelete(t *testing.T, m *ldFixture, id string) {
+	t.Helper()
+	ag, err := m.store.GetAgent(context.Background(), id)
+	require.NoError(t, err)
+	ag.DeletedAt = time.Now()
+	require.NoError(t, m.store.UpdateAgent(context.Background(), ag))
+}
+
+// lgAdoptedAt is an adopted (system_migration) edge at role, whose bounded
+// compatibility ceiling lacks the deliver permissions.
+func lgAdoptedAt(role AgentRole) func(e *store.DelegationEdge) {
+	return func(e *store.DelegationEdge) {
+		withBoundedCeiling("agent.read")(e)
+		e.Role = string(role)
+		e.SourceCredentialKind = store.SourceCredentialSystemMigration
+	}
+}
+
+// lgUATCreated is an edge recorded from a user access token, whose bounded
+// ceiling cannot carry the deliver permissions.
+func lgUATCreated(e *store.DelegationEdge) {
+	withBoundedCeiling("agent.read")(e)
+	e.SourceCredentialKind = store.SourceCredentialUAT
+}
+
+// TestDispatchDelivery_LegacyCohortsDeliveredWithWarn: an agent whose
+// delivery walk fails only because of legacy provenance still gets its
+// project, hub and broker material at restart, with one Warn per item that
+// names the agent, the cohort and the item, and no value.
+func TestDispatchDelivery_LegacyCohortsDeliveredWithWarn(t *testing.T) {
+	rows := []struct {
+		name       string
+		opts       ldOptions
+		after      func(t *testing.T, m *ldFixture)
+		wantCohort string
+		wantDepth  bool
+	}{
+		{name: "no_edge", opts: ldOptions{noEdge: true}, wantCohort: legacyDeliveryCohortNoEdge},
+		{
+			name: "sentinel_edge", opts: ldOptions{noEdge: true},
+			after: func(t *testing.T, m *ldFixture) {
+				createDCEdge(t, m.store, store.DelegationPrincipalUser, migrationDelegatorID, store.DelegationPrincipalAgent, m.agent.ID,
+					store.RoleScopeProject, m.agent.ProjectID, string(AgentRoleFull))
+			},
+			wantCohort: legacyDeliveryCohortSentinelEdge,
+		},
+		{
+			name: "unadopted_edge", opts: ldOptions{noEdge: true},
+			after: func(t *testing.T, m *ldFixture) {
+				createDCEdge(t, m.store, store.DelegationPrincipalUser, m.projectOwnerID, store.DelegationPrincipalAgent, m.agent.ID,
+					store.RoleScopeProject, m.agent.ProjectID, string(AgentRoleFull))
+			},
+			wantCohort: legacyDeliveryCohortUnadoptedEdge,
+		},
+		{
+			// A legacy scheduled-dispatch child: unrecorded, role none.
+			name: "scheduled_child_role_none", opts: ldOptions{noEdge: true},
+			after: func(t *testing.T, m *ldFixture) {
+				createDCEdge(t, m.store, store.DelegationPrincipalUser, m.projectOwnerID, store.DelegationPrincipalAgent, m.agent.ID,
+					store.RoleScopeProject, m.agent.ProjectID, string(AgentRoleNone))
+			},
+			wantCohort: legacyDeliveryCohortUnadoptedEdge,
+		},
+		{name: "adopted_baseline", opts: ldOptions{edge: lgAdoptedAt(AgentRoleBaseline)}, wantCohort: legacyDeliveryCohortAdoptedBaseline},
+		{name: "adopted_readonly", opts: ldOptions{edge: lgAdoptedAt(AgentRoleReadOnly)}, wantCohort: legacyDeliveryCohortAdoptedReadOnly},
+		{name: "uat_created", opts: ldOptions{edge: lgUATCreated}, wantCohort: legacyDeliveryCohortUATCreated},
+		{
+			// The agent's own recorded edge passes; its parent's edge is
+			// unrecorded.
+			name: "legacy_ancestor", opts: ldOptions{noEdge: true},
+			after: func(t *testing.T, m *ldFixture) {
+				p := lgParent(t, m, "ancestor")
+				createDCEdge(t, m.store, store.DelegationPrincipalUser, m.projectOwnerID, store.DelegationPrincipalAgent, p,
+					store.RoleScopeProject, m.agent.ProjectID, string(AgentRoleFull))
+				hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, nil)
+			},
+			wantCohort: legacyDeliveryCohortUnadoptedEdge,
+			wantDepth:  true,
+		},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			m := newLDFixture(t, "lg-"+r.name, r.opts)
+			if r.after != nil {
+				r.after(t, m)
+			}
+			keys := lgItems(t, m)
+			buf := lgLogger(m)
+
+			require.NoError(t, m.d.DispatchAgentRestart(context.Background(), m.agent))
+			env := m.client.lastRestartResolvedEnv
+			for _, k := range keys {
+				assert.NotEmpty(t, env[k], "legacy item %s was not delivered", k)
+			}
+
+			seen := map[string]map[string]any{}
+			for _, rec := range warnRecords(t, buf.Bytes(), lgFallbackMsg) {
+				k, _ := rec["key"].(string)
+				seen[k] = rec
+			}
+			for _, k := range keys {
+				rec, ok := seen[k]
+				require.True(t, ok, "no fallback Warn for %s; log: %s", k, buf.String())
+				assert.Equal(t, m.agent.ID, rec["agent_id"])
+				assert.Equal(t, r.wantCohort, rec["cohort"])
+				assert.Equal(t, string(PurposeRestart), rec["purpose"])
+				assert.NotEmpty(t, rec["scope"])
+				assert.NotEmpty(t, rec["kind"])
+				reason, _ := rec["reason"].(string)
+				assert.Equal(t, r.wantDepth, strings.Contains(reason, "at depth"), "reason %q", reason)
+			}
+			assert.Empty(t, warnRecords(t, buf.Bytes(), "launch material withheld: not authorized for delivery"))
+			assert.NotContains(t, buf.String(), "lg-env-value-", "a value was logged")
+			assert.NotContains(t, buf.String(), "lg-secret-value-", "a value was logged")
+
+			// Outside launch selection the walk is still strict: the same
+			// item is refused to a credential without the fallback.
+			sm := m.secret(t, "LG_STRICT", "v", store.SecretTypeEnvironment, store.ScopeProject, m.agent.ProjectID)
+			d := m.decideItem(t, m.authz, hdIdentity(t, m.authz, m.agent.ID), MaterialKindSecret, materialRecordSecret, sm.ID, sm.Name, store.ScopeProject, m.agent.ProjectID)
+			assert.False(t, d.Allowed, "strict decision: %s", d.Reason)
+			assert.Equal(t, DeniedByDelegationCeiling, d.DeniedBy)
+		})
+	}
+}
+
+// TestDispatchDelivery_LegacyFallbackKeepsRealDenials: a legacy-shaped agent
+// whose chain also carries a real denial gets none of its project, hub or
+// broker material, and no fallback Warn.
+func TestDispatchDelivery_LegacyFallbackKeepsRealDenials(t *testing.T) {
+	unrecordedFrom := func(t *testing.T, m *ldFixture, parent string) {
+		createDCEdge(t, m.store, store.DelegationPrincipalAgent, parent, store.DelegationPrincipalAgent, m.agent.ID,
+			store.RoleScopeProject, m.agent.ProjectID, string(AgentRoleFull))
+	}
+	rows := []struct {
+		name  string
+		opts  ldOptions
+		after func(t *testing.T, m *ldFixture)
+	}{
+		{
+			name: "held_agent_no_edge", opts: ldOptions{noEdge: true},
+			after: func(t *testing.T, m *ldFixture) {
+				holdAgentFor(t, m.store, m.agent.ID, m.agent.ProjectID, m.projectOwnerID)
+			},
+		},
+		{
+			name: "held_agent_adopted_baseline", opts: ldOptions{edge: lgAdoptedAt(AgentRoleBaseline)},
+			after: func(t *testing.T, m *ldFixture) {
+				holdAgentFor(t, m.store, m.agent.ID, m.agent.ProjectID, m.projectOwnerID)
+			},
+		},
+		{
+			name: "unadopted_edge_from_deleted_parent", opts: ldOptions{noEdge: true},
+			after: func(t *testing.T, m *ldFixture) {
+				p := lgParent(t, m, "deleted")
+				unrecordedFrom(t, m, p)
+				lgSoftDelete(t, m, p)
+			},
+		},
+		{
+			name: "unadopted_edge_from_held_parent", opts: ldOptions{noEdge: true},
+			after: func(t *testing.T, m *ldFixture) {
+				p := lgParent(t, m, "held")
+				unrecordedFrom(t, m, p)
+				holdAgentFor(t, m.store, p, m.agent.ProjectID, m.projectOwnerID)
+			},
+		},
+		{
+			name: "no_edge_deleted_ancestor", opts: ldOptions{noEdge: true},
+			after: func(t *testing.T, m *ldFixture) {
+				p := lgParent(t, m, "deleted-ancestor")
+				lgSetAncestry(t, m, []string{m.projectOwnerID, p})
+				lgSoftDelete(t, m, p)
+			},
+		},
+		{
+			name: "no_edge_held_ancestor", opts: ldOptions{noEdge: true},
+			after: func(t *testing.T, m *ldFixture) {
+				p := lgParent(t, m, "held-ancestor")
+				lgSetAncestry(t, m, []string{m.projectOwnerID, p})
+				holdAgentFor(t, m.store, p, m.agent.ProjectID, m.projectOwnerID)
+			},
+		},
+		{
+			name: "no_edge_root_user_suspended", opts: ldOptions{noEdge: true},
+			after: func(t *testing.T, m *ldFixture) {
+				setUserStatus(t, m.store, m.projectOwnerID, store.UserStatusSuspended)
+			},
+		},
+		{
+			name: "unadopted_edge_root_user_suspended", opts: ldOptions{noEdge: true},
+			after: func(t *testing.T, m *ldFixture) {
+				createDCEdge(t, m.store, store.DelegationPrincipalUser, m.projectOwnerID, store.DelegationPrincipalAgent, m.agent.ID,
+					store.RoleScopeProject, m.agent.ProjectID, string(AgentRoleFull))
+				setUserStatus(t, m.store, m.projectOwnerID, store.UserStatusSuspended)
+			},
+		},
+		{
+			name: "no_edge_no_stored_ancestry", opts: ldOptions{noEdge: true},
+			after: func(t *testing.T, m *ldFixture) {
+				lgSetAncestry(t, m, nil)
+			},
+		},
+		{
+			// Local-development provenance on a hub without dev auth is not
+			// a legacy shape.
+			name: "dev_local_edge_without_dev_auth",
+			opts: ldOptions{edge: func(e *store.DelegationEdge) { e.SourceCredentialKind = store.SourceCredentialDevLocal }},
+		},
+		{
+			// A recorded ceiling that lacks the permission is enforced.
+			name: "recorded_session_ceiling_without_deliver",
+			opts: ldOptions{edge: withBoundedCeiling("agent.read")},
+		},
+		{
+			// The child of a UAT-created agent has a recorded agent edge
+			// whose ceiling lacks the permission: enforced, not legacy.
+			name: "recorded_child_of_uat_created_agent", opts: ldOptions{noEdge: true},
+			after: func(t *testing.T, m *ldFixture) {
+				p := lgParent(t, m, "uat-parent")
+				hdEdge(t, m.store, store.DelegationPrincipalUser, m.projectOwnerID, p, m.agent.ProjectID, lgUATCreated)
+				hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, withBoundedCeiling("agent.read"))
+			},
+		},
+		{
+			// The root user is not admitted to the project: a provenance
+			// root denial on a fully recorded chain, never a legacy hop.
+			name: "recorded_chain_root_not_admitted", opts: ldOptions{rootMemberNone: true},
+		},
+	}
+	for _, r := range rows {
+		t.Run(r.name, func(t *testing.T) {
+			m := newLDFixture(t, "lg-deny-"+r.name, r.opts)
+			if r.after != nil {
+				r.after(t, m)
+			}
+			keys := lgItems(t, m)
+			buf := lgLogger(m)
+
+			// The selection itself, for start and restart, so no dispatch
+			// precondition can stand in for the selection's own refusal.
+			for _, purpose := range []MaterialPurpose{PurposeDispatch, PurposeRestart} {
+				got := map[string]bool{}
+				env, _, err := m.d.selectDeliveryEnv(context.Background(), newDeliverySelector(m.authz, m.agent, purpose), m.agent)
+				require.NoError(t, err)
+				for k := range env {
+					got[k] = true
+				}
+				secrets, err := m.d.selectDeliverySecrets(context.Background(), newDeliverySelector(m.authz, m.agent, purpose), m.agent)
+				require.NoError(t, err)
+				for _, rs := range secrets {
+					got[rs.Name] = true
+				}
+				for _, k := range keys {
+					assert.False(t, got[k], "%s: item %s was delivered despite a real denial", purpose, k)
+				}
+			}
+			assert.Empty(t, warnRecords(t, buf.Bytes(), lgFallbackMsg), "no fallback for a real denial")
+			assert.NotEmpty(t, warnRecords(t, buf.Bytes(), "launch material withheld: not authorized for delivery"))
+		})
+	}
+}
+
+// TestDispatchDelivery_LegacyFallbackKeepsEarlierDenials: the fallback runs
+// inside step 10 only, so an item a stage before it refuses (here the
+// association's record check) stays withheld for a legacy agent, while the
+// other items are served.
+func TestDispatchDelivery_LegacyFallbackKeepsEarlierDenials(t *testing.T) {
+	m := newLDFixture(t, "lg-earlier", ldOptions{noEdge: true})
+	m.env(t, "LG_PROJECT_ENV", "p", store.ScopeProject, m.agent.ProjectID, false)
+	m.env(t, "LG_HUB_ENV", "h", store.ScopeHub, m.hubID, false)
+	hdWithStore(t, m.authz, &ldProjectEnvHiddenStore{Store: m.store})
+
+	sel := newDeliverySelector(m.authz, m.agent, PurposeRestart)
+	env, _, err := m.d.selectDeliveryEnv(context.Background(), sel, m.agent)
+	require.NoError(t, err)
+	assert.NotContains(t, env, "LG_PROJECT_ENV", "an association refusal is not overridden")
+	assert.Equal(t, "h", env["LG_HUB_ENV"])
+}
+
+// TestDispatchDelivery_RecordedEdgeNeedsNoFallback: a recorded principal
+// chain delivers through the strict admission, with no fallback Warn.
+func TestDispatchDelivery_RecordedEdgeNeedsNoFallback(t *testing.T) {
+	m := newLDFixture(t, "lg-recorded", ldOptions{})
+	keys := lgItems(t, m)
+	buf := lgLogger(m)
+	require.NoError(t, m.d.DispatchAgentRestart(context.Background(), m.agent))
+	for _, k := range keys {
+		assert.NotEmpty(t, m.client.lastRestartResolvedEnv[k], k)
+	}
+	assert.Empty(t, warnRecords(t, buf.Bytes(), lgFallbackMsg))
+}
+
+// TestDispatchDelivery_LegacyFallbackWarnRateLimited: a second restart
+// within the window logs no second fallback Warn for the same items, and
+// still delivers them.
+func TestDispatchDelivery_LegacyFallbackWarnRateLimited(t *testing.T) {
+	m := newLDFixture(t, "lg-ratelimit", ldOptions{noEdge: true})
+	m.env(t, "LG_RL_ENV", "v", store.ScopeProject, m.agent.ProjectID, false)
+	buf := lgLogger(m)
+	for i := 0; i < 2; i++ {
+		require.NoError(t, m.d.DispatchAgentRestart(context.Background(), m.agent))
+		assert.Equal(t, "v", m.client.lastRestartResolvedEnv["LG_RL_ENV"], "restart %d", i)
+	}
+	assert.Len(t, warnRecords(t, buf.Bytes(), lgFallbackMsg), 1)
+}
+
+// TestLegacyDeliveryFallback_Scope pins which purposes take the fallback
+// and which strict causes can.
+func TestLegacyDeliveryFallback_Scope(t *testing.T) {
+	assert.True(t, legacyDeliveryFallbackPurpose(PurposeDispatch))
+	assert.True(t, legacyDeliveryFallbackPurpose(PurposeRestart))
+	assert.True(t, legacyDeliveryFallbackPurpose(PurposeAvailabilityProbe))
+	assert.False(t, legacyDeliveryFallbackPurpose(PurposeRuntimeRead))
+
+	for _, c := range []DenyCause{
+		DenyCauseCeilingProvenanceAmbiguous, DenyCauseCeilingSourceNotAllowed,
+		DenyCauseCeilingDelegatorLacksPermission, DenyCauseCeilingError, "",
+	} {
+		assert.False(t, legacyFallbackCauses[c], "cause %q must never take the fallback", c)
+	}
+	for _, p := range LaunchDeliveryCensusPermissions {
+		assert.False(t, uatCarriesPermission(p), "%s: the UAT-created cohort assumes no token scope maps it", p)
+	}
+}
