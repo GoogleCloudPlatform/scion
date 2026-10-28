@@ -270,17 +270,24 @@ func checkDoctorNFSMounts(vs *config.VersionedSettings, probe nfsDoctorProbe) sc
 		remediation = "The broker mounts the shares itself: check the broker log (broker.nfs-mount) and that the broker runs as root"
 	}
 
+	// Inline pod volumes are selected by shares[0] alone, as in the
+	// project-storage Layout and the runtime: no shares[0].pv_name on a
+	// Kubernetes default runtime.
+	inline := verifyOnlyRuntime != "" && kubernetesRuntimeType(verifyOnlyRuntime) &&
+		len(nfsCfg.Shares) > 0 && nfsCfg.Shares[0].PVName == ""
+
 	// A missing mount is a failure only where the broker is expected to
 	// mount it: with auto_mount on, no pv_name, and a local-container
-	// default runtime; and, with no pv_name on a Kubernetes default
-	// runtime, where agent starts need it (inline pod volumes). With auto_mount off the operator may mount it
-	// elsewhere; a pv_name share is mounted into pods by the kubelet; and
-	// on a Kubernetes or Cloud Run default runtime the broker does not
-	// mount. Those are warnings, as in the broker's health. A wrong source,
-	// an unreachable server, or an unusable block are failures.
+	// default runtime; and, in inline mode, for shares[0], which agent
+	// starts need (the broker creates each directory before the pod).
+	// With auto_mount off the operator may mount it elsewhere; a pv_name
+	// share is mounted into pods by the kubelet; and on a Kubernetes or
+	// Cloud Run default runtime the broker does not mount. Those are
+	// warnings, as in the broker's health. A wrong source, an unreachable
+	// server, or an unusable block are failures.
 	var ok, problems []string
 	failed := false
-	for _, share := range nfsCfg.Shares {
+	for i, share := range nfsCfg.Shares {
 		target := filepath.Join(nfsCfg.MountRoot, share.ID)
 		want := share.Server + ":" + share.Export
 		var issues []string
@@ -292,10 +299,11 @@ func checkDoctorNFSMounts(vs *config.VersionedSettings, probe nfsDoctorProbe) sc
 			failed = true
 		case !mounted && share.PVName != "":
 			issues = append(issues, fmt.Sprintf("not mounted at %s (pv_name is set, so the export is mounted into pods and this host need not mount it)", target))
-		case !mounted && verifyOnlyRuntime != "" && kubernetesRuntimeType(verifyOnlyRuntime):
+		case !mounted && inline && i == 0:
 			// No pv_name on Kubernetes: pods mount each directory inline,
 			// and the broker must create it first through this mount.
 			issues = append(issues, fmt.Sprintf("not mounted at %s (no pv_name: Kubernetes pods mount the share inline, and this broker must mount the export, writable, to create each directory first)", target))
+			remediation = fmt.Sprintf("Mount %s at %s on this host, writable by the broker (no pv_name: agent pods mount the share inline and the broker creates each directory first), or set nfs.shares[0].pv_name", want, target)
 			failed = true
 		case !mounted && !nfsCfg.AutoMount:
 			issues = append(issues, fmt.Sprintf("not mounted at %s (auto_mount is off, so the broker does not mount it)", target))
@@ -341,7 +349,8 @@ func checkDoctorNFSMounts(vs *config.VersionedSettings, probe nfsDoctorProbe) sc
 }
 
 // kubernetesRuntimeType reports whether a resolved runtime type is the
-// Kubernetes runtime.
+// Kubernetes runtime ("kubernetes", "k8s" or "remote"), using the settings
+// package's runtime-entry predicate.
 func kubernetesRuntimeType(rtType string) bool {
-	return rtType == "kubernetes" || rtType == "k8s"
+	return config.IsKubernetesRuntimeEntry(rtType, config.V1RuntimeConfig{})
 }

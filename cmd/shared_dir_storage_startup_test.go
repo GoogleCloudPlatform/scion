@@ -215,6 +215,9 @@ func TestLogK8sNFSVolumeStartup(t *testing.T) {
 	if assert.Len(t, inline, 1, "%v", inline) {
 		assert.Contains(t, inline[0], "k8s NFS volumes: inline, by server path; no mount options; set shares[0].pv_name to use an operator PV")
 	}
+	for _, rtType := range []string{"k8s", "remote"} {
+		assert.Len(t, logLines(settings(rtType, "", "")), 1, "runtime type %q is Kubernetes", rtType)
+	}
 	homes := logLines(settings("kubernetes", "", "nfs"))
 	if assert.Len(t, homes, 2, "%v", homes) {
 		assert.Contains(t, homes[1], "home_storage nfs")
