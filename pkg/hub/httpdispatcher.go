@@ -4918,7 +4918,10 @@ func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent 
 			if decision.Allowed && s.Scope == store.ScopeUser {
 				decision = secretUse(ident, s)
 				if !decision.Allowed {
+					// One line per refused user row: the rate-limited
+					// withheld record, not also the deny line below.
 					withheld("progeny", s, decision)
+					return false
 				}
 			}
 			if !decision.Allowed {

@@ -633,8 +633,8 @@ func TestStartDelivery_CrossUserReincarnation(t *testing.T) {
 
 // TestStartDelivery_WithheldOwnerRowLoggedAtWarn: a shared owner row the
 // start-time check refuses (the terminal user's secret.use constraint, S4b) is
-// withheld from the launch selection and logged at Warn with its name, scope,
-// path and reason, never its value.
+// withheld from the launch selection and logged with exactly ONE Warn line, the
+// rate-limited withheld record (path owner, its cause), never its value.
 func TestStartDelivery_WithheldOwnerRowLoggedAtWarn(t *testing.T) {
 	f := newSDFixture(t, "sd-warn")
 	direct, _ := f.direct(t, "warn-direct", true)
@@ -650,20 +650,57 @@ func TestStartDelivery_WithheldOwnerRowLoggedAtWarn(t *testing.T) {
 		assert.False(t, r.Name == sdAlwaysKey && r.Source == store.ScopeUser, "the refused owner row was delivered")
 	}
 
-	var found map[string]any
-	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+	recs := sdWarnRecordsFor(t, buf.String(), sdAlwaysKey)
+	require.Len(t, recs, 1, "exactly one Warn record for the withheld owner row; log: %s", buf.String())
+	assert.Equal(t, sdWithheldMsg, recs[0]["msg"])
+	assert.Equal(t, "owner", recs[0]["path"])
+	assert.Equal(t, direct, recs[0]["agent_id"])
+	assert.NotEmpty(t, recs[0]["deny_cause"])
+	assert.NotContains(t, buf.String(), sdAlwaysValue, "a withheld secret value was logged")
+}
+
+// TestStartDelivery_WithheldProgenyRowLoggedOnce: on the progeny path, a
+// user row that secret.use refuses is withheld with ONE Warn line, the
+// rate-limited withheld record, and not also the deny line.
+func TestStartDelivery_WithheldProgenyRowLoggedOnce(t *testing.T) {
+	f := newSDFixture(t, "sd-warn-progeny")
+	child, _, _ := f.progeny(t, "warn-progeny", true)
+	constrainAllBut(t, f.Store, "user", f.UserID, secretUsePermission)
+	var buf bytes.Buffer
+	f.disp.log = slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	agent, err := f.Store.GetAgent(context.Background(), child)
+	require.NoError(t, err)
+	selected, err := f.disp.selectDeliverySecrets(context.Background(), newDeliverySelector(f.disp.authzService, agent, PurposeRestart), agent)
+	require.NoError(t, err)
+	for _, r := range selected {
+		assert.False(t, r.Name == sdAlwaysKey && r.Source == store.ScopeUser, "the refused progeny row was delivered")
+	}
+
+	recs := sdWarnRecordsFor(t, buf.String(), sdAlwaysKey)
+	require.Len(t, recs, 1, "exactly one Warn record for the withheld progeny row; log: %s", buf.String())
+	assert.Equal(t, sdWithheldMsg, recs[0]["msg"])
+	assert.Equal(t, "progeny", recs[0]["path"])
+	assert.Equal(t, child, recs[0]["agent_id"])
+	assert.NotContains(t, buf.String(), sdAlwaysValue, "a withheld secret value was logged")
+}
+
+// sdWithheldMsg is the rate-limited Warn of a user row authorization keeps
+// from the agent (startSecretResolveOpts' withheld).
+const sdWithheldMsg = "start-time user secret withheld by authorization; the agent starts without it"
+
+// sdWarnRecordsFor returns the WARN records of a JSON log that name secret.
+func sdWarnRecordsFor(t *testing.T, raw, secretName string) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
 		var rec map[string]any
 		if line == "" || json.Unmarshal([]byte(line), &rec) != nil {
 			continue
 		}
-		if rec["level"] == "WARN" && rec["msg"] == "start-time secret withheld: denied by authz" && rec["secret"] == sdAlwaysKey {
-			found = rec
+		if rec["level"] == "WARN" && rec["secret"] == secretName {
+			out = append(out, rec)
 		}
 	}
-	require.NotNil(t, found, "no Warn record for the withheld owner row; log: %s", buf.String())
-	assert.Equal(t, "owner", found["path"])
-	assert.Equal(t, store.ScopeUser, found["scope"])
-	assert.Equal(t, direct, found["agent_id"])
-	assert.NotEmpty(t, found["reason"])
-	assert.NotContains(t, buf.String(), sdAlwaysValue, "a withheld secret value was logged")
+	return out
 }

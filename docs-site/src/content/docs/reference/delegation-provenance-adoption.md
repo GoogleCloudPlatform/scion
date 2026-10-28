@@ -82,6 +82,13 @@ this cohort:
 - with an adoption record under policy V1 (`adopted` or `recognized`) for
   that edge.
 
+This exception covers the owner's own user secrets, through `secret.use`. A
+separate fallback covers the Project, Hub and Broker variables and secrets of
+legacy agents, through the delivery permissions: see
+[Launch material for legacy agents](#launch-material-for-legacy-agents). Its
+`legacy_adopted_*` groups are keyed on the adopted edge's ceiling at any depth,
+so an agent can fall in that group and not in this one, or in both.
+
 For such an agent the ceiling lets the missing `secret.use` pass, and every
 other check still applies: a held or deleted agent, an agent-delegated chain,
 an edge recorded any other way, a terminal user who is inactive or not
@@ -293,6 +300,8 @@ When the Hub starts or restarts an agent, it authorizes each Project, Hub and Br
 | `legacy_sentinel_edge` | only the backfill's migration edge (`user:system/migration`) |
 | `legacy_unadopted_edge` | only an edge with unrecorded provenance, including scheduled children with role `none`, which adoption skips |
 | `legacy_adopted_readonly`, `legacy_adopted_baseline`, `legacy_adopted_capped` | only an adopted edge (source `system_migration`) whose ceiling lacks the delivery permissions only because policy V1 capped it: the ceiling lies within the V1 row of the edge's own role. The group is named after the lowest V1 row the ceiling fits in (`readonly`, then `baseline`; `capped` if neither), whatever the edge role. Adoption keeps the edge role but caps the ceiling at the lower of the edge and applied roles, and intersects a child's ceiling with its adopted parent's. So an edge of role `full` can carry the `baseline` or `readonly` row, and it is served here. An edge re-issued by an agent delegator keeps the `system_migration` source and is judged the same way. |
+
+This fallback covers Project, Hub and Broker items only. The owner's own user secrets of adopted `baseline` and `readonly` agents follow their own exception, under different rules (an exact V1 row, an adoption record and the owner as delegator): see [Legacy exception: the owner's own user secrets for adopted baseline and readonly agents](#legacy-exception-the-owners-own-user-secrets-for-adopted-baseline-and-readonly-agents). One start can use both, each for its own items.
 
 Each item delivered this way is logged at `Warn` at most once an hour per agent and item, as `launch material delivered through the legacy fallback`. The line has the agent ID, the group, `exception` (`legacy`, or `product_gap` for the group below), and the item's name and scope. The Hub remembers the 16384 most recently logged items; beyond that it forgets the oldest first.
 
