@@ -17,10 +17,15 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -28,6 +33,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -197,4 +203,36 @@ func TestAttachmentAudience_TwoUsers(t *testing.T) {
 	f.sendWith(t, f.ua, dm, legacy)
 	assert.NoDirExists(t, filepath.Join(stagingDir, legacy))
 	requireSameAnswer(t, missing, f.download(t, f.ub, legacy))
+}
+
+// TestAttachmentAudience_LocalDefaults_ParticipantGroupSend: end to end on
+// a local-storage hub with the defaults, a message with an attachment sent
+// into a participant-list group conversation is delivered by artifact and
+// gets no copy in the project scratchpad.
+func TestAttachmentAudience_LocalDefaults_ParticipantGroupSend(t *testing.T) {
+	f := newRefFixture(t)
+	stagingDir, _ := localStorageHub(t, f)
+	require.True(t, f.srv.experimentEnabled(experiments.AttachmentArtifacts))
+	group := seedGroupConversation(t, f.st, f.projA.ID, "crew")
+	id := f.uploadAs(t, f.ua, f.projA.ID, "group.txt", "group bytes")
+	alice := NewAuthenticatedUser(f.ua.ID, f.ua.Email, f.ua.DisplayName, f.ua.Role, string(ClientTypeWeb))
+
+	body, err := json.Marshal(MessageRequest{StructuredMessage: &messages.StructuredMessage{
+		Version: messages.Version, Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Sender: "user:" + f.ua.ID, SenderID: f.ua.ID,
+		Recipient: "agent:" + f.aa.Slug, RecipientID: f.aa.ID,
+		Msg: "into a group with a file", Type: messages.TypeInstruction, ConversationID: group,
+	}, AttachmentIDs: []string{id}})
+	require.NoError(t, err)
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+f.aa.ID+"/message", bytes.NewReader(body))
+	r.Header.Set("Content-Type", "application/json")
+	r = r.WithContext(contextWithIdentity(r.Context(), alice))
+	rr := httptest.NewRecorder()
+	f.srv.handleAgentMessage(rr, r, f.aa.ID)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.NoDirExists(t, filepath.Join(stagingDir, id), "no scratchpad copy for a participant-list group conversation")
+	entries, err := os.ReadDir(stagingDir)
+	if err == nil {
+		assert.Empty(t, entries, "nothing was copied into _webchat")
+	}
 }

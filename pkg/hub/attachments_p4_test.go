@@ -62,9 +62,8 @@ func TestAttachmentArtifacts_DefaultOnWithObjectStorage(t *testing.T) {
 	local, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, Bucket: "hub", LocalPath: t.TempDir()})
 	require.NoError(t, err)
 	srv.SetStorage(local)
-	if !srv.attachmentArtifactsReady() {
-		assert.False(t, srv.experimentEnabled(name), "local resource storage without an artifact store: off")
-	}
+	assert.Equal(t, srv.attachmentArtifactsReady(), srv.experimentEnabled(name),
+		"local resource storage: on exactly when the artifact service is ready")
 
 	srv.SetStorage(&mockStorage{provider: storage.ProviderGCS})
 	assert.True(t, srv.experimentEnabled(name), "object storage: on by default")

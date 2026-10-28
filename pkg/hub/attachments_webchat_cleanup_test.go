@@ -224,3 +224,32 @@ func TestWebChatCopyCleanupOnce_ReplicaReadsTheHubSetting(t *testing.T) {
 		assert.NoDirExists(t, dmCopy)
 	})
 }
+
+// TestWebChatCopyCleanup_KeepsCopyWithMissingMessage: a copy whose
+// referencing message is gone (deleted, or a dangling link) cannot be
+// attributed, so it is kept, also when its other referencing messages are
+// all direct conversations.
+func TestWebChatCopyCleanup_KeepsCopyWithMissingMessage(t *testing.T) {
+	f := newRefFixture(t)
+	ctx := context.Background()
+	webchat := f.enableScratchpad(t)
+	dm := dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID)
+
+	// Only referencing message is gone.
+	gone := cleanupAttachment(t, f)
+	require.NoError(t, f.wcs.LinkAttachmentToMessage(ctx, api.NewUUID(), gone))
+	goneCopy := cleanupCopy(t, webchat, gone)
+	// One DM message plus one that is gone.
+	mixed := cleanupAttachment(t, f, dm)
+	require.NoError(t, f.wcs.LinkAttachmentToMessage(ctx, api.NewUUID(), mixed))
+	mixedCopy := cleanupCopy(t, webchat, mixed)
+	// Control: a DM copy whose messages all exist is removed.
+	dmCopy := cleanupCopy(t, webchat, cleanupAttachment(t, f, dm))
+
+	removed, done := f.srv.runWebChatCopyCleanup(ctx)
+	require.True(t, done)
+	assert.Equal(t, 1, removed)
+	assert.DirExists(t, goneCopy, "a copy whose only message is gone is kept")
+	assert.DirExists(t, mixedCopy, "a copy with any missing message is kept")
+	assert.NoDirExists(t, dmCopy)
+}

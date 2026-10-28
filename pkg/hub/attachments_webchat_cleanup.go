@@ -188,10 +188,11 @@ func (s *Server) cleanupWebChatCopiesIn(ctx context.Context, wcs WebChatStore, p
 
 // webChatCopyRemovable reports whether the web chat copy named id in
 // project projectID's scratchpad is to be removed: id names an attachment
-// row, at least one message references it, every referencing message could
-// be read (fewer than attachmentRetentionLinkProbe), and none of them is
-// read by the whole of projectID (projectionAudienceIsProject). Any lookup
-// failure keeps the copy.
+// row, at least one message references it (fewer than
+// attachmentRetentionLinkProbe), every referencing message exists and was
+// read, and none of them is read by the whole of projectID
+// (projectionAudienceIsProject). Any lookup failure, and any referencing
+// message that is missing, keeps the copy.
 func (s *Server) webChatCopyRemovable(ctx context.Context, wcs WebChatStore, projectID, id string) bool {
 	meta, err := wcs.GetAttachment(ctx, id)
 	if err != nil || meta == nil || meta.ID != id {
@@ -205,8 +206,12 @@ func (s *Server) webChatCopyRemovable(ctx context.Context, wcs WebChatStore, pro
 	if err != nil {
 		return false
 	}
-	for _, m := range msgs {
-		if m != nil && s.projectionAudienceIsProject(ctx, m.ThreadID, projectID) {
+	// GetMessagesByIDs skips ids it cannot find: a referencing message that
+	// is gone (deleted, or a dangling link) leaves the copy unattributable,
+	// so it is kept.
+	for _, mid := range msgIDs {
+		m := msgs[mid]
+		if m == nil || s.projectionAudienceIsProject(ctx, m.ThreadID, projectID) {
 			return false
 		}
 	}
