@@ -97,9 +97,9 @@ const untrustedContentSandboxTokens = "allow-scripts allow-popups allow-popups-t
 
 // agentServedPageSandboxTokens are added on agent-served pages only. None of
 // them reaches past the page's opaque origin:
-//   - allow-forms: a form the page submits to the hub is a cross-site request
-//     that carries no SameSite=Lax session cookie, and a GET form navigates
-//     nowhere a script cannot.
+//   - allow-forms: a POST form the page submits is a cross-site request and
+//     carries no SameSite=Lax session cookie; a GET form is a top-level
+//     navigation a script can already make.
 //   - allow-pointer-lock: needs a user gesture and is always released by Esc.
 //   - allow-orientation-lock: locks screen rotation, normally only in
 //     fullscreen.

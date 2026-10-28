@@ -1123,17 +1123,25 @@ func TestSandboxCSPTokens(t *testing.T) {
 // The Permissions-Policy denies every powerful feature it names and leaves
 // clipboard writes allowed.
 func TestUntrustedContentPermissionsPolicy(t *testing.T) {
-	for _, d := range strings.Split(untrustedContentPermissionsPolicy, ",") {
-		d = strings.TrimSpace(d)
+	// directives splits a policy into its exact directives, so a check never
+	// matches part of a longer directive.
+	directives := func(policy string) map[string]bool {
+		out := map[string]bool{}
+		for _, d := range strings.Split(policy, ",") {
+			out[strings.TrimSpace(d)] = true
+		}
+		return out
+	}
+	content := directives(untrustedContentPermissionsPolicy)
+	for d := range content {
 		assert.True(t, strings.HasSuffix(d, "=()"), "directive %q must deny the feature", d)
+		assert.False(t, strings.HasPrefix(d, "clipboard-write="), "clipboard writes stay allowed: %q", d)
 	}
 	for _, f := range []string{"camera", "microphone", "geolocation", "display-capture", "clipboard-read"} {
-		assert.Contains(t, untrustedContentPermissionsPolicy, f+"=()")
+		assert.True(t, content[f+"=()"], "%s must be denied", f)
 	}
-	assert.NotContains(t, untrustedContentPermissionsPolicy, "clipboard-write")
-	for _, d := range strings.Split(webPermissionsPolicy, ",") {
-		assert.Contains(t, untrustedContentPermissionsPolicy, strings.TrimSpace(d),
-			"untrusted content must deny everything the hub-wide policy denies")
+	for d := range directives(webPermissionsPolicy) {
+		assert.True(t, content[d], "untrusted content must deny everything the hub-wide policy denies: %q", d)
 	}
 	h := http.Header{}
 	setUntrustedContentHeaders(h, agentServedPageSandboxCSP)
