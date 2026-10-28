@@ -4560,12 +4560,13 @@ The value must be host:port with a port of 1-65535 in any mode; the host is
 empty, a bracketed IPv6 literal, or a name or IPv4 address without colons.
 
 Without TLS the listener must also be loopback, as the hub's
-CheckRelayInternalListen reads it: a host of localhost, [::1] or a valid
-127.x.y.z (octets 0-255, no leading zeros).
+CheckRelayInternalListen reads it: a loopback IP literal, [::1] or a valid
+127.x.y.z (octets 0-255, no leading zeros). A name is never loopback, not even
+localhost, because the hub would resolve it when it binds.
 
 The chart is deliberately stricter than the hub in these cases:
-- other loopback spellings (LOCALHOST, an expanded ::1, ::ffff:127.0.0.1),
-  which it treats as not loopback;
+- other loopback IP spellings (an expanded ::1, ::ffff:127.0.0.1), which it
+  treats as not loopback;
 - port 0;
 - a port written with a sign or a leading zero (for example :+9443, :09443).
 - an empty bracketed host ([]:port).
@@ -4581,7 +4582,7 @@ The chart is deliberately stricter than the hub in these cases:
 {{- /* One loopback definition, shared with the image check's exemption. */}}
 {{- $loopback := eq (include "scion-hub.isLoopbackListen" $listen) "true" }}
 {{- if and (not $loopback) (not (and $cert $key)) }}
-{{- fail (printf "server.hub.conduit.internal_listen is %s, which is not a loopback address (localhost, [::1] or 127.x.y.z, with a port of 1-65535), and internal_tls_cert_file and internal_tls_key_file are not both set. The relay hop between hub nodes must serve TLS: set conduit.internalTls (enabled, existingSecret), or bind internal_listen to loopback." (include "scion-hub.diagValue" $listen)) }}
+{{- fail (printf "server.hub.conduit.internal_listen is %s, which is not a loopback address (a loopback IP literal, [::1] or 127.x.y.z, never a name such as localhost, with a port of 1-65535), and internal_tls_cert_file and internal_tls_key_file are not both set. The relay hop between hub nodes must serve TLS: set conduit.internalTls (enabled, existingSecret), or bind internal_listen to loopback." (include "scion-hub.diagValue" $listen)) }}
 {{- end }}
 {{- end }}
 {{- if and (or $cert $key) (not (and $cert $key)) }}
@@ -4686,6 +4687,6 @@ scion-hub.assertRelayListenerTls), else empty.
 {{- if regexMatch $hostPort . }}
 {{- $host := regexReplaceAll $hostPort . "${1}" }}
 {{- $oct := "(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])" }}
-{{- if or (eq $host "localhost") (eq $host "[::1]") (regexMatch (printf "^127\\.%s\\.%s\\.%s$" $oct $oct $oct) $host) }}true{{- end }}
+{{- if or (eq $host "[::1]") (regexMatch (printf "^127\\.%s\\.%s\\.%s$" $oct $oct $oct) $host) }}true{{- end }}
 {{- end }}
 {{- end }}
