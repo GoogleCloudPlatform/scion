@@ -244,8 +244,6 @@ const (
 	nfsVolGit            = "workspace-git"
 	nfsVolWorktree       = "workspace-worktree"
 	nfsVolProvisionState = "workspace-provision"
-	nfsVolGitAdminPrefix = "workspace-git-"
-	nfsVolGitOwnWorktree = "workspace-git-own-worktree"
 )
 
 // sharedDirPodVolume returns the volume of shared dir sd (index i) on a

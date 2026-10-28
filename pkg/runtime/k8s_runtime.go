@@ -2505,6 +2505,11 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	if nfsAgentDir && nfsWorktree {
 		return nil, fmt.Errorf("an agent cannot use both a worktree and its own workspace on the NFS workspace")
 	}
+	if nfsWorktree && nfsVols != nil && workspaceNFSShare(config).Inline() {
+		// Run refuses this shape at start today; refusing it here as well
+		// keeps it refused if that start check ever moves.
+		return nil, errors.New("inline NFS volumes do not support worktree-per-agent yet")
+	}
 	if nfsAgentDir {
 		// Clone-per-agent: the agent's own workspace at
 		// <project>/agents/<agent name>/workspace, mounted at /workspace as
@@ -2554,13 +2559,11 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		// export) needs no mount changes. The init container stays writable (it
 		// provisions: clone + worktree add) and is hardened by pkg/provision's
 		// SafeGitCommand/HostGitArgs instead.
-		for _, am := range k8sGitAdminReadOnlyMounts(gitSubPath, config.NFSWorktreeName) {
-			placed, err := nfsVols.mount(k8sGitAdminVolumeName(am.MountPath, config.NFSWorktreeName), am.SubPath, am.MountPath, am.ReadOnly)
-			if err != nil {
-				return nil, err
-			}
-			agentVolumeMounts = append(agentVolumeMounts, placed)
+		adminMounts, err := k8sNFSGitAdminMounts(nfsVols, gitSubPath, config.NFSWorktreeName)
+		if err != nil {
+			return nil, err
 		}
+		agentVolumeMounts = append(agentVolumeMounts, adminMounts...)
 	}
 	// Keep the in-project agents root of a shared /workspace mount out of
 	// the agent's view (k8sWorkspaceAgentsExcluded). The worktree and
@@ -4832,15 +4835,21 @@ func k8sGitAdminReadOnlyMounts(gitSubPath, ownWorktreeName string) []corev1.Volu
 	return mounts
 }
 
-// k8sGitAdminVolumeName is the inline volume name of one of
-// k8sGitAdminReadOnlyMounts' mounts, from its mount path under
-// /repo-root/.git.
-func k8sGitAdminVolumeName(mountPath, ownWorktreeName string) string {
-	rel := strings.TrimPrefix(mountPath, "/repo-root/.git/")
-	if ownWorktreeName != "" && rel == path.Join("worktrees", ownWorktreeName) {
-		return nfsVolGitOwnWorktree
+// k8sNFSGitAdminMounts places k8sGitAdminReadOnlyMounts' entries on the
+// workspace share. Entries inside .git are mounted from the .git volume so
+// the node resolves them within it: inline, each is a subPath mount of the
+// nfsVolGit volume (already added by mount), not a volume of its own; with
+// a claim, each is the claim subPath mount, as before.
+func k8sNFSGitAdminMounts(nfsVols *nfsPodVolumes, gitSubPath, ownWorktreeName string) ([]corev1.VolumeMount, error) {
+	var mounts []corev1.VolumeMount
+	for _, am := range k8sGitAdminReadOnlyMounts(gitSubPath, ownWorktreeName) {
+		placed, err := nfsVols.mountWithin(nfsVolGit, am.SubPath, am.MountPath, am.ReadOnly)
+		if err != nil {
+			return nil, err
+		}
+		mounts = append(mounts, placed)
 	}
-	return nfsVolGitAdminPrefix + strings.ReplaceAll(rel, "/", "-")
+	return mounts, nil
 }
 
 // nfsWorktreeSubPaths returns the subPaths of the shared checkout's .git and

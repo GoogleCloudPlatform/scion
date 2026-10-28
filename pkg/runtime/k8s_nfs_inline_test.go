@@ -273,20 +273,49 @@ func TestNFSPodVolumes_MountWithin(t *testing.T) {
 	assert.Equal(t, corev1.VolumeMount{Name: "workspace", MountPath: "/workspace/.scion", SubPath: "projects/proj-123/workspace/.scion", ReadOnly: true}, m)
 }
 
-func TestBuildPod_InlineWorktree(t *testing.T) {
-	claimPod, inlinePod := buildClaimAndInline(t, nfsWorktreeConfig("wt"))
-	assertInlineMatchesClaim(t, claimPod, inlinePod, "proj-123")
-	for name, p := range map[string]string{
-		"workspace-git":              "/projects/proj-123/workspace/.git",
-		"workspace-worktree":         "/projects/proj-123/workspace/worktrees/agent-1",
-		"workspace-git-hooks":        "/projects/proj-123/workspace/.git/hooks",
-		"workspace-git-objects-info": "/projects/proj-123/workspace/.git/objects/info",
-		"workspace-git-own-worktree": "/projects/proj-123/workspace/.git/worktrees/agent-1",
-	} {
-		v := findVolume(inlinePod, name)
-		require.NotNil(t, v, name)
-		assert.Equal(t, inlineTestExport+p, v.NFS.Path, name)
-	}
+// Inline, buildPod refuses the worktree-per-agent shape (Run refuses it
+// at start today); the claim pod of the same start still builds.
+func TestBuildPod_InlineWorktreeRefused(t *testing.T) {
+	cfg := nfsWorktreeConfig("wt")
+	_, err := newNFSTestK8sRuntime().buildPod("default", claimTestConfig(cfg))
+	require.NoError(t, err)
+	_, err = newNFSTestK8sRuntime().buildPod("default", inlineTestConfig(cfg))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "inline NFS volumes do not support worktree-per-agent yet")
+}
+
+// Inline, the .git admin entries are subPath mounts of the .git volume
+// and add no volumes of their own; they need that volume to be there.
+// With a claim they are k8sGitAdminReadOnlyMounts' claim subPath mounts.
+func TestK8sNFSGitAdminMounts(t *testing.T) {
+	const gitSubPath = "projects/proj-123/workspace/.git"
+	cfg := nfsWorktreeConfig("wt")
+
+	b := newWorkspaceNFSPodVolumes(inlineTestConfig(cfg))
+	_, err := k8sNFSGitAdminMounts(b, gitSubPath, "agent-1")
+	require.Error(t, err, "the .git volume is not there yet")
+	assert.Contains(t, err.Error(), "needs the volume")
+
+	_, err = b.mount(nfsVolGit, gitSubPath, "/repo-root/.git", false)
+	require.NoError(t, err)
+	got, err := k8sNFSGitAdminMounts(b, gitSubPath, "agent-1")
+	require.NoError(t, err)
+	assert.Equal(t, []corev1.VolumeMount{
+		{Name: nfsVolGit, MountPath: "/repo-root/.git/hooks", SubPath: "hooks", ReadOnly: true},
+		{Name: nfsVolGit, MountPath: "/repo-root/.git/info", SubPath: "info", ReadOnly: true},
+		{Name: nfsVolGit, MountPath: "/repo-root/.git/objects/info", SubPath: "objects/info", ReadOnly: true},
+		{Name: nfsVolGit, MountPath: "/repo-root/.git/worktrees", SubPath: "worktrees", ReadOnly: true},
+		{Name: nfsVolGit, MountPath: "/repo-root/.git/worktrees/agent-1", SubPath: "worktrees/agent-1"},
+	}, got)
+	require.Len(t, b.inline, 1, "only the .git volume")
+	assert.Equal(t, nfsVolGit, b.inline[0].Name)
+	assert.Equal(t, inlineTestExport+"/"+gitSubPath, b.inline[0].NFS.Path)
+
+	claim := newWorkspaceNFSPodVolumes(claimTestConfig(cfg))
+	got, err = k8sNFSGitAdminMounts(claim, gitSubPath, "agent-1")
+	require.NoError(t, err)
+	assert.Equal(t, k8sGitAdminReadOnlyMounts(gitSubPath, "agent-1"), got)
+	assert.Empty(t, claim.inline)
 }
 
 func TestBuildPod_InlineAgentDirModes(t *testing.T) {
