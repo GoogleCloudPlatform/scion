@@ -532,6 +532,37 @@ func TestHookRefusalLimiter_PrunesStaleEntries(t *testing.T) {
 	assert.Len(t, l.entries, 1, "stale entries are pruned once the limit is reached")
 }
 
+// TestHookRefusalLimiter_PruneScanAtMostOncePerInterval: once the limit is
+// reached, the prune scan runs at most once per interval. A new hook within
+// an interval of the last scan is admitted without scanning (stale entries
+// stay), and the next scan after the interval removes them.
+func TestHookRefusalLimiter_PruneScanAtMostOncePerInterval(t *testing.T) {
+	clock := &fakeClock{now: time.Now()}
+	l := newHookRefusalLimiter(time.Minute, clock.Now)
+	for i := 0; i < hookRefusalLimiterMaxEntries; i++ {
+		rec, _ := l.admit(uuid.New().String(), "c")
+		require.True(t, rec)
+	}
+	clock.advance(59 * time.Second)
+	rec, _ := l.admit("first", "c")
+	require.True(t, rec)
+	require.Len(t, l.entries, hookRefusalLimiterMaxEntries+1, "a scan with nothing stale removes nothing")
+
+	clock.advance(time.Second) // the original entries are now stale
+	rec, _ = l.admit("second", "c")
+	require.True(t, rec)
+	assert.Len(t, l.entries, hookRefusalLimiterMaxEntries+2, "no second scan within the interval of the last one")
+
+	clock.advance(59 * time.Second)
+	rec, _ = l.admit("third", "c")
+	require.True(t, rec)
+	// Left: "second" (59 s old) and "third"; the originals and "first" (60 s
+	// old) are stale.
+	assert.Len(t, l.entries, 2, "the next scan, an interval after the last, removes the stale entries")
+	assert.Contains(t, l.entries, "second")
+	assert.Contains(t, l.entries, "third")
+}
+
 func TestHookFire_ActAsAuditSink_RateLimitsDenials(t *testing.T) {
 	sink := &capturingSASink{}
 	clock := &fakeClock{now: time.Now()}
