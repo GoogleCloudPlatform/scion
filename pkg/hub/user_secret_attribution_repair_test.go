@@ -423,10 +423,11 @@ func (usaSwapMissTx) AttributeUserSecretToOwner(context.Context, string, string)
 	return false, nil
 }
 
-// TestUserSecretAttributionRepair_ValueWriteDuringRepair: a value write (a
-// credential refresh) between the list and the repair bumps the version;
-// the repair still applies, because the swap does not depend on it.
-func TestUserSecretAttributionRepair_ValueWriteDuringRepair(t *testing.T) {
+// TestUserSecretAttributionRepair_VersionBumpDuringRepair: a write between
+// the list and the repair bumps the version (here a metadata write; the
+// value-write case is TestAttributeUserSecretToOwner in entadapter); the
+// repair still applies, because the swap does not depend on the version.
+func TestUserSecretAttributionRepair_VersionBumpDuringRepair(t *testing.T) {
 	f, capturer, _ := newUSAFixture(t, "usa-refresh")
 	ctx := context.Background()
 	s := &usaListHookStore{Store: f.Store, after: func(ctx context.Context, inner store.Store, row store.Secret) error {
@@ -554,4 +555,153 @@ func TestUserSecretWithheldWarn_RateLimited(t *testing.T) {
 	}
 	assert.Equal(t, 1, strings.Count(defaultLog.String(), "runtime user secret read withheld by authorization"),
 		"three reads log the withheld Warn once")
+}
+
+// usaMissOnceTx makes the first attribution swap of secret missID miss,
+// across transactions (missed is shared).
+type usaMissOnceTx struct {
+	store.Store
+	missID string
+	missed *bool
+}
+
+func (m usaMissOnceTx) AttributeUserSecretToOwner(ctx context.Context, id, expected string) (bool, error) {
+	if id == m.missID && !*m.missed {
+		*m.missed = true
+		return false, nil
+	}
+	return m.Store.AttributeUserSecretToOwner(ctx, id, expected)
+}
+
+// usaRereadStore applies mutate to what GetSecret returns for key once a
+// swap of that row has missed (*after), as a writer between the swap and
+// the re-read would.
+type usaRereadStore struct {
+	store.Store
+	key    string
+	after  *bool
+	mutate func(*store.Secret)
+}
+
+func (r *usaRereadStore) GetSecret(ctx context.Context, key, scope, scopeID string) (*store.Secret, error) {
+	sec, err := r.Store.GetSecret(ctx, key, scope, scopeID)
+	if err == nil && sec != nil && key == r.key && *r.after {
+		r.mutate(sec)
+	}
+	return sec, err
+}
+
+// usaMissOnce returns a store over f whose first swap of key's row misses,
+// whose re-read of key is passed through mutate (nil: unchanged), and the
+// row's ID.
+func usaMissOnce(t *testing.T, f *sdFixture, key string, mutate func(*store.Secret)) (store.Store, string) {
+	t.Helper()
+	row, err := f.Store.GetSecret(context.Background(), key, store.ScopeUser, f.UserID)
+	require.NoError(t, err)
+	missed := false
+	tx := &usaTxStore{Store: f.Store, wrap: func(tx store.Store) store.Store {
+		return usaMissOnceTx{Store: tx, missID: row.ID, missed: &missed}
+	}}
+	if mutate == nil {
+		return tx, row.ID
+	}
+	return &usaRereadStore{Store: tx, key: key, after: &missed, mutate: mutate}, row.ID
+}
+
+// TestUserSecretAttributionRepair_MissThenSuccess: a swap that misses once
+// while the row still carries the legacy attribution is decided again and
+// applied on the second attempt, with one audit record.
+func TestUserSecretAttributionRepair_MissThenSuccess(t *testing.T) {
+	f, capturer, _ := newUSAFixture(t, "usa-missonce")
+	ctx := context.Background()
+	s, id := usaMissOnce(t, f, sdAlwaysKey, nil)
+	res, err := RepairLegacyUserSecretAttribution(ctx, s)
+	require.NoError(t, err)
+	assert.Empty(t, res.Skipped)
+	require.Len(t, res.Repaired, 2)
+	for _, r := range res.Repaired {
+		assert.Equal(t, userSecretAttrBasisAncestryRoot, r.Basis)
+		assert.Equal(t, userSecretAttrAgentRefPrefix+capturer, r.OriginalCreatedBy)
+	}
+	row, err := f.Store.GetSecret(ctx, sdAlwaysKey, store.ScopeUser, f.UserID)
+	require.NoError(t, err)
+	assert.Equal(t, f.UserID, row.CreatedBy)
+	audits, _, err := f.Store.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: mutationTypeUserSecretAttributionRepair, TargetID: id})
+	require.NoError(t, err)
+	assert.Len(t, audits, 1, "the missed attempt writes no audit record")
+}
+
+// TestUserSecretAttributionRepair_RereadForeignAgentNotRewritten: after a
+// missed swap, a re-read that finds the row attributed to an agent of
+// another user is decided on its own facts: skipped, never rewritten.
+func TestUserSecretAttributionRepair_RereadForeignAgentNotRewritten(t *testing.T) {
+	f, capturer, _ := newUSAFixture(t, "usa-reread-foreign")
+	ctx := context.Background()
+	otherUser := tid("usa-reread-foreign-user")
+	createDCUser(t, f.Store, otherUser, "usa-reread-foreign-other@test.com", f.ProjectID, store.ProjectRoleMember)
+	foreign := tid("usa-reread-foreign-agent")
+	require.NoError(t, f.Store.CreateAgent(ctx, &store.Agent{
+		ID: foreign, Slug: "usa-reread-foreign", Name: "usa-reread-foreign", ProjectID: f.ProjectID,
+		Phase: "running", StateVersion: 1, OwnerID: otherUser, CreatedBy: otherUser, Ancestry: []string{otherUser},
+	}))
+	s, _ := usaMissOnce(t, f, sdAlwaysKey, func(sec *store.Secret) { sec.CreatedBy = userSecretAttrAgentRefPrefix + foreign })
+	res, err := RepairLegacyUserSecretAttribution(ctx, s)
+	require.NoError(t, err)
+	require.Len(t, res.Skipped, 1)
+	assert.Equal(t, sdAlwaysKey, res.Skipped[0].Name)
+	assert.Equal(t, userSecretAttrSkipAgentNotOwnedBy, res.Skipped[0].Reason)
+	assert.Equal(t, userSecretAttrAgentRefPrefix+foreign, res.Skipped[0].CreatedBy)
+	require.Len(t, res.Repaired, 1, "the other legacy row is repaired")
+	assert.Equal(t, sdAsNeededKey, res.Repaired[0].Name)
+	row, err := f.Store.GetSecret(ctx, sdAlwaysKey, store.ScopeUser, f.UserID)
+	require.NoError(t, err)
+	assert.Equal(t, userSecretAttrAgentRefPrefix+capturer, row.CreatedBy, "the skipped row is not rewritten")
+}
+
+// TestUserSecretAttributionRepair_RereadNonAgentAuthorLeftAlone: after a
+// missed swap, a re-read that finds an author that is neither an agent
+// reference nor the owner leaves the row alone and counts it.
+func TestUserSecretAttributionRepair_RereadNonAgentAuthorLeftAlone(t *testing.T) {
+	f, capturer, _ := newUSAFixture(t, "usa-reread-nonagent")
+	ctx := context.Background()
+	s, _ := usaMissOnce(t, f, sdAlwaysKey, func(sec *store.Secret) { sec.CreatedBy = "someone-else" })
+	res, err := RepairLegacyUserSecretAttribution(ctx, s)
+	require.NoError(t, err)
+	assert.Equal(t, 2, res.Examined)
+	assert.Equal(t, 1, res.AuthorChanged)
+	assert.Empty(t, res.Skipped)
+	require.Len(t, res.Repaired, 1)
+	assert.Equal(t, sdAsNeededKey, res.Repaired[0].Name)
+	row, err := f.Store.GetSecret(ctx, sdAlwaysKey, store.ScopeUser, f.UserID)
+	require.NoError(t, err)
+	assert.Equal(t, userSecretAttrAgentRefPrefix+capturer, row.CreatedBy, "the row is not rewritten")
+}
+
+// TestUserSecretAttributionRepair_RecreatedRowVanishes: a row deleted and
+// recreated under the same key between the list and the repair (a new ID)
+// counts as vanished, and the new row is not touched by this pass.
+func TestUserSecretAttributionRepair_RecreatedRowVanishes(t *testing.T) {
+	f, capturer, _ := newUSAFixture(t, "usa-recreated")
+	ctx := context.Background()
+	legacy := userSecretAttrAgentRefPrefix + capturer
+	s := &usaListHookStore{Store: f.Store, after: func(ctx context.Context, inner store.Store, row store.Secret) error {
+		if row.Key != sdAlwaysKey {
+			return nil
+		}
+		if err := inner.DeleteSecret(ctx, row.Key, row.Scope, row.ScopeID); err != nil {
+			return err
+		}
+		return inner.CreateSecret(ctx, &store.Secret{
+			ID: uuid.NewString(), Key: row.Key, EncryptedValue: "enc-recreated",
+			Scope: row.Scope, ScopeID: row.ScopeID, AllowProgeny: true, CreatedBy: legacy,
+		})
+	}}
+	res, err := RepairLegacyUserSecretAttribution(ctx, s)
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Vanished)
+	require.Len(t, res.Repaired, 1)
+	assert.Equal(t, sdAsNeededKey, res.Repaired[0].Name)
+	row, err := f.Store.GetSecret(ctx, sdAlwaysKey, store.ScopeUser, f.UserID)
+	require.NoError(t, err)
+	assert.Equal(t, legacy, row.CreatedBy, "the recreated row is not touched by this pass")
 }
