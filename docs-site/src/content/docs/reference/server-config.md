@@ -345,8 +345,44 @@ The runtime target of one flat Runtime Broker instance, and the instance's own i
 | `safe_to_evict` | bool | kubernetes | `false` adds the `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` annotation to agent pods (on GKE Autopilot this requests extended run duration). `true` or unset adds nothing. An agent's own `kubernetes.safeToEvict`, `true` or `false`, wins. |
 | `priority_class_name` | string | kubernetes | Default PriorityClass of agent pods (DNS-1123 subdomain). The PriorityClass must already exist on the cluster. An agent's own `kubernetes.priorityClassName` wins. |
 | `gke` | bool | kubernetes | `true` turns on GKE mode for the instance. `false` or unset detects a GKE cluster automatically. |
+| `node_selector` | map | kubernetes | Node labels (key to value) every agent pod of the instance must match. See [Flat instance placement](#flat-instance-placement). |
+| `tolerations` | list | kubernetes | Tolerations of every agent pod of the instance, each with `key`, `operator` (`Equal` or `Exists`; empty means `Equal`), `value` and `effect` (`NoSchedule`, `PreferNoSchedule`, `NoExecute`, or empty for any). An empty key requires `Exists`, and `Exists` requires an empty value. |
+| `runtime_class_name` | string | kubernetes | RuntimeClass of every agent pod of the instance (DNS-1123 subdomain). The RuntimeClass must already exist on the cluster. |
 
 A runtime target does not choose where its agents' storage lives: [`server.project_storage`](#project-storage-serverproject_storage) does, for every instance of the process. The former `shared_dir_storage_backend`, `shared_dir_storage_backends`, `home_storage_backend` and `home_storage_leaf` fields are removed. A flat instance that sets them refuses startup with an error that names the field, `server.project_storage` and `volumes:`. On runtimes and profiles, startup reports them and agent start refuses them; see [Removed storage overrides](#removed-storage-overrides). For a node-local directory, use a `volumes:` entry.
+
+#### Flat instance placement
+
+`node_selector`, `tolerations` and `runtime_class_name` place the instance's agent pods on the nodes the operator chooses, whatever template the agent uses, including `default`. Unlike the other defaults in the table, the operator owns them, so an agent's own value does not win:
+
+- An agent's `kubernetes.nodeSelector` may add keys the runtime target does not set. It cannot change the value of a key the runtime target sets, including the pool key `scion.dev/pool`. A differing value refuses the start.
+- Each of an agent's `kubernetes.tolerations` must match one of the runtime target's tolerations exactly: the same key, operator (empty counts as `Equal`), value and effect. A broader `Exists` toleration does not cover a different entry. While placement is set, an agent toleration with an empty key and `Exists` is refused.
+- An agent cannot choose or change the runtime class. An agent `kubernetes.runtimeClassName` must be empty or equal to the runtime target's value.
+
+A refused start is reported as a validation error that names the field and whether it comes from the request or the agent's stored configuration. The check runs before the start creates, changes or stops anything. Node selector entries combine: an agent-added key narrows placement further, and a key with no matching nodes leaves the pod pending. An agent-added key can also steer a pod onto any pool whose nodes carry no taint, because only the runtime target's keys are fixed. Tolerations stay limited to the runtime target's. A node selector and a toleration are independent: Scion never derives one from the other, so a tainted pool needs both.
+
+The values are read from the instance's settings when it starts, so a change takes effect when the Runtime Broker restarts. Existing pods keep their placement. The Brokers page shows the instance's reported placement read-only, as defaults for new agents. In GCP identity `block` mode the Workload Identity node label is still added after this placement.
+
+```yaml
+server:
+  broker:
+    instances:
+      - key: agents
+        name: agents
+        runtime_target:
+          type: kubernetes
+          namespace: agents
+          node_selector:
+            scion.dev/pool: agents
+          tolerations:
+            - key: scion.dev/pool
+              operator: Equal
+              value: agents
+              effect: NoSchedule
+          runtime_class_name: gvisor
+```
+
+`gvisor` is an example: Scion does not create RuntimeClasses or check that one exists.
 
 #### Flat instance agent defaults (`server.broker.instances[].agent_defaults`)
 
