@@ -23,6 +23,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -121,15 +122,51 @@ func TestReconcileMessageStars_StoreErrorKeepsCountsSoFar(t *testing.T) {
 	assert.Equal(t, messageStarReconcileReport{Examined: 4}, report)
 }
 
-// deadlineScanner is a scripted scanner whose second batch runs until the
-// run's deadline passes.
+// expiringCtx is a run context that reaches its deadline only when expire
+// is called: Done closes then and Err reports DeadlineExceeded. It makes
+// the time-limit path deterministic (no timer).
+type expiringCtx struct {
+	context.Context
+	done    chan struct{}
+	mu      sync.Mutex
+	expired bool
+}
+
+func newExpiringCtx() *expiringCtx {
+	return &expiringCtx{Context: context.Background(), done: make(chan struct{})}
+}
+
+func (c *expiringCtx) Done() <-chan struct{} { return c.done }
+
+func (c *expiringCtx) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.expired {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+func (c *expiringCtx) expire() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.expired {
+		c.expired = true
+		close(c.done)
+	}
+}
+
+// deadlineScanner is a scripted scanner whose second batch expires the run
+// context and returns once the batch context sees it.
 type deadlineScanner struct {
 	scriptedStarScanner
+	run *expiringCtx
 }
 
 func (s *deadlineScanner) PurgeMessageStarCandidates(ctx context.Context, after StarCleanupPosition, limit int) (StarCleanupResult, error) {
 	if len(s.calls) == 1 {
 		s.calls = append(s.calls, after)
+		s.run.expire()
 		<-ctx.Done()
 		return StarCleanupResult{}, ctx.Err()
 	}
@@ -137,9 +174,8 @@ func (s *deadlineScanner) PurgeMessageStarCandidates(ctx context.Context, after 
 }
 
 func TestReconcileMessageStars_TimeLimitSaysRunAgain(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	scan := &deadlineScanner{scriptedStarScanner{rows: 6}}
+	ctx := newExpiringCtx()
+	scan := &deadlineScanner{scriptedStarScanner: scriptedStarScanner{rows: 6}, run: ctx}
 	lim := messageStarReconcileLimits{Batch: 2, BatchTimeout: time.Minute, MaxSweeps: 3}
 	report, err := reconcileMessageStars(ctx, scan, lim, nil)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
