@@ -38,12 +38,42 @@ var (
 	nonAlphanumeric = regexp.MustCompile(`[^a-z0-9]+`)
 )
 
+// isAlreadySlug reports whether s is already a valid canonical slug:
+// non-empty, at most MaxSlugLength, no leading or trailing dashes,
+// containing only lowercase alphanumeric ASCII and non-consecutive dashes.
+func isAlreadySlug(s string) bool {
+	if len(s) == 0 || len(s) > MaxSlugLength {
+		return false
+	}
+	if s[0] == '-' || s[len(s)-1] == '-' {
+		return false
+	}
+	nextCanBeDash := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			nextCanBeDash = true
+		} else if c == '-' {
+			if !nextCanBeDash {
+				return false
+			}
+			nextCanBeDash = false
+		} else {
+			return false
+		}
+	}
+	return true
+}
+
 // Slugify converts a string to a URL-safe slug.
 // It normalizes unicode, converts to lowercase, replaces non-alphanumeric
 // characters with dashes, and enforces length limits.
 func Slugify(s string) string {
 	if s == "" {
 		return ""
+	}
+	if isAlreadySlug(s) {
+		return s
 	}
 
 	// Normalize unicode (NFD decomposition then remove combining marks)

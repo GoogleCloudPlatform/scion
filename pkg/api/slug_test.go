@@ -406,6 +406,15 @@ func BenchmarkSlugify(b *testing.B) {
 	}
 }
 
+func BenchmarkSlugify_AlreadySlug(b *testing.B) {
+	input := "my-awesome-agent-007"
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = Slugify(input)
+	}
+}
+
 func BenchmarkValidateDisplayName_ASCII(b *testing.B) {
 	name := "Builder Prime"
 	b.ResetTimer()
