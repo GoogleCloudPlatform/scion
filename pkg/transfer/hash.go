@@ -123,8 +123,7 @@ func HashFile(path string) (string, error) {
 	}
 
 	var digest [sha256.Size]byte
-	hasher.Sum(digest[:0])
-	return formatDigest(digest[:]), nil
+	return formatDigest(hasher.Sum(digest[:0])), nil
 }
 
 func formatDigest(digest []byte) string {
@@ -135,8 +134,8 @@ func formatDigest(digest []byte) string {
 }
 
 var (
-	nulByte = []byte{0}
-	nlByte  = []byte{'\n'}
+	nulByte = [1]byte{0}
+	nlByte  = [1]byte{'\n'}
 )
 
 // HashBytes computes the SHA-256 hash of a byte slice.
@@ -180,8 +179,7 @@ func ComputeContentHashV1(files []FileInfo) string {
 	}
 
 	var digest [sha256.Size]byte
-	hasher.Sum(digest[:0])
-	return formatDigest(digest[:])
+	return formatDigest(hasher.Sum(digest[:0]))
 }
 
 // ComputeContentHashV2 is the content hash of templates and harness-configs
@@ -203,16 +201,15 @@ func ComputeContentHashV2(files []FileInfo) string {
 	hasher := sha256.New()
 	for _, file := range sorted {
 		_, _ = io.WriteString(hasher, file.Path)
-		_, _ = hasher.Write(nulByte)
+		_, _ = hasher.Write(nulByte[:])
 		_, _ = io.WriteString(hasher, NormalizedModeString(file.Mode))
-		_, _ = hasher.Write(nulByte)
+		_, _ = hasher.Write(nulByte[:])
 		_, _ = io.WriteString(hasher, file.Hash)
-		_, _ = hasher.Write(nlByte)
+		_, _ = hasher.Write(nlByte[:])
 	}
 
 	var digest [sha256.Size]byte
-	hasher.Sum(digest[:0])
-	return formatDigest(digest[:])
+	return formatDigest(hasher.Sum(digest[:0]))
 }
 
 // sortedByPath returns a copy of files sorted by path.
