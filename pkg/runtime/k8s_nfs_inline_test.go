@@ -99,8 +99,10 @@ func claimTestConfig(cfg RunConfig) RunConfig {
 // the same start: every container keeps the same mount targets in the same
 // order; each claim subPath mount of the share is, inline, a mount with no
 // subPath of its own NFS volume whose path is <export>/<subPath> (the
-// directory's server path) strictly under the project's tree; the inline
-// pod has no claim volume at all.
+// directory's server path) strictly under the project's tree, except the
+// workspace's .scion entry, which is a subPath mount of the inline
+// "workspace" volume at the same server path; the inline pod has no claim
+// volume at all.
 func assertInlineMatchesClaim(t *testing.T, claimPod, inlinePod *corev1.Pod, projectID string) {
 	t.Helper()
 	projectPrefix := path.Join(inlineTestExport, "projects", projectID) + "/"
@@ -134,8 +136,13 @@ func assertInlineMatchesClaim(t *testing.T, claimPod, inlinePod *corev1.Pod, pro
 			iv := findVolume(inlinePod, im.Name)
 			require.NotNil(t, iv, im.Name)
 			require.NotNil(t, iv.NFS, "%s mount %s must be an inline NFS volume", cc.Name, cm.MountPath)
+			assert.Equal(t, path.Join(inlineTestExport, cm.SubPath), path.Join(iv.NFS.Path, im.SubPath), "%s mount %s server path", cc.Name, cm.MountPath)
+			if path.Base(cm.MountPath) == projectfs.ProjectConfigEntryName {
+				assert.Equal(t, nfsVolWorkspace, im.Name, "%s mount %s is from the workspace volume", cc.Name, cm.MountPath)
+				assert.Equal(t, projectfs.ProjectConfigEntryName, im.SubPath, "%s mount %s", cc.Name, cm.MountPath)
+				continue
+			}
 			assert.Empty(t, im.SubPath, "%s mount %s", cc.Name, cm.MountPath)
-			assert.Equal(t, path.Join(inlineTestExport, cm.SubPath), iv.NFS.Path, "%s mount %s server path", cc.Name, cm.MountPath)
 			assert.Equal(t, cm.ReadOnly || cv.PersistentVolumeClaim.ReadOnly, iv.NFS.ReadOnly, "%s mount %s volume read-only", cc.Name, cm.MountPath)
 		}
 	}
@@ -159,15 +166,14 @@ func TestBuildPod_InlineSharedPlainSharedDirsProjectConfig(t *testing.T) {
 	claimPod, inlinePod := buildClaimAndInline(t, cfg)
 	assertInlineMatchesClaim(t, claimPod, inlinePod, "proj-123")
 
-	// The workspace, the provisioning state dir, the project-config entry
-	// and both shared dirs, by server path.
+	// The workspace, the provisioning state dir and both shared dirs, by
+	// server path.
 	for name, want := range map[string]struct {
 		path     string
 		readOnly bool
 	}{
 		"workspace":           {inlineTestExport + "/projects/proj-123/workspace", false},
 		"workspace-provision": {inlineTestExport + "/projects/proj-123/provision", false},
-		"workspace-config":    {inlineTestExport + "/projects/proj-123/workspace/.scion", true},
 		"shared-dir-0":        {inlineTestExport + "/projects/proj-123/shared-dirs/notes", false},
 		"shared-dir-1":        {inlineTestExport + "/projects/proj-123/shared-dirs/cache", true},
 	} {
@@ -177,7 +183,94 @@ func TestBuildPod_InlineSharedPlainSharedDirsProjectConfig(t *testing.T) {
 		assert.Equal(t, want.path, v.NFS.Path, name)
 		assert.Equal(t, want.readOnly, v.NFS.ReadOnly, name)
 	}
+	assertInlineProjectConfigFromWorkspace(t, inlinePod)
 	assert.True(t, k8sPodWorkspaceRecoverable(inlinePod), "the inline workspace volume is persistent")
+}
+
+// assertInlineProjectConfigFromWorkspace checks that the agent container
+// mounts the workspace's .scion entry read-only from the inline
+// "workspace" volume by the subPath ".scion", and that no inline volume of
+// its own names the entry or anything under it.
+func assertInlineProjectConfigFromWorkspace(t *testing.T, pod *corev1.Pod) {
+	t.Helper()
+	ws := findVolume(pod, nfsVolWorkspace)
+	require.NotNil(t, ws)
+	require.NotNil(t, ws.NFS)
+	entryPath := path.Join(ws.NFS.Path, projectfs.ProjectConfigEntryName)
+	for _, v := range pod.Spec.Volumes {
+		if v.NFS != nil {
+			assert.False(t, v.NFS.Path == entryPath || strings.HasPrefix(v.NFS.Path, entryPath+"/"),
+				"volume %q mounts %s on its own; the entry comes from the workspace volume", v.Name, v.NFS.Path)
+		}
+	}
+	var found bool
+	for _, m := range pod.Spec.Containers[0].VolumeMounts {
+		if m.MountPath != "/workspace/"+projectfs.ProjectConfigEntryName {
+			continue
+		}
+		found = true
+		assert.Equal(t, nfsVolWorkspace, m.Name)
+		assert.Equal(t, projectfs.ProjectConfigEntryName, m.SubPath)
+		assert.True(t, m.ReadOnly)
+	}
+	assert.True(t, found, "the agent container mounts the workspace's .scion")
+}
+
+// Inline, with the in-project agents root masked, the .scion entry is
+// still mounted from the workspace volume and the mask over it stays an
+// empty in-memory volume: neither is an inline NFS volume of its own.
+func TestBuildPod_InlineProjectConfigAndAgentsMask(t *testing.T) {
+	cfg, ws := nfsClaimGoldenConfig(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(ws, ".scion", "agents"), 0o755))
+	cfg.RepoRoot = ws
+	claimPod, inlinePod := buildClaimAndInline(t, cfg)
+	assertInlineMatchesClaim(t, claimPod, inlinePod, "proj-123")
+	assertInlineProjectConfigFromWorkspace(t, inlinePod)
+
+	mask := findVolume(inlinePod, k8sAgentsMaskVolume)
+	require.NotNil(t, mask, "the agents root is masked")
+	assert.NotNil(t, mask.EmptyDir)
+	assert.Nil(t, mask.NFS)
+	var maskMount *corev1.VolumeMount
+	for i, m := range inlinePod.Spec.Containers[0].VolumeMounts {
+		if m.Name == k8sAgentsMaskVolume {
+			maskMount = &inlinePod.Spec.Containers[0].VolumeMounts[i]
+		}
+	}
+	require.NotNil(t, maskMount)
+	assert.Equal(t, "/workspace/.scion/agents", maskMount.MountPath)
+	assert.Empty(t, maskMount.SubPath)
+}
+
+// mountWithin mounts an entry from its parent's inline volume by the
+// entry's path relative to it, and refuses an entry outside that
+// directory or a parent volume that is not there; with a claim it is the
+// claim subPath mount.
+func TestNFSPodVolumes_MountWithin(t *testing.T) {
+	cfg := inlineTestConfig(nfsBaseConfig("mw"))
+	b := newWorkspaceNFSPodVolumes(cfg)
+	_, err := b.mountWithin(nfsVolWorkspace, "projects/proj-123/workspace/.scion", "/workspace/.scion", true)
+	require.Error(t, err, "the parent volume is not there yet")
+	assert.Contains(t, err.Error(), "needs the volume")
+
+	_, err = b.mount(nfsVolWorkspace, "projects/proj-123/workspace", "/workspace", false)
+	require.NoError(t, err)
+	m, err := b.mountWithin(nfsVolWorkspace, "projects/proj-123/workspace/.scion", "/workspace/.scion", true)
+	require.NoError(t, err)
+	assert.Equal(t, corev1.VolumeMount{Name: nfsVolWorkspace, MountPath: "/workspace/.scion", SubPath: ".scion", ReadOnly: true}, m)
+	assert.Len(t, b.inline, 1, "no volume of its own")
+
+	for _, sub := range []string{"projects/proj-123/workspace", "projects/proj-123/workspace-other/.scion", "projects/proj-123/provision"} {
+		_, err := b.mountWithin(nfsVolWorkspace, sub, "/x", true)
+		assert.Error(t, err, "subPath %q is not inside the workspace volume", sub)
+	}
+	_, err = b.mountWithin(nfsVolWorkspace, "projects/other/workspace/.scion", "/x", true)
+	assert.Error(t, err, "outside the project tree")
+
+	claim := newWorkspaceNFSPodVolumes(claimTestConfig(nfsBaseConfig("mw")))
+	m, err = claim.mountWithin(nfsVolWorkspace, "projects/proj-123/workspace/.scion", "/workspace/.scion", true)
+	require.NoError(t, err)
+	assert.Equal(t, corev1.VolumeMount{Name: "workspace", MountPath: "/workspace/.scion", SubPath: "projects/proj-123/workspace/.scion", ReadOnly: true}, m)
 }
 
 func TestBuildPod_InlineWorktree(t *testing.T) {
@@ -287,22 +380,52 @@ func TestNFSWorkspaceOnShare_Inline(t *testing.T) {
 	assert.False(t, nfsInitContainerInjected(cfg))
 }
 
-// An NFS home is never shared with an inline workspace volume: it keeps
-// its own claim volume.
+// An NFS home with an inline workspace share is refused by the runtime
+// too, as at agent start, even when the home has a claim of its own.
 func TestBuildPod_InlineWorkspaceHomeOwnClaim(t *testing.T) {
 	cfg, _ := nfsClaimGoldenConfig(t)
 	cfg = withTestHomeStorage(inlineTestConfig(cfg))
 	cfg.HomeStorage.PVClaimName = "scion-workspaces"
-	pod, err := newTestK8sRuntimeBuild(t, cfg)
-	require.NoError(t, err)
-	home := findVolume(pod, k8sHomeVolume)
-	require.NotNil(t, home)
-	require.NotNil(t, home.PersistentVolumeClaim)
-	assert.Equal(t, "scion-workspaces", home.PersistentVolumeClaim.ClaimName)
+	_, err := newTestK8sRuntimeBuild(t, cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "shares[0].pv_name")
+	assert.Contains(t, err.Error(), "NFS homes do not support yet")
 }
 
 func newTestK8sRuntimeBuild(t *testing.T, cfg RunConfig) (*corev1.Pod, error) {
 	t.Helper()
 	rt, _, _ := newTestK8sRuntime()
 	return rt.buildPod("default", cfg)
+}
+
+// addInline accepts the same directory under the same name once, and
+// reports a name reused for another directory apart from a read-only
+// mismatch on the same directory.
+func TestNFSPodVolumes_AddInlineConflicts(t *testing.T) {
+	vol := func(path string, readOnly bool) corev1.Volume {
+		return corev1.Volume{Name: "workspace-git", VolumeSource: corev1.VolumeSource{
+			NFS: &corev1.NFSVolumeSource{Server: inlineTestServer, Path: path, ReadOnly: readOnly}}}
+	}
+	b := &nfsPodVolumes{}
+	require.NoError(t, b.addInline(vol("/e/projects/p/a", false)))
+	require.NoError(t, b.addInline(vol("/e/projects/p/a", false)))
+	assert.Len(t, b.inline, 1)
+
+	err := b.addInline(vol("/e/projects/p/b", false))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "names two directories")
+	assert.Contains(t, err.Error(), "/e/projects/p/a")
+	assert.Contains(t, err.Error(), "/e/projects/p/b")
+
+	err = b.addInline(vol("/e/projects/p/a", true))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "both read-only and read-write")
+	assert.NotContains(t, err.Error(), "two directories")
+
+	other := vol("/e/projects/p/a", false)
+	other.NFS.Server = "192.0.2.99"
+	err = b.addInline(other)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "names two directories")
+	assert.Len(t, b.inline, 1)
 }

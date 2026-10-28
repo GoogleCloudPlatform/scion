@@ -428,6 +428,12 @@ func (r *KubernetesRuntime) nfsHomePodSpec(config RunConfig, containerHome strin
 	if hs == nil || hs.PVClaimName == "" {
 		return parts, fmt.Errorf("home storage %q needs a claim", HomeStorageNFS)
 	}
+	if workspaceShare.Inline() {
+		// The same refusal as at agent start: an inline workspace share
+		// (no shares[0].pv_name) does not carry NFS homes yet.
+		return parts, fmt.Errorf("home storage %q needs a claim (shares[0].pv_name) on the workspace share: "+
+			"without it Kubernetes pods mount the share inline, which NFS homes do not support yet", HomeStorageNFS)
+	}
 	agentDir, home, err := NFSHomeSubPaths(hs.SubPathRoot, hs.ProjectID, hs.AgentSlug, hs.AgentID)
 	if err != nil {
 		return parts, err
@@ -444,9 +450,11 @@ func (r *KubernetesRuntime) nfsHomePodSpec(config RunConfig, containerHome strin
 	if workspaceShare.Same(NFSPodShare{ClaimName: hs.PVClaimName}) {
 		volName = "workspace"
 	} else {
-		// NFS homes are on a claim only (an inline share is refused at
-		// agent start); the volume source comes from the same translation
-		// as every other NFS share volume.
+		// NFS homes are on a claim only (an inline workspace share is
+		// refused above and at agent start); the volume source comes from
+		// the same translation as every other NFS share volume. A
+		// whole-claim volume is the deliberate exception to
+		// projectfs.Layout.Realize, which models subPath mounts only.
 		src, err := podVolumeSource(projectfs.Realized{ClaimName: hs.PVClaimName, Target: containerHome})
 		if err != nil {
 			return parts, err

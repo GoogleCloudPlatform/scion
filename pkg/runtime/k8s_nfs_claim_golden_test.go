@@ -27,6 +27,8 @@ import (
 // nfsClaimGoldenConfig is a shared-plain agent on an NFS workspace claim,
 // with a read-write and a read-only shared dir on the same claim and a
 // .scion directory in the workspace (the read-only project-config entry).
+// As in production, the start also carries the share's server and export
+// and the shared dirs' server, export and subPath root.
 func nfsClaimGoldenConfig(t *testing.T) (RunConfig, string) {
 	t.Helper()
 	ws := t.TempDir()
@@ -42,12 +44,15 @@ func nfsClaimGoldenConfig(t *testing.T) (RunConfig, string) {
 		Workspace:              ws,
 		WorkspaceBackendName:   "nfs",
 		NFSPVClaimName:         "scion-workspaces",
+		NFSShareServer:         inlineTestServer,
+		NFSShareExport:         inlineTestExport,
 		NFSSubPath:             "projects/proj-123/workspace",
 		ProjectID:              "proj-123",
 		NFSWorkspacePreCreated: true,
 		SharedDirs:             []api.SharedDir{{Name: "notes"}, {Name: "cache", ReadOnly: true, InWorkspace: true}},
 		SharedDirStorage: &SharedDirRealization{
 			Backend: "nfs", PVClaimName: "scion-workspaces", ProjectID: "proj-123",
+			Server: inlineTestServer, Export: inlineTestExport, SubPathRoot: "projects",
 			SubPaths: map[string]string{
 				"notes": "projects/proj-123/shared-dirs/notes",
 				"cache": "projects/proj-123/shared-dirs/cache",
@@ -61,8 +66,16 @@ func nfsClaimGoldenConfig(t *testing.T) (RunConfig, string) {
 // (a pv_name share) byte for byte: the workspace, both shared dirs, the
 // project-config entry and the home, on the workspace claim and on its own
 // claim. Inline volumes for a share without a claim must leave these
-// unchanged.
+// unchanged. Each case runs with the share's server, export and subPath
+// root set (as production sets them) and without them; both must match the
+// same snapshot.
 func TestBuildPod_NFSClaimPodGolden(t *testing.T) {
+	withoutShareAddress := func(c *RunConfig) {
+		c.NFSShareServer, c.NFSShareExport = "", ""
+		sd := *c.SharedDirStorage
+		sd.Server, sd.Export, sd.SubPathRoot = "", "", ""
+		c.SharedDirStorage = &sd
+	}
 	cases := []struct {
 		name   string
 		mutate func(*RunConfig)
@@ -76,34 +89,41 @@ func TestBuildPod_NFSClaimPodGolden(t *testing.T) {
 		}},
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg, ws := nfsClaimGoldenConfig(t)
-			tc.mutate(&cfg)
-			rt, _, _ := newTestK8sRuntime()
-			pod, err := rt.buildPod("default", cfg)
-			if err != nil {
-				t.Fatalf("buildPod: %v", err)
-			}
-			normalizeHostIDs(pod)
-			got, err := json.MarshalIndent(pod, "", "  ")
-			if err != nil {
-				t.Fatalf("marshal: %v", err)
-			}
-			got = append(bytes.ReplaceAll(got, []byte(ws), []byte("/WORKSPACE")), '\n')
-			file := filepath.Join("testdata", "k8s_pod_golden", tc.name+".json")
-			if *updatePodGolden {
-				if err := os.WriteFile(file, got, 0o644); err != nil {
-					t.Fatal(err)
+		for _, shape := range []string{"with-share-address", "without-share-address"} {
+			t.Run(tc.name+"/"+shape, func(t *testing.T) {
+				cfg, ws := nfsClaimGoldenConfig(t)
+				if shape == "without-share-address" {
+					withoutShareAddress(&cfg)
 				}
-				return
-			}
-			want, err := os.ReadFile(file)
-			if err != nil {
-				t.Fatalf("read golden: %v", err)
-			}
-			if !bytes.Equal(got, want) {
-				t.Errorf("pod spec for %s differs from %s:\n%s", tc.name, file, got)
-			}
-		})
+				tc.mutate(&cfg)
+				rt, _, _ := newTestK8sRuntime()
+				pod, err := rt.buildPod("default", cfg)
+				if err != nil {
+					t.Fatalf("buildPod: %v", err)
+				}
+				normalizeHostIDs(pod)
+				got, err := json.MarshalIndent(pod, "", "  ")
+				if err != nil {
+					t.Fatalf("marshal: %v", err)
+				}
+				got = append(bytes.ReplaceAll(got, []byte(ws), []byte("/WORKSPACE")), '\n')
+				file := filepath.Join("testdata", "k8s_pod_golden", tc.name+".json")
+				if *updatePodGolden {
+					if shape == "with-share-address" {
+						if err := os.WriteFile(file, got, 0o644); err != nil {
+							t.Fatal(err)
+						}
+					}
+					return
+				}
+				want, err := os.ReadFile(file)
+				if err != nil {
+					t.Fatalf("read golden: %v", err)
+				}
+				if !bytes.Equal(got, want) {
+					t.Errorf("pod spec for %s (%s) differs from %s:\n%s", tc.name, shape, file, got)
+				}
+			})
+		}
 	}
 }

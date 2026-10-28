@@ -5112,7 +5112,10 @@ func k8sProjectConfigVolumeMount(config RunConfig, vols *nfsPodVolumes) (corev1.
 	if entry.SubPath == "" {
 		return corev1.VolumeMount{}, false, fmt.Errorf("projectfs: invalid subPath %q", entry.SubPath)
 	}
-	m, err := vols.mount(nfsVolProjectConfig, entry.SubPath, entry.Target, entry.ReadOnly)
+	// Inline, the entry sits inside the agent-writable workspace directory,
+	// so it is mounted from the workspace volume by its subPath (the node
+	// resolves it within that volume), not as an inline volume of its own.
+	m, err := vols.mountWithin(nfsVolWorkspace, entry.SubPath, entry.Target, entry.ReadOnly)
 	if err != nil {
 		return corev1.VolumeMount{}, false, err
 	}

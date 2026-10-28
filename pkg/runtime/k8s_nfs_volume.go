@@ -17,6 +17,7 @@ package runtime
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -148,6 +149,9 @@ func (b *nfsPodVolumes) claimVolume() (corev1.Volume, error) {
 	if b.layout.Share.PVName == "" {
 		return corev1.Volume{}, errors.New("the NFS workspace share has no claim")
 	}
+	// A whole-claim volume is the deliberate exception to
+	// projectfs.Layout.Realize, which models subPath mounts only; its
+	// mounts are realized per directory in mount.
 	src, err := podVolumeSource(projectfs.Realized{ClaimName: b.layout.Share.PVName, Target: "/workspace"})
 	if err != nil {
 		return corev1.Volume{}, err
@@ -180,6 +184,39 @@ func (b *nfsPodVolumes) mount(inlineName, subPath, mountPath string, readOnly bo
 	return corev1.VolumeMount{Name: inlineName, MountPath: mountPath, ReadOnly: readOnly}, nil
 }
 
+// mountWithin returns the mount of the directory or file at subPath at
+// mountPath, an entry inside the directory of the inline volume parentName
+// (already added by mount). Inline, the entry is mounted from that volume
+// by its subPath relative to the volume's directory, not as its own
+// volume: entries inside the workspace are mounted from the workspace
+// volume so the node resolves them within it. The entry is still realized
+// through the layout first, so it must sit strictly under the project's
+// tree. With a claim, it is mount's subPath mount of the claim.
+func (b *nfsPodVolumes) mountWithin(parentName, subPath, mountPath string, readOnly bool) (corev1.VolumeMount, error) {
+	if b.layout.Share.PVName != "" {
+		return b.mount(parentName, subPath, mountPath, readOnly)
+	}
+	realized, err := realizeNFSLeaf(b.layout, b.projectID, subPath, mountPath, readOnly)
+	if err != nil {
+		return corev1.VolumeMount{}, err
+	}
+	if realized.NFS == nil {
+		return corev1.VolumeMount{}, fmt.Errorf("inline NFS mount of %q has no server path", mountPath)
+	}
+	for _, parent := range b.inline {
+		if parent.Name != parentName {
+			continue
+		}
+		rel, ok := strings.CutPrefix(realized.NFS.Path, strings.TrimSuffix(parent.NFS.Path, "/")+"/")
+		if parent.NFS.Server != realized.NFS.Server || !ok || rel == "" {
+			return corev1.VolumeMount{}, fmt.Errorf("inline NFS mount of %q (%s) is not inside volume %q (%s)",
+				mountPath, realized.NFS.Path, parentName, parent.NFS.Path)
+		}
+		return corev1.VolumeMount{Name: parentName, MountPath: mountPath, SubPath: rel, ReadOnly: readOnly}, nil
+	}
+	return corev1.VolumeMount{}, fmt.Errorf("inline NFS mount of %q needs the volume %q of its parent directory", mountPath, parentName)
+}
+
 // addInline adds v unless a volume of that name is already there, which
 // must then be the same.
 func (b *nfsPodVolumes) addInline(v corev1.Volume) error {
@@ -187,8 +224,12 @@ func (b *nfsPodVolumes) addInline(v corev1.Volume) error {
 		if have.Name != v.Name {
 			continue
 		}
-		if *have.NFS != *v.NFS {
-			return fmt.Errorf("inline NFS volume %q names two directories (%s and %s)", v.Name, have.NFS.Path, v.NFS.Path)
+		if have.NFS.Server != v.NFS.Server || have.NFS.Path != v.NFS.Path {
+			return fmt.Errorf("inline NFS volume %q names two directories (%s:%s and %s:%s)",
+				v.Name, have.NFS.Server, have.NFS.Path, v.NFS.Server, v.NFS.Path)
+		}
+		if have.NFS.ReadOnly != v.NFS.ReadOnly {
+			return fmt.Errorf("inline NFS volume %q of %s is mounted both read-only and read-write", v.Name, v.NFS.Path)
 		}
 		return nil
 	}
@@ -203,7 +244,6 @@ const (
 	nfsVolGit            = "workspace-git"
 	nfsVolWorktree       = "workspace-worktree"
 	nfsVolProvisionState = "workspace-provision"
-	nfsVolProjectConfig  = "workspace-config"
 	nfsVolGitAdminPrefix = "workspace-git-"
 	nfsVolGitOwnWorktree = "workspace-git-own-worktree"
 )
