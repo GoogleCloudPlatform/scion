@@ -66,7 +66,7 @@ func TestLegacyAdoptedSecretUseFallback_Predicate(t *testing.T) {
 	record := func(edge *store.DelegationEdge, mutate func(*store.DelegationAdoption)) {
 		rec := &store.DelegationAdoption{
 			CohortID: "laf-cohort", Origin: store.DelegationAdoptionOriginBoot, PolicyVersion: int(permissions.CompatibilityPolicyV1),
-			AdoptedEdgeID: edge.ID, DelegateID: agent.ID, Status: store.DelegationAdoptionAdopted,
+			OriginalEdgeID: uuid.NewString(), AdoptedEdgeID: edge.ID, DelegateID: agent.ID, Status: store.DelegationAdoptionAdopted,
 		}
 		if mutate != nil {
 			mutate(rec)
@@ -182,12 +182,20 @@ func TestLegacyAdoptedSecretUseFallback_Predicate(t *testing.T) {
 		}, false},
 		{"reverted record", func() (*store.DelegationEdge, int) {
 			e := cohortEdge(AgentRoleBaseline)
-			record(e, func(r *store.DelegationAdoption) { r.Status = store.DelegationAdoptionReverted })
+			record(e, func(r *store.DelegationAdoption) {
+				now := time.Now()
+				r.Status = store.DelegationAdoptionReverted
+				r.RevertedByKind, r.RevertedByID, r.RevertedAt = "user", uuid.NewString(), &now
+			})
 			return e, 0
 		}, false},
-		{"excluded record", func() (*store.DelegationEdge, int) {
+		{"only an excluded record for the agent (names no adopted edge)", func() (*store.DelegationEdge, int) {
 			e := cohortEdge(AgentRoleBaseline)
-			record(e, func(r *store.DelegationAdoption) { r.Status = store.DelegationAdoptionExcluded })
+			record(e, func(r *store.DelegationAdoption) {
+				r.Status = store.DelegationAdoptionExcluded
+				r.Reason = "role_none"
+				r.AdoptedEdgeID = ""
+			})
 			return e, 0
 		}, false},
 		{"record for another agent", func() (*store.DelegationEdge, int) {
