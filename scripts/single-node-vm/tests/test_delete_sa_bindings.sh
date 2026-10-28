@@ -43,17 +43,20 @@ EOF
 # `phase2-complete` sentinel shows Phase 2 (SA and role grants included)
 # has run, then stops it. Sets DEPLOY_RC and DEPLOY_LOG.
 run_sa_bindings_create() {
-  local config_file log_file sentinel pid waited_ms=0
+  local config_file log_file sentinel pid waited_ms=0 monitor_was_on=false
   config_file="$(mktemp)"
   log_file="$(mktemp)"
   printf '%s' "$1" > "$config_file"
   sentinel="${GCLOUD_STUB_STATE_DIR}/phase2-complete"
   rm -f "$sentinel"
+  # Job control only for this one launch (its own process group, so the
+  # whole group can be stopped below); restore the caller's setting.
+  [[ "$-" == *m* ]] && monitor_was_on=true
   set -m
   bash "$DEPLOY_SH" --config "$config_file" --version v1.0.0-test \
     < /dev/null > "$log_file" 2>&1 &
   pid=$!
-  set +m
+  if [[ "$monitor_was_on" == "false" ]]; then set +m; fi
   while [[ ! -f "$sentinel" && "$waited_ms" -lt 30000 ]]; do
     kill -0 "$pid" 2>/dev/null || break
     sleep 0.1

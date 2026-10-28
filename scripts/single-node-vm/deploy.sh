@@ -514,10 +514,10 @@ HUB_SA_MINTING_ROLE="roles/iam.serviceAccountAdmin"
 # plural "Policy bindings with the specified principal and role not
 # found!". Older SDKs say "member" where newer ones say "principal".
 _project_binding_absent() {
-  if echo "$1" | grep -qiE 'permission|forbidden'; then
+  if printf '%s\n' "$1" | grep -qiE 'permission|forbidden'; then
     return 1
   fi
-  echo "$1" | grep -qiE 'Policy bindings? with the specified (principal|member).* not found'
+  printf '%s\n' "$1" | grep -qiE 'Policy bindings? with the specified (principal|member).* not found'
 }
 
 # remove_hub_sa_project_bindings PROJECT_ID SA_EMAIL ROLE...
