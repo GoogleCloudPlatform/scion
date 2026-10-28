@@ -337,7 +337,7 @@ func testMessageStarLifecycleContract(t *testing.T, env starStoreEnv) {
 		assert.Equal(t, StarCleanupPosition{}, res.Next, "fewer rows than the limit: the scan wrapped")
 	})
 
-	t.Run("reconciliation sweeps until nothing is left, also overlapping another replica", func(t *testing.T) {
+	t.Run("reconciliation sweeps until nothing is left, between another replica's batches", func(t *testing.T) {
 		owner := uuid.NewString()
 		env.addUser(t, owner)
 		topic := uuid.NewString()
@@ -354,7 +354,9 @@ func testMessageStarLifecycleContract(t *testing.T, env starStoreEnv) {
 		}
 		lim := messageStarReconcileLimits{Batch: 2, BatchTimeout: 10 * time.Second, MaxSweeps: 3}
 
-		// Another replica has run one batch of its own pass when this run starts.
+		// Another replica has run one batch of its own pass when this run
+		// starts, and finishes its pass after the run (one after another, not
+		// concurrently).
 		other, err := st.PurgeMessageStarCandidates(ctx, StarCleanupPosition{}, 1)
 		require.NoError(t, err)
 
