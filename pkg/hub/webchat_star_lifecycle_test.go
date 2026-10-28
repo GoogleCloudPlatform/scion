@@ -336,6 +336,69 @@ func testMessageStarLifecycleContract(t *testing.T, env starStoreEnv) {
 		assert.Zero(t, res.Repaired)
 		assert.Equal(t, StarCleanupPosition{}, res.Next, "fewer rows than the limit: the scan wrapped")
 	})
+
+	t.Run("reconciliation sweeps until nothing is left, between another replica's batches", func(t *testing.T) {
+		owner := uuid.NewString()
+		env.addUser(t, owner)
+		topic := uuid.NewString()
+		env.addTopic(t, topic)
+		at := time.Now().UTC().Add(-time.Minute).Truncate(starTimePrecision)
+		moved, kept := uuid.NewString(), uuid.NewString()
+		env.addMsg(t, moved, "web", topic, "", base)
+		env.addMsg(t, kept, "web", topic, "", base)
+		env.insertStar(t, owner, moved, "dm:agent:"+uuid.NewString()+":user:"+owner, "", at)
+		env.insertStar(t, owner, kept, topic, env.projectID, at)
+		gone := []string{uuid.NewString(), uuid.NewString(), uuid.NewString()}
+		for _, m := range gone {
+			env.insertStar(t, owner, m, topic, env.projectID, at) // message missing
+		}
+		lim := messageStarReconcileLimits{Batch: 2, BatchTimeout: 10 * time.Second, MaxSweeps: 3}
+
+		// Another replica has run one batch of its own pass when this run
+		// starts, and finishes its pass after the run (one after another, not
+		// concurrently).
+		other, err := st.PurgeMessageStarCandidates(ctx, StarCleanupPosition{}, 1)
+		require.NoError(t, err)
+
+		var sweeps []messageStarSweep
+		report, err := reconcileMessageStars(ctx, st, lim, func(n int, sw messageStarSweep) {
+			assert.Equal(t, len(sweeps)+1, n)
+			sweeps = append(sweeps, sw)
+		})
+		require.NoError(t, err)
+		assert.True(t, report.Exhausted)
+		require.Len(t, sweeps, report.Sweeps)
+		assert.Equal(t, 2, report.Sweeps, "a sweep fixes everything it examines; the second finds nothing")
+		assert.False(t, sweeps[len(sweeps)-1].changed())
+		assert.GreaterOrEqual(t, report.Repaired+other.Repaired, int64(1))
+		assert.GreaterOrEqual(t, report.Purged+other.Purged, int64(len(gone)))
+		assert.GreaterOrEqual(t, sweeps[0].Examined, 2, "the kept and the repaired star")
+
+		// The other replica finishes its pass afterwards: nothing is left for it.
+		pos := other.Next
+		for i := 0; pos != (StarCleanupPosition{}); i++ {
+			require.Less(t, i, 1000)
+			res, err := st.PurgeMessageStarCandidates(ctx, pos, 1)
+			require.NoError(t, err)
+			assert.Zero(t, res.Repaired+res.Purged, "nothing left after the run")
+			pos = res.Next
+		}
+
+		got := get(owner, moved)
+		require.NotNil(t, got)
+		assert.Equal(t, topic, got.ConversationKey)
+		assert.Equal(t, env.projectID, got.ProjectID)
+		assert.True(t, got.StarredAt.Equal(at), "save time kept")
+		require.NotNil(t, get(owner, kept))
+		for _, m := range gone {
+			assert.Nil(t, get(owner, m))
+		}
+
+		// A second run changes nothing and stops after one sweep.
+		again, err := reconcileMessageStars(ctx, st, lim, nil)
+		require.NoError(t, err)
+		assert.Equal(t, messageStarReconcileReport{Sweeps: 1, Examined: again.Examined, Exhausted: true}, again)
+	})
 }
 
 // TestMessageStarStore_SQLite_SingleConnection runs deletion and
