@@ -650,6 +650,40 @@ func TestEntrypointVolumeRootProbe(t *testing.T) {
 	if !strings.Contains(res.stderr, want) {
 		t.Errorf("stderr lacks %q (no chmod needed):\n%s", want, res.stderr)
 	}
+
+	// The production-likely case: a root-owned, world-writable volume root. This uid
+	// cannot chmod it, so the entrypoint only logs it and leaves the mode alone. A
+	// stub stat reports "0 777" for the owner/mode query on the volume root only (the
+	// job guard's own stat calls, on other paths, see the real stat).
+	h3 := newSuccessHarness(t)
+	if err := os.Chmod(h3.vol, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realStat, err := exec.LookPath("stat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h3.stubCommand("stat", fmt.Sprintf(`#!/usr/bin/env bash
+if [[ ${!#} == %q && " $* " == *" %%u %%a "* ]]; then
+  echo "0 777"
+  exit 0
+fi
+exec %q "$@"
+`, h3.vol, realStat))
+	res = h3.run()
+	if res.exitCode != 0 {
+		t.Fatalf("root-owned 777 root: exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
+	}
+	want = fmt.Sprintf("volume root %s: owner uid 0, mode 777\n", h3.vol)
+	if !strings.Contains(res.stderr, want) {
+		t.Errorf("stderr lacks %q:\n%s", want, res.stderr)
+	}
+	if strings.Contains(res.stderr, "set to 0755") || strings.Contains(res.stderr, "chmod 0755 failed") {
+		t.Errorf("the entrypoint tried to change a root-owned volume root:\n%s", res.stderr)
+	}
+	if fi, err := os.Stat(h3.vol); err != nil || fi.Mode().Perm() != 0o755 {
+		t.Errorf("volume root mode = %v (%v), want it left as found (0755 here)", modeOf(fi), err)
+	}
 }
 
 func TestEntrypointTmpfsScratchWarns(t *testing.T) {
