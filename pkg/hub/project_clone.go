@@ -432,6 +432,10 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 			slog.Warn("project clone: failed to initialize hub-managed workspace",
 				"clone_id", clone.ID, "error", err)
 		}
+	} else {
+		// Per-agent git clone: seed only the project identity files on a
+		// shared backend (best-effort), as createProject does.
+		s.ensureSharedProjectIdentityBestEffort(clone)
 	}
 
 	// ── Step 15: Auto-link providers (best-effort) ───────────────────────

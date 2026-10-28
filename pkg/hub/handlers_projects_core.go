@@ -633,6 +633,11 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 			s.projectsLogger().Warn("failed to initialize project workspace",
 				"project_id", project.ID, "slug", project.Slug, "error", err)
 		}
+	} else {
+		// Per-agent git project (clone-per-agent, worktree-per-agent): no
+		// workspace is prepared at create, but on a shared backend brokers
+		// still require <ProjectRoot>/.scion/{project-id,project-slug}.
+		s.ensureSharedProjectIdentityBestEffort(project)
 	}
 
 	// Auto-link brokers that have auto_provide enabled (mirrors registerProject behavior).
@@ -1139,6 +1144,27 @@ func (s *Server) seedSharedProjectIdentity(project *store.Project, scionDir stri
 		return fmt.Errorf("project configuration: %w", errWorkspaceStorageUnavailable)
 	}
 	return nil
+}
+
+// ensureSharedProjectIdentityBestEffort writes the project-id and
+// project-slug files for a project whose create seeds no project
+// configuration otherwise: a git project that is not a shared workspace
+// (clone-per-agent or worktree-per-agent). A no-op on the local backend.
+// Hub-native and shared-workspace projects are seeded by initHubManagedProject
+// and cloneSharedWorkspaceProject (seedSharedProjectIdentity) and do not call
+// this, so each project shape has exactly one seeding call site at create.
+// Best-effort: a failure is logged and the create goes on (the hub-start
+// pass ensureProjectConfigIdentities retries it); a project-id naming
+// another project is left unchanged and reported by
+// ensureProjectConfigIdentity, as for the other shapes.
+func (s *Server) ensureSharedProjectIdentityBestEffort(project *store.Project) {
+	if !s.workspaceBackendShared() {
+		return
+	}
+	if _, err := s.ensureProjectConfigIdentity(project); err != nil {
+		s.projectsLogger().Warn("failed to write the project identity files on shared workspace storage",
+			"project_id", project.ID, "error", err)
+	}
 }
 
 // ensureProjectConfigDir creates the hub-managed project's configuration
