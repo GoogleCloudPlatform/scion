@@ -511,6 +511,12 @@ func (a *AuthzService) hubDeliveryChainWalk(ctx context.Context, startAgentID, s
 // there it records the hop's cohort in legacy and goes on instead of
 // denying; every other check is unchanged.
 func (a *AuthzService) hubDeliveryWalk(ctx context.Context, startAgentID, scopeProjectID, permissionID string, explain *[]DecisionStep, legacy *hubDeliveryLegacyNote) (bool, string, DenyCause) {
+	// The tolerant walk applies only to the delivery permissions
+	// (legacyFallbackPermission); for any other permission it is the strict
+	// walk, whatever the caller passed.
+	if legacy != nil && !legacyFallbackPermission(permissionID) {
+		legacy = nil
+	}
 	addStep := func(step, detail string) {
 		if explain != nil {
 			*explain = append(*explain, DecisionStep{Step: step, Detail: detail})

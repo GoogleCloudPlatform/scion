@@ -699,4 +699,20 @@ func TestLegacyDeliveryFallback_OnlyDeliverPermissions(t *testing.T) {
 		assert.False(t, o.ok, "%s: %s", p, o.reason)
 		assert.Empty(t, o.legacyCohort, p)
 	}
+
+	// The walk itself: with a legacy note, a non-deliver permission gets
+	// the strict result and no cohort is noted.
+	strictOK, strictReason, strictCause := f.authz.hubDeliveryChainWalk(ctx, id, f.projectAlpha.ID, "secret.use", nil)
+	var note hubDeliveryLegacyNote
+	walkOK, walkReason, walkCause := f.authz.hubDeliveryWalk(ctx, id, f.projectAlpha.ID, "secret.use", nil, &note)
+	assert.False(t, walkOK)
+	assert.Equal(t, strictOK, walkOK)
+	assert.Equal(t, strictReason, walkReason)
+	assert.Equal(t, strictCause, walkCause)
+	assert.Equal(t, DenyCauseCeilingProvenanceMissing, walkCause)
+	assert.Empty(t, note.cohort, "no legacy hop is noted for a non-deliver permission")
+	var deliverNote hubDeliveryLegacyNote
+	deliverOK, _, _ := f.authz.hubDeliveryWalk(ctx, id, f.projectAlpha.ID, "secret.deliver", nil, &deliverNote)
+	assert.True(t, deliverOK, "control: the tolerant walk serves a deliver permission")
+	assert.Equal(t, legacyDeliveryCohortNoEdge, deliverNote.cohort)
 }
