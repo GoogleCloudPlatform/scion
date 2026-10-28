@@ -606,6 +606,7 @@ BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS := TestMoveBrokerQuota_SourceAtCapTar
 USER_DELETION_POSTGRES_TESTS := TestForceDeleteUser_RestoreRacesRequest_Postgres \
 	TestForceDeleteUser_RestoreRacesCompletion_Postgres \
 	TestForceDeleteUser_TwoReconcilersOneCompletion_Postgres
+USER_DELETION_POSTGRES_TESTS += TestForceDeleteUser_FinalizeRacesCompletionReopen_Postgres
 
 # HUB_INTEGRATION_POSTGRES_TESTS are the pkg/hub Postgres tests that need
 # -tags integration (the integration TestMain sets up the ent test
