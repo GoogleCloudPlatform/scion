@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 359
+**Operations:** 360
 
 ## Table of Contents
 
@@ -217,6 +217,7 @@
 - [user.admin.promote](#useradminpromote) — Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present)
 - [user.admin.delete](#useradmindelete) — Delete a user account
 - [user.admin.deleteblockers](#useradmindeleteblockers) — List what blocks deleting a user (agents and active delegations), without deleting
+- [user.admin.deletion](#useradmindeletion) — Read the forced deletion of a user: its state and the outcome of each of the user's agents
 - [group.read](#groupread) — Read group details
 - [group.list](#grouplist) — List groups. Each row is shown only when the caller may read it (group.read); a user access token needs group:read on a hub boundary, and a group with no project resolves to the hub
 - [group.create](#groupcreate) — Create a new group. A user access token needs group:create on a hub boundary; the target is the hub's group collection. Creating under a parent group runs the member-add delegation check on the parent
@@ -8259,12 +8260,13 @@
 - **Before Fields:** target_user_id, email, role, status
 - **Atomic:** Yes
 
-**Denial Codes:** `forbidden`, `last_owner`, `user_delete_blocked`, `conflict`
+**Denial Codes:** `forbidden`, `last_owner`, `user_delete_blocked`, `conflict`, `user_delete_force_forbidden`, `user_delete_blockers_changed`, `user_deletion_in_progress`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestDeleteUser_GuardOrder`
+- `pkg/hub:TestForceDeleteUser_ForbiddenWritesNothing`
 
 ---
 
@@ -8299,6 +8301,39 @@
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestUserDeleteBlockers_RequiresUserDelete`
 - `pkg/hub:TestSessionOnlyGate_ReasonIsReported`
+
+---
+
+## user.admin.deletion
+
+**Domain:** user.admin
+
+**Description:** Read the forced deletion of a user: its state and the outcome of each of the user's agents
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users/{id}/deletion` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `user.delete`
+
+**Resource Resolver:** user-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserDeletion_RequiresUserDelete`
 
 ---
 

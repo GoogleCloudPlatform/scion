@@ -127,6 +127,7 @@ type CompositeStore struct {
 	*UserTerminalWorkspaceStore
 	*HubInstanceStore
 	*TestIdentityDelegationStore
+	*UserDeletionStore
 
 	client *ent.Client
 	inTx   bool // true when this CompositeStore wraps a transaction
@@ -317,6 +318,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		UserTerminalWorkspaceStore:  NewUserTerminalWorkspaceStore(client),
 		HubInstanceStore:            NewHubInstanceStore(client),
 		TestIdentityDelegationStore: NewTestIdentityDelegationStore(client),
+		UserDeletionStore:           NewUserDeletionStore(client),
 		client:                      client,
 	}
 }
