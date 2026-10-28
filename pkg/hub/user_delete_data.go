@@ -409,6 +409,11 @@ var errAgentOwnerUserMissing = errors.New("the user or agent this agent belongs 
 // completes, after which errAgentOwnerUserMissing applies.
 var errAgentOwnerUserDeleting = errors.New("the user this agent belongs to is being deleted")
 
+// errAgentGuardUserLookup wraps a store error reading the locked guard
+// user's row (its status). Agent create and restore answer 503: the guard
+// could not be verified, and nothing was written.
+var errAgentGuardUserLookup = errors.New("could not read the user this agent belongs to")
+
 // lockUserPrincipalTx takes a shared lock on the row of principalID when it
 // names a user, and reports whether it did (ptone/scion#2769). It returns
 // errAgentOwnerUserDeleting when that user's status is deleting. It runs
@@ -440,7 +445,7 @@ func lockUserPrincipalTx(ctx context.Context, tx store.Store, principalID string
 		// here, or waits for this transaction (ptone/scion#2143).
 		u, gerr := tx.GetUser(ctx, principalID)
 		if gerr != nil {
-			return false, gerr
+			return false, fmt.Errorf("%w: %w", errAgentGuardUserLookup, gerr)
 		}
 		if u.Status == store.UserStatusDeleting {
 			return true, errAgentOwnerUserDeleting

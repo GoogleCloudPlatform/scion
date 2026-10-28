@@ -1529,10 +1529,11 @@ type userDeletionRef struct {
 
 // userDeleteBlockersResponse is the body of GET
 // /api/v1/users/{id}/delete-blockers: the blockers, and the forced
-// deletion in progress, or null.
+// deletion in progress (omitted when there is none, so the body is
+// unchanged for a user with no deletion).
 type userDeleteBlockersResponse struct {
 	userDeleteBlockers
-	InProgress *userDeletionRef `json:"inProgress"`
+	InProgress *userDeletionRef `json:"inProgress,omitempty"`
 }
 
 // deleteUserRowCascadeTx deletes the user row of userID and what hangs off

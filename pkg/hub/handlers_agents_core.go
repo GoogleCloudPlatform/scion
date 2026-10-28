@@ -2394,6 +2394,11 @@ func (s *Server) createAgentInProject(
 				"cannot create the agent: the user it belongs to is being deleted", nil)
 			return
 		}
+		if errors.Is(err, errAgentGuardUserLookup) {
+			slog.ErrorContext(ctx, "agent create: guard user lookup failed", "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Could not verify the agent's owner; retry", nil)
+			return
+		}
 		if errors.Is(err, errAgentCreateWriteInvalid) {
 			slog.ErrorContext(ctx, "agent create: incomplete create write", "error", err)
 			InternalError(w)

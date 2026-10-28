@@ -214,6 +214,12 @@ func (s *Server) reconcileUserDeletion(ctx context.Context, id string, retryNow 
 			lastErr = "complete: " + err.Error()
 		case completed:
 			return
+		default:
+			// The completion found agents blocking again and recorded them
+			// pending (or another process completed it): reconcile again
+			// once this pass releases the deletion's lock, so they are
+			// claimed without waiting for the next tick.
+			s.kickUserDeletion(d.ID, false)
 		}
 	}
 	s.touchUserDeletion(ctx, d, lastErr)
@@ -344,20 +350,47 @@ func (s *Server) claimUserDeletionAgent(ctx context.Context, d *store.UserDeleti
 	return nil
 }
 
+// recordUserDeletionAgentStoppedTx runs inside the delete engine's
+// finalize transaction (agentFinalizeHook), after the soft or hard delete
+// work. When the delete was not a force delete, the engine got here only
+// after the runtime teardown succeeded, so every stopping deletion that
+// lists the agent records it as stopped, in the same transaction that
+// soft-deletes or removes the row: no reconcile can see the row gone
+// without this record. A force delete skips broker failures, so it is not
+// recorded; its row is gone without confirmation, which the reconcile
+// reports as removed. A stored request that cannot be read is treated as
+// a force delete (not confirmed).
+func recordUserDeletionAgentStoppedTx(ctx context.Context, tx store.Store, a *store.Agent) error {
+	req, ok := storedDeletionRequest(a)
+	if !ok || req.Force {
+		return nil
+	}
+	recs, err := tx.ListUserDeletionAgentsForAgent(ctx, a.ID)
+	if err != nil {
+		return fmt.Errorf("user deletion: list records of agent %s: %w", a.ID, err)
+	}
+	for i := range recs {
+		rec := recs[i]
+		rec.Outcome = store.UserDeletionOutcomeStopped
+		rec.LastError = ""
+		rec.UpdatedAt = time.Now()
+		if err := tx.UpsertUserDeletionAgent(ctx, &rec); err != nil {
+			return fmt.Errorf("user deletion: record agent %s stopped: %w", a.ID, err)
+		}
+	}
+	return nil
+}
+
 // noteUserDeletionAgentFinished is called by the delete engine when a run
-// ends with a deleted or failed outcome. For every stopping deletion that
-// lists the agent, a deleted outcome of a non-force run is recorded as
-// stopped (the engine confirmed the runtime teardown, whether it then
-// soft-deleted or removed the row), and the deletion is reconciled. A
-// force run is not recorded: its row is gone without confirmation, which
-// the reconcile reports as removed. It returns at once; the work runs in
-// the background.
+// ends with a deleted or failed outcome. Every stopping deletion that lists
+// the agent is reconciled (the outcome itself is recorded in the finalize
+// transaction, recordUserDeletionAgentStoppedTx, or read from the agent
+// row). It returns at once; the work runs in the background.
 func (s *Server) noteUserDeletionAgentFinished(plan *agentDeletionPlan, out deletionOutcome) {
 	if out.kind != deletionOutcomeDeleted && out.kind != deletionOutcomeFailed {
 		return
 	}
 	agentID := plan.snapshot.ID
-	confirmed := out.kind == deletionOutcomeDeleted && !plan.req.Force
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), userDeletionReconcileTimeout)
 		defer cancel()
@@ -367,22 +400,7 @@ func (s *Server) noteUserDeletionAgentFinished(plan *agentDeletionPlan, out dele
 			return
 		}
 		for i := range recs {
-			rec := recs[i]
-			if confirmed {
-				func() {
-					mu := s.userDeletionLock(rec.DeletionID)
-					mu.Lock()
-					defer mu.Unlock()
-					rec.Outcome = store.UserDeletionOutcomeStopped
-					rec.LastError = ""
-					rec.UpdatedAt = time.Now()
-					if err := s.store.UpsertUserDeletionAgent(ctx, &rec); err != nil {
-						slog.WarnContext(ctx, "user deletion: record stopped agent failed",
-							"deletion_id", rec.DeletionID, "agent_id", agentID, "error", err)
-					}
-				}()
-			}
-			s.reconcileUserDeletion(ctx, rec.DeletionID, false)
+			s.reconcileUserDeletion(ctx, recs[i].DeletionID, false)
 		}
 	}()
 }
