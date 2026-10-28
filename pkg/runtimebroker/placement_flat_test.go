@@ -362,9 +362,10 @@ func TestFlatProfileStillUnsupported(t *testing.T) {
 }
 
 // writeStoredAgentConfig writes the stored config of test-agent-1 in the
-// fixture's project, and records that project on the agent's container, as
-// a running agent's labels do, so a start or restart that names no project
-// recovers it from there.
+// fixture's project, and records that project (path and project ID) on the
+// agent's container, as a running agent's labels do, so a start or restart
+// that names no project matches the container in the request's project and
+// recovers the path from there.
 func writeStoredAgentConfig(t *testing.T, f *flatInstanceFixture, content string) string {
 	t.Helper()
 	projectDir, err := config.GetResolvedProjectDir("")
@@ -377,6 +378,7 @@ func writeStoredAgentConfig(t *testing.T, f *flatInstanceFixture, content string
 	for i := range f.mgr.agents {
 		if f.mgr.agents[i].Name == "test-agent-1" {
 			f.mgr.agents[i].ProjectPath = projectDir
+			f.mgr.agents[i].ProjectID = flatTestProjectID
 		}
 	}
 	f.mgr.mu.Unlock()

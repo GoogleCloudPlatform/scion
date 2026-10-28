@@ -172,6 +172,16 @@ func (p *policyInstance) startWith(name string, edit func(*api.StartOptions)) er
 			return
 		}
 		opts := sc.Opts
+		// A flat instance's starts carry its resolved placement, as the
+		// create handler resolves it before Manager.Start.
+		if p.srv.isFlat() {
+			rp, err := p.srv.placementForStart(r.Context(), sc.Resolution, opts.ProjectPath)
+			if err != nil {
+				startErr = err
+				return
+			}
+			opts.ResolvedPlacement, opts.PlacementResolved = rp, true
+		}
 		opts.BrokerMode, opts.NoAuth = true, true
 		opts.SharedDirs = []api.SharedDir{{Name: "scratch"}}
 		if edit != nil {
