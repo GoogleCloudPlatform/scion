@@ -796,7 +796,6 @@ If the export is not mounted on the Runtime Broker, or the Runtime Broker is not
 Also refused in inline mode, with a message that says what to change:
 
 - agents with NFS homes (`project_storage.homes: nfs`). Set `pv_name` to use them.
-- a workspace whose `.scion` entry is a file rather than a directory, because an `nfs` volume cannot mount a single file. Set `pv_name`, or make `.scion` a directory.
 - shared directories on the deprecated split `shared_dir_storage` export, which still need that share's `pv_name`.
 
 `mount_root/<share id>` must be the mounted export itself, not a parent of the mount point or an ordinary directory. The Runtime Broker treats it as the export once it exists: if the export is not actually mounted there, the directories are created on the Runtime Broker host's local disk, and the Pod still depends on the kubelet creating them on the export.

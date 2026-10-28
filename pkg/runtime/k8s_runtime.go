@@ -5087,16 +5087,10 @@ func k8sProjectConfigVolumeMount(config RunConfig, vols *nfsPodVolumes) (corev1.
 	if _, err := os.Stat(config.Workspace); err != nil {
 		return corev1.VolumeMount{}, false, fmt.Errorf("cannot check the shared workspace for project configuration to mount read-only: %w", err)
 	}
-	// An inline NFS volume mounts a directory only: a .scion marker file
-	// cannot be mounted that way, so it is refused rather than left
-	// writable.
-	inline := workspaceNFSShare(config).Inline()
-	if _, _, ok, err := workspaceProjectConfigMount(config.Workspace, "/workspace", !inline); err != nil || !ok {
-		if inline && errors.Is(err, errProjectConfigMarkerNoBind) {
-			return corev1.VolumeMount{}, false, fmt.Errorf("the workspace's .scion (%s) is a file, which an inline NFS volume cannot mount read-only: "+
-				"set nfs.shares[0].pv_name to mount the share through an operator PersistentVolume, or make .scion a directory",
-				filepath.Join(config.Workspace, projectfs.ProjectConfigEntryName))
-		}
+	// A .scion marker file is mounted read-only like a directory, with a
+	// claim and inline alike: inline, the entry is a subPath mount of the
+	// workspace volume (below), which can mount a single file.
+	if _, _, ok, err := workspaceProjectConfigMount(config.Workspace, "/workspace", true); err != nil || !ok {
 		return corev1.VolumeMount{}, false, err
 	}
 	// The entry is realized through the layout authority as a pod mount of
