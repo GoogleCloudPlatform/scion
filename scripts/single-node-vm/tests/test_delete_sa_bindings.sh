@@ -309,3 +309,37 @@ test_delete_sa_bindings_skip_conditional_and_dedupe() {
   assert_not_contains "$removes" "roles/cloudtrace.agent" "a conditional tombstone must get no remove call"
   assert_not_contains "$DEPLOY_LOG" "Could not remove" "nothing may be reported as failed"
 }
+
+# _project_binding_absent, called directly: true only for gcloud's
+# IamPolicyBindingNotFound texts (singular and plural, with and without
+# the condition, "principal" and older SDKs' "member"), false for any
+# other error, including a permission error that also says "not found".
+test_delete_sa_bindings_project_binding_absent_table() {
+  eval "$(sed -n '/^_project_binding_absent() {/,/^}/p' "$DEPLOY_SH")"
+  local prefix="ERROR: (gcloud.projects.remove-iam-policy-binding) " text
+  local -a absent=(
+    "Policy binding with the specified principal, role, and condition not found!"
+    "Policy binding with the specified principal and role not found!"
+    "Policy bindings with the specified principal and role not found!"
+    "Policy binding with the specified member, role, and condition not found!"
+    "Policy binding with the specified member and role not found!"
+    "Policy bindings with the specified member and role not found!"
+  )
+  local -a not_absent=(
+    "PERMISSION_DENIED: Policy update access denied."
+    "PERMISSION_DENIED: permission resourcemanager.projects.setIamPolicy not found on project"
+    "Policy binding with the specified principal and role not found! (permission denied)"
+    "NOT_FOUND: Requested entity was not found."
+    "INVALID_ARGUMENT: Invalid service account email."
+    "ABORTED: There were concurrent policy changes. Please retry the whole read-modify-write with exponential backoff."
+    ""
+  )
+  for text in "${absent[@]}"; do
+    assert_true "$(_project_binding_absent "${prefix}${text}" && echo true)" \
+      "must count as an absent binding: ${text}"
+  done
+  for text in "${not_absent[@]}"; do
+    assert_false "$(_project_binding_absent "${prefix}${text}" && echo true)" \
+      "must not count as an absent binding: '${text}'"
+  done
+}

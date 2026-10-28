@@ -512,12 +512,12 @@ HUB_SA_MINTING_ROLE="roles/iam.serviceAccountAdmin"
 # specified principal, role, and condition not found!" (what
 # --condition=None gets), "... principal and role not found!", or the
 # plural "Policy bindings with the specified principal and role not
-# found!".
+# found!". Older SDKs say "member" where newer ones say "principal".
 _project_binding_absent() {
   if echo "$1" | grep -qiE 'permission|forbidden'; then
     return 1
   fi
-  echo "$1" | grep -qiE 'Policy bindings? with the specified principal.* not found'
+  echo "$1" | grep -qiE 'Policy bindings? with the specified (principal|member).* not found'
 }
 
 # remove_hub_sa_project_bindings PROJECT_ID SA_EMAIL ROLE...
@@ -554,7 +554,8 @@ remove_hub_sa_project_bindings() {
       --format="value(bindings.role,bindings.members,bindings.condition.title,bindings.condition.expression)" 2>"${policy_err_file}")"; then
     # Tab is IFS whitespace, so empty condition fields collapse: an
     # unconditional row leaves cond_title and cond_expr both empty, and any
-    # condition at all leaves at least one of them set.
+    # condition at all leaves at least one of them set. --flatten makes
+    # each row a single member, so member is compared whole.
     while IFS=$'\t' read -r role member cond_title cond_expr; do
       [[ -z "$role" || -z "$member" ]] && continue
       [[ -n "$cond_title" || -n "$cond_expr" ]] && continue
