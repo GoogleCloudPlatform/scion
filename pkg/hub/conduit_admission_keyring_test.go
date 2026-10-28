@@ -203,7 +203,7 @@ func (p *admPair) refresh(t *testing.T, f *relayOpsFixture, sessionID, token str
 func (p *admPair) refreshWith(t *testing.T, f *relayOpsFixture, sessionID, token, cred string) (string, error) {
 	t.Helper()
 	var out relay.HubRefreshResponse
-	err = f.hub.Call(context.Background(), relay.HubSessionPath(sessionID, "refresh"),
+	err := f.hub.Call(context.Background(), relay.HubSessionPath(sessionID, "refresh"),
 		relay.HubRefreshRequest{AdmissionToken: token, Credential: []byte(cred)}, &out)
 	return out.AdmissionToken, err
 }
