@@ -76,8 +76,8 @@ func probeAttachmentUploads(ctx context.Context, client hubclient.Client) (uploa
 		}
 		return nil, nil, "", fmt.Errorf("attachments: could not ask the hub where uploads go: %w", err)
 	}
-	if probe == nil {
-		return nil, nil, "the hub gave no upload answer", nil
+	if probe == nil || probe.Uploads == "" {
+		return nil, nil, "the hub did not offer uploads", nil
 	}
 	if probe.Uploads != hubclient.AttachmentUploadsArtifact {
 		return nil, nil, fmt.Sprintf("the hub answered %q", probe.Uploads), nil
@@ -239,23 +239,36 @@ func attachmentIDsForSend(ctx context.Context) ([]string, error) {
 // resolveAttachMode decides how the --attach files of a send travel: it
 // asks the hub's probe first (prepareAttachmentUpload); with "artifact" it
 // returns the upload and no staged paths, otherwise it runs today's path
-// validation and returns the paths to stage, unchanged, after one stderr
-// line saying why the files are staged (ptone/scion#6549).
-func resolveAttachMode(client hubclient.Client, paths []string, toAgent bool) (*attachmentUpload, []string, error) {
+// validation and returns the paths to stage, unchanged, and the reason they
+// are staged (for stageAttachmentsWithWarning).
+func resolveAttachMode(client hubclient.Client, paths []string, toAgent bool) (*attachmentUpload, []string, string, error) {
 	upload, fallback, err := prepareAttachmentUpload(client, paths, toAgent)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	if upload != nil {
-		return upload, nil, nil
+		return upload, nil, "", nil
 	}
 	if err := validateStagedAttachmentPaths(paths); err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
-	if len(paths) > 0 {
-		fmt.Fprintf(os.Stderr, "Warning: attachments are staged on this broker's scratchpad instead of uploaded to the hub (%s); they may not reach the hub or recipients on another broker\n", fallback)
+	return nil, paths, fallback, nil
+}
+
+// stageAttachmentsWithWarning stages the --attach files (stageAttachments)
+// and, once they are staged, prints one stderr line saying why they were
+// staged instead of uploaded (ptone/scion#6549). Nothing is printed for no
+// files or when staging fails.
+func stageAttachmentsWithWarning(paths []string, fallback string) ([]string, error) {
+	if len(paths) == 0 {
+		return paths, nil
 	}
-	return nil, paths, nil
+	staged, err := stageAttachments(paths)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Fprintf(os.Stderr, "Warning: attachments are staged on the local scratchpad instead of uploaded to the hub (%s); they may not reach the hub or recipients on another broker\n", fallback)
+	return staged, nil
 }
 
 // validateStagedAttachmentPaths is today's validation of --attach paths for

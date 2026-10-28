@@ -380,13 +380,13 @@ func TestResolveAttachMode(t *testing.T) {
 			h, srv := newAttachHub(t, tc.uploads)
 			h.probeStatus = tc.status
 			c := attachHubClient(t, srv)
-			_, _, err := resolveAttachMode(c, []string{"/etc/passwd"}, true)
+			_, _, _, err := resolveAttachMode(c, []string{"/etc/passwd"}, true)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "outside allowed roots")
-			_, _, err = resolveAttachMode(c, []string{root}, true)
+			_, _, _, err = resolveAttachMode(c, []string{root}, true)
 			require.Error(t, err)
 			require.Contains(t, err.Error(), "is a directory, not a regular file")
-			upload, staged, err := resolveAttachMode(c, []string{inRoot}, true)
+			upload, staged, _, err := resolveAttachMode(c, []string{inRoot}, true)
 			require.NoError(t, err)
 			require.Nil(t, upload)
 			require.Equal(t, []string{inRoot}, staged, "today's staging gets the paths unchanged")
@@ -395,7 +395,7 @@ func TestResolveAttachMode(t *testing.T) {
 		})
 	}
 	h, srv := newAttachHub(t, "artifact")
-	upload, staged, err := resolveAttachMode(attachHubClient(t, srv), []string{writeAttachFile(t, t.TempDir(), "a.txt", "a")}, true)
+	upload, staged, _, err := resolveAttachMode(attachHubClient(t, srv), []string{writeAttachFile(t, t.TempDir(), "a.txt", "a")}, true)
 	require.NoError(t, err)
 	require.NotNil(t, upload)
 	require.Nil(t, staged, "nothing is staged when the files are uploaded")
@@ -403,63 +403,116 @@ func TestResolveAttachMode(t *testing.T) {
 	require.Zero(t, uploads, "nothing is uploaded before the send")
 }
 
-// TestResolveAttachMode_FallbackWarning: a send whose --attach files fall
-// back to staging prints one stderr line naming the reason; an upload, or a
-// send without --attach files, prints nothing (ptone/scion#6549).
-func TestResolveAttachMode_FallbackWarning(t *testing.T) {
+// noUploadClient is a hub client that cannot upload attachments: embedding
+// the interface hides hubclient.AttachmentUploader.
+type noUploadClient struct{ hubclient.Client }
+
+// TestResolveAttachMode_FallbackReason: when the --attach files fall back
+// to staging, resolveAttachMode names the reason; an upload, a send without
+// --attach files or an invalid path gives none and prints nothing
+// (ptone/scion#6549).
+func TestResolveAttachMode_FallbackReason(t *testing.T) {
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	require.NoError(t, err)
 	origRoots := attachmentRoots
 	attachmentRoots = []string{root}
 	t.Cleanup(func() { attachmentRoots = origRoots })
 	inRoot := writeAttachFile(t, root, "notes.txt", "notes")
-	const tail = "they may not reach the hub or recipients on another broker"
 	for _, tc := range []struct {
-		name   string
-		client func(srv *httptest.Server) hubclient.Client
-		status int
-		want   string
+		name    string
+		uploads string
+		status  int
+		noUp    bool
+		want    string
 	}{
-		{"legacy", nil, 0, `the hub answered "legacy"`},
-		{"status 403", nil, http.StatusForbidden, "the hub refused the upload probe with status 403"},
-		{"status 404", nil, http.StatusNotFound, "the hub refused the upload probe with status 404"},
-		{"status 405", nil, http.StatusMethodNotAllowed, "the hub refused the upload probe with status 405"},
-		{"client cannot upload", func(srv *httptest.Server) hubclient.Client {
-			return plainClient{attachHubClient(t, srv)}
-		}, 0, "this client cannot upload attachments"},
+		{"legacy", "legacy", 0, false, `the hub answered "legacy"`},
+		{"empty answer", "", 0, false, "the hub did not offer uploads"},
+		{"status 403", "artifact", http.StatusForbidden, false, "the hub refused the upload probe with status 403"},
+		{"status 404", "artifact", http.StatusNotFound, false, "the hub refused the upload probe with status 404"},
+		{"status 405", "artifact", http.StatusMethodNotAllowed, false, "the hub refused the upload probe with status 405"},
+		{"client cannot upload", "artifact", 0, true, "this client cannot upload attachments"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h, srv := newAttachHub(t, "legacy")
+			h, srv := newAttachHub(t, tc.uploads)
 			h.probeStatus = tc.status
 			c := attachHubClient(t, srv)
-			if tc.client != nil {
-				c = tc.client(srv)
+			if tc.noUp {
+				c = noUploadClient{c}
 			}
 			var staged []string
+			var fallback string
 			stderr := captureStderr(t, func() {
-				_, staged, err = resolveAttachMode(c, []string{inRoot}, true)
+				var err error
+				_, staged, fallback, err = resolveAttachMode(c, []string{inRoot}, true)
+				require.NoError(t, err)
 			})
-			require.NoError(t, err)
 			require.Equal(t, []string{inRoot}, staged)
-			require.Equal(t, 1, strings.Count(stderr, "\n"), "one line: %q", stderr)
-			require.Contains(t, stderr, "Warning: attachments are staged")
-			require.Contains(t, stderr, tc.want)
-			require.Contains(t, stderr, tail)
+			require.Equal(t, tc.want, fallback)
+			require.Empty(t, stderr, "the warning waits for staging")
 		})
 	}
-	t.Run("artifact prints nothing", func(t *testing.T) {
-		_, srv := newAttachHub(t, "artifact")
+	t.Run("invalid path on a legacy hub", func(t *testing.T) {
+		_, srv := newAttachHub(t, "legacy")
 		stderr := captureStderr(t, func() {
-			upload, _, err := resolveAttachMode(attachHubClient(t, srv), []string{writeAttachFile(t, t.TempDir(), "a.txt", "a")}, true)
-			require.NoError(t, err)
-			require.NotNil(t, upload)
+			_, _, fallback, err := resolveAttachMode(attachHubClient(t, srv), []string{"/etc/passwd"}, true)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "outside allowed roots")
+			require.Empty(t, fallback)
 		})
 		require.Empty(t, stderr)
 	})
-	t.Run("no attach files prints nothing", func(t *testing.T) {
-		_, srv := newAttachHub(t, "legacy")
+	t.Run("artifact", func(t *testing.T) {
+		_, srv := newAttachHub(t, "artifact")
 		stderr := captureStderr(t, func() {
-			_, staged, err := resolveAttachMode(attachHubClient(t, srv), nil, true)
+			upload, _, fallback, err := resolveAttachMode(attachHubClient(t, srv), []string{writeAttachFile(t, t.TempDir(), "a.txt", "a")}, true)
+			require.NoError(t, err)
+			require.NotNil(t, upload)
+			require.Empty(t, fallback)
+		})
+		require.Empty(t, stderr)
+	})
+}
+
+// TestStageAttachmentsWithWarning: one stderr line naming the reason is
+// printed only after the files are staged; a staging failure or no files
+// prints nothing.
+func TestStageAttachmentsWithWarning(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	origRoots := attachmentRoots
+	attachmentRoots = []string{root}
+	t.Cleanup(func() { attachmentRoots = origRoots })
+	t.Setenv("SCION_AGENT_NAME", "sender")
+	file := writeAttachFile(t, root, "notes.txt", "notes")
+	const reason = `the hub answered "legacy"`
+
+	t.Run("staged", func(t *testing.T) {
+		withScratchpadTargets(t, t.TempDir())
+		var staged []string
+		stderr := captureStderr(t, func() {
+			var err error
+			staged, err = stageAttachmentsWithWarning([]string{file}, reason)
+			require.NoError(t, err)
+		})
+		require.Len(t, staged, 1)
+		require.Equal(t, 1, strings.Count(stderr, "\n"), "one line: %q", stderr)
+		require.Contains(t, stderr, "Warning: attachments are staged on the local scratchpad")
+		require.Contains(t, stderr, reason)
+		require.Contains(t, stderr, "they may not reach the hub or recipients on another broker")
+	})
+	t.Run("staging fails", func(t *testing.T) {
+		withScratchpadTargets(t, filepath.Join(t.TempDir(), "missing"))
+		stderr := captureStderr(t, func() {
+			_, err := stageAttachmentsWithWarning([]string{file}, reason)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "scratchpad volume not available")
+		})
+		require.Empty(t, stderr)
+	})
+	t.Run("no files", func(t *testing.T) {
+		withScratchpadTargets(t, filepath.Join(t.TempDir(), "missing"))
+		stderr := captureStderr(t, func() {
+			staged, err := stageAttachmentsWithWarning(nil, reason)
 			require.NoError(t, err)
 			require.Empty(t, staged)
 		})
