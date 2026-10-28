@@ -297,7 +297,7 @@ func TestCheckDoctorNFSMounts(t *testing.T) {
 			wantStatus: "warn", wantMessage: []string{"ws2: not mounted at /mnt/nfs/ws2", "default runtime is kubernetes"}, wantRemedy: "mounts the export into each agent"},
 		{name: "two shares, no pv_name, second not mounted, kubernetes default runtime: warn", vs: withDefaultRuntime(nfsSettings(true, share1, extraShare), "gke", "kubernetes"),
 			probe:      fakeNFSProbe{mounts: map[string]string{"/mnt/nfs/ws1": "10.0.0.2:/scion-workspaces"}},
-			wantStatus: "warn", wantMessage: []string{"ws2: not mounted at /mnt/nfs/ws2", "default runtime is kubernetes"}, wantRemedy: "writable by the broker"},
+			wantStatus: "warn", wantMessage: []string{"ws2: not mounted at /mnt/nfs/ws2", "default runtime is kubernetes"}, wantRemedy: "mounts the export into each agent"},
 		{name: "two shares, no pv_name, neither mounted, kubernetes default runtime: fail on the first", vs: withDefaultRuntime(nfsSettings(true, share1, extraShare), "gke", "kubernetes"),
 			wantStatus: "fail", wantMessage: []string{"ws1: not mounted at /mnt/nfs/ws1 (no pv_name", "ws2: not mounted at /mnt/nfs/ws2 (the default runtime is kubernetes"},
 			wantRemedy: "Mount 10.0.0.2:/scion-workspaces at /mnt/nfs/ws1"},
