@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -1433,4 +1434,40 @@ func TestResolveSharedDirs_NFS_InlineMissingHostBaseRefused(t *testing.T) {
 	assert.Nil(t, realization)
 	_, statErr := os.Stat(missingBase)
 	assert.True(t, os.IsNotExist(statErr), "host base must not be created")
+}
+
+// Inline shared dirs (no pv_name, Kubernetes): a shared dir the broker is
+// not allowed to create refuses the start with the directory and the fix;
+// with a claim it is still left to the node.
+func TestResolveSharedDirs_NFS_InlinePermissionDeniedRefused(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	hostBase := t.TempDir()
+	projectDir := filepath.Join(hostBase, "projects", "pid-1")
+	require.NoError(t, os.MkdirAll(projectDir, 0o755))
+	require.NoError(t, os.Chmod(projectDir, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(projectDir, 0o755) })
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+
+	inlineCfg := nfsSharedDirStorageCfg(filepath.Dir(hostBase))
+	inlineCfg.NFS.Shares[0].ID = filepath.Base(hostBase)
+	inlineCfg.NFS.Shares[0].PVName = ""
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, inlineCfg), false, "/unused", "pid-1", "kubernetes", dirs, "/workspace")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, fs.ErrPermission), "got %v", err)
+	assert.Contains(t, err.Error(), `shared dir "scratchpad"`)
+	assert.Contains(t, err.Error(), "projects/pid-1/shared-dirs/scratchpad")
+	assert.Contains(t, err.Error(), "mount the share's export at \""+hostBase+"\"")
+	assert.Nil(t, volumes)
+	assert.Nil(t, realization)
+
+	claimCfg := nfsSharedDirStorageCfg(filepath.Dir(hostBase))
+	claimCfg.NFS.Shares[0].ID = filepath.Base(hostBase)
+	volumes, realization, err = resolveSharedDirs(sdLayoutFor(t, claimCfg), false, "/unused", "pid-1", "kubernetes", dirs, "/workspace")
+	require.NoError(t, err, "with a claim the node still creates it")
+	require.NotNil(t, realization)
+	assert.Equal(t, "scion-shared", realization.PVClaimName)
+	assert.Len(t, volumes, 1)
+	assert.NoDirExists(t, filepath.Join(projectDir, "shared-dirs"))
 }
