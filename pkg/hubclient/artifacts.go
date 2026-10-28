@@ -460,6 +460,11 @@ func (s *artifactService) fetchObject(ctx context.Context, signedURL string) (io
 		// No whole-exchange timeout: the caller's context bounds it.
 		// An object-store URL follows no further redirect.
 		hc = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	} else {
+		// Ensure the custom client also does not follow subsequent redirects.
+		clientCopy := *hc
+		clientCopy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		hc = &clientCopy
 	}
 	resp, err := hc.Do(req)
 	if err != nil {

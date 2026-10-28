@@ -268,6 +268,36 @@ func TestArtifactOpenFile_NoSubsequentRedirect(t *testing.T) {
 	}
 }
 
+// TestArtifactOpenFile_CustomClient_NoSubsequentRedirect checks that when a custom
+// objectClient is configured on artifactService, it also enforces the redirect policy
+// and does not follow subsequent redirects.
+func TestArtifactOpenFile_CustomClient_NoSubsequentRedirect(t *testing.T) {
+	third := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("third party server should not be requested")
+		_, _ = w.Write([]byte("third bytes"))
+	}))
+	defer third.Close()
+
+	object := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, third.URL+"/blob", http.StatusFound)
+	}))
+	defer object.Close()
+
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, object.URL+"/blob", http.StatusFound)
+	}))
+	defer hub.Close()
+
+	c, _ := New(hub.URL)
+	svc := &artifactService{
+		c:            c.(*client),
+		objectClient: &http.Client{},
+	}
+	if _, err := svc.OpenFile(context.Background(), "id-1", 0, "a.png"); err == nil || !strings.Contains(err.Error(), "unexpected status") {
+		t.Fatalf("object store redirect followed with custom client: got %v, want unexpected status error", err)
+	}
+}
+
 func TestArtifactList(t *testing.T) {
 	var queries []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
