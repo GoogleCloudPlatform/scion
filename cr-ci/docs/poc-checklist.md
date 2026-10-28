@@ -8,6 +8,16 @@ the [cache-sharing](../workflows/README.md#cache-sharing) assumptions, and the
 design's PoC success criteria
 ([workflows/README.md](../workflows/README.md#poc-success-criteria)).
 
+**Layout note.** P6 ran on the earlier runner layout: the ephemeral disk at
+`/scratch`, with `~/work`, `~/.cache` and `~/go` linked into it. Since cr-ci FIXUP-5
+the disk is mounted at HOME (`/home/runner`), the work folder and caches are real
+directories on it, and `TMPDIR` is unset ([operations.md, "Runner layout
+switch"](operations.md#runner-layout-switch)). For a re-run, read D2's log line as
+`/home/runner is a mount (...)`, D4's parity lines as `real directory ...` (and
+`GITHUB_WORKSPACE` physically the same path), D7's disk figures from `df -h
+/home/runner`, and the `/scratch` realpath remarks below as moot (logical paths are
+physical now).
+
 P6 needs ptone's explicit go-ahead. Work through the list in order; it
 follows the [quick start](../README.md#quick-start). Record each result (pass,
 fail or value) next to its ID. After the PoC, fold every result back into the
