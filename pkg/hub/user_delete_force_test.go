@@ -928,6 +928,11 @@ func TestForceDeleteUser_LastSuperAdminRefused(t *testing.T) {
 	ctx := context.Background()
 	a := f.agent(t, "lsa-a", nil)
 	f.srv.ensureSuperAdminBinding(ctx, f.dave.ID)
+	// The requester keeps the permissions a forced delete needs through a
+	// role other than super-admin, so the last super-admin guard decides.
+	deleter := createTestRoleDefinition(t, f.s, "lsa-deleter", store.RoleScopeSystem,
+		[]string{"user.read", "user.delete", "project.read", "agent.read", "agent.list", "agent.delete"})
+	pvSeedRoleBinding(t, f.s, deleter.ID, "user", DevUserID, store.RoleScopeSystem, "")
 	rd, err := f.s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
 	require.NoError(t, err)
 	bindings, err := f.s.ListRoleBindingsForScope(ctx, store.RoleScopeSystem, "")
