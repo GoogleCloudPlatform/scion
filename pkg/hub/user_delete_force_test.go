@@ -1082,3 +1082,46 @@ func TestForceDeleteUser_CompletionKeepsStoppedOfFinalizeCommittedFirst(t *testi
 	require.True(t, completed)
 	assert.Equal(t, userDeletionCounts{Stopped: 2}, f.getDeletion(t).Counts)
 }
+
+// A finalize with retention soft-deletes the agent. One that commits
+// between the completion's re-listing and its lock is seen only by the
+// re-read under the lock, which skips the soft-deleted row: its stopped
+// record is not reopened.
+func TestForceDeleteUser_CompletionSkipsSoftDeletedBlocker(t *testing.T) {
+	f := newForceDelFixture(t, time.Hour)
+	ctx := context.Background()
+	d := stoppedDeletionReadyToComplete(t, f)
+	live := f.agent(t, "soft-deleted-first", nil)
+	require.NoError(t, f.s.UpsertUserDeletionAgent(ctx, &store.UserDeletionAgent{
+		DeletionID: d.ID, AgentID: live.ID, Slug: live.Slug, ProjectID: live.ProjectID,
+		Outcome: store.UserDeletionOutcomeStopped, Attempts: 1,
+	}))
+	completeUserDeletionBeforeAgentLock = func(ctx context.Context, tx store.Store, agents []store.Agent) {
+		require.Len(t, agents, 1)
+		// The row as a soft-deleting finalize leaves it: present, with
+		// DeletedAt set. The store has no write of DeletedAt outside the
+		// finalize, so the row is replaced by its soft-deleted copy.
+		gone := agents[0]
+		gone.DeletedAt = time.Now()
+		require.NoError(t, tx.DeleteAgent(ctx, gone.ID))
+		require.NoError(t, tx.CreateAgent(ctx, &gone))
+	}
+	t.Cleanup(func() { completeUserDeletionBeforeAgentLock = nil })
+
+	completed, err := f.srv.completeUserDeletion(ctx, d)
+	require.NoError(t, err)
+	assert.False(t, completed)
+	require.False(t, mustGetAgent(t, f.s, live.ID).DeletedAt.IsZero(), "the row is soft-deleted")
+	recs, err := f.s.ListUserDeletionAgents(ctx, d.ID)
+	require.NoError(t, err)
+	require.Len(t, recs, 2)
+	for _, r := range recs {
+		assert.Equal(t, store.UserDeletionOutcomeStopped, r.Outcome, "agent %s keeps stopped", r.AgentID)
+	}
+
+	completeUserDeletionBeforeAgentLock = nil
+	completed, err = f.srv.completeUserDeletion(ctx, d)
+	require.NoError(t, err)
+	require.True(t, completed)
+	assert.Equal(t, userDeletionCounts{Stopped: 2}, f.getDeletion(t).Counts)
+}
