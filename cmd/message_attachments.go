@@ -56,47 +56,51 @@ const htmlRefusal = "attachments cannot be HTML or SVG; publish it as an artifac
 const markdownHintBytes = 64 * 1024
 
 // probeAttachmentUploads asks the hub where this credential's uploads go.
-// It returns nil (use today's path) when the hub answers "legacy", or
-// refuses the probe with 403, 404 or 405 (a hub from before the probe), or
-// the client cannot upload; any other error is returned.
-func probeAttachmentUploads(ctx context.Context, client hubclient.Client) (hubclient.AttachmentUploader, *hubclient.AttachmentProbe, error) {
+// It returns a nil uploader (use today's path) when the hub answers
+// anything but "artifact", or refuses the probe with 403, 404 or 405 (a hub
+// from before the probe), or the client cannot upload; fallback then names
+// the reason. Any other error is returned.
+func probeAttachmentUploads(ctx context.Context, client hubclient.Client) (uploader hubclient.AttachmentUploader, probe *hubclient.AttachmentProbe, fallback string, err error) {
 	uploader, ok := client.(hubclient.AttachmentUploader)
 	if !ok {
-		return nil, nil, nil
+		return nil, nil, "this client cannot upload attachments", nil
 	}
-	probe, err := uploader.ProbeAttachmentUploads(ctx)
+	probe, err = uploader.ProbeAttachmentUploads(ctx)
 	if err != nil {
 		var apiErr *apiclient.APIError
 		if errors.As(err, &apiErr) {
 			switch apiErr.StatusCode {
 			case http.StatusForbidden, http.StatusNotFound, http.StatusMethodNotAllowed:
-				return nil, nil, nil
+				return nil, nil, fmt.Sprintf("the hub refused the upload probe with status %d", apiErr.StatusCode), nil
 			}
 		}
-		return nil, nil, fmt.Errorf("attachments: could not ask the hub where uploads go: %w", err)
+		return nil, nil, "", fmt.Errorf("attachments: could not ask the hub where uploads go: %w", err)
 	}
-	if probe == nil || probe.Uploads != hubclient.AttachmentUploadsArtifact {
-		return nil, nil, nil
+	if probe == nil {
+		return nil, nil, "the hub gave no upload answer", nil
 	}
-	return uploader, probe, nil
+	if probe.Uploads != hubclient.AttachmentUploadsArtifact {
+		return nil, nil, fmt.Sprintf("the hub answered %q", probe.Uploads), nil
+	}
+	return uploader, probe, "", nil
 }
 
 // prepareAttachmentUpload checks the --attach files for an upload and
 // returns the upload, or nil when the hub takes today's staged paths. With
-// toAgent, the total size must fit the hub's delivery budget. Nothing is
-// uploaded here.
-func prepareAttachmentUpload(client hubclient.Client, paths []string, toAgent bool) (*attachmentUpload, error) {
+// toAgent, the total size must fit the hub's delivery budget; fallback
+// names why the files are staged instead. Nothing is uploaded here.
+func prepareAttachmentUpload(client hubclient.Client, paths []string, toAgent bool) (*attachmentUpload, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	uploader, probe, err := probeAttachmentUploads(ctx, client)
+	uploader, probe, fallback, err := probeAttachmentUploads(ctx, client)
 	if err != nil || uploader == nil {
-		return nil, err
+		return nil, fallback, err
 	}
 	resolved, err := checkAttachmentFiles(paths, toAgent, probe.DeliveryMaxBytes)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return &attachmentUpload{uploader: uploader, paths: resolved}, nil
+	return &attachmentUpload{uploader: uploader, paths: resolved}, "", nil
 }
 
 // checkAttachmentFiles applies the upload guard rails and returns the
@@ -235,9 +239,10 @@ func attachmentIDsForSend(ctx context.Context) ([]string, error) {
 // resolveAttachMode decides how the --attach files of a send travel: it
 // asks the hub's probe first (prepareAttachmentUpload); with "artifact" it
 // returns the upload and no staged paths, otherwise it runs today's path
-// validation and returns the paths to stage, unchanged.
+// validation and returns the paths to stage, unchanged, after one stderr
+// line saying why the files are staged (ptone/scion#6549).
 func resolveAttachMode(client hubclient.Client, paths []string, toAgent bool) (*attachmentUpload, []string, error) {
-	upload, err := prepareAttachmentUpload(client, paths, toAgent)
+	upload, fallback, err := prepareAttachmentUpload(client, paths, toAgent)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -246,6 +251,9 @@ func resolveAttachMode(client hubclient.Client, paths []string, toAgent bool) (*
 	}
 	if err := validateStagedAttachmentPaths(paths); err != nil {
 		return nil, nil, err
+	}
+	if len(paths) > 0 {
+		fmt.Fprintf(os.Stderr, "Warning: attachments are staged on this broker's scratchpad instead of uploaded to the hub (%s); they may not reach the hub or recipients on another broker\n", fallback)
 	}
 	return nil, paths, nil
 }
