@@ -30,41 +30,51 @@ import (
 // A start refused because the project storage share is not mounted on the
 // broker (agent.ErrProjectShareNotMounted, whose text names the mount
 // point) is answered 503 project_storage_unavailable with the field-name
-// text on the synchronous create, and reported with the same code and text
-// by the async launch. Neither carries the path.
+// text on the synchronous create, start and restart, and reported with the
+// same code and text by the async launch. None carries the path.
 const projectShareTestPath = "/mnt/nfs/share-1"
 
 func projectShareNotMountedErr() error {
 	return fmt.Errorf("start agent: %w (%s)", agent.ErrProjectShareNotMounted, projectShareTestPath)
 }
 
-func TestProjectShareNotMounted_SyncCreate(t *testing.T) {
-	srv := newTestServer(t)
-	srv.manager.(*mockManager).startErr = projectShareNotMountedErr()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(`{"name": "share-agent", "config": {"template": "claude"}}`))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(w, req)
-	if w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("create = %d %s, want 503", w.Code, w.Body.String())
-	}
-	var body struct {
-		Error struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode %s: %v", w.Body.String(), err)
-	}
-	if body.Error.Code != ErrCodeProjectStorageUnavailable {
-		t.Errorf("code = %q, want %q", body.Error.Code, ErrCodeProjectStorageUnavailable)
-	}
-	if want := scionrt.ProjectShareUnavailableText(scionrt.ProjectShareMountPathField, true); body.Error.Message != want {
-		t.Errorf("message = %q, want %q", body.Error.Message, want)
-	}
-	if strings.Contains(w.Body.String(), projectShareTestPath) {
-		t.Errorf("body names the mount point: %s", w.Body.String())
+// Every synchronous path that runs Manager.Start: create, start and
+// restart (the restart's stop still runs first; ptone/scion#6371).
+func TestProjectShareNotMounted_SyncPaths(t *testing.T) {
+	for _, tc := range []struct{ name, path, body string }{
+		{"create", "/api/v1/agents", `{"name": "share-agent", "config": {"template": "claude"}}`},
+		{"start", "/api/v1/agents/test-agent-1/start", `{}`},
+		{"restart", "/api/v1/agents/test-agent-1/restart", `{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newTestServer(t)
+			srv.manager.(*mockManager).startErr = projectShareNotMountedErr()
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("%s = %d %s, want 503", tc.name, w.Code, w.Body.String())
+			}
+			var body struct {
+				Error struct {
+					Code    string `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode %s: %v", w.Body.String(), err)
+			}
+			if body.Error.Code != ErrCodeProjectStorageUnavailable {
+				t.Errorf("code = %q, want %q", body.Error.Code, ErrCodeProjectStorageUnavailable)
+			}
+			if want := scionrt.ProjectShareUnavailableText(scionrt.ProjectShareMountPathField, true); body.Error.Message != want {
+				t.Errorf("message = %q, want %q", body.Error.Message, want)
+			}
+			if strings.Contains(w.Body.String(), projectShareTestPath) {
+				t.Errorf("body names the mount point: %s", w.Body.String())
+			}
+		})
 	}
 }
 

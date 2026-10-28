@@ -114,8 +114,8 @@ const (
 
 	// ErrCodeProjectStorageUnavailable is the 503 code for a dispatch of a
 	// project on shared project storage whose share is not mounted on the
-	// broker (ptone/scion#5823).
-	ErrCodeProjectStorageUnavailable = "project_storage_unavailable"
+	// broker (ptone/scion#5823); see api.BrokerErrCodeProjectStorageUnavailable.
+	ErrCodeProjectStorageUnavailable = api.BrokerErrCodeProjectStorageUnavailable
 
 	// ErrCodeRuntimeLogsUnsupported marks a logs request that a runtime
 	// declines to serve at all, rather than one that failed. The broker uses

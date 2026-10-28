@@ -5626,6 +5626,11 @@ const harnessConfigUnusableErrorCode = api.BrokerErrCodeHarnessConfigUnusable
 // than configured before server.project_storage (ptone/scion#6371).
 const storageMigrationRequiredErrorCode = api.BrokerErrCodeStorageMigrationRequired
 
+// projectStorageUnavailableErrorCode is the runtime broker's error code for
+// an agent create, start or restart refused because the broker does not see
+// the project storage share (ptone/scion#5823).
+const projectStorageUnavailableErrorCode = api.BrokerErrCodeProjectStorageUnavailable
+
 // dispatchCreateErrorResponse classifies a failed create/provision dispatch to
 // the runtime broker and writes the matching HTTP response.
 //
@@ -5743,11 +5748,12 @@ func relayWorkspaceStorageUnconfigured(w http.ResponseWriter, err error) bool {
 	return true
 }
 
-// relayBrokerRefusal writes a broker 4xx refusal of a dispatch -- 422
+// relayBrokerRefusal writes a broker refusal of a dispatch -- 422
 // harness_config_unusable, 422 storage_migration_required, 403 forbidden,
-// 400 validation_error or 409 conflict -- with the broker's status, code and message instead of the
-// generic 502, and reports whether it did. For any other error it writes
-// nothing and returns false.
+// 400 validation_error, 409 conflict or 503 project_storage_unavailable --
+// with the broker's status, code and message instead of the generic 502,
+// and reports whether it did. For any other error it writes nothing and
+// returns false.
 //
 // The 422 harness_config_unusable and 403 forbidden answers are the broker's
 // refusal of the harness-config a dispatch would run: its provisioner cannot
@@ -5777,6 +5783,10 @@ func relayBrokerRefusal(w http.ResponseWriter, err error) bool {
 	case se.StatusCode == http.StatusBadRequest && code == ErrCodeValidationError:
 	case se.StatusCode == http.StatusUnprocessableEntity && code == harnessConfigUnusableErrorCode:
 	case se.StatusCode == http.StatusUnprocessableEntity && code == storageMigrationRequiredErrorCode:
+	case se.StatusCode == http.StatusServiceUnavailable && code == projectStorageUnavailableErrorCode:
+		// The broker does not see the project storage share. Its message
+		// names configuration fields only (never the path) and gives the
+		// remedy, so it is relayed as is.
 	case se.StatusCode == http.StatusConflict && code == ErrCodeConflict:
 	case se.StatusCode == http.StatusForbidden && code == ErrCodeForbidden:
 		// Harness-config policy is today the broker's only producer of a

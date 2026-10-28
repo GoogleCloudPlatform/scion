@@ -18,7 +18,7 @@ A Runtime Broker whose `server.project_storage` uses a shared backend reads proj
 - **Other Runtime Brokers:** mount it at that path, or set `server.project_storage.nfs.auto_mount: true`.
 - **Check:** list `<path>/<subpath_root>` in the Runtime Broker's container; it shows project IDs.
 
-**Changed status codes and texts.** On a Kubernetes runtime, a create that fails because the share is not mounted on the Runtime Broker now gets `503 project_storage_unavailable` with the field-name text, instead of `500 runtime_error` with the generic "Failed to create agent". An async launch reports the same code and text. The `503 nfs_unavailable` refusal of an NFS-backed create no longer includes the share ID, the mount point or the server and export, with or without shared project storage; the Runtime Broker log has them.
+**Changed status codes and texts.** On a Kubernetes runtime, a create, start or restart that fails because the share is not mounted on the Runtime Broker now gets `503 project_storage_unavailable` with the field-name text, instead of `500 runtime_error` with the generic "Failed to create agent". An async launch reports the same code and text, and the Hub passes the Runtime Broker's `503 project_storage_unavailable` through to the client with its code and text instead of a `502 runtime_error`. The `503 nfs_unavailable` refusal of an NFS-backed create no longer includes the share ID, the mount point or the server and export, with or without shared project storage; the Runtime Broker log has them.
 
 ## Lifecycle hooks re-check their writer before minting a token
 

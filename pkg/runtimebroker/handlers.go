@@ -1973,6 +1973,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			markAttemptFailed(skillResolutionHTTPStatus(skillErr.Code), "failed to create agent")
 		case config.IsAgentStateConflict(err):
 			markAttemptFailed(http.StatusConflict, "failed to create agent")
+		case errors.Is(err, agent.ErrProjectShareNotMounted):
+			markAttemptFailed(http.StatusServiceUnavailable, projectShareNotMountedText())
 		default:
 			markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
 		}
@@ -3963,6 +3965,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			skillResolutionFailedWithDetails(w, skillErr, startSkill.ref, details)
 		case config.IsAgentStateConflict(err):
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to start agent: "+err.Error(), details)
+		case errors.Is(err, agent.ErrProjectShareNotMounted):
+			// As on create: err names the mount point and is logged above.
+			writeError(w, http.StatusServiceUnavailable, ErrCodeProjectStorageUnavailable, projectShareNotMountedText(), details)
 		default:
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, runtimeOpError("start agent", err).Error(), details)
 		}
@@ -5156,6 +5161,11 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		}
 		if config.IsAgentStateConflict(err) {
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to restart agent: "+err.Error(), details)
+			return
+		}
+		if errors.Is(err, agent.ErrProjectShareNotMounted) {
+			// As on create: err names the mount point and is logged above.
+			writeError(w, http.StatusServiceUnavailable, ErrCodeProjectStorageUnavailable, projectShareNotMountedText(), details)
 			return
 		}
 		if errors.Is(err, agent.ErrContainerNameInUse) {
