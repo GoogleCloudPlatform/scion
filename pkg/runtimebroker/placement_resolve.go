@@ -95,7 +95,7 @@ func (r runtimeResolution) forExistingAgent(agentName string) runtimeResolution 
 // projectPath; a load failure leaves them out.
 func (s *Server) placementForStart(ctx context.Context, res runtimeResolution, projectPath string) (*api.ResolvedPlacement, error) {
 	var projectVS *config.VersionedSettings
-	if res.Runtime != nil && res.Runtime.Name() == "kubernetes" && res.How != resolutionFlat {
+	if res.Runtime != nil && res.Runtime.Name() == "kubernetes" && res.How != resolutionFlat && !s.isFlat() {
 		// Without a resolved project directory the loader would fall back to
 		// the working directory's project; skip the warning input instead.
 		if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
@@ -113,12 +113,15 @@ func (s *Server) placementForStart(ctx context.Context, res runtimeResolution, p
 // nothing configured for this runtime), and a placementRefusal when the
 // placement cannot be determined.
 func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, projectVS *config.VersionedSettings) (*api.ResolvedPlacement, error) {
-	switch res.How {
-	case resolutionFlat:
-		return s.resolveFlatPlacement(res.Runtime, res.Agent)
-	case resolutionErrorRuntime:
+	if res.How == resolutionErrorRuntime {
 		// A runtime that failed to build starts nothing.
 		return nil, nil
+	}
+	if s.isFlat() || res.How == resolutionFlat {
+		// Every start on a flat instance, including an existing agent's
+		// start or restart on the runtime its container was found on,
+		// takes the instance's own placement.
+		return s.resolveFlatPlacement(res.Agent)
 	}
 	if res.Runtime == nil || res.Runtime.Name() != "kubernetes" {
 		s.warnPlacementOffKubernetes(ctx, res)
@@ -317,24 +320,24 @@ const (
 )
 
 // resolveFlatPlacement resolves the placement of a start on this flat
-// instance's runtime rt: the node selector, tolerations and runtime class
-// of the instance's runtime_target, from the policy activated when the
-// instance started (never the legacy runtime entries or profiles). The
-// result is operator-owned (api.ResolvedPlacement.OperatorOwned), even
-// when the target sets none of the fields, so the agent's own fields are
-// always checked against it. Nil for a runtime other than Kubernetes, whose
-// target cannot set placement. The target is validated again here; an
-// invalid one refuses the start.
-func (s *Server) resolveFlatPlacement(rt scionrt.Runtime, agentName string) (*api.ResolvedPlacement, error) {
-	if rt == nil || rt.Name() != "kubernetes" {
-		return nil, nil
-	}
+// instance: the node selector, tolerations and runtime class of the
+// instance's runtime_target, from the policy activated when the instance
+// started (never the legacy runtime entries or profiles). The result is
+// operator-owned (api.ResolvedPlacement.OperatorOwned), even when the
+// target sets none of the fields, so the agent's own fields are always
+// checked against it. Nil for a target other than Kubernetes, which cannot
+// set placement. The target is validated again here; an invalid one
+// refuses the start.
+func (s *Server) resolveFlatPlacement(agentName string) (*api.ResolvedPlacement, error) {
 	p := s.flatInstancePolicy()
 	if p == nil {
 		s.agentLifecycleLog.Warn("Kubernetes placement: the flat instance has no activated policy", "agent", agentName)
 		return nil, placementRefusal(placementFlatUnresolvedCause)
 	}
 	t := p.Target
+	if t.Type != config.RuntimeTargetTypeKubernetes {
+		return nil, nil
+	}
 	source := "server.broker.instances[" + p.InstanceKey + "].runtime_target"
 	if errs := config.ValidatePlacementFields(source, t.NodeSelector, t.Tolerations, t.RuntimeClassName); len(errs) > 0 {
 		paths := make([]string, len(errs))
@@ -368,22 +371,31 @@ func (s *Server) resolveFlatPlacement(rt scionrt.Runtime, agentName string) (*ap
 }
 
 // checkFlatCreatePlacement checks, for a create on a flat instance, the
-// request's own kubernetes block against the instance's operator-owned
-// placement (config.CheckAgentPlacement), before the create has any side
-// effect. Nil on a legacy Runtime Broker, whose create relies on
-// Manager.Start's check.
+// request's own kubernetes blocks (its inline config, which provisioning
+// writes into the agent's config, and its create config) against the
+// instance's operator-owned placement (config.CheckAgentPlacement), before
+// the create has any side effect. Nil on a legacy Runtime Broker, whose
+// create relies on Manager.Start's check.
 func (s *Server) checkFlatCreatePlacement(req CreateAgentRequest) error {
 	if !s.isFlat() {
 		return nil
 	}
-	_, rt, _ := s.defaultPair()
-	rp, err := s.resolveFlatPlacement(rt, req.Name)
-	if err != nil || rp == nil || req.Config == nil {
+	rp, err := s.resolveFlatPlacement(req.Name)
+	if err != nil || rp == nil {
 		return err
 	}
-	if err := config.CheckAgentPlacement(req.Config.Kubernetes, rp, config.AgentPlacementLayerRequest); err != nil {
-		s.agentLifecycleLog.Warn("Kubernetes placement: the request's kubernetes block conflicts with the instance's placement", "agent", req.Name, "error", err)
-		return placementRefusal(err.Error())
+	var blocks []*api.KubernetesConfig
+	if req.InlineConfig != nil {
+		blocks = append(blocks, req.InlineConfig.Kubernetes)
+	}
+	if req.Config != nil {
+		blocks = append(blocks, req.Config.Kubernetes)
+	}
+	for _, block := range blocks {
+		if err := config.CheckAgentPlacement(block, rp, config.AgentPlacementLayerRequest); err != nil {
+			s.agentLifecycleLog.Warn("Kubernetes placement: the request's kubernetes block conflicts with the instance's placement", "agent", req.Name, "error", err)
+			return placementRefusal(err.Error())
+		}
 	}
 	return nil
 }

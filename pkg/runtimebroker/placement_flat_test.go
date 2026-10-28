@@ -82,13 +82,18 @@ func (f *flatPodFixture) flatRes(agentName string) runtimeResolution {
 // start context, its placement and the real agent manager's start.
 func startFlatPlacedPod(t *testing.T, f *flatPodFixture, name string, gcp *GCPIdentityConfig, k8sCfg *api.KubernetesConfig) *corev1.Pod {
 	t.Helper()
-	if err := f.srv.checkFlatCreatePlacement(CreateAgentRequest{Name: name, Config: &CreateAgentConfig{Kubernetes: k8sCfg}}); err != nil {
+	var inline *api.ScionConfig
+	if k8sCfg != nil {
+		inline = &api.ScionConfig{Kubernetes: k8sCfg}
+	}
+	if err := f.srv.checkFlatCreatePlacement(CreateAgentRequest{Name: name, InlineConfig: inline}); err != nil {
 		t.Fatalf("create placement check: %v", err)
 	}
 	sc, err := f.srv.buildStartContext(context.Background(), startContextInputs{
 		Name: name, ProjectPath: f.projectDir, Operation: opCreate,
-		Config:      &CreateAgentConfig{GCPIdentity: gcp, Kubernetes: k8sCfg},
-		HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
+		Config:       &CreateAgentConfig{GCPIdentity: gcp},
+		InlineConfig: inline,
+		HTTPRequest:  httptest.NewRequest("POST", "/api/v1/agents", nil),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -317,6 +322,13 @@ func TestPlacementRejectedBeforeCreateSideEffects(t *testing.T) {
 	expectPlacementRefusal(t, w, "pool selector conflicts with inherited placement", "other-pool")
 	expectNoCreateSideEffects(t, f, "req-pool-conflict")
 
+	w = serveFlat(f.srv, http.MethodPost, "/api/v1/agents", flatCreateBody("req-inline-toleration", "tol-agent",
+		map[string]interface{}{"expectedRuntimeTargetId": f.identity.RuntimeTarget.ID,
+			"inlineConfig": map[string]interface{}{"kubernetes": map[string]interface{}{
+				"tolerations": []map[string]string{{"key": "dedicated", "operator": "Equal", "value": "batch-pool", "effect": "NoSchedule"}}}}}))
+	expectPlacementRefusal(t, w, "kubernetes.tolerations[0] in the request", "batch-pool")
+	expectNoCreateSideEffects(t, f, "req-inline-toleration")
+
 	w = serveFlat(f.srv, http.MethodPost, "/api/v1/agents", flatCreateBody("req-runtime-class", "rc-agent",
 		map[string]interface{}{"expectedRuntimeTargetId": f.identity.RuntimeTarget.ID,
 			"config": map[string]interface{}{"kubernetes": map[string]interface{}{"runtimeClassName": "kata"}}}))
@@ -350,8 +362,10 @@ func TestFlatProfileStillUnsupported(t *testing.T) {
 }
 
 // writeStoredAgentConfig writes the stored config of test-agent-1 in the
-// fixture's project.
-func writeStoredAgentConfig(t *testing.T, content string) string {
+// fixture's project, and records that project on the agent's container, as
+// a running agent's labels do, so a start or restart that names no project
+// recovers it from there.
+func writeStoredAgentConfig(t *testing.T, f *flatInstanceFixture, content string) string {
 	t.Helper()
 	projectDir, err := config.GetResolvedProjectDir("")
 	if err != nil {
@@ -359,6 +373,13 @@ func writeStoredAgentConfig(t *testing.T, content string) string {
 	}
 	path := filepath.Join(config.GetAgentDir(projectDir, "test-agent-1", false), "scion-agent.json")
 	writeFlatFixtureFile(t, path, content)
+	f.mgr.mu.Lock()
+	for i := range f.mgr.agents {
+		if f.mgr.agents[i].Name == "test-agent-1" {
+			f.mgr.agents[i].ProjectPath = projectDir
+		}
+	}
+	f.mgr.mu.Unlock()
 	return path
 }
 
@@ -374,7 +395,7 @@ func TestRestartPlacementRejectedBeforeStop(t *testing.T) {
 	invalid.RuntimeClassName = "Not_A_Class"
 	f := newFlatPlacementInstanceServer(t, invalid)
 	f.seedOwnedAgent(t)
-	writeStoredAgentConfig(t, `{}`)
+	writeStoredAgentConfig(t, f, `{}`)
 	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/restart"+flatStartQuery, flatRestartBody(f))
 	expectPlacementRefusal(t, w, placementFlatInvalidCause, "Not_A_Class")
 	f.mgr.mu.Lock()
@@ -390,7 +411,7 @@ func TestRestartPlacementRejectedBeforeStop(t *testing.T) {
 func TestRestartPersistedConflictRejectedBeforeStop(t *testing.T) {
 	f := newFlatPlacementInstanceServer(t, flatPlacementTarget())
 	f.seedOwnedAgent(t)
-	writeStoredAgentConfig(t, `{"kubernetes": {"tolerations": [{"key": "dedicated", "operator": "Equal", "value": "batch", "effect": "NoSchedule"}]}}`)
+	writeStoredAgentConfig(t, f, `{"kubernetes": {"tolerations": [{"key": "dedicated", "operator": "Equal", "value": "batch", "effect": "NoSchedule"}]}}`)
 	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/restart"+flatStartQuery, flatRestartBody(f))
 	expectPlacementRefusal(t, w, "kubernetes.tolerations[0] in the agent's stored config", "batch")
 	f.mgr.mu.Lock()
@@ -406,7 +427,7 @@ func TestRestartPersistedConflictRejectedBeforeStop(t *testing.T) {
 func TestFlatStartPlacementRejectedBeforeConfigWrite(t *testing.T) {
 	f := newFlatPlacementInstanceServer(t, flatPlacementTarget())
 	f.seedOwnedAgent(t)
-	path := writeStoredAgentConfig(t, `{"max_turns": 3}`)
+	path := writeStoredAgentConfig(t, f, `{"max_turns": 3}`)
 	before, _ := os.ReadFile(path)
 	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start"+flatStartQuery,
 		`{"expectedRuntimeTargetId":"`+f.identity.RuntimeTarget.ID+`",`+flatAgentEnv+
@@ -419,7 +440,7 @@ func TestFlatStartPlacementRejectedBeforeConfigWrite(t *testing.T) {
 		t.Fatalf("a refused start started: %d", n)
 	}
 
-	writeStoredAgentConfig(t, `{"kubernetes": {"runtimeClassName": "kata"}}`)
+	writeStoredAgentConfig(t, f, `{"kubernetes": {"runtimeClassName": "kata"}}`)
 	w = serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start"+flatStartQuery,
 		`{"expectedRuntimeTargetId":"`+f.identity.RuntimeTarget.ID+`",`+flatAgentEnv+`}`)
 	expectPlacementRefusal(t, w, "in the agent's stored config", "kata")
@@ -435,8 +456,7 @@ func TestPlacementPresentationDoesNotDriveDispatch(t *testing.T) {
 	report.Target.RuntimeClassName = "from-report"
 	f.srv.config.FlatInstance.Instance.RuntimeTarget.NodeSelector[config.PoolNodeSelectorKey] = "edited-after-activation"
 
-	_, rt, _ := f.srv.defaultPair()
-	rp, err := f.srv.resolveFlatPlacement(rt, "a1")
+	rp, err := f.srv.resolveFlatPlacement("a1")
 	if err != nil {
 		t.Fatal(err)
 	}
