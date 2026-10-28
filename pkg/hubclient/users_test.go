@@ -461,3 +461,22 @@ func TestUserService_GetDeletion(t *testing.T) {
 	require.NotNil(t, got.CompletedAt)
 	assert.Equal(t, UserDeletionCounts{Stopped: 2, Removed: 1}, got.Counts)
 }
+
+// TestUserService_GetDeletion_NotFound verifies that a 404 (no deletion,
+// or the experiment off) is returned as an API error.
+func TestUserService_GetDeletion_NotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"User deletion not found"}}`))
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL)
+	require.NoError(t, err)
+	got, err := client.Users().GetDeletion(context.Background(), "u-1")
+	assert.Nil(t, got)
+	var apiErr *apiclient.APIError
+	require.True(t, errors.As(err, &apiErr), "got %v", err)
+	assert.Equal(t, http.StatusNotFound, apiErr.StatusCode)
+}
