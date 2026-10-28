@@ -128,6 +128,16 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		}
 	}
 
+	// The project storage share on a shared Layout: not visible degrades
+	// the status (readiness is unaffected; stop, delete and status keep
+	// working). The value names configuration fields, never the path.
+	if v, notVisible, ok := s.shareHealthValue(); ok {
+		checks[shareHealthCheck] = v
+		if notVisible {
+			status = degradeHealthStatus(status)
+		}
+	}
+
 	if s.storageOverridesError() != nil {
 		checks[storageOverridesCheck] = storageOverridesCheckDegraded
 		status = degradeHealthStatus(status)
