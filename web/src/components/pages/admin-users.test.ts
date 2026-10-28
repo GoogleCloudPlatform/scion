@@ -1262,3 +1262,250 @@ describe('scion-page-admin-users — delete dialog blockers', () => {
     expect(alert?.textContent).toContain('last owner');
   });
 });
+
+describe('scion-page-admin-users — forced delete and deletion panel', () => {
+  const FLAG = 'hub.user_delete_force_cascade';
+  let element: PageEl | null = null;
+
+  function setForceFlag(value: boolean | undefined): void {
+    const bag = { ...(window.__SCION_FEATURES__ ?? {}) };
+    if (value === undefined) delete bag[FLAG];
+    else bag[FLAG] = value;
+    window.__SCION_FEATURES__ = bag;
+  }
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler([])));
+    mod = await import('./admin-users.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    setForceFlag(undefined);
+    vi.restoreAllMocks();
+  });
+
+  const BLOCKERS = {
+    agents: [{ id: 'a-1', slug: 'worker', projectId: 'p-1', deletionState: '' }],
+    edges: [],
+    truncated: false,
+  };
+  const DELETION = {
+    deletionId: 'd-1',
+    userId: 'u-target',
+    state: 'stopping',
+    requestedAt: '2026-10-28T10:00:00Z',
+    requestedBy: { kind: 'user', id: 'u-self' },
+    completedAt: null,
+    lastReconciledAt: null,
+    lastError: '',
+    agents: [
+      {
+        id: 'a-1',
+        slug: 'worker',
+        projectId: 'p-1',
+        outcome: 'stopped',
+        attempts: 1,
+        lastError: '',
+      },
+      {
+        id: 'a-2',
+        slug: 'stuck',
+        projectId: 'p-1',
+        outcome: 'failed',
+        attempts: 2,
+        lastError: 'broker unreachable',
+      },
+      { id: 'a-3', slug: 'gone', projectId: 'p-1', outcome: 'removed', attempts: 1, lastError: '' },
+    ],
+    counts: { pending: 0, stopping: 0, failed: 1, stopped: 1, removed: 1 },
+    orphanedByRevoke: [],
+  };
+
+  /** Fetch handler for the target's blockers, deletes and deletion. */
+  function handler(
+    users: AdminUser[],
+    deleteRes: (path: string) => Response
+  ): (url: string | URL | Request, init?: RequestInit) => Promise<Response> {
+    const base = createFetchHandler(users);
+    return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+      if (path.endsWith('/api/v1/users/u-target/delete-blockers')) {
+        return Promise.resolve(jsonResponse(BLOCKERS));
+      }
+      if (path.endsWith('/api/v1/users/u-target/deletion')) {
+        return Promise.resolve(jsonResponse(DELETION));
+      }
+      if (init?.method === 'DELETE' && path.includes('/api/v1/users/u-target')) {
+        return Promise.resolve(deleteRes(path));
+      }
+      return base(url, init);
+    };
+  }
+
+  function deleteUrls(): string[] {
+    return vi
+      .mocked(fetch)
+      .mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === 'DELETE')
+      .map(([url]) => requestUrl(url as string | URL | Request));
+  }
+
+  async function settle(el: PageEl): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await el.updateComplete;
+  }
+
+  async function openDeleteDialog(el: PageEl): Promise<Element> {
+    const item = queryAll(el, 'sl-menu-item.menu-item-danger').find(
+      (i) => i.textContent?.trim() === 'Delete'
+    );
+    item!.click();
+    await settle(el);
+    return el.shadowRoot!.querySelector('sl-dialog[label="Delete user"]')!;
+  }
+
+  it('parses a deletion resource and rejects other shapes', () => {
+    const d = mod.parseUserDeletion(DELETION);
+    expect(d.deletionId).toBe('d-1');
+    expect(d.state).toBe('stopping');
+    expect(d.agents).toHaveLength(3);
+    expect(d.agents[1]).toEqual({
+      id: 'a-2',
+      slug: 'stuck',
+      projectId: 'p-1',
+      outcome: 'failed',
+      attempts: 2,
+      lastError: 'broker unreachable',
+    });
+    expect(d.counts).toEqual({ pending: 0, stopping: 0, failed: 1, stopped: 1, removed: 1 });
+    expect(mod.parseUserDeletion({ agents: [] })).toBeNull();
+    expect(mod.parseUserDeletion(null)).toBeNull();
+  });
+
+  it('offers no force delete while the experiment is off', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal('fetch', vi.fn(handler([makeUser()], () => new Response(null, { status: 204 }))));
+    const dialog = await openDeleteDialog(element);
+    expect(dialog.querySelector('.delete-blockers-agents')).not.toBeNull();
+    expect(dialog.querySelector('.force-delete-button')).toBeNull();
+    expect(dialog.querySelector('.force-delete-help')).toBeNull();
+  });
+
+  it('force-deletes a blocked user and shows the deletion panel', async () => {
+    setForceFlag(true);
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(handler([makeUser()], () => jsonResponse({ ...DELETION, agents: [] }, 202)))
+    );
+    const dialog = await openDeleteDialog(element);
+    expect(dialog.querySelector('.force-delete-help')).not.toBeNull();
+    const force = dialog.querySelector('.force-delete-button') as HTMLElement;
+    expect(force).not.toBeNull();
+    force.click();
+    await settle(element);
+
+    expect(deleteUrls()).toEqual([expect.stringContaining('/api/v1/users/u-target?force=true')]);
+    expect(element.shadowRoot!.querySelector('sl-dialog[label="Delete user"]')).toBeNull();
+    const panel = element.shadowRoot!.querySelector('sl-dialog.deletion-panel');
+    expect(panel).not.toBeNull();
+    expect(panel!.textContent).toContain('Deleting');
+  });
+
+  it('shows the agents the caller may not delete on a 403', async () => {
+    setForceFlag(true);
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        handler([makeUser()], () =>
+          jsonResponse(
+            {
+              error: {
+                code: 'user_delete_force_forbidden',
+                message: 'cannot force-delete this user',
+                details: { agents: [{ id: 'a-1', projectId: 'p-1' }] },
+              },
+            },
+            403
+          )
+        )
+      )
+    );
+    const dialog = await openDeleteDialog(element);
+    (dialog.querySelector('.force-delete-button') as HTMLElement).click();
+    await settle(element);
+    const alert = element.shadowRoot!.querySelector('.feedback-alert');
+    expect(alert?.getAttribute('variant')).toBe('danger');
+    expect(alert?.textContent).toContain('a-1');
+    expect(element.shadowRoot!.querySelector('sl-dialog.deletion-panel')).toBeNull();
+  });
+
+  it('shows a deleting user with its deletion status and retries', async () => {
+    setForceFlag(true);
+    const deleting = makeUser({ status: 'deleting' });
+    element = (await createComponent([deleting])) as PageEl;
+    vi.stubGlobal('fetch', vi.fn(handler([deleting], () => jsonResponse(DELETION, 202))));
+
+    expect(queryAll(element, '.status-badge.deleting')).toHaveLength(1);
+    expect(queryAll(element, 'sl-menu-item.menu-item-danger')).toHaveLength(0);
+    const item = queryAll(element, 'sl-menu-item.menu-item-deletion')[0];
+    expect(item).toBeTruthy();
+    item.click();
+    await settle(element);
+
+    const panel = element.shadowRoot!.querySelector('sl-dialog.deletion-panel')!;
+    expect(panel).not.toBeNull();
+    const rows = Array.from(panel.querySelectorAll('.deletion-agents li'));
+    expect(rows).toHaveLength(3);
+    expect(rows[0].querySelector('a')!.getAttribute('href')).toBe('/agents/a-1');
+    expect(rows[0].textContent).toContain('Stopped');
+    expect(rows[1].textContent).toContain('Failed');
+    expect(rows[1].textContent).toContain('broker unreachable');
+    expect(rows[2].textContent).toContain('Removed (stop not confirmed)');
+    expect(panel.querySelector('.deletion-help')).not.toBeNull();
+
+    (panel.querySelector('.retry-deletion-button') as HTMLElement).click();
+    await settle(element);
+    expect(deleteUrls()).toEqual([expect.stringContaining('/api/v1/users/u-target?force=true')]);
+  });
+
+  it('opens the deletion panel when a plain delete meets a deletion in progress', async () => {
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        handler([makeUser()], () =>
+          jsonResponse(
+            {
+              error: {
+                code: 'user_deletion_in_progress',
+                message: 'a deletion of this user is in progress',
+                details: { deletionId: 'd-1', state: 'stopping' },
+              },
+            },
+            409
+          )
+        )
+      )
+    );
+    // No blockers this time, so the plain Delete is enabled.
+    const base = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation((url, init) => {
+      const path = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+      if (path.endsWith('/delete-blockers')) {
+        return Promise.resolve(jsonResponse({ agents: [], edges: [], truncated: false }));
+      }
+      return base(url, init);
+    });
+    const dialog = await openDeleteDialog(element);
+    const del = Array.from(dialog.querySelectorAll('sl-button')).find(
+      (b) => b.textContent?.trim() === 'Delete'
+    ) as HTMLElement;
+    del.click();
+    await settle(element);
+    expect(element.shadowRoot!.querySelector('sl-dialog[label="Delete user"]')).toBeNull();
+    expect(element.shadowRoot!.querySelector('sl-dialog.deletion-panel')).not.toBeNull();
+  });
+});
