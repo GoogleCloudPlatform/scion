@@ -243,9 +243,10 @@ const hookRefusalAuditInterval = 10 * time.Minute
 
 // hookRefusalLimiterMaxEntries bounds the limiter's memory; past it, entries
 // older than the interval are pruned. The prune scans the whole map, so it
-// runs at most once per interval (an entry cannot expire sooner); between
-// scans the map can exceed the bound only by the hooks first refused within
-// one interval.
+// runs at most once per interval (an entry cannot expire sooner). A scan
+// keeps the entries recorded within the interval before it, and the next
+// scan is an interval later, so at worst the map holds the hooks first
+// refused within about two intervals.
 const hookRefusalLimiterMaxEntries = 1024
 
 // hookRefusalLimiter rate limits refusal audit records per hook. It is safe
