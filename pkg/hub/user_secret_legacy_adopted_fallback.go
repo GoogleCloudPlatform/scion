@@ -1,0 +1,247 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"slices"
+	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// Legacy adopted-agent fallback for an owner's user secrets.
+//
+// Delegation provenance adoption gives a legacy agent's edge the frozen
+// compatibility ceiling of its role (permissions.CompatibilityPolicyV1).
+// That table grants secret.use to full only, so an adopted baseline or
+// readonly agent fails clause S3c of the user secret parent ceiling and
+// lost its owner's progeny-shared user secrets at start, restart, runtime
+// read and list when the ceiling started to apply to those paths. Before,
+// these agents received them (start: no check on the owner path; read and
+// list: the progeny rule).
+//
+// The fallback lets S3c pass for exactly that case and nothing else:
+//   - the hop is the agent's own edge (depth 0), and its delegator is a
+//     user who is the agent's owner, so there is no agent above it;
+//   - the edge was written by adoption (source credential
+//     system_migration), is bounded, and its role is baseline or readonly;
+//   - its ceiling is exactly that role's CompatibilityPolicyV1 row (with
+//     or without the assigned service account permissions), so the missing
+//     secret.use is the policy's doing and nothing narrower;
+//   - an adoption record under policy V1, adopted or recognized, points at
+//     this edge for this agent.
+//
+// Every other clause still applies: S1, S2 (held and deleted agents),
+// S3/S3a/S3b/S3f on the hop, S4 (terminal user active), S4a (admitted to
+// the project), S4c, and the source check S5-S8 (the secret is the owner's
+// own, shared with progeny, authored by the owner at the head of the
+// ancestry). A use under the fallback is logged at Warn, rate limited per
+// (agent, secret), naming the cohort and the secret, never the value.
+//
+// The runtime read decides secret.use through Decide, whose step 7b (the
+// agent token's scope restriction) also refuses it to these agents: their
+// role tokens never carry project:secret:read. For the fallback cohort the
+// read therefore applies the agent secret list's sequence instead (the
+// parent ceiling, then the agent's own access constraints), which is what
+// it applied before the ceiling. See authorizeRuntimeUserItem.
+
+// legacyAdoptedFallback records that a chain passed S3c through the
+// legacy adopted-agent fallback.
+type legacyAdoptedFallback struct {
+	Role   string
+	EdgeID string
+}
+
+// legacyAdoptedFallbackWarnInterval is the shortest gap between two Warn
+// lines for the same agent and secret.
+const legacyAdoptedFallbackWarnInterval = 10 * time.Minute
+
+// legacyAdoptedSecretUseFallback reports whether edge, the hop at depth of
+// agent's chain that S3c refuses, qualifies for the legacy adopted-agent
+// fallback. A store error is returned; the caller denies with ceiling_error.
+func (a *AuthzService) legacyAdoptedSecretUseFallback(ctx context.Context, agent *store.Agent, edge *store.DelegationEdge, depth int) (*legacyAdoptedFallback, error) {
+	if agent == nil || edge == nil || depth != 0 {
+		return nil, nil
+	}
+	if edge.DelegatorType != store.DelegationPrincipalUser || edge.DelegatorID == "" || edge.DelegatorID != agent.OwnerID {
+		return nil, nil
+	}
+	if edge.SourceCredentialKind != store.SourceCredentialSystemMigration || edge.Kind != store.EffectCeilingBounded {
+		return nil, nil
+	}
+	role := AgentRole(edge.Role)
+	if role != AgentRoleBaseline && role != AgentRoleReadOnly {
+		return nil, nil
+	}
+	if !legacyCeilingIsCompatibilityV1(edge.Role, edge.EffectCeiling.PermissionIDs) {
+		return nil, nil
+	}
+	recs, _, err := a.store.ListDelegationAdoptions(ctx, store.DelegationAdoptionFilter{AdoptedEdgeID: edge.ID})
+	if err != nil {
+		return nil, fmt.Errorf("adoption record lookup: %w", err)
+	}
+	for _, rec := range recs {
+		if rec == nil || rec.AdoptedEdgeID != edge.ID || rec.DelegateID != agent.ID {
+			continue
+		}
+		if rec.PolicyVersion != int(permissions.CompatibilityPolicyV1) {
+			continue
+		}
+		if rec.Status != store.DelegationAdoptionAdopted && rec.Status != store.DelegationAdoptionRecognized {
+			continue
+		}
+		return &legacyAdoptedFallback{Role: edge.Role, EdgeID: edge.ID}, nil
+	}
+	return nil, nil
+}
+
+// legacyCeilingIsCompatibilityV1 reports whether ids is exactly role's
+// CompatibilityPolicyV1 row, with or without the assigned service account
+// permissions. Both sides are sorted and de-duplicated.
+func legacyCeilingIsCompatibilityV1(role string, ids []string) bool {
+	for _, withSA := range []bool{false, true} {
+		want, ok := permissions.CompatibilityCeiling(permissions.CompatibilityPolicyV1, role, withSA)
+		if ok && slices.Equal(want, ids) {
+			return true
+		}
+	}
+	return false
+}
+
+// Paths that may use the fallback, for the Warn line and the counter.
+const (
+	legacyFallbackPathStart = "start"
+	legacyFallbackPathRead  = "runtime_read"
+	legacyFallbackPathList  = "list"
+)
+
+// legacyAdoptedFallbackMetrics counts uses of the fallback, so the policy V2
+// backfill can show when the exception is no longer needed.
+type legacyAdoptedFallbackMetrics interface {
+	RecordLegacyAdoptedFallback(path, role string)
+}
+
+// OTelLegacyAdoptedFallbackMetrics counts fallback uses as
+// scion.hub.user_secret.legacy_adopted_fallback (attributes path, role).
+type OTelLegacyAdoptedFallbackMetrics struct {
+	total metric.Int64Counter
+}
+
+// NewOTelLegacyAdoptedFallbackMetrics creates the counter.
+func NewOTelLegacyAdoptedFallbackMetrics(mp metric.MeterProvider) (*OTelLegacyAdoptedFallbackMetrics, error) {
+	if mp == nil {
+		return nil, fmt.Errorf("otel legacy adopted fallback metrics: nil MeterProvider")
+	}
+	c, err := mp.Meter(instrumentationScope).Int64Counter("scion.hub.user_secret.legacy_adopted_fallback",
+		metric.WithUnit("{use}"))
+	if err != nil {
+		return nil, fmt.Errorf("creating user_secret.legacy_adopted_fallback counter: %w", err)
+	}
+	return &OTelLegacyAdoptedFallbackMetrics{total: c}, nil
+}
+
+// RecordLegacyAdoptedFallback implements legacyAdoptedFallbackMetrics.
+func (m *OTelLegacyAdoptedFallbackMetrics) RecordLegacyAdoptedFallback(path, role string) {
+	m.total.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String("path", path),
+		attribute.String("role", role),
+	))
+}
+
+// SetLegacyAdoptedFallbackMetrics installs the fallback-use counter.
+func (s *Server) SetLegacyAdoptedFallbackMetrics(m legacyAdoptedFallbackMetrics) {
+	if s == nil || s.authzService == nil {
+		return
+	}
+	s.authzService.legacyFallbackMetrics = m
+}
+
+// LegacyAdoptedFallbackUses returns the number of fallback uses since the
+// process started.
+func (a *AuthzService) LegacyAdoptedFallbackUses() int64 {
+	if a == nil {
+		return 0
+	}
+	return a.legacyFallbackUses.Load()
+}
+
+// recordLegacyAdoptedFallback counts one use of the fallback on path and
+// logs it at Warn, rate limited per (agent, secret), naming the cohort and
+// the secret, never the value.
+func (a *AuthzService) recordLegacyAdoptedFallback(ctx context.Context, path string, fb *legacyAdoptedFallback, agentID, userID, secretID, secretName string) {
+	if a == nil || fb == nil {
+		return
+	}
+	total := a.legacyFallbackUses.Add(1)
+	if m := a.legacyFallbackMetrics; m != nil {
+		m.RecordLegacyAdoptedFallback(path, fb.Role)
+	}
+	a.legacyFallbackWarnOnce.Do(func() {
+		a.legacyFallbackWarn = newHookRefusalLimiter(legacyAdoptedFallbackWarnInterval, time.Now)
+	})
+	record, suppressed := a.legacyFallbackWarn.admit(agentID+"/"+secretID, "legacy_adopted_fallback/"+fb.Role)
+	if !record {
+		return
+	}
+	slog.WarnContext(ctx, "user secret allowed under the legacy adopted-agent fallback: compatibility policy V1 grants secret.use to full only",
+		"path", path, "agent_id", agentID, "cohort", "adopted_"+fb.Role, "edge_id", fb.EdgeID,
+		"secret", secretName, "secret_id", secretID, "user_id", userID,
+		"suppressed_since_last", suppressed, "total_uses", total)
+}
+
+// progenySecretName returns the key of the progeny secret with id, or "".
+func progenySecretName(in *userSecretSourceInputs, id string) string {
+	if in == nil {
+		return ""
+	}
+	for _, sec := range in.progeny {
+		if sec.ID == id {
+			return sec.Key
+		}
+	}
+	return ""
+}
+
+// agentConstraintsAllowSecretUse applies the agent's own access constraints
+// for secret.use on resource, as Decide step 7c and the agent secret list do.
+func (a *AuthzService) agentConstraintsAllowSecretUse(ctx context.Context, ident AgentIdentity, resource Resource) (bool, error) {
+	ctx = maskAuthzInputs(ctx)
+	principals, err := a.authorizationPrincipals(ctx, ident)
+	if err != nil {
+		return false, fmt.Errorf("agent principal lookup: %w", err)
+	}
+	closure := make(map[string]struct{}, len(principals))
+	for _, p := range principals {
+		closure[p.Type+":"+p.ID] = struct{}{}
+	}
+	constraints, err := a.loadAllAccessConstraintsUncached(ctx)
+	if err != nil {
+		return false, fmt.Errorf("access constraint lookup: %w", err)
+	}
+	return restrictionsAllow(restrictionsFromConstraints(constraints, closure, ResourceContext{
+		ResourceType: resource.Type,
+		ResourceID:   resource.ID,
+		OwnerID:      resource.OwnerID,
+		ProjectID:    projectIDForResource(resource),
+		Ancestry:     resource.Ancestry,
+	}), secretUsePermission), nil
+}

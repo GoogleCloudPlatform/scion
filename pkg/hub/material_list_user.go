@@ -135,6 +135,9 @@ func (s *Server) agentListUserSecrets(
 		}), secretUsePermission) {
 			continue
 		}
+		if chain.legacyFallback != nil {
+			s.authzService.recordLegacyAdoptedFallback(ctx, legacyFallbackPathList, chain.legacyFallback, agentID, chain.user.ID, m.ID, m.Name)
+		}
 
 		var src *SourceRef
 		if kind != "" {

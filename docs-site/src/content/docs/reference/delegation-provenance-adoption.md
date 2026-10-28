@@ -61,6 +61,44 @@ the permission registry or role scopes.
 New children of an adopted agent are created through the normal create path,
 so their ceilings stay within the adopted chain.
 
+### Legacy exception: the owner's own user secrets for adopted baseline and readonly agents
+
+The V1 table gives `secret.use` to `full` only, so the user secret parent
+ceiling refuses an adopted `baseline` or `readonly` agent its owner's
+progeny-shared user secrets. Before that ceiling applied to start, restart,
+the runtime read and the agent secret list, these agents received them. As a
+**legacy compatibility exception**, the Hub keeps that behaviour for exactly
+this cohort:
+
+- the agent's own edge (no agent above it), delegated by the agent's owner;
+- written by adoption (source credential `system_migration`), bounded, with
+  role `baseline` or `readonly`;
+- whose ceiling is exactly that role's V1 row (with or without the assigned
+  service account permissions);
+- with an adoption record under policy V1 (`adopted` or `recognized`) for
+  that edge.
+
+For such an agent the ceiling lets the missing `secret.use` pass, and every
+other check still applies: a held or deleted agent, an agent-delegated chain,
+an edge recorded any other way, a terminal user who is inactive or not
+admitted to the project, and the secret source check (the secret must be the
+owner's own, shared with progeny and authored by the owner) all still deny.
+
+The runtime read normally also checks the agent token's scopes, and a
+`baseline` or `readonly` token never carries `project:secret:read`. For this
+cohort only, the read skips that token-scope check and applies the ceiling
+and the agent's own access constraints, the same checks the agent secret
+list applies, as the read did before the ceiling. This is an exception to
+the token-scope check. Every other agent keeps it.
+
+Each use is counted (`scion.hub.user_secret.legacy_adopted_fallback`, with
+attributes `path` and `role`) and logged at warning level as `user secret
+allowed under the legacy adopted-agent fallback`, with the agent, the cohort
+(`adopted_baseline` or `adopted_readonly`), the edge and the secret name,
+never the value. The warning is logged at most once every 10 minutes per
+agent and secret. **The exception ends with the planned policy V2 backfill**, which
+is to re-ceiling these edges; the counter shows when it is no longer used.
+
 ## Which edges are adopted
 
 The planner examines the ancestor closure of every live agent (a stopped
