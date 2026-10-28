@@ -502,7 +502,7 @@ For user-scoped (personal) secrets, you can explicitly configure them to propaga
 scion hub secret set --allow-progeny MY_PERSONAL_TOKEN my-secret-value
 ```
 
-When a child agent is created, Scion walks the ancestry chain of the agent (from child to ancestors) to resolve secrets. If the secret's creator is in the agent's ancestry chain AND `allow-progeny` is enabled, the secret is safely inherited and projected into the descendant agent. Under the hood, this dynamically manages implicit **progeny policies** (`progeny-secret-access:<id>`) on the Scion Hub.
+When a child agent is created, started, or reads secrets at runtime, Scion walks the ancestry and delegation chain of the agent (from child to ancestors) to resolve secrets. If the secret's creator is in the agent's ancestry chain AND `allow-progeny` is enabled — and, when the agent's delegation chain has recorded provenance, every hop on the chain allows `secret.use`, every agent delegator on the chain is live and holds `project:secret:read`, and the root user is active, admitted to the project, not restricted from `secret.use`, and the recorded author of the secret — the secret is safely inherited and projected into the descendant agent (see [Propagation to Descendant Agents](/scion/hosted/user/secrets/#propagation-to-descendant-agents-progeny)). Under the hood, this dynamically manages implicit **progeny policies** (`progeny-secret-access:<id>`) on the Scion Hub.
 
 ---
 
