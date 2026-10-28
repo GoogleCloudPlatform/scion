@@ -6339,7 +6339,7 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 	// Defence in depth: markup is refused at upload and only raster images
 	// are served inline, but if either check ever lets active content
 	// through, the sandbox keeps it off the hub's origin.
-	w.Header().Set("Content-Security-Policy", untrustedContentSandboxCSP)
+	setUntrustedContentHeaders(w.Header(), untrustedContentSandboxCSP)
 
 	// Content-Disposition: inline for images, attachment for everything else.
 	disposition := "attachment"

@@ -97,6 +97,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletion"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletionagent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 )
 
@@ -243,6 +245,8 @@ func checkColumn(t, c string) error {
 			usagereservation.Table:              usagereservation.ValidColumn,
 			user.Table:                          user.ValidColumn,
 			useraccesstoken.Table:               useraccesstoken.ValidColumn,
+			userdeletion.Table:                  userdeletion.ValidColumn,
+			userdeletionagent.Table:             userdeletionagent.ValidColumn,
 			userterminalworkspace.Table:         userterminalworkspace.ValidColumn,
 		})
 	})

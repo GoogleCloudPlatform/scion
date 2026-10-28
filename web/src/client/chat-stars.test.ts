@@ -26,6 +26,7 @@ import {
   fetchStarState,
   putStar,
   type StarsApi,
+  VisibleReconciler,
 } from './chat-stars.js';
 
 function deferred<T>(): {
@@ -478,5 +479,76 @@ describe('star API helpers', () => {
   it('answers null for a star that is no longer available', async () => {
     stubFetch(404, { error: { message: 'Message not found' } });
     await expect(fetchStarDetail('m1')).resolves.toBeNull();
+  });
+});
+
+describe('VisibleReconciler', () => {
+  let visibility: DocumentVisibilityState = 'visible';
+
+  function setup(): { run: ReturnType<typeof vi.fn>; r: VisibleReconciler } {
+    vi.useFakeTimers();
+    vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility);
+    const run = vi.fn();
+    return { run, r: new VisibleReconciler(run, 60_000) };
+  }
+
+  afterEach(() => {
+    visibility = 'visible';
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it('runs once a minute while started and visible', async () => {
+    const { run, r } = setup();
+    r.start();
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(run).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(run).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(run).toHaveBeenCalledTimes(2);
+    r.stop();
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
+  it('a refetch for another reason restarts the interval', async () => {
+    const { run, r } = setup();
+    r.start();
+    await vi.advanceTimersByTimeAsync(50_000);
+    r.noteRefetched();
+    await vi.advanceTimersByTimeAsync(50_000);
+    expect(run).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(run).toHaveBeenCalledTimes(1);
+    r.stop();
+  });
+
+  it('never polls while hidden, and runs once on return', async () => {
+    const { run, r } = setup();
+    r.start();
+    visibility = 'hidden';
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(run).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    visibility = 'visible';
+    document.dispatchEvent(new Event('visibilitychange'));
+    // The window's focus right after the same return refetches nothing more.
+    window.dispatchEvent(new Event('focus'));
+    expect(run).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(run).toHaveBeenCalledTimes(2);
+    r.stop();
+  });
+
+  it('ignores page returns once stopped', () => {
+    const { run, r } = setup();
+    r.start();
+    r.stop();
+    vi.advanceTimersByTime(5_000);
+    document.dispatchEvent(new Event('visibilitychange'));
+    window.dispatchEvent(new Event('focus'));
+    expect(run).not.toHaveBeenCalled();
+    expect(r.started).toBe(false);
   });
 });

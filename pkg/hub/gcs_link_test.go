@@ -760,6 +760,7 @@ func TestGCSLink_Allowed_ProjectTopic(t *testing.T) {
 	require.Equal(t, `attachment; filename*=UTF-8''o.txt`, rec.Header().Get("Content-Disposition"))
 	require.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"))
 	require.Equal(t, untrustedContentSandboxCSP, rec.Header().Get("Content-Security-Policy"))
+	require.Equal(t, untrustedContentPermissionsPolicy, rec.Header().Get("Permissions-Policy"))
 	require.Equal(t, "private, no-store", rec.Header().Get("Cache-Control"))
 	require.Equal(t, "42", rec.Header().Get("X-Scion-Gcs-Generation"))
 

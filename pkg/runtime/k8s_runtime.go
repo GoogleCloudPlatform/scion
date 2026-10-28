@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -115,6 +116,12 @@ type KubernetesRuntime struct {
 	// it as terminal is still reported with that reason (see
 	// k8s_pod_tombstones.go).
 	podTrack podTracker
+
+	// claimReadFallbackLogged and claimEventsFallbackLogged make the claim
+	// check before the pod (verifyPodClaims) log only once per runtime
+	// that it cannot read claims, or events, and so checks less.
+	claimReadFallbackLogged   atomic.Bool
+	claimEventsFallbackLogged atomic.Bool
 }
 
 // agentContainerName is the name of the primary scion agent container in
@@ -822,23 +829,35 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		}
 	}
 
+	// NFS workspace provisioning is serialized by the file lock that
+	// sciontool provision takes on the export, inside the init container.
+	// buildPod only constructs the spec (no API calls, no files written),
+	// so it runs before the checkpoint below, letting the claim check see
+	// every claim the pod mounts.
+	pod, err := r.buildPod(namespace, config)
+	if err != nil {
+		return "", fmt.Errorf("failed to build pod spec: %w", err)
+	}
+
+	// Check every claim the pod mounts before the pod exists, so a start
+	// whose pod could never be scheduled fails with a reason. It only
+	// reads, and runs before the checkpoint because it can wait for a
+	// Pending claim: the checkpoint stays immediately before the create.
+	if err := r.verifyPodClaims(ctx, namespace, pod, podClaimSources(config)); err != nil {
+		return "", err
+	}
+
 	runtimeLog().Info("Pre-create setup complete", "agent", config.Name, "namespace", namespace,
 		"phase", "pre-create", "elapsed_ms", time.Since(preCreateStart).Milliseconds())
 
 	// The pod create's checkpoint can block for as long as the launch
 	// deadline while the Hub is unreachable. Between here and the pod create
-	// there is only local work (the pod spec), no API object creates.
+	// there is only local work (the debug file), no API object creates
+	// (verifyStartObjects only reads).
 	if err := hooks.checkpoint(ctx, CheckpointStepPodCreate); err != nil {
 		// The launch is over: create nothing further. The secrets this
 		// launch created are removed by its cleanup, by UID.
 		return "", err
-	}
-
-	// NFS workspace provisioning is serialized by the file lock that
-	// sciontool provision takes on the export, inside the init container.
-	pod, err := r.buildPod(namespace, config)
-	if err != nil {
-		return "", fmt.Errorf("failed to build pod spec: %w", err)
 	}
 
 	writeK8sRuntimeDebugFile(config, namespace, pod)
@@ -1937,15 +1956,10 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 		return fmt.Errorf("cannot create shared dir PVCs: missing scion.project label")
 	}
 
-	storageClass := ""
+	policy := sharedDirClaimPolicyFor(config.Kubernetes)
 	size := defaultSharedDirSize
-	if config.Kubernetes != nil {
-		if config.Kubernetes.SharedDirStorageClass != "" {
-			storageClass = config.Kubernetes.SharedDirStorageClass
-		}
-		if config.Kubernetes.SharedDirSize != "" {
-			size = config.Kubernetes.SharedDirSize
-		}
+	if config.Kubernetes != nil && config.Kubernetes.SharedDirSize != "" {
+		size = config.Kubernetes.SharedDirSize
 	}
 
 	storageQuantity, err := parseResourceSafe(size, "shared_dir_size")
@@ -1954,7 +1968,7 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 	}
 
 	for _, sd := range sharedDirs {
-		if err := r.ensureProjectRWXClaim(ctx, namespace, projectName, projectID, sd.Name, storageClass, storageQuantity); err != nil {
+		if err := r.ensureProjectRWXClaim(ctx, namespace, projectName, projectID, sd.Name, policy, storageQuantity); err != nil {
 			return err
 		}
 	}
@@ -1988,9 +2002,17 @@ func warnOnStorageClassMismatch(pvc *corev1.PersistentVolumeClaim, requested str
 // ensureProjectRWXClaim is the idempotent get-or-create core for project-scoped
 // RWX PVCs. It creates a PVC with a deterministic name if one does not already
 // exist. Used by both shared-dir and (future) workspace claim paths.
+//
+// An existing claim is reused as it is, with no policy needed, unless it is
+// labelled for a different project, which refuses the start. An existing
+// claim without a project ID label (one made by hand) is reused with a
+// warning. A claim that does not exist is created only when policy allows
+// it (sharedDirClaimPolicy.createSpec); otherwise the start is refused with
+// an error naming the settings that fix it, and nothing is created.
 func (r *KubernetesRuntime) ensureProjectRWXClaim(
 	ctx context.Context,
-	namespace, projectName, projectID, dirName, storageClass string,
+	namespace, projectName, projectID, dirName string,
+	policy sharedDirClaimPolicy,
 	storageQuantity resource.Quantity,
 ) error {
 	pvcName := sharedDirPVCName(projectName, dirName)
@@ -1998,9 +2020,26 @@ func (r *KubernetesRuntime) ensureProjectRWXClaim(
 	// Check if PVC already exists (project-scoped, may have been created by another agent)
 	existing, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
 	if err == nil {
-		runtimeLog().Info("Project RWX PVC already exists, reusing", "pvc", pvcName, "dir", dirName)
-		warnOnStorageClassMismatch(existing, storageClass)
+		claimProjectID := projectkeys.ProjectIDFromLabels(existing.Labels)
+		switch {
+		case claimProjectID == "":
+			runtimeLog().Warn("Reusing shared-dir claim without a project ID label; it is used as is",
+				"pvc", pvcName, "namespace", namespace, "dir", dirName, "project_id", projectID)
+		case projectID != "" && claimProjectID != projectID:
+			return sharedDirClaimOtherProjectError(dirName, namespace, pvcName, claimProjectID, projectID)
+		default:
+			runtimeLog().Info("Project RWX PVC already exists, reusing", "pvc", pvcName, "dir", dirName)
+		}
+		warnOnStorageClassMismatch(existing, policy.Class)
 		return nil
+	}
+	if !k8serrors.IsNotFound(err) {
+		return fmt.Errorf("checking shared-dir claim %s/%s: %w", namespace, pvcName, err)
+	}
+
+	storageClass, err := policy.createSpec()
+	if err != nil {
+		return sharedDirClaimUnresolvedError(dirName, namespace, pvcName)
 	}
 
 	pvc := &corev1.PersistentVolumeClaim{
@@ -2030,9 +2069,7 @@ func (r *KubernetesRuntime) ensureProjectRWXClaim(
 		}
 	}
 
-	if storageClass != "" {
-		pvc.Spec.StorageClassName = &storageClass
-	}
+	pvc.Spec.StorageClassName = storageClass
 
 	runtimeLog().Info("Creating project RWX PVC", "pvc", pvcName, "dir", dirName, "storage", storageQuantity.String())
 	if _, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Create(ctx, pvc, metav1.CreateOptions{}); err != nil {

@@ -3000,6 +3000,12 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetAgentRunScopeMetrics(runScopeRec)
 	}
 
+	if legacyFallbackRec, err := hub.NewOTelLegacyAdoptedFallbackMetrics(mp); err != nil {
+		log.Printf("WARNING: hub legacy adopted-agent fallback metrics disabled: %v", err)
+	} else {
+		hubSrv.SetLegacyAdoptedFallbackMetrics(legacyFallbackRec)
+	}
+
 	// Decision logging (remaining-audit P1): the audit writer's
 	// scion.logging.* series and the decision-log disposition counter.
 	// The same instruments carry writer=cloud (P2): the Cloud Logging
@@ -4217,7 +4223,8 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		if authSvc := hubSrv.GetBrokerAuthService(); authSvc != nil {
 			secretKeyB64, secretErr := authSvc.GenerateAndStoreSecret(ctx, brokerID)
 			if secretErr != nil {
-				log.Printf("Warning: failed to generate/retrieve secret for co-located broker: %v", secretErr)
+				slog.Error("Co-located broker secret could not be generated or loaded; the broker API refuses every request except health checks until the server is restarted with a working secret",
+					"error", secretErr)
 			} else {
 				log.Printf("Broker secret ready for co-located control channel (idempotent)")
 				inMemoryCreds = &brokercredentials.BrokerCredentials{
@@ -4228,7 +4235,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 				}
 			}
 		} else {
-			log.Printf("Warning: BrokerAuthService not available, skipping co-located broker credentials")
+			slog.Error("Co-located broker credentials are unavailable (BrokerAuthService not available); the broker API refuses every request except health checks")
 		}
 	}
 

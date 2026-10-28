@@ -786,3 +786,18 @@ func (s *Server) bearerStillValid(ctx context.Context) bool {
 	}
 	return true
 }
+
+// revokeUserAccessTokensForUserTx revokes every unrevoked access token of
+// userID inside the caller's transaction and returns how many it revoked.
+// The forced user delete (forceDeleteUserTx, ptone/scion#2143) calls it in
+// the transaction that marks the user deleting, so the user's tokens end
+// with the rest of the user's authority; ValidateToken already refuses a
+// token whose user is not active. Like every UAT mutation it lives in this
+// file.
+func revokeUserAccessTokensForUserTx(ctx context.Context, tx store.Store, userID string) (int, error) {
+	n, err := tx.RevokeUserAccessTokensForUser(ctx, userID)
+	if err != nil {
+		return 0, fmt.Errorf("revoke access tokens of user: %w", err)
+	}
+	return n, nil
+}

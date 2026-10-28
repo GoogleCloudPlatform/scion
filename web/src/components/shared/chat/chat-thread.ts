@@ -61,6 +61,7 @@ import {
   fetchStarDetail,
   isStarrableMessageId,
   starredMessagesEnabled,
+  VisibleReconciler,
   type StarItem,
 } from '../../../client/chat-stars.js';
 import type { ChatMessageFilter } from '../../../client/chat-routes.js';
@@ -103,8 +104,10 @@ import type { PreviewTarget } from './chat-file-preview.js';
 import './chat-action-sheet.js';
 import type { ActionSheetSelectDetail } from './chat-action-sheet.js';
 import {
+  focusedElement,
+  MenuFocus,
   placeMenuInViewport,
-  renderMenuRows,
+  renderMenu,
   runMenuAction,
   shouldUseMenuSheet,
   type MenuAction,
@@ -189,6 +192,30 @@ interface FilterExitTarget {
   highlight: boolean;
   /** Seed the composer with a reply to, or an edit of, the message. */
   action?: 'reply' | 'edit';
+  /** Move focus to the message when it lands (a jump). */
+  focus?: boolean;
+}
+
+/** Whether the user asked for reduced motion. */
+function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  );
+}
+
+/**
+ * Focus a message a jump landed on, for keyboard and assistive users,
+ * without putting every message in the tab order: the row is focusable
+ * (tabindex -1) only until focus leaves it.
+ */
+function focusArrivedMessage(el: HTMLElement): void {
+  if (!el.hasAttribute('tabindex')) {
+    el.setAttribute('tabindex', '-1');
+    el.addEventListener('blur', () => el.removeAttribute('tabindex'), { once: true });
+  }
+  el.focus({ preventScroll: true });
 }
 
 /** Delay that coalesces a burst of live messages with artifacts into one refresh. */
@@ -397,6 +424,16 @@ function isJumpScrollClamped(
     scrollEl.scrollTop >=
     scrollEl.scrollHeight - scrollEl.clientHeight - JUMP_SCROLL_VIEW_TOLERANCE_PX;
   return (targetAbove && atTop) || (targetBelow && atBottom);
+}
+
+/**
+ * Whether a key event comes from inside an open popup menu (its
+ * `.context-menu` container): the menu's own keys, never a scroll gesture.
+ */
+function isInOpenMenu(e: Event): boolean {
+  return e
+    .composedPath()
+    .some((n) => n instanceof HTMLElement && n.classList.contains('context-menu'));
 }
 
 /**
@@ -855,6 +892,15 @@ export class ScionChatThread extends LitElement {
   /** The open message menu is the mobile bottom sheet, not the popup. */
   @state() private contextMenuAsSheet = false;
 
+  /** The message a popup menu follows, and its last viewport top. */
+  private _menuAnchor: { messageId: string; top: number | null } | null = null;
+
+  /** The user scrolled since the popup menu opened (it then closes). */
+  private _menuUserScrolled = false;
+
+  /** Keyboard focus around the popup message menu. */
+  private readonly _menuFocus = new MenuFocus();
+
   // ---- Starred messages (web.chat_starred_messages) ----
 
   /** Star state of this conversation's loaded messages (in memory only). */
@@ -880,10 +926,35 @@ export class ScionChatThread extends LitElement {
   /** An SSE star invalidation: refetch the state of loaded messages. */
   private _starsUpdatedHandler = (): void => {
     if (!this.starsActive) return;
+    this._starCenterReconciler.noteRefetched();
     void this.stars.invalidate();
     // The starred-only center lists the collection itself: refetch it.
     if (this.filtered && this.loaded) void this.refreshFilteredWindow();
   };
+
+  /**
+   * The starred-only center is a visible collection: it reconciles at most
+   * once a minute while shown and the page is visible, and on returning to
+   * the page, in case an invalidation was missed.
+   */
+  private readonly _starCenterReconciler = new VisibleReconciler(() => this._starsUpdatedHandler());
+
+  /**
+   * The full conversation is not a collection surface (no polling), but
+   * returning to the page refetches the loaded messages' star state.
+   */
+  private readonly _starReturnReconciler = new VisibleReconciler(() => {
+    if (this.starsActive && !this.filtered) void this.stars.invalidate();
+  }, null);
+
+  /** Run the reconciler that fits the current view, and stop the other. */
+  private syncStarReconcilers(): void {
+    const active = this.isConnected && this.starsActive;
+    if (active && this.filtered) this._starCenterReconciler.start();
+    else this._starCenterReconciler.stop();
+    if (active && !this.filtered) this._starReturnReconciler.start();
+    else this._starReturnReconciler.stop();
+  }
 
   // ---- Path-link file preview state (#1148) ----
 
@@ -1340,6 +1411,24 @@ export class ScionChatThread extends LitElement {
         }
       }
 
+      /* Reduced motion: the same mark, held without the fade. */
+      @media (prefers-reduced-motion: reduce) {
+        .permalink-highlight {
+          animation: none;
+          background-color: rgba(59, 130, 246, 0.2);
+        }
+      }
+
+      /* A message focused on arrival from a jump. */
+      scion-chat-message:focus {
+        outline: none;
+      }
+
+      scion-chat-message:focus-visible {
+        outline: 2px solid var(--scion-primary, #3b82f6);
+        outline-offset: -2px;
+      }
+
       /* Empty / Loading / Error states */
       .state-msg {
         display: flex;
@@ -1640,8 +1729,15 @@ export class ScionChatThread extends LitElement {
         transition: background 0.1s;
       }
 
-      .context-menu-item:hover {
+      .context-menu-item:hover,
+      .context-menu-item:focus {
         background: var(--scion-primary-50, #eff6ff);
+        outline: none;
+      }
+
+      .context-menu-item:focus-visible {
+        outline: 2px solid var(--scion-primary, #3b82f6);
+        outline-offset: -2px;
       }
 
       .context-menu-item.danger {
@@ -1699,6 +1795,8 @@ export class ScionChatThread extends LitElement {
    * new conversationKey — we must tear down old state and reload.
    */
   override updated(changedProperties: Map<string, unknown>): void {
+    this.syncStarReconcilers();
+    this.syncActionsTabStop();
     this.measureSendErrorTruncation();
     this.observeSendError();
     // The typing indicator is in the list on a phone or tablet: when it
@@ -1713,10 +1811,9 @@ export class ScionChatThread extends LitElement {
       if (list) list.scrollTop = list.scrollHeight;
     }
     if (this.contextMenuMessage && !this.contextMenuAsSheet) {
-      placeMenuInViewport(
-        this.renderRoot.querySelector<HTMLElement>('.context-menu'),
-        this.contextMenuPosition
-      );
+      const menu = this.renderRoot.querySelector<HTMLElement>('.context-menu');
+      placeMenuInViewport(menu, this.contextMenuPosition);
+      this._menuFocus.afterRender(menu);
     }
     if (
       changedProperties.has('conversationKey') &&
@@ -1885,6 +1982,9 @@ export class ScionChatThread extends LitElement {
     this._sendErrorObserver = null;
     this._observedSendError = null;
     this.stopStream();
+    this.untrackMenuAnchor();
+    this._starCenterReconciler.stop();
+    this._starReturnReconciler.stop();
     this.deactivateUnreadAnchor();
     this._bottomPinObserver?.disconnect();
     this._bottomPinObserver = null;
@@ -2367,7 +2467,9 @@ export class ScionChatThread extends LitElement {
         } else if (exit) {
           void this.landFilterExit(exit);
         } else if (hashMsgId) {
-          void this.scrollToMessageById(hashMsgId, true);
+          // A permalink (also a starred entry in another conversation)
+          // lands focus on its message for keyboard and assistive users.
+          void this.scrollToMessageById(hashMsgId, true, true);
         } else if (restore && !(restore.pinnedToBottom && this.showUnreadDivider)) {
           void this.restoreScrollPosition(restore);
         } else if (this.showUnreadDivider) {
@@ -4112,12 +4214,12 @@ export class ScionChatThread extends LitElement {
     this.scheduleScrollAnchorCapture();
 
     // A tap-opened (or right-clicked) context menu is positioned at a fixed
-    // viewport point; once the thread scrolls it no longer points at the
-    // message it targets, so dismiss it rather than leave it stranded. The
-    // mobile sheet is not anchored to the message, so it stays open (a new
-    // message arriving scrolls the list underneath it).
+    // viewport point: a user scroll dismisses it rather than leave it
+    // stranded, and any other scroll moves it with its message
+    // (followMenuAnchor). The mobile sheet is not anchored to the message,
+    // so it stays open (a new message arriving scrolls the list underneath).
     if (this.contextMenuMessage && !this.contextMenuAsSheet) {
-      this.closeContextMenu();
+      this.followMenuAnchor(el);
     }
 
     // Load older messages when scrolled near top
@@ -4448,7 +4550,7 @@ export class ScionChatThread extends LitElement {
    * Scroll to a specific message by ID, with optional highlight animation.
    * Can be called externally (e.g. from search navigation on same conversation).
    */
-  async scrollToMessageById(messageId: string, highlight = true): Promise<void> {
+  async scrollToMessageById(messageId: string, highlight = true, focus = false): Promise<void> {
     // Explicit programmatic navigation (search-jump, reply-jump, deep link)
     // takes precedence over the open-time unread anchor (rule 5). Without
     // this, a same-thread search-jump made inside the anchor window is
@@ -4495,7 +4597,11 @@ export class ScionChatThread extends LitElement {
       !isJumpTargetInView(containerRect, targetRect) &&
       !isJumpScrollClamped(scrollEl, containerRect, targetRect);
 
-    msgEl.scrollIntoView({ behavior: 'smooth', block: align });
+    msgEl.scrollIntoView({ behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: align });
+    if (focus) {
+      focusArrivedMessage(msgEl);
+      if (this.starsActive) this.setActiveActions(messageId);
+    }
     if (willScroll) {
       // A large layout shift mid-scroll (image load, late markdown,
       // attachment height) can leave the target off screen because the
@@ -4573,7 +4679,8 @@ export class ScionChatThread extends LitElement {
    * grab/middle-click via `pointerdown`, or a scroll-relevant `keydown`
    * anywhere in the document — not just on the scroll container, since focus
    * often isn't there, and ignoring the same keys typed into an editable
-   * field like the composer, review N3), another jump (scrollToMessageById
+   * field like the composer, review N3, or inside the open message menu),
+   * another jump (scrollToMessageById
    * re-entry, or scrollToBottom for "Jump to latest" / autoscroll), or
    * thread switch/disconnect — never yanks the user back to a target they've
    * since scrolled away from on purpose.
@@ -4605,6 +4712,8 @@ export class ScionChatThread extends LitElement {
       // they're in JUMP_SCROLL_CANCEL_KEYS for the document-wide case (review
       // N3).
       if (isEditableKeydownTarget(e.composedPath()[0])) return;
+      // Keys inside the open message menu move between its items.
+      if (isInOpenMenu(e)) return;
       cleanup();
     };
     // Not a cancel signal — Chromium fires `scroll` every frame of the
@@ -5198,10 +5307,10 @@ export class ScionChatThread extends LitElement {
    */
   openInFullContext(messageId: string): void {
     if (this.filtered) {
-      this.exitFilter({ messageId, highlight: true }, true);
+      this.exitFilter({ messageId, highlight: true, focus: true }, true);
       return;
     }
-    void this.scrollToMessageById(messageId);
+    void this.scrollToMessageById(messageId, true, true);
   }
 
   /** Show all messages: the full conversation at the nearest visible message. */
@@ -5253,7 +5362,7 @@ export class ScionChatThread extends LitElement {
       );
       return;
     }
-    this.exitFilter({ messageId: item.messageId, highlight: true }, true);
+    this.exitFilter({ messageId: item.messageId, highlight: true, focus: true }, true);
   }
 
   /**
@@ -5263,7 +5372,8 @@ export class ScionChatThread extends LitElement {
    */
   private async landFilterExit(exit: FilterExitTarget): Promise<void> {
     const fetchId = this.fetchId;
-    await this.scrollToMessageById(exit.messageId, exit.highlight);
+    // A jump focuses its message; Reply and Edit focus the composer below.
+    await this.scrollToMessageById(exit.messageId, exit.highlight, exit.focus === true);
     if (!exit.action || fetchId !== this.fetchId || this.filtered) return;
     const msg = this.messageMap.get(exit.messageId);
     if (!msg) return;
@@ -5468,11 +5578,21 @@ export class ScionChatThread extends LitElement {
   /** Render the context menu when a message is right-clicked or tapped. */
   private renderContextMenu() {
     if (!this.contextMenuMessage || this.contextMenuAsSheet) return nothing;
+    const msg = this.contextMenuMessage;
+    const sender = this.getSenderDisplayName(msg) || msg.sender;
     return html`
-      <div class="context-menu-overlay" @click=${this.closeContextMenu}></div>
-      <div class="context-menu">
-        ${renderMenuRows(this.messageMenuActions(this.contextMenuMessage))}
-      </div>
+      <div
+        class="context-menu-overlay"
+        @click=${(): void => {
+          this.closeContextMenu();
+          this._menuFocus.closed();
+        }}
+      ></div>
+      ${renderMenu(this.messageMenuActions(msg), {
+        label: sender ? `Message actions, ${sender}` : 'Message actions',
+        focus: this._menuFocus,
+        close: () => this.closeContextMenu(),
+      })}
     `;
   }
 
@@ -5579,12 +5699,272 @@ export class ScionChatThread extends LitElement {
   /** Handle right-click on a message to show context menu. */
   private handleMessageContextMenu(e: MouseEvent, msg: Message): void {
     e.preventDefault();
+    // A context menu the keyboard raised (the ContextMenu key on a focused
+    // message) carries no pointer position: anchor it to the message.
+    let at = { x: e.clientX, y: e.clientY };
+    if (e.clientX === 0 && e.clientY === 0) {
+      const el = this.shadowRoot?.getElementById(`msg-${msg.id}`);
+      if (el) {
+        const r = el.getBoundingClientRect();
+        at = { x: r.left + 16, y: r.top + 16 };
+      }
+    }
+    this.openMessageMenu(msg, at);
+  }
+
+  /**
+   * Open the message menu at `at`. The message becomes the list's tab stop
+   * (pointer or keyboard alike), and its More actions button is where
+   * Escape returns focus.
+   */
+  private openMessageMenu(msg: Message, at: { x: number; y: number }): void {
     // Star states whose request failed are retried when a menu opens.
     if (this.starsActive) void this.stars.retryFailed();
     this.contextMenuMessage = msg;
-    this.contextMenuPosition = { x: e.clientX, y: e.clientY };
+    this.contextMenuPosition = at;
     this.contextMenuAsSheet = shouldUseMenuSheet();
     document.addEventListener('keydown', this.handleContextMenuKeydown);
+    if (this.starsActive) this.setActiveActions(msg.id);
+    if (!this.contextMenuAsSheet) {
+      const el = this.messageElement(msg.id);
+      this._menuFocus.opened(el?.actionsButton ?? undefined);
+    }
+    this.trackMenuAnchor(msg.id);
+  }
+
+  // ---- Message list tab stop (the roving More actions button) ----
+
+  /** The message whose More actions button is the list's one tab stop. */
+  private _activeActionsId = '';
+
+  /** That message's index the last time the stop was synced. */
+  private _activeActionsIndex = -1;
+
+  /** The message whose More actions button holds focus, if any. */
+  private _actionsFocusId = '';
+
+  private messageElement(
+    messageId: string
+  ): (HTMLElement & import('./chat-message.js').ScionChatMessage) | null {
+    return (this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null) as
+      | (HTMLElement & import('./chat-message.js').ScionChatMessage)
+      | null;
+  }
+
+  private messageElements(): Array<import('./chat-message.js').ScionChatMessage> {
+    return [...(this.shadowRoot?.querySelectorAll('scion-chat-message') ?? [])];
+  }
+
+  /** Make `messageId`'s More actions button the list's tab stop. */
+  private setActiveActions(messageId: string): void {
+    this._activeActionsId = messageId;
+    this.syncActionsTabStop();
+  }
+
+  /**
+   * Keep exactly one rendered message's More actions button in the tab
+   * order, and its aria-expanded in step with the menu. An active message
+   * that is still rendered keeps the stop (live messages, edits and
+   * refreshes do not move it). When it left: the closest surviving
+   * message takes the stop, and takes focus only if focus was on the
+   * removed button (an empty starred-only center gives it to Show all).
+   * With no stop yet, the last message in view takes it, without focus.
+   */
+  private syncActionsTabStop(): void {
+    if (!this.starsActive) return;
+    const els = this.messageElements();
+    let index = this._activeActionsId
+      ? els.findIndex((m) => m.messageId === this._activeActionsId)
+      : -1;
+    let repairFocus = false;
+    if (index < 0) {
+      if (this._activeActionsId && this._activeActionsIndex >= 0) {
+        // The active message left.
+        repairFocus = this._actionsFocusId === this._activeActionsId && focusedElement() === null;
+        index = els.length > 0 ? Math.min(this._activeActionsIndex, els.length - 1) : -1;
+      } else {
+        index = this.lastVisibleMessageIndex(els);
+      }
+      this._activeActionsId = index >= 0 ? els[index].messageId : '';
+    }
+    this._activeActionsIndex = index;
+    const open = this.contextMenuAsSheet ? '' : (this.contextMenuMessage?.id ?? '');
+    for (let i = 0; i < els.length; i++) {
+      const tab = i === index ? 0 : -1;
+      if (els[i].actionsTabIndex !== tab) els[i].actionsTabIndex = tab;
+      const expanded = els[i].messageId === open;
+      if (els[i].actionsExpanded !== expanded) els[i].actionsExpanded = expanded;
+    }
+    if (!repairFocus) return;
+    this._actionsFocusId = '';
+    if (index >= 0) {
+      const target = els[index];
+      void target.updateComplete.then(() => target.actionsButton?.focus());
+    } else if (this.filtered) {
+      void this.updateComplete.then(() =>
+        this.shadowRoot?.querySelector<HTMLElement>('.star-filter-empty sl-button')?.focus()
+      );
+    }
+  }
+
+  /**
+   * The last rendered message whose box is inside the scroller; else the last one that overlaps
+   * it (a message taller than the view); else the last.
+   */
+  private lastVisibleMessageIndex(
+    els: Array<import('./chat-message.js').ScionChatMessage>
+  ): number {
+    if (els.length === 0) return -1;
+    const scroller = this.shadowRoot?.querySelector<HTMLElement>('.messages-scroll');
+    if (scroller) {
+      const view = scroller.getBoundingClientRect();
+      let overlapping = -1;
+      for (let i = els.length - 1; i >= 0; i--) {
+        const r = els[i].getBoundingClientRect();
+        if (r.height <= 0) continue;
+        if (r.top >= view.top && r.bottom <= view.bottom) return i;
+        if (overlapping < 0 && r.bottom > view.top && r.top < view.bottom) overlapping = i;
+      }
+      if (overlapping >= 0) return overlapping;
+    }
+    return els.length - 1;
+  }
+
+  /** Up/Down/Home/End on a More actions button: move the tab stop and focus. */
+  private handleActionsNav = (e: Event): void => {
+    const { messageId, key } = (e as CustomEvent<{ messageId: string; key: string }>).detail;
+    const els = this.messageElements();
+    const from = els.findIndex((m) => m.messageId === messageId);
+    if (from < 0) return;
+    let to = from;
+    if (key === 'ArrowUp') to = Math.max(0, from - 1);
+    else if (key === 'ArrowDown') to = Math.min(els.length - 1, from + 1);
+    else if (key === 'Home') to = 0;
+    else if (key === 'End') to = els.length - 1;
+    const target = els[to];
+    this.setActiveActions(target.messageId);
+    void target.updateComplete.then(() => target.actionsButton?.focus());
+  };
+
+  /** A More actions button was activated (or Shift+F10 / ContextMenu on it). */
+  private handleActionsOpen = (e: Event): void => {
+    const { messageId } = (e as CustomEvent<{ messageId: string }>).detail;
+    const msg = this.messageMap.get(messageId);
+    const el = this.messageElement(messageId);
+    if (!msg || !el) return;
+    const r = (el.actionsButton ?? el).getBoundingClientRect();
+    this.openMessageMenu(msg, { x: r.left, y: r.bottom });
+  };
+
+  /** Shift+F10 / ContextMenu on a message focused by a jump opens its menu. */
+  private handleMessageHostKeydown(e: KeyboardEvent, msg: Message): void {
+    if (e.composedPath()[0] !== e.currentTarget) return;
+    if (e.key !== 'ContextMenu' && !(e.key === 'F10' && e.shiftKey)) return;
+    e.preventDefault();
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    this.openMessageMenu(msg, { x: r.left + 16, y: r.top + 16 });
+  }
+
+  private handleActionsFocusIn = (e: FocusEvent): void => {
+    const target = e.composedPath()[0];
+    if (!(target instanceof HTMLElement) || !target.classList.contains('msg-actions')) return;
+    const host = (target.getRootNode() as ShadowRoot).host as
+      | import('./chat-message.js').ScionChatMessage
+      | undefined;
+    if (host?.messageId) {
+      this._actionsFocusId = host.messageId;
+      if (this._activeActionsId !== host.messageId) this.setActiveActions(host.messageId);
+    }
+  };
+
+  /** Focus moved somewhere else on purpose: no repair is owed. */
+  private handleActionsFocusOut = (e: FocusEvent): void => {
+    if (e.relatedTarget) this._actionsFocusId = '';
+  };
+
+  /**
+   * Follow the message a popup menu was opened on. A scroll the user makes
+   * (wheel, touch, a scroll key, a scrollbar grab) dismisses the menu, as
+   * before. A scroll the user did not make (a jump's smooth scroll still
+   * settling, its correction, a late layout shift) moves the menu with its
+   * message instead, so a menu opened right after a jump lands is not lost;
+   * it closes only if the message leaves the view.
+   */
+  private trackMenuAnchor(messageId: string): void {
+    this.untrackMenuAnchor();
+    if (this.contextMenuAsSheet) return;
+    const el = this.shadowRoot?.getElementById(`msg-${messageId}`);
+    this._menuAnchor = { messageId, top: el ? el.getBoundingClientRect().top : null };
+    this._menuUserScrolled = false;
+    for (const type of ['wheel', 'touchmove'] as const) {
+      document.addEventListener(type, this.handleMenuUserScroll, { capture: true, passive: true });
+    }
+    document.addEventListener('keydown', this.handleMenuUserScrollKey, { capture: true });
+    document.addEventListener('pointerdown', this.handleMenuScrollbarGrab, { capture: true });
+  }
+
+  private untrackMenuAnchor(): void {
+    this._menuAnchor = null;
+    for (const type of ['wheel', 'touchmove'] as const) {
+      document.removeEventListener(type, this.handleMenuUserScroll, { capture: true });
+    }
+    document.removeEventListener('keydown', this.handleMenuUserScrollKey, { capture: true });
+    document.removeEventListener('pointerdown', this.handleMenuScrollbarGrab, { capture: true });
+  }
+
+  private handleMenuUserScroll = (): void => {
+    this._menuUserScrolled = true;
+  };
+
+  private handleMenuUserScrollKey = (e: KeyboardEvent): void => {
+    if (!JUMP_SCROLL_CANCEL_KEYS.has(e.key)) return;
+    if (isEditableKeydownTarget(e.composedPath()[0])) return;
+    // Arrow keys, Home/End and Space inside the open menu move between its
+    // items; they scroll nothing.
+    if (isInOpenMenu(e)) return;
+    this._menuUserScrolled = true;
+  };
+
+  /** A pointer down on the scroller itself (not a row) is a scrollbar grab. */
+  private handleMenuScrollbarGrab = (e: PointerEvent): void => {
+    const target = e.composedPath()[0];
+    if (target instanceof HTMLElement && target.classList.contains('messages-scroll')) {
+      this._menuUserScrolled = true;
+    }
+  };
+
+  /**
+   * The thread scrolled while a popup menu is open: dismiss it after a
+   * user scroll, otherwise move it with its message (see trackMenuAnchor).
+   */
+  private followMenuAnchor(scrollEl: HTMLElement): void {
+    const anchor = this._menuAnchor;
+    const dismiss = (): void => {
+      this.closeContextMenu();
+      this._menuFocus.restoreIfLost();
+    };
+    if (this._menuUserScrolled || !anchor || anchor.top === null) {
+      dismiss();
+      return;
+    }
+    const el = this.shadowRoot?.getElementById(`msg-${anchor.messageId}`);
+    if (!el) {
+      dismiss();
+      return;
+    }
+    const rect = el.getBoundingClientRect();
+    const view = scrollEl.getBoundingClientRect();
+    if (rect.bottom <= view.top || rect.top >= view.bottom) {
+      dismiss();
+      return;
+    }
+    const delta = rect.top - anchor.top;
+    if (Math.abs(delta) < 0.5) return;
+    anchor.top = rect.top;
+    this.contextMenuPosition = {
+      x: this.contextMenuPosition.x,
+      y: this.contextMenuPosition.y + delta,
+    };
   }
 
   /**
@@ -5614,6 +5994,7 @@ export class ScionChatThread extends LitElement {
   private handleContextMenuKeydown = (e: KeyboardEvent): void => {
     if (e.key === 'Escape') {
       this.closeContextMenu();
+      this._menuFocus.restore();
     }
   };
 
@@ -5621,6 +6002,7 @@ export class ScionChatThread extends LitElement {
   private closeContextMenu(): void {
     this.contextMenuMessage = null;
     document.removeEventListener('keydown', this.handleContextMenuKeydown);
+    this.untrackMenuAnchor();
   }
 
   /** Context menu: Reply to the right-clicked message. */
@@ -6630,8 +7012,8 @@ export class ScionChatThread extends LitElement {
   private renderContent() {
     if (this.loading && this.messages.length === 0) {
       return html`
-        <div class="state-msg">
-          <sl-spinner></sl-spinner>
+        <div class="state-msg" role=${this.filtered ? 'status' : nothing}>
+          <sl-spinner aria-hidden=${this.filtered ? 'true' : nothing}></sl-spinner>
           <span>${this.filtered ? 'Loading starred messages...' : 'Loading messages...'}</span>
         </div>
       `;
@@ -6639,7 +7021,7 @@ export class ScionChatThread extends LitElement {
 
     if (this.error && this.messages.length === 0) {
       return html`
-        <div class="state-msg">
+        <div class="state-msg" role=${this.filtered ? 'alert' : nothing}>
           <sl-icon name="exclamation-triangle"></sl-icon>
           <span>${this.error}</span>
           <sl-button
@@ -6657,7 +7039,7 @@ export class ScionChatThread extends LitElement {
 
     if (this.filtered && this.messages.length === 0) {
       return html`
-        <div class="state-msg star-filter-empty">
+        <div class="state-msg star-filter-empty" role="status">
           <sl-icon name="star" aria-hidden="true"></sl-icon>
           <span>No starred messages in this conversation</span>
           <sl-button size="small" @click=${this.handleShowAllMessages}>Show all messages</sl-button>
@@ -6680,8 +7062,15 @@ export class ScionChatThread extends LitElement {
     return html`
       <div
         class="messages-scroll"
+        role=${this.filtered ? 'region' : nothing}
+        aria-label=${this.filtered ? 'Starred messages' : nothing}
+        aria-busy=${this.filtered && this.loading ? 'true' : nothing}
         @scroll=${this.handleScroll}
         @click=${this.handleMessageAreaClick}
+        @message-actions-nav=${this.handleActionsNav}
+        @message-actions-open=${this.handleActionsOpen}
+        @focusin=${this.handleActionsFocusIn}
+        @focusout=${this.handleActionsFocusOut}
       >
         <div class="messages-list">
           ${this.loadingOlder
@@ -6892,6 +7281,7 @@ export class ScionChatThread extends LitElement {
         tpl: html`
           <scion-chat-message
             @contextmenu=${(e: MouseEvent) => this.handleMessageContextMenu(e, msg)}
+            @keydown=${(e: KeyboardEvent) => this.handleMessageHostKeydown(e, msg)}
             @click=${(e: MouseEvent) => this.handleMessageTap(e, msg)}
             id="msg-${msg.id}"
             messageId=${msg.id}
@@ -6922,6 +7312,7 @@ export class ScionChatThread extends LitElement {
             editedAt=${ext?.editedAt || ''}
             deletedAt=${ext?.deletedAt || ''}
             ?starred=${this.starsActive && this.stars.state(msg.id) === 'starred'}
+            ?actionsEnabled=${this.starsActive}
             senderProjectSlug=${msg.senderProjectId
               ? this.resolveProjectSlug(msg.senderProjectId)
               : ''}

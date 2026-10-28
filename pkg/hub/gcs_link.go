@@ -70,9 +70,10 @@ const (
 
 	// gcsLinksExperiment is the registered experiment (pkg/experiments) that
 	// gates both the web linkifier (LayerWeb) and this endpoint (LayerServer;
-	// ptone/scion#2545). The hub decides hub behaviour (AGENTS.md "Experimental
-	// features"): this constant is what handleGCSObject's step 1 actually
-	// checks, and the web gate only mirrors it.
+	// ptone/scion#2545). The hub decides hub behaviour
+	// (docs-site/src/content/docs/reference/experiments.md): this constant
+	// is what handleGCSObject's step 1 actually checks, and the web gate
+	// only mirrors it.
 	gcsLinksExperiment = "web.gcs_links"
 )
 
@@ -750,7 +751,7 @@ func (s *Server) handleGCSObject(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Length", strconv.FormatInt(attrs.Size, 10))
 	w.Header().Set("Content-Disposition", gcsContentDisposition(gcsObjectBasename(object)))
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Security-Policy", untrustedContentSandboxCSP)
+	setUntrustedContentHeaders(w.Header(), untrustedContentSandboxCSP)
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("X-Scion-Gcs-Generation", strconv.FormatInt(attrs.Generation, 10))
 

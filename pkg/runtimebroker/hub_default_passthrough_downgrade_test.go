@@ -513,7 +513,7 @@ func newTestServerForSavedProfileRemap(t *testing.T, agentName, remapRuntimeName
 	}
 	writeProvisionedProfile(t, dotScion, agentName, "local")
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	// No ForceRuntime: see the doc comment above.
@@ -877,7 +877,7 @@ func newTestServerForLateCheckOrdering(t *testing.T, agentName, urlID, remapRunt
 	writeSavedAgentProfile(t, dotScion, urlID, "local")
 	writeSavedAgentProfile(t, dotScion, agentName, "local")
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 

@@ -298,6 +298,15 @@ const SkillContentHashV2 = "hub.skill_content_hash_v2"
 // whether or not it is on.
 const ArtifactReviewEditor = "web.artifact_review_editor"
 
+// UserDeleteForceCascade gates the forced user delete (ptone/scion#2143):
+// DELETE /api/v1/users/{id}?force=true, which revokes the user's authority,
+// records a deletion tombstone and stops the user's agents, the GET
+// /api/v1/users/{id}/deletion resource, and the hub's reconciler that
+// completes such deletions. The hub checks it (the force parameter with
+// experimentEnabled, the sub-route with requireExperiment); the web layer
+// only mirrors it to show the force option.
+const UserDeleteForceCascade = "hub.user_delete_force_cascade"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
@@ -502,6 +511,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#5913",
 		Owner:       "artifacts",
 		ReviewBy:    "2027-01-21",
+	},
+	{
+		Name:        UserDeleteForceCascade,
+		Title:       "Force user delete",
+		Description: "Lets an admin delete a user who has agents: DELETE /api/v1/users/{id}?force=true revokes the user's authority at once (status deleting, role bindings, access tokens, delegations), stops the user's agents through the agent delete, and removes the user once every agent is stopped or removed by an operator. Needs agent.delete on every one of those agents. While off, force is ignored (a user with agents is refused as before) and the deletion resource answers 404; a deletion accepted while it was on runs to completion.",
+		Default:     false,
+		Layers:      []Layer{LayerServer, LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#2143",
+		Owner:       "authz",
+		ReviewBy:    "2027-01-31",
 	},
 	{
 		Name:        AgentPlugins,

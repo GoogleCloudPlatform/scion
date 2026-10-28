@@ -123,12 +123,13 @@ func TestLaunchProgress_EveryStepHasALabel(t *testing.T) {
 }
 
 // TestLaunchFailedError_EveryCodeHasALabel: every pkg/api launch code but
-// launch_stopped, and the broker's skill_resolution_failed, is followed by a
+// launch_stopped, and the broker's skill_resolution_failed and
+// storage_migration_required, is followed by a
 // label in the failure text, never only the raw code or its fallback.
 func TestLaunchFailedError_EveryCodeHasALabel(t *testing.T) {
 	_, codes := apiLaunchVocabulary(t)
 	assert.Contains(t, codes, "image_pull_failed")
-	codes = append(codes, "skill_resolution_failed")
+	codes = append(codes, "skill_resolution_failed", "storage_migration_required")
 	for _, code := range codes {
 		if code == "launch_stopped" {
 			continue // a stopped launch has its own neutral text (TestWaitForAgentLaunch_FailureNamesCodeAndStepLabels)

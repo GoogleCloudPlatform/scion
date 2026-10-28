@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -549,6 +550,15 @@ type AuthzService struct {
 	// legacyDeliveryLog rate-limits the launch legacy fallback Warn
 	// (deliverySelector.warnLegacyFallback). Nil logs every line.
 	legacyDeliveryLog *deliveryLogDedup
+
+	// legacyFallbackUses counts uses of the legacy adopted-agent fallback
+	// for owner user secrets (user_secret_legacy_adopted_fallback.go);
+	// legacyFallbackMetrics, when set, exports them; legacyFallbackWarn
+	// rate limits their Warn line, created on first use.
+	legacyFallbackUses     atomic.Int64
+	legacyFallbackMetrics  legacyAdoptedFallbackMetrics
+	legacyFallbackWarn     *hookRefusalLimiter
+	legacyFallbackWarnOnce sync.Once
 
 	// relationshipResolver handles progeny relationship grants. Lazily
 	// initialized on first use.

@@ -55,8 +55,9 @@ import { TouchPrimaryController } from '../../../utils/input-modality.js';
 import { LongPressController, type LongPressPoint } from './long-press.js';
 import { PullToRefreshController, type PullState } from './pull-to-refresh.js';
 import {
+  MenuFocus,
   placeMenuInViewport,
-  renderMenuRows,
+  renderMenu,
   runMenuAction,
   shouldUseMenuSheet,
   type MenuAction,
@@ -1117,8 +1118,15 @@ export class ScionChatSpaceRail extends LitElement {
       color: var(--scion-text, #1e293b);
     }
 
-    .context-menu-item:hover {
+    .context-menu-item:hover,
+    .context-menu-item:focus {
       background: var(--scion-bg-subtle, #f1f5f9);
+      outline: none;
+    }
+
+    .context-menu-item:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: -2px;
     }
 
     .context-menu-item.danger {
@@ -1479,10 +1487,9 @@ export class ScionChatSpaceRail extends LitElement {
 
   override updated(changedProperties: Map<string, unknown>): void {
     if ((this.contextMenuTarget || this.groupContextMenuTarget) && !this.menuAsSheet) {
-      placeMenuInViewport(
-        this.renderRoot.querySelector<HTMLElement>('.context-menu'),
-        this.contextMenuPos
-      );
+      const menu = this.renderRoot.querySelector<HTMLElement>('.context-menu');
+      placeMenuInViewport(menu, this.contextMenuPos);
+      this.menuFocus.afterRender(menu);
     }
     if (changedProperties.has('selectedProjectId') && this.selectedProjectId) {
       this.expandSpaceForSelectedKey();
@@ -1662,13 +1669,14 @@ export class ScionChatSpaceRail extends LitElement {
   private _outsideClickHandler: ((e: Event) => void) | null = null;
 
   private handleOutsideClick(): void {
-    if (this.contextMenuTarget) {
-      this.contextMenuTarget = null;
-    }
-    if (this.groupContextMenuTarget) {
-      this.groupContextMenuTarget = null;
-    }
+    if (!this.contextMenuTarget && !this.groupContextMenuTarget) return;
+    this.contextMenuTarget = null;
+    this.groupContextMenuTarget = null;
+    this.menuFocus.closed();
   }
+
+  /** Keyboard focus around the thread and group popup menus. */
+  private readonly menuFocus = new MenuFocus();
 
   /**
    * Reload all data (called externally when SSE events indicate changes).
@@ -3696,6 +3704,7 @@ export class ScionChatSpaceRail extends LitElement {
     this.contextMenuTarget = { type: 'thread', thread, projectId };
     this.contextMenuPos = at;
     this.menuAsSheet = shouldUseMenuSheet();
+    if (!this.menuAsSheet) this.menuFocus.opened();
   }
 
   /** Close whichever row menu is open, popup or sheet. */
@@ -5171,6 +5180,7 @@ export class ScionChatSpaceRail extends LitElement {
     this.groupContextMenuTarget = { group, projectId };
     this.contextMenuPos = at;
     this.menuAsSheet = shouldUseMenuSheet();
+    if (!this.menuAsSheet) this.menuFocus.opened();
   }
 
   /**
@@ -5529,22 +5539,22 @@ export class ScionChatSpaceRail extends LitElement {
   private renderContextMenu() {
     if (!this.contextMenuTarget) return nothing;
     const { thread, projectId } = this.contextMenuTarget;
-    return html`
-      <div class="context-menu" @click=${(e: Event) => e.stopPropagation()}>
-        ${renderMenuRows(this.threadMenuActions(thread, projectId))}
-      </div>
-    `;
+    return renderMenu(this.threadMenuActions(thread, projectId), {
+      label: `Actions for #${thread.name}`,
+      focus: this.menuFocus,
+      close: () => this.closeRowMenus(),
+    });
   }
 
   /** Render context menu for a group header. */
   private renderGroupContextMenu() {
     if (!this.groupContextMenuTarget) return nothing;
     const { group, projectId } = this.groupContextMenuTarget;
-    return html`
-      <div class="context-menu" @click=${(e: Event) => e.stopPropagation()}>
-        ${renderMenuRows(this.groupMenuActions(group, projectId))}
-      </div>
-    `;
+    return renderMenu(this.groupMenuActions(group, projectId), {
+      label: `Actions for ${group.name}`,
+      focus: this.menuFocus,
+      close: () => this.closeRowMenus(),
+    });
   }
 
   /** The mobile presentation of the thread and group menus. */

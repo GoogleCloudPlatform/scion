@@ -572,6 +572,96 @@ describe('scion-chat-thread starred-only center', () => {
     expect(el.shadowRoot?.querySelector('.jump-to-latest')).toBeNull();
   });
 
+  // Up to the history limit a refresh reloads every loaded row; past it, it
+  // refetches around the reader. Both end in the empty state.
+  it.each([
+    { size: 80, first: 'limit=80' },
+    { size: 260, first: 'around=' },
+  ])(
+    'a refresh far up a starred list of $size that leaves nothing starred shows the empty state',
+    async ({ size, first }) => {
+      const many = Array.from({ length: size }, (_, i) =>
+        message(`00000000-0000-4000-8000-${(3000 + i).toString(16).padStart(12, '0')}`, 0)
+      );
+      many.forEach((m, i) => {
+        m.createdAt = new Date(Date.parse('2026-10-20T00:00:00Z') + i * 60_000).toISOString();
+      });
+      let starred = many;
+      apiFetch.mockImplementation((url: string) => {
+        if (url.includes('/messages?')) {
+          const params = new URL(url, 'http://x').searchParams;
+          const around = params.get('around');
+          if (around) {
+            const at = starred.findIndex((m) => m.id === around);
+            if (at < 0) return Promise.resolve(json({}, 404));
+            return Promise.resolve(
+              json({ messages: starred.slice(Math.max(0, at - 25), at + 25).reverse() })
+            );
+          }
+          const cursor = params.get('cursor');
+          const limit = Number(params.get('limit') ?? 50);
+          const end = cursor ? Number(cursor.slice(2)) : starred.length;
+          const page = starred.slice(Math.max(0, end - limit), end);
+          return Promise.resolve(
+            json({
+              messages: [...page].reverse(),
+              ...(end - limit > 0 ? { nextCursor: `c-${end - limit}` } : {}),
+            })
+          );
+        }
+        return Promise.resolve(json({ starredMessageIds: [] }));
+      });
+      const el = await mount();
+      const internals = el as unknown as {
+        loadOlderMessagesV2(scroller: HTMLElement): Promise<void>;
+        _scrollAnchor: {
+          conversationKey: string;
+          messageId: string;
+          offset: number;
+          pinnedToBottom: boolean;
+        } | null;
+        pinnedToBottom: boolean;
+        viewingAroundMessage: boolean;
+        captureScrollAnchor(): void;
+      };
+      const scroller = el.shadowRoot?.querySelector('.messages-scroll') as HTMLElement;
+      while (renderedIds(el).length < size) {
+        const loaded = renderedIds(el).length;
+        await internals.loadOlderMessagesV2(scroller);
+        await vi.waitFor(() => expect(renderedIds(el).length).toBeGreaterThan(loaded));
+      }
+      expect(renderedIds(el).length).toBe(size);
+      // The reader sits far up the list when every star is removed elsewhere.
+      const target = many[5].id;
+      internals.captureScrollAnchor = (): void => {
+        internals._scrollAnchor = {
+          conversationKey: TOPIC,
+          messageId: target,
+          offset: 0,
+          pinnedToBottom: false,
+        };
+      };
+      internals.pinnedToBottom = false;
+      starred = [];
+      const seen = filterEvents(el);
+      const before = historyCalls().length;
+      fakeStateManager.dispatchEvent(new CustomEvent('chat-stars-updated', { detail: {} }));
+      await vi.waitFor(() => expect(renderedIds(el)).toEqual([]));
+      await el.updateComplete;
+      const refetch = historyCalls().slice(before);
+      expect(refetch[0]).toContain(first === 'around=' ? `around=${target}` : first);
+      expect(refetch.every((u) => u.includes('starred=true'))).toBe(true);
+      expect(internals.viewingAroundMessage).toBe(false);
+      expect(el.shadowRoot?.querySelector('.jump-to-latest')).toBeNull();
+      const empty = el.shadowRoot?.querySelector('.star-filter-empty');
+      expect(empty?.textContent).toContain('No starred messages in this conversation');
+      expect(el.shadowRoot?.querySelector('sl-spinner')).toBeNull();
+      // Show all still leaves the filter.
+      (empty?.querySelector('sl-button') as HTMLElement).click();
+      expect(seen).toEqual([{ filter: '' }]);
+    }
+  );
+
   it('a filtered page arriving after the filter changed is dropped', async () => {
     let releaseFiltered!: () => void;
     const gate = new Promise<void>((r) => (releaseFiltered = r));
@@ -598,5 +688,128 @@ describe('scion-chat-thread starred-only center', () => {
     await el.updateComplete;
     expect(renderedIds(el)).toEqual([S1, U1]);
     expect(el.shadowRoot?.querySelector('.star-filter-banner')).toBeNull();
+  });
+});
+
+describe('scion-chat-thread starred-only center: reconcile and semantics', () => {
+  let now = 1_000_000;
+
+  beforeEach(() => {
+    apiFetch.mockReset();
+    showToastMock.mockReset();
+    setFlag(true);
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    document.body.innerHTML = '';
+    delete (window as unknown as { __SCION_FEATURES__?: unknown }).__SCION_FEATURES__;
+  });
+
+  function returnToPage(): void {
+    now += 10_000;
+    document.dispatchEvent(new Event('visibilitychange'));
+  }
+
+  const stateCalls = (): string[] => calls((u) => u.startsWith('/api/v1/chat/stars/state'));
+
+  it('refetches the starred list on returning to the page', async () => {
+    routeHub({ starred: () => [message(S1, 1)] });
+    const el = await mount();
+    await vi.waitFor(() => expect(renderedIds(el)).toEqual([S1]));
+    const before = historyCalls().length;
+    returnToPage();
+    await vi.waitFor(() => expect(historyCalls().length).toBe(before + 1));
+    expect(historyCalls().at(-1)).toContain('starred=true');
+  });
+
+  it('the full conversation refetches star state on return, not history', async () => {
+    routeHub({ starred: () => [], all: [message(S1, 1), message(S2, 2)] });
+    const el = await mount('');
+    await vi.waitFor(() => expect(renderedIds(el)).toEqual([S1, S2]));
+    await vi.waitFor(() => expect(stateCalls().length).toBe(1));
+    const history = historyCalls().length;
+    returnToPage();
+    await vi.waitFor(() => expect(stateCalls().length).toBe(2));
+    expect(historyCalls().length).toBe(history);
+  });
+
+  it('stops reconciling once removed', async () => {
+    routeHub({ starred: () => [message(S1, 1)] });
+    const el = await mount();
+    await vi.waitFor(() => expect(renderedIds(el)).toEqual([S1]));
+    el.remove();
+    const before = apiFetch.mock.calls.length;
+    returnToPage();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(apiFetch.mock.calls.length).toBe(before);
+  });
+
+  it('labels the starred list region and announces the empty state', async () => {
+    routeHub({ starred: () => [message(S1, 1)] });
+    const el = await mount();
+    await vi.waitFor(() => expect(renderedIds(el)).toEqual([S1]));
+    const region = el.shadowRoot!.querySelector('.messages-scroll')!;
+    expect(region.getAttribute('role')).toBe('region');
+    expect(region.getAttribute('aria-label')).toBe('Starred messages');
+
+    document.body.innerHTML = '';
+    apiFetch.mockReset();
+    routeHub({ starred: () => [] });
+    const empty = await mount();
+    await vi.waitFor(() =>
+      expect(empty.shadowRoot!.querySelector('.star-filter-empty')?.getAttribute('role')).toBe(
+        'status'
+      )
+    );
+  });
+
+  it('the full conversation keeps its unlabelled scroller', async () => {
+    routeHub({ starred: () => [], all: [message(S1, 1)] });
+    const el = await mount('');
+    await vi.waitFor(() => expect(renderedIds(el)).toEqual([S1]));
+    const scroller = el.shadowRoot!.querySelector('.messages-scroll')!;
+    expect(scroller.hasAttribute('role')).toBe(false);
+    expect(scroller.hasAttribute('aria-label')).toBe(false);
+  });
+});
+
+describe('scion-chat-thread starred-only center: focus repair', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    showToastMock.mockReset();
+    setFlag(true);
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    delete (window as unknown as { __SCION_FEATURES__?: unknown }).__SCION_FEATURES__;
+  });
+
+  type Msg = import('./chat-message.js').ScionChatMessage;
+
+  it('when the focused starred row goes, focus moves to the closest row, then to Show all', async () => {
+    let starred = [message(S1, 1), message(S2, 2)];
+    routeHub({ starred: () => starred });
+    const el = await mount();
+    await vi.waitFor(() => expect(renderedIds(el)).toEqual([S1, S2]));
+    const row = (id: string): Msg =>
+      el.shadowRoot!.querySelector<Msg>(`#msg-${id}`)! as unknown as Msg;
+    await row(S2).updateComplete;
+    row(S2).actionsButton!.focus();
+
+    starred = [message(S1, 1)];
+    fakeStateManager.dispatchEvent(new CustomEvent('chat-stars-updated'));
+    await vi.waitFor(() => expect(renderedIds(el)).toEqual([S1]));
+    await vi.waitFor(() => expect(row(S1).shadowRoot!.activeElement).toBe(row(S1).actionsButton));
+
+    starred = [];
+    fakeStateManager.dispatchEvent(new CustomEvent('chat-stars-updated'));
+    await vi.waitFor(() =>
+      expect(el.shadowRoot!.querySelector('.star-filter-empty')).not.toBeNull()
+    );
+    const showAll = el.shadowRoot!.querySelector('.star-filter-empty sl-button');
+    await vi.waitFor(() => expect(el.shadowRoot!.activeElement).toBe(showAll));
   });
 });

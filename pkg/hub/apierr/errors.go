@@ -285,6 +285,23 @@ const (
 	// returns the same lists without attempting the delete.
 	ErrCodeUserDeleteBlocked = "user_delete_blocked"
 
+	// ErrCodeUserDeleteForceForbidden is returned with 403 when a forced
+	// user delete (DELETE /api/v1/users/{id}?force=true) names agents the
+	// caller may not delete; details.agents lists them ({id, projectId}).
+	// Nothing is written.
+	ErrCodeUserDeleteForceForbidden = "user_delete_force_forbidden"
+
+	// ErrCodeUserDeleteBlockersChanged is returned with 409 when the agents
+	// blocking a forced user delete changed between the authorization
+	// check and the delete transaction. Nothing is written; retry.
+	ErrCodeUserDeleteBlockersChanged = "user_delete_blockers_changed"
+
+	// ErrCodeUserDeletionInProgress is returned with 409 for a plain user
+	// delete, or an update of the user, while a forced deletion of that
+	// user is in progress; details.deletionId and details.state identify
+	// it (GET /api/v1/users/{id}/deletion).
+	ErrCodeUserDeletionInProgress = "user_deletion_in_progress"
+
 	// ErrCodeInvalidCursor is returned for every authorizedList pagination
 	// cursor failure: malformed input, truncation, a tampered byte, a
 	// legacy (pre-opaque-cursor) plaintext cursor, a cursor sealed under a

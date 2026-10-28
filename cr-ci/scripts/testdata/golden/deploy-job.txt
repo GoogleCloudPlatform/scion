@@ -9,4 +9,4 @@
 + gcloud run jobs add-iam-policy-binding cr-gh-runner-8c32g --region=us-central1 --project=example-project --member=serviceAccount:cr-runner-mediator-sa@example-project.iam.gserviceaccount.com --role=roles/run.developer --format=none
 # check: EXEC_SA_NAME holds no project roles
 ? gcloud projects get-iam-policy example-project '--flatten=bindings[].members' --filter=bindings.members:serviceAccount:cr-runner-exec-sa@example-project.iam.gserviceaccount.com '--format=value(bindings.role)'
-# done; next: deploy-mediator.sh
+# done (upgrade order: deploy-mediator.sh goes before this when both changed)

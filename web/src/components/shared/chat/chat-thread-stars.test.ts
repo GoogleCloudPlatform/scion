@@ -317,7 +317,7 @@ describe('scion-chat-thread starred messages', () => {
     expect(starAction(el, 'local-1700000000000')).toBeUndefined();
   });
 
-  it('renders the desktop toggle row without an orphan menu role', () => {
+  it('renders the desktop toggle row as a checked menu item', () => {
     const host = document.createElement('div');
     render(
       renderMenuRows([{ id: 'star', label: 'Unstar message', checked: true, run: () => {} }]),
@@ -325,8 +325,8 @@ describe('scion-chat-thread starred messages', () => {
     );
     const row = host.querySelector('.context-menu-item')!;
     expect(row.textContent).toContain('Unstar message');
-    expect(row.hasAttribute('role')).toBe(false);
-    expect(row.hasAttribute('aria-checked')).toBe(false);
+    expect(row.getAttribute('role')).toBe('menuitemcheckbox');
+    expect(row.getAttribute('aria-checked')).toBe('true');
   });
 
   it('sends no state request for a live message, which starts unstarred', async () => {

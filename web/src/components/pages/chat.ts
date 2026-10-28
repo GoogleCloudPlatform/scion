@@ -6922,6 +6922,7 @@ export class ScionPageChat extends LitElement {
       item = await fetchStarDetail(messageId);
     } catch {
       if (superseded()) return;
+      this.refocusStarredTrigger();
       showToast('Could not open the starred message', 'danger', {
         action: {
           label: 'Retry',
@@ -6935,6 +6936,7 @@ export class ScionPageChat extends LitElement {
     }
     if (superseded()) return;
     if (!item) {
+      this.refocusStarredTrigger();
       showToast('This starred message is no longer available', 'warning');
       return;
     }
@@ -6945,10 +6947,20 @@ export class ScionPageChat extends LitElement {
       // also from the starred-only center.
       const thread = this.threadElement();
       if (this.centerMessageFilter) thread?.openInFullContext(item.messageId);
-      else void thread?.scrollToMessageById(item.messageId);
+      else void thread?.scrollToMessageById(item.messageId, true, true);
       return;
     }
     navigateTo(item.permalink);
+  }
+
+  /**
+   * A header entry could not be opened: the list closed before the jump,
+   * so give focus back to its star button, unless focus already moved on.
+   */
+  private refocusStarredTrigger(): void {
+    const focused = deepActiveElement();
+    if (focused && focused !== document.body) return;
+    this.shadowRoot?.querySelector('scion-chat-starred-list')?.focusTrigger();
   }
 
   /**

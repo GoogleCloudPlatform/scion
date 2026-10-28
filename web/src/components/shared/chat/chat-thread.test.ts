@@ -8312,7 +8312,7 @@ describe('scion-chat-thread scroll position hand-over', () => {
       el.conversationKey = CONVERSATION_KEY;
       el.restoreScrollAnchor = anchor;
       document.body.appendChild(el);
-      await vi.waitFor(() => expect(jump).toHaveBeenCalledWith('m2', true));
+      await vi.waitFor(() => expect(jump).toHaveBeenCalledWith('m2', true, true));
       const scroller = el.shadowRoot!.querySelector('.messages-scroll') as HTMLElement;
       expect(scroller.scrollTop).not.toBe(400);
       expect((el as unknown as { _usedRestoreAnchor: unknown })._usedRestoreAnchor).toBe(anchor);

@@ -101,6 +101,25 @@ When the deletion succeeds, Scion also removes all of the user's role bindings (
 
 After a user is deleted, that user's tokens stop working immediately. Requests that present a web or CLI sign-in token get `401` with the error code `user_not_found`. Requests that present one of the user's access tokens (`scion_pat_`) are also refused, with `401` and the error code `unauthorized`.
 
+### Force-deleting a user who has agents
+
+Behind the `hub.user_delete_force_cascade` [experiment](/scion/reference/experiments/) (off by default), an admin can delete a user whom agents or delegations depend on, instead of deleting those agents one by one. On **Admin > Users**, the delete dialog of such a user offers **Force delete**, which asks for confirmation naming how many agents it stops; the API is `DELETE /api/v1/users/{id}?force=true`. While the experiment is off, `force=true` is ignored and the delete is refused as described above.
+
+A forced delete needs `user.delete` on the user and, for every one of the user's agents, the same permission an agent delete needs (`agent.delete` on that agent). If you may not delete one or more of them, the request is refused with `403 user_delete_force_forbidden`, `details.agents` lists those agents (`id`, `projectId`), and nothing changes. It needs a sign-in session, like a plain delete. The last super-admin, admin lockout and last-owner guards apply as for a plain delete. If nothing blocks the delete, a forced delete is a plain delete (`204`).
+
+Otherwise the delete runs in two steps:
+
+1. **Revoke, at once.** In one transaction, the user's status becomes `deleting`, the user's role bindings are removed, the user's access tokens are revoked, and every active delegation from the user, together with the delegations and service-account assignments of each of the user's agents, is deactivated. The user cannot sign in or use any credential from then on, and the agents keep only the read access every agent has in its project. The request answers `202` with the deletion resource. If an agent of the user appeared after the permission checks, the request is refused with `409 user_delete_blockers_changed` and nothing changes; retry it.
+2. **Stop, then remove.** The Hub deletes each of the user's agents through the normal agent delete (deepest child agents first), retrying failures with a growing delay, and removes the user once every agent is **stopped** (the agent delete confirmed its runtime was torn down) or **removed** (its record is gone without that confirmation). The user's user-scope secrets and environment variables are then removed as after a plain delete.
+
+While the deletion is in progress:
+
+- `GET /api/v1/users/{id}/deletion`, and **Deletion status** on the user's row, show the state (`stopping`, then `completed`; the panel reloads every few seconds while the deletion is stopping), each agent's outcome (`pending`, `stopping`, `failed`, `stopped` or `removed`) with its latest error, and counts per outcome. The resource answers after the user is removed too.
+- A plain delete, and any change to the user, is refused with `409 user_deletion_in_progress` (with `details.deletionId`). Another forced delete joins the deletion and retries its agents at once (**Retry** in the panel).
+- Creating or restoring an agent for the user (an agent owned by the user, or started by one of the user's agents) is refused with `409 conflict`.
+
+An agent whose Runtime Broker cannot be reached stays `failed`, and the deletion stays in progress, with no timeout: the Hub never reports an agent as stopped unless its teardown was confirmed. To finish, delete that agent from its page with force (`DELETE /api/v1/agents/{id}?force=true`); it is then reported as `removed`, and the completion records how many agents were stopped and how many were removed. Turning the experiment off stops new forced deletes only: a deletion already accepted runs to completion, because the user's authority is already revoked and what remains is stopping the agents the requester was allowed to delete. While the experiment is off, the **Deletion status** panel and `GET /api/v1/users/{id}/deletion` are not available.
+
 ## OAuth Authentication
 
 Scion supports OAuth authentication via Google and GitHub. OAuth credentials are configured separately for web and CLI clients due to different redirect URI requirements.
@@ -426,8 +445,8 @@ Dev auth requires a loopback listen host (`127.0.0.1`, `::1`, or `localhost`). T
 ### Using the Developer Token
 When the Hub starts with `dev_mode: true`, it writes the token to `~/.scion/dev-token`.
 - **CLI**: The `scion` CLI automatically uses `~/.scion/dev-token` (or `SCION_DEV_TOKEN` / `SCION_DEV_TOKEN_FILE`) only when the target Hub endpoint is on loopback (`localhost`, `127.0.0.1`, or `::1`). For any non-loopback Hub, `SCION_DEV_TOKEN` and `SCION_DEV_TOKEN_FILE` are not sent and, when no other credential applies, print a one-line notice to stderr naming the Hub, and `~/.scion/dev-token` is not sent and prints no notice.
-- **Web**: Browser sign-in in dev auth mode uses a single-use launch link rather than logging in automatically on page load. `scion server start` and `scion server open` (or `scion server open --print`) exchange the local dev token via `POST /auth/dev-launch` (`Authorization: Bearer <dev-token>`) for a short-lived, single-use code (valid for about two minutes, up to 32 pending codes) and open `GET /auth/dev-signin?code=<code...>`, which consumes the code and sets the browser session cookie. Visiting `/login` directly without a launch link does not sign in automatically (`POST /auth/dev-launch` and `GET /auth/dev-signin` return `404` when dev auth is off).
-- **Agent containers**: Hub-dispatched agents authenticate with the token the Hub issues for their run (`~/.scion/scion-token` or `SCION_AUTH_TOKEN`). The Runtime Broker never passes its own `SCION_DEV_TOKEN` or `SCION_AUTH_TOKEN` values into an agent's environment. When a Hub and Runtime Broker run co-located with dev auth enabled, the Runtime Broker offers its dev token only to an agent that has no Hub-issued token, whose dispatch comes from the co-located Hub on a loopback endpoint, and whose Hub endpoint comes from the server's own configuration rather than from project settings or the agent's environment.
+- **Web**: Browser sign-in in dev auth mode uses a single-use launch link rather than logging in automatically on page load. `scion server start` and `scion server open` (or `scion server open --print`) exchange the local dev token via `POST /auth/dev-launch` (`Authorization: Bearer <dev-token>`) for a short-lived, single-use code (valid for about two minutes, up to 32 pending codes) and open `GET /auth/dev-signin?code=<code...>`, which consumes the code and sets the browser session cookie. Visiting `/login` directly without a launch link does not sign in automatically (`POST /auth/dev-launch` and `GET /auth/dev-signin` return `404` when dev auth is off). When a signed-out browser opens a protected page, `/login?returnTo=<path>` (and `/auth/login`, including on a dev sign-in server when a web OAuth provider is configured) carries the requested local path through the OAuth flow so the callback redirects back to that page instead of `/`; non-local, absolute, or sign-in paths fall back to `/`.
+- **Agent containers**: Hub-dispatched agents authenticate with the token the Hub issues for their run (`~/.scion/scion-token` or `SCION_AUTH_TOKEN`). The Runtime Broker passes an agent only its Hub-issued token (`StartOptions.ScionToken`) and never passes its own `SCION_DEV_TOKEN` or `SCION_AUTH_TOKEN` values into an agent's environment. If a Hub-dispatched agent starts without a Hub-issued token, the Runtime Broker removes any stale `~/.scion/scion-token` file from the agent home (failing the start if removal fails) and relays a warning to the Hub that the agent started without a Hub token and cannot reach the Hub. When a Hub and Runtime Broker run co-located with dev auth enabled, the Runtime Broker offers its dev token only to an agent that has no Hub-issued token, whose dispatch comes from the co-located Hub on a loopback endpoint, and whose Hub endpoint comes from the server's own configuration rather than from project settings or the agent's environment.
 
 Alternatively, you can set the token in your environment for a loopback Hub:
 ```bash
@@ -443,7 +462,7 @@ Runtime Brokers use a robust security model to ensure that only authorized Hubs 
 Communication between the Hub and a Runtime Broker (in both directions) is secured using **HMAC-SHA256 request signing**. This provides several security benefits:
 - **Mutual Authentication**: Both parties prove they possess the shared secret.
 - **Payload Integrity**: The request body is included in the signature, preventing tampering.
-- **Replay Protection**: Every request includes a timestamp and a unique nonce.
+- **Replay Protection**: Every signed request must include both an `X-Scion-Timestamp` header (within ±5 minutes) and a non-empty `X-Scion-Nonce` header (refused with `401 missing X-Scion-Nonce header` otherwise; every in-tree signer sends a random nonce). Both the Hub and the Runtime Broker's HMAC verification middlewares (and the Conduit RPC guard) record each verified signature for the clock-skew window and refuse any repeat within that window with `401 request already served`.
 
 A shared secret is established during the `scion runtime-broker register` flow and is stored locally in `~/.scion/hub-credentials/<name>.json`, one file per Hub connection.
 
@@ -472,7 +491,7 @@ When creating an agent, you can configure its **GCP Identity Mode**:
 - **Block (Default on every runtime except Kubernetes)**: All requests to the metadata server are intercepted and return a 403 Forbidden. This ensures agents cannot expose the host's identity (e.g., when running on a GCE instance). On the Kubernetes runtime, Block is accepted but works differently: the agent pod runs as the runtime profile's block Kubernetes ServiceAccount, or the namespace's default ServiceAccount when none is configured, with no GCP credentials mounted. On Workload Identity nodes that ServiceAccount still receives a federated token, so the agent's GCP access is whatever IAM grants that ServiceAccount holds. An agent with no GCP identity mode configured gets Passthrough on Kubernetes. See the Kubernetes runtime note in [Permissions](/scion/hosted/ha/permissions/#hub-default-gcp-identity).
 - **Assign**: Assigns a specific Google Service Account to the agent.
   - The agent's `sciontool` sidecar intercepts requests to the metadata server.
-  - Token requests are proxied to the Scion Hub, which uses its own broad permissions to generate a short-lived access token for the requested Service Account (via the `iam.serviceAccounts.getAccessToken` permission).
+  - Token requests are proxied to the Scion Hub, which checks both the calling agent's live `gcp_service_account.use` authority and the recorded assigner's live `gcp_service_account.assign` authority on that Service Account (within the recorded permission ceiling; see [Token-Request Authority](/scion/hosted/ha/permissions/#token-request-authority)) before using its own permissions to generate a short-lived access or identity token (via `iam.serviceAccounts.getAccessToken` or `generateIdToken`).
   - The token is then returned to the agent, allowing it to use standard GCP SDKs (Application Default Credentials) as that specific Service Account.
 - **Passthrough**: Requests are allowed to reach the actual host metadata server. Use with caution as this allows the agent to assume the identity of the underlying node. Security is tightened by restricting GCP identity passthrough to broker owners and admin-role users on embedded (co-located) brokers.
 
@@ -508,7 +527,7 @@ Administrators can manage available Service Accounts through the **Service Accou
 ### Security & Auditing
 
 - **Iptables Interception**: Scion uses `iptables` (when `NET_ADMIN` capability is available) to redirect traffic from `169.254.169.254:80` to the local sidecar.
-- **Authorization Checks**: Administrative actions for GCP Service Account management require `project-owner` (`ActionManage`) permissions to enforce strict authorization boundaries.
+- **Authorization Checks**: Administrative actions for GCP Service Account management require `project-owner` (`ActionManage`) permissions to enforce strict authorization boundaries. Every agent token request (`POST /api/v1/agent/gcp-token` and `POST /api/v1/agent/gcp-identity-token`, as well as `gs://` link fetches in chat) also verifies both the agent's live `gcp_service_account.use` authority and the recorded assigner's live `gcp_service_account.assign` authority on the assigned Service Account (see [Token-Request Authority](/scion/hosted/ha/permissions/#token-request-authority)).
 - **Rate Limiting**: Token requests are rate-limited per-agent to prevent abuse.
 - **Audit Logging**: All token issuance events are logged at the Hub level with the requesting `agent_id` and `user_id`.
 
@@ -553,6 +572,7 @@ Agents are automatically authenticated. When the Hub dispatches an agent to a Ru
 - The agent uses this token for all calls back to the Hub (e.g., updating status, streaming logs).
 - Tokens are scoped to the specific agent and its project.
 - Tokens have a default expiration (typically 24 hours), but Scion implements an automated token refresh mechanism to ensure long-running agents maintain valid authorization throughout extended tasks.
+- When `server.keyring_file` is configured (or `server.jwt.emit_version` is `"keyring"`), the Hub signs agent and user JWTs with the active generation of the keyring's signing ring (writing that generation's key ID in the JWT protected `kid` header when `emit` is `"versioned"` or `server.jwt.emit_version` is `"keyring"`) and verifies tokens by `kid` against the keyring while still accepting unversioned tokens during rotation (`signing.legacy_read_ids` / `server.jwt.accept_legacy`; see [`server.keyring_file`](/scion/reference/server-config/#environment-variables)).
 
 ## User Access Tokens
 

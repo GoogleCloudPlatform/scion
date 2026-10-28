@@ -43,6 +43,9 @@ func TestSharedDirRecordPinRefusal_BoundedRead(t *testing.T) {
 		err := sharedDirRecordPinRefusal(dir, local, nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cannot check this agent's shared-dir storage record")
+		// A typed refusal (422 at the broker) whose public text names no path.
+		se := storageRefusalOf(t, err)
+		assert.NotContains(t, se.PublicMessage(), dir)
 	})
 	t.Run("oversized record", func(t *testing.T) {
 		dir := t.TempDir()

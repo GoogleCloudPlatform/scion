@@ -1335,8 +1335,8 @@ func DefaultGlobalConfig() GlobalConfig {
 			Host:                          DefaultBrokerHost,
 			ReadTimeout:                   30 * time.Second,
 			WriteTimeout:                  120 * time.Second, // Longer for agent operations
-			CORSEnabled:                   true,
-			CORSAllowedOrigins:            []string{"*"},
+			CORSEnabled:                   false,             // off by default with no origins: nothing calls the broker from a browser (opt in with server.broker.cors)
+			CORSAllowedOrigins:            []string{},
 			CORSAllowedMethods:            []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 			CORSAllowedHeaders:            []string{"Authorization", "Content-Type", "X-Scion-Broker-Token", "X-API-Key"},
 			CORSMaxAge:                    3600,

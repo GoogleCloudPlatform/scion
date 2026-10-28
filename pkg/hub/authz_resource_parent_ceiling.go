@@ -120,6 +120,10 @@ type ParentCeilingDecision struct {
 	DenyCause DenyCause
 	Reason    string
 	Proof     ParentProof
+	// legacyFallback is set on an allowed user secret decision that passed
+	// S3c through the legacy adopted-agent fallback; callers record the use
+	// (recordLegacyAdoptedFallback).
+	legacyFallback *legacyAdoptedFallback
 }
 
 func parentCeilingDeny(cause DenyCause, reason string, proof ParentProof) ParentCeilingDecision {
@@ -766,6 +770,9 @@ type userSecretChain struct {
 	// the callers (check 8 and the agent secret list) never deny on such a
 	// hop alone: they apply the progeny rule instead.
 	unrecorded bool
+	// legacyFallback is set when S3c passed through the legacy adopted-agent
+	// fallback (legacyAdoptedSecretUseFallback). Every other clause applied.
+	legacyFallback *legacyAdoptedFallback
 }
 
 func (c userSecretChain) deny(cause DenyCause, reason string) userSecretChain {
@@ -858,7 +865,11 @@ func (a *AuthzService) evaluateUserSecretParentCeiling(ctx context.Context, prin
 		d.Proof.ResourceID = resource.ID
 		return d, unrecordedHopNote{}
 	}
-	return userSecretSourceCheck(chain, in, resource, explain), unrecordedHopNote{}
+	d := userSecretSourceCheck(chain, in, resource, explain)
+	if d.Allowed && chain.legacyFallback != nil {
+		d.legacyFallback = chain.legacyFallback
+	}
+	return d, unrecordedHopNote{}
 }
 
 // userSecretChainVerdict runs clauses S1-S4c for principal (see
@@ -970,10 +981,20 @@ func (a *AuthzService) userSecretChainVerdict(ctx context.Context, principal Age
 				return chain.deny(DenyCauseCeilingSourceNotAllowed, "local development provenance with another delegator")
 			}
 		}
-		// S3c
+		// S3c, with the legacy adopted-agent fallback (see
+		// user_secret_legacy_adopted_fallback.go).
 		if edge.Kind == store.EffectCeilingBounded && !EffectCeilingAllows(edge.EffectCeiling, secretUsePermission, false) {
-			secretParentStep(explain, "effect_exceeded", fmt.Sprintf("edge %s: secret.use is outside the recorded effect ceiling", edge.ID))
-			return chain.deny(DenyCauseCeilingEffectExceeded, "secret.use is outside the recorded effect ceiling")
+			fb, err := a.legacyAdoptedSecretUseFallback(ctx, agent, edge, depth)
+			if err != nil {
+				secretParentStep(explain, "error", "adoption record lookup failed")
+				return chain.deny(DenyCauseCeilingError, "adoption record lookup failed")
+			}
+			if fb == nil {
+				secretParentStep(explain, "effect_exceeded", fmt.Sprintf("edge %s: secret.use is outside the recorded effect ceiling", edge.ID))
+				return chain.deny(DenyCauseCeilingEffectExceeded, "secret.use is outside the recorded effect ceiling")
+			}
+			secretParentStep(explain, "legacy_adopted_fallback", fmt.Sprintf("edge %s: adopted %s edge under compatibility policy V1; secret.use allowed for the owner's own secrets", edge.ID, fb.Role))
+			chain.legacyFallback = fb
 		}
 
 		switch edge.DelegatorType {

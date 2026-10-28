@@ -130,6 +130,13 @@ func (m *BrokerAuthMiddleware) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// Bound the body before anything reads it: the canonical string
+		// below hashes the body before the signature is checked.
+		if err := apiclient.LimitSignedRequestBody(w, r); err != nil {
+			writeSignedBodyTooLarge(w)
+			return
+		}
+
 		// Validate timestamp
 		ts, err := strconv.ParseInt(timestamp, 10, 64)
 		if err != nil {
@@ -155,6 +162,13 @@ func (m *BrokerAuthMiddleware) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// A signed body must declare its length. BuildCanonicalString
+		// covers the body either way; this refuses unsized framing early.
+		if err := apiclient.CheckSignedBodyFraming(r); err != nil {
+			m.writeError(w, err.Error())
+			return
+		}
+
 		// Build canonical string and verify signature
 		canonical := apiclient.BuildCanonicalString(r, timestamp, nonce)
 		if !apiclient.VerifyHMAC(m.config.SecretKey, canonical, sigBytes) {
@@ -175,6 +189,15 @@ func (m *BrokerAuthMiddleware) Middleware(next http.Handler) http.Handler {
 		// Signature valid, continue to handler
 		next.ServeHTTP(w, r)
 	})
+}
+
+// writeSignedBodyTooLarge answers a signed request whose body exceeds
+// apiclient.MaxSignedRequestBodyBytes with 413, in the same JSON error shape
+// as the authentication errors.
+func writeSignedBodyTooLarge(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusRequestEntityTooLarge)
+	_, _ = fmt.Fprintf(w, `{"error":{"code":"payload_too_large","message":%q}}`, apiclient.SignedBodyTooLargeMessage)
 }
 
 // writeError writes an authentication error response.
@@ -295,6 +318,13 @@ func (m *MultiKeyBrokerAuthMiddleware) ServeWith(w http.ResponseWriter, r *http.
 		return
 	}
 
+	// Bound the body before anything reads it: the canonical string below
+	// hashes the body before the signature is checked.
+	if err := apiclient.LimitSignedRequestBody(w, r); err != nil {
+		writeSignedBodyTooLarge(w)
+		return
+	}
+
 	// Validate timestamp
 	ts, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil {
@@ -317,6 +347,13 @@ func (m *MultiKeyBrokerAuthMiddleware) ServeWith(w http.ResponseWriter, r *http.
 	sigBytes, err := base64.StdEncoding.DecodeString(signature)
 	if err != nil {
 		m.writeError(w, "invalid signature encoding")
+		return
+	}
+
+	// A signed body must declare its length. BuildCanonicalString
+	// covers the body either way; this refuses unsized framing early.
+	if err := apiclient.CheckSignedBodyFraming(r); err != nil {
+		m.writeError(w, err.Error())
 		return
 	}
 

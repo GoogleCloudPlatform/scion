@@ -93,13 +93,19 @@ commands without `--apply`; read that transcript before applying.
 | Runner image | see [Runner image updates](#runner-image-updates) |
 | `RECONCILE_SCHEDULE` or `MEDIATOR_URL` | `scripts/deploy-scheduler.sh --apply` (after `deploy-mediator.sh` for `MEDIATOR_URL`) |
 
-**Upgrade order: runner first.** When a change touches both, run
-`build-runner-image.sh` and `deploy-job.sh` **before** `deploy-mediator.sh`.
-The mediator registers runners with the work folder `/home/runner/work`, and
-only a runner image that links that folder to the `/scratch` disk (cache
-parity) keeps the work folder off the in-memory root filesystem. An older
-image with a newer mediator risks OOM on large jobs. `deploy-mediator.sh`
-warns when the job's image tag differs from the current `runner/` tree hash.
+**Upgrade order: mediator first.** When a change touches both, run
+`deploy-mediator.sh` **before** `build-runner-image.sh` and `deploy-job.sh`. A
+newer mediator only adds launch env that an older runner image ignores (for
+example `GH_REPOS`, the job guard's allowlist), while a newer runner image can
+require it: under an older mediator it fails closed at startup (exit 2,
+`required environment variable GH_REPOS is not set`), and the job it was launched
+for waits until the stale registration is reaped. That happened in redeploy #2
+(2026-10-27), which updated the job first. `deploy-mediator.sh` notes when the
+job's image tag differs from the current `runner/` tree hash; deploy the job next.
+(The earlier rule, runner first, came from the mediator's `/home/runner/work`
+work folder, which needs a runner image that links it to `/scratch`; every image
+since PR-img does.) The mediator-first order assumes the job runs a runner image at or
+after PR-img; with an older one, deploy the job first.
 
 Every script is idempotent, so re-running one after a partial failure is the
 recovery. A mediator deploy restarts the single instance and loses pending
@@ -259,7 +265,7 @@ logged (a unit test enforces this).
 | `cancel` | INFO | Job finished while queued: its idle runner stopped, or left alone because it runs another job (`action=none_busy`) |
 | `claim_consumed` / `claim_rejected` | INFO / WARNING | Runner fetched its JIT config / was refused: `identity_missing` or `identity_invalid` (401, claim kept; repeated ones from outside the runner are worth a look), or an unknown, used or expired token (410) |
 | `SECURITY_REJECT_FORK_PR` | WARNING | A run outside the allowlist was refused a runner: a fork PR (`reason=head_repository_differs`), or any event but `push` and `pull_request` (`reason=event_not_allowed:<event>`). **Alert on this.** |
-| `SECURITY_KILL_HIJACKED_RUNNER` | ERROR | An untrusted job started on a cr-ci runner minted for another job; the execution was cancelled and the registration deleted ([architecture](architecture.md#residual-risk-label-matched-job-assignment)). **Alert on this and review the run.** |
+| `SECURITY_KILL_HIJACKED_RUNNER` | ERROR / WARNING | An untrusted job started on a cr-ci runner minted for another job; the execution was cancelled and the registration deleted ([architecture](architecture.md#residual-risk-label-matched-job-assignment)). **Alert on the ERROR and review the run.** While GitHub still shows the untrusted job running it refuses to delete the busy registration: the ERROR then has `registration_deleted=false` and GitHub's 422 in `registration_error`, and every later guard pass retries at WARNING (`repeat=true`) until GitHub times the job out, about 10 minutes. The WARNING `hijacked runner's registration deleted` follows when GitHub's `completed` delivery for that job arrives (if it is lost, reconcile forgets the runner after an hour). The execution is gone from the first line on |
 | `runner_swap` | INFO | A runner started a different legitimate job; harmless. `inherited_budget` is the task time that job has left (`TASK_TIMEOUT` minus `execution_age`) |
 | `runner_swap_low_budget` | WARNING | That job inherited less than 20 minutes; if it fails on the task timeout, re-run it. Frequent ones: lower `RUNNER_IDLE_TIMEOUT` or raise `TASK_TIMEOUT` ([architecture](architecture.md#flow)) |
 | `webhook_rejected` | WARNING | Bad signature, malformed payload or repo outside `TARGET_REPOS` |
@@ -280,6 +286,14 @@ logged (a unit test enforces this).
 - TODO(P6): execution results and memory utilisation of runner executions.
 
 ## Troubleshooting
+
+- **Testing the job guard live:** a refused job only lands on a runner launched for
+  another job (the mediator launches none for it), and any routed job, including a
+  real one queued meanwhile, can supply or take that runner. So a quiet window cannot
+  be guaranteed; plan for real jobs competing. A real job displaced this way is
+  re-served at once by the hijack recovery and loses only its first runner (D11 live
+  test, 2026-10-27: a third-party golangci-lint job supplied the runner and ran on its
+  replacement).
 
 - **Job stuck "waiting for a runner":** look for its `job_id` in the mediator
   logs. `capacity_full` means it is waiting for a slot; `SECURITY_REJECT_FORK_PR`
@@ -312,16 +326,21 @@ logged (a unit test enforces this).
   repository outside the runner's served list, `GH_REPOS`; typically one queued on
   the label), and the runner's job-started hook stopped the runner before any of the
   job's steps. The execution's log line (Cloud Logging) names the reason, event,
-  head, the job's repository and the served list (`served=`, comma-separated). The
-  job's own log in GitHub shows only the reason code: it may be public, and under org
-  scope the served list can name private repositories. In org scope the served list is
+  head, the job's repository and the served list (`served=`, comma-separated), and
+  only there is the reason recorded. **In GitHub the job looks like a broken runner:**
+  it stays "in progress" with no steps for about 10 minutes, then fails with the
+  annotation "The self-hosted runner lost communication with the server" and an
+  empty log, because the hook kills the runner before its log is uploaded (D11 live
+  test, 2026-10-27). The hook prints only the reason code to the job's log, when that
+  log is uploaded at all: it may be public, and under org scope the served list can
+  name private repositories. In org scope the served list is
   every `TARGET_REPOS` entry of the owner, so a job of another served repository
   runs; `reason=repository_not_served` then means a repository of the org that is
   not in `TARGET_REPOS` queued a job on the label (add it to `TARGET_REPOS`, or drop
   the label from its workflow). `served_repositories_missing` or
   `served_repositories_malformed` means a launch without a valid `GH_REPOS`, which
-  the mediator never produces (the entrypoint exits 2 first). The mediator's hijack guard deletes the registration, and the job
-  shows as failed in GitHub. This is the guard working; look at who queued that job
+  the mediator never produces (the entrypoint exits 2 first). The mediator's hijack guard deletes the registration once
+  GitHub releases it (see `SECURITY_KILL_HIJACKED_RUNNER`), and the job shows as failed in GitHub. This is the guard working; look at who queued that job
   on the label (`SECURITY_REJECT_FORK_PR` in the mediator log for the same run).
 - **Runner execution exits 4 with `ERROR idle_timeout_raced_job`:** the idle stop
   and a job start crossed (a job was assigned just as the idle deadline passed),
