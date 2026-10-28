@@ -2216,16 +2216,15 @@ authDone:
 			}
 			nfsPVClaimName = mount.PVClaimName
 			nfsPodShare = podShare
+			// The runtime's share server and export come from the same
+			// descriptor as the pod share, so both sides read one value.
+			nfsShareServer, nfsShareExport = podShare.Server, podShare.Export
 			nfsSubPath = mount.SubPath
 			if settings.Server.EffectiveWorkspaceStorage().NFS != nil {
 				nfsSubPathRoot = settings.Server.EffectiveWorkspaceStorage().NFS.SubPathRoot
 				nfsUID = settings.Server.EffectiveWorkspaceStorage().NFS.UID
 				nfsGID = settings.Server.EffectiveWorkspaceStorage().NFS.GID
 				nfsStorageClass = settings.Server.EffectiveWorkspaceStorage().NFS.StorageClass
-				if shares := settings.Server.EffectiveWorkspaceStorage().NFS.Shares; len(shares) > 0 {
-					nfsShareServer = shares[0].Server
-					nfsShareExport = shares[0].Export
-				}
 			}
 		}
 	}
