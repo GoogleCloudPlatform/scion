@@ -267,6 +267,15 @@ func TestNFSPodVolumes_MountWithin(t *testing.T) {
 	_, err = b.mountWithin(nfsVolWorkspace, "projects/other/workspace/.scion", "/x", true)
 	assert.Error(t, err, "outside the project tree")
 
+	// A parent volume of the same path on another server does not
+	// contain the entry.
+	otherServer := newWorkspaceNFSPodVolumes(cfg)
+	otherServer.inline = []corev1.Volume{{Name: nfsVolWorkspace, VolumeSource: corev1.VolumeSource{
+		NFS: &corev1.NFSVolumeSource{Server: "192.0.2.99", Path: inlineTestExport + "/projects/proj-123/workspace"}}}}
+	_, err = otherServer.mountWithin(nfsVolWorkspace, "projects/proj-123/workspace/.scion", "/workspace/.scion", true)
+	require.Error(t, err, "the parent volume is on another server")
+	assert.Contains(t, err.Error(), "is not inside volume")
+
 	claim := newWorkspaceNFSPodVolumes(claimTestConfig(nfsBaseConfig("mw")))
 	m, err = claim.mountWithin(nfsVolWorkspace, "projects/proj-123/workspace/.scion", "/workspace/.scion", true)
 	require.NoError(t, err)
