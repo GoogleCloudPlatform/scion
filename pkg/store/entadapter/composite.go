@@ -24,7 +24,6 @@ import (
 	"time"
 
 	"entgo.io/ent/dialect"
-	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -795,7 +794,7 @@ func (c *CompositeStore) Close() error {
 
 // Ping verifies connectivity to the underlying database.
 func (c *CompositeStore) Ping(ctx context.Context) error {
-	drv, ok := c.client.Driver().(*entsql.Driver)
+	drv, ok := entc.SQLDriver(c.client.Driver())
 	if !ok {
 		return fmt.Errorf("ent client driver does not expose a *sql.DB for ping")
 	}

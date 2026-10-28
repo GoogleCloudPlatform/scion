@@ -786,6 +786,77 @@ type DatabaseConfig struct {
 	// refuses to start (and those commands refuse to migrate); with this set
 	// it logs a warning and continues.
 	AllowShadowedSchema bool `json:"allowShadowedSchema" yaml:"allowShadowedSchema" koanf:"allowShadowedSchema"`
+
+	// TxDiagnostics configures the hub's transaction-hold and lock-wait
+	// diagnostics (WARN lines and metrics). See TxDiagnosticsSettings.
+	TxDiagnostics TxDiagnosticsConfig `json:"tx_diagnostics" yaml:"tx_diagnostics" koanf:"tx_diagnostics"`
+}
+
+// TxDiagnosticsConfig configures the hub database's transaction-hold and
+// lock-wait diagnostics. Durations are Go duration strings; empty takes the
+// default and "0" turns that WARN off (metrics are still recorded).
+type TxDiagnosticsConfig struct {
+	// Enabled installs the diagnostics. Nil means true. False leaves the
+	// database open path exactly as without diagnostics.
+	Enabled *bool `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
+	// HoldWarnThreshold logs a transaction or connection held this long
+	// (default "2s").
+	HoldWarnThreshold string `json:"hold_warn_threshold,omitempty" yaml:"hold_warn_threshold,omitempty" koanf:"hold_warn_threshold"`
+	// LockWaitWarnThreshold logs a request that waited this long for a
+	// connection (default "1s").
+	LockWaitWarnThreshold string `json:"lock_wait_warn_threshold,omitempty" yaml:"lock_wait_warn_threshold,omitempty" koanf:"lock_wait_warn_threshold"`
+	// WarnInterval is the rate-limit window: at most one line per call site
+	// and kind per interval (default "1m").
+	WarnInterval string `json:"warn_interval,omitempty" yaml:"warn_interval,omitempty" koanf:"warn_interval"`
+}
+
+// Defaults of TxDiagnosticsConfig.
+const (
+	DefaultTxHoldWarnThreshold     = 2 * time.Second
+	DefaultTxLockWaitWarnThreshold = time.Second
+	DefaultTxWarnInterval          = time.Minute
+)
+
+// TxDiagnosticsSettings are the parsed TxDiagnosticsConfig values.
+type TxDiagnosticsSettings struct {
+	Enabled               bool
+	HoldWarnThreshold     time.Duration
+	LockWaitWarnThreshold time.Duration
+	WarnInterval          time.Duration
+}
+
+// Settings parses c, applying the defaults. A malformed or negative
+// duration, or a zero warn_interval, returns an error.
+func (c TxDiagnosticsConfig) Settings() (TxDiagnosticsSettings, error) {
+	s := TxDiagnosticsSettings{Enabled: c.Enabled == nil || *c.Enabled}
+	var err error
+	if s.HoldWarnThreshold, err = parseTxDiagDuration("hold_warn_threshold", c.HoldWarnThreshold, DefaultTxHoldWarnThreshold); err != nil {
+		return s, err
+	}
+	if s.LockWaitWarnThreshold, err = parseTxDiagDuration("lock_wait_warn_threshold", c.LockWaitWarnThreshold, DefaultTxLockWaitWarnThreshold); err != nil {
+		return s, err
+	}
+	if s.WarnInterval, err = parseTxDiagDuration("warn_interval", c.WarnInterval, DefaultTxWarnInterval); err != nil {
+		return s, err
+	}
+	if s.WarnInterval == 0 {
+		return s, fmt.Errorf("invalid tx_diagnostics.warn_interval %q: must be positive", c.WarnInterval)
+	}
+	return s, nil
+}
+
+func parseTxDiagDuration(key, v string, def time.Duration) (time.Duration, error) {
+	if v == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid tx_diagnostics.%s %q: %w", key, v, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("invalid tx_diagnostics.%s %q: must not be negative", key, v)
+	}
+	return d, nil
 }
 
 // ConnMaxLifetimeDuration parses ConnMaxLifetime into a time.Duration.

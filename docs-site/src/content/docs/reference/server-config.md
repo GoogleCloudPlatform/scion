@@ -411,6 +411,27 @@ Persistence settings for the Hub.
 | `conn_max_lifetime` | duration | sqlite: unlimited; postgres: `"30m"` | Maximum time a connection may be reused (Go duration, for example `"30m"`). Empty takes the default; `"0"` means unlimited. Settings file only: no environment variable sets it. |
 | `conn_max_idle_time` | duration | sqlite: no limit; postgres: `"5m"` | Maximum time a connection may sit idle in the pool before it is closed (Go duration). Set it shorter than the server-side or proxy idle timeout so idle connections are recycled first. Empty takes the default; `"0"` means no idle limit. Settings file only: no environment variable sets it. |
 | `allow_shadowed_schema` | bool | `false` | PostgreSQL only. Lets the Hub start, and the maintenance commands that migrate its database run, when the schema migration would create a new table set that hides existing Hub tables in a later schema on the `search_path`. See [PostgreSQL `search_path` check](#postgresql-search_path-check). Env: `SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA`. |
+| `tx_diagnostics` | object | see below | Transaction-hold and lock-wait diagnostics. See [Transaction diagnostics](#transaction-diagnostics). Settings file only. |
+
+#### Transaction diagnostics
+
+The Hub measures how long each database transaction and connection checkout holds its connection, and how long each request waits to get one. SQLite runs one writer at a time, and the Hub's SQLite pool has a single connection, so one slow holder makes every other database request wait behind it. These diagnostics name the holder and the waiters.
+
+| Field (`server.database.tx_diagnostics.*`) | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `enabled` | bool | `true` | Install the diagnostics. `false` opens the database exactly as without them. |
+| `hold_warn_threshold` | duration | `"2s"` | Log a transaction or connection checkout held at least this long. `"0"` turns these lines off; metrics are still recorded. |
+| `lock_wait_warn_threshold` | duration | `"1s"` | Log a request that waited at least this long for a connection. `"0"` turns these lines off. |
+| `warn_interval` | duration | `"1m"` | At most one line per call site and kind per interval. Must be positive; `"0"` or a negative value fails startup. Lines dropped by this limit are counted in the next line's `suppressed`. |
+
+The lines are WARN records from the `hub.db` subsystem:
+
+- `db_tx_long_hold`: `kind` (`tx`, or on SQLite `conn` for a held connection with no transaction line), `op` (the calling function), `site` (the first three calling frames), `hold_ms`, `begin_ms`, `stmts`, `stmt_ms` (time in SQL), `commit_ms` (time in the transaction's COMMIT; on SQLite that includes writing and syncing the WAL, so a slow disk shows up here; on a `kind=conn` line, `begin_ms` and `commit_ms` add up the transactions run during that checkout), `idle_ms` (time the connection was held outside BEGIN, SQL and COMMIT, such as Go work inside a transaction), `max_stmt_ms`, `rows_affected`, `outcome`, and on SQLite `waiters_max` (requests from the ent client that waited during the hold) and `busy`.
+- `db_lock_wait`: `op`, `site`, `wait_ms`, `req` (`tx`, `exec` or `query`) and `outcome` (`acquired`, `canceled`, `deadline` or `error`). On SQLite it also names who held the connection during the wait: `holders` (how many connection checkouts overlapped the wait; many short ones mean a queue rather than one slow holder), `top_holder_op` and `top_holder_ms` (the holder with the most time in the wait), and, when the waiter gave up, `holder_open_op` and `holder_open_ms` (the checkout still holding the connection at that moment).
+
+A write made outside an explicit transaction commits inside its own statement, so its commit time is part of that statement's `stmt_ms` and is not reported as `commit_ms`. Both carry `suppressed` and `dropped` (lines lost because the log queue was full). Per-waiter lines cover requests made through the ent client. Waits of the raw-SQL stores appear in aggregate, in the `scion.db.pool.connections.wait_duration` metric. Startup schema migrations run through the same path, so a long migration can log one or more lines at boot; they are expected and are not a stall.
+
+When metrics export is on, the Hub also records the histograms `scion.db.tx.hold.duration` (labels `op`, `kind`, `outcome`, `pool`), `scion.db.tx.lock_wait.duration` and `scion.db.tx.commit.duration` (labels `op`, `outcome`, `pool`), the counter `scion.db.pool.connections.wait_duration` (ms), and `scion.db.diag.warn.dropped`. The `op` label is capped at 256 values; further call sites are reported as `other`.
 
 #### PostgreSQL `search_path` check
 

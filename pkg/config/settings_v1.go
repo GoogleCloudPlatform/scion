@@ -1986,6 +1986,9 @@ type V1DatabaseConfig struct {
 	// create a new table set that hides existing hub tables
 	// later on the search_path. See DatabaseConfig.AllowShadowedSchema.
 	AllowShadowedSchema bool `json:"allow_shadowed_schema,omitempty" yaml:"allow_shadowed_schema,omitempty" koanf:"allow_shadowed_schema"`
+	// TxDiagnostics configures transaction-hold and lock-wait diagnostics.
+	// See TxDiagnosticsConfig.
+	TxDiagnostics *TxDiagnosticsConfig `json:"tx_diagnostics,omitempty" yaml:"tx_diagnostics,omitempty" koanf:"tx_diagnostics"`
 }
 
 // V1AuthConfig holds authentication settings.
@@ -4396,6 +4399,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			gc.Database.ConnMaxIdleTime = v1.Database.ConnMaxIdleTime
 		}
 		gc.Database.AllowShadowedSchema = v1.Database.AllowShadowedSchema
+		if v1.Database.TxDiagnostics != nil {
+			gc.Database.TxDiagnostics = *v1.Database.TxDiagnostics
+		}
 	}
 
 	// Auth config
@@ -4782,6 +4788,9 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		ConnMaxIdleTime: gc.Database.ConnMaxIdleTime,
 
 		AllowShadowedSchema: gc.Database.AllowShadowedSchema,
+	}
+	if td := gc.Database.TxDiagnostics; td != (TxDiagnosticsConfig{}) {
+		v1.Database.TxDiagnostics = &td
 	}
 
 	// Auth config

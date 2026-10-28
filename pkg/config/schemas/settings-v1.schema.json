@@ -2006,6 +2006,33 @@
           "default": false,
           "description": "PostgreSQL only. By default the hub refuses to start, and the maintenance commands that migrate the hub database refuse to run, when current_schema() has no hub tables but a later schema on the connection's search_path does, because the migration would create a new, empty table set that hides the existing data. Set true to log a warning and continue anyway, creating the new table set in the current schema.",
           "x-env-var": "SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA"
+        },
+        "tx_diagnostics": {
+          "type": "object",
+          "description": "Transaction-hold and lock-wait diagnostics for the hub database. A transaction or connection checkout held past hold_warn_threshold, or a request that waited past lock_wait_warn_threshold for a connection, logs one WARN per call site and kind per warn_interval; hold and wait histograms are recorded when metrics export is on.",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Install the diagnostics. false leaves the database open path exactly as without them."
+            },
+            "hold_warn_threshold": {
+              "type": "string",
+              "default": "2s",
+              "description": "Log a transaction or connection held at least this long (Go duration). '0' turns these WARNs off; metrics are still recorded."
+            },
+            "lock_wait_warn_threshold": {
+              "type": "string",
+              "default": "1s",
+              "description": "Log a request that waited at least this long for a database connection (Go duration). '0' turns these WARNs off."
+            },
+            "warn_interval": {
+              "type": "string",
+              "default": "1m",
+              "description": "Rate-limit window: at most one WARN per call site and kind per interval (Go duration, positive)."
+            }
+          }
         }
       }
     },
