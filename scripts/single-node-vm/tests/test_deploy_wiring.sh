@@ -2639,10 +2639,10 @@ test_deploy_create_api_check_enables_iamcredentials_when_missing() {
   assert_not_contains "$enable_line" "compute.googleapis.com" "an already-enabled API must not be re-enabled"
 }
 
-# deploy.sh never removes the hub SA's project role bindings one by one:
-# --delete deletes the hub SA itself, so every binding it holds
-# (serviceAccountAdmin included) no longer applies. Asserts that path, against the
-# exact state a default create left behind.
+# --delete removes the hub SA's project role bindings (serviceAccountAdmin
+# included; see test_delete_sa_bindings.sh) and then deletes the SA.
+# Asserts the SA delete, against the exact state a default create left
+# behind.
 test_deploy_delete_after_create_deletes_hub_sa_holding_service_account_admin() {
   fresh_gcloud_state
   run_deploy_create "$(base_config_json "$HUB")"

@@ -314,7 +314,7 @@ func (e *HTTPExecutor) recordFireRefusal(ctx context.Context, hook *store.Lifecy
 	if suppressed > 0 {
 		err = fmt.Errorf("%w (%d similar refusals for this hook not recorded)", denied, suppressed)
 	}
-	e.log.Warn("Lifecycle hook token mint refused: hook writer no longer authorized",
+	e.log.WarnContext(ctx, "Lifecycle hook token mint refused: hook writer no longer authorized",
 		"hook_id", hook.ID,
 		"hook_name", hook.Name,
 		"trigger", trigger,
