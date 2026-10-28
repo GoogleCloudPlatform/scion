@@ -180,6 +180,7 @@ func TestCreateSharedDirPVCs(t *testing.T) {
 			{Name: "build-cache"},
 			{Name: "artifacts", ReadOnly: true},
 		},
+		Kubernetes: &api.KubernetesConfig{SharedDirStorageClass: "standard-rwx"},
 	}
 
 	err := rt.createSharedDirPVCs(ctx, "default", config)
@@ -384,9 +385,12 @@ func TestCreateSharedDirPVCs_ReuseWarnsOnStorageClassMismatch(t *testing.T) {
 			rt, clientset, _ := newTestK8sRuntime()
 			ctx := context.Background()
 			_, err := clientset.CoreV1().PersistentVolumeClaims("default").Create(ctx, &corev1.PersistentVolumeClaim{
-				ObjectMeta: metav1.ObjectMeta{Name: "scion-shared-myproject-build-cache", Namespace: "default"},
-				Spec:       corev1.PersistentVolumeClaimSpec{StorageClassName: tt.existingClass},
-				Status:     corev1.PersistentVolumeClaimStatus{Phase: tt.phase},
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "scion-shared-myproject-build-cache", Namespace: "default",
+					Labels: map[string]string{"scion.project_id": "proj-1"},
+				},
+				Spec:   corev1.PersistentVolumeClaimSpec{StorageClassName: tt.existingClass},
+				Status: corev1.PersistentVolumeClaimStatus{Phase: tt.phase},
 			}, metav1.CreateOptions{})
 			require.NoError(t, err)
 
