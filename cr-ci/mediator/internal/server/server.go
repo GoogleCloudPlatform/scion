@@ -155,6 +155,10 @@ type Server struct {
 	// Later kills of the same runner log at WARNING; cleared once the registration is
 	// gone, or by reconcile after cancelledTTL.
 	hijacked map[string]time.Time
+	// forgotten: runners whose job's completed webhook dropped their record, -> when.
+	// Reconcile skips them (its discovery may predate the webhook); pruned after
+	// cancelledTTL.
+	forgotten map[string]time.Time
 }
 
 // New returns a Server.
@@ -181,6 +185,7 @@ func New(o Options) *Server {
 		offlineSeen: map[string]time.Time{},
 		noticed:     map[string]bool{},
 		hijacked:    map[string]time.Time{},
+		forgotten:   map[string]time.Time{},
 	}
 }
 
