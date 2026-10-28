@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -466,11 +467,11 @@ func TestBrokerRotateSecret_SelfAllowed(t *testing.T) {
 	originalKey := seedBrokerSecret(t, s, broker.ID)
 
 	// Driven through real middleware: the request is HMAC-signed with the
-	// broker's actual stored secret via BrokerAuthService.SignRequest and
-	// dispatched through srv.Handler().ServeHTTP, the same as a real broker's
-	// outbound call.
+	// broker's actual stored secret via apiclient.HMACAuth.ApplyAuth (the
+	// signer real brokers use) and dispatched through srv.Handler().ServeHTTP,
+	// the same as a real broker's outbound call.
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/brokers/"+broker.ID+"/rotate-secret", nil)
-	require.NoError(t, srv.brokerAuthService.SignRequest(req, broker.ID, originalKey))
+	require.NoError(t, (&apiclient.HMACAuth{BrokerID: broker.ID, SecretKey: originalKey}).ApplyAuth(req))
 	rec := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(rec, req)

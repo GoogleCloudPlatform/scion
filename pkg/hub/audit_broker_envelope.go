@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -220,7 +221,7 @@ func brokerAuthFailureCode(err error) auditevent.BrokerFailureCode {
 	case errors.Is(err, errBrokerAuthMissingBrokerID), errors.Is(err, errBrokerAuthMissingTimestamp),
 		errors.Is(err, errBrokerAuthMissingSignature), errors.Is(err, errBrokerAuthMissingNonce):
 		return auditevent.BrokerFailureMissingCredentials
-	case errors.Is(err, errBrokerAuthMalformedTimestamp):
+	case errors.Is(err, errBrokerAuthMalformedTimestamp), errors.Is(err, apiclient.ErrUnsizedSignedBody):
 		return auditevent.BrokerFailureMalformed
 	case errors.Is(err, errBrokerAuthClockSkew):
 		return auditevent.BrokerFailureClockSkew
