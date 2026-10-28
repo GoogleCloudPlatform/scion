@@ -86,8 +86,13 @@ job no longer has those since #4061 (`hack/golangci-lint-split.sh`).
 **Only host-process jobs may be routed.** Cloud Run cannot run Docker, so
 jobs with `services:` (the Postgres jobs) or Docker steps must stay on
 `ubuntu-latest` ([architecture: constraints](../docs/architecture.md#constraints)).
-`hack/check-runner-routing.sh` enforces this for every job whose `runs-on` reads
-the variable (`grep -n SCION_LARGE_RUNNER .github/workflows/*.yml` lists them).
+For every job whose `runs-on` reads the variable (`grep -n SCION_LARGE_RUNNER
+.github/workflows/*.yml` lists them), `hack/check-runner-routing.sh` fails on
+`services:`, `container:`, a `uses: docker://` step and a docker command in a step
+(`docker run`, `build`, `buildx`, `compose`, `pull`, `push`, `exec`, `login`,
+`create`, `start`, or `docker-compose`). It matches commands by pattern, so a step
+that reaches Docker some other way (a script it calls, a tool that uses the Docker
+API) is not caught: review routed jobs for that.
 
 ### Things P6 must look at before P7
 
@@ -194,7 +199,7 @@ zstd are wrong.
   `github-hosted` exists. Harmless either way.
 - **The Go build and module caches and golangci-lint's analysis cache keep one key
   for both runner types, but the build cache is warm only for the type that saved
-  it (decision: document this, cr-ci-rev-16 R1 option (a)).** The cr-ci image has no
+  it.** The cr-ci image has no
   C compiler, so Go there defaults to `CGO_ENABLED=0`, while ubuntu-latest builds
   with cgo on. With cgo off, `net` and `os/user` compile other files, and every
   package that imports them, which is nearly all of scion and most dependencies,
