@@ -198,6 +198,11 @@ func TestForceDeleteUser_FinalizeRacesCompletionReopen_Postgres(t *testing.T) {
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
+	// On any failure path the cleanup releases the held finalize at once,
+	// so its transaction does not hold locks and a connection until the
+	// hook's own timeout.
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseOnce)
 	var once sync.Once
 	f.srv.RegisterHardDeleteHook("test-hold-finalize", func(_ context.Context, _ store.Store, a *store.Agent, _ AuditActor) error {
 		if a.ID != x.ID {
@@ -232,18 +237,27 @@ func TestForceDeleteUser_FinalizeRacesCompletionReopen_Postgres(t *testing.T) {
 		completionDone <- completion{c, err}
 	}()
 
-	// enttest gives each package its own database, so current_database()
-	// scopes the check to this test's connections.
+	// enttest gives each package one database (each test its own schema),
+	// and the pkg/hub Postgres job runs its tests one at a time, so
+	// current_database() scopes the check to this package's connections,
+	// not only this test's. The check therefore matches only the two waits
+	// the completion can have here: a backend blocked by another backend
+	// on the agent row lock (the agents FOR UPDATE of LockAgentRows) or on
+	// the agent's delegation edge (the edge UPDATE when that lock is not
+	// taken).
 	require.Eventually(t, func() bool {
 		var waiting int
 		if err := db.QueryRowContext(ctx,
 			`SELECT count(*) FROM pg_stat_activity
-			  WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting); err != nil {
+			  WHERE datname = current_database()
+			    AND wait_event_type = 'Lock'
+			    AND cardinality(pg_blocking_pids(pid)) > 0
+			    AND (query ILIKE '%agents%FOR UPDATE%' OR query ILIKE '%UPDATE%delegation_edges%')`).Scan(&waiting); err != nil {
 			return false
 		}
 		return waiting > 0
 	}, 10*time.Second, 20*time.Millisecond, "the completion never waited on a lock the finalize holds")
-	close(release)
+	releaseOnce()
 
 	var res completion
 	select {
