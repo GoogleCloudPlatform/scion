@@ -455,7 +455,11 @@ a tag that starts like a version but is not valid semver, or has a version
 number longer than 19 digits, is refused. An `image.digest`, or a tag that is
 not a version (such as `latest`), cannot be checked: the render is allowed,
 `NOTES.txt` prints a warning, and the Deployment is annotated
-`scion.io/relay-tls-image-check: unverified`. Check such an image yourself.
+`scion.io/relay-tls-image-check: unverified`. Check such an image yourself. The
+chart's `appVersion` (the default image tag) stays below that release until a
+versioned hub release carries relay TLS, so with relay TLS on (the default above
+one replica) set `image.tag` to `nightly-20261029` or later, or set
+`image.digest`.
 
 **Rolling back.** Hub releases before the one that adds relay TLS ignore the
 `internal_tls_*` settings and would serve this listener in plaintext. If you roll
