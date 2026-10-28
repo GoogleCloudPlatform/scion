@@ -1842,7 +1842,7 @@ jobs:
     # always on push to main. Fails open: if the changes job did not succeed,
     # the harness runs anyway.
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.single_node_vm == 'true') }}
-    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: Checkout code
