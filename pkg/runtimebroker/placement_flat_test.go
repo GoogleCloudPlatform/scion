@@ -27,6 +27,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -624,5 +625,43 @@ func TestFlatStartUnreadableStoredConfigRefusedBeforeWrite(t *testing.T) {
 	}
 	if err := f.srv.checkStartLegacyPlacement("test-agent-1", projectDir, nil, false, rp); err != nil {
 		t.Fatalf("no stored config yet: got %v, want no refusal", err)
+	}
+}
+
+// A flat restart where both pre-stop refusals' conditions hold: the agent's
+// stored config conflicts with the instance's placement, and the global
+// settings' active profile carries a removed storage override. The
+// placement check runs first (restartAgent), so its validation error is
+// returned and nothing is stopped. The storage refusal does not apply to a
+// flat instance at all (its settings view has no profile tier), which the
+// test also shows; without that view the same settings refuse.
+func TestFlatRestartPlacementAndStorageRefusalOrder(t *testing.T) {
+	f := newFlatPlacementInstanceServer(t, flatPlacementTarget())
+	f.seedOwnedAgent(t)
+	writeStoredAgentConfig(t, f, `{"kubernetes": {"tolerations": [{"key": "dedicated", "operator": "Equal", "value": "batch", "effect": "NoSchedule"}]}}`)
+	settingsPath := filepath.Join(f.globalDir, "settings.yaml")
+	settings, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withOverride := string(settings) + "active_profile: legacy\nprofiles:\n  legacy:\n    runtime: kube\n    shared_dir_storage_backend: nfs\nruntimes:\n  kube:\n    type: kubernetes\n"
+	writeFlatFixtureFile(t, settingsPath, withOverride)
+	if err := agent.CheckProfileStorageRefusal(context.Background(), "legacy"); err == nil {
+		t.Fatal("the storage condition does not hold outside the flat view; the test would not cover both")
+	}
+	flatCtx := config.WithFlatInstancePolicy(context.Background(), f.srv.flatInstancePolicy())
+	if err := agent.CheckProfileStorageRefusal(flatCtx, ""); err != nil {
+		t.Fatalf("the storage refusal applied to a flat instance: %v", err)
+	}
+
+	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/restart"+flatStartQuery, flatRestartBody(f))
+	expectPlacementRefusal(t, w, "kubernetes.tolerations[0] in the agent's stored config", "batch")
+	if strings.Contains(w.Body.String(), ErrCodeStorageMigrationRequired) {
+		t.Fatalf("the storage refusal won: %s", w.Body.String())
+	}
+	f.mgr.mu.Lock()
+	defer f.mgr.mu.Unlock()
+	if f.mgr.stopCalls != 0 || f.mgr.startCalls != 0 {
+		t.Errorf("stop=%d start=%d, want 0 and 0 (agent left running)", f.mgr.stopCalls, f.mgr.startCalls)
 	}
 }
