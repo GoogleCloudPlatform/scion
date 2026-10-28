@@ -46,6 +46,9 @@
 - **happy-dom's `ShadowRoot.activeElement` throws** while focus is on a detached node (a closed menu's row); test
   helpers that read it catch that.
 - **The header list's short-page rule matches the rail's**: a reconcile never continues a hub scan on its own.
+- **Browser cases on the phone sheet must wait for its slide-in** (`sheet-in`, 0.18 s) before measuring it: a touch drag
+  computed from a box that is still moving lands below the list. Wait on the dialog's `getAnimations({ subtree: true })`.
+  Locate the message menu by its accessible name: the composer's agent menu is also a `role="menu"`.
 
 ## Follow-ups
 
