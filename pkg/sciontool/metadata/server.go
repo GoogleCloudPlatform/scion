@@ -259,6 +259,10 @@ type Server struct {
 	// afterRefusalCheck, if set, runs in the token handlers between the
 	// first refusal check and the singleflight lock (tests).
 	afterRefusalCheck func()
+	// afterFollowerJoin, if set, runs in handleIdentityToken when a request
+	// has joined another request's in-flight fetch for its audience, just
+	// before it waits (tests).
+	afterFollowerJoin func(audience string)
 }
 
 // authToken returns the current auth token, preferring the dynamic TokenFunc
@@ -1144,6 +1148,9 @@ func (s *Server) handleIdentityToken(w http.ResponseWriter, r *http.Request) {
 	if s.idFetchInFlight && s.idFetchAudience == audience {
 		done := s.idFetchDone
 		s.idFetchMu.Unlock()
+		if s.afterFollowerJoin != nil {
+			s.afterFollowerJoin(audience)
+		}
 		<-done
 		if s.serveCachedIDToken(w, audience) {
 			return
