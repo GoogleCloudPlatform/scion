@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -207,9 +208,22 @@ func shareTreeListing(t *testing.T, dir string) []string {
 	return out
 }
 
+// assertNoPathValues fails when a refusal body names a path or source value
+// of the layout (D328: non-admin bodies carry field names only).
+func assertNoPathValues(t *testing.T, f *shareVisibleFixture, body string) {
+	t.Helper()
+	for _, v := range []string{f.hostBase, filepath.Dir(f.hostBase), "10.0.0.2", "/scion-workspaces", "nfs-server"} {
+		if strings.Contains(body, v) {
+			t.Errorf("refusal body %q carries the layout value %q", body, v)
+		}
+	}
+}
+
 // The main wrong-share case: a verify-only broker whose mount point is an
-// empty directory (the share is not really mounted there) is refused by the
-// identity check (409), and nothing is written under the mount point.
+// empty directory (the share is not really mounted there; no subpath root)
+// is refused with 503, the share is not visible, whatever the mount table
+// says, with a body that names no path, and nothing is written under the
+// mount point.
 func TestSharedHubProjectPath_VerifyOnlyEmptyMountPointRefusedNoWrite(t *testing.T) {
 	f := newShareVisibleFixture(t, "kubernetes", "10.0.0.2:/scion-workspaces/")
 	if err := os.RemoveAll(filepath.Join(f.hostBase, "projects")); err != nil {
@@ -217,9 +231,13 @@ func TestSharedHubProjectPath_VerifyOnlyEmptyMountPointRefusedNoWrite(t *testing
 	}
 	before := shareTreeListing(t, f.hostBase)
 	_, ok, sce := f.srv.sharedHubProjectPath(context.Background(), sharedRootProjectID)
-	if !ok || sce == nil || sce.Status != http.StatusConflict {
-		t.Fatalf("sharedHubProjectPath on an empty mount point = %v, %+v; want a 409 refusal", ok, sce)
+	if !ok || sce == nil || sce.Status != http.StatusServiceUnavailable || sce.Code != ErrCodeProjectStorageUnavailable {
+		t.Fatalf("sharedHubProjectPath on an empty mount point = %v, %+v; want the 503 %s refusal", ok, sce, ErrCodeProjectStorageUnavailable)
 	}
+	if want := shareNotVisibleText(shareMountPathField, true); sce.Message != want {
+		t.Errorf("message = %q, want the not-visible text %q", sce.Message, want)
+	}
+	assertNoPathValues(t, f, sce.Message)
 	after := shareTreeListing(t, f.hostBase)
 	if len(before) != len(after) {
 		t.Fatalf("the refused dispatch wrote under the mount point: before %v, after %v", before, after)
@@ -229,6 +247,42 @@ func TestSharedHubProjectPath_VerifyOnlyEmptyMountPointRefusedNoWrite(t *testing
 			t.Fatalf("the refused dispatch changed the mount point: before %v, after %v", before, after)
 		}
 	}
+}
+
+// With the subpath root present but no configuration of this project under
+// it, a verify-only broker refuses with 409 ("run project-storage-migrate"
+// stays), the body names no path, and nothing is written.
+func TestSharedHubProjectPath_VerifyOnlySubpathRootWithoutProjectConfig(t *testing.T) {
+	f := newShareVisibleFixture(t, "kubernetes", "10.0.0.2:/scion-workspaces/")
+	if err := os.RemoveAll(filepath.Join(f.hostBase, "projects", sharedRootProjectID)); err != nil {
+		t.Fatal(err)
+	}
+	before := shareTreeListing(t, f.hostBase)
+	_, ok, sce := f.srv.sharedHubProjectPath(context.Background(), sharedRootProjectID)
+	if !ok || sce == nil || sce.Status != http.StatusConflict || sce.Message != sharedProjectConfigText {
+		t.Fatalf("sharedHubProjectPath = %v, %+v; want the 409 configuration refusal", ok, sce)
+	}
+	assertNoPathValues(t, f, sce.Message)
+	if after := shareTreeListing(t, f.hostBase); strings.Join(after, "\n") != strings.Join(before, "\n") {
+		t.Fatalf("the refused dispatch changed the mount point: before %v, after %v", before, after)
+	}
+}
+
+// A broker that mounts its shares gets the mounting form of the
+// not-visible text when the subpath root is missing.
+func TestSharedHubProjectPath_MountingBrokerMissingSubpathRoot(t *testing.T) {
+	f := newShareVisibleFixture(t, "docker", "10.0.0.2:/scion-workspaces")
+	if err := os.RemoveAll(filepath.Join(f.hostBase, "projects")); err != nil {
+		t.Fatal(err)
+	}
+	_, ok, sce := f.srv.sharedHubProjectPath(context.Background(), sharedRootProjectID)
+	if !ok || sce == nil || sce.Status != http.StatusServiceUnavailable {
+		t.Fatalf("sharedHubProjectPath = %v, %+v; want 503", ok, sce)
+	}
+	if want := shareNotVisibleText(shareMountPathField, false); sce.Message != want {
+		t.Errorf("message = %q, want %q", sce.Message, want)
+	}
+	assertNoPathValues(t, f, sce.Message)
 }
 
 // The NFS dispatch pre-flight of a broker that mounts its shares keeps the

@@ -9211,8 +9211,11 @@ func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, pro
 			// visible refuses the dispatch (ptone/scion#5823). For a
 			// verify-only reconciler the status above is advisory
 			// (shareVisible): a visible share directory admits the
-			// dispatch, and the project tree's identity is checked when its
-			// project root is resolved (sharedHubProjectPath).
+			// dispatch. A hub-managed dispatch then has the project tree's
+			// identity checked when its project root is resolved
+			// (sharedHubProjectPath). A dispatch that carries a project
+			// path (not hub-managed) is admitted on directory visibility
+			// alone, with no hub-seeded identity check, as before #4219.
 			if s.config.StorageLayout.Backend.Shared() && r.VerifyOnly() &&
 				shareVisible(ctx, s.config.StorageLayout, r) == nil {
 				s.agentLifecycleLog.Warn("NFS share check is advisory on this broker; the share directory is visible, continuing dispatch",
