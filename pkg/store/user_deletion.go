@@ -122,7 +122,10 @@ type UserDeletionStore interface {
 	GetUserDeletionByUser(ctx context.Context, userID string) (*UserDeletion, error)
 
 	// ListUserDeletionsByState returns up to limit deletions in state,
-	// oldest request first.
+	// least recently reconciled first (never reconciled before any other),
+	// then oldest request first. A caller that reconciles each deletion it
+	// lists and records that (TouchUserDeletionReconciled) so works through
+	// every deletion in turn, however many there are.
 	ListUserDeletionsByState(ctx context.Context, state string, limit int) ([]UserDeletion, error)
 
 	// CompleteUserDeletion moves a deletion from stopping to completed at
@@ -131,14 +134,26 @@ type UserDeletionStore interface {
 	CompleteUserDeletion(ctx context.Context, id string, at time.Time) (bool, error)
 
 	// TouchUserDeletionReconciled records a reconcile at at and its error
-	// ("" for none).
+	// ("" for none) on a deletion in state stopping. A completed deletion
+	// is left unchanged (nil); an unknown ID returns ErrNotFound.
 	TouchUserDeletionReconciled(ctx context.Context, id string, at time.Time, lastErr string) error
 
 	// UpsertUserDeletionAgent creates or replaces the record of one agent
-	// of a deletion, keyed by (DeletionID, AgentID). It returns
-	// ErrInvalidInput for an unknown outcome and ErrNotFound for an
-	// unknown deletion.
+	// of a deletion, keyed by (DeletionID, AgentID). A record whose
+	// outcome is stopped or removed is final: the call leaves it unchanged
+	// and returns nil, so a writer holding an older copy of the record
+	// cannot replace a confirmed outcome. It returns ErrInvalidInput for
+	// an unknown outcome and ErrNotFound for an unknown deletion. It is a
+	// single conditional write per statement and never fails on a
+	// concurrent insert, so it is safe inside a transaction.
 	UpsertUserDeletionAgent(ctx context.Context, a *UserDeletionAgent) error
+
+	// ReopenUserDeletionAgent creates or replaces the record of one agent
+	// of a deletion whatever its outcome, including stopped and removed.
+	// It is meant only for the completion of a deletion, under the user
+	// row lock, for an agent that blocks the user again. Errors are as for
+	// UpsertUserDeletionAgent.
+	ReopenUserDeletionAgent(ctx context.Context, a *UserDeletionAgent) error
 
 	// ListUserDeletionAgents returns the agents of a deletion, by agent ID.
 	ListUserDeletionAgents(ctx context.Context, deletionID string) ([]UserDeletionAgent, error)

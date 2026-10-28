@@ -123,6 +123,11 @@ func Spec() []TableFixture {
 				"kind": "federated", "home_issuer": visitorIssuer,
 				"federated_email": "visitor@" + visitorDomain, "created_at": baseTime,
 			},
+			{ // user of the stopping forced deletion below: status deleting
+				"id": "22222222-2222-2222-2222-2222222222d1", "email": "deleting@example.com",
+				"display_name": "Deleting", "role": "member", "status": "deleting",
+				"created_at": baseTime,
+			},
 		}},
 		{Table: "runtime_brokers", Rows: []row{
 			{

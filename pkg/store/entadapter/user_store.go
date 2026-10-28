@@ -441,7 +441,9 @@ func (s *UserStore) UpdateUser(ctx context.Context, u *store.User) error {
 	// deleting (MarkUserDeleting does) and never changes a deleting row.
 	// The update below repeats the status test in its WHERE clause, so a
 	// caller that read the row before MarkUserDeleting committed cannot
-	// write another status over it.
+	// write another status over it. That window lies between two
+	// statements of this call, so no conformance case reaches it; the
+	// conformance suite covers the refusal of a row already deleting.
 	if current.Status == user.StatusDeleting || u.Status == store.UserStatusDeleting {
 		return store.ErrUserDeleting
 	}

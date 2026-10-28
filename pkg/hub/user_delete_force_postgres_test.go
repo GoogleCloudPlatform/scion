@@ -17,8 +17,9 @@
 package hub
 
 // PostgreSQL concurrency tests for the forced user delete
-// (ptone/scion#2143). They run in the PostgreSQL CI job
-// (make test-launch-store-postgres) and skip elsewhere.
+// (ptone/scion#2143). CI runs them in the pkg/hub PostgreSQL integration
+// shards (make test-hub-postgres-integration SHARD=K); locally, make
+// test-launch-store-postgres runs them too. They skip without PostgreSQL.
 
 import (
 	"context"

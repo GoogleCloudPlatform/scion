@@ -162,6 +162,146 @@ func UserDeletionConformance(t *testing.T, factory Factory) {
 		require.NotNil(t, got.LastReconciledAt)
 		assert.WithinDuration(t, at, *got.LastReconciledAt, time.Second)
 		assert.Equal(t, "broker unreachable", got.LastError)
+
+		// Least recently reconciled first: the deletion just reconciled
+		// goes after the one never reconciled, whatever their request
+		// times, and a reconcile of that one puts it last in turn.
+		stopping, err = s.ListUserDeletionsByState(ctx, store.UserDeletionStateStopping, 0)
+		require.NoError(t, err)
+		require.Len(t, stopping, 2)
+		assert.Equal(t, ids[2], stopping[0].ID, "never reconciled first")
+		assert.Equal(t, ids[0], stopping[1].ID)
+		require.NoError(t, s.TouchUserDeletionReconciled(ctx, ids[2], at.Add(time.Minute), ""))
+		stopping, err = s.ListUserDeletionsByState(ctx, store.UserDeletionStateStopping, 1)
+		require.NoError(t, err)
+		require.Len(t, stopping, 1)
+		assert.Equal(t, ids[0], stopping[0].ID, "least recently reconciled first")
+
+		// Unknown IDs are not found; a completed deletion is left as it is.
+		assert.ErrorIs(t, s.TouchUserDeletionReconciled(ctx, uuid.NewString(), at, ""), store.ErrNotFound)
+		assert.ErrorIs(t, s.TouchUserDeletionReconciled(ctx, "not-a-uuid", at, ""), store.ErrNotFound)
+		require.NoError(t, s.TouchUserDeletionReconciled(ctx, ids[1], at, "late"))
+		done, err := s.GetUserDeletion(ctx, ids[1])
+		require.NoError(t, err)
+		assert.Empty(t, done.LastError, "a completed deletion takes no reconcile error")
+		assert.Nil(t, done.LastReconciledAt)
+	})
+
+	t.Run("FinalOutcomesAreKept", func(t *testing.T) {
+		s := factory(t)
+		u := seedUser(t, s)
+		d := newDeletion(u.ID, time.Now())
+		require.NoError(t, s.CreateUserDeletion(ctx, d))
+		rec := func(agentID, outcome string, attempts int) *store.UserDeletionAgent {
+			return &store.UserDeletionAgent{DeletionID: d.ID, AgentID: agentID, Slug: "s", ProjectID: "p1",
+				Outcome: outcome, Attempts: attempts}
+		}
+		get := func(agentID string) store.UserDeletionAgent {
+			t.Helper()
+			all, err := s.ListUserDeletionAgents(ctx, d.ID)
+			require.NoError(t, err)
+			for _, r := range all {
+				if r.AgentID == agentID {
+					return r
+				}
+			}
+			t.Fatalf("no record of agent %s", agentID)
+			return store.UserDeletionAgent{}
+		}
+
+		stopped, removed := uuid.NewString(), uuid.NewString()
+		require.NoError(t, s.UpsertUserDeletionAgent(ctx, rec(stopped, store.UserDeletionOutcomeStopping, 1)))
+		require.NoError(t, s.UpsertUserDeletionAgent(ctx, rec(stopped, store.UserDeletionOutcomeStopped, 1)))
+		require.NoError(t, s.UpsertUserDeletionAgent(ctx, rec(removed, store.UserDeletionOutcomeRemoved, 1)))
+
+		// A writer holding an older copy cannot replace a final outcome.
+		for _, o := range []string{store.UserDeletionOutcomePending, store.UserDeletionOutcomeStopping,
+			store.UserDeletionOutcomeFailed, store.UserDeletionOutcomeRemoved} {
+			require.NoError(t, s.UpsertUserDeletionAgent(ctx, rec(stopped, o, 7)), o)
+			got := get(stopped)
+			assert.Equal(t, store.UserDeletionOutcomeStopped, got.Outcome, "stopped is kept over %s", o)
+			assert.Equal(t, 1, got.Attempts)
+		}
+		require.NoError(t, s.UpsertUserDeletionAgent(ctx, rec(removed, store.UserDeletionOutcomeStopped, 7)))
+		assert.Equal(t, store.UserDeletionOutcomeRemoved, get(removed).Outcome, "removed is kept")
+
+		// Reopen moves a final record back, and creates a missing one.
+		require.NoError(t, s.ReopenUserDeletionAgent(ctx, rec(stopped, store.UserDeletionOutcomePending, 1)))
+		assert.Equal(t, store.UserDeletionOutcomePending, get(stopped).Outcome)
+		require.NoError(t, s.UpsertUserDeletionAgent(ctx, rec(stopped, store.UserDeletionOutcomeStopping, 2)))
+		assert.Equal(t, store.UserDeletionOutcomeStopping, get(stopped).Outcome, "a reopened record takes upserts")
+		fresh := uuid.NewString()
+		require.NoError(t, s.ReopenUserDeletionAgent(ctx, rec(fresh, store.UserDeletionOutcomePending, 0)))
+		assert.Equal(t, store.UserDeletionOutcomePending, get(fresh).Outcome)
+
+		assert.ErrorIs(t, s.ReopenUserDeletionAgent(ctx, rec(fresh, "gone", 0)), store.ErrInvalidInput)
+		other := rec(fresh, store.UserDeletionOutcomePending, 0)
+		other.DeletionID = uuid.NewString()
+		assert.ErrorIs(t, s.ReopenUserDeletionAgent(ctx, other), store.ErrNotFound)
+	})
+
+	t.Run("AgentWritesInsideTransaction", func(t *testing.T) {
+		s := factory(t)
+		u := seedUser(t, s)
+		d := newDeletion(u.ID, time.Now())
+		require.NoError(t, s.CreateUserDeletion(ctx, d))
+		agentID := uuid.NewString()
+		// Every write path inside one transaction, the record existing and
+		// final for the later ones: no statement may fail (on PostgreSQL a
+		// failed statement aborts the transaction), and the commit keeps
+		// the final outcome.
+		err := s.WithTx(ctx, func(tx store.Store) error {
+			for _, o := range []string{store.UserDeletionOutcomePending, store.UserDeletionOutcomeStopped,
+				store.UserDeletionOutcomePending} {
+				if err := tx.UpsertUserDeletionAgent(ctx, &store.UserDeletionAgent{
+					DeletionID: d.ID, AgentID: agentID, Outcome: o}); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		require.NoError(t, err)
+		got, err := s.ListUserDeletionAgents(ctx, d.ID)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, store.UserDeletionOutcomeStopped, got[0].Outcome)
+	})
+
+	t.Run("RequestRollsBackTogether", func(t *testing.T) {
+		s := factory(t)
+		u := seedUser(t, s)
+		tokenID := uuid.NewString()
+		require.NoError(t, s.CreateUserAccessToken(ctx, &store.UserAccessToken{
+			ID: tokenID, UserID: u.ID, Name: "t", Prefix: tokenID[:8], KeyHash: "hash-" + tokenID,
+			BoundaryKind: "hub", Scopes: []string{"agent:read"},
+		}))
+		d := newDeletion(u.ID, time.Now())
+		errRollback := fmt.Errorf("rollback")
+		// The writes of a force request, in one transaction that fails at
+		// the end: none of them may persist.
+		err := s.WithTx(ctx, func(tx store.Store) error {
+			require.NoError(t, tx.MarkUserDeleting(ctx, u.ID))
+			n, err := tx.RevokeUserAccessTokensForUser(ctx, u.ID)
+			require.NoError(t, err)
+			require.Equal(t, 1, n)
+			require.NoError(t, tx.CreateUserDeletion(ctx, d))
+			require.NoError(t, tx.UpsertUserDeletionAgent(ctx, &store.UserDeletionAgent{
+				DeletionID: d.ID, AgentID: uuid.NewString(), Outcome: store.UserDeletionOutcomePending}))
+			return errRollback
+		})
+		require.ErrorIs(t, err, errRollback)
+
+		after, err := s.GetUser(ctx, u.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.UserStatusActive, after.Status)
+		left, err := s.CountUserAccessTokens(ctx, u.ID)
+		require.NoError(t, err)
+		assert.Equal(t, 1, left, "the token revoke rolled back")
+		_, err = s.GetUserDeletionByUser(ctx, u.ID)
+		assert.ErrorIs(t, err, store.ErrNotFound)
+		recs, err := s.ListUserDeletionAgents(ctx, d.ID)
+		require.NoError(t, err)
+		assert.Empty(t, recs)
 	})
 
 	t.Run("Agents", func(t *testing.T) {

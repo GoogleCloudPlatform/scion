@@ -16,12 +16,12 @@ package entadapter
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
 	"entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/userdeletionagent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -131,12 +131,17 @@ func (s *UserDeletionStore) GetUserDeletionByUser(ctx context.Context, userID st
 	return entUserDeletionToStore(row), nil
 }
 
-// ListUserDeletionsByState returns up to limit deletions in state, oldest
-// request first.
+// ListUserDeletionsByState returns up to limit deletions in state, least
+// recently reconciled first (never reconciled first), then oldest request.
+// NULLS FIRST is explicit: PostgreSQL sorts NULL last in ascending order.
 func (s *UserDeletionStore) ListUserDeletionsByState(ctx context.Context, state string, limit int) ([]store.UserDeletion, error) {
 	q := s.client.UserDeletion.Query().
 		Where(userdeletion.StateEQ(state)).
-		Order(userdeletion.ByRequestedAt(sql.OrderAsc()), userdeletion.ByID())
+		Order(
+			userdeletion.ByLastReconciledAt(sql.OrderAsc(), sql.OrderNullsFirst()),
+			userdeletion.ByRequestedAt(sql.OrderAsc()),
+			userdeletion.ByID(),
+		)
 	if limit > 0 {
 		q = q.Limit(limit)
 	}
@@ -179,22 +184,56 @@ func (s *UserDeletionStore) CompleteUserDeletion(ctx context.Context, id string,
 	return false, nil
 }
 
-// TouchUserDeletionReconciled records a reconcile and its error.
+// TouchUserDeletionReconciled records a reconcile and its error on a
+// deletion in state stopping; a completed deletion is left unchanged.
 func (s *UserDeletionStore) TouchUserDeletionReconciled(ctx context.Context, id string, at time.Time, lastErr string) error {
 	uid, err := uuid.Parse(id)
 	if err != nil {
 		return store.ErrNotFound
 	}
-	err = s.client.UserDeletion.UpdateOneID(uid).
+	n, err := s.client.UserDeletion.Update().
+		Where(userdeletion.IDEQ(uid), userdeletion.StateEQ(store.UserDeletionStateStopping)).
 		SetLastReconciledAt(at).
 		SetLastError(lastErr).
-		Exec(ctx)
-	return mapError(err)
+		Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if n > 0 {
+		return nil
+	}
+	exists, err := s.client.UserDeletion.Query().Where(userdeletion.IDEQ(uid)).Exist(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if !exists {
+		return store.ErrNotFound
+	}
+	return nil
 }
 
 // UpsertUserDeletionAgent creates or replaces the record of one agent of a
-// deletion.
+// deletion, leaving a stopped or removed record unchanged.
 func (s *UserDeletionStore) UpsertUserDeletionAgent(ctx context.Context, a *store.UserDeletionAgent) error {
+	return s.writeUserDeletionAgent(ctx, a, false)
+}
+
+// ReopenUserDeletionAgent creates or replaces the record of one agent of a
+// deletion whatever its outcome.
+func (s *UserDeletionStore) ReopenUserDeletionAgent(ctx context.Context, a *store.UserDeletionAgent) error {
+	return s.writeUserDeletionAgent(ctx, a, true)
+}
+
+// writeUserDeletionAgent writes the record of one agent. Unless reopen, a
+// record whose outcome is final (stopped or removed) is left unchanged.
+//
+// Each statement is safe inside a PostgreSQL transaction: the insert is
+// ON CONFLICT DO NOTHING, so a concurrent insert of the same record never
+// raises a unique violation (which would abort the transaction). The
+// statements are: a conditional UPDATE; when it matched nothing, the insert;
+// when the insert added nothing (the record exists), the conditional UPDATE
+// again, which matches nothing on a final record.
+func (s *UserDeletionStore) writeUserDeletionAgent(ctx context.Context, a *store.UserDeletionAgent, reopen bool) error {
 	if a == nil {
 		return fmt.Errorf("%w: nil user deletion agent", store.ErrInvalidInput)
 	}
@@ -223,8 +262,16 @@ func (s *UserDeletionStore) UpsertUserDeletionAgent(ctx context.Context, a *stor
 		a.UpdatedAt = time.Now()
 	}
 	update := func() (int, error) {
+		preds := []predicate.UserDeletionAgent{
+			userdeletionagent.DeletionIDEQ(deletionID),
+			userdeletionagent.AgentIDEQ(agentID),
+		}
+		if !reopen {
+			preds = append(preds, userdeletionagent.OutcomeNotIn(
+				store.UserDeletionOutcomeStopped, store.UserDeletionOutcomeRemoved))
+		}
 		return s.client.UserDeletionAgent.Update().
-			Where(userdeletionagent.DeletionIDEQ(deletionID), userdeletionagent.AgentIDEQ(agentID)).
+			Where(preds...).
 			SetSlug(a.Slug).
 			SetProjectID(a.ProjectID).
 			SetOutcome(a.Outcome).
@@ -240,24 +287,40 @@ func (s *UserDeletionStore) UpsertUserDeletionAgent(ctx context.Context, a *stor
 	if n > 0 {
 		return nil
 	}
-	_, err = s.client.UserDeletionAgent.Create().
-		SetDeletionID(deletionID).
-		SetAgentID(agentID).
-		SetSlug(a.Slug).
-		SetProjectID(a.ProjectID).
-		SetOutcome(a.Outcome).
-		SetAttempts(a.Attempts).
-		SetLastError(a.LastError).
-		SetUpdatedAt(a.UpdatedAt).
-		Save(ctx)
-	if err = mapError(err); errors.Is(err, store.ErrAlreadyExists) {
-		// A concurrent upsert created the row first: replace it.
-		if _, uerr := update(); uerr != nil {
-			return mapError(uerr)
-		}
+	// CreateBulk and Exec, not Create and Save: when DO NOTHING skips the
+	// row, the single-row read-back fails (see SeedMaintenanceOperations).
+	rowID := uuid.New()
+	err = s.client.UserDeletionAgent.CreateBulk(
+		s.client.UserDeletionAgent.Create().
+			SetID(rowID).
+			SetDeletionID(deletionID).
+			SetAgentID(agentID).
+			SetSlug(a.Slug).
+			SetProjectID(a.ProjectID).
+			SetOutcome(a.Outcome).
+			SetAttempts(a.Attempts).
+			SetLastError(a.LastError).
+			SetUpdatedAt(a.UpdatedAt),
+	).
+		OnConflictColumns(userdeletionagent.FieldDeletionID, userdeletionagent.FieldAgentID).
+		DoNothing().
+		Exec(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	inserted, err := s.client.UserDeletionAgent.Query().Where(userdeletionagent.IDEQ(rowID)).Exist(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if inserted {
 		return nil
 	}
-	return err
+	// The record exists: it was final, or a concurrent writer inserted it
+	// after the first UPDATE. Replace it unless it is final.
+	if _, err := update(); err != nil {
+		return mapError(err)
+	}
+	return nil
 }
 
 // ListUserDeletionAgents returns the agents of a deletion, by agent ID.
