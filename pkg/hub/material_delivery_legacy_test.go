@@ -645,3 +645,58 @@ func TestDeliveryLogDedup_BoundedLRU(t *testing.T) {
 	assert.LessOrEqual(t, d.order.Len(), 3)
 	assert.Equal(t, d.order.Len(), len(d.byKey))
 }
+
+// TestLegacyDeliveryFallback_OnlyDeliverPermissions pins the permission
+// bound: the fallback admits only the three deliver permissions. The adopted
+// cohort serves them beyond the V1 baseline and readonly rows on purpose
+// (those rows never carry them; that is the ruled legacy gap), and a
+// permission outside the deliver set is never tolerated, on an adopted hop
+// or any other legacy hop.
+func TestLegacyDeliveryFallback_OnlyDeliverPermissions(t *testing.T) {
+	for _, role := range []AgentRole{AgentRoleReadOnly, AgentRoleBaseline} {
+		row := lgV1Row(t, role)
+		for _, p := range LaunchDeliveryCensusPermissions {
+			assert.NotContains(t, row, p, "the V1 %s row lacks %s: the adopted cohort is the ruled gap", role, p)
+		}
+	}
+	full := lgV1Row(t, AgentRoleFull)
+	for _, p := range LaunchDeliveryCensusPermissions {
+		assert.Contains(t, full, p)
+	}
+
+	adopted := &store.DelegationEdge{
+		DelegatorType: store.DelegationPrincipalUser, Role: string(AgentRoleBaseline), Active: true,
+		AuthorityProvenance: store.AuthorityProvenance{ProvenanceVersion: store.ProvenanceVersionV1, SourceCredentialKind: store.SourceCredentialSystemMigration},
+		EffectCeiling:       store.EffectCeiling{Kind: store.EffectCeilingBounded, PermissionIDs: lgV1Row(t, AgentRoleBaseline)},
+	}
+	uat := &store.DelegationEdge{
+		DelegatorType: store.DelegationPrincipalUser, Role: string(AgentRoleFull), Active: true,
+		AuthorityProvenance: store.AuthorityProvenance{ProvenanceVersion: store.ProvenanceVersionV1, SourceCredentialKind: store.SourceCredentialUAT},
+		EffectCeiling:       store.EffectCeiling{Kind: store.EffectCeilingBounded, PermissionIDs: []string{"agent.read"}},
+	}
+	for _, p := range LaunchDeliveryCensusPermissions {
+		assert.Equal(t, legacyDeliveryCohortAdoptedBaseline, legacyBoundedEdgeCohort(adopted, p), p)
+		assert.Equal(t, deliveryCohortUATNoDeliverMapping, legacyBoundedEdgeCohort(uat, p), p)
+	}
+	// Permissions outside the deliver set, in and out of the V1 rows.
+	for _, p := range []string{"secret.use", "project.secret_read", "gcp_service_account.use", "agent.identity_token", "agent.create"} {
+		assert.Empty(t, legacyBoundedEdgeCohort(adopted, p), p)
+		assert.Empty(t, legacyBoundedEdgeCohort(uat, p), p)
+	}
+
+	// The fallback entry point refuses a non-deliver permission even for a
+	// legacy agent (no edge) on a launch credential.
+	f := newGoldenFixture(t)
+	ctx := context.Background()
+	id := tid("lg-perm-bound")
+	hdAgent(t, f.store, id, f.projectAlpha.ID, []string{f.projectOwnerID})
+	h := hdIdentity(t, f.authz, id)
+	h.legacyFallback = true
+	ok := f.authz.hubDeliveryAdmissionOutcomeFor(ctx, h, "secret.deliver", id, nil)
+	assert.True(t, ok.ok, "control: a deliver permission is served: %s", ok.reason)
+	for _, p := range []string{"secret.use", "project.secret_read", "agent.create"} {
+		o := f.authz.hubDeliveryAdmissionOutcomeFor(ctx, h, p, id, nil)
+		assert.False(t, o.ok, "%s: %s", p, o.reason)
+		assert.Empty(t, o.legacyCohort, p)
+	}
+}

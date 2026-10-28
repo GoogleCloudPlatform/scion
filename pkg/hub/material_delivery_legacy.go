@@ -150,6 +150,16 @@ var legacyFallbackCauses = map[DenyCause]bool{
 	DenyCauseCeilingEffectExceeded:    true, // adopted baseline/readonly, UAT-created
 }
 
+// legacyFallbackPermission reports whether permissionID is one the fallback
+// may admit: exactly the three deliver permissions (hubDeliveryPermissionIDs).
+// The step-10 gate already limits the delivery credential to them; this
+// bound keeps the fallback itself from admitting any other permission
+// whatever its caller.
+func legacyFallbackPermission(permissionID string) bool {
+	_, ok := hubDeliveryPermissionIDs[permissionID]
+	return ok
+}
+
 // legacyDeliveryFallbackPurpose reports whether launch selection for
 // purpose takes the legacy fallback: the start and restart selection, and
 // the create-time availability probe, which must agree with what a start
@@ -177,7 +187,15 @@ func (n *hubDeliveryLegacyNote) note(cohort string, depth int) {
 // legacyBoundedEdgeCohort returns the legacy cohort of a recorded bounded
 // edge whose ceiling does not allow permissionID, or "" when the edge is
 // not legacy (its deny stands).
+//
+// Only the three deliver permissions are ever tolerated
+// (legacyFallbackPermission): the adopted cohort deliberately serves them
+// beyond the V1 baseline and readonly rows, which never carry them (that is
+// the ruled legacy gap), and nothing else may ride on it.
 func legacyBoundedEdgeCohort(edge *store.DelegationEdge, permissionID string) string {
+	if !legacyFallbackPermission(permissionID) {
+		return ""
+	}
 	switch edge.SourceCredentialKind {
 	case store.SourceCredentialSystemMigration:
 		return legacyAdoptedCohort(edge)
@@ -317,7 +335,7 @@ func (a *AuthzService) hubDeliveryLegacyFallback(
 	strict hubDeliveryAdmissionOutcome,
 	explain *[]DecisionStep,
 ) hubDeliveryAdmissionOutcome {
-	if !legacyFallbackCauses[strict.cause] {
+	if !legacyFallbackCauses[strict.cause] || !legacyFallbackPermission(permissionID) {
 		return strict
 	}
 	var note hubDeliveryLegacyNote

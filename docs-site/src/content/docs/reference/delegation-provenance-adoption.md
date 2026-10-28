@@ -256,6 +256,8 @@ One more group is served the same way, although it is not legacy data:
 
 This covers agents created from a user access token today and in future, so it is a gap in the current product, not a migration leftover. It does not end with a later backfill. It ends only when a user access token scope grants the delivery permissions: from then on the Hub stops treating such edges as an exception by itself. Its removal is tracked as a follow-up issue. The `Warn` line marks it `exception=product_gap`, and the census counts it separately from the legacy groups.
 
+The fallback only ever admits the three delivery permissions. It grants nothing else, whatever group an agent falls in.
+
 The fallback never applies when:
 
 - any agent on the chain is held;
