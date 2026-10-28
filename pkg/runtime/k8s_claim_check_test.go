@@ -158,6 +158,66 @@ func TestVerifyPodClaims_ProvisioningFailedFails(t *testing.T) {
 	assert.NotContains(t, err.Error(), "old failure")
 }
 
+// The newest of two ProvisioningFailed events of the claim is the one
+// quoted, whether its time is in LastTimestamp or only in EventTime.
+func TestVerifyPodClaims_ProvisioningFailedQuotesNewest(t *testing.T) {
+	now := time.Now()
+	cases := []struct {
+		name   string
+		events []*corev1.Event
+	}{
+		{"last timestamp", []*corev1.Event{
+			{Message: "newer failure", LastTimestamp: metav1.NewTime(now)},
+			{Message: "older failure", LastTimestamp: metav1.NewTime(now.Add(-time.Minute))},
+		}},
+		{"event time", []*corev1.Event{
+			{Message: "older failure", LastTimestamp: metav1.NewTime(now.Add(-time.Minute))},
+			{Message: "newer failure", EventTime: metav1.NewMicroTime(now)},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			shortenClaimCheckWait(t, 5*time.Second, 10*time.Millisecond)
+			rt, clientset, _ := newTestK8sRuntime()
+			createClaim(t, clientset, "c1", "uid-1", corev1.ClaimPending)
+			for i, ev := range tc.events {
+				ev.ObjectMeta = metav1.ObjectMeta{Name: "e" + string(rune('a'+i)), Namespace: "default"}
+				ev.InvolvedObject = corev1.ObjectReference{Kind: "PersistentVolumeClaim", Name: "c1", Namespace: "default", UID: "uid-1"}
+				ev.Reason = claimEventProvisioningFailed
+				_, err := clientset.CoreV1().Events("default").Create(context.Background(), ev, metav1.CreateOptions{})
+				require.NoError(t, err)
+			}
+
+			err := rt.verifyPodClaims(context.Background(), "default", claimCheckPod("c1"), nil)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "ProvisioningFailed: newer failure")
+			assert.NotContains(t, err.Error(), "older failure")
+		})
+	}
+}
+
+// A ProvisioningFailed event followed by a newer event of the same claim
+// means the provisioner is retrying: the claim counts as Pending, so the
+// check waits, warns and lets the start continue.
+func TestVerifyPodClaims_ProvisioningFailedThenNewerEventWaits(t *testing.T) {
+	var buf bytes.Buffer
+	setRuntimeLogHandler(t, slog.NewTextHandler(&buf, nil))
+	shortenClaimCheckWait(t, 50*time.Millisecond, 10*time.Millisecond)
+	rt, clientset, _ := newTestK8sRuntime()
+	createClaim(t, clientset, "c1", "uid-1", corev1.ClaimPending)
+	now := time.Now()
+	createClaimEvent(t, clientset, "e1", "c1", "uid-1", claimEventProvisioningFailed, "rpc error: DeadlineExceeded", now.Add(-time.Minute))
+	createClaimEvent(t, clientset, "e2", "c1", "uid-1", "Provisioning", "External provisioner is provisioning volume", now)
+
+	start := time.Now()
+	require.NoError(t, rt.verifyPodClaims(context.Background(), "default", claimCheckPod("c1"), nil))
+	assert.GreaterOrEqual(t, time.Since(start), 50*time.Millisecond, "waits for the claim check wait")
+	out := buf.String()
+	assert.Contains(t, out, "level=WARN")
+	assert.Contains(t, out, "creating the pod anyway")
+	assert.Contains(t, out, "last_event_reason=Provisioning")
+}
+
 func TestVerifyPodClaims_StaleProvisioningFailedIgnored(t *testing.T) {
 	shortenClaimCheckWait(t, 30*time.Millisecond, 10*time.Millisecond)
 	rt, clientset, _ := newTestK8sRuntime()
@@ -185,6 +245,28 @@ func TestVerifyPodClaims_PendingWithoutEventWarnsAndContinues(t *testing.T) {
 	assert.Contains(t, out, "creating the pod anyway")
 	assert.Contains(t, out, "pvc=c1")
 	assert.Contains(t, out, "last_event_reason=ExternalProvisioning")
+}
+
+// The check has one wait budget for all of the pod's claims, not one per
+// claim: two Pending claims together wait about one budget.
+func TestVerifyPodClaims_OneWaitBudgetForAllClaims(t *testing.T) {
+	var buf bytes.Buffer
+	setRuntimeLogHandler(t, slog.NewTextHandler(&buf, nil))
+	const budget = 300 * time.Millisecond
+	shortenClaimCheckWait(t, budget, 10*time.Millisecond)
+	rt, clientset, _ := newTestK8sRuntime()
+	createClaim(t, clientset, "c1", "uid-1", corev1.ClaimPending)
+	createClaim(t, clientset, "c2", "uid-2", corev1.ClaimPending)
+
+	start := time.Now()
+	require.NoError(t, rt.verifyPodClaims(context.Background(), "default", claimCheckPod("c1", "c2"), nil))
+	elapsed := time.Since(start)
+	assert.GreaterOrEqual(t, elapsed, budget)
+	assert.Less(t, elapsed, 2*budget-50*time.Millisecond, "two claims share one wait budget")
+	out := buf.String()
+	assert.Contains(t, out, "pvc=c1")
+	assert.Contains(t, out, "pvc=c2")
+	assert.Equal(t, 2, strings.Count(out, "creating the pod anyway"), "each Pending claim still warns")
 }
 
 // A Lost claim is treated like a Pending one: a warning, not a failure.
@@ -406,6 +488,22 @@ func TestRun_ClaimCheckBeforePodCreateCheckpoint(t *testing.T) {
 	mu.Lock()
 	assert.True(t, slices.Contains(steps, CheckpointStepPodCreate))
 	mu.Unlock()
+}
+
+// A start with a shared dir, no storage class and no existing claim is
+// refused by Run before any pod create, with no claim written.
+func TestRun_SharedDirNoClassNoClaimRefused(t *testing.T) {
+	rt, clientset := newTransportTestRuntime(false)
+	cfg := baseTransportConfig()
+	cfg.Labels["scion.project"] = "myproject"
+	cfg.Labels["scion.project_id"] = "proj-1"
+	cfg.SharedDirs = []api.SharedDir{{Name: "cache"}}
+
+	_, err := rt.Run(context.Background(), cfg)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errSharedDirClaimUnresolved)
+	assert.NotContains(t, actionVerbs(clientset, "pods"), "create")
+	assert.Empty(t, pvcWrites(clientset))
 }
 
 // pvcWrites lists the writes made to claims or volumes.

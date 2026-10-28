@@ -90,6 +90,7 @@ func TestCreateSharedDirPVCs_NoClassNoClaimRefused(t *testing.T) {
 	assert.Contains(t, msg, "configure server.project_storage backend nfs")
 	assert.Contains(t, msg, "set shared_dir_storage_class to a ReadWriteMany class")
 	assert.Contains(t, msg, "set shared_dir_storage_class to that class, or configure server.project_storage backend nfs")
+	assert.Equal(t, ".", msg[len(msg)-1:], "the message ends with a period")
 
 	assert.Empty(t, claimWrites(clientset))
 	pvcs, err := clientset.CoreV1().PersistentVolumeClaims("default").List(context.Background(), metav1.ListOptions{})

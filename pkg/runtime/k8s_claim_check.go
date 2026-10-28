@@ -26,9 +26,10 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 )
 
-// claimCheckWait is how long the claim check waits for a Pending claim to
-// bind before it warns and lets the start continue. claimCheckPollInterval
-// is how often it re-reads the claim meanwhile. Tests shorten both.
+// claimCheckWait is how long the claim check waits, in total for all of a
+// pod's claims, for Pending claims to bind before it warns and lets the
+// start continue. claimCheckPollInterval is how often it re-reads a claim
+// meanwhile. Tests shorten both.
 var (
 	claimCheckWait         = 30 * time.Second
 	claimCheckPollInterval = 2 * time.Second
@@ -49,17 +50,21 @@ const (
 //   - a missing claim fails at once, naming the setting that produced it
 //     (sources maps a claim name to that description; see podClaimSources);
 //   - a Bound claim passes;
-//   - a claim with a ProvisioningFailed event fails at once, quoting it;
+//   - a claim whose newest event is ProvisioningFailed fails at once,
+//     quoting it (an older ProvisioningFailed followed by a newer event
+//     means the provisioner is retrying, so the claim counts as Pending);
 //   - a claim with a WaitForFirstConsumer event passes (it binds when the
 //     pod is scheduled);
 //   - any other claim (Pending, Lost) is re-read every
-//     claimCheckPollInterval for up to claimCheckWait, then the start
-//     continues with a warning.
+//     claimCheckPollInterval until it binds or the check's one wait
+//     budget (claimCheckWait, shared by all the pod's claims) is used up,
+//     then the start continues with a warning.
 //
 // It only reads. When the runtime may not read events, it uses the claim
 // phase alone; when it may not read claims, it skips the check. Each of
 // these is logged once per runtime instance.
 func (r *KubernetesRuntime) verifyPodClaims(ctx context.Context, namespace string, pod *corev1.Pod, sources map[string]string) error {
+	deadline := time.Now().Add(claimCheckWait)
 	seen := make(map[string]bool)
 	for _, v := range pod.Spec.Volumes {
 		if v.PersistentVolumeClaim == nil || v.PersistentVolumeClaim.ClaimName == "" {
@@ -74,7 +79,7 @@ func (r *KubernetesRuntime) verifyPodClaims(ctx context.Context, namespace strin
 		if !ok {
 			source = fmt.Sprintf("mounted by pod volume %q", v.Name)
 		}
-		skip, err := r.verifyClaim(ctx, namespace, name, source)
+		skip, err := r.verifyClaim(ctx, namespace, name, source, deadline)
 		if err != nil {
 			return err
 		}
@@ -85,11 +90,11 @@ func (r *KubernetesRuntime) verifyPodClaims(ctx context.Context, namespace strin
 	return nil
 }
 
-// verifyClaim checks one claim (see verifyPodClaims). skip reports that
-// claims cannot be read at all, so the rest of the check is skipped.
-func (r *KubernetesRuntime) verifyClaim(ctx context.Context, namespace, name, source string) (skip bool, err error) {
+// verifyClaim checks one claim (see verifyPodClaims), waiting for it to
+// bind until deadline at most. skip reports that claims cannot be read at
+// all, so the rest of the check is skipped.
+func (r *KubernetesRuntime) verifyClaim(ctx context.Context, namespace, name, source string, deadline time.Time) (skip bool, err error) {
 	claims := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace)
-	deadline := time.Now().Add(claimCheckWait)
 	var lastEvent *corev1.Event
 	for {
 		pvc, err := claims.Get(ctx, name, metav1.GetOptions{})
@@ -140,9 +145,11 @@ func (r *KubernetesRuntime) verifyClaim(ctx context.Context, namespace, name, so
 	}
 }
 
-// claimEvent returns the newest event about pvc whose reason the claim
-// check acts on (ProvisioningFailed first, then WaitForFirstConsumer), else
-// the newest event about pvc, else nil. Events of an earlier claim with
+// claimEvent returns the event about pvc the claim check acts on: the
+// newest event when it is ProvisioningFailed, else the newest
+// WaitForFirstConsumer event, else the newest event, else nil. A
+// ProvisioningFailed event with a newer event after it is not returned for
+// its reason: the provisioner is retrying. Events of an earlier claim with
 // the same name are ignored by UID. When events cannot be read it returns
 // nil, logging that once per runtime instance, so the check falls back to
 // the claim phase.
@@ -159,7 +166,7 @@ func (r *KubernetesRuntime) claimEvent(ctx context.Context, namespace string, pv
 		}
 		return nil
 	}
-	var newest, failed, firstConsumer *corev1.Event
+	var newest, firstConsumer *corev1.Event
 	for i := range list.Items {
 		ev := &list.Items[i]
 		if ev.InvolvedObject.Kind != "PersistentVolumeClaim" || ev.InvolvedObject.Name != pvc.Name {
@@ -168,18 +175,15 @@ func (r *KubernetesRuntime) claimEvent(ctx context.Context, namespace string, pv
 		if ev.InvolvedObject.UID != "" && pvc.UID != "" && ev.InvolvedObject.UID != pvc.UID {
 			continue
 		}
-		switch ev.Reason {
-		case claimEventProvisioningFailed:
-			failed = newerEvent(failed, ev)
-		case claimEventWaitForFirstConsumer:
+		if ev.Reason == claimEventWaitForFirstConsumer {
 			firstConsumer = newerEvent(firstConsumer, ev)
 		}
 		newest = newerEvent(newest, ev)
 	}
-	switch {
-	case failed != nil:
-		return failed
-	case firstConsumer != nil:
+	if newest != nil && newest.Reason == claimEventProvisioningFailed {
+		return newest
+	}
+	if firstConsumer != nil {
 		return firstConsumer
 	}
 	return newest

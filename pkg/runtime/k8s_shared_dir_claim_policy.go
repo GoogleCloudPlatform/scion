@@ -65,7 +65,7 @@ func sharedDirClaimUnresolvedError(dirName, namespace, claimName string) error {
 		"(one share for all projects; recommended), or set shared_dir_storage_class to a ReadWriteMany class "+
 		"(on the runtime or profile entry in settings.yaml, a broker instance's runtime_target, or the agent's kubernetes block). "+
 		"If the cluster default class already supports ReadWriteMany: set shared_dir_storage_class to that class, "+
-		"or configure server.project_storage backend nfs",
+		"or configure server.project_storage backend nfs.",
 		dirName, namespace, claimName)}
 }
 
