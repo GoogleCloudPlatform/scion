@@ -243,7 +243,7 @@ When the Hub starts or restarts an agent, it authorizes each Project, Hub and Br
 | `legacy_sentinel_edge` | only the backfill's migration edge (`user:system/migration`) |
 | `legacy_unadopted_edge` | only an edge with unrecorded provenance, including scheduled children with role `none`, which adoption skips |
 | `legacy_adopted_baseline`, `legacy_adopted_readonly` | only an adopted edge at role `baseline` or `readonly`, whose policy V1 ceiling has no delivery permissions |
-| `legacy_uat_created` | only an edge recorded from a user access token, whose ceiling cannot hold the delivery permissions because no token scope grants them |
+| `legacy_uat_created` | only an edge recorded from a user access token, whose ceiling cannot hold the delivery permissions because no token scope grants them; or it is a descendant of such an agent whose own edge, recorded by its parent agent, lacks the delivery permissions only because the parent could not pass them down (every agent between the two must be of the same kind) |
 
 Each item delivered this way is logged once an hour per agent and item at `Warn`, as `launch material delivered through the legacy fallback`, with the agent ID, the group, and the item's name and scope.
 
@@ -251,9 +251,9 @@ The fallback never applies when:
 
 - any agent on the chain is held;
 - a delegator or ancestor agent is deleted, missing or held, or the root user is not active;
-- the agent has more than one active edge in the project;
+- the agent has more than one active edge in the project. Such agents are withheld for now: the `Warn` line names the cause `ceiling_provenance_ambiguous`, and the census counts them as `duplicate_edges`. This will be revisited once census numbers from real Hubs are available;
 - a hop has local-development provenance and the Hub does not run dev auth;
-- a recorded hop that is not one of the groups above has a ceiling without the permission, for example the child of an agent created from a user access token;
+- a recorded hop that is not one of the groups above has a ceiling without the permission, for example an agent whose parent's ceiling does hold the permission;
 - an earlier check (the item's association with the agent, an access constraint, the test-admin policy) refuses the item;
 - the chain is fully recorded, which leaves the root user's project admission as the deciding check.
 

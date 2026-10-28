@@ -54,14 +54,21 @@ package hub
 //     whose compatibility policy V1 ceiling lacks the deliver permission;
 //   - legacy_uat_created: its only active edge was recorded from a user
 //     access token (source uat), whose bounded ceiling cannot carry the
-//     deliver permission because no token scope maps to it.
+//     deliver permission because no token scope maps to it. A descendant
+//     agent's recorded agent edge that lacks the permission only because
+//     of that ancestor (legacyInheritsUATGap) is let through under the same
+//     cohort when every hop between them is of the same kind; a descendant
+//     hop whose parent's ceiling does allow the permission is a real
+//     narrowing and still denies.
 //
 // Everything else is enforced as before, on the strict and tolerant walk
 // alike: a held agent at any hop, a deleted, missing or held delegator or
 // ancestor agent, an inactive delegator or root user, more than one active
-// edge, local-development provenance this server does not admit, the depth
-// bound and cycles, and every recorded non-legacy hop's effect ceiling (an
-// agent-recorded edge whose ceiling lacks the permission still denies). A
+// edge (withheld for now, with the Warn naming ceiling_provenance_ambiguous,
+// and counted by the census), local-development provenance this server does
+// not admit, the depth bound and cycles, and every recorded non-legacy hop's
+// effect ceiling (an agent-recorded edge whose ceiling lacks the permission
+// still denies unless it only inherits a UAT-created ancestor's gap). A
 // chain with no legacy hop never takes the fallback, so its provenance
 // root admission (ResolveProvenanceRoot) still applies.
 //
@@ -152,6 +159,20 @@ func legacyBoundedEdgeCohort(edge *store.DelegationEdge, permissionID string) st
 		}
 	}
 	return ""
+}
+
+// legacyInheritsUATGap reports whether a recorded bounded edge whose ceiling
+// does not allow permissionID may only inherit the legacy_uat_created gap:
+// it was recorded by an agent delegator from an agent credential, and no
+// user access token scope maps permissionID, so a UAT-created ancestor
+// could not have passed the permission down. The tolerant walk admits such
+// a hop only when the hops above reach a legacy_uat_created hop through
+// hops of the same kind (hubDeliveryWalk, pendingUAT); otherwise its own
+// deny stands.
+func legacyInheritsUATGap(edge *store.DelegationEdge, permissionID string) bool {
+	return edge.SourceCredentialKind == store.SourceCredentialAgent &&
+		edge.DelegatorType == store.DelegationPrincipalAgent &&
+		!uatCarriesPermission(permissionID)
 }
 
 // uatPermissionIDs is every permission some user access token scope or

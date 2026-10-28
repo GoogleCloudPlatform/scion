@@ -142,6 +142,32 @@ func TestDispatchDelivery_LegacyCohortsDeliveredWithWarn(t *testing.T) {
 		{name: "adopted_readonly", opts: ldOptions{edge: lgAdoptedAt(AgentRoleReadOnly)}, wantCohort: legacyDeliveryCohortAdoptedReadOnly},
 		{name: "uat_created", opts: ldOptions{edge: lgUATCreated}, wantCohort: legacyDeliveryCohortUATCreated},
 		{
+			// The child of a UAT-created agent: its recorded agent edge
+			// lacks the permission only because its parent could not pass
+			// it down.
+			name: "recorded_child_of_uat_created_agent", opts: ldOptions{noEdge: true},
+			after: func(t *testing.T, m *ldFixture) {
+				p := lgParent(t, m, "uat-parent")
+				hdEdge(t, m.store, store.DelegationPrincipalUser, m.projectOwnerID, p, m.agent.ProjectID, lgUATCreated)
+				hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, withBoundedCeiling("agent.read"))
+			},
+			wantCohort: legacyDeliveryCohortUATCreated,
+			wantDepth:  true,
+		},
+		{
+			// Two inheriting hops below the UAT-created agent.
+			name: "recorded_grandchild_of_uat_created_agent", opts: ldOptions{noEdge: true},
+			after: func(t *testing.T, m *ldFixture) {
+				gp := lgParent(t, m, "uat-grandparent")
+				p := lgParent(t, m, "uat-middle")
+				hdEdge(t, m.store, store.DelegationPrincipalUser, m.projectOwnerID, gp, m.agent.ProjectID, lgUATCreated)
+				hdEdge(t, m.store, store.DelegationPrincipalAgent, gp, p, m.agent.ProjectID, withBoundedCeiling("agent.read"))
+				hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, withBoundedCeiling("agent.read"))
+			},
+			wantCohort: legacyDeliveryCohortUATCreated,
+			wantDepth:  true,
+		},
+		{
 			// The agent's own recorded edge passes; its parent's edge is
 			// unrecorded.
 			name: "legacy_ancestor", opts: ldOptions{noEdge: true},
@@ -289,13 +315,34 @@ func TestDispatchDelivery_LegacyFallbackKeepsRealDenials(t *testing.T) {
 			opts: ldOptions{edge: withBoundedCeiling("agent.read")},
 		},
 		{
-			// The child of a UAT-created agent has a recorded agent edge
-			// whose ceiling lacks the permission: enforced, not legacy.
-			name: "recorded_child_of_uat_created_agent", opts: ldOptions{noEdge: true},
+			// A recorded agent edge that lacks the permission under a parent
+			// whose recorded ceiling allows it is a real narrowing.
+			name: "recorded_child_narrowed_below_principal_parent", opts: ldOptions{noEdge: true},
 			after: func(t *testing.T, m *ldFixture) {
-				p := lgParent(t, m, "uat-parent")
+				p := lgParent(t, m, "principal-parent")
+				hdEdge(t, m.store, store.DelegationPrincipalUser, m.projectOwnerID, p, m.agent.ProjectID, nil)
+				hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, withBoundedCeiling("agent.read"))
+			},
+		},
+		{
+			// The UAT gap is the only inherited gap tolerated: under an
+			// unadopted parent the child's own recorded deny stands.
+			name: "recorded_child_lacking_deliver_below_unadopted_parent", opts: ldOptions{noEdge: true},
+			after: func(t *testing.T, m *ldFixture) {
+				p := lgParent(t, m, "unadopted-parent")
+				createDCEdge(t, m.store, store.DelegationPrincipalUser, m.projectOwnerID, store.DelegationPrincipalAgent, p,
+					store.RoleScopeProject, m.agent.ProjectID, string(AgentRoleFull))
+				hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, withBoundedCeiling("agent.read"))
+			},
+		},
+		{
+			// An inheriting child of a UAT-created parent that is held.
+			name: "recorded_child_of_held_uat_created_agent", opts: ldOptions{noEdge: true},
+			after: func(t *testing.T, m *ldFixture) {
+				p := lgParent(t, m, "held-uat-parent")
 				hdEdge(t, m.store, store.DelegationPrincipalUser, m.projectOwnerID, p, m.agent.ProjectID, lgUATCreated)
 				hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, withBoundedCeiling("agent.read"))
+				holdAgentFor(t, m.store, p, m.agent.ProjectID, m.projectOwnerID)
 			},
 		},
 		{
@@ -335,6 +382,48 @@ func TestDispatchDelivery_LegacyFallbackKeepsRealDenials(t *testing.T) {
 			assert.NotEmpty(t, warnRecords(t, buf.Bytes(), "launch material withheld: not authorized for delivery"))
 		})
 	}
+}
+
+// lgDupEdgeStore reports two active edges for one agent, the malformed
+// state the partial unique index forbids, as legacy data may still hold.
+type lgDupEdgeStore struct {
+	store.Store
+	agentID   string
+	projectID string
+	ownerID   string
+}
+
+func (s *lgDupEdgeStore) GetDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {
+	if delegateType != store.DelegationPrincipalAgent || delegateID != s.agentID {
+		return s.Store.GetDelegationEdgesForDelegate(ctx, delegateType, delegateID)
+	}
+	edge := func(id string) *store.DelegationEdge {
+		return &store.DelegationEdge{
+			ID: id, DelegatorType: store.DelegationPrincipalUser, DelegatorID: s.ownerID,
+			DelegateType: store.DelegationPrincipalAgent, DelegateID: s.agentID,
+			ScopeType: store.RoleScopeProject, ScopeID: s.projectID, Role: string(AgentRoleFull), Active: true,
+		}
+	}
+	return []*store.DelegationEdge{edge(tid("lg-dup-1-" + s.agentID)), edge(tid("lg-dup-2-" + s.agentID))}, nil
+}
+
+// TestDispatchDelivery_DuplicateEdgesWithheldWithCause: an agent with two
+// active edges stays withheld (no fallback, pending a decision on the census
+// numbers), and each item's Warn names the cause.
+func TestDispatchDelivery_DuplicateEdgesWithheldWithCause(t *testing.T) {
+	m := newLDFixture(t, "lg-dup", ldOptions{noEdge: true})
+	m.env(t, "LG_DUP_ENV", "v", store.ScopeProject, m.agent.ProjectID, false)
+	buf := lgLogger(m)
+	hdWithStore(t, m.authz, &lgDupEdgeStore{Store: m.store, agentID: m.agent.ID, projectID: m.agent.ProjectID, ownerID: m.projectOwnerID})
+
+	env, _, err := m.d.selectDeliveryEnv(context.Background(), newDeliverySelector(m.authz, m.agent, PurposeRestart), m.agent)
+	require.NoError(t, err)
+	assert.NotContains(t, env, "LG_DUP_ENV")
+	assert.Empty(t, warnRecords(t, buf.Bytes(), lgFallbackMsg))
+	recs := warnRecords(t, buf.Bytes(), "launch material withheld: not authorized for delivery")
+	require.Len(t, recs, 1, "log: %s", buf.String())
+	assert.Equal(t, "LG_DUP_ENV", recs[0]["key"])
+	assert.Equal(t, string(DenyCauseCeilingProvenanceAmbiguous), recs[0]["deny_cause"])
 }
 
 // TestDispatchDelivery_LegacyFallbackKeepsEarlierDenials: the fallback runs
