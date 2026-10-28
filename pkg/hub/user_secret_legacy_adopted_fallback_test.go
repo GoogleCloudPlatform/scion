@@ -127,9 +127,34 @@ func TestLegacyAdoptedSecretUseFallback_Predicate(t *testing.T) {
 			record(e, nil)
 			return e, 0
 		}, false},
-		{"full role", func() (*store.DelegationEdge, int) {
+		{"full edge role carrying the baseline row (adopted at the applied role)", func() (*store.DelegationEdge, int) {
 			e := cohortEdge(AgentRoleBaseline)
 			e.Role = string(AgentRoleFull)
+			record(e, nil)
+			return e, 0
+		}, true},
+		{"baseline edge role carrying the readonly row", func() (*store.DelegationEdge, int) {
+			e := cohortEdge(AgentRoleReadOnly)
+			e.Role = string(AgentRoleBaseline)
+			record(e, nil)
+			return e, 0
+		}, true},
+		{"readonly edge role carrying the baseline row", func() (*store.DelegationEdge, int) {
+			e := cohortEdge(AgentRoleBaseline)
+			e.Role = string(AgentRoleReadOnly)
+			record(e, nil)
+			return e, 0
+		}, false},
+		{"empty edge role", func() (*store.DelegationEdge, int) {
+			e := cohortEdge(AgentRoleReadOnly)
+			e.Role = ""
+			record(e, nil)
+			return e, 0
+		}, false},
+		{"full row", func() (*store.DelegationEdge, int) {
+			e := cohortEdge(AgentRoleBaseline)
+			e.Role = string(AgentRoleFull)
+			e.EffectCeiling.PermissionIDs = lafV1(t, AgentRoleFull, false)
 			record(e, nil)
 			return e, 0
 		}, false},
@@ -139,9 +164,9 @@ func TestLegacyAdoptedSecretUseFallback_Predicate(t *testing.T) {
 			record(e, nil)
 			return e, 0
 		}, false},
-		{"ceiling of another role's row", func() (*store.DelegationEdge, int) {
+		{"ceiling with an extra permission", func() (*store.DelegationEdge, int) {
 			e := cohortEdge(AgentRoleBaseline)
-			e.EffectCeiling.PermissionIDs = lafV1(t, AgentRoleReadOnly, false)
+			e.EffectCeiling.PermissionIDs = append(append([]string{}, e.EffectCeiling.PermissionIDs...), "zz.extra")
 			record(e, nil)
 			return e, 0
 		}, false},
@@ -176,7 +201,9 @@ func TestLegacyAdoptedSecretUseFallback_Predicate(t *testing.T) {
 			require.NoError(t, err)
 			if tc.want {
 				require.NotNil(t, fb)
-				assert.Equal(t, edge.Role, fb.Role)
+				rowRole, ok := legacyCompatibilityV1RowRole(edge.EffectCeiling.PermissionIDs)
+				require.True(t, ok)
+				assert.Equal(t, string(rowRole), fb.Role, "the cohort role is the carried row's role")
 				assert.Equal(t, edge.ID, fb.EdgeID)
 			} else {
 				assert.Nil(t, fb)
@@ -216,10 +243,17 @@ func newLAFFixture(t *testing.T, name string) *lafFixture {
 // edge that carries no provenance (adoption turns it into a V1 edge).
 func (f *lafFixture) legacy(t *testing.T, name string, role AgentRole) string {
 	t.Helper()
+	return f.legacyMixed(t, name, role, role)
+}
+
+// legacyMixed is legacy with an edge role different from the agent's
+// applied role (adoption ceilings at the lower of the two).
+func (f *lafFixture) legacyMixed(t *testing.T, name string, edgeRole, appliedRole AgentRole) string {
+	t.Helper()
 	id := tid("laf-" + name)
-	createDCAgent(t, f.Store, id, f.ProjectID, f.UserID, role)
+	createDCAgent(t, f.Store, id, f.ProjectID, f.UserID, appliedRole)
 	createDCEdge(t, f.Store, store.DelegationPrincipalUser, f.UserID, store.DelegationPrincipalAgent, id,
-		store.RoleScopeProject, f.ProjectID, string(role))
+		store.RoleScopeProject, f.ProjectID, string(edgeRole))
 	return id
 }
 
@@ -326,6 +360,8 @@ func TestLegacyAdoptedFallback_HeldAgentStillRefused(t *testing.T) {
 	assert.Equal(t, DenyCauseCeilingOrphaned, d.DenyCause)
 	assert.False(t, sdStartDelivery(t, f.disp, f.Store, b).always)
 	assert.False(t, f.read(t, b, tok, sdAlwaysKey))
+	_, keys := f.listKeys(t, b, tok, "user")
+	assert.NotContains(t, keys, sdAlwaysKey)
 }
 
 // TestLegacyAdoptedFallback_AgentDelegatedChildStillRefused: an adopted
@@ -406,4 +442,83 @@ func TestLegacyAdoptedFallback_OnlyOwnersOwnSecrets(t *testing.T) {
 	_, keys := f.listKeys(t, b, f.token(t, b), "user")
 	assert.NotContains(t, keys, "LAF_FOREIGN_AUTHOR")
 	assert.True(t, strings.HasPrefix(meta.CreatedBy, "agent:"))
+}
+
+// TestLegacyAdoptedFallback_MixedRoleCohorts: adoption keeps the edge's role
+// but ceilings it at the lower of that role and the agent's applied role.
+// An edge "full" adopted at the baseline row (applied baseline) and an edge
+// "baseline" adopted at the readonly row (applied readonly) are in the
+// cohort, reported under the row's role.
+func TestLegacyAdoptedFallback_MixedRoleCohorts(t *testing.T) {
+	f := newLAFFixture(t, "laf-mixed")
+	fullAtBaseline := f.legacyMixed(t, "full-b", AgentRoleFull, AgentRoleBaseline)
+	baselineAtReadonly := f.legacyMixed(t, "base-r", AgentRoleBaseline, AgentRoleReadOnly)
+	runBootAdoption(t, f.Store)
+	log := usaCaptureDefaultLog(t)
+	for _, tc := range []struct {
+		id, edgeRole, rowRole string
+	}{
+		{fullAtBaseline, string(AgentRoleFull), string(AgentRoleBaseline)},
+		{baselineAtReadonly, string(AgentRoleBaseline), string(AgentRoleReadOnly)},
+	} {
+		edges := activeEdgesFor(t, f.Store, tc.id)
+		require.Len(t, edges, 1)
+		require.Equal(t, store.SourceCredentialSystemMigration, edges[0].SourceCredentialKind)
+		require.Equal(t, tc.edgeRole, edges[0].Role, "adoption keeps the edge's role")
+		require.Equal(t, lafV1(t, AgentRole(tc.rowRole), false), edges[0].EffectCeiling.PermissionIDs, "adoption ceilings at the lower role's row")
+		d := f.ceiling(t, tc.id, sdAlwaysKey)
+		require.True(t, d.Allowed, d.Reason)
+		require.NotNil(t, d.legacyFallback)
+		assert.Equal(t, tc.rowRole, d.legacyFallback.Role)
+		assert.Equal(t, lafDelivery{start: true, restart: true, read: true, list: true}, f.delivery(t, tc.id), tc.edgeRole+" at "+tc.rowRole)
+		assert.Contains(t, log.String(), "cohort=adopted_"+tc.rowRole)
+	}
+}
+
+// TestLegacyAdoptedFallback_AgentConstraintStillRefusesReadAndList: the
+// agent's own access constraints (7c) are the check that replaces Decide on
+// the fallback read; one that excludes secret.use refuses the read and
+// drops the key from the list. Start, which never applied the agent's own
+// constraints on the owner path, is unchanged.
+func TestLegacyAdoptedFallback_AgentConstraintStillRefusesReadAndList(t *testing.T) {
+	f := newLAFFixture(t, "laf-7c")
+	b := f.legacy(t, "constrained", AgentRoleBaseline)
+	runBootAdoption(t, f.Store)
+	tok := f.token(t, b)
+	require.True(t, f.read(t, b, tok, sdAlwaysKey), "the fallback read is allowed before the constraint")
+
+	constrainAllBut(t, f.Store, "agent", b, secretUsePermission)
+	before := f.Server.authzService.LegacyAdoptedFallbackUses()
+	assert.False(t, f.read(t, b, tok, sdAlwaysKey), "7c refuses the fallback read")
+	_, keys := f.listKeys(t, b, tok, "user")
+	assert.NotContains(t, keys, sdAlwaysKey, "7c drops the key from the list")
+	ok, err := f.Server.authzService.agentConstraintsAllowSecretUse(context.Background(),
+		newFullAgentIdentity(b, f.ProjectID, []string{f.UserID}, nil), userSecretResource("any", f.UserID))
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.Equal(t, before, f.Server.authzService.LegacyAdoptedFallbackUses(), "a refused read or list is not counted as a use")
+}
+
+// lafRecordingMetrics records (path, role) of each fallback use.
+type lafRecordingMetrics struct{ uses []string }
+
+func (m *lafRecordingMetrics) RecordLegacyAdoptedFallback(path, role string) {
+	m.uses = append(m.uses, path+"/"+role)
+}
+
+// TestLegacyAdoptedFallback_MetricAttributes: each path records its own
+// path attribute and the cohort role.
+func TestLegacyAdoptedFallback_MetricAttributes(t *testing.T) {
+	f := newLAFFixture(t, "laf-metrics")
+	b := f.legacy(t, "metrics", AgentRoleBaseline)
+	runBootAdoption(t, f.Store)
+	m := &lafRecordingMetrics{}
+	f.Server.SetLegacyAdoptedFallbackMetrics(m)
+	f.delivery(t, b)
+	for _, want := range []string{"start/baseline", "runtime_read/baseline", "list/baseline"} {
+		assert.Contains(t, m.uses, want)
+	}
+	for _, u := range m.uses {
+		assert.True(t, strings.HasSuffix(u, "/baseline"), u)
+	}
 }

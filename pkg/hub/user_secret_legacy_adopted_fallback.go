@@ -43,12 +43,22 @@ import (
 //   - the hop is the agent's own edge (depth 0), and its delegator is a
 //     user who is the agent's owner, so there is no agent above it;
 //   - the edge was written by adoption (source credential
-//     system_migration), is bounded, and its role is baseline or readonly;
-//   - its ceiling is exactly that role's CompatibilityPolicyV1 row (with
-//     or without the assigned service account permissions), so the missing
-//     secret.use is the policy's doing and nothing narrower;
+//     system_migration) and is bounded;
+//   - its ceiling is exactly the baseline or the readonly
+//     CompatibilityPolicyV1 row (with or without the assigned service
+//     account permissions), so the missing secret.use is the policy's
+//     doing and nothing narrower. Adoption ceilings the edge at the lower of
+//     its role and the agent's applied role but keeps the edge's role, so
+//     the cohort role is the row's role, which must not rank above the
+//     edge's recorded role (an edge "full" adopted at the baseline row
+//     because the agent's applied role was baseline qualifies; an edge
+//     "readonly" carrying the baseline row does not);
 //   - an adoption record under policy V1, adopted or recognized, points at
 //     this edge for this agent.
+//
+// An edge written later by a scope re-issue keeps the system_migration
+// source but has a new ID and no adoption record, so it drops out of the
+// cohort and fails closed (S3c denies again).
 //
 // Every other clause still applies: S1, S2 (held and deleted agents),
 // S3/S3a/S3b/S3f on the hop, S4 (terminal user active), S4a (admitted to
@@ -88,11 +98,8 @@ func (a *AuthzService) legacyAdoptedSecretUseFallback(ctx context.Context, agent
 	if edge.SourceCredentialKind != store.SourceCredentialSystemMigration || edge.Kind != store.EffectCeilingBounded {
 		return nil, nil
 	}
-	role := AgentRole(edge.Role)
-	if role != AgentRoleBaseline && role != AgentRoleReadOnly {
-		return nil, nil
-	}
-	if !legacyCeilingIsCompatibilityV1(edge.Role, edge.EffectCeiling.PermissionIDs) {
+	rowRole, ok := legacyCompatibilityV1RowRole(edge.EffectCeiling.PermissionIDs)
+	if !ok || roleOrdinal(rowRole) > roleOrdinal(AgentRole(edge.Role)) {
 		return nil, nil
 	}
 	recs, _, err := a.store.ListDelegationAdoptions(ctx, store.DelegationAdoptionFilter{AdoptedEdgeID: edge.ID})
@@ -109,22 +116,25 @@ func (a *AuthzService) legacyAdoptedSecretUseFallback(ctx context.Context, agent
 		if rec.Status != store.DelegationAdoptionAdopted && rec.Status != store.DelegationAdoptionRecognized {
 			continue
 		}
-		return &legacyAdoptedFallback{Role: edge.Role, EdgeID: edge.ID}, nil
+		return &legacyAdoptedFallback{Role: string(rowRole), EdgeID: edge.ID}, nil
 	}
 	return nil, nil
 }
 
-// legacyCeilingIsCompatibilityV1 reports whether ids is exactly role's
-// CompatibilityPolicyV1 row, with or without the assigned service account
-// permissions. Both sides are sorted and de-duplicated.
-func legacyCeilingIsCompatibilityV1(role string, ids []string) bool {
-	for _, withSA := range []bool{false, true} {
-		want, ok := permissions.CompatibilityCeiling(permissions.CompatibilityPolicyV1, role, withSA)
-		if ok && slices.Equal(want, ids) {
-			return true
+// legacyCompatibilityV1RowRole returns the role whose CompatibilityPolicyV1
+// row ids is exactly, with or without the assigned service account
+// permissions, when that role is baseline or readonly (the rows without
+// secret.use). Both sides are sorted and de-duplicated.
+func legacyCompatibilityV1RowRole(ids []string) (AgentRole, bool) {
+	for _, role := range []AgentRole{AgentRoleBaseline, AgentRoleReadOnly} {
+		for _, withSA := range []bool{false, true} {
+			want, ok := permissions.CompatibilityCeiling(permissions.CompatibilityPolicyV1, string(role), withSA)
+			if ok && slices.Equal(want, ids) {
+				return role, true
+			}
 		}
 	}
-	return false
+	return "", false
 }
 
 // Paths that may use the fallback, for the Warn line and the counter.

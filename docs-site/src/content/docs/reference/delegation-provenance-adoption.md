@@ -71,10 +71,14 @@ the runtime read and the agent secret list, these agents received them. As a
 this cohort:
 
 - the agent's own edge (no agent above it), delegated by the agent's owner;
-- written by adoption (source credential `system_migration`), bounded, with
-  role `baseline` or `readonly`;
-- whose ceiling is exactly that role's V1 row (with or without the assigned
-  service account permissions);
+- written by adoption (source credential `system_migration`) and bounded;
+- whose ceiling is exactly the `baseline` or the `readonly` V1 row (with or
+  without the assigned service account permissions), and that row's role
+  does not rank above the edge's recorded role. Adoption ceilings an edge at
+  the lower of its role and the agent's applied role but keeps the edge's
+  role, so an edge recorded as `full` for an agent whose applied role is
+  `baseline` carries the `baseline` row and is in the cohort, reported as
+  `adopted_baseline`;
 - with an adoption record under policy V1 (`adopted` or `recognized`) for
   that edge.
 
@@ -88,8 +92,15 @@ The runtime read normally also checks the agent token's scopes, and a
 `baseline` or `readonly` token never carries `project:secret:read`. For this
 cohort only, the read skips that token-scope check and applies the ceiling
 and the agent's own access constraints, the same checks the agent secret
-list applies, as the read did before the ceiling. This is an exception to
-the token-scope check. Every other agent keeps it.
+list applies. Before the ceiling applied, the read applied the progeny rule
+alone, so the cohort's read is still stricter than it was then. This is an
+exception to the token-scope check. Every other agent keeps it.
+
+An edge written later for such an agent, for example by a scope re-issue,
+keeps the `system_migration` source but has no adoption record of its own,
+so the agent leaves the cohort and its owner's shared secrets are withheld
+again (fail closed). Reincarnating the agent as its owner with role `full`
+restores them.
 
 Each use is counted (`scion.hub.user_secret.legacy_adopted_fallback`, with
 attributes `path` and `role`) and logged at warning level as `user secret
