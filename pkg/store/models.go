@@ -1907,6 +1907,13 @@ const (
 	// UserStatusPending is used only on UserKindFederated rows: the
 	// account was recorded before the user's first verified request.
 	UserStatusPending = "pending"
+	// UserStatusDeleting is the status of a user whose forced deletion is
+	// in progress (ptone/scion#2143; see UserDeletion). Only
+	// UserStore.MarkUserDeleting writes it; UpdateUser refuses to write it
+	// and refuses to change a row that has it (ErrUserDeleting), so the
+	// status leaves deleting only when the deletion completes and the row
+	// is removed. Every status check that requires active denies it.
+	UserStatusDeleting = "deleting"
 )
 
 // User kind constants.
@@ -4411,6 +4418,14 @@ const (
 	// operator scope re-issue (ptone/scion#3652). The row is kept as
 	// evidence of the authority the agent held before.
 	EdgeDeactivationScopeReissueReplaced EdgeDeactivationCause = "scope_reissue_replaced"
+	// EdgeDeactivationUserDeleteCascade is recorded by a forced user
+	// delete (ptone/scion#2143), under the deletion's operation ID, on the
+	// edges where the user is the delegator and on the edges and
+	// service-account assignments of every agent it stops. A restore
+	// reactivates only agent_soft_delete rows, so it reactivates none of
+	// these. ValidEdgeDeactivationCause and
+	// ValidAssignmentDeactivationCause accept it.
+	EdgeDeactivationUserDeleteCascade EdgeDeactivationCause = "user_delete_cascade"
 )
 
 // ValidEdgeDeactivationCause reports whether c is a cause that may be
@@ -4421,7 +4436,8 @@ func ValidEdgeDeactivationCause(c EdgeDeactivationCause) bool {
 		EdgeDeactivationAgentHardDelete,
 		EdgeDeactivationDelegatorDeleted,
 		EdgeDeactivationCreateCompensation,
-		EdgeDeactivationReincarnateReplaced:
+		EdgeDeactivationReincarnateReplaced,
+		EdgeDeactivationUserDeleteCascade:
 		return true
 	}
 	return false
@@ -4464,7 +4480,8 @@ func ValidAssignmentDeactivationCause(c EdgeDeactivationCause) bool {
 		EdgeDeactivationReincarnateReplaced,
 		EdgeDeactivationReincarnateFailed,
 		EdgeDeactivationReincarnatePendingSwept,
-		EdgeDeactivationReincarnateStaleSwept:
+		EdgeDeactivationReincarnateStaleSwept,
+		EdgeDeactivationUserDeleteCascade:
 		return true
 	}
 	return false

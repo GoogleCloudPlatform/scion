@@ -136,12 +136,27 @@ type HubConduitConfig struct {
 	// ports (9810, 18380) are always refused. Empty: exposed ports only.
 	TCPAllowedPorts []int `json:"tcpAllowedPorts,omitempty" yaml:"tcpAllowedPorts,omitempty" koanf:"tcpAllowedPorts"`
 	// InternalListen is the host:port of the internal relay API listener
-	// ("" = none). It must be reachable only inside the cluster/VPC; TLS
-	// on the internal hop is recommended (http:// is accepted).
+	// ("" = none). It must be reachable only inside the cluster/VPC.
+	// Without InternalTLSCertFile it must be a loopback address
+	// (CheckRelayInternalListen).
 	InternalListen string `json:"internalListen,omitempty" yaml:"internalListen,omitempty" koanf:"internalListen"`
 	// InternalAdvertise is the base URL other nodes use to reach the
-	// internal listener ("" = derived).
+	// internal listener ("" = derived). It must be https:// unless it is
+	// loopback (CheckRelayTransport).
 	InternalAdvertise string `json:"internalAdvertise,omitempty" yaml:"internalAdvertise,omitempty" koanf:"internalAdvertise"`
+	// InternalTLSCertFile and InternalTLSKeyFile are the PEM certificate
+	// chain and private key the internal listener serves TLS with. Set
+	// both or neither.
+	InternalTLSCertFile string `json:"internalTlsCertFile,omitempty" yaml:"internalTlsCertFile,omitempty" koanf:"internalTlsCertFile"`
+	InternalTLSKeyFile  string `json:"internalTlsKeyFile,omitempty" yaml:"internalTlsKeyFile,omitempty" koanf:"internalTlsKeyFile"`
+	// InternalTLSCAFile is the PEM CA bundle every internal hop client
+	// verifies peers with. When set it replaces the system roots; a
+	// private or internal CA requires it.
+	InternalTLSCAFile string `json:"internalTlsCaFile,omitempty" yaml:"internalTlsCaFile,omitempty" koanf:"internalTlsCaFile"`
+	// InternalTLSServerName is the name internal hop clients verify in
+	// the peer certificate instead of the dialed host ("" = the dialed
+	// host), so one certificate can serve every node.
+	InternalTLSServerName string `json:"internalTlsServerName,omitempty" yaml:"internalTlsServerName,omitempty" koanf:"internalTlsServerName"`
 	// PeerAuth is "auto" (or ""), "oidc" or "hmac". Requests are signed in
 	// every mode; oidc (and auto on GCP) also requires an OIDC ID token.
 	PeerAuth string `json:"peerAuth,omitempty" yaml:"peerAuth,omitempty" koanf:"peerAuth"`
@@ -240,7 +255,15 @@ func (c HubConduitConfig) IsZero() bool {
 		c.InternalAdvertise == "" && c.PeerAuth == "" && len(c.PeerServiceAccounts) == 0 && c.PeerAudience == "" &&
 		c.ReconnectWindow == "" && c.InstanceID == "" && c.AuthzRecheckInterval == "" && c.LifetimeCap == "" &&
 		c.ShutdownGrace == "" && c.ProxySessionMaxAge == "" && c.StreamAuthzMax.IsZero() &&
-		c.RelayMode == "" && c.Ingress == "" && c.TargetStreamDeadlines == "" && c.PeerSecret == ""
+		c.RelayMode == "" && c.Ingress == "" && c.TargetStreamDeadlines == "" && c.PeerSecret == "" &&
+		c.InternalTLSCertFile == "" && c.InternalTLSKeyFile == "" && c.InternalTLSCAFile == "" &&
+		c.InternalTLSServerName == ""
+}
+
+// InternalTLS reports whether the internal listener serves TLS (a
+// certificate and key are configured).
+func (c HubConduitConfig) InternalTLS() bool {
+	return c.InternalTLSCertFile != "" && c.InternalTLSKeyFile != ""
 }
 
 // IngressValue returns the ingress mode with the default applied.
@@ -508,8 +531,11 @@ func (c HubConduitConfig) Validate() error {
 		u, err := url.Parse(c.InternalAdvertise)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || (u.Path != "" && u.Path != "/") || u.RawQuery != "" {
 			errs = append(errs, fmt.Errorf("invalid server.hub.conduit.internal_advertise %q: want http(s)://host:port", c.InternalAdvertise))
+		} else if err := CheckRelayTransport(c.InternalAdvertise); err != nil {
+			errs = append(errs, fmt.Errorf("invalid server.hub.conduit.internal_advertise: %w", err))
 		}
 	}
+	errs = append(errs, c.validateInternalTLS()...)
 	switch c.PeerAuthMode() {
 	case ConduitPeerAuthAuto, ConduitPeerAuthOIDC, ConduitPeerAuthHMAC:
 	default:
@@ -544,4 +570,25 @@ func (c HubConduitConfig) Validate() error {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+// validateInternalTLS checks the internal hop TLS settings: the
+// certificate and key are set together, the server name is a bare host
+// name, and an internal listener without TLS binds loopback
+// (CheckRelayInternalListen). The files themselves are read when the
+// listener and the hop clients are built.
+func (c HubConduitConfig) validateInternalTLS() []error {
+	var errs []error
+	if (c.InternalTLSCertFile == "") != (c.InternalTLSKeyFile == "") {
+		errs = append(errs, errors.New("server.hub.conduit.internal_tls_cert_file and internal_tls_key_file must be set together"))
+	}
+	if n := c.InternalTLSServerName; n != "" && (strings.ContainsAny(n, "/: \t") || strings.TrimSpace(n) != n) {
+		errs = append(errs, fmt.Errorf("invalid server.hub.conduit.internal_tls_server_name %q: want a host name", n))
+	}
+	if c.InternalListen != "" {
+		if err := CheckRelayInternalListen("server.hub.conduit.internal_listen", c.InternalListen, c.InternalTLS()); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errs
 }

@@ -101,6 +101,25 @@ When the deletion succeeds, Scion also removes all of the user's role bindings (
 
 After a user is deleted, that user's tokens stop working immediately. Requests that present a web or CLI sign-in token get `401` with the error code `user_not_found`. Requests that present one of the user's access tokens (`scion_pat_`) are also refused, with `401` and the error code `unauthorized`.
 
+### Force-deleting a user who has agents
+
+Behind the `hub.user_delete_force_cascade` [experiment](/scion/reference/experiments/) (off by default), an admin can delete a user whom agents or delegations depend on, instead of deleting those agents one by one. On **Admin > Users**, the delete dialog of such a user offers **Force delete**, which asks for confirmation naming how many agents it stops; the API is `DELETE /api/v1/users/{id}?force=true`. While the experiment is off, `force=true` is ignored and the delete is refused as described above.
+
+A forced delete needs `user.delete` on the user and, for every one of the user's agents, the same permission an agent delete needs (`agent.delete` on that agent). If you may not delete one or more of them, the request is refused with `403 user_delete_force_forbidden`, `details.agents` lists those agents (`id`, `projectId`), and nothing changes. It needs a sign-in session, like a plain delete. The last super-admin, admin lockout and last-owner guards apply as for a plain delete. If nothing blocks the delete, a forced delete is a plain delete (`204`).
+
+Otherwise the delete runs in two steps:
+
+1. **Revoke, at once.** In one transaction, the user's status becomes `deleting`, the user's role bindings are removed, the user's access tokens are revoked, and every active delegation from the user, together with the delegations and service-account assignments of each of the user's agents, is deactivated. The user cannot sign in or use any credential from then on, and the agents keep only the read access every agent has in its project. The request answers `202` with the deletion resource. If an agent of the user appeared after the permission checks, the request is refused with `409 user_delete_blockers_changed` and nothing changes; retry it.
+2. **Stop, then remove.** The Hub deletes each of the user's agents through the normal agent delete (deepest child agents first), retrying failures with a growing delay, and removes the user once every agent is **stopped** (the agent delete confirmed its runtime was torn down) or **removed** (its record is gone without that confirmation). The user's user-scope secrets and environment variables are then removed as after a plain delete.
+
+While the deletion is in progress:
+
+- `GET /api/v1/users/{id}/deletion`, and **Deletion status** on the user's row, show the state (`stopping`, then `completed`; the panel reloads every few seconds while the deletion is stopping), each agent's outcome (`pending`, `stopping`, `failed`, `stopped` or `removed`) with its latest error, and counts per outcome. The resource answers after the user is removed too.
+- A plain delete, and any change to the user, is refused with `409 user_deletion_in_progress` (with `details.deletionId`). Another forced delete joins the deletion and retries its agents at once (**Retry** in the panel).
+- Creating or restoring an agent for the user (an agent owned by the user, or started by one of the user's agents) is refused with `409 conflict`.
+
+An agent whose Runtime Broker cannot be reached stays `failed`, and the deletion stays in progress, with no timeout: the Hub never reports an agent as stopped unless its teardown was confirmed. To finish, delete that agent from its page with force (`DELETE /api/v1/agents/{id}?force=true`); it is then reported as `removed`, and the completion records how many agents were stopped and how many were removed. Turning the experiment off stops new forced deletes only: a deletion already accepted runs to completion, because the user's authority is already revoked and what remains is stopping the agents the requester was allowed to delete. While the experiment is off, the **Deletion status** panel and `GET /api/v1/users/{id}/deletion` are not available.
+
 ## OAuth Authentication
 
 Scion supports OAuth authentication via Google and GitHub. OAuth credentials are configured separately for web and CLI clients due to different redirect URI requirements.

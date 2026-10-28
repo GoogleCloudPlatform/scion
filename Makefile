@@ -600,14 +600,24 @@ BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS := TestMoveBrokerQuota_SourceAtCapTar
 	TestTransferBroker_TargetLockHeldAcrossTransaction_Postgres \
 	TestTransferBroker_ConcurrentReserveSoak_Postgres
 
+# USER_DELETION_POSTGRES_TESTS are the forced user delete concurrency tests
+# (ptone/scion#2143): a restore racing the delete request, a restore racing
+# the completion, two hub processes completing one deletion, and a finalize
+# racing the completion's reopen of a blocking agent.
+USER_DELETION_POSTGRES_TESTS := TestForceDeleteUser_RestoreRacesRequest_Postgres \
+	TestForceDeleteUser_RestoreRacesCompletion_Postgres \
+	TestForceDeleteUser_TwoReconcilersOneCompletion_Postgres \
+	TestForceDeleteUser_FinalizeRacesCompletionReopen_Postgres
+
 # HUB_INTEGRATION_POSTGRES_TESTS are the pkg/hub Postgres tests that need
 # -tags integration (the integration TestMain sets up the ent test
 # database): the project-delete lock-order test, the two-replica scheduled
 # send test, the membership loss and test identity concurrency tests, and
 # the broker presence registry test (its conduit registry runs on the ent
 # test database), the agent delegation issuance vs reincarnation claim
-# race, and the broker reservation transfer tests
-# (BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS).
+# race, the broker reservation transfer tests
+# (BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS) and the forced user delete
+# tests (USER_DELETION_POSTGRES_TESTS).
 # Each must print a PASS line, and any skip fails (shard.sh postgres).
 HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock \
 	TestScheduledSend_TwoHubReplicasPostgres_OneDelivery \
@@ -616,6 +626,7 @@ HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock
 	$(MEMBERSHIP_LOSS_POSTGRES_TESTS) \
 	$(TEST_IDENTITY_POSTGRES_TESTS) \
 	$(BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS) \
+	$(USER_DELETION_POSTGRES_TESTS) \
 	TestHubInternal_ReplayAcrossHubReplicas
 
 ## test-hub-postgres: Run the pkg/hub Postgres tests of shard SHARD=K (SHARD=all: every shard holding one)

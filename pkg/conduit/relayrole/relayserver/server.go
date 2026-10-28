@@ -24,6 +24,7 @@ package relayserver
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -32,6 +33,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
@@ -39,6 +41,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relayrole"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
@@ -87,13 +90,27 @@ type Config struct {
 	PublicListener net.Listener
 	// Advertise returns the internal endpoint other nodes reach this relay
 	// at, given the internal listener's bound address (nil:
-	// http://<bound address>).
+	// https://<bound address> with InternalTLS, else http://<bound
+	// address>). The endpoint must pass config.CheckRelayTransport.
 	Advertise func(bound net.Addr) string
+	// InternalTLS, when set, is the TLS configuration the internal
+	// listener serves (relay.NewHopServerTLS). Without it InternalListen
+	// must be a loopback address (config.CheckRelayInternalListen).
+	InternalTLS *tls.Config
 	// PeerAuth signs this relay's calls to the hub and verifies relay-peer
 	// calls to it. Required.
 	PeerAuth relay.PeerAuth
 	// HTTPClient makes the hub and relay-peer calls (nil: default).
 	HTTPClient *http.Client
+	// WSDialer dials stream hops to other relays (nil: gorilla defaults,
+	// or relay.NewHopWSDialer(HopTLS)).
+	WSDialer *websocket.Dialer
+	// HopTLS is the TLS client configuration of the hub and relay-peer
+	// calls (relay.NewHopClientTLS: the operator CA and server name; nil:
+	// the system roots). It applies to the clients HTTPClient and WSDialer
+	// leave nil, which otherwise keep their defaults. Verification is
+	// never skipped.
+	HopTLS *tls.Config
 	// Registry is the conduit registry store. Required.
 	Registry registry.Store
 	// Experiment reads hub.conduit. Required.
@@ -150,8 +167,19 @@ func (c *Config) validate() error {
 	case c.Experiment == nil:
 		return errors.New("conduit relay: no hub.conduit reader")
 	}
+	// The relay internal hop rule: the hub internal API and the internal
+	// listener carry user and agent credentials.
+	if err := config.CheckRelayTransport(c.HubInternalURL); err != nil {
+		return fmt.Errorf("server.relay.hub_internal_url: %w", err)
+	}
+	if err := config.CheckRelayInternalListen("server.hub.conduit.internal_listen", c.InternalListen, c.InternalTLS != nil); err != nil {
+		return err
+	}
 	if c.ExperimentPollPeriod <= 0 {
 		c.ExperimentPollPeriod = DefaultExperimentPollPeriod
+	}
+	if c.HopTLS != nil && c.WSDialer == nil {
+		c.WSDialer = relay.NewHopWSDialer(c.HopTLS)
 	}
 	if c.StartupDeadline <= 0 {
 		c.StartupDeadline = DefaultStartupDeadline
@@ -228,8 +256,16 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		return nil, err
 	}
 	log := cfg.Logger.With("subsystem", "relay")
+	// With HopTLS the hub and relay-peer clients verify peers with it, and
+	// keep the defaults they have without it otherwise (an untimed hub
+	// client; the relay's 10s client).
+	hubHTTP, relayHTTP := cfg.HTTPClient, cfg.HTTPClient
+	if cfg.HTTPClient == nil && cfg.HopTLS != nil {
+		hubHTTP = relay.NewHopHTTPClient(cfg.HopTLS)
+		relayHTTP = relay.NewHopHTTPClientWithTimeout(cfg.HopTLS, 10*time.Second)
+	}
 	role, err := relayrole.New(relayrole.Config{
-		Hub:             &relay.HubClient{BaseURL: cfg.HubInternalURL, HTTP: cfg.HTTPClient, Auth: cfg.PeerAuth},
+		Hub:             &relay.HubClient{BaseURL: cfg.HubInternalURL, HTTP: hubHTTP, Auth: cfg.PeerAuth},
 		RecheckInterval: cfg.RecheckInterval,
 		Clock:           cfg.Clock,
 		Events:          cfg.Events,
@@ -249,6 +285,11 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("conduit internal listener %s: %w", cfg.InternalListen, err)
 	}
 	s.InternalAddr = internalLn.Addr()
+	scheme := "http://"
+	if cfg.InternalTLS != nil {
+		internalLn = tls.NewListener(internalLn, cfg.InternalTLS)
+		scheme = "https://"
+	}
 	// The internal listener also serves the conduit dials a hub ingress
 	// proxies (design §3.9 "Ingress"): GET /api/v1/conduit, after the same
 	// relay-peer checks as every internal-API call, except that a relay
@@ -280,7 +321,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	})}
 	go s.serve(s.internal, internalLn, "relay internal listener")
 
-	endpoint := "http://" + internalLn.Addr().String()
+	endpoint := scheme + internalLn.Addr().String()
 	if cfg.Advertise != nil {
 		endpoint = cfg.Advertise(internalLn.Addr())
 	}
@@ -298,7 +339,8 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		},
 		Refresh:         role.Refresh,
 		PeerAuth:        cfg.PeerAuth,
-		HTTPClient:      cfg.HTTPClient,
+		HTTPClient:      relayHTTP,
+		WSDialer:        cfg.WSDialer,
 		ReconnectWindow: cfg.ReconnectWindow,
 		LifetimeCap:     cfg.LifetimeCap,
 		Clock:           cfg.Clock,
