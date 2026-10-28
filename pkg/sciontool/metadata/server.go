@@ -250,6 +250,12 @@ type Server struct {
 
 	shutdownToken     string
 	shutdownTokenPath string
+
+	// Hub refusals of the access token and of identity tokens (refusal.go).
+	accessRefusal *refusalState
+	idRefusal     *refusalState
+	// now, if set, replaces time.Now for the refusal windows (tests).
+	now func() time.Time
 }
 
 // authToken returns the current auth token, preferring the dynamic TokenFunc
@@ -393,6 +399,8 @@ func New(cfg Config) *Server {
 		config:         cfg,
 		client:         &http.Client{Timeout: 10 * time.Second},
 		cachedIDTokens: make(map[string]*cachedIDToken),
+		accessRefusal:  newRefusalState(),
+		idRefusal:      newRefusalState(),
 	}
 }
 
@@ -1010,6 +1018,9 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	if s.serveCachedToken(w) {
 		return
 	}
+	if s.serveRefusal(w, s.accessRefusal) {
+		return
+	}
 
 	// Singleflight: collapse concurrent fetches into one Hub request
 	s.fetchMu.Lock()
@@ -1018,6 +1029,9 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		s.fetchMu.Unlock()
 		<-done
 		if s.serveCachedToken(w) {
+			return
+		}
+		if s.serveRefusal(w, s.accessRefusal) {
 			return
 		}
 		http.Error(w, "token generation failed", http.StatusBadGateway)
@@ -1036,6 +1050,9 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	s.fetchMu.Unlock()
 
 	if err != nil {
+		if isHubRefusal(err) && s.serveRefusal(w, s.accessRefusal) {
+			return
+		}
 		log.Error("Failed to fetch GCP access token from Hub: %v", err)
 		http.Error(w, "token generation failed", http.StatusBadGateway)
 		return
@@ -1068,6 +1085,9 @@ func (s *Server) handleIdentityToken(w http.ResponseWriter, r *http.Request) {
 	if s.serveCachedIDToken(w, audience) {
 		return
 	}
+	if s.serveRefusal(w, s.idRefusal) {
+		return
+	}
 
 	// Singleflight: collapse concurrent fetches for the same audience
 	s.idFetchMu.Lock()
@@ -1076,6 +1096,9 @@ func (s *Server) handleIdentityToken(w http.ResponseWriter, r *http.Request) {
 		s.idFetchMu.Unlock()
 		<-done
 		if s.serveCachedIDToken(w, audience) {
+			return
+		}
+		if s.serveRefusal(w, s.idRefusal) {
 			return
 		}
 		http.Error(w, "identity token generation failed", http.StatusBadGateway)
@@ -1095,6 +1118,9 @@ func (s *Server) handleIdentityToken(w http.ResponseWriter, r *http.Request) {
 	s.idFetchMu.Unlock()
 
 	if err != nil {
+		if isHubRefusal(err) && s.serveRefusal(w, s.idRefusal) {
+			return
+		}
 		log.Error("Failed to fetch GCP identity token from Hub: %v", err)
 		http.Error(w, "identity token generation failed", http.StatusBadGateway)
 		return
@@ -1113,6 +1139,7 @@ func (s *Server) fetchAccessToken(ctx context.Context) (*GCPAccessTokenResponse,
 	} else {
 		token, err = s.fetchAccessTokenDirect(ctx)
 	}
+	s.noteFetchResult(s.accessRefusal, "access token", err)
 
 	if err != nil {
 		return nil, err
@@ -1150,7 +1177,7 @@ func (s *Server) fetchAccessTokenDirect(ctx context.Context) (*GCPAccessTokenRes
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("hub returned %d: %s", resp.StatusCode, string(respBody))
+		return nil, &hubStatusError{code: resp.StatusCode, body: string(respBody)}
 	}
 
 	var token GCPAccessTokenResponse
@@ -1174,6 +1201,7 @@ func (s *Server) fetchIdentityToken(ctx context.Context, audience string) (*cach
 	} else {
 		tokenStr, err = s.fetchIdentityTokenDirect(ctx, audience)
 	}
+	s.noteFetchResult(s.idRefusal, "identity token", err)
 
 	if err != nil {
 		return nil, err
@@ -1213,7 +1241,7 @@ func (s *Server) fetchIdentityTokenDirect(ctx context.Context, audience string) 
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("hub returned %d: %s", resp.StatusCode, string(respBody))
+		return "", &hubStatusError{code: resp.StatusCode, body: string(respBody)}
 	}
 
 	var result hubIDTokenResponse
@@ -1244,6 +1272,9 @@ func (s *Server) proactiveRefreshLoop(ctx context.Context) {
 
 			elapsed := time.Since(cached.FetchedAt)
 			remaining := time.Duration(cached.ExpiresIn)*time.Second - elapsed
+			if _, refusing := s.accessRefusal.active(s.clock(), s.assignmentKey()); refusing {
+				continue
+			}
 			if remaining < 300*time.Second {
 				log.Debug("Proactively refreshing GCP access token (remaining: %v)", remaining)
 				refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
