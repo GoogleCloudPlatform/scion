@@ -129,7 +129,10 @@ export interface HealthSummaryItem {
   id: string;
   checks?: Record<string, string>;
   layout_mismatch?: string[];
-  /** The row carries workspace_storage: null (the broker reported no layout). */
+  /**
+   * The row carries workspace_storage: null (the broker reported no layout).
+   * When set, it takes precedence over layout_mismatch.
+   */
   no_workspace_storage?: boolean;
 }
 

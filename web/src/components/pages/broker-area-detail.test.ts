@@ -256,12 +256,23 @@ describe('scion-page-broker-area-detail', () => {
     expect(card.shadowRoot!.querySelector('.storage-compare-note')).not.toBeNull();
   });
 
+  it('Project storage: comparison not available when the broker reports storage but its summary row has none', async () => {
+    vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
+    summaryItems = [{ id: FLAT_K8S.id, no_workspace_storage: true }];
+    const el = await mount({ ...FLAT_K8S, workspaceStorage: nfsStorage() });
+    const card = el.shadowRoot!.querySelector('scion-broker-storage-card') as Page;
+    await card.updateComplete;
+    expect(card.shadowRoot!.querySelector('.storage-none')).toBeNull();
+    expect(card.shadowRoot!.querySelector('.storage-mismatch-alert')).toBeNull();
+    expect(card.shadowRoot!.querySelector('.storage-compare-note')).not.toBeNull();
+  });
+
   it('Project storage: comparison not available when the summary request fails', async () => {
     vi.mocked(loadAdminStatus).mockResolvedValue(adminStatus(true));
-    summaryItems = [{ id: FLAT_K8S.id, layout_mismatch: LAYOUT_MISMATCH }];
     summaryStatus = 500;
     const el = await mount({ ...FLAT_K8S, workspaceStorage: nfsStorage() });
     expect(fetchMock.mock.calls.some(([u]) => u === '/api/v1/admin/health/summary')).toBe(true);
+    expect(tabs(el)).not.toContain('health');
     const card = el.shadowRoot!.querySelector('scion-broker-storage-card') as Page;
     await card.updateComplete;
     expect(card.shadowRoot!.querySelector('.storage-mismatch-alert')).toBeNull();
@@ -274,6 +285,9 @@ describe('scion-page-broker-area-detail', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
       const el = await mount({ ...FLAT_K8S, workspaceStorage: nfsStorage() });
+      expect(fetchMock.mock.calls.some(([u]) => u === '/api/v1/admin/health/summary')).toBe(true);
+      expect(errorSpy).toHaveBeenCalled();
+      expect(tabs(el)).not.toContain('health');
       const card = el.shadowRoot!.querySelector('scion-broker-storage-card') as Page;
       await card.updateComplete;
       expect(card.shadowRoot!.querySelector('.storage-mismatch-alert')).toBeNull();
