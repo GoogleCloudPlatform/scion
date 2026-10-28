@@ -110,6 +110,14 @@ func (s *Server) shareUnavailableText() string {
 	return scionrt.ProjectShareUnavailableText(scionrt.ProjectShareMountPathField, NFSWarnOnlyRuntime(s.RuntimeName()))
 }
 
+// projectShareNotMountedText is the client text for a start refused with
+// agent.ErrProjectShareNotMounted. That refusal comes only from the
+// Kubernetes workspace leaves, a runtime that never mounts the share on
+// the broker, so the remedy is the broker's own container.
+func projectShareNotMountedText() string {
+	return scionrt.ProjectShareUnavailableText(scionrt.ProjectShareMountPathField, true)
+}
+
 // shareAdvisoryDetail is the reconciler's last status message for the
 // layout's share when it is unhealthy (for example the expected and found
 // mount sources), or "". It is for logs and admin views only.

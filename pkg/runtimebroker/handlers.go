@@ -2067,6 +2067,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			SkillResolutionFailed(w, skillErr, createSkill.ref)
 		case config.IsAgentStateConflict(err):
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to create agent: "+err.Error(), nil)
+		case errors.Is(err, agent.ErrProjectShareNotMounted):
+			// The start found no project storage share on this broker
+			// (the Kubernetes workspace leaves). err names the mount
+			// point and is logged above; the body names the fields.
+			writeError(w, http.StatusServiceUnavailable, ErrCodeProjectStorageUnavailable, projectShareNotMountedText(), nil)
 		default:
 			writeCreateRuntimeError(w, err)
 		}
