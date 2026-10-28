@@ -507,12 +507,17 @@ HUB_SA_MINTING_ROLE="roles/iam.serviceAccountAdmin"
 
 # _project_binding_absent TEXT -- true when TEXT (gcloud's stderr from
 # projects remove-iam-policy-binding) says the member/role binding is not
-# in the policy. Real gcloud exits 1 in that case rather than no-op.
+# in the policy. Real gcloud exits 1 in that case rather than no-op, with
+# one of the IamPolicyBindingNotFound messages: "Policy binding with the
+# specified principal, role, and condition not found!" (what
+# --condition=None gets), "... principal and role not found!", or the
+# plural "Policy bindings with the specified principal and role not
+# found!".
 _project_binding_absent() {
   if echo "$1" | grep -qiE 'permission|forbidden'; then
     return 1
   fi
-  echo "$1" | grep -qiE 'binding with the specified principal and role not found'
+  echo "$1" | grep -qiE 'Policy bindings? with the specified principal.* not found'
 }
 
 # remove_hub_sa_project_bindings PROJECT_ID SA_EMAIL ROLE...
@@ -522,7 +527,9 @@ _project_binding_absent() {
 # with --condition=None, never set-iam-policy. Members removed are the
 # live "serviceAccount:SA_EMAIL" and any "deleted:serviceAccount:SA_EMAIL
 # ?uid=..." tombstones GCP left from an earlier SA delete. No other
-# member and no other role is touched.
+# member and no other role is touched. Conditional bindings are skipped:
+# deploy.sh never creates one, and --condition=None cannot remove one.
+# Each role and member gets at most one call.
 #
 # The policy is read once to find what is bound. If that read fails, it
 # falls back to one blind removal of the live member per role, where an
@@ -537,23 +544,31 @@ remove_hub_sa_project_bindings() {
   local live_member="serviceAccount:${sa_email}"
   local tombstone_prefix="deleted:serviceAccount:${sa_email}?uid="
   local -a targets=()
-  local role member policy_rows policy_err_file err_text wanted r
+  local role member cond_title cond_expr policy_rows policy_err_file err_text wanted r t
   HUB_SA_BINDINGS_REMOVED=0
   HUB_SA_BINDINGS_FAILED=0
 
   policy_err_file="$(mktemp)"
   if policy_rows="$(gcloud projects get-iam-policy "${project}" \
       --flatten="bindings[].members" \
-      --format="value(bindings.role,bindings.members)" 2>"${policy_err_file}")"; then
-    while IFS=$'\t' read -r role member; do
+      --format="value(bindings.role,bindings.members,bindings.condition.title,bindings.condition.expression)" 2>"${policy_err_file}")"; then
+    # Tab is IFS whitespace, so empty condition fields collapse: an
+    # unconditional row leaves cond_title and cond_expr both empty, and any
+    # condition at all leaves at least one of them set.
+    while IFS=$'\t' read -r role member cond_title cond_expr; do
       [[ -z "$role" || -z "$member" ]] && continue
+      [[ -n "$cond_title" || -n "$cond_expr" ]] && continue
       wanted=false
       for r in "$@"; do
         [[ "$r" == "$role" ]] && wanted=true
       done
       [[ "$wanted" == "true" ]] || continue
       if [[ "$member" == "$live_member" || "$member" == "$tombstone_prefix"* ]]; then
-        targets+=("${role}"$'\t'"${member}")
+        wanted=true
+        for t in ${targets[@]+"${targets[@]}"}; do
+          [[ "$t" == "${role}"$'\t'"${member}" ]] && wanted=false
+        done
+        [[ "$wanted" == "true" ]] && targets+=("${role}"$'\t'"${member}")
       fi
     done <<< "$policy_rows"
     if [[ ${#targets[@]} -eq 0 ]]; then

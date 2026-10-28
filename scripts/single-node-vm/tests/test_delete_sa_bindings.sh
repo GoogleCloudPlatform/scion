@@ -259,3 +259,53 @@ test_delete_sa_bindings_removal_failure_warns_and_continues() {
   assert_contains "$DEPLOY_LOG" "Removed project bindings:   5 for ${SA_EMAIL}" \
     "the summary must report the bindings that were removed"
 }
+
+# Sibling hubs whose SA ids share this hub's prefix ("bindhub-p1pm-vm",
+# "bindhubx"): their live and tombstoned members must never match the
+# hub SA's. A prefix match on the SA id or email would remove them.
+test_delete_sa_bindings_leave_sibling_hub_sas_alone() {
+  fresh_gcloud_state
+  seed_service_account "$SA_EMAIL" "Scion Hub"
+  seed_project_iam_binding roles/aiplatform.user "$SA_MEMBER"
+  local sibling sibling_members=()
+  for sibling in "scion-hub-${HUB}-p1pm-vm@demo-project.iam.gserviceaccount.com" \
+      "scion-hub-${HUB}x@demo-project.iam.gserviceaccount.com"; do
+    sibling_members+=("serviceAccount:${sibling}" "deleted:serviceAccount:${sibling}?uid=55")
+  done
+  local m
+  for m in "${sibling_members[@]}"; do
+    seed_project_iam_binding roles/aiplatform.user "$m"
+  done
+  run_sa_bindings_delete "$(sa_bindings_config_json "$HUB")"
+  assert_eq "0" "$DEPLOY_RC" "teardown must exit 0"
+  local removes
+  removes="$(remove_calls)"
+  assert_eq "1" "$(count_lines "$removes")" "only the hub SA's own binding may be removed"
+  for m in "${sibling_members[@]}"; do
+    assert_not_contains "$removes" "--member=${m} " "sibling member ${m} must get no remove call"
+    assert_eq "1" "$(project_iam_bindings | grep -cxF "roles/aiplatform.user	${m}" || true)" \
+      "sibling member ${m} must survive"
+  done
+}
+
+# deploy.sh never creates a conditional binding, and --condition=None
+# cannot remove one, so a conditional binding of the hub SA is skipped;
+# and a role/member listed twice still gets only one call.
+test_delete_sa_bindings_skip_conditional_and_dedupe() {
+  fresh_gcloud_state
+  seed_service_account "$SA_EMAIL" "Scion Hub"
+  seed_project_iam_binding roles/aiplatform.user "$SA_MEMBER" "temporary access"
+  seed_project_iam_binding roles/cloudtrace.agent "$TOMBSTONE_MEMBER" "temporary access"
+  seed_project_iam_binding roles/logging.logWriter "$SA_MEMBER"
+  seed_project_iam_binding roles/logging.logWriter "$SA_MEMBER"
+  run_sa_bindings_delete "$(sa_bindings_config_json "$HUB")"
+  assert_eq "0" "$DEPLOY_RC" "teardown must exit 0"
+  local removes
+  removes="$(remove_calls)"
+  assert_eq "1" "$(count_lines "$removes")" "one call for the duplicated unconditional binding, none for conditional ones"
+  assert_contains "$removes" "--member=${SA_MEMBER} --role=roles/logging.logWriter --condition=None" \
+    "the unconditional binding must be removed"
+  assert_not_contains "$removes" "roles/aiplatform.user" "a conditional binding must get no remove call"
+  assert_not_contains "$removes" "roles/cloudtrace.agent" "a conditional tombstone must get no remove call"
+  assert_not_contains "$DEPLOY_LOG" "Could not remove" "nothing may be reported as failed"
+}

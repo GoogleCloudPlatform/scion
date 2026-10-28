@@ -413,11 +413,16 @@ set_project_binding_will_fail() {
   printf '%s' "${2:-}" > "${GCLOUD_STUB_STATE_DIR}/project-binding-fail/${1//\//_}"
 }
 
-# seed_project_iam_binding ROLE MEMBER — the project IAM policy already
-# binds MEMBER (e.g. "serviceAccount:x@p.iam.gserviceaccount.com" or a
-# "deleted:serviceAccount:...?uid=N" tombstone) to ROLE, unconditionally.
+# seed_project_iam_binding ROLE MEMBER [CONDITION_TITLE] — the project
+# IAM policy already binds MEMBER (e.g. "serviceAccount:x@p.iam.
+# gserviceaccount.com" or a "deleted:serviceAccount:...?uid=N" tombstone)
+# to ROLE, unconditionally, or under a condition titled CONDITION_TITLE.
 seed_project_iam_binding() {
-  printf '%s\t%s\n' "$1" "$2" >> "${GCLOUD_STUB_STATE_DIR}/project-iam-policy.tsv"
+  if [[ -n "${3:-}" ]]; then
+    printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "${GCLOUD_STUB_STATE_DIR}/project-iam-policy.tsv"
+  else
+    printf '%s\t%s\n' "$1" "$2" >> "${GCLOUD_STUB_STATE_DIR}/project-iam-policy.tsv"
+  fi
 }
 
 # project_iam_bindings — the project IAM policy fixture as it stands now,

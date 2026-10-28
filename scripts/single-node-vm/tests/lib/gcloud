@@ -252,22 +252,34 @@ case "${1:-} ${2:-}" in
     ;;
   "projects get-iam-policy")
     # The project policy is a plain fixture file, one "ROLE<TAB>MEMBER"
-    # line per unconditional binding member, seeded by
+    # line per unconditional binding member, or "ROLE<TAB>MEMBER<TAB>TITLE"
+    # for a conditional one, seeded by
     # seed_project_iam_binding and kept up to date by add/remove below and
     # by "iam service-accounts delete" (which turns a deleted SA's members
     # into deleted:serviceAccount:...?uid= tombstones, as GCP does). Only
     # the one shape deploy.sh asks for is answered: flattened per member,
-    # printed as value(bindings.role,bindings.members), tab-separated.
+    # printed as value(bindings.role,bindings.members,
+    # bindings.condition.title,bindings.condition.expression),
+    # tab-separated, with empty trailing fields for an unconditional row.
+    want_format="value(bindings.role,bindings.members,bindings.condition.title,bindings.condition.expression)"
     if [[ "$(get_flag flatten "$@" || true)" != "bindings[].members" \
-        || "$(get_flag format "$@" || true)" != "value(bindings.role,bindings.members)" ]]; then
-      echo "gcloud-stub: projects get-iam-policy only answers --flatten=bindings[].members --format=value(bindings.role,bindings.members): $*" >&2
+        || "$(get_flag format "$@" || true)" != "$want_format" ]]; then
+      echo "gcloud-stub: projects get-iam-policy only answers --flatten=bindings[].members --format=${want_format}: $*" >&2
       exit 1
     fi
     if [[ -f "${GCLOUD_STUB_STATE_DIR}/project-get-iam-policy-fail" ]]; then
       echo "ERROR: (gcloud.projects.get-iam-policy) PERMISSION_DENIED: simulated policy read failure on project [${3:-}]" >&2
       exit 1
     fi
-    cat "${GCLOUD_STUB_STATE_DIR}/project-iam-policy.tsv" 2>/dev/null || true
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/project-iam-policy.tsv" ]]; then
+      while IFS=$'\t' read -r p_role p_member p_title; do
+        if [[ -n "$p_title" ]]; then
+          printf '%s\t%s\t%s\t%s\n' "$p_role" "$p_member" "$p_title" "request.time < timestamp(\"2030-01-01T00:00:00Z\")"
+        else
+          printf '%s\t%s\t\t\n' "$p_role" "$p_member"
+        fi
+      done < "${GCLOUD_STUB_STATE_DIR}/project-iam-policy.tsv"
+    fi
     exit 0
     ;;
   "projects remove-iam-policy-binding")
@@ -293,8 +305,10 @@ case "${1:-} ${2:-}" in
       exit 0
     fi
     # Real gcloud raises IamPolicyBindingNotFound (exit 1) for a member
-    # and role not in the policy; it is not a no-op success.
-    echo "ERROR: (gcloud.projects.remove-iam-policy-binding) Policy binding with the specified principal and role not found!" >&2
+    # and role not in the policy; it is not a no-op success. With
+    # --condition=None its text names the condition too
+    # (iam_util.RemoveBindingFromIamPolicyWithCondition, Cloud SDK 591.0.0).
+    echo "ERROR: (gcloud.projects.remove-iam-policy-binding) Policy binding with the specified principal, role, and condition not found!" >&2
     exit 1
     ;;
   "projects get-ancestors")
@@ -1008,11 +1022,15 @@ json.dump({'email': email, 'description': desc}, open(path, 'w', encoding='utf-8
       # GCP keeps a deleted SA's project bindings as tombstones.
       policy_file="${GCLOUD_STUB_STATE_DIR}/project-iam-policy.tsv"
       if [[ -f "$policy_file" ]]; then
-        while IFS=$'\t' read -r p_role p_member; do
+        while IFS=$'\t' read -r p_role p_member p_title; do
           if [[ "$p_member" == "serviceAccount:${sa_email}" ]]; then
             p_member="deleted:serviceAccount:${sa_email}?uid=100000000000000000001"
           fi
-          printf '%s\t%s\n' "$p_role" "$p_member"
+          if [[ -n "$p_title" ]]; then
+            printf '%s\t%s\t%s\n' "$p_role" "$p_member" "$p_title"
+          else
+            printf '%s\t%s\n' "$p_role" "$p_member"
+          fi
         done < "$policy_file" > "${policy_file}.new"
         mv "${policy_file}.new" "$policy_file"
       fi

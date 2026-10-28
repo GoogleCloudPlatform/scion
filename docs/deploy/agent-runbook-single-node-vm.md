@@ -1322,7 +1322,7 @@ stops if either finds an unmarked resource or cannot complete.
 | GCE VM instance | `scion-hub-HUB_NAME` |
 | Cloud NAT | `scion-hub-HUB_NAME-nat` |
 | Cloud Router | `scion-hub-HUB_NAME-router` |
-| Project IAM role bindings of the hub service account | The roles Phase 2 grants it (`roles/iam.serviceAccountAdmin` included, whatever `hub_sa_minting` says now), removed one per role with `--condition=None` before the account is deleted. `deleted:serviceAccount:...?uid=` tombstones of the same account on those roles, left by an earlier delete, are removed too. No other member or role is touched. |
+| Project IAM role bindings of the hub service account | The roles Phase 2 grants it (`roles/iam.serviceAccountAdmin` included, whatever `hub_sa_minting` says now), removed with one `--condition=None` call per role and member before the account is deleted. `deleted:serviceAccount:...?uid=` tombstones of the same account on those roles, left by an earlier delete, are removed too. Conditional bindings and every other member or role are not touched. |
 | Service account | `scion-hub-HUB_NAME@PROJECT_ID.iam.gserviceaccount.com` |
 | Cloud Run proxy service account | `scion-hub-HUB_NAME-proxy@PROJECT_ID.iam.gserviceaccount.com` (name truncated and hashed for long HUB_NAME values) |
 | IAP SSH firewall rule | `scion-hub-HUB_NAME-allow-iap-ssh` (scoped via `--target-tags` to instances tagged `scion-hub-HUB_NAME`; deleting the VM removes the tag along with it) |
