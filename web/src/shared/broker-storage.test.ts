@@ -158,10 +158,10 @@ describe('storageRows', () => {
   it('redacts userinfo in a reported server', () => {
     const rows = rowMap({
       backend: 'nfs',
-      nfs: { server: 'user:secretpw@filer', export: '/e', subPathRoot: 'r', healthy: true },
+      nfs: { server: 'user:pw123@filer', export: '/e', subPathRoot: 'r', healthy: true },
     });
     expect(rows['NFS server']).toBe('***@filer');
-    expect(JSON.stringify(rows)).not.toContain('secretpw');
+    expect(JSON.stringify(rows)).not.toContain('pw123');
   });
 
   it('shows the volume fields and a split shared-dir placement', () => {

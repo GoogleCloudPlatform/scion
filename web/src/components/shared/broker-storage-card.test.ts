@@ -112,14 +112,14 @@ describe('scion-broker-storage-card', () => {
 
   it('redacts userinfo in reported values and in difference lines', async () => {
     const storage = nfsStorage({
-      nfs: { server: 'user:secretpw@filer', export: '/e', subPathRoot: 'r', healthy: true },
+      nfs: { server: 'user:pw123@filer', export: '/e', subPathRoot: 'r', healthy: true },
     });
-    const root = await mount(storage, ['nfs server: hub "filer", broker "user:secretpw@filer"']);
+    const root = await mount(storage, ['nfs server: hub "filer", broker "user:pw123@filer"']);
     expect(rows(root)['NFS server']).toBe('***@filer');
     expect(root.querySelector('.storage-mismatch-alert li')?.textContent?.trim()).toBe(
       'nfs server: hub "filer", broker "***@filer"'
     );
-    expect(root.textContent).not.toContain('secretpw');
+    expect(root.textContent).not.toContain('pw123');
   });
 
   it('redacts a difference line whose value contains an escaped quote', async () => {

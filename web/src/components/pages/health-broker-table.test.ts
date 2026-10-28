@@ -483,7 +483,7 @@ describe('scion-health-broker-table storage layout mismatch', () => {
 
   it('shows a layout mismatch pill with the redacted differences', async () => {
     const lines = [
-      'nfs server: hub "filer", broker "user:secretpw@filer"',
+      'nfs server: hub "filer", broker "user:pw123@filer"',
       'homes: hub "nfs", broker "local"',
     ];
     const root = await mount(
@@ -502,7 +502,7 @@ describe('scion-health-broker-table storage layout mismatch', () => {
     expect(root.querySelector('td.storage .visually-hidden')?.textContent).toContain(
       'homes: hub "nfs", broker "local"'
     );
-    expect(root.querySelector('td.storage')?.innerHTML).not.toContain('secretpw');
+    expect(root.querySelector('td.storage')?.innerHTML).not.toContain('pw123');
   });
 
   it('redacts a difference whose value contains an escaped quote', async () => {
