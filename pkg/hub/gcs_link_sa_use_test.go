@@ -265,7 +265,7 @@ func TestGCSLink_SAUse_AccessConstraintFailuresDeny(t *testing.T) {
 			func(inner store.Store, fault *storeFaultSwitch) store.Store {
 				return &switchedConstraintsStore{Store: inner, fault: fault, err: injected}
 			},
-			"restriction removed permission: access_constraint_error - restriction has no check function (fail closed)",
+			reasonStoredAgentConstraintLoadError,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

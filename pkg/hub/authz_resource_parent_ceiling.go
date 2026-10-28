@@ -403,7 +403,7 @@ func (a *AuthzService) parentCeilingSourceIdentity(ctx context.Context, row stor
 // reviewed mappings have an evaluator; any other mapping denies with
 // ceiling_error, so adding a table row without an evaluator cannot allow.
 func (a *AuthzService) evaluateResourceParentCeiling(ctx context.Context, m ResourceParentCeiling, agentID string, resource Resource) ParentCeilingDecision {
-	proof := ParentProof{Permission: m.ParentPermission}
+	proof := ParentProof{Kind: ParentProofKindParentPermission, Permission: m.ParentPermission}
 	if resource.Type != m.ResourceType {
 		return parentCeilingDeny(DenyCauseCeilingError, "resource does not match the parent ceiling", proof)
 	}
@@ -430,10 +430,10 @@ func (a *AuthzService) evaluateResourceParentCeiling(ctx context.Context, m Reso
 func (a *AuthzService) applyResourceParentCeiling(ctx context.Context, m ResourceParentCeiling, agent AgentIdentity, resource Resource, decision Decision) Decision {
 	if agent == nil || isNilIdentity(agent) || agent.ID() == "" {
 		return parentCeilingDenyDecision(decision, DenyCauseCeilingError,
-			"parent ceiling: the principal is not an agent identity", ParentProof{Permission: m.ParentPermission})
+			"parent ceiling: the principal is not an agent identity", ParentProof{Kind: ParentProofKindParentPermission, Permission: m.ParentPermission})
 	}
 	if deny, cause, reason, adoptable := a.parentCeilingChainDeny(ctx, agent, m.DecisionPermission); deny {
-		decision = parentCeilingDenyDecision(decision, cause, reason, ParentProof{Permission: m.ParentPermission})
+		decision = parentCeilingDenyDecision(decision, cause, reason, ParentProof{Kind: ParentProofKindParentPermission, Permission: m.ParentPermission})
 		decision.adoptionRemediable = cause == DenyCauseCeilingUnrecorded && adoptable
 		return decision
 	}
@@ -631,6 +631,12 @@ func (a *AuthzService) decideStoredAgentServiceAccountUse(ctx context.Context, a
 	return decision
 }
 
+// reasonStoredAgentConstraintLoadError is the deny reason of
+// storedAgentAccessConstraintDeny when the access constraints cannot be
+// loaded. It names the failure, rather than the "no check function" text of
+// a restriction without a check.
+const reasonStoredAgentConstraintLoadError = "access constraint load error (fail-closed)"
+
 // storedAgentAccessConstraintDeny is Decide's step 7c for a stored agent
 // with no credential on the request: it loads the access constraints that
 // apply to the agent's principal closure (the agent and the groups it
@@ -661,7 +667,7 @@ func (a *AuthzService) storedAgentAccessConstraintDeny(ctx context.Context, iden
 	restrictions, err := a.accessConstraintRestrictions(ctx, closure, resourceCtx)
 	if err != nil {
 		a.logger.Warn("stored-agent use: failed to load access constraints (fail-closed)", "error", err)
-		return Decision{Allowed: false, Reason: "restriction removed permission: access_constraint_error - restriction has no check function (fail closed)", DenyCause: DenyCauseResolutionError}, true
+		return Decision{Allowed: false, Reason: reasonStoredAgentConstraintLoadError, DenyCause: DenyCauseResolutionError}, true
 	}
 	for _, r := range restrictions {
 		if r.Check == nil {

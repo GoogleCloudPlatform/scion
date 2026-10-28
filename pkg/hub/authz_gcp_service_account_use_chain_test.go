@@ -134,6 +134,8 @@ func TestMissingOwnEdgeNotHubAttestedDeniesGCPServiceAccountUse(t *testing.T) {
 	d := authz.applyResourceParentCeiling(context.Background(), m, unattested, gcpUseResource(saX), allowed)
 	requireUseDeniedWithCause(t, d, "")
 	require.Equal(t, missingEdgeReason(agentID), d.Reason)
+	require.NotNil(t, d.parentProof)
+	assert.Equal(t, ParentProofKindParentPermission, d.parentProof.Kind, "the chain-deny proof names its kind")
 }
 
 // seedDevLocalDelegationEdge records delegateID's edge from the
