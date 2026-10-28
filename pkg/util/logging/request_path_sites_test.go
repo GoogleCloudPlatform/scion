@@ -83,6 +83,7 @@ var requestPathSites = []requestPathSite{
 	{"conduit_ingress.go", "Server.proxyConduitDial", "URL.RawPath", 1, "not the served request: clears the escaped path of the outgoing ingress leg to a relay; not logged"},
 	{"conduit_proxy.go", "Server.serveConduitProxy", "URL.Path", 1, "routing: forwards the path to the proxied conduit target"},
 	{"conduit_proxy.go", "Server.serveConduitProxy", "URL.RawPath", 1, "routing: forwards the path to the proxied conduit target"},
+	{"conduit_ingress_broker_nonce.go", "Server.conduitIngressDefersBrokerNonce", "URL.Path", 1, "comparison: whether a broker request is the conduit dial whose nonce Admit records (path exactly /api/v1/conduit); not logged"},
 	{"conduit_relay_admit.go", "Server.hubAdmit", "URL(bare)", 1, "not the served request: the forwarded handshake request (fixed path /api/v1/conduit) a relay admission runs through the middleware chain"},
 	{"conduit_relay_admit.go", "relayServesHost", "URL(bare)", 1, "comparison: a URL built from the dialer's Host for hostname and port matching; not logged"},
 	{"devauth.go", "DevAuthMiddlewareWithDebug", "URL.Path", 2, "comparison: health endpoint checks"},

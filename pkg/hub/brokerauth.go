@@ -84,6 +84,18 @@ type BrokerAuthService struct {
 	// Server.testAdminBrokerAdmission, which refuses every broker other than
 	// the co-located one while the test admin tier is on.
 	brokerAdmission func(ctx context.Context, brokerID string) error
+	// deferNonce, when set and true for a request, makes
+	// ValidateBrokerSignature verify the request without recording its
+	// nonce. The hub sets it to Server.conduitIngressDefersBrokerNonce: a
+	// conduit dial the ingress forwards to a separate relay, whose Admit
+	// records the nonce instead (conduit_ingress_broker_nonce.go).
+	deferNonce func(r *http.Request) bool
+}
+
+// defersNonce reports whether ValidateBrokerSignature leaves r's nonce to
+// the hop that admits it (deferNonce).
+func (s *BrokerAuthService) defersNonce(r *http.Request) bool {
+	return s != nil && s.deferNonce != nil && s.deferNonce(r)
 }
 
 // admitBroker applies brokerAdmission, if any.
@@ -1020,26 +1032,6 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 		return nil, fmt.Errorf("%w (skew: %v)", errBrokerAuthClockSkew, clockSkew)
 	}
 
-	// Validate nonce if enabled — use DB-backed store for multi-instance
-	// replay protection when configured; otherwise use in-memory cache.
-	// DB errors are fail-closed (request is rejected, not silently passed).
-	// Defence-in-depth: guard against empty nonce reaching the DB store.
-	if s.config.EnableNonceCache && nonce != "" {
-		if s.nonceStore != nil {
-			isNew, err := s.nonceStore.CheckAndStore(ctx, nonce, s.config.NonceCacheTTL)
-			if err != nil {
-				return nil, fmt.Errorf("%w: %w", errBrokerAuthNonceCheck, err)
-			}
-			if !isNew {
-				return nil, errBrokerAuthReplay
-			}
-		} else if s.nonces != nil {
-			if !s.nonces.Add(nonce) {
-				return nil, errBrokerAuthReplay
-			}
-		}
-	}
-
 	// Get the broker's secret
 	brokerSecret, err := s.store.GetBrokerSecret(ctx, brokerID)
 	if err != nil {
@@ -1068,7 +1060,42 @@ func (s *BrokerAuthService) ValidateBrokerSignature(ctx context.Context, r *http
 		return nil, errBrokerAuthInvalidSignature
 	}
 
+	// Record the nonce only for a request whose signature verified, so a
+	// request with a valid nonce and a bad signature leaves the nonce
+	// unused. A request deferNonce selects is verified here and has its
+	// nonce recorded by the hop that admits it.
+	if !s.defersNonce(r) {
+		if err := s.recordNonce(ctx, nonce); err != nil {
+			return nil, err
+		}
+	}
+
 	return NewBrokerIdentity(brokerID), nil
+}
+
+// recordNonce records nonce when the nonce cache is enabled, refusing a
+// nonce already recorded. It uses the DB-backed store for multi-instance
+// replay protection when configured, otherwise the in-memory cache. DB
+// errors are fail-closed (the request is rejected, not silently passed).
+// Defence-in-depth: an empty nonce never reaches the DB store.
+func (s *BrokerAuthService) recordNonce(ctx context.Context, nonce string) error {
+	if !s.config.EnableNonceCache || nonce == "" {
+		return nil
+	}
+	if s.nonceStore != nil {
+		isNew, err := s.nonceStore.CheckAndStore(ctx, nonce, s.config.NonceCacheTTL)
+		if err != nil {
+			return fmt.Errorf("%w: %w", errBrokerAuthNonceCheck, err)
+		}
+		if !isNew {
+			return errBrokerAuthReplay
+		}
+		return nil
+	}
+	if s.nonces != nil && !s.nonces.Add(nonce) {
+		return errBrokerAuthReplay
+	}
+	return nil
 }
 
 // buildCanonicalString builds the canonical string for HMAC signing.
