@@ -1851,6 +1851,11 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 				"cannot restore the agent: the user or agent it belongs to no longer exists", nil)
 			return
 		}
+		if errors.Is(err, errAgentOwnerUserDeleting) {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"cannot restore the agent: the user it belongs to is being deleted", nil)
+			return
+		}
 		if errors.Is(err, errRestoreEdgeConflict) {
 			Conflict(w, "The agent already has an active delegation that conflicts with the one being restored")
 			return

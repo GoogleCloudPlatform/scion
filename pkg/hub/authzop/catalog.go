@@ -498,12 +498,15 @@ var MutationClassifications = []MutationClassification{
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_users_core.go — user management
 	// -----------------------------------------------------------------------
-	// deleteUserRowCascadeTx (and the binding cascade it calls) is shared
-	// by user.admin.delete and testidentity.delete
-	// (handleDeleteTestIdentity), which reaches it only for a
-	// kind=test_fixture row.
-	{File: "pkg/hub/handlers_users_core.go", Function: "deleteUserRowCascadeTx", Symbol: "DeleteUser", OperationID: "user.admin.delete"},
-	{File: "pkg/hub/handlers_users_core.go", Function: "deleteUserRowCascadeTx", Symbol: "DeleteGroupMembershipsForUser", OperationID: "user.admin.delete"},
+	// deleteUserRowCascadeModeTx (through deleteUserRowCascadeTx, with the
+	// binding cascade it calls) is shared by user.admin.delete and
+	// testidentity.delete (handleDeleteTestIdentity), which reaches it only
+	// for a kind=test_fixture row. The completion of a forced user delete
+	// (completeUserDeletion, user.admin.delete) reaches it too.
+	{File: "pkg/hub/handlers_users_core.go", Function: "deleteUserRowCascadeModeTx", Symbol: "DeleteUser", OperationID: "user.admin.delete"},
+	{File: "pkg/hub/user_delete_force.go", Function: "forceDeleteUserTx", Symbol: "MarkUserDeleting", OperationID: "user.admin.delete"},
+	{File: "pkg/hub/useraccesstoken.go", Function: "revokeUserAccessTokensForUserTx", Symbol: "RevokeUserAccessTokensForUser", OperationID: "user.admin.delete"},
+	{File: "pkg/hub/handlers_users_core.go", Function: "deleteUserRowCascadeModeTx", Symbol: "DeleteGroupMembershipsForUser", OperationID: "user.admin.delete"},
 	{File: "pkg/hub/handlers_users_core.go", Function: "guardAndCascadeUserRoleBindingsTx", Symbol: "DeleteRoleBindingsForPrincipal", OperationID: "user.admin.delete"},
 	{File: "pkg/hub/handlers_users_core.go", Function: "guardAndCascadeUserRoleBindingsTx", Symbol: "DeleteRoleBinding", OperationID: "user.admin.delete"},
 	{File: "pkg/hub/handlers_users_core.go", Function: "updateUser", Symbol: "UpdateUser", OperationID: "user.update"},
@@ -608,7 +611,8 @@ var MutationClassifications = []MutationClassification{
 	// external-bearer auth path (auth_external_bearer.go). Extracted from
 	// ge_exchange.go's former resolveLocalUser/provisionNewUser.
 	// -----------------------------------------------------------------------
-	{File: "pkg/hub/google_identity_resolver.go", Function: "Resolve", Symbol: "DeleteUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Google identity resolution: orphan user cleanup after concurrent binding race", Scope: "pkg/hub/google_identity_resolver.go"}},
+	{File: "pkg/hub/google_identity_resolver.go", Function: "cleanupProvisionedUser", Symbol: "DeleteUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Google identity resolution: orphan user cleanup after concurrent binding race, for a resolver without the guarded cleanup; kept when the row gained an external identity binding", Scope: "pkg/hub/google_identity_resolver.go"}},
+	{File: "pkg/hub/user_delete_data.go", Function: "cleanupOrphanedProvisionedUser", Symbol: "DeleteUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Google identity resolution: guarded orphan user cleanup after concurrent binding race; in one transaction under the user row lock, deletes only a row with no external identity binding, role binding, agent or delegation, after the delegator-edge sweep", Scope: "pkg/hub/user_delete_data.go"}},
 	{File: "pkg/hub/google_identity_resolver.go", Function: "provisionNewUser", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionAuthenticationOnly, Reason: "Google identity resolution: new user provisioning (GE exchange and external-bearer)", Scope: "pkg/hub/google_identity_resolver.go"}},
 
 	// -----------------------------------------------------------------------

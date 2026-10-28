@@ -2389,6 +2389,11 @@ func (s *Server) createAgentInProject(
 				"cannot create the agent: the user or agent it belongs to no longer exists", nil)
 			return
 		}
+		if errors.Is(err, errAgentOwnerUserDeleting) {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"cannot create the agent: the user it belongs to is being deleted", nil)
+			return
+		}
 		if errors.Is(err, errAgentCreateWriteInvalid) {
 			slog.ErrorContext(ctx, "agent create: incomplete create write", "error", err)
 			InternalError(w)
