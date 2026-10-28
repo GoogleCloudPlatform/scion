@@ -638,7 +638,7 @@ func TestUserSecretAttributionRepair_RereadForeignAgentNotRewritten(t *testing.T
 	f, capturer, _ := newUSAFixture(t, "usa-reread-foreign")
 	ctx := context.Background()
 	otherUser := tid("usa-reread-foreign-user")
-	createDCUser(t, f.Store, otherUser, "usa-reread-foreign@test.com", f.ProjectID, store.ProjectRoleMember)
+	createDCUser(t, f.Store, otherUser, "usa-reread-foreign-other@test.com", f.ProjectID, store.ProjectRoleMember)
 	foreign := tid("usa-reread-foreign-agent")
 	require.NoError(t, f.Store.CreateAgent(ctx, &store.Agent{
 		ID: foreign, Slug: "usa-reread-foreign", Name: "usa-reread-foreign", ProjectID: f.ProjectID,
