@@ -1018,3 +1018,20 @@ func TestReconcileSuperAdminBindings_SkipsDeletingUser(t *testing.T) {
 	assert.Equal(t, store.UserStatusDeleting, u.Status)
 	assert.Equal(t, store.UserRoleMember, u.Role)
 }
+
+// An active delegation from the user to an agent the cascade does not stop
+// (another user's agent), left active at completion, ends with the user:
+// the completion deactivates it with cause delegator_deleted.
+func TestForceDeleteUser_CompletionSweepsDelegatorEdges(t *testing.T) {
+	f := newForceDelFixture(t, time.Hour)
+	ctx := context.Background()
+	d := stoppedDeletionReadyToComplete(t, f)
+	other := createOwnedAgent(t, f.s, "sweep-other", f.project.ID, DevUserID)
+	edge := f.agentEdge(t, store.DelegationPrincipalUser, f.dave.ID, other)
+
+	completed, err := f.srv.completeUserDeletion(ctx, d)
+	require.NoError(t, err)
+	require.True(t, completed)
+	requireEdgeCause(t, f.s, edge.ID, store.EdgeDeactivationDelegatorDeleted, d.ID)
+	assert.True(t, mustGetAgent(t, f.s, other.ID).DeletedAt.IsZero(), "the other user's agent is not stopped")
+}
