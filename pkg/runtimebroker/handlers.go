@@ -9248,7 +9248,15 @@ func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, pro
 		return nil
 	}
 	// ctx (the request context) bounds the wait and any mount command.
-	return r.EnsureShareMounted(ctx, shareID)
+	// The reconciler's error names the share, its server and export, and
+	// the mount point: it goes to the broker log only, and the refusal
+	// (written into the response body) names configuration fields.
+	if err := r.EnsureShareMounted(ctx, shareID); err != nil {
+		s.agentLifecycleLog.Error("NFS share not mounted on the broker; refusing dispatch",
+			"agent", name, "runtime", runtimeType, "share", shareID, "error", err)
+		return errors.New(scionrt.ProjectShareUnavailableText(scionrt.ProjectShareMountPathField, false))
+	}
+	return nil
 }
 
 // resolveDispatchProjectDir mirrors buildStartContext's hub-managed project
