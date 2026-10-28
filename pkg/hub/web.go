@@ -4252,6 +4252,11 @@ func sessionString(session *sessions.Session, key string) string {
 	return ""
 }
 
+// webPermissionsPolicy is the Permissions-Policy on every hub response.
+// untrustedContentPermissionsPolicy replaces it on user- and agent-written
+// content and must deny everything this one denies.
+const webPermissionsPolicy = "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+
 // securityHeadersMiddleware adds security headers to all responses. Each
 // response gets its own script nonce (see web_csp.go); the SPA shell reads
 // it from the request context and puts it on its inline script.
@@ -4264,7 +4269,7 @@ func (ws *WebServer) securityHeadersMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
-		w.Header().Set("Permissions-Policy", "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()")
+		w.Header().Set("Permissions-Policy", webPermissionsPolicy)
 		next.ServeHTTP(w, r)
 	})
 }
