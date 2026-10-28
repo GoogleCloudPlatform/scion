@@ -6683,8 +6683,9 @@ func (s *Server) registerSchedulerHandlers() {
 	s.scheduler.RegisterRecurringSingleton("start-claim-reaper", 1, store.LockStartClaimReaper, s.startClaimReaperHandler())
 	// Forced user deletions (ptone/scion#2143): every minute, on every
 	// replica (the engine's per-agent lease and the completion's
-	// compare-and-set make concurrent runs safe). Does nothing while
-	// hub.user_delete_force_cascade is off.
+	// compare-and-set make concurrent runs safe). It runs whether or not
+	// hub.user_delete_force_cascade is on, so deletions accepted while it
+	// was on complete (see userDeletionReconcileHandler).
 	s.scheduler.RegisterRecurring("user-deletion-reconcile", 1, s.userDeletionReconcileHandler())
 	go func() {
 		// Bounded: a store that does not answer at startup must not leave

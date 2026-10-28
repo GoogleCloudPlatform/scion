@@ -204,6 +204,12 @@ func (s *Server) forceDeleteUser(w http.ResponseWriter, r *http.Request, actor U
 			writeUserDeletionInProgress(w, inProgress)
 		case errors.Is(err, store.ErrNotFound):
 			NotFound(w, "User")
+		case errors.Is(err, store.ErrTransient):
+			// A PostgreSQL deadlock or serialization failure, for example
+			// with the finalize of one of the user's agents: the
+			// transaction rolled back, so nothing was written.
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"the user deletion conflicted with a concurrent change and wrote nothing; retry", nil)
 		default:
 			if writeConstraintAdminLockoutError(w, err) || writeUserDeleteCascadeError(w, err) {
 				break

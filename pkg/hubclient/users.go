@@ -57,7 +57,7 @@ type UserService interface {
 	// ForceDelete deletes a user whom agents or active delegations depend
 	// on, through DELETE /api/v1/users/{id}?force=true (behind the
 	// hub.user_delete_force_cascade experiment; while it is off the hub
-	// refuses as for a plain delete). It returns the deletion in progress
+	// ignores force and the request is a plain delete). It returns the deletion in progress
 	// (202), or nil when nothing blocked and the user was deleted at once
 	// (204). A repeated call while the deletion is in progress returns the
 	// same deletion. A 403 user_delete_force_forbidden (agents the caller

@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -41,17 +42,23 @@ import (
 // enableUserDeleteForce turns hub.user_delete_force_cascade on for srv.
 func enableUserDeleteForce(t *testing.T, srv *Server) {
 	t.Helper()
+	setUserDeleteForce(t, srv, true)
+}
+
+// setUserDeleteForce turns hub.user_delete_force_cascade on or off for srv.
+func setUserDeleteForce(t *testing.T, srv *Server, on bool) {
+	t.Helper()
 	var active []experiments.Experiment
 	for _, e := range srv.experimentRegistry().All() {
 		if e.Name == experiments.UserDeleteForceCascade {
-			e.Default = true
+			e.Default = on
 		}
 		active = append(active, e)
 	}
 	reg, err := experiments.NewRegistry(active, nil)
 	require.NoError(t, err)
 	srv.experiments = reg
-	require.True(t, srv.experimentEnabled(experiments.UserDeleteForceCascade))
+	require.Equal(t, on, srv.experimentEnabled(experiments.UserDeleteForceCascade))
 }
 
 // forceDelFixture is a hub with a broker-backed project, the force
@@ -189,6 +196,10 @@ func runForceCascade(t *testing.T, f *forceDelFixture) (userDeletionView, []*sto
 	}))
 	f.uat(t, "one")
 	f.uat(t, "two")
+	// A grant dave issued to another user's agent, which the cascade does
+	// not stop: the completion revokes every grant dave issued.
+	other := createOwnedAgent(t, f.s, "fd-other", f.project.ID, DevUserID)
+	grant := seedLifecycleGrant(t, f.s, other, f.dave.ID)
 
 	// Hold the teardown so the request's own writes can be checked
 	// before the engines run.
@@ -242,6 +253,13 @@ func runForceCascade(t *testing.T, f *forceDelFixture) (userDeletionView, []*sto
 	sec, ev := userScopedCounts(t, f.s, f.dave.ID)
 	assert.Zero(t, sec, "afterUserDeleted removed the user-scope secrets")
 	assert.Zero(t, ev, "afterUserDeleted removed the user-scope env vars")
+	// afterUserDeleted runs after the completion commits.
+	require.Eventually(t, func() bool {
+		g, err := f.s.GetAgentDelegationGrant(ctx, grant.grant.ID)
+		return err == nil && g.RevokedAt != nil
+	}, 15*time.Second, 20*time.Millisecond, "the grant dave issued is revoked")
+	assertGrantRevoked(t, f.s, grant, revokeReasonIssuerDeleted)
+	assert.True(t, mustGetAgent(t, f.s, other.ID).DeletedAt.IsZero(), "the other user's agent is not stopped")
 	return done, []*store.Agent{a, b, c}
 }
 
@@ -324,6 +342,10 @@ func TestForceDeleteUser_StoppingRefusals(t *testing.T) {
 	edges, err := f.s.GetDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, held.ID)
 	require.NoError(t, err)
 	assert.Empty(t, edges)
+	// A non-read decision for the agent as the principal is denied.
+	stored := mustGetAgent(t, f.s, held.ID)
+	decision := f.srv.agentCreateDecision(ctx, &storedAgentIdentity{agent: stored}, f.project.ID)
+	assert.False(t, decision.Allowed, "an agent of a deleting user may not create agents")
 
 	// Restore in the user's tree.
 	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+gone.ID+"/restore", nil)
@@ -538,9 +560,13 @@ func TestForceDeleteUser_FailedAgentUntilOperatorRemoves(t *testing.T) {
 			assert.Equal(t, store.UserDeletionOutcomeStopped, a.Outcome)
 		}
 	}
-	// Reconciling again does not complete it.
+	// Reconciling again does not complete it, and the deletion names the
+	// failed agent and its error.
 	f.srv.reconcileUserDeletion(context.Background(), v.DeletionID, false)
-	assert.Equal(t, store.UserDeletionStateStopping, f.getDeletion(t).State)
+	v = f.getDeletion(t)
+	assert.Equal(t, store.UserDeletionStateStopping, v.State)
+	assert.Contains(t, v.LastError, stuck.ID)
+	assert.Contains(t, v.LastError, "broker unreachable")
 
 	// The operator removes the stuck agent with force.
 	rec = doRequest(t, f.srv, http.MethodDelete, "/api/v1/agents/"+stuck.ID+"?force=true", nil)
@@ -698,4 +724,297 @@ func TestUserDeletionRetryDue(t *testing.T) {
 	assert.True(t, userDeletionRetryDue(rec(2, 2*userDeletionRetryBase), ts))
 	assert.True(t, userDeletionRetryDue(rec(40, userDeletionRetryMax), ts))
 	assert.False(t, userDeletionRetryDue(rec(40, userDeletionRetryMax-time.Second), ts))
+}
+
+// One blocking agent the caller may not delete, among several it may:
+// 403 user_delete_force_forbidden naming only that agent, and nothing is
+// written.
+func TestForceDeleteUser_OneForbiddenAgentRefusesAll(t *testing.T) {
+	srv, s := testServerNoDevAuth(t)
+	enableUserDeleteForce(t, srv)
+	ctx := context.Background()
+	target := newActiveMember(t, s, "user-target", "target@test.com")
+	allowedProject := pvSeedProject(t, s, "force-allowed-project")
+	deniedProject := pvSeedProject(t, s, "force-denied-project")
+	createOwnedAgent(t, s, "target-ok-1", allowedProject, target.ID)
+	okAgent := createOwnedAgent(t, s, "target-ok-2", allowedProject, target.ID)
+	denied := createOwnedAgent(t, s, "target-denied", deniedProject, target.ID)
+	edge := createUserEdge(t, s, target.ID, store.DelegationPrincipalAgent, okAgent.ID, allowedProject)
+	tokenID := tid("uat-one-forbidden")
+	require.NoError(t, s.CreateUserAccessToken(ctx, &store.UserAccessToken{
+		ID: tokenID, UserID: target.ID, Name: "of", Prefix: "pfx-of", KeyHash: "hash-" + tokenID,
+		BoundaryKind: "hub", Scopes: []string{"agent:read"},
+	}))
+	actor := bulkInviteOnlyCaller(t, s, "deleter", "user.delete")
+	rd := createTestRoleDefinition(t, s, "force-agent-deleter", store.RoleScopeProject,
+		[]string{"project.read", "agent.read", "agent.list", "agent.delete"})
+	pvSeedRoleBinding(t, s, rd.ID, "user", actor.ID, store.RoleScopeProject, allowedProject)
+
+	rec := doRequestAsUser(t, srv, actor, http.MethodDelete, "/api/v1/users/"+target.ID+"?force=true", nil)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	code, details := errorBody(t, rec)
+	assert.Equal(t, ErrCodeUserDeleteForceForbidden, code)
+	agents, _ := details["agents"].([]interface{})
+	require.Len(t, agents, 1, "only the agent the caller may not delete is named: %v", agents)
+	assert.Equal(t, denied.ID, agents[0].(map[string]interface{})["id"])
+
+	u, err := s.GetUser(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserStatusActive, u.Status)
+	_, err = s.GetUserDeletionByUser(ctx, target.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	e, err := s.GetDelegationEdge(ctx, edge.ID)
+	require.NoError(t, err)
+	assert.True(t, e.Active)
+	n, err := s.CountUserAccessTokens(ctx, target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "the access token is not revoked")
+	assert.Empty(t, auditsOf(t, s, "user_delete_requested", target.ID))
+}
+
+// A finalize that fails and rolls back (a hook of the finalize
+// transaction refuses) leaves the agent failed with the engine's error;
+// it is not claimed again before its backoff, and the user stays
+// deleting.
+func TestForceDeleteUser_FinalizeFailureIsFailedAndBacksOff(t *testing.T) {
+	f := newForceDelFixture(t, time.Hour)
+	ctx := context.Background()
+	a := f.agent(t, "ff-a", nil)
+	var finalizes atomic.Int32
+	var refuse atomic.Bool
+	refuse.Store(true)
+	old := agentDeletionFinalizeSeam
+	t.Cleanup(func() { agentDeletionFinalizeSeam = old })
+	agentDeletionFinalizeSeam = func(_ context.Context, _ store.Store, got *store.Agent, _ store.DeletionFinalizeMode) error {
+		if got.ID == a.ID && refuse.Load() {
+			finalizes.Add(1)
+			return errors.New("audit write refused")
+		}
+		return nil
+	}
+
+	rec := f.forceDelete(t)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	var v userDeletionView
+	require.Eventually(t, func() bool {
+		v = f.getDeletion(t)
+		return v.Counts.Failed == 1
+	}, 15*time.Second, 20*time.Millisecond, "the agent reads failed")
+	require.Len(t, v.Agents, 1)
+	assert.Equal(t, store.UserDeletionOutcomeFailed, v.Agents[0].Outcome)
+	assert.Contains(t, v.Agents[0].LastError, "audit write refused")
+	assert.Equal(t, 1, v.Agents[0].Attempts)
+	assert.Equal(t, store.DeletionStateFinalizing, mustGetAgent(t, f.s, a.ID).DeletionState)
+
+	// Before the backoff passes, reconciles claim nothing: the finalize
+	// does not run again.
+	seen := finalizes.Load()
+	require.Positive(t, seen)
+	for i := 0; i < 3; i++ {
+		f.srv.reconcileUserDeletion(ctx, v.DeletionID, false)
+	}
+	assert.Equal(t, seen, finalizes.Load(), "no claim before the backoff")
+	v = f.getDeletion(t)
+	assert.Equal(t, 1, v.Agents[0].Attempts)
+	assert.Equal(t, store.UserDeletionStateStopping, v.State)
+	assert.Contains(t, v.LastError, "audit write refused")
+	u, err := f.s.GetUser(ctx, f.dave.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserStatusDeleting, u.Status)
+
+	// Once the hook accepts, a retry finalizes the agent and the deletion
+	// completes with it stopped.
+	refuse.Store(false)
+	f.srv.reconcileUserDeletion(ctx, v.DeletionID, true)
+	done := f.waitCompleted(t)
+	assert.Equal(t, userDeletionCounts{Stopped: 1}, done.Counts)
+}
+
+// An agent whose Runtime Broker is not connected is failed with no delete
+// attempted, and the deletion names it in its last error.
+func TestForceDeleteUser_BrokerUnavailableIsFailed(t *testing.T) {
+	f := newForceDelFixture(t, time.Hour)
+	ctx := context.Background()
+	offline := &store.RuntimeBroker{ID: tid("broker-force-del-offline"), Name: "Offline Broker", Slug: "force-del-offline",
+		Status: store.BrokerStatusOffline, Endpoint: "http://localhost:9801"}
+	require.NoError(t, f.s.CreateRuntimeBroker(ctx, offline))
+	a := &store.Agent{ID: tid("agent-bu-a"), Slug: "bu-a", Name: "bu-a", ProjectID: f.project.ID,
+		RuntimeBrokerID: offline.ID, Phase: string(state.PhaseRunning),
+		OwnerID: f.dave.ID, CreatedBy: f.dave.ID, Ancestry: []string{f.dave.ID}}
+	require.NoError(t, f.s.CreateAgent(ctx, a))
+
+	rec := f.forceDelete(t)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	var v userDeletionView
+	require.Eventually(t, func() bool {
+		v = f.getDeletion(t)
+		return v.Counts.Failed == 1 && v.LastError != ""
+	}, 15*time.Second, 20*time.Millisecond, "the agent reads failed and the deletion names it")
+	assert.Equal(t, userDeletionBrokerUnavailable, v.Agents[0].LastError)
+	assert.Contains(t, v.LastError, a.ID)
+	assert.Contains(t, v.LastError, userDeletionBrokerUnavailable)
+	assert.Equal(t, store.DeletionStateNone, mustGetAgent(t, f.s, a.ID).DeletionState, "no delete was claimed")
+}
+
+// A reconcile pass holding an older copy of an agent's record cannot
+// replace the stopped outcome a finalize recorded since it read it: the
+// agent is reported stopped, not removed.
+func TestForceDeleteUser_StaleWriteKeepsStopped(t *testing.T) {
+	f := newForceDelFixture(t, 0)
+	ctx := context.Background()
+	a := f.agent(t, "stale-a", nil)
+	require.NoError(t, f.s.MarkUserDeleting(ctx, f.dave.ID))
+	d := &store.UserDeletion{UserID: f.dave.ID, RequestedByKind: "user", RequestedByID: DevUserID,
+		CredentialKind: "session", RequestedAt: time.Now()}
+	require.NoError(t, f.s.CreateUserDeletion(ctx, d))
+	stale := store.UserDeletionAgent{DeletionID: d.ID, AgentID: a.ID, Slug: a.Slug, ProjectID: a.ProjectID,
+		Outcome: store.UserDeletionOutcomePending}
+	require.NoError(t, f.s.UpsertUserDeletionAgent(ctx, &stale))
+
+	// Another delete holds the agent, and its finalize records the agent
+	// stopped after the pass read the record.
+	deleting := store.DeletionStateDeleting
+	lease := time.Now().Add(time.Hour)
+	n, err := f.s.UpdateAgentDeletion(ctx, a.ID,
+		store.DeletionPredicate{States: []string{store.DeletionStateNone}, DeletedAtNull: true},
+		store.DeletionFields{State: &deleting, LeaseAt: &lease})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	confirmed := stale
+	confirmed.Outcome = store.UserDeletionOutcomeStopped
+	require.NoError(t, f.s.UpsertUserDeletionAgent(ctx, &confirmed))
+
+	// The pass refreshes from its older copy: it sees the delete in flight
+	// and writes stopping, which leaves the stopped record as it is.
+	row, err := f.srv.refreshUserDeletionAgent(ctx, d, &stale, time.Now())
+	require.NoError(t, err)
+	require.NotNil(t, row)
+	assert.Equal(t, store.UserDeletionOutcomeStopping, stale.Outcome, "the pass decided from its older copy")
+	recs, err := f.s.ListUserDeletionAgents(ctx, d.ID)
+	require.NoError(t, err)
+	require.Len(t, recs, 1)
+	assert.Equal(t, store.UserDeletionOutcomeStopped, recs[0].Outcome)
+
+	// The finalize removed the row (no retention): the deletion completes
+	// with the agent stopped.
+	require.NoError(t, f.s.DeleteAgent(ctx, a.ID))
+	f.srv.reconcileUserDeletion(ctx, d.ID, false)
+	done := f.waitCompleted(t)
+	assert.Equal(t, userDeletionCounts{Stopped: 1}, done.Counts)
+}
+
+// An agent the scheduler started for one of the user's schedules (no
+// owner or ancestry; the user only as created_by) blocks the user, and a
+// force request stops it.
+func TestForceDeleteUser_ScheduleStartedAgentIsStopped(t *testing.T) {
+	f := newForceDelFixture(t, time.Hour)
+	a := &store.Agent{ID: tid("agent-sched"), Slug: "sched", Name: "sched", ProjectID: f.project.ID,
+		RuntimeBrokerID: f.broker.ID, Phase: string(state.PhaseRunning), CreatedBy: f.dave.ID}
+	require.NoError(t, f.s.CreateAgent(context.Background(), a))
+
+	rec := f.forceDelete(t)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	v := decodeDeletion(t, rec)
+	require.Len(t, v.Agents, 1)
+	assert.Equal(t, a.ID, v.Agents[0].ID)
+	done := f.waitCompleted(t)
+	assert.Equal(t, userDeletionCounts{Stopped: 1}, done.Counts)
+	assert.False(t, mustGetAgent(t, f.s, a.ID).DeletedAt.IsZero())
+}
+
+// The last super-admin is refused under force too, before any write.
+func TestForceDeleteUser_LastSuperAdminRefused(t *testing.T) {
+	f := newForceDelFixture(t, time.Hour)
+	ctx := context.Background()
+	a := f.agent(t, "lsa-a", nil)
+	f.srv.ensureSuperAdminBinding(ctx, f.dave.ID)
+	rd, err := f.s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	bindings, err := f.s.ListRoleBindingsForScope(ctx, store.RoleScopeSystem, "")
+	require.NoError(t, err)
+	for _, b := range bindings {
+		if b.RoleDefinitionID == rd.ID && b.PrincipalID != f.dave.ID {
+			require.NoError(t, f.s.DeleteRoleBinding(ctx, b.ID))
+		}
+	}
+
+	rec := f.forceDelete(t)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "last super-admin")
+	u, err := f.s.GetUser(ctx, f.dave.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserStatusActive, u.Status)
+	_, err = f.s.GetUserDeletionByUser(ctx, f.dave.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	assert.True(t, mustGetAgent(t, f.s, a.ID).DeletedAt.IsZero())
+}
+
+// With the experiment off, a deletion accepted while it was on runs to
+// completion on the recurring reconcile.
+func TestForceDeleteUser_InFlightCompletesWithExperimentOff(t *testing.T) {
+	f := newForceDelFixture(t, time.Hour)
+	ctx := context.Background()
+	d := stoppedDeletionReadyToComplete(t, f)
+	setUserDeleteForce(t, f.srv, false)
+
+	f.srv.userDeletionReconcileHandler()(ctx)
+	got, err := f.s.GetUserDeletion(ctx, d.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserDeletionStateCompleted, got.State)
+	_, err = f.s.GetUser(ctx, f.dave.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// The completion reopens the record of an agent recorded stopped that
+// blocks the user again; the deletion stays stopping until it is stopped.
+func TestForceDeleteUser_CompletionReopensStoppedRecord(t *testing.T) {
+	f := newForceDelFixture(t, time.Hour)
+	ctx := context.Background()
+	d := stoppedDeletionReadyToComplete(t, f)
+	// A live agent of dave's whose record reads stopped (written behind
+	// the guard's back).
+	live := f.agent(t, "reopen-live", nil)
+	require.NoError(t, f.s.UpsertUserDeletionAgent(ctx, &store.UserDeletionAgent{
+		DeletionID: d.ID, AgentID: live.ID, Slug: live.Slug, ProjectID: live.ProjectID,
+		Outcome: store.UserDeletionOutcomeStopped, Attempts: 1,
+	}))
+
+	completed, err := f.srv.completeUserDeletion(ctx, d)
+	require.NoError(t, err)
+	assert.False(t, completed)
+	recs, err := f.s.ListUserDeletionAgents(ctx, d.ID)
+	require.NoError(t, err)
+	require.Len(t, recs, 2)
+	for _, r := range recs {
+		if r.AgentID == live.ID {
+			assert.Equal(t, store.UserDeletionOutcomePending, r.Outcome, "the record is reopened")
+		} else {
+			assert.Equal(t, store.UserDeletionOutcomeStopped, r.Outcome)
+		}
+	}
+	got, err := f.s.GetUserDeletion(ctx, d.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserDeletionStateStopping, got.State)
+}
+
+// The admin_emails reconcile neither promotes nor binds a user being
+// deleted, even when it is listed.
+func TestReconcileSuperAdminBindings_SkipsDeletingUser(t *testing.T) {
+	_, s := setupCanDelegateTest(t)
+	ctx := context.Background()
+	id := tid("reconcile-deleting")
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: id, Email: "reconcile-deleting@test.com", DisplayName: "Deleting", Role: "member", Status: "active",
+	}))
+	require.NoError(t, s.MarkUserDeleting(ctx, id))
+
+	_, err := ReconcileSuperAdminBindings(ctx, s, []string{"reconcile-deleting@test.com"}, "")
+	require.NoError(t, err)
+	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, id)
+	require.NoError(t, err)
+	assert.Empty(t, bindings, "no super-admin binding for a user being deleted")
+	u, err := s.GetUser(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserStatusDeleting, u.Status)
+	assert.Equal(t, store.UserRoleMember, u.Role)
 }

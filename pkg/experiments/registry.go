@@ -515,7 +515,7 @@ var compiled = []Experiment{
 	{
 		Name:        UserDeleteForceCascade,
 		Title:       "Force user delete",
-		Description: "Lets an admin delete a user who has agents: DELETE /api/v1/users/{id}?force=true revokes the user's authority at once (status deleting, role bindings, access tokens, delegations), stops the user's agents through the agent delete, and removes the user once every agent is stopped or removed by an operator. Needs agent.delete on every one of those agents. While off, force is ignored (a user with agents is refused as before), the deletion resource answers 404 and deletions in progress wait, their users staying in deleting.",
+		Description: "Lets an admin delete a user who has agents: DELETE /api/v1/users/{id}?force=true revokes the user's authority at once (status deleting, role bindings, access tokens, delegations), stops the user's agents through the agent delete, and removes the user once every agent is stopped or removed by an operator. Needs agent.delete on every one of those agents. While off, force is ignored (a user with agents is refused as before) and the deletion resource answers 404; a deletion accepted while it was on runs to completion.",
 		Default:     false,
 		Layers:      []Layer{LayerServer, LayerWeb},
 		Stage:       StageAlpha,

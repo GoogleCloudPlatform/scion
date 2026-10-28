@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -93,18 +92,24 @@ func (s *Server) kickUserDeletion(id string, retryNow bool) {
 }
 
 // userDeletionReconcileHandler is the recurring handler that reconciles
-// every stopping deletion. It does nothing while the experiment is off:
-// the deletions then wait, with their users in deleting.
+// every stopping deletion.
+//
+// It runs whether or not hub.user_delete_force_cascade is on. The
+// experiment governs new force requests (and the deletion resource); a
+// deletion accepted while it was on runs to completion after it is turned
+// off. By then the request has revoked the user's authority and the user
+// is deleting; what is left is stopping the agents the requester was
+// authorized to delete and removing the user. Pausing that work would
+// leave the user deleting with no way to see or retry the deletion (the
+// resource answers 404 and force is ignored while the experiment is off).
 func (s *Server) userDeletionReconcileHandler() func(ctx context.Context) {
-	return func(ctx context.Context) {
-		if !s.experimentEnabled(experiments.UserDeleteForceCascade) {
-			return
-		}
-		s.reconcileUserDeletions(ctx)
-	}
+	return s.reconcileUserDeletions
 }
 
-// reconcileUserDeletions reconciles every stopping deletion, oldest first.
+// reconcileUserDeletions reconciles up to userDeletionReconcileBatch
+// stopping deletions, least recently reconciled first. Each reconcile
+// records itself on the deletion, so successive ticks work through every
+// deletion in turn however many are stuck.
 func (s *Server) reconcileUserDeletions(ctx context.Context) {
 	ds, err := s.store.ListUserDeletionsByState(ctx, store.UserDeletionStateStopping, userDeletionReconcileBatch)
 	if err != nil {
@@ -147,12 +152,18 @@ func (s *Server) reconcileUserDeletion(ctx context.Context, id string, retryNow 
 
 	d, err := s.store.GetUserDeletion(ctx, id)
 	if err != nil {
-		if !errors.Is(err, store.ErrNotFound) {
+		if errors.Is(err, store.ErrNotFound) {
+			s.userDeletionLocks.Delete(id)
+		} else {
 			slog.WarnContext(ctx, "user deletion reconcile: read failed", "deletion_id", id, "error", err)
 		}
 		return
 	}
 	if d.State != store.UserDeletionStateStopping {
+		// Completed, here or by another replica. Dropping the entry while
+		// this pass holds the mutex is harmless: a pass that creates a
+		// fresh mutex reads the same completed state and returns.
+		s.userDeletionLocks.Delete(id)
 		return
 	}
 	recs, err := s.store.ListUserDeletionAgents(ctx, d.ID)
@@ -180,10 +191,12 @@ func (s *Server) reconcileUserDeletion(ctx context.Context, id string, retryNow 
 		}
 		retryable := rec.Outcome == store.UserDeletionOutcomePending || rec.Outcome == store.UserDeletionOutcomeFailed
 		// A delete in flight whose lease lapsed (its engine died) is
-		// claimed again, as an abandoned delete is.
+		// claimed again, as an abandoned delete is, after the same
+		// backoff as a failed one, so a delete that keeps dying is not
+		// claimed in a loop.
 		abandoned := rec.Outcome == store.UserDeletionOutcomeStopping &&
 			a.DeletionLeaseAt != nil && a.DeletionLeaseAt.Before(ts)
-		if (retryable && (retryNow || userDeletionRetryDue(rec, ts))) || abandoned {
+		if (retryable || abandoned) && (retryNow || userDeletionRetryDue(rec, ts)) {
 			claims = append(claims, candidate{rec: rec, agent: a})
 		}
 	}
@@ -210,6 +223,10 @@ func (s *Server) reconcileUserDeletion(ctx context.Context, id string, retryNow 
 	if done {
 		completed, err := s.completeUserDeletion(ctx, d)
 		switch {
+		case errors.Is(err, errUserDeletionNotDone):
+			// A record this pass read as final is not final in the
+			// completion's transaction: nothing to do until the next
+			// reconcile, which reads it again.
 		case err != nil:
 			lastErr = "complete: " + err.Error()
 		case completed:
@@ -260,6 +277,13 @@ func (s *Server) refreshUserDeletionAgent(ctx context.Context, d *store.UserDele
 		rec.Outcome = store.UserDeletionOutcomeStopped
 		rec.LastError = ""
 		a = nil
+	case a.DeletionState == store.DeletionStateFinalizing && a.DeletionFailedAt != nil:
+		// The finalize failed and rolled back (for example a hook of the
+		// finalize transaction refused). Only a new claim clears the
+		// failure time, so the agent is failed, with the engine's error,
+		// and is claimed again only after its backoff.
+		rec.Outcome = store.UserDeletionOutcomeFailed
+		rec.LastError = a.DeletionError
 	case a.DeletionState == store.DeletionStateDeleting || a.DeletionState == store.DeletionStateFinalizing:
 		rec.Outcome = store.UserDeletionOutcomeStopping
 	case a.DeletionState == store.DeletionStateFailed:
@@ -275,6 +299,9 @@ func (s *Server) refreshUserDeletionAgent(ctx context.Context, d *store.UserDele
 	if rec.Outcome != prev.Outcome || rec.LastError != prev.LastError {
 		rec.UpdatedAt = ts
 		if err := s.store.UpsertUserDeletionAgent(ctx, rec); err != nil {
+			// Keep the record as it was read, so this pass does not
+			// treat an outcome it could not save as final.
+			*rec = prev
 			return a, fmt.Errorf("record agent %s: %w", rec.AgentID, err)
 		}
 	}
@@ -417,26 +444,13 @@ func (s *Server) noteUserDeletionAgentFinished(plan *agentDeletionPlan, out dele
 // writes the user_delete audit record, which counts the agents stopped
 // (teardown confirmed) apart from those removed (not confirmed). After the
 // commit, afterUserDeleted runs as for any user delete. It reports whether
-// this call completed the deletion.
+// this call completed the deletion, and returns errUserDeletionNotDone,
+// having written nothing, when an agent record read in its transaction is
+// neither stopped nor removed.
 func (s *Server) completeUserDeletion(ctx context.Context, d *store.UserDeletion) (bool, error) {
-	recs, err := s.store.ListUserDeletionAgents(ctx, d.ID)
-	if err != nil {
-		return false, err
-	}
-	known := make(map[string]store.UserDeletionAgent, len(recs))
-	var counts userDeletionCounts
-	removed := []string{}
-	for _, r := range recs {
-		known[r.AgentID] = r
-		counts.add(r.Outcome)
-		if r.Outcome == store.UserDeletionOutcomeRemoved {
-			removed = append(removed, r.AgentID)
-		}
-	}
-
 	ts := time.Now()
 	completed := false
-	err = s.store.WithTx(ctx, func(tx store.Store) error {
+	err := s.store.WithTx(ctx, func(tx store.Store) error {
 		userGone := false
 		if err := tx.LockUserRow(ctx, d.UserID, true); err != nil {
 			if !errors.Is(err, store.ErrNotFound) {
@@ -444,6 +458,30 @@ func (s *Server) completeUserDeletion(ctx context.Context, d *store.UserDeletion
 			}
 			userGone = true
 		}
+		// The records are read in the transaction, under the user row
+		// lock, so the audit counts match what it commits. Stopped and
+		// removed are final (UpsertUserDeletionAgent never changes them;
+		// only this transaction reopens a record), so a concurrent write
+		// cannot change a record counted here.
+		recs, err := tx.ListUserDeletionAgents(ctx, d.ID)
+		if err != nil {
+			return err
+		}
+		known := make(map[string]store.UserDeletionAgent, len(recs))
+		var counts userDeletionCounts
+		removed := []string{}
+		for _, r := range recs {
+			if r.Outcome != store.UserDeletionOutcomeStopped && r.Outcome != store.UserDeletionOutcomeRemoved {
+				// The caller decided from an older read: not done.
+				return errUserDeletionNotDone
+			}
+			known[r.AgentID] = r
+			counts.add(r.Outcome)
+			if r.Outcome == store.UserDeletionOutcomeRemoved {
+				removed = append(removed, r.AgentID)
+			}
+		}
+
 		var before string
 		if !userGone {
 			u, err := tx.GetUser(ctx, d.UserID)
@@ -464,10 +502,13 @@ func (s *Server) completeUserDeletion(ctx context.Context, d *store.UserDeletion
 					if _, err := tx.DeactivateAgentServiceAccountAssignments(ctx, a.ID, deact); err != nil {
 						return fmt.Errorf("deactivate service-account assignments of agent %s: %w", a.ID, err)
 					}
+					// The agent blocks again, so its record is reopened even
+					// when it reads stopped or removed: the one move out of
+					// a final outcome.
 					rec := known[a.ID]
 					rec.DeletionID, rec.AgentID, rec.Slug, rec.ProjectID = d.ID, a.ID, a.Slug, a.ProjectID
 					rec.Outcome, rec.LastError, rec.UpdatedAt = store.UserDeletionOutcomePending, "", ts
-					if err := tx.UpsertUserDeletionAgent(ctx, &rec); err != nil {
+					if err := tx.ReopenUserDeletionAgent(ctx, &rec); err != nil {
 						return fmt.Errorf("record agent %s: %w", a.ID, err)
 					}
 				}
@@ -539,3 +580,7 @@ func (s *Server) completeUserDeletion(ctx context.Context, d *store.UserDeletion
 // errUserDeletionNotStopping rolls back a completion that lost the
 // compare-and-set to a concurrent one.
 var errUserDeletionNotStopping = errors.New("user deletion is not stopping")
+
+// errUserDeletionNotDone rolls back a completion that finds, in its
+// transaction, an agent record that is neither stopped nor removed.
+var errUserDeletionNotDone = errors.New("user deletion has agents left to stop")
