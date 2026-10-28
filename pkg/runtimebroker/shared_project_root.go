@@ -105,25 +105,47 @@ func checkSharedProjectConfig(projectRoot, projectID string) *startContextError 
 	return nil
 }
 
-// ensureLayoutShareMounted checks that the Layout's share is mounted at its
-// host base: for nfs through the broker's NFS mount reconciler when it has
-// one (EnsureShareMounted, which mounts only with auto_mount on), otherwise
-// by the host base being a directory. A broker without the mount refuses
-// shared-backend dispatches (ptone/scion#5823).
+// ensureLayoutShareMounted checks that the Layout's share is usable at its
+// host base (shareVisible). A broker without it refuses shared-backend
+// dispatches (ptone/scion#5823); the project tree's identity is checked by
+// the caller (checkSharedProjectConfig).
 func (s *Server) ensureLayoutShareMounted(ctx context.Context, layout projectfs.Layout) error {
-	if layout.Backend == projectfs.BackendNFS && s.nfsMountReconciler != nil {
-		if err := s.nfsMountReconciler.EnsureShareMounted(ctx, layout.Share.ID); err != nil {
-			return err
+	return shareVisible(ctx, layout, s.nfsMountReconciler)
+}
+
+// shareVisible is the share check for a shared Layout on this broker.
+//
+//   - A broker that never mounts (its default runtime is Kubernetes or Cloud
+//     Run, NFSWarnOnlyRuntime; its reconciler r is verify-only), or one with
+//     no reconciler: the share is visible when Layout.HostBase is a
+//     directory (projectfs.ShareDirVisible, bounded). The reconciler's
+//     mount-table source match is advisory: the share may be mounted into
+//     the broker's container from a source that differs from server:export
+//     only in form (a trailing slash, a host name for an IP address). A
+//     mismatch is logged as a warning and stays in the reconciler's status,
+//     so health and the descriptor's NFS.Healthy flag still show it; it is
+//     never a precondition.
+//   - A broker that mounts the share (auto_mount on, not verify-only): the
+//     exact source match stays a precondition (EnsureShareMounted), since
+//     the broker owns that mount, and then the directory must be visible.
+//
+// Callers prove the tree's identity afterwards (checkSharedProjectConfig:
+// the hub-seeded project-id under <ProjectRoot>/.scion names the project).
+func shareVisible(ctx context.Context, layout projectfs.Layout, r *NFSMountReconciler) error {
+	if layout.Backend == projectfs.BackendNFS && r != nil {
+		if err := r.EnsureShareMounted(ctx, layout.Share.ID); err != nil {
+			if !r.VerifyOnly() || ctx.Err() != nil {
+				return err
+			}
+			if dirErr := projectfs.ShareDirVisible(ctx, layout.HostBase); dirErr != nil {
+				return dirErr
+			}
+			r.log.Warn("Project storage share check is advisory on a broker that never mounts; the share directory is visible",
+				"host_base", layout.HostBase, "share", layout.Share.ID, "reason", r.VerifyOnlyReason(), "check", err)
+			return nil
 		}
 	}
-	info, err := os.Stat(layout.HostBase)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("%s is not a directory", layout.HostBase)
-	}
-	return nil
+	return projectfs.ShareDirVisible(ctx, layout.HostBase)
 }
 
 // isSharedHubProjectRoot reports whether projectPath is a hub-managed
@@ -170,10 +192,8 @@ func (s *Server) findAgentInSharedProject(ctx context.Context, agentName, projec
 		mountCtx, cancel := context.WithTimeout(ctx, sharedLookupMountTimeout)
 		mountErr = s.ensureLayoutShareMounted(mountCtx, layout)
 		cancel()
-	} else if info, statErr := os.Stat(layout.HostBase); statErr != nil {
-		mountErr = statErr
-	} else if !info.IsDir() {
-		mountErr = fmt.Errorf("%s is not a directory", layout.HostBase)
+	} else {
+		mountErr = projectfs.ShareDirVisible(ctx, layout.HostBase)
 	}
 	if err := mountErr; err != nil {
 		s.agentLifecycleLog.Error("Agent look-up: project storage share is not mounted on this broker", "agent", agentName,
