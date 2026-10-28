@@ -54,7 +54,7 @@ func (m *gitCloneCapturingManager) Start(ctx context.Context, opts api.StartOpti
 }
 
 func newTestServerWithGitCloneCapture() (*Server, *gitCloneCapturingManager) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.Debug = true

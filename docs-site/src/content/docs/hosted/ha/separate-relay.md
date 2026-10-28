@@ -29,7 +29,7 @@ The relay keeps each session's hub admission token and presents it unchanged. It
 
 ## Hub ingress
 
-Clients and Runtime Brokers keep dialing the hub's own `GET /api/v1/conduit`. With `server.hub.conduit.ingress: proxy` (the default), the hub passes each dial on to a relay:
+Clients, Runtime Brokers and agents dial the hub's own `GET /api/v1/conduit`. The hub tells agents to dial it only while the ingress serves and at least one relay is eligible; an agent started at any other time keeps the port-forward tunnel until its next start. An agent told to dial keeps redialing with backoff while no relay is eligible (the hub answers `503` with reason `conduit_not_serving`) and runs no port-forward tunnel meanwhile; it is admitted once a relay is eligible again. With `server.hub.conduit.ingress: proxy` (the default), the hub passes each dial on to a relay:
 
 - **Selection.** The hub samples two eligible relays (recently seen and not draining) and picks the one holding fewer sessions. If the session count cannot be read, it picks one of the two at random.
 - **The proxied dial.** The hub forwards only the WebSocket upgrade, to the relay's internal listener, authenticated as `relay-peer`. The client's credential headers, path, query and `Host` pass unchanged, so a Runtime Broker's signature verifies as sent. The hub removes any relay-peer or ingress header the client sent, and names itself in an ingress header that the relay trusts only on that authenticated leg.

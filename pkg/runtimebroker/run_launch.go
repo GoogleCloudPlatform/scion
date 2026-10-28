@@ -1019,6 +1019,9 @@ func classifyStartErrorCode(err error, templateSlug string) (code, message strin
 	if ue, ok := unusableProvisionerFrom(err); ok {
 		return ErrCodeHarnessConfigUnusable, ue.PublicMessage()
 	}
+	if se, ok := storageMigrationRequiredFrom(err); ok {
+		return ErrCodeStorageMigrationRequired, se.PublicMessage()
+	}
 	var skillErr *agent.SkillResolutionError
 	switch {
 	case errors.Is(err, agent.ErrContainerNameInUse):

@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -156,7 +157,7 @@ func removedSharedDirBackendOptionError(req ReincarnateAgentRequest) string {
 		return ""
 	}
 	return "sharedDirBackends and allowEmptySharedDir (--shared-dir-backend, --allow-empty-shared-dir) were removed: " +
-		"server.project_storage places every agent's shared dirs; run the project-storage migration to move node-local shared dirs onto the share"
+		"server.project_storage places every agent's shared dirs. Existing node-local shared dirs: " + config.ProjectStorageMigrationText
 }
 
 // authorizeAgentReincarnate gates POST .../reincarnate for every caller kind

@@ -35,12 +35,22 @@ const DIRECT = [
   '@milkdown/preset-commonmark',
   '@milkdown/preset-gfm',
   '@milkdown/prose',
+  // The editor builds a document from a Markdown tree it has already parsed
+  // (ParserState), as Milkdown's own parser does; @milkdown/core ships it.
+  '@milkdown/transformer',
   '@milkdown/utils',
 ];
 
 /** Milkdown import specifiers the editor may use (the prose subpaths exactly). */
 const ALLOWED_IMPORT =
-  /^@milkdown\/(core|ctx|utils|preset-commonmark|preset-gfm|plugin-history|prose\/(model|state|view|transform|commands|history|keymap))$/;
+  /^@milkdown\/(core|ctx|utils|preset-commonmark|preset-gfm|plugin-history|transformer|prose\/(model|state|view|transform|commands|history|keymap))$/;
+
+/**
+ * Milkdown names written in quotes that are not imports, per file: the
+ * entity table test locates @milkdown/transformer's package directory to
+ * follow the Markdown parser's dependency chain (it imports nothing from it).
+ */
+const NOT_IMPORTS: Record<string, number> = { 'src/utils/critic-sentinels.test.ts': 1 };
 
 /** Packages that come only through Milkdown: never imported by name. */
 const TRANSITIVE = /^(prosemirror-|remark|micromark|mdast-|unified)/;
@@ -149,8 +159,9 @@ describe('Milkdown dependency', () => {
       const rel = relative(web, f);
       if (rel === 'src/components/artifact-review/dependencies.test.ts') continue;
       const text = readFileSync(f, 'utf-8');
-      // Every quoted Milkdown specifier is found by the import scan.
-      mentions += text.match(/'@milkdown\//g)?.length ?? 0;
+      // Every quoted Milkdown specifier (single quotes or backticks) is
+      // found by the import scan, apart from the listed non-imports.
+      mentions += (text.match(/['`]@milkdown\//g)?.length ?? 0) - (NOT_IMPORTS[rel] ?? 0);
       found += importSpecs(text).filter((x) => x.spec.startsWith('@milkdown/')).length;
       for (const p of importProblems(text, rel.startsWith('src/components/artifact-review/')))
         problems.push(`${rel}: ${p}`);

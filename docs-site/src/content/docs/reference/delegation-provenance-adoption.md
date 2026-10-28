@@ -61,6 +61,56 @@ the permission registry or role scopes.
 New children of an adopted agent are created through the normal create path,
 so their ceilings stay within the adopted chain.
 
+### Legacy exception: the owner's own user secrets for adopted baseline and readonly agents
+
+The V1 table gives `secret.use` to `full` only, so the user secret parent
+ceiling refuses an adopted `baseline` or `readonly` agent its owner's
+progeny-shared user secrets. Before that ceiling applied to agent start and
+restart, these agents received them there. As a **legacy compatibility
+exception**, the Hub keeps that behaviour at start and restart for exactly
+this cohort:
+
+- the agent's own edge (no agent above it), delegated by the agent's owner;
+- written by adoption (source credential `system_migration`) and bounded;
+- whose ceiling is exactly the `baseline` or the `readonly` V1 row (with or
+  without the assigned service account permissions), and that row's role
+  does not rank above the edge's recorded role. Adoption ceilings an edge at
+  the lower of its role and the agent's applied role but keeps the edge's
+  role, so an edge recorded as `full` for an agent whose applied role is
+  `baseline` carries the `baseline` row and is in the cohort, reported as
+  `adopted_baseline`;
+- with an adoption record under policy V1 (`adopted` or `recognized`) for
+  that edge.
+
+For such an agent the ceiling lets the missing `secret.use` pass, and every
+other check still applies: a held or deleted agent, an agent-delegated chain,
+an edge recorded any other way, a terminal user who is inactive or not
+admitted to the project, and the secret source check (the secret must be the
+owner's own, shared with progeny and authored by the owner) all still deny.
+
+The runtime read (`scion secret get` inside the agent, the agent secret
+fetch) and the agent secret list are **not** restored for this cohort. Since
+ptone/scion#2072 every runtime read and list has required the agent token
+scope `project:secret:read`, and `baseline` and `readonly` tokens never
+carry it, so these agents are refused there (`capability_required`), as they
+were before the ceiling. To give such an agent its owner's secrets at
+runtime, reincarnate it as its owner with role `full`.
+
+An edge written later for such an agent, for example by a scope re-issue,
+keeps the `system_migration` source but has no adoption record of its own,
+so the agent leaves the cohort and its owner's shared secrets are withheld at
+start again (fail closed). Reincarnating the agent as its owner with role
+`full` restores them.
+
+Each use at start or restart is counted
+(`scion.hub.user_secret.legacy_adopted_fallback`, attributes `path` and
+`role`) and logged at warning level as `user secret allowed under the legacy
+adopted-agent fallback`, with the agent, the cohort (`adopted_baseline` or
+`adopted_readonly`), the edge and the secret name, never the value. The
+warning is logged at most once every 10 minutes per agent and secret. **The
+exception ends with the planned policy V2 backfill**, which is to re-ceiling
+these edges; the counter shows when it is no longer used.
+
 ## Which edges are adopted
 
 The planner examines the ancestor closure of every live agent (a stopped
@@ -163,6 +213,41 @@ run the retry pass once over the marker's cohort, then rewrite the marker
 with the new `retry_version` and counts. No new snapshot is taken and no
 admin step or database edit is needed. If a hop write fails during the pass,
 the marker is left as it was and the next start runs the pass again.
+
+## Service-account assignment backfill
+
+The GCP token mint and the GCS link proxy also require the agent's active
+**service-account assignment**: the row that records who authorized the
+agent's `assign`-mode service account, with that principal's frozen ceiling.
+Agent create, a service-account PATCH and reincarnation write it. An agent
+created before assignment rows were recorded has none, and its token
+requests are refused with `ceiling_provenance_missing`.
+
+A one-shot data migration at Hub start (marker
+`sa_assignment_legacy_backfill`, after schema migration and so after
+adoption) writes the missing row for every live `assign`-mode agent that has
+no active row. It copies the agent's single active delegation edge in its
+project, because agent create records the same provenance and ceiling on
+the edge and on the assignment:
+
+- An edge recorded from a session, access token, agent, local development
+  or schedule credential is copied as is.
+- An edge recorded by adoption (`system_migration`) is not an accepted
+  assignment source. The row records the edge's delegator as the source,
+  with credential kind `agent` for an agent and `session` for a user, and
+  the edge's ceiling.
+
+Rows carry origin `legacy_backfill`. The migration never replaces an existing
+row. It skips an agent, logging a warning with the reason, when the agent
+has no active edge or more than one (`no_active_edge`, `ambiguous_edges`),
+the edge is the migration sentinel or unrecorded
+(`migration_sentinel_edge`, `unrecorded_edge`), the edge's ceiling does not
+allow `gcp_service_account.assign` (`ceiling_lacks_assign`), or the delegator
+is deleted or not an active user (`delegator_missing`,
+`delegator_inactive`). A skipped agent keeps its denial. The usual
+remediation is to reincarnate it with the same role, as a user who holds
+`gcp_service_account.assign`. Skips do not block the marker, and a store
+error leaves the marker unwritten so the next start retries.
 
 ## Denial details
 

@@ -152,10 +152,11 @@ const AttachmentArtifacts = "hub.attachment_artifacts"
 const ChatScheduledSend = "web.chat_scheduled_send"
 
 // ChatStarredMessages gates starred messages in native web chat: the
-// message Star/Unstar action, the private starred indicator and the
-// conversation header's starred-message list in the web UI, and the hub's
-// /api/v1/chat/stars routes (404 while off). Stored stars are kept while
-// it is off.
+// message Star/Unstar action, the private starred indicator, the
+// conversation header's starred-message list, the starred-only center and
+// the rail's Starred filter in the web UI, and the hub's /api/v1/chat/stars
+// and /api/v1/chat/starred-conversations routes and the starred=true
+// history variant (404 while off). Stored stars are kept while it is off.
 const ChatStarredMessages = "web.chat_starred_messages"
 
 // AuthorizationDecisionAuditV2 gates decision logging (remaining-audit P1).

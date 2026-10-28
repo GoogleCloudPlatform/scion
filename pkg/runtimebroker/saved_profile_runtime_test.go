@@ -222,7 +222,7 @@ func TestStartAgent_UnresolvableSavedProfileOnKubernetesDefaultBroker(t *testing
 	const name = "k8s-default-saved-profile"
 	writeSavedAgentProfile(t, projectPath, name, "vanished")
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.StateDir = t.TempDir()
@@ -407,7 +407,7 @@ func TestStartAgent_RecordedRuntimeNoFallbackForInstanceRuntimes(t *testing.T) {
 				const name = "instance-runtime-agent"
 				writeSavedAgentInfo(t, projectPath, name, "vanished", c.recorded)
 
-				cfg := DefaultServerConfig()
+				cfg := testServerConfig()
 				cfg.BrokerID = "test-broker-id"
 				cfg.BrokerName = "test-host"
 				cfg.StateDir = t.TempDir()

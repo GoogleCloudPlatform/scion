@@ -72,7 +72,7 @@ func newSharedRootFixture(t *testing.T, seed bool) *sharedRootFixture {
 
 func newSharedLayoutServer(t *testing.T, layout projectfs.Layout) (*Server, *provisionCapturingManager) {
 	t.Helper()
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.ForceRuntime = "mock"

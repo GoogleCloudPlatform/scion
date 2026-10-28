@@ -2517,6 +2517,20 @@ type SecretStore interface {
 	// The replacement passes the encryption policy fence like every other
 	// payload write.
 	ReplaceSecretCiphertext(ctx context.Context, id string, expectedVersion int, expectedCiphertext, replacement string) (applied bool, err error)
+
+	// AttributeUserSecretToOwner sets created_by to scope_id on the
+	// user-scope secret row with this ID, and only while its created_by
+	// equals expectedCreatedBy. It is the repair write of the legacy user
+	// secret attribution migration, which moves rows captured by an agent
+	// before ptone/scion#1557 from "agent:<uuid>" to their owner. The
+	// decision depends only on the row's identity, scope, owner and
+	// created_by, never on its payload, so a concurrent value write (for
+	// example a credential refresh) does not defeat it. Version,
+	// timestamps, the payload and every other column are preserved, so the
+	// repair is never seen as a credential change. It returns applied=false
+	// (no error) when the row is gone, is not user-scoped, has an empty
+	// scope_id, or its created_by differs.
+	AttributeUserSecretToOwner(ctx context.Context, id string, expectedCreatedBy string) (applied bool, err error)
 }
 
 // MaxSecretPayloadScan is the largest ScanSecretPayloads page.
