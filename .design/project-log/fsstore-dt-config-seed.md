@@ -29,6 +29,8 @@ with the 409.
   `ensureSharedProjectIdentityBestEffort`, which on a shared backend runs
   `ensureProjectConfigIdentity` (the helper `seedSharedProjectIdentity` and the
   startup pass use).
+- `handleProjectRegister` calls the same helper in its `created` branch only,
+  for any project shape. Re-registering an existing project changes nothing.
 - Each project shape has exactly one seeding call site at create. The helper
   is idempotent in any case, since `ensureProjectConfigIdentity` rewrites only
   a stale slug.
@@ -54,6 +56,43 @@ with the 409.
   unchanged.
 - `TestCreateProject_PerAgentGit_SharedBackend_MismatchLeftAndCreateSucceeds`:
   a differing project-id is kept and reported, and the create still succeeds.
+
+- `TestCloneProject_PerAgentGit_SharedBackend_SeedsProjectIdentity`
+  (review N-1): cloning a clone-per-agent or worktree-per-agent git project
+  seeds the clone's identity files, with no workspace.
+- `TestRegisterProject_SharedBackend_SeedsProjectIdentity` (git and hub-native
+  shapes): a registered project gets both files at register time.
+- `TestRegisterProject_ReRegisterExisting_LeavesIdentityUnchanged`: a
+  re-register of an existing project leaves a mismatched project-id and a
+  stale slug untouched.
+
+All of these tests are in hubshard default shard 5.
+
+## Why registered projects need the seed too (review N-2)
+
+The broker runs the hub-seeded identity check whenever a dispatch carries a
+project slug and no project path (`buildStartContext`, start_context.go).
+The hub sends a project path only when the dispatching broker has a provider
+`LocalPath` for the project; otherwise `ProjectDispatchLocation` returns the
+slug alone (httpdispatcher.go; `brokerUsesSlugProjectDir` documents this).
+
+A project created by `handleProjectRegister` is auto-linked to every
+auto-provide broker with no `LocalPath` (`autoLinkProviders`). A register
+without a path, or with a path only on the registering broker, leaves no
+path on any other provider. An agent of such a project, dispatched to one of
+those brokers on a shared backend, was refused with the same 409 until the
+next hub-start pass. Registered projects therefore do not always dispatch
+with a project path, and they are now seeded at register time as well.
+
+## Follow-ups (not in this change)
+
+- **N-3:** request-path NFS I/O at create (the identity write through the
+  confined walk) has no hang guard. A hung share can stall the create
+  request; the hub-start pass already runs under a deadline.
+- **N-4:** error-path hygiene in the shared helpers: make the warning texts
+  and returned errors of `seedSharedProjectIdentity` and
+  `ensureSharedProjectIdentityBestEffort` uniform, and make sure no host path
+  beyond what the confined helpers report reaches a log line.
 
 `TestRequestPathSites` impact: none. The change adds no request-path use and
 logs only `project_id` and `error`.

@@ -176,3 +176,98 @@ func TestCreateProject_PerAgentGit_SharedBackend_MismatchLeftAndCreateSucceeds(t
 	f.srv.checkProjectConfigIdentityHealth(checks)
 	assert.Contains(t, checks[projectConfigIdentityHealthKey], HealthStatusDegraded)
 }
+
+// TestCloneProject_PerAgentGit_SharedBackend_SeedsProjectIdentity covers the
+// clone path (handleProjectClone): cloning a per-agent git project on a
+// shared backend seeds the clone's <ProjectRoot>/.scion/project-id and
+// project-slug at clone time, as createProject does, with no workspace.
+func TestCloneProject_PerAgentGit_SharedBackend_SeedsProjectIdentity(t *testing.T) {
+	for name, mode := range map[string]string{
+		"clone-per-agent":    "per-agent",
+		"worktree-per-agent": "worktree-per-agent",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newWorkspaceLayoutFixture(t)
+			f.useNFS()
+			src := createProjectOverHTTP(t, f.srv, CreateProjectRequest{
+				Name:          "Clone Source " + name,
+				GitRemote:     "github.com/test/per-agent-clone-src",
+				WorkspaceMode: mode,
+			})
+			rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+				map[string]string{"name": "Cloned " + name})
+			require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+			var clone store.Project
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
+			require.NotEqual(t, src.ID, clone.ID)
+			require.False(t, clone.IsSharedWorkspace(), "fixture check: the clone is not a shared workspace")
+			require.NotEmpty(t, clone.GitRemote, "fixture check: the clone is a git project")
+
+			cfgDir := filepath.Join(f.shareBase, "projects", clone.ID, ".scion")
+			assert.Equal(t, clone.ID+"\n", readIdentityFile(t, cfgDir, projectkeys.ProjectIDFile))
+			assert.Equal(t, clone.Slug+"\n", readIdentityFile(t, cfgDir, projectkeys.ProjectSlugFile))
+			_, err := os.Stat(filepath.Join(f.shareBase, "projects", clone.ID, "workspace"))
+			assert.True(t, os.IsNotExist(err), "no workspace is prepared for a per-agent git clone")
+		})
+	}
+}
+
+// TestRegisterProject_SharedBackend_SeedsProjectIdentity: a project created
+// by POST /api/v1/projects/register is dispatched by slug to every provider
+// without a registered local path, so on a shared backend its identity files
+// are written at register time (git and hub-native shapes alike).
+func TestRegisterProject_SharedBackend_SeedsProjectIdentity(t *testing.T) {
+	for name, remote := range map[string]string{
+		"git":        "github.com/test/registered-seed",
+		"hub-native": "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newWorkspaceLayoutFixture(t)
+			f.useNFS()
+			rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+				Name:      "Registered " + name,
+				GitRemote: remote,
+			})
+			require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+			var resp RegisterProjectResponse
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+			require.True(t, resp.Created, "fixture check: a new project")
+			require.NotNil(t, resp.Project)
+
+			cfgDir := filepath.Join(f.shareBase, "projects", resp.Project.ID, ".scion")
+			assert.Equal(t, resp.Project.ID+"\n", readIdentityFile(t, cfgDir, projectkeys.ProjectIDFile))
+			assert.Equal(t, resp.Project.Slug+"\n", readIdentityFile(t, cfgDir, projectkeys.ProjectSlugFile))
+		})
+	}
+}
+
+// TestRegisterProject_ReRegisterExisting_LeavesIdentityUnchanged: only the
+// created branch of handleProjectRegister seeds. Re-registering an existing
+// project changes nothing, even when its project-id file was left naming
+// another project (that mismatch stays for the reporting paths).
+func TestRegisterProject_ReRegisterExisting_LeavesIdentityUnchanged(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	f.useNFS()
+	const id = "aaaaaaaa-0000-4000-8000-0000000000f1"
+	const other = "bbbbbbbb-0000-4000-8000-0000000000f2"
+	req := RegisterProjectRequest{ID: id, Name: "Registered Again", GitRemote: "github.com/test/registered-again"}
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects/register", req)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var first RegisterProjectResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&first))
+	require.True(t, first.Created)
+	require.Equal(t, id, first.Project.ID, "fixture check: the client-supplied ID is used")
+
+	cfgDir := filepath.Join(f.shareBase, "projects", id, ".scion")
+	require.Equal(t, id+"\n", readIdentityFile(t, cfgDir, projectkeys.ProjectIDFile), "fixture check: seeded at register")
+	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, projectkeys.ProjectIDFile), []byte(other+"\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, projectkeys.ProjectSlugFile), []byte("stale\n"), 0o644))
+
+	rec = doRequest(t, f.srv, http.MethodPost, "/api/v1/projects/register", req)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var again RegisterProjectResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&again))
+	require.False(t, again.Created, "fixture check: the existing project is re-registered")
+	assert.Equal(t, other+"\n", readIdentityFile(t, cfgDir, projectkeys.ProjectIDFile), "a re-register never touches project-id")
+	assert.Equal(t, "stale\n", readIdentityFile(t, cfgDir, projectkeys.ProjectSlugFile), "a re-register writes nothing")
+}

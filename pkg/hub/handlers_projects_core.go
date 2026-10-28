@@ -1149,7 +1149,8 @@ func (s *Server) seedSharedProjectIdentity(project *store.Project, scionDir stri
 // ensureSharedProjectIdentityBestEffort writes the project-id and
 // project-slug files for a project whose create seeds no project
 // configuration otherwise: a git project that is not a shared workspace
-// (clone-per-agent or worktree-per-agent). A no-op on the local backend.
+// (clone-per-agent or worktree-per-agent), and a project created by
+// handleProjectRegister. A no-op on the local backend.
 // Hub-native and shared-workspace projects are seeded by initHubManagedProject
 // and cloneSharedWorkspaceProject (seedSharedProjectIdentity) and do not call
 // this, so each project shape has exactly one seeding call site at create.
@@ -2094,6 +2095,12 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 
 		// Ensure the #general chat topic exists for this project (best-effort).
 		s.ensureProjectGeneralTopic(ctx, project)
+
+		// A registered project is dispatched by slug to every provider without a
+		// registered local path (the auto-linked brokers below; brokerUsesSlugProjectDir),
+		// and on a shared backend such a broker requires the project identity
+		// files: write them now (best-effort), not at the next hub start.
+		s.ensureSharedProjectIdentityBestEffort(project)
 
 		// Auto-link brokers that have auto_provide enabled
 		s.autoLinkProviders(ctx, project)
