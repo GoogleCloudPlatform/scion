@@ -384,6 +384,18 @@ server:
 
 `gvisor` is an example: Scion does not create RuntimeClasses or check that one exists.
 
+This release checks and enforces these rules for flat instances only. Runtime entries and profiles of a regular Runtime Broker keep their current behaviour and follow in a later release.
+
+##### Before upgrading
+
+An agent that sets its own tolerations or runtime class while the instance's runtime target sets none is refused at its next start or restart. Running agents keep their pods until then. Before upgrading a host with flat instances:
+
+1. Run `scion doctor` with the new release. The `flat-placement-preflight` check scans the stored configuration of every agent each flat instance owns, without changing anything, and reports counts per instance: agents with tolerations while the runtime target sets none (`agent_tolerations_without_operator_policy`), agents with a runtime class while the runtime target sets none (`agent_runtime_class_without_operator_policy`), and agents it could not check (`incomplete`). It shows no agent names or configuration values. An agent can be counted in both categories.
+2. Treat `incomplete` as unfinished: fix unreadable agent records or configurations, then run the check again.
+3. For agent tolerations, decide whether each belongs to the instance. If it does, add it to the runtime target's `tolerations`; otherwise remove it from the agent's configuration. Tolerations match by key, operator (empty counts as `Equal`), value and effect; a broad `Exists` toleration on the runtime target does not cover a different agent entry. A toleration added to the runtime target applies to every agent of the instance.
+4. For an agent runtime class, either set `runtime_class_name` on the runtime target or remove the agent's class. An agent cannot choose a class on its own; repeating the runtime target's class is accepted.
+5. Restart the Runtime Broker to activate runtime target changes, run `scion doctor` again, and resolve every count before restarting the affected agents.
+
 #### Flat instance agent defaults (`server.broker.instances[].agent_defaults`)
 
 An optional block of workload defaults for the agents a flat Runtime Broker instance runs. A flat instance does not use Runtime Broker profiles, so these take the place of the matching profile settings. Each value sits exactly where the profile value sat in its own precedence order: a template, the agent's own configuration or the request still wins wherever it won over a profile, and an unset value falls through to the same lower settings. The block is read from `settings.yaml` only and is never sent to the Hub. Unknown keys are refused at startup, naming the settings path.
