@@ -651,10 +651,12 @@ func TestEntrypointVolumeRootProbe(t *testing.T) {
 		t.Errorf("stderr lacks %q (no chmod needed):\n%s", want, res.stderr)
 	}
 
-	// The production-likely case: a root-owned, world-writable volume root. This uid
-	// cannot chmod it, so the entrypoint only logs it and leaves the mode alone. A
-	// stub stat reports "0 777" for the owner/mode query on the volume root only (the
-	// job guard's own stat calls, on other paths, see the real stat).
+	// The production-likely case: a world-writable volume root owned by another uid
+	// (root on Cloud Run). This uid cannot chmod it, so the entrypoint only logs it and
+	// leaves the mode alone. A stub stat reports another uid (this uid + 1, so the case
+	// also holds when the tests run as root) and mode 777 for the owner/mode query on the
+	// volume root only (the job guard's own stat calls, on other paths, see the real stat).
+	other := os.Getuid() + 1
 	h3 := newSuccessHarness(t)
 	if err := os.Chmod(h3.vol, 0o755); err != nil {
 		t.Fatal(err)
@@ -665,21 +667,21 @@ func TestEntrypointVolumeRootProbe(t *testing.T) {
 	}
 	h3.stubCommand("stat", fmt.Sprintf(`#!/usr/bin/env bash
 if [[ ${!#} == %q && " $* " == *" %%u %%a "* ]]; then
-  echo "0 777"
+  echo "%d 777"
   exit 0
 fi
 exec %q "$@"
-`, h3.vol, realStat))
+`, h3.vol, other, realStat))
 	res = h3.run()
 	if res.exitCode != 0 {
-		t.Fatalf("root-owned 777 root: exit code = %d, want 0; stderr:\n%s", res.exitCode, res.stderr)
+		t.Fatalf("777 root owned by uid %d: exit code = %d, want 0; stderr:\n%s", other, res.exitCode, res.stderr)
 	}
-	want = fmt.Sprintf("volume root %s: owner uid 0, mode 777\n", h3.vol)
+	want = fmt.Sprintf("volume root %s: owner uid %d, mode 777\n", h3.vol, other)
 	if !strings.Contains(res.stderr, want) {
 		t.Errorf("stderr lacks %q:\n%s", want, res.stderr)
 	}
 	if strings.Contains(res.stderr, "set to 0755") || strings.Contains(res.stderr, "chmod 0755 failed") {
-		t.Errorf("the entrypoint tried to change a root-owned volume root:\n%s", res.stderr)
+		t.Errorf("the entrypoint tried to change a volume root it does not own:\n%s", res.stderr)
 	}
 	if fi, err := os.Stat(h3.vol); err != nil || fi.Mode().Perm() != 0o755 {
 		t.Errorf("volume root mode = %v (%v), want it left as found (0755 here)", modeOf(fi), err)

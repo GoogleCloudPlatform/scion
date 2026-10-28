@@ -312,8 +312,8 @@ func requireRAMBranch(t *testing.T, name, content string) {
 // TestCacheParityRAMBranchInSync: the live parity check (.github/actions/setup-go-cache,
 // outside this module) has the same RAM-mode branch as the PoC template, so the two
 // cannot drift apart. The action is read from the repository checkout; an archive of
-// cr-ci/ alone (the gate windows) does not contain it, and then only the PoC side is
-// checked, by TestCacheParityCheck. The RAM directory both checks expect must be the
+// cr-ci/ alone (the gate windows) does not contain it: the test then SKIPs, and only
+// the PoC side is checked, by TestCacheParityCheck. The RAM directory both checks expect must be the
 // entrypoint's default.
 func TestCacheParityRAMBranchInSync(t *testing.T) {
 	if want := "/tmp/cr-ci-build-cache"; !strings.Contains(readFile(t, "../runner/entrypoint.sh"), "ram_cache_dir=${CR_RAM_CACHE_DIR:-"+want+"}") {
@@ -322,8 +322,7 @@ func TestCacheParityRAMBranchInSync(t *testing.T) {
 	const action = "../../.github/actions/setup-go-cache/action.yml"
 	b, err := os.ReadFile(action)
 	if os.IsNotExist(err) {
-		t.Logf("%s is not in this tree (a cr-ci-only archive); the PoC side is checked by TestCacheParityCheck", action)
-		return
+		t.Skipf("%s is not in this tree (a cr-ci-only archive); the PoC side is checked by TestCacheParityCheck", action)
 	}
 	if err != nil {
 		t.Fatal(err)

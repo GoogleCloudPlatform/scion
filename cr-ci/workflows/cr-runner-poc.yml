@@ -68,7 +68,8 @@ jobs:
           # between ubuntu-latest and cr-ci, HOME must be /home/runner, on the
           # runner's ephemeral-disk volume (mounted at HOME), with the work folder
           # /home/runner/work, ~/.cache and ~/go as real directories on it (no
-          # links: physical paths equal logical ones). Plus zstd (the cache
+          # links: physical paths equal logical ones; ~/.cache: see the RAM branch
+          # below, a link to the RAM directory with RUNNER_BUILD_CACHE_IN_RAM=true). Plus zstd (the cache
           # version hashes the paths and the compression method). Fails the job
           # if any of it is off.
           set -uo pipefail
