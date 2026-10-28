@@ -287,9 +287,11 @@ const agentTolerationsRequireOperatorPolicy = false
 // comes from (AgentPlacementLayerRequest, ...). The block's placement
 // fields are validated even when d has none. Then, an empty-key Exists
 // toleration is refused while d is in effect; a node selector key that d
-// sets must have d's value (other keys are allowed); each toleration must
-// be one of d's, compared by (key, operator with "" as Equal, value,
-// effect); and a set runtime class must equal d's, which must then be set.
+// sets must have d's value (other keys are allowed); when d sets
+// tolerations, each toleration must be one of d's, compared by (key,
+// operator with "" as Equal, value, effect), and when d sets none they are
+// currently kept after validation (agentTolerationsRequireOperatorPolicy);
+// and a set runtime class must equal d's, which must then be set.
 // Errors name fields by key or index and never carry submitted values.
 func CheckAgentPlacement(block *api.KubernetesConfig, d *api.ResolvedPlacement, layer string) error {
 	if block == nil {

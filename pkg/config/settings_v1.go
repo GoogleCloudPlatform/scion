@@ -1946,8 +1946,10 @@ type V1RuntimeTargetConfig struct {
 	// instance's pod placement: the flat counterpart of the runtime entry
 	// fields of the same names. Unlike the defaults above, the operator owns
 	// them: an agent may add node selector keys, but it cannot change a key
-	// set here or the runtime class, and its tolerations must be among
-	// these (config.ApplyOperatorPlacement). Read from the activated
+	// set here or the runtime class; when tolerations are set here, the
+	// agent's must be among them, and when none are, the agent's are
+	// currently accepted after validation (config.ApplyOperatorPlacement).
+	// Read from the activated
 	// instance policy on every start; a change takes effect on restart.
 	// Kubernetes only.
 	NodeSelector     map[string]string   `json:"node_selector,omitempty" yaml:"node_selector,omitempty" koanf:"node_selector"`
