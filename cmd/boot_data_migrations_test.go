@@ -523,6 +523,11 @@ func TestBootDataMigrations_FullFlow(t *testing.T) {
 	assert.True(t, saBackfillDone,
 		"SA assignment legacy backfill marker should be written by runBootDataMigrations")
 
+	userSecretAttrDone, err := IsMigrationComplete(ctx, s, MigrationUserSecretAttributionRepair)
+	require.NoError(t, err)
+	assert.True(t, userSecretAttrDone,
+		"user secret attribution repair marker should be written by runBootDataMigrations")
+
 	// M9: the unattributable message is now classified as permanent,
 	// so WARN should NOT fire. Instead, the permanent INFO should appear.
 	assert.Contains(t, logOutput, "Permanently unattributable messages in listed projects",
