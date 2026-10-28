@@ -212,7 +212,7 @@ func legacyBoundedEdgeCohort(edge *store.DelegationEdge, permissionID string) st
 // ceiling is not within the compatibility policy V1 row of the edge's own
 // role (it was not capped or intersected by V1, so its deny stands).
 func legacyAdoptedCohort(edge *store.DelegationEdge) string {
-	ids := edge.EffectCeiling.PermissionIDs
+	ids := edge.PermissionIDs
 	if !withinCompatibilityV1Row(ids, AgentRole(edge.Role)) {
 		return ""
 	}

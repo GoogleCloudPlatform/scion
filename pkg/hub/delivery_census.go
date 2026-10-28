@@ -163,7 +163,7 @@ func (a *AuthzService) launchDeliveryCensusRow(ctx context.Context, ag *store.Ag
 	row := LaunchDeliveryCensusRow{AgentID: ag.ID, ProjectID: ag.ProjectID, OwnerID: ag.OwnerID, Phase: ag.Phase,
 		Verdicts: map[string]LaunchDeliveryVerdict{}}
 	row.Edge = a.launchDeliveryEdgeFacts(ctx, ag)
-	h, err := a.newHubDeliveryIdentity(ctx, ag.ID)
+	h, err := a.newLaunchDeliveryIdentity(ctx, ag.ID, true)
 	if err != nil {
 		// A start of this agent fails hard (the credential cannot be minted).
 		row.MintError = err.Error()

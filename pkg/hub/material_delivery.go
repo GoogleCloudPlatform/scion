@@ -102,20 +102,35 @@ func (s *deliverySelector) mint(ctx context.Context) error {
 	if s.agent == nil || s.agent.ID == "" {
 		return errors.New("material delivery: no target agent")
 	}
-	h, err := s.authz.newHubDeliveryIdentity(ctx, s.agent.ID)
+	h, err := s.authz.newLaunchDeliveryIdentity(ctx, s.agent.ID, legacyDeliveryFallbackPurpose(s.purpose))
 	if err != nil {
 		return fmt.Errorf("material delivery: %w", err)
 	}
 	if h.projectID != s.agent.ProjectID {
 		return fmt.Errorf("material delivery: agent %s project changed", s.agent.ID)
 	}
-	// One selection judges all its items against one admission walk per
-	// permission (hubDeliveryAdmissionMemo); the credential, and so the
-	// memo, is dropped with the selector.
-	h.admission = newHubDeliveryAdmissionMemo()
-	h.legacyFallback = legacyDeliveryFallbackPurpose(s.purpose)
 	s.ident = h
 	return nil
+}
+
+// newLaunchDeliveryIdentity is the ONLY production caller of
+// newHubDeliveryIdentity (TestHubDelivery_ConstructorCallSites pins it). It
+// builds the delivery credential for agentID from the stored agent, with a
+// fresh admission memo, so one selection judges all its items against one
+// admission walk per permission and drops the memo with the credential, and
+// with the legacy fallback when legacyFallback is set. Its callers are
+// deliverySelector.mint and the read-only census (LaunchDeliveryCensus). The
+// credential is an in-memory value only: neither path issues a token from
+// it, persists it or puts it in a request context, and the census reads
+// only the admission outcomes it yields.
+func (a *AuthzService) newLaunchDeliveryIdentity(ctx context.Context, agentID string, legacyFallback bool) (*hubDeliveryIdentity, error) {
+	h, err := a.newHubDeliveryIdentity(ctx, agentID)
+	if err != nil {
+		return nil, err
+	}
+	h.admission = newHubDeliveryAdmissionMemo()
+	h.legacyFallback = legacyFallback
+	return h, nil
 }
 
 // authorize decides one associated item. It returns an error only when the

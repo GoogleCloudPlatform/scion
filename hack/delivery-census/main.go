@@ -91,8 +91,7 @@ func run(ctx context.Context, w io.Writer, driver, db string, devAuth, asJSON, a
 		enc.SetIndent("", "  ")
 		return enc.Encode(rep)
 	}
-	writeText(w, rep, devAuth, all)
-	return nil
+	return writeText(w, rep, devAuth, all)
 }
 
 // openReadOnly opens the hub database read-only.
@@ -135,27 +134,28 @@ func withQueryParam(dsn, key, value string) string {
 	return base + "?" + strings.Join(kept, "&")
 }
 
-func writeText(w io.Writer, rep *hub.LaunchDeliveryCensusReport, devAuth, all bool) {
-	fmt.Fprintf(w, "# launch delivery census (read-only), dev_auth=%t\n", devAuth)
-	fmt.Fprintf(w, "agents\t%d\nwithheld\t%d\nlegacy_fallback\t%d\nproduct_gap_uat_no_deliver_mapping\t%d\nstrict_withheld\t%d\n",
+func writeText(w io.Writer, rep *hub.LaunchDeliveryCensusReport, devAuth, all bool) error {
+	o := &textOut{w: w}
+	o.printf("# launch delivery census (read-only), dev_auth=%t\n", devAuth)
+	o.printf("agents\t%d\nwithheld\t%d\nlegacy_fallback\t%d\nproduct_gap_uat_no_deliver_mapping\t%d\nstrict_withheld\t%d\n",
 		rep.Agents, rep.Withheld, rep.Fallback, rep.ProductGap, rep.StrictWithheld)
-	fmt.Fprintln(w, "# by cohort")
+	o.printf("%s\n", "# by cohort")
 	for _, k := range sortedKeys(rep.ByCohort) {
-		fmt.Fprintf(w, "cohort\t%s\t%d\n", k, rep.ByCohort[k])
+		o.printf("cohort\t%s\t%d\n", k, rep.ByCohort[k])
 	}
-	fmt.Fprintln(w, "# by permission:cause (refusals)")
+	o.printf("%s\n", "# by permission:cause (refusals)")
 	for _, k := range sortedKeys(rep.ByCause) {
-		fmt.Fprintf(w, "cause\t%s\t%d\n", k, rep.ByCause[k])
+		o.printf("cause\t%s\t%d\n", k, rep.ByCause[k])
 	}
-	fmt.Fprintln(w, "# by permission:cause without the legacy fallback")
+	o.printf("%s\n", "# by permission:cause without the legacy fallback")
 	for _, k := range sortedKeys(rep.ByStrictCause) {
-		fmt.Fprintf(w, "strict_cause\t%s\t%d\n", k, rep.ByStrictCause[k])
+		o.printf("strict_cause\t%s\t%d\n", k, rep.ByStrictCause[k])
 	}
-	fmt.Fprintln(w, "# rows")
+	o.printf("%s\n", "# rows")
 	cols := []string{"agent_id", "project_id", "owner_id", "phase", "cohort", "strict_cohort", "edges", "delegator", "role", "prov_version", "source_kind", "ceiling_kind"}
 	cols = append(cols, hub.LaunchDeliveryCensusPermissions...)
 	cols = append(cols, "first_reason")
-	fmt.Fprintln(w, strings.Join(cols, "\t"))
+	o.printf("%s\n", strings.Join(cols, "\t"))
 	for _, r := range rep.Rows {
 		if r.Cohort == "delivers" && !all {
 			continue
@@ -185,7 +185,20 @@ func writeText(w io.Writer, rep *hub.LaunchDeliveryCensusReport, devAuth, all bo
 			}
 		}
 		f = append(f, reason)
-		fmt.Fprintln(w, strings.Join(f, "\t"))
+		o.printf("%s\n", strings.Join(f, "\t"))
+	}
+	return o.err
+}
+
+// textOut writes formatted lines and keeps the first write error.
+type textOut struct {
+	w   io.Writer
+	err error
+}
+
+func (o *textOut) printf(format string, a ...any) {
+	if o.err == nil {
+		_, o.err = fmt.Fprintf(o.w, format, a...)
 	}
 }
 

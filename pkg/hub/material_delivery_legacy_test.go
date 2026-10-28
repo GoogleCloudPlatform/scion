@@ -56,14 +56,23 @@ func lgLogger(m *ldFixture) *bytes.Buffer {
 	return &buf
 }
 
-// lgSetAncestry rewrites the stored agent's ancestry (and the fixture copy).
-func lgSetAncestry(t *testing.T, m *ldFixture, ancestry []string) {
+// lgAncestryWithParent is an ldOptions.ancestry giving the agent the
+// ancestry [project owner, lgParent(name)]. The parent's ID is the
+// deterministic one lgParent stores later.
+func lgAncestryWithParent(name string) func(f *goldenFixture) []string {
+	return func(f *goldenFixture) []string { return []string{f.projectOwnerID, tid("lg-parent-" + name)} }
+}
+
+// lgRequireStoredAncestry checks that the stored agent has ancestry want, so
+// a row never silently tests the default ancestry.
+func lgRequireStoredAncestry(t *testing.T, m *ldFixture, want []string) {
 	t.Helper()
 	ag, err := m.store.GetAgent(context.Background(), m.agent.ID)
 	require.NoError(t, err)
-	ag.Ancestry = ancestry
-	require.NoError(t, m.store.UpdateAgent(context.Background(), ag))
-	m.agent.Ancestry = ancestry
+	require.Equal(t, len(want), len(ag.Ancestry), "stored ancestry %v", ag.Ancestry)
+	for i := range want {
+		require.Equal(t, want[i], ag.Ancestry[i], "stored ancestry %v", ag.Ancestry)
+	}
 }
 
 // lgParent stores a parent agent in the fixture's project with ancestry
@@ -316,18 +325,18 @@ func TestDispatchDelivery_LegacyFallbackKeepsRealDenials(t *testing.T) {
 			},
 		},
 		{
-			name: "no_edge_deleted_ancestor", opts: ldOptions{noEdge: true},
+			name: "no_edge_deleted_ancestor", opts: ldOptions{noEdge: true, ancestry: lgAncestryWithParent("deleted-ancestor")},
 			after: func(t *testing.T, m *ldFixture) {
 				p := lgParent(t, m, "deleted-ancestor")
-				lgSetAncestry(t, m, []string{m.projectOwnerID, p})
+				lgRequireStoredAncestry(t, m, []string{m.projectOwnerID, p})
 				lgSoftDelete(t, m, p)
 			},
 		},
 		{
-			name: "no_edge_held_ancestor", opts: ldOptions{noEdge: true},
+			name: "no_edge_held_ancestor", opts: ldOptions{noEdge: true, ancestry: lgAncestryWithParent("held-ancestor")},
 			after: func(t *testing.T, m *ldFixture) {
 				p := lgParent(t, m, "held-ancestor")
-				lgSetAncestry(t, m, []string{m.projectOwnerID, p})
+				lgRequireStoredAncestry(t, m, []string{m.projectOwnerID, p})
 				holdAgentFor(t, m.store, p, m.agent.ProjectID, m.projectOwnerID)
 			},
 		},
@@ -346,9 +355,10 @@ func TestDispatchDelivery_LegacyFallbackKeepsRealDenials(t *testing.T) {
 			},
 		},
 		{
-			name: "no_edge_no_stored_ancestry", opts: ldOptions{noEdge: true},
+			name: "no_edge_no_stored_ancestry",
+			opts: ldOptions{noEdge: true, ancestry: func(*goldenFixture) []string { return []string{} }},
 			after: func(t *testing.T, m *ldFixture) {
-				lgSetAncestry(t, m, nil)
+				lgRequireStoredAncestry(t, m, nil)
 			},
 		},
 		{

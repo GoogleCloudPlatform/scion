@@ -63,6 +63,10 @@ type ldOptions struct {
 	// rootMemberNone makes the golden hub member with no project
 	// membership the agent's root user instead of the project owner.
 	rootMemberNone bool
+	// ancestry, when set, gives the agent's stored ancestry instead of
+	// [root]. The store writes ancestry only at create (UpdateAgent leaves
+	// it unchanged), so a fixture needing another ancestry must set it here.
+	ancestry func(f *goldenFixture) []string
 }
 
 func newLDFixture(t *testing.T, name string, opts ldOptions) *ldFixture {
@@ -88,6 +92,9 @@ func newLDFixture(t *testing.T, name string, opts ldOptions) *ldFixture {
 		OwnerID: root, CreatedBy: root, Ancestry: []string{root},
 		RuntimeBrokerID: m.broker.ID,
 		AppliedConfig:   &store.AgentAppliedConfig{},
+	}
+	if opts.ancestry != nil {
+		m.agent.Ancestry = opts.ancestry(f)
 	}
 	require.NoError(t, f.store.CreateAgent(ctx, m.agent))
 	if !opts.noEdge {

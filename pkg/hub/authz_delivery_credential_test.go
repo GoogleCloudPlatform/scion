@@ -723,10 +723,10 @@ func referencesIdent(node ast.Node, names ...string) bool {
 
 // TestHubDelivery_ConstructorCallSites pins, by AST scan, where a
 // hubDeliveryIdentity can be produced: newHubDeliveryIdentity is called only
-// from authz_delivery_credential.go, the launch material selector
-// (material_delivery.go, the one production caller) and the hub_delivery
-// tests, and no other production file builds the type as a composite
-// literal or with new.
+// from authz_delivery_credential.go, material_delivery.go (its one production
+// caller, newLaunchDeliveryIdentity, which deliverySelector.mint and the
+// read-only census share) and the hub_delivery tests, and no other
+// production file builds the type as a composite literal or with new.
 func TestHubDelivery_ConstructorCallSites(t *testing.T) {
 	allowedCallers := map[string]bool{
 		"authz_delivery_credential.go":      true,
@@ -762,7 +762,7 @@ func TestHubDelivery_ConstructorCallSites(t *testing.T) {
 		})
 	}
 	assert.Positive(t, calls, "the scan must find the test call sites, or it is not scanning this package")
-	// Exactly one production call site: deliverySelector.mint.
+	// Exactly one production call site: newLaunchDeliveryIdentity.
 	assert.Equal(t, map[string]int{"material_delivery.go": 1}, productionCalls)
 }
 
