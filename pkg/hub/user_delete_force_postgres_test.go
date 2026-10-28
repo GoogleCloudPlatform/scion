@@ -23,7 +23,10 @@ package hub
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -151,4 +154,115 @@ func TestForceDeleteUser_TwoReconcilersOneCompletion_Postgres(t *testing.T) {
 	got, err := f.s.GetUserDeletion(ctx, d.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.UserDeletionStateCompleted, got.State)
+}
+
+// A real finalize of a blocking agent racing the completion's re-blocker
+// branch: the agent's outcome is stopped, never removed, and neither side
+// deadlocks.
+//
+// The finalize is a non-force engine delete with no retention (a hard
+// delete). A hard-delete hook holds it inside its transaction after it
+// removed the agent row and deactivated the agent's delegation edges,
+// before it commits. The completion then runs and must wait on a row lock
+// the finalize holds; the test releases the finalize only once
+// pg_stat_activity shows that wait.
+//
+//   - With the agent row lock, the completion waits in LockAgentRows. Once
+//     the finalize commits, the re-read finds the row gone and the
+//     completion leaves the stopped record alone.
+//   - Without it, the completion's re-read sees the row (the delete is not
+//     committed), then waits on the agent's delegation edge. Once the
+//     finalize commits, the completion reopens the record as pending, and
+//     the next reconcile, finding the row gone, records the agent removed.
+//
+// Both orders are forced by the lock waits, not by timing, so the test
+// fails deterministically if the lock is removed.
+func TestForceDeleteUser_FinalizeRacesCompletionReopen_Postgres(t *testing.T) {
+	f := newForceDelPostgresFixture(t, "finalize-reopen")
+	f.srv.config.SoftDeleteRetention = 0
+	ctx := context.Background()
+	dbs, ok := f.s.(interface{ DB() *sql.DB })
+	require.True(t, ok, "raw database handle needed to watch for lock waits")
+	db := dbs.DB()
+	require.NotNil(t, db)
+
+	d := stoppedDeletionReadyToComplete(t, f)
+	x := f.agent(t, "pg-reopen-x", nil)
+	f.agentEdge(t, store.DelegationPrincipalUser, f.dave.ID, x)
+	// The record reads stopped while the agent is live, so the completion
+	// reaches its re-blocker branch for it.
+	require.NoError(t, f.s.UpsertUserDeletionAgent(ctx, &store.UserDeletionAgent{
+		DeletionID: d.ID, AgentID: x.ID, Slug: x.Slug, ProjectID: x.ProjectID,
+		Outcome: store.UserDeletionOutcomeStopped, Attempts: 1,
+	}))
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	f.srv.RegisterHardDeleteHook("test-hold-finalize", func(_ context.Context, _ store.Store, a *store.Agent, _ AuditActor) error {
+		if a.ID != x.ID {
+			return nil
+		}
+		once.Do(func() { close(entered) })
+		select {
+		case <-release:
+			return nil
+		case <-time.After(30 * time.Second):
+			return errors.New("test: finalize held too long")
+		}
+	})
+
+	plan, err := f.srv.claimAgentDeletion(ctx, x.ID, agentDeleteParams{requestedBy: DevUserID})
+	require.NoError(t, err)
+	require.NotNil(t, plan, "the engine claims the agent")
+	engineDone := f.srv.runAgentDeletion(ctx, plan)
+	select {
+	case <-entered:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the finalize never reached its hard-delete hooks")
+	}
+
+	type completion struct {
+		completed bool
+		err       error
+	}
+	completionDone := make(chan completion, 1)
+	go func() {
+		c, err := f.srv.completeUserDeletion(ctx, d)
+		completionDone <- completion{c, err}
+	}()
+
+	// enttest gives each package its own database, so current_database()
+	// scopes the check to this test's connections.
+	require.Eventually(t, func() bool {
+		var waiting int
+		if err := db.QueryRowContext(ctx,
+			`SELECT count(*) FROM pg_stat_activity
+			  WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting); err != nil {
+			return false
+		}
+		return waiting > 0
+	}, 10*time.Second, 20*time.Millisecond, "the completion never waited on a lock the finalize holds")
+	close(release)
+
+	var res completion
+	select {
+	case res = <-completionDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the completion did not finish")
+	}
+	assertNoDeadlock(t, res.err)
+	require.NoError(t, res.err)
+	assert.False(t, res.completed, "the pass that listed the agent as a blocker does not complete")
+	select {
+	case out := <-engineDone:
+		assert.Equal(t, deletionOutcomeDeleted, out.kind, "the finalize commits")
+	case <-time.After(30 * time.Second):
+		t.Fatal("the delete engine did not finish")
+	}
+	assert.True(t, agentGone(t, f.s, x.ID), "the finalize removed the row")
+
+	f.srv.reconcileUserDeletion(ctx, d.ID, false)
+	done := f.waitCompleted(t)
+	assert.Equal(t, userDeletionCounts{Stopped: 2}, done.Counts, "the agent the finalize removed is stopped, not removed")
 }
