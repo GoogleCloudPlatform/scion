@@ -329,18 +329,6 @@ func (s *Server) authorizeRuntimeUserItem(ctx context.Context, ident AgentIdenti
 			return ItemResult{Candidate: cand, Reason: ReasonDeniedByPolicy}
 		}
 	default:
-		if chain.decision.Allowed && chain.legacyFallback != nil {
-			// The legacy adopted-agent fallback cohort reads under the agent
-			// secret list's sequence instead of Decide, whose step 7b
-			// refuses these agents' role tokens (see
-			// user_secret_legacy_adopted_fallback.go).
-			if reason, handled := s.legacyAdoptedRuntimeRead(ctx, ident, resource, meta, key); handled {
-				if reason != ReasonAllowed {
-					return ItemResult{Candidate: cand, Reason: reason}
-				}
-				break
-			}
-		}
 		decision := s.authzService.Decide(ctx, AuthzRequest{
 			Principal:  principalContextForIdentity(ident),
 			Credential: credentialContextForIdentity(ident),
@@ -420,43 +408,4 @@ func (s *Server) userSecretWithheldWarnLimiter() *hookRefusalLimiter {
 		s.userSecretWithheldLimiter = newUserSecretWithheldLimiter()
 	})
 	return s.userSecretWithheldLimiter
-}
-
-// legacyAdoptedRuntimeRead decides a runtime read of an owner user secret
-// for an agent in the legacy adopted-agent fallback cohort, with the agent
-// secret list's sequence: the user secret parent ceiling (S1-S8, S3c
-// through the fallback), then the agent's own access constraints (7c). It
-// does not apply Decide's step 7b, the token-scope restriction: this is the
-// legacy compatibility exception, and it ends with the policy V2 backfill.
-//
-// handled is false when the ceiling allowed the secret without the
-// fallback (the chain changed since the verdict); the caller then decides
-// with Decide as for any other agent, so no agent outside the cohort skips
-// step 7b.
-func (s *Server) legacyAdoptedRuntimeRead(ctx context.Context, ident AgentIdentity, resource Resource, meta *secret.SecretMeta, key string) (reason string, handled bool) {
-	ceiling := s.authzService.EvaluateUserSecretParentCeiling(ctx, ident, resource)
-	if !ceiling.Allowed {
-		if record, suppressed := s.userSecretWithheldWarnLimiter().admit(ident.ID()+"/"+meta.ID, string(ceiling.DenyCause)+"/"+ceiling.Reason); record {
-			slog.WarnContext(ctx, "runtime user secret read withheld by authorization",
-				"agent_id", ident.ID(), "secret", key, "secret_id", meta.ID,
-				"user_id", meta.ScopeID, "deny_cause", string(ceiling.DenyCause), "reason", ceiling.Reason,
-				"suppressed_since_last", suppressed)
-		}
-		if ceiling.DenyCause == DenyCauseCeilingError {
-			return ReasonBackendError, true
-		}
-		return ReasonDeniedByPolicy, true
-	}
-	if ceiling.legacyFallback == nil {
-		return "", false
-	}
-	ok, err := s.authzService.agentConstraintsAllowSecretUse(ctx, ident, resource)
-	if err != nil {
-		return ReasonBackendError, true
-	}
-	if !ok {
-		return ReasonDeniedByPolicy, true
-	}
-	s.authzService.recordLegacyAdoptedFallback(ctx, legacyFallbackPathRead, ceiling.legacyFallback, ident.ID(), meta.ScopeID, meta.ID, key)
-	return ReasonAllowed, true
 }

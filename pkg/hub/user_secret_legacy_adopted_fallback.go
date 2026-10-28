@@ -34,10 +34,9 @@ import (
 // compatibility ceiling of its role (permissions.CompatibilityPolicyV1).
 // That table grants secret.use to full only, so an adopted baseline or
 // readonly agent fails clause S3c of the user secret parent ceiling and
-// lost its owner's progeny-shared user secrets at start, restart, runtime
-// read and list when the ceiling started to apply to those paths. Before,
-// these agents received them (start: no check on the owner path; read and
-// list: the progeny rule).
+// lost its owner's progeny-shared user secrets at start and restart when
+// the ceiling started to apply to the owner path (#4234). Before, the owner
+// path delivered them with no check.
 //
 // The fallback lets S3c pass for exactly that case and nothing else:
 //   - the hop is the agent's own edge (depth 0), and its delegator is a
@@ -67,12 +66,13 @@ import (
 // ancestry). A use under the fallback is logged at Warn, rate limited per
 // (agent, secret), naming the cohort and the secret, never the value.
 //
-// The runtime read decides secret.use through Decide, whose step 7b (the
-// agent token's scope restriction) also refuses it to these agents: their
-// role tokens never carry project:secret:read. For the fallback cohort the
-// read therefore applies the agent secret list's sequence instead (the
-// parent ceiling, then the agent's own access constraints), which is what
-// it applied before the ceiling. See authorizeRuntimeUserItem.
+// The runtime read and the agent secret list are not restored for this
+// cohort: their precheck (materialRuntimePrecheck) has required the token
+// scope project:secret:read for every runtime read since ptone/scion#2072,
+// and these agents' tokens never carry it. That refusal predates the
+// ceiling and is unchanged. The fallback still applies inside the ceiling
+// evaluator, so a cohort agent whose token does carry the scope is judged
+// like any other (Decide's step 10), but the read path adds no exception.
 
 // legacyAdoptedFallback records that a chain passed S3c through the
 // legacy adopted-agent fallback.
@@ -137,12 +137,10 @@ func legacyCompatibilityV1RowRole(ids []string) (AgentRole, bool) {
 	return "", false
 }
 
-// Paths that may use the fallback, for the Warn line and the counter.
-const (
-	legacyFallbackPathStart = "start"
-	legacyFallbackPathRead  = "runtime_read"
-	legacyFallbackPathList  = "list"
-)
+// legacyFallbackPathStart is the path attribute of a fallback use at start
+// or restart (the owner path of startSecretResolveOpts), the only path that
+// records one.
+const legacyFallbackPathStart = "start"
 
 // legacyAdoptedFallbackMetrics counts uses of the fallback, so the policy V2
 // backfill can show when the exception is no longer needed.
@@ -229,29 +227,4 @@ func progenySecretName(in *userSecretSourceInputs, id string) string {
 		}
 	}
 	return ""
-}
-
-// agentConstraintsAllowSecretUse applies the agent's own access constraints
-// for secret.use on resource, as Decide step 7c and the agent secret list do.
-func (a *AuthzService) agentConstraintsAllowSecretUse(ctx context.Context, ident AgentIdentity, resource Resource) (bool, error) {
-	ctx = maskAuthzInputs(ctx)
-	principals, err := a.authorizationPrincipals(ctx, ident)
-	if err != nil {
-		return false, fmt.Errorf("agent principal lookup: %w", err)
-	}
-	closure := make(map[string]struct{}, len(principals))
-	for _, p := range principals {
-		closure[p.Type+":"+p.ID] = struct{}{}
-	}
-	constraints, err := a.loadAllAccessConstraintsUncached(ctx)
-	if err != nil {
-		return false, fmt.Errorf("access constraint lookup: %w", err)
-	}
-	return restrictionsAllow(restrictionsFromConstraints(constraints, closure, ResourceContext{
-		ResourceType: resource.Type,
-		ResourceID:   resource.ID,
-		OwnerID:      resource.OwnerID,
-		ProjectID:    projectIDForResource(resource),
-		Ancestry:     resource.Ancestry,
-	}), secretUsePermission), nil
 }

@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -64,7 +65,7 @@ func TestLegacyAdoptedSecretUseFallback_Predicate(t *testing.T) {
 	}
 	record := func(edge *store.DelegationEdge, mutate func(*store.DelegationAdoption)) {
 		rec := &store.DelegationAdoption{
-			CohortID: "laf-cohort", Origin: "boot", PolicyVersion: int(permissions.CompatibilityPolicyV1),
+			CohortID: "laf-cohort", Origin: store.DelegationAdoptionOriginBoot, PolicyVersion: int(permissions.CompatibilityPolicyV1),
 			AdoptedEdgeID: edge.ID, DelegateID: agent.ID, Status: store.DelegationAdoptionAdopted,
 		}
 		if mutate != nil {
@@ -237,6 +238,9 @@ func newLAFFixture(t *testing.T, name string) *lafFixture {
 	t.Helper()
 	base := &userScopeCeilingFixture{materialFixture: newMaterialFixture(t, name)}
 	sdShareOwnerSecrets(t, base.Server.secretBackend, base.UserID)
+	// Model production: the test server's dev-auth mint override raises
+	// every agent token to the full role's scopes.
+	base.Server.authzService.mintDevAuthOverride = false
 	return &lafFixture{sdFixture: &sdFixture{userScopeCeilingFixture: base, disp: sdDispatcher(base.Server, base.Store)}}
 }
 
@@ -271,21 +275,38 @@ func (f *lafFixture) token(t *testing.T, agentID string) string {
 // delivery is what each path gives the agent of the owner's shared,
 // always-injected secret: start (resolveSecrets), restart (a real
 // DispatchAgentRestart), the runtime read and the agent secret list.
+// readCode and listCode are the HTTP statuses of the read and the list.
 type lafDelivery struct {
 	start, restart, read, list bool
+	readCode, listCode         int
 }
 
 func (f *lafFixture) delivery(t *testing.T, agentID string) lafDelivery {
 	t.Helper()
 	tok := f.token(t, agentID)
 	got := usaDispatch(t, f.sdFixture, agentID)
-	_, keys := f.listKeys(t, agentID, tok, "user")
+	listCode, keys := f.listKeys(t, agentID, tok, "user")
+	readCode, _ := f.readAs(t, agentID, tok, sdAlwaysKey)
 	return lafDelivery{
-		start:   sdStartDelivery(t, f.disp, f.Store, agentID).always,
-		restart: got.restart,
-		read:    f.read(t, agentID, tok, sdAlwaysKey),
-		list:    containsString(keys, sdAlwaysKey),
+		start:    sdStartDelivery(t, f.disp, f.Store, agentID).always,
+		restart:  got.restart,
+		read:     readCode == http.StatusOK,
+		list:     containsString(keys, sdAlwaysKey),
+		readCode: readCode,
+		listCode: listCode,
 	}
+}
+
+// assertCohortDelivery checks the cohort's delivery: start and restart
+// deliver; the runtime read and the list are refused at the precheck.
+func assertCohortDelivery(t *testing.T, got lafDelivery, msg string) {
+	t.Helper()
+	assert.True(t, got.start, "%s: start delivers", msg)
+	assert.True(t, got.restart, "%s: restart delivers", msg)
+	assert.False(t, got.read, "%s: the runtime read stays refused", msg)
+	assert.Equal(t, http.StatusForbidden, got.readCode, "%s: capability_required", msg)
+	assert.False(t, got.list, "%s: the list stays refused", msg)
+	assert.Equal(t, http.StatusForbidden, got.listCode, "%s: capability_required", msg)
 }
 
 func containsString(list []string, s string) bool {
@@ -298,9 +319,11 @@ func containsString(list []string, s string) bool {
 }
 
 // TestLegacyAdoptedFallback_CohortDeliversOwnerSecrets: adopted baseline and
-// readonly agents receive their owner's shared secret at start, restart,
-// runtime read and list, each use is counted and logged at Warn with the
-// cohort and the secret name, never the value.
+// readonly agents receive their owner's shared secret at start and restart;
+// each use is counted and logged at Warn with the cohort and the secret
+// name, never the value. The runtime read and the list stay refused with
+// capability_required: their precheck has required project:secret:read
+// since #2072, and these tokens never carry it.
 func TestLegacyAdoptedFallback_CohortDeliversOwnerSecrets(t *testing.T) {
 	f := newLAFFixture(t, "laf-cohort")
 	b := f.legacy(t, "b", AgentRoleBaseline)
@@ -320,7 +343,7 @@ func TestLegacyAdoptedFallback_CohortDeliversOwnerSecrets(t *testing.T) {
 		d := f.ceiling(t, tc.id, sdAlwaysKey)
 		require.True(t, d.Allowed, "the ceiling allows the owner's secret under the fallback; reason %q", d.Reason)
 		require.NotNil(t, d.legacyFallback)
-		assert.Equal(t, lafDelivery{start: true, restart: true, read: true, list: true}, f.delivery(t, tc.id), tc.cohort)
+		assertCohortDelivery(t, f.delivery(t, tc.id), tc.cohort)
 		assert.Contains(t, log.String(), "cohort="+tc.cohort)
 	}
 	assert.Contains(t, log.String(), "legacy adopted-agent fallback")
@@ -339,7 +362,8 @@ func TestLegacyAdoptedFallback_FullAdoptedNotCounted(t *testing.T) {
 	d := f.ceiling(t, full, sdAlwaysKey)
 	require.True(t, d.Allowed, d.Reason)
 	assert.Nil(t, d.legacyFallback)
-	assert.Equal(t, lafDelivery{start: true, restart: true, read: true, list: true}, f.delivery(t, full))
+	got := f.delivery(t, full)
+	assert.True(t, got.start && got.restart && got.read && got.list, "a full adopted agent keeps every path: %+v", got)
 	assert.Equal(t, before, f.Server.authzService.LegacyAdoptedFallbackUses())
 }
 
@@ -390,8 +414,8 @@ func TestLegacyAdoptedFallback_AgentDelegatedChildStillRefused(t *testing.T) {
 // TestLegacyAdoptedFallback_NonCohortBaselineStillRefusedAtRead: a baseline
 // agent outside the cohort keeps every refusal. A recorded baseline agent
 // (principal edge, as a user's create writes today) passes the ceiling, so
-// start delivers as before #4234, but the runtime read is still refused by
-// Decide's step 7b: its role token lacks project:secret:read. A baseline
+// start delivers as before #4234, but the runtime read is still refused at
+// its precheck: its role token lacks project:secret:read. A baseline
 // agent with a bounded V1-row ceiling from a session source (not adoption)
 // is refused by S3c everywhere.
 func TestLegacyAdoptedFallback_NonCohortBaselineStillRefusedAtRead(t *testing.T) {
@@ -411,7 +435,8 @@ func TestLegacyAdoptedFallback_NonCohortBaselineStillRefusedAtRead(t *testing.T)
 	before := f.Server.authzService.LegacyAdoptedFallbackUses()
 
 	tok := f.token(t, recorded)
-	assert.False(t, f.read(t, recorded, tok, sdAlwaysKey), "step 7b still refuses a non-cohort baseline token at runtime read")
+	code, _ := f.readAs(t, recorded, tok, sdAlwaysKey)
+	assert.Equal(t, http.StatusForbidden, code, "a baseline token is refused at the runtime read precheck (project:secret:read)")
 	assert.True(t, sdStartDelivery(t, f.disp, f.Store, recorded).always, "start is unchanged for a recorded principal edge")
 
 	d := f.ceiling(t, bounded, sdAlwaysKey)
@@ -471,33 +496,9 @@ func TestLegacyAdoptedFallback_MixedRoleCohorts(t *testing.T) {
 		require.True(t, d.Allowed, d.Reason)
 		require.NotNil(t, d.legacyFallback)
 		assert.Equal(t, tc.rowRole, d.legacyFallback.Role)
-		assert.Equal(t, lafDelivery{start: true, restart: true, read: true, list: true}, f.delivery(t, tc.id), tc.edgeRole+" at "+tc.rowRole)
+		assertCohortDelivery(t, f.delivery(t, tc.id), tc.edgeRole+" at "+tc.rowRole)
 		assert.Contains(t, log.String(), "cohort=adopted_"+tc.rowRole)
 	}
-}
-
-// TestLegacyAdoptedFallback_AgentConstraintStillRefusesReadAndList: the
-// agent's own access constraints (7c) are the check that replaces Decide on
-// the fallback read; one that excludes secret.use refuses the read and
-// drops the key from the list. Start, which never applied the agent's own
-// constraints on the owner path, is unchanged.
-func TestLegacyAdoptedFallback_AgentConstraintStillRefusesReadAndList(t *testing.T) {
-	f := newLAFFixture(t, "laf-7c")
-	b := f.legacy(t, "constrained", AgentRoleBaseline)
-	runBootAdoption(t, f.Store)
-	tok := f.token(t, b)
-	require.True(t, f.read(t, b, tok, sdAlwaysKey), "the fallback read is allowed before the constraint")
-
-	constrainAllBut(t, f.Store, "agent", b, secretUsePermission)
-	before := f.Server.authzService.LegacyAdoptedFallbackUses()
-	assert.False(t, f.read(t, b, tok, sdAlwaysKey), "7c refuses the fallback read")
-	_, keys := f.listKeys(t, b, tok, "user")
-	assert.NotContains(t, keys, sdAlwaysKey, "7c drops the key from the list")
-	ok, err := f.Server.authzService.agentConstraintsAllowSecretUse(context.Background(),
-		newFullAgentIdentity(b, f.ProjectID, []string{f.UserID}, nil), userSecretResource("any", f.UserID))
-	require.NoError(t, err)
-	assert.False(t, ok)
-	assert.Equal(t, before, f.Server.authzService.LegacyAdoptedFallbackUses(), "a refused read or list is not counted as a use")
 }
 
 // lafRecordingMetrics records (path, role) of each fallback use.
@@ -507,8 +508,9 @@ func (m *lafRecordingMetrics) RecordLegacyAdoptedFallback(path, role string) {
 	m.uses = append(m.uses, path+"/"+role)
 }
 
-// TestLegacyAdoptedFallback_MetricAttributes: each path records its own
-// path attribute and the cohort role.
+// TestLegacyAdoptedFallback_MetricAttributes: only start and restart (the
+// owner path, path "start") record a use, with the cohort role; the runtime
+// read and the list record none.
 func TestLegacyAdoptedFallback_MetricAttributes(t *testing.T) {
 	f := newLAFFixture(t, "laf-metrics")
 	b := f.legacy(t, "metrics", AgentRoleBaseline)
@@ -516,43 +518,10 @@ func TestLegacyAdoptedFallback_MetricAttributes(t *testing.T) {
 	m := &lafRecordingMetrics{}
 	f.Server.SetLegacyAdoptedFallbackMetrics(m)
 	f.delivery(t, b)
-	for _, want := range []string{"start/baseline", "runtime_read/baseline", "list/baseline"} {
-		assert.Contains(t, m.uses, want)
-	}
+	require.NotEmpty(t, m.uses)
 	for _, u := range m.uses {
-		assert.True(t, strings.HasSuffix(u, "/baseline"), u)
+		assert.Equal(t, "start/baseline", u)
 	}
-}
-
-// TestLegacyAdoptedFallback_RaceGuardSendsNonCohortToDecide pins the guard
-// in legacyAdoptedRuntimeRead: when the ceiling allows the secret without
-// the fallback (here a full adopted agent, and a recorded baseline agent,
-// neither of which uses it), the function does not decide (handled=false),
-// so the caller runs Decide and its step 7b. Only a decision that came
-// through the fallback skips 7b.
-func TestLegacyAdoptedFallback_RaceGuardSendsNonCohortToDecide(t *testing.T) {
-	f := newLAFFixture(t, "laf-race")
-	ctx := context.Background()
-	full := f.legacy(t, "race-full", AgentRoleFull)
-	runBootAdoption(t, f.Store)
-	recorded := tid("laf-race-recorded")
-	createDCAgent(t, f.Store, recorded, f.ProjectID, f.UserID, AgentRoleBaseline)
-	seedRecordedDelegationEdge(t, f.Store, store.DelegationPrincipalUser, f.UserID, store.DelegationPrincipalAgent, recorded,
-		store.RoleScopeProject, f.ProjectID, string(AgentRoleBaseline))
-	meta, err := f.Server.secretBackend.GetMeta(ctx, sdAlwaysKey, store.ScopeUser, f.UserID)
-	require.NoError(t, err)
-	before := f.Server.authzService.LegacyAdoptedFallbackUses()
-	for _, id := range []string{full, recorded} {
-		ident := newFullAgentIdentity(id, f.ProjectID, []string{f.UserID}, nil)
-		d := f.Server.authzService.EvaluateUserSecretParentCeiling(ctx, ident, userSecretResource(meta.ID, meta.ScopeID))
-		require.True(t, d.Allowed, d.Reason)
-		require.Nil(t, d.legacyFallback)
-		reason, handled := f.Server.legacyAdoptedRuntimeRead(ctx, ident, userSecretResource(meta.ID, meta.ScopeID), meta, sdAlwaysKey)
-		assert.False(t, handled, "a ceiling allow without the fallback is left to Decide")
-		assert.Empty(t, reason)
-	}
-	assert.Equal(t, before, f.Server.authzService.LegacyAdoptedFallbackUses())
-	assert.False(t, f.read(t, recorded, f.token(t, recorded), sdAlwaysKey), "and Decide's 7b refuses the recorded baseline token")
 }
 
 // TestLegacyAdoptedFallback_CohortStillRefusedOnS2S4S4a: the fallback lifts
@@ -609,22 +578,4 @@ func TestLegacyAdoptedFallback_CohortStillRefusedOnS2S4S4a(t *testing.T) {
 			assert.Equal(t, before, f.Server.authzService.LegacyAdoptedFallbackUses())
 		})
 	}
-}
-
-type lafConstraintErrStore struct{ store.Store }
-
-func (lafConstraintErrStore) ListAccessConstraints(context.Context, int, int) ([]*store.AccessConstraint, error) {
-	return nil, errors.New("fake constraint load failure")
-}
-
-// TestLegacyAdoptedFallback_ConstraintLoadErrorFailsClosed: when the
-// agent's access constraints cannot be loaded, the 7c check returns an
-// error, which the fallback read turns into backend_error (never allow).
-func TestLegacyAdoptedFallback_ConstraintLoadErrorFailsClosed(t *testing.T) {
-	mf := newMaterialFixture(t, "laf-7c-err")
-	failing := &AuthzService{store: lafConstraintErrStore{Store: mf.Store}}
-	ok, err := failing.agentConstraintsAllowSecretUse(context.Background(),
-		newFullAgentIdentity(mf.AgentID, mf.ProjectID, []string{mf.UserID}, nil), userSecretResource("any", mf.UserID))
-	require.Error(t, err)
-	assert.False(t, ok)
 }

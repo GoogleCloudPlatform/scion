@@ -65,9 +65,9 @@ so their ceilings stay within the adopted chain.
 
 The V1 table gives `secret.use` to `full` only, so the user secret parent
 ceiling refuses an adopted `baseline` or `readonly` agent its owner's
-progeny-shared user secrets. Before that ceiling applied to start, restart,
-the runtime read and the agent secret list, these agents received them. As a
-**legacy compatibility exception**, the Hub keeps that behaviour for exactly
+progeny-shared user secrets. Before that ceiling applied to agent start and
+restart, these agents received them there. As a **legacy compatibility
+exception**, the Hub keeps that behaviour at start and restart for exactly
 this cohort:
 
 - the agent's own edge (no agent above it), delegated by the agent's owner;
@@ -88,27 +88,28 @@ an edge recorded any other way, a terminal user who is inactive or not
 admitted to the project, and the secret source check (the secret must be the
 owner's own, shared with progeny and authored by the owner) all still deny.
 
-The runtime read normally also checks the agent token's scopes, and a
-`baseline` or `readonly` token never carries `project:secret:read`. For this
-cohort only, the read skips that token-scope check and applies the ceiling
-and the agent's own access constraints, the same checks the agent secret
-list applies. Before the ceiling applied, the read applied the progeny rule
-alone, so the cohort's read is still stricter than it was then. This is an
-exception to the token-scope check. Every other agent keeps it.
+The runtime read (`scion secret get` inside the agent, the agent secret
+fetch) and the agent secret list are **not** restored for this cohort. Since
+ptone/scion#2072 every runtime read and list has required the agent token
+scope `project:secret:read`, and `baseline` and `readonly` tokens never
+carry it, so these agents are refused there (`capability_required`), as they
+were before the ceiling. To give such an agent its owner's secrets at
+runtime, reincarnate it as its owner with role `full`.
 
 An edge written later for such an agent, for example by a scope re-issue,
 keeps the `system_migration` source but has no adoption record of its own,
-so the agent leaves the cohort and its owner's shared secrets are withheld
-again (fail closed). Reincarnating the agent as its owner with role `full`
-restores them.
+so the agent leaves the cohort and its owner's shared secrets are withheld at
+start again (fail closed). Reincarnating the agent as its owner with role
+`full` restores them.
 
-Each use is counted (`scion.hub.user_secret.legacy_adopted_fallback`, with
-attributes `path` and `role`) and logged at warning level as `user secret
-allowed under the legacy adopted-agent fallback`, with the agent, the cohort
-(`adopted_baseline` or `adopted_readonly`), the edge and the secret name,
-never the value. The warning is logged at most once every 10 minutes per
-agent and secret. **The exception ends with the planned policy V2 backfill**, which
-is to re-ceiling these edges; the counter shows when it is no longer used.
+Each use at start or restart is counted
+(`scion.hub.user_secret.legacy_adopted_fallback`, attributes `path` and
+`role`) and logged at warning level as `user secret allowed under the legacy
+adopted-agent fallback`, with the agent, the cohort (`adopted_baseline` or
+`adopted_readonly`), the edge and the secret name, never the value. The
+warning is logged at most once every 10 minutes per agent and secret. **The
+exception ends with the planned policy V2 backfill**, which is to re-ceiling
+these edges; the counter shows when it is no longer used.
 
 ## Which edges are adopted
 
