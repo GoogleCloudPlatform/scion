@@ -215,16 +215,3 @@ func (a *AuthzService) recordLegacyAdoptedFallback(ctx context.Context, path str
 		"secret", secretName, "secret_id", secretID, "user_id", userID,
 		"suppressed_since_last", suppressed, "total_uses", total)
 }
-
-// progenySecretName returns the key of the progeny secret with id, or "".
-func progenySecretName(in *userSecretSourceInputs, id string) string {
-	if in == nil {
-		return ""
-	}
-	for _, sec := range in.progeny {
-		if sec.ID == id {
-			return sec.Key
-		}
-	}
-	return ""
-}

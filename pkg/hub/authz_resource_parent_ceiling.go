@@ -124,8 +124,6 @@ type ParentCeilingDecision struct {
 	// S3c through the legacy adopted-agent fallback; callers record the use
 	// (recordLegacyAdoptedFallback).
 	legacyFallback *legacyAdoptedFallback
-	// legacyFallbackSecret is the key of the secret allowed under it.
-	legacyFallbackSecret string
 }
 
 func parentCeilingDeny(cause DenyCause, reason string, proof ParentProof) ParentCeilingDecision {
@@ -870,7 +868,6 @@ func (a *AuthzService) evaluateUserSecretParentCeiling(ctx context.Context, prin
 	d := userSecretSourceCheck(chain, in, resource, explain)
 	if d.Allowed && chain.legacyFallback != nil {
 		d.legacyFallback = chain.legacyFallback
-		d.legacyFallbackSecret = progenySecretName(in, resource.ID)
 	}
 	return d, unrecordedHopNote{}
 }
