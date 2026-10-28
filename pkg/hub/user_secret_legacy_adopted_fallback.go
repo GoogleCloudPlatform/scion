@@ -98,7 +98,7 @@ func (a *AuthzService) legacyAdoptedSecretUseFallback(ctx context.Context, agent
 	if edge.SourceCredentialKind != store.SourceCredentialSystemMigration || edge.Kind != store.EffectCeilingBounded {
 		return nil, nil
 	}
-	rowRole, ok := legacyCompatibilityV1RowRole(edge.EffectCeiling.PermissionIDs)
+	rowRole, ok := legacyCompatibilityV1RowRole(edge.PermissionIDs)
 	if !ok || roleOrdinal(rowRole) > roleOrdinal(AgentRole(edge.Role)) {
 		return nil, nil
 	}
