@@ -17,8 +17,9 @@
 /**
  * Read-only "Project storage" card of a broker in the Brokers area. It shows
  * the storage layout the broker reported and, for users who can read the
- * health summary, how that layout differs from the hub's. Storage is set in
- * the broker's own settings, never from the Hub, so nothing here is editable.
+ * health summary, how that layout differs from the hub's. Storage comes from
+ * the broker's settings.yaml or its deployment tooling and is not edited from
+ * this page, so nothing here is editable.
  */
 
 import { LitElement, html, nothing, type TemplateResult } from 'lit';
