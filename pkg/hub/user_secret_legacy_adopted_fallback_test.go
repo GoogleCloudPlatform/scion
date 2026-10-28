@@ -21,6 +21,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -521,4 +522,109 @@ func TestLegacyAdoptedFallback_MetricAttributes(t *testing.T) {
 	for _, u := range m.uses {
 		assert.True(t, strings.HasSuffix(u, "/baseline"), u)
 	}
+}
+
+// TestLegacyAdoptedFallback_RaceGuardSendsNonCohortToDecide pins the guard
+// in legacyAdoptedRuntimeRead: when the ceiling allows the secret without
+// the fallback (here a full adopted agent, and a recorded baseline agent,
+// neither of which uses it), the function does not decide (handled=false),
+// so the caller runs Decide and its step 7b. Only a decision that came
+// through the fallback skips 7b.
+func TestLegacyAdoptedFallback_RaceGuardSendsNonCohortToDecide(t *testing.T) {
+	f := newLAFFixture(t, "laf-race")
+	ctx := context.Background()
+	full := f.legacy(t, "race-full", AgentRoleFull)
+	runBootAdoption(t, f.Store)
+	recorded := tid("laf-race-recorded")
+	createDCAgent(t, f.Store, recorded, f.ProjectID, f.UserID, AgentRoleBaseline)
+	seedRecordedDelegationEdge(t, f.Store, store.DelegationPrincipalUser, f.UserID, store.DelegationPrincipalAgent, recorded,
+		store.RoleScopeProject, f.ProjectID, string(AgentRoleBaseline))
+	meta, err := f.Server.secretBackend.GetMeta(ctx, sdAlwaysKey, store.ScopeUser, f.UserID)
+	require.NoError(t, err)
+	before := f.Server.authzService.LegacyAdoptedFallbackUses()
+	for _, id := range []string{full, recorded} {
+		ident := newFullAgentIdentity(id, f.ProjectID, []string{f.UserID}, nil)
+		d := f.Server.authzService.EvaluateUserSecretParentCeiling(ctx, ident, userSecretResource(meta.ID, meta.ScopeID))
+		require.True(t, d.Allowed, d.Reason)
+		require.Nil(t, d.legacyFallback)
+		reason, handled := f.Server.legacyAdoptedRuntimeRead(ctx, ident, userSecretResource(meta.ID, meta.ScopeID), meta, sdAlwaysKey)
+		assert.False(t, handled, "a ceiling allow without the fallback is left to Decide")
+		assert.Empty(t, reason)
+	}
+	assert.Equal(t, before, f.Server.authzService.LegacyAdoptedFallbackUses())
+	assert.False(t, f.read(t, recorded, f.token(t, recorded), sdAlwaysKey), "and Decide's 7b refuses the recorded baseline token")
+}
+
+// TestLegacyAdoptedFallback_CohortStillRefusedOnS2S4S4a: the fallback lifts
+// S3c only. A deleted cohort agent (S2), an inactive owner (S4) and an owner
+// no longer admitted to the project (S4a) are refused at start, runtime read
+// and list.
+func TestLegacyAdoptedFallback_CohortStillRefusedOnS2S4S4a(t *testing.T) {
+	cases := []struct {
+		name    string
+		cause   DenyCause
+		breakIt func(t *testing.T, f *lafFixture, agentID string)
+	}{
+		{"deleted agent (S2)", DenyCauseCeilingOrphaned, func(t *testing.T, f *lafFixture, agentID string) {
+			a, err := f.Store.GetAgent(context.Background(), agentID)
+			require.NoError(t, err)
+			a.DeletedAt = time.Now()
+			require.NoError(t, f.Store.UpdateAgent(context.Background(), a))
+		}},
+		{"inactive owner (S4)", DenyCauseCeilingOrphaned, func(t *testing.T, f *lafFixture, _ string) {
+			u, err := f.Store.GetUser(context.Background(), f.UserID)
+			require.NoError(t, err)
+			u.Status = "suspended"
+			require.NoError(t, f.Store.UpdateUser(context.Background(), u))
+		}},
+		{"owner not admitted to the project (S4a)", DenyCauseCeilingDelegatorLacksPermission, func(t *testing.T, f *lafFixture, _ string) {
+			rbs, err := f.Store.ListRoleBindingsForPrincipal(context.Background(), store.RoleBindingPrincipalUser, f.UserID)
+			require.NoError(t, err)
+			for _, rb := range rbs {
+				if rb.ScopeType == store.RoleScopeProject && rb.ScopeID == f.ProjectID {
+					require.NoError(t, f.Store.DeleteRoleBinding(context.Background(), rb.ID))
+				}
+			}
+		}},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLAFFixture(t, "laf-s2s4-"+string(rune('a'+i)))
+			b := f.legacy(t, "cohort", AgentRoleBaseline)
+			runBootAdoption(t, f.Store)
+			tok := f.token(t, b)
+			require.True(t, f.ceiling(t, b, sdAlwaysKey).Allowed, "in the cohort before the change")
+
+			tc.breakIt(t, f, b)
+			before := f.Server.authzService.LegacyAdoptedFallbackUses()
+			d := f.ceiling(t, b, sdAlwaysKey)
+			require.False(t, d.Allowed)
+			assert.Equal(t, tc.cause, d.DenyCause, d.Reason)
+			if tc.name != "deleted agent (S2)" {
+				assert.False(t, sdStartDelivery(t, f.disp, f.Store, b).always)
+			}
+			assert.False(t, f.read(t, b, tok, sdAlwaysKey))
+			_, keys := f.listKeys(t, b, tok, "user")
+			assert.NotContains(t, keys, sdAlwaysKey)
+			assert.Equal(t, before, f.Server.authzService.LegacyAdoptedFallbackUses())
+		})
+	}
+}
+
+type lafConstraintErrStore struct{ store.Store }
+
+func (lafConstraintErrStore) ListAccessConstraints(context.Context, int, int) ([]*store.AccessConstraint, error) {
+	return nil, errors.New("fake constraint load failure")
+}
+
+// TestLegacyAdoptedFallback_ConstraintLoadErrorFailsClosed: when the
+// agent's access constraints cannot be loaded, the 7c check returns an
+// error, which the fallback read turns into backend_error (never allow).
+func TestLegacyAdoptedFallback_ConstraintLoadErrorFailsClosed(t *testing.T) {
+	mf := newMaterialFixture(t, "laf-7c-err")
+	failing := &AuthzService{store: lafConstraintErrStore{Store: mf.Store}}
+	ok, err := failing.agentConstraintsAllowSecretUse(context.Background(),
+		newFullAgentIdentity(mf.AgentID, mf.ProjectID, []string{mf.UserID}, nil), userSecretResource("any", mf.UserID))
+	require.Error(t, err)
+	assert.False(t, ok)
 }
