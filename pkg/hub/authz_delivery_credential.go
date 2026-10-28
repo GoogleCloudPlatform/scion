@@ -635,7 +635,7 @@ func (a *AuthzService) hubDeliveryWalk(ctx context.Context, startAgentID, scopeP
 		}
 		if pendingUAT {
 			switch {
-			case hopCohort == legacyDeliveryCohortUATCreated:
+			case hopCohort == deliveryCohortUATNoDeliverMapping:
 				pendingUAT = false
 			case inherits:
 			default:

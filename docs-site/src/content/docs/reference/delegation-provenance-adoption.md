@@ -242,10 +242,19 @@ When the Hub starts or restarts an agent, it authorizes each Project, Hub and Br
 | `legacy_no_edge` | no active edge in the project |
 | `legacy_sentinel_edge` | only the backfill's migration edge (`user:system/migration`) |
 | `legacy_unadopted_edge` | only an edge with unrecorded provenance, including scheduled children with role `none`, which adoption skips |
-| `legacy_adopted_baseline`, `legacy_adopted_readonly` | only an adopted edge at role `baseline` or `readonly`, whose policy V1 ceiling has no delivery permissions |
-| `legacy_uat_created` | only an edge recorded from a user access token, whose ceiling cannot hold the delivery permissions because no token scope grants them; or it is a descendant of such an agent whose own edge, recorded by its parent agent, lacks the delivery permissions only because the parent could not pass them down (every agent between the two must be of the same kind) |
+| `legacy_adopted_readonly`, `legacy_adopted_baseline`, `legacy_adopted_capped` | only an adopted edge (source `system_migration`) whose ceiling lacks the delivery permissions only because policy V1 capped it: the ceiling lies within the V1 row of the edge's own role. The group is named after the lowest V1 row the ceiling fits in (`readonly`, then `baseline`; `capped` if neither), whatever the edge role. Adoption keeps the edge role but caps the ceiling at the lower of the edge and applied roles, and intersects a child's ceiling with its adopted parent's. So an edge of role `full` can carry the `baseline` or `readonly` row, and it is served here. An edge re-issued by an agent delegator keeps the `system_migration` source and is judged the same way. |
 
-Each item delivered this way is logged once an hour per agent and item at `Warn`, as `launch material delivered through the legacy fallback`, with the agent ID, the group, and the item's name and scope.
+Each item delivered this way is logged at `Warn` at most once an hour per agent and item, as `launch material delivered through the legacy fallback`. The line has the agent ID, the group, `exception` (`legacy`, or `product_gap` for the group below), and the item's name and scope. The Hub remembers the 16384 most recently logged items; beyond that it forgets the oldest first.
+
+### Product-gap exception: agents created from a user access token
+
+One more group is served the same way, although it is not legacy data:
+
+| Group (`cohort` in the log) | The hop's agent has |
+| :--- | :--- |
+| `uat_created_no_deliver_mapping` | only an edge recorded from a user access token, whose ceiling cannot hold the delivery permissions because no token scope grants them; or it is a descendant of such an agent whose own edge, recorded by its parent agent, lacks the delivery permissions only because the parent could not pass them down (every agent between the two must be of the same kind) |
+
+This covers agents created from a user access token today and in future, so it is a gap in the current product, not a migration leftover. It does not end with a later backfill. It ends only when a user access token scope grants the delivery permissions: from then on the Hub stops treating such edges as an exception by itself. Its removal is tracked as a follow-up issue. The `Warn` line marks it `exception=product_gap`, and the census counts it separately from the legacy groups.
 
 The fallback never applies when:
 
@@ -253,7 +262,7 @@ The fallback never applies when:
 - a delegator or ancestor agent is deleted, missing or held, or the root user is not active;
 - the agent has more than one active edge in the project. Such agents are withheld for now: the `Warn` line names the cause `ceiling_provenance_ambiguous`, and the census counts them as `duplicate_edges`. This will be revisited once census numbers from real Hubs are available;
 - a hop has local-development provenance and the Hub does not run dev auth;
-- a recorded hop that is not one of the groups above has a ceiling without the permission, for example an agent whose parent's ceiling does hold the permission;
+- a recorded hop that is not one of the groups above has a ceiling without the permission. Examples: an agent whose parent's ceiling does hold the permission, or an adopted edge whose ceiling is not within the V1 row of its role;
 - an earlier check (the item's association with the agent, an access constraint, the test-admin policy) refuses the item;
 - the chain is fully recorded, which leaves the root user's project admission as the deciding check.
 

@@ -49,17 +49,34 @@ package hub
 //     (version 0, or no known effect ceiling kind), the shape older writers
 //     left and that adoption excluded, legacy scheduled children with role
 //     none included;
-//   - legacy_adopted_baseline, legacy_adopted_readonly: its only active edge
-//     was adopted (source system_migration) at role baseline or readonly,
-//     whose compatibility policy V1 ceiling lacks the deliver permission;
-//   - legacy_uat_created: its only active edge was recorded from a user
-//     access token (source uat), whose bounded ceiling cannot carry the
-//     deliver permission because no token scope maps to it. A descendant
-//     agent's recorded agent edge that lacks the permission only because
-//     of that ancestor (legacyInheritsUATGap) is let through under the same
-//     cohort when every hop between them is of the same kind; a descendant
-//     hop whose parent's ceiling does allow the permission is a real
-//     narrowing and still denies.
+//   - legacy_adopted_readonly, legacy_adopted_baseline, legacy_adopted_capped:
+//     its only active edge was written by adoption (source system_migration)
+//     with a bounded ceiling that lacks the deliver permission only because
+//     of the compatibility policy V1 cap or intersection: the ceiling is
+//     within the V1 row of the edge's own role (legacyAdoptedCohort). The
+//     cohort is keyed on the ceiling, never on the edge role: adoption
+//     keeps the edge role and caps the ceiling at the lower of the edge and
+//     applied roles, and intersects a child's ceiling with its adopted
+//     parent's, so a full edge can carry the baseline or readonly row. The
+//     cohort names the lowest V1 row the ceiling fits in (readonly, then
+//     baseline); legacy_adopted_capped is a ceiling within the edge role's
+//     row that fits in neither.
+//
+// One more cohort is served the same way although it is not legacy:
+//
+//   - uat_created_no_deliver_mapping: the hop's only active edge was
+//     recorded from a user access token (source uat), whose bounded ceiling
+//     cannot carry the deliver permission because no token scope maps it.
+//     This is a current product gap, not legacy data: it covers agents
+//     created from a token today and in future, and it ends only when a
+//     token scope maps the deliver permissions (uatCarriesPermission turns
+//     it off by itself then). A descendant agent's recorded agent edge that
+//     lacks the permission only because of that ancestor
+//     (legacyInheritsUATGap) is let through under the same cohort when every
+//     hop between them is of the same kind; a descendant hop whose parent's
+//     ceiling does allow the permission is a real narrowing and still
+//     denies. The Warn and the census name it separately from the legacy
+//     cohorts.
 //
 // Everything else is enforced as before, on the strict and tolerant walk
 // alike: a held agent at any hop, a deleted, missing or held delegator or
@@ -81,6 +98,7 @@ package hub
 // a chain with no legacy hop still requires it.
 
 import (
+	"container/list"
 	"context"
 	"fmt"
 	"sync"
@@ -90,21 +108,36 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Legacy cohorts (see the file comment).
+// Fallback cohorts (see the file comment).
 const (
 	legacyDeliveryCohortNoEdge          = "legacy_no_edge"
 	legacyDeliveryCohortSentinelEdge    = "legacy_sentinel_edge"
 	legacyDeliveryCohortUnadoptedEdge   = "legacy_unadopted_edge"
 	legacyDeliveryCohortAdoptedBaseline = "legacy_adopted_baseline"
 	legacyDeliveryCohortAdoptedReadOnly = "legacy_adopted_readonly"
-	legacyDeliveryCohortUATCreated      = "legacy_uat_created"
+	legacyDeliveryCohortAdoptedCapped   = "legacy_adopted_capped"
+	// deliveryCohortUATNoDeliverMapping is the product-gap exception, not a
+	// legacy cohort (see the file comment).
+	deliveryCohortUATNoDeliverMapping = "uat_created_no_deliver_mapping"
 )
 
-// Fallback Warn rate limit: one line per agent, cohort and item per window.
+// Fallback Warn rate limit: one line per agent, cohort and item per window,
+// remembering at most legacyDeliveryLogDedupSize keys (least recently
+// logged evicted first).
 const (
 	legacyDeliveryLogDedupWindow = time.Hour
-	legacyDeliveryLogDedupSize   = 4096
+	legacyDeliveryLogDedupSize   = 16384
 )
+
+// deliveryFallbackException names, for the Warn, what kind of exception a
+// cohort is: "product_gap" for uat_created_no_deliver_mapping, "legacy"
+// otherwise.
+func deliveryFallbackException(cohort string) string {
+	if cohort == deliveryCohortUATNoDeliverMapping {
+		return "product_gap"
+	}
+	return "legacy"
+}
 
 // legacyFallbackCauses are the strict walk's deny causes a legacy hop
 // produces. A strict deny with any other cause (held agent, ambiguous
@@ -147,26 +180,59 @@ func (n *hubDeliveryLegacyNote) note(cohort string, depth int) {
 func legacyBoundedEdgeCohort(edge *store.DelegationEdge, permissionID string) string {
 	switch edge.SourceCredentialKind {
 	case store.SourceCredentialSystemMigration:
-		switch AgentRole(edge.Role) {
-		case AgentRoleBaseline:
-			return legacyDeliveryCohortAdoptedBaseline
-		case AgentRoleReadOnly:
-			return legacyDeliveryCohortAdoptedReadOnly
-		}
+		return legacyAdoptedCohort(edge)
 	case store.SourceCredentialUAT:
 		if !uatCarriesPermission(permissionID) {
-			return legacyDeliveryCohortUATCreated
+			return deliveryCohortUATNoDeliverMapping
 		}
 	}
 	return ""
 }
 
+// legacyAdoptedCohort returns the adopted cohort of a system_migration
+// bounded edge whose ceiling lacks a deliver permission, or "" when its
+// ceiling is not within the compatibility policy V1 row of the edge's own
+// role (it was not capped or intersected by V1, so its deny stands).
+func legacyAdoptedCohort(edge *store.DelegationEdge) string {
+	ids := edge.EffectCeiling.PermissionIDs
+	if !withinCompatibilityV1Row(ids, AgentRole(edge.Role)) {
+		return ""
+	}
+	switch {
+	case withinCompatibilityV1Row(ids, AgentRoleReadOnly):
+		return legacyDeliveryCohortAdoptedReadOnly
+	case withinCompatibilityV1Row(ids, AgentRoleBaseline):
+		return legacyDeliveryCohortAdoptedBaseline
+	}
+	return legacyDeliveryCohortAdoptedCapped
+}
+
+// withinCompatibilityV1Row reports whether every ID in ids is in the
+// compatibility policy V1 row of role, assigned service account permissions
+// included. An unknown role (none included) has no row.
+func withinCompatibilityV1Row(ids []string, role AgentRole) bool {
+	row, ok := permissions.CompatibilityCeiling(permissions.CompatibilityPolicyV1, string(role), true)
+	if !ok {
+		return false
+	}
+	in := make(map[string]bool, len(row))
+	for _, id := range row {
+		in[id] = true
+	}
+	for _, id := range ids {
+		if !in[id] {
+			return false
+		}
+	}
+	return true
+}
+
 // legacyInheritsUATGap reports whether a recorded bounded edge whose ceiling
-// does not allow permissionID may only inherit the legacy_uat_created gap:
+// does not allow permissionID may only inherit the uat_created_no_deliver_mapping gap:
 // it was recorded by an agent delegator from an agent credential, and no
 // user access token scope maps permissionID, so a UAT-created ancestor
 // could not have passed the permission down. The tolerant walk admits such
-// a hop only when the hops above reach a legacy_uat_created hop through
+// a hop only when the hops above reach a uat_created_no_deliver_mapping hop through
 // hops of the same kind (hubDeliveryWalk, pendingUAT); otherwise its own
 // deny stands.
 func legacyInheritsUATGap(edge *store.DelegationEdge, permissionID string) bool {
@@ -267,4 +333,49 @@ func (a *AuthzService) hubDeliveryLegacyFallback(
 		*explain = append(*explain, DecisionStep{Step: "delegation_ceiling_delivery_legacy_fallback", Detail: reason})
 	}
 	return hubDeliveryAdmissionOutcome{ok: true, reason: reason, legacyCohort: note.cohort}
+}
+
+// deliveryLogDedup remembers recently logged keys for the fallback Warn: a
+// key logged within window is not logged again. It holds at most max keys;
+// when full it evicts the least recently logged key, so a hub with more
+// keys than max degrades to re-logging only its oldest items, never to
+// clearing everything.
+type deliveryLogDedup struct {
+	mu     sync.Mutex
+	max    int
+	window time.Duration
+	order  *list.List // front = most recently logged; values are *deliveryLogEntry
+	byKey  map[string]*list.Element
+}
+
+type deliveryLogEntry struct {
+	key string
+	at  time.Time
+}
+
+func newDeliveryLogDedup(max int, window time.Duration) *deliveryLogDedup {
+	return &deliveryLogDedup{max: max, window: window, order: list.New(), byKey: make(map[string]*list.Element)}
+}
+
+// first reports whether key was not logged within the window, and records
+// it as logged at now when so.
+func (d *deliveryLogDedup) first(key string, now time.Time) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if el, ok := d.byKey[key]; ok {
+		e := el.Value.(*deliveryLogEntry)
+		if now.Sub(e.at) < d.window {
+			return false
+		}
+		e.at = now
+		d.order.MoveToFront(el)
+		return true
+	}
+	d.byKey[key] = d.order.PushFront(&deliveryLogEntry{key: key, at: now})
+	for d.order.Len() > d.max {
+		oldest := d.order.Back()
+		d.order.Remove(oldest)
+		delete(d.byKey, oldest.Value.(*deliveryLogEntry).key)
+	}
+	return true
 }

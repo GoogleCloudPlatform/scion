@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -83,11 +84,26 @@ func lgSoftDelete(t *testing.T, m *ldFixture, id string) {
 	require.NoError(t, m.store.UpdateAgent(context.Background(), ag))
 }
 
-// lgAdoptedAt is an adopted (system_migration) edge at role, whose bounded
-// compatibility ceiling lacks the deliver permissions.
-func lgAdoptedAt(role AgentRole) func(e *store.DelegationEdge) {
+// lgV1Row is the compatibility policy V1 row of role (no assigned service
+// account).
+func lgV1Row(t *testing.T, role AgentRole) []string {
+	t.Helper()
+	ids, ok := permissions.CompatibilityCeiling(permissions.CompatibilityPolicyV1, string(role), false)
+	require.True(t, ok, "role %s", role)
+	return ids
+}
+
+// lgV1RowStatic is lgV1Row for table literals built before t exists.
+func lgV1RowStatic(role AgentRole) []string {
+	ids, _ := permissions.CompatibilityCeiling(permissions.CompatibilityPolicyV1, string(role), false)
+	return ids
+}
+
+// lgAdopted is an adopted (system_migration) edge with edge role role whose
+// bounded ceiling is ceiling.
+func lgAdopted(role AgentRole, ceiling []string) func(e *store.DelegationEdge) {
 	return func(e *store.DelegationEdge) {
-		withBoundedCeiling("agent.read")(e)
+		withBoundedCeiling(ceiling...)(e)
 		e.Role = string(role)
 		e.SourceCredentialKind = store.SourceCredentialSystemMigration
 	}
@@ -138,9 +154,40 @@ func TestDispatchDelivery_LegacyCohortsDeliveredWithWarn(t *testing.T) {
 			},
 			wantCohort: legacyDeliveryCohortUnadoptedEdge,
 		},
-		{name: "adopted_baseline", opts: ldOptions{edge: lgAdoptedAt(AgentRoleBaseline)}, wantCohort: legacyDeliveryCohortAdoptedBaseline},
-		{name: "adopted_readonly", opts: ldOptions{edge: lgAdoptedAt(AgentRoleReadOnly)}, wantCohort: legacyDeliveryCohortAdoptedReadOnly},
-		{name: "uat_created", opts: ldOptions{edge: lgUATCreated}, wantCohort: legacyDeliveryCohortUATCreated},
+		{name: "adopted_baseline", opts: ldOptions{edge: lgAdopted(AgentRoleBaseline, lgV1RowStatic(AgentRoleBaseline))}, wantCohort: legacyDeliveryCohortAdoptedBaseline},
+		{name: "adopted_readonly", opts: ldOptions{edge: lgAdopted(AgentRoleReadOnly, lgV1RowStatic(AgentRoleReadOnly))}, wantCohort: legacyDeliveryCohortAdoptedReadOnly},
+		{
+			// Adopted at the lower of edge and applied role: the edge role
+			// stays full, the ceiling is the baseline row.
+			name: "adopted_full_edge_capped_at_baseline_row", opts: ldOptions{edge: lgAdopted(AgentRoleFull, lgV1RowStatic(AgentRoleBaseline))},
+			wantCohort: legacyDeliveryCohortAdoptedBaseline,
+		},
+		{
+			name: "adopted_full_edge_capped_at_readonly_row", opts: ldOptions{edge: lgAdopted(AgentRoleFull, lgV1RowStatic(AgentRoleReadOnly))},
+			wantCohort: legacyDeliveryCohortAdoptedReadOnly,
+		},
+		{
+			// The root user is not a member of the project: a fallback chain
+			// does not check project membership (as before the check).
+			name: "no_edge_root_not_project_member", opts: ldOptions{noEdge: true, rootMemberNone: true},
+			wantCohort: legacyDeliveryCohortNoEdge,
+		},
+		{
+			// A recorded target edge whose parent's edge is unrecorded and
+			// whose root user is not a member of the project: served, because
+			// the provenance root admission does not run on a fallback chain.
+			name: "legacy_parent_root_not_project_member", opts: ldOptions{noEdge: true, rootMemberNone: true},
+			after: func(t *testing.T, m *ldFixture) {
+				p := tid("lg-parent-nonmember")
+				hdAgent(t, m.store, p, m.agent.ProjectID, []string{m.memberNoneID})
+				createDCEdge(t, m.store, store.DelegationPrincipalUser, m.memberNoneID, store.DelegationPrincipalAgent, p,
+					store.RoleScopeProject, m.agent.ProjectID, string(AgentRoleFull))
+				hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, nil)
+			},
+			wantCohort: legacyDeliveryCohortUnadoptedEdge,
+			wantDepth:  true,
+		},
+		{name: "uat_created", opts: ldOptions{edge: lgUATCreated}, wantCohort: deliveryCohortUATNoDeliverMapping},
 		{
 			// The child of a UAT-created agent: its recorded agent edge
 			// lacks the permission only because its parent could not pass
@@ -151,7 +198,7 @@ func TestDispatchDelivery_LegacyCohortsDeliveredWithWarn(t *testing.T) {
 				hdEdge(t, m.store, store.DelegationPrincipalUser, m.projectOwnerID, p, m.agent.ProjectID, lgUATCreated)
 				hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, withBoundedCeiling("agent.read"))
 			},
-			wantCohort: legacyDeliveryCohortUATCreated,
+			wantCohort: deliveryCohortUATNoDeliverMapping,
 			wantDepth:  true,
 		},
 		{
@@ -164,7 +211,7 @@ func TestDispatchDelivery_LegacyCohortsDeliveredWithWarn(t *testing.T) {
 				hdEdge(t, m.store, store.DelegationPrincipalAgent, gp, p, m.agent.ProjectID, withBoundedCeiling("agent.read"))
 				hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, withBoundedCeiling("agent.read"))
 			},
-			wantCohort: legacyDeliveryCohortUATCreated,
+			wantCohort: deliveryCohortUATNoDeliverMapping,
 			wantDepth:  true,
 		},
 		{
@@ -206,6 +253,7 @@ func TestDispatchDelivery_LegacyCohortsDeliveredWithWarn(t *testing.T) {
 				require.True(t, ok, "no fallback Warn for %s; log: %s", k, buf.String())
 				assert.Equal(t, m.agent.ID, rec["agent_id"])
 				assert.Equal(t, r.wantCohort, rec["cohort"])
+				assert.Equal(t, deliveryFallbackException(r.wantCohort), rec["exception"])
 				assert.Equal(t, string(PurposeRestart), rec["purpose"])
 				assert.NotEmpty(t, rec["scope"])
 				assert.NotEmpty(t, rec["kind"])
@@ -246,7 +294,7 @@ func TestDispatchDelivery_LegacyFallbackKeepsRealDenials(t *testing.T) {
 			},
 		},
 		{
-			name: "held_agent_adopted_baseline", opts: ldOptions{edge: lgAdoptedAt(AgentRoleBaseline)},
+			name: "held_agent_adopted_baseline", opts: ldOptions{edge: lgAdopted(AgentRoleBaseline, lgV1RowStatic(AgentRoleBaseline))},
 			after: func(t *testing.T, m *ldFixture) {
 				holdAgentFor(t, m.store, m.agent.ID, m.agent.ProjectID, m.projectOwnerID)
 			},
@@ -334,6 +382,37 @@ func TestDispatchDelivery_LegacyFallbackKeepsRealDenials(t *testing.T) {
 					store.RoleScopeProject, m.agent.ProjectID, string(AgentRoleFull))
 				hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, withBoundedCeiling("agent.read"))
 			},
+		},
+		{
+			// A pending UAT inheritance must end at a UAT-created hop: an
+			// adopted parent does not explain the child's missing permission.
+			name: "recorded_child_lacking_deliver_below_adopted_parent", opts: ldOptions{noEdge: true},
+			after: func(t *testing.T, m *ldFixture) {
+				p := lgParent(t, m, "adopted-parent")
+				hdEdge(t, m.store, store.DelegationPrincipalUser, m.projectOwnerID, p, m.agent.ProjectID, lgAdopted(AgentRoleBaseline, lgV1Row(t, AgentRoleBaseline)))
+				hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, withBoundedCeiling("agent.read"))
+			},
+		},
+		{
+			name: "recorded_child_lacking_deliver_below_sentinel_parent", opts: ldOptions{noEdge: true},
+			after: func(t *testing.T, m *ldFixture) {
+				p := lgParent(t, m, "sentinel-parent")
+				createDCEdge(t, m.store, store.DelegationPrincipalUser, migrationDelegatorID, store.DelegationPrincipalAgent, p,
+					store.RoleScopeProject, m.agent.ProjectID, string(AgentRoleFull))
+				hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, withBoundedCeiling("agent.read"))
+			},
+		},
+		{
+			name: "recorded_child_lacking_deliver_below_parent_without_edge", opts: ldOptions{noEdge: true},
+			after: func(t *testing.T, m *ldFixture) {
+				p := lgParent(t, m, "edgeless-parent")
+				hdEdge(t, m.store, store.DelegationPrincipalAgent, p, m.agent.ID, m.agent.ProjectID, withBoundedCeiling("agent.read"))
+			},
+		},
+		{
+			// An adopted edge whose ceiling is not within the V1 row of its
+			// role was not capped by V1: its deny stands.
+			name: "adopted_edge_ceiling_outside_v1_row", opts: ldOptions{edge: lgAdopted(AgentRoleBaseline, []string{"agent.read"})},
 		},
 		{
 			// An inheriting child of a UAT-created parent that is held.
@@ -487,4 +566,82 @@ func TestLegacyDeliveryFallback_Scope(t *testing.T) {
 	for _, p := range LaunchDeliveryCensusPermissions {
 		assert.False(t, uatCarriesPermission(p), "%s: the UAT-created cohort assumes no token scope maps it", p)
 	}
+}
+
+// TestDispatchDelivery_BootAdoptedFullEdgesWithoutDeliverServed: boot
+// adoption keeps the edge role and caps the ceiling by policy V1, so a full
+// edge can carry a ceiling without the deliver permissions: (a) an edge of
+// role full on an agent applied at baseline, and (b) a full child of an
+// adopted baseline parent (intersection). Both are served by the adopted
+// cohort, keyed on the ceiling.
+func TestDispatchDelivery_BootAdoptedFullEdgesWithoutDeliverServed(t *testing.T) {
+	m := newLDFixture(t, "lg-boot", ldOptions{})
+	ctx := context.Background()
+	owner, alpha := m.projectOwnerID, m.agent.ProjectID
+
+	capped := tid("lg-boot-capped")
+	createDCAgent(t, m.store, capped, alpha, owner, AgentRoleBaseline)
+	createDCEdge(t, m.store, store.DelegationPrincipalUser, owner, store.DelegationPrincipalAgent, capped,
+		store.RoleScopeProject, alpha, string(AgentRoleFull))
+
+	parent := tid("lg-boot-parent")
+	createDCAgent(t, m.store, parent, alpha, owner, AgentRoleBaseline)
+	createDCEdge(t, m.store, store.DelegationPrincipalUser, owner, store.DelegationPrincipalAgent, parent,
+		store.RoleScopeProject, alpha, string(AgentRoleBaseline))
+	child := tid("lg-boot-child")
+	require.NoError(t, m.store.CreateAgent(ctx, &store.Agent{
+		ID: child, Slug: "slug-" + child[:8], Name: "name-" + child[:8], ProjectID: alpha, Phase: "running",
+		CreatedBy: parent, OwnerID: parent, Ancestry: []string{owner, parent},
+		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
+	}))
+	createDCEdge(t, m.store, store.DelegationPrincipalAgent, parent, store.DelegationPrincipalAgent, child,
+		store.RoleScopeProject, alpha, string(AgentRoleFull))
+
+	runBootAdoption(t, m.store)
+
+	m.env(t, "LG_BOOT_ENV", "boot-value", store.ScopeProject, alpha, false)
+	buf := lgLogger(m)
+	for _, id := range []string{capped, child} {
+		edges := activeEdgesFor(t, m.store, id)
+		require.Len(t, edges, 1, id)
+		e := edges[0]
+		require.Equal(t, store.SourceCredentialSystemMigration, e.SourceCredentialKind, "%s: the edge is adopted", id)
+		require.Equal(t, string(AgentRoleFull), e.Role, "%s: adoption keeps the edge role", id)
+		require.Equal(t, store.EffectCeilingBounded, e.Kind, id)
+		assert.Subset(t, lgV1Row(t, AgentRoleBaseline), e.PermissionIDs, "%s: the ceiling is capped at the baseline row", id)
+		assert.NotContains(t, e.PermissionIDs, "env_var.deliver", id)
+
+		agent, err := m.store.GetAgent(ctx, id)
+		require.NoError(t, err)
+		env, _, err := m.d.selectDeliveryEnv(ctx, newDeliverySelector(m.authz, agent, PurposeRestart), agent)
+		require.NoError(t, err)
+		assert.Equal(t, "boot-value", env["LG_BOOT_ENV"], "%s: served by the adopted cohort", id)
+	}
+	cohorts := map[string]any{}
+	for _, rec := range warnRecords(t, buf.Bytes(), lgFallbackMsg) {
+		if id, _ := rec["agent_id"].(string); id == capped || id == child {
+			cohorts[id] = rec["cohort"]
+		}
+	}
+	assert.Equal(t, map[string]any{capped: legacyDeliveryCohortAdoptedBaseline, child: legacyDeliveryCohortAdoptedBaseline}, cohorts, "log: %s", buf.String())
+}
+
+// TestDeliveryLogDedup_BoundedLRU: within the window a key logs once; past
+// capacity only the least recently logged key is forgotten; past the window
+// a key logs again.
+func TestDeliveryLogDedup_BoundedLRU(t *testing.T) {
+	d := newDeliveryLogDedup(3, time.Hour)
+	now := time.Date(2026, 10, 28, 4, 0, 0, 0, time.UTC)
+	for _, k := range []string{"a", "b", "c"} {
+		assert.True(t, d.first(k, now), k)
+	}
+	assert.False(t, d.first("b", now.Add(time.Minute)))
+	assert.True(t, d.first("d", now.Add(2*time.Minute)), "a fourth key is logged")
+	assert.True(t, d.first("a", now.Add(3*time.Minute)), "only the least recently logged key was evicted")
+	for _, k := range []string{"c", "d"} {
+		assert.False(t, d.first(k, now.Add(4*time.Minute)), "%s is still remembered", k)
+	}
+	assert.True(t, d.first("d", now.Add(2*time.Minute+time.Hour)), "past the window a key logs again")
+	assert.LessOrEqual(t, d.order.Len(), 3)
+	assert.Equal(t, d.order.Len(), len(d.byKey))
 }

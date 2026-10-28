@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 import (
@@ -52,11 +54,7 @@ func TestLaunchDeliveryCensus_Cohorts(t *testing.T) {
 
 	adopted := tid("census-adopted")
 	hdAgent(t, f.store, adopted, alpha, []string{owner})
-	hdEdge(t, f.store, store.DelegationPrincipalUser, owner, adopted, alpha, func(e *store.DelegationEdge) {
-		withBoundedCeiling("agent.read")(e)
-		e.Role = string(AgentRoleReadOnly)
-		e.SourceCredentialKind = store.SourceCredentialSystemMigration
-	})
+	hdEdge(t, f.store, store.DelegationPrincipalUser, owner, adopted, alpha, lgAdopted(AgentRoleReadOnly, lgV1RowStatic(AgentRoleReadOnly)))
 
 	uat := tid("census-uat")
 	hdAgent(t, f.store, uat, alpha, []string{owner})
@@ -82,7 +80,7 @@ func TestLaunchDeliveryCensus_Cohorts(t *testing.T) {
 		sentinel:  legacyDeliveryCohortSentinelEdge,
 		unadopted: legacyDeliveryCohortUnadoptedEdge,
 		adopted:   legacyDeliveryCohortAdoptedReadOnly,
-		uat:       legacyDeliveryCohortUATCreated,
+		uat:       deliveryCohortUATNoDeliverMapping,
 		parent:    legacyDeliveryCohortNoEdge,
 		child:     legacyDeliveryCohortNoEdge,
 		devLocal:  "dev_local_edge",
@@ -132,8 +130,9 @@ func TestLaunchDeliveryCensus_Cohorts(t *testing.T) {
 	}
 	assert.Equal(t, len(rep.Rows), rep.Agents)
 	assert.Equal(t, rep.Agents-rep.ByCohort["delivers"], rep.StrictWithheld)
-	assert.Equal(t, rep.StrictWithheld, rep.Withheld+rep.Fallback)
-	assert.GreaterOrEqual(t, rep.Fallback, 7, "the seven legacy agents above")
+	assert.Equal(t, rep.StrictWithheld, rep.Withheld+rep.Fallback+rep.ProductGap)
+	assert.GreaterOrEqual(t, rep.Fallback, 6, "the six legacy agents above")
+	assert.GreaterOrEqual(t, rep.ProductGap, 1, "the UAT-created agent, counted apart from the legacy cohorts")
 
 	// With dev auth on (the workstation hub), the dev_local agent delivers.
 	rep, err = f.authz.LaunchDeliveryCensus(ctx, true)

@@ -70,9 +70,9 @@ type LaunchDeliveryEdgeFacts struct {
 
 // LaunchDeliveryCensusRow is one live agent's census result. Cohort is what
 // a start delivers: "delivers" when the strict admission admits every
-// deliver permission; a legacy_* cohort when every permission is admitted
-// and at least one only through the legacy fallback (the first such
-// cohort); otherwise the withheld cohort of the first refused permission.
+// deliver permission; a legacy_* cohort or uat_created_no_deliver_mapping
+// when every permission is admitted and at least one only through the
+// fallback (the first such cohort); otherwise the withheld cohort of the first refused permission.
 // StrictCohort is the same classification without the fallback.
 type LaunchDeliveryCensusRow struct {
 	AgentID      string                           `json:"agentId"`
@@ -88,12 +88,15 @@ type LaunchDeliveryCensusRow struct {
 
 // LaunchDeliveryCensusReport is the whole census. Withheld counts agents a
 // start refuses at least one deliver permission; Fallback counts agents
-// served only through the legacy fallback; StrictWithheld counts agents the
-// strict admission refuses (Withheld + Fallback).
+// served only through a legacy cohort of the fallback; ProductGap counts
+// agents served only through the uat_created_no_deliver_mapping exception;
+// StrictWithheld counts agents the strict admission refuses (Withheld +
+// Fallback + ProductGap).
 type LaunchDeliveryCensusReport struct {
 	Agents         int                       `json:"agents"`
 	Withheld       int                       `json:"withheld"`
 	Fallback       int                       `json:"fallback"`
+	ProductGap     int                       `json:"productGap"`
 	StrictWithheld int                       `json:"strictWithheld"`
 	ByCohort       map[string]int            `json:"byCohort"`
 	ByCause        map[string]int            `json:"byCause"`
@@ -126,6 +129,9 @@ func (a *AuthzService) LaunchDeliveryCensus(ctx context.Context, devLocal bool) 
 			case row.Cohort == "delivers":
 			case strings.HasPrefix(row.Cohort, "legacy_"):
 				rep.Fallback++
+				rep.StrictWithheld++
+			case row.Cohort == deliveryCohortUATNoDeliverMapping:
+				rep.ProductGap++
 				rep.StrictWithheld++
 			default:
 				rep.Withheld++

@@ -14,9 +14,10 @@
 
 // Command delivery-census reports, READ-ONLY, which live agents on a hub
 // database the launch material delivery admission would refuse at start or
-// restart, which of those the legacy fallback still serves (legacy_* cohorts:
-// no edge, sentinel edge, unadopted edge, adopted baseline/readonly,
-// UAT-created; see pkg/hub/material_delivery_legacy.go), and which stay
+// restart, which of those the fallback still serves (legacy_* cohorts: no
+// edge, sentinel edge, unadopted edge, adopted; and, counted separately, the
+// uat_created_no_deliver_mapping product-gap exception; see
+// pkg/hub/material_delivery_legacy.go), and which stay
 // withheld (deleted or held parent, held agent, duplicate edges, recorded
 // ceiling, ...), with counts by cohort and by deny cause with and without
 // the fallback. It runs hub.(*AuthzService).LaunchDeliveryCensus, the same
@@ -33,7 +34,7 @@
 // Pass -dev-auth when the hub runs with dev auth (the workstation server),
 // because the admission refuses local-development provenance without it.
 // Output: a summary (counts by cohort and cause) on stdout, then one TSV row
-// per agent not served by the strict admission (legacy_* and withheld); -all
+// per agent not served by the strict admission (fallback and withheld); -all
 // adds the agents that deliver; -json prints the
 // whole report as JSON instead.
 package main
@@ -136,7 +137,8 @@ func withQueryParam(dsn, key, value string) string {
 
 func writeText(w io.Writer, rep *hub.LaunchDeliveryCensusReport, devAuth, all bool) {
 	fmt.Fprintf(w, "# launch delivery census (read-only), dev_auth=%t\n", devAuth)
-	fmt.Fprintf(w, "agents\t%d\nwithheld\t%d\nlegacy_fallback\t%d\nstrict_withheld\t%d\n", rep.Agents, rep.Withheld, rep.Fallback, rep.StrictWithheld)
+	fmt.Fprintf(w, "agents\t%d\nwithheld\t%d\nlegacy_fallback\t%d\nproduct_gap_uat_no_deliver_mapping\t%d\nstrict_withheld\t%d\n",
+		rep.Agents, rep.Withheld, rep.Fallback, rep.ProductGap, rep.StrictWithheld)
 	fmt.Fprintln(w, "# by cohort")
 	for _, k := range sortedKeys(rep.ByCohort) {
 		fmt.Fprintf(w, "cohort\t%s\t%d\n", k, rep.ByCohort[k])
