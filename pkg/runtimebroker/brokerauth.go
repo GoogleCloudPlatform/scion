@@ -130,6 +130,13 @@ func (m *BrokerAuthMiddleware) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// Bound the body before anything reads it: the canonical string
+		// below hashes the body before the signature is checked.
+		if err := apiclient.LimitSignedRequestBody(w, r); err != nil {
+			writeSignedBodyTooLarge(w)
+			return
+		}
+
 		// Validate timestamp
 		ts, err := strconv.ParseInt(timestamp, 10, 64)
 		if err != nil {
@@ -182,6 +189,15 @@ func (m *BrokerAuthMiddleware) Middleware(next http.Handler) http.Handler {
 		// Signature valid, continue to handler
 		next.ServeHTTP(w, r)
 	})
+}
+
+// writeSignedBodyTooLarge answers a signed request whose body exceeds
+// apiclient.MaxSignedRequestBodyBytes with 413, in the same JSON error shape
+// as the authentication errors.
+func writeSignedBodyTooLarge(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusRequestEntityTooLarge)
+	_, _ = fmt.Fprintf(w, `{"error":{"code":"payload_too_large","message":%q}}`, apiclient.SignedBodyTooLargeMessage)
 }
 
 // writeError writes an authentication error response.
@@ -299,6 +315,13 @@ func (m *MultiKeyBrokerAuthMiddleware) ServeWith(w http.ResponseWriter, r *http.
 	}
 	if nonce == "" {
 		m.writeError(w, "missing X-Scion-Nonce header")
+		return
+	}
+
+	// Bound the body before anything reads it: the canonical string below
+	// hashes the body before the signature is checked.
+	if err := apiclient.LimitSignedRequestBody(w, r); err != nil {
+		writeSignedBodyTooLarge(w)
 		return
 	}
 
