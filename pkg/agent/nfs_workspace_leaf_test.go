@@ -844,3 +844,55 @@ func TestEnsureNFSWorktreeLeaf_InlineExportNotMountedRefused(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, ok)
 }
+
+// Inline, a permission error while checking whether the shared checkout is
+// provisioned, or while creating the worktree directory, refuses the start
+// with the directory and the fix; with a claim both are left to the node.
+func TestEnsureNFSWorktreeLeaf_InlinePermissionDeniedRefused(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	claim := runtime.NFSPodShare{ClaimName: "ws-pv"}
+	leaf := filepath.Join("workspace", "worktrees", "agent-1")
+
+	t.Run("provisioning check", func(t *testing.T) {
+		mountRoot := t.TempDir()
+		res := resolveTestNFSWorkspace(t, mountRoot)
+		stateDir := filepath.Join(res.HostBase, provision.ProjectStateDir(res.ServerRelativePath))
+		require.NoError(t, os.MkdirAll(stateDir, 0o755))
+		require.NoError(t, os.Chmod(stateDir, 0o000))
+		t.Cleanup(func() { _ = os.Chmod(stateDir, 0o755) })
+
+		_, err := ensureNFSWorktreeLeaf("kubernetes", res, inlineTestShare, "agent-1")
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, fs.ErrPermission), "got %v", err)
+		assert.Contains(t, err.Error(), leaf)
+		assert.Contains(t, err.Error(), "mount the share's export at \""+res.HostBase+"\"")
+
+		ok, err := ensureNFSWorktreeLeaf("kubernetes", res, claim, "agent-1")
+		require.NoError(t, err, "with a claim the node still creates it")
+		assert.False(t, ok)
+	})
+
+	t.Run("worktree directory", func(t *testing.T) {
+		mountRoot := t.TempDir()
+		res := resolveTestNFSWorkspace(t, mountRoot)
+		stateDir := filepath.Join(res.HostBase, provision.ProjectStateDir(res.ServerRelativePath))
+		require.NoError(t, os.MkdirAll(stateDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(stateDir, provision.ProvisionSentinelFile), nil, 0o644))
+		require.NoError(t, os.MkdirAll(res.HostPath, 0o755))
+		require.NoError(t, os.Chmod(res.HostPath, 0o555))
+		t.Cleanup(func() { _ = os.Chmod(res.HostPath, 0o755) })
+
+		_, err := ensureNFSWorktreeLeaf("kubernetes", res, inlineTestShare, "agent-1")
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, fs.ErrPermission), "got %v", err)
+		assert.Contains(t, err.Error(), leaf)
+		assert.Contains(t, err.Error(), "mount the share's export at \""+res.HostBase+"\"")
+		assert.NoDirExists(t, filepath.Join(res.HostPath, "worktrees"))
+
+		ok, err := ensureNFSWorktreeLeaf("kubernetes", res, claim, "agent-1")
+		require.NoError(t, err, "with a claim the node still creates it")
+		assert.False(t, ok)
+	})
+}
