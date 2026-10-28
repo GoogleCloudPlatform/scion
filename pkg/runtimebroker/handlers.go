@@ -44,7 +44,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -9169,9 +9168,12 @@ func isLocalhostEndpoint(endpoint string) bool {
 // It is decided by the dispatch's resolved runtime, which is checked before
 // anything is mounted:
 //   - Kubernetes or Cloud Run (NFSWarnOnlyRuntime): the platform
-//     mounts the export into the agent. The broker reads the share's last
-//     recorded status, logs a warning if it is unhealthy, and continues; it
-//     never mounts and never refuses the dispatch.
+//     mounts the export into the agent, and the broker never mounts it. The
+//     broker reads the share's last recorded status. Off a shared
+//     project-storage Layout it logs a warning if the share is unhealthy and
+//     continues. On a shared Layout an unhealthy share refuses the dispatch,
+//     except on a verify-only reconciler, where the status is advisory and
+//     the share's directory being visible admits it (shareVisible).
 //   - Any other (local-container) runtime: the share is checked and, when
 //     the broker mounts shares, mounted. If it is not mounted the dispatch
 //     is refused, since the workspace would otherwise silently land on
@@ -9212,7 +9214,7 @@ func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, pro
 			// dispatch, and the project tree's identity is checked when its
 			// project root is resolved (sharedHubProjectPath).
 			if s.config.StorageLayout.Backend.Shared() && r.VerifyOnly() &&
-				projectfs.ShareDirVisible(ctx, filepath.Join(nfsCfg.MountRoot, shareID)) == nil {
+				shareVisible(ctx, s.config.StorageLayout, r) == nil {
 				s.agentLifecycleLog.Warn("NFS share check is advisory on this broker; the share directory is visible, continuing dispatch",
 					"agent", name, "runtime", runtimeType, "share", shareID, "detail", detail)
 				return nil

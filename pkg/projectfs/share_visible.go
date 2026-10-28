@@ -33,6 +33,13 @@ var ShareVisibleTimeout = 10 * time.Second
 // that does not return in time is an error. The returned error wraps the
 // stat error (errors.Is(err, fs.ErrNotExist) holds for a missing path).
 //
+// A stat that hangs (a hard network mount whose server is gone) cannot be
+// interrupted: the call returns at the deadline, but its goroutine stays
+// blocked in the stat until the kernel returns it, one goroutine per
+// timed-out call. That is bounded by the callers' rate (one per dispatch or
+// look-up) and is strictly better than the plain os.Stat it replaces, which
+// blocked the caller itself.
+//
 // It proves only that a directory is there. The caller proves that it holds
 // the expected project tree (for example the hub-seeded project-id under
 // <ProjectRoot>/.scion).

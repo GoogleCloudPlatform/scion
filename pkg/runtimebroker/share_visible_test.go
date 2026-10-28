@@ -187,3 +187,93 @@ func TestCheckNFSForDispatch_VerifyOnlySharedLayout(t *testing.T) {
 		t.Fatal("checkNFSForDispatch with the share directory absent = nil, want the not-mounted refusal")
 	}
 }
+
+// shareTreeListing lists every path under dir (relative), sorted, for checking that
+// a refused dispatch wrote nothing.
+func shareTreeListing(t *testing.T, dir string) []string {
+	t.Helper()
+	var out []string
+	err := filepath.Walk(dir, func(p string, _ os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(dir, p)
+		out = append(out, rel)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// The main wrong-share case: a verify-only broker whose mount point is an
+// empty directory (the share is not really mounted there) is refused by the
+// identity check (409), and nothing is written under the mount point.
+func TestSharedHubProjectPath_VerifyOnlyEmptyMountPointRefusedNoWrite(t *testing.T) {
+	f := newShareVisibleFixture(t, "kubernetes", "10.0.0.2:/scion-workspaces/")
+	if err := os.RemoveAll(filepath.Join(f.hostBase, "projects")); err != nil {
+		t.Fatal(err)
+	}
+	before := shareTreeListing(t, f.hostBase)
+	_, ok, sce := f.srv.sharedHubProjectPath(context.Background(), sharedRootProjectID)
+	if !ok || sce == nil || sce.Status != http.StatusConflict {
+		t.Fatalf("sharedHubProjectPath on an empty mount point = %v, %+v; want a 409 refusal", ok, sce)
+	}
+	after := shareTreeListing(t, f.hostBase)
+	if len(before) != len(after) {
+		t.Fatalf("the refused dispatch wrote under the mount point: before %v, after %v", before, after)
+	}
+	for i := range before {
+		if before[i] != after[i] {
+			t.Fatalf("the refused dispatch changed the mount point: before %v, after %v", before, after)
+		}
+	}
+}
+
+// The NFS dispatch pre-flight of a broker that mounts its shares keeps the
+// exact source match: a Kubernetes dispatch on a shared Layout whose share
+// is mounted from a cosmetically different source, which the broker failed
+// to remount, is refused.
+func TestCheckNFSForDispatch_MountingBrokerCosmeticSourceRefused(t *testing.T) {
+	mountRoot := t.TempDir()
+	nfs := &config.V1NFSConfig{
+		MountRoot: mountRoot,
+		AutoMount: true,
+		Shares:    []config.V1NFSShare{{ID: "ws1", Server: "10.0.0.2", Export: "/scion-workspaces"}},
+	}
+	srv, mc := newGateServer(t, nfs, "docker", "kubernetes")
+	hostBase := filepath.Join(mountRoot, "ws1")
+	if err := os.MkdirAll(hostBase, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mc.setMounted(hostBase, "10.0.0.2:/scion-workspaces/")
+	srv.config.StorageLayout = projectfs.Layout{Backend: projectfs.BackendNFS, HostBase: hostBase, SubPathRoot: "projects", Share: projectfs.Share{ID: "ws1"}}
+	if srv.nfsMountReconciler.VerifyOnly() || !srv.nfsMountReconciler.MountsShares() {
+		t.Fatal("a docker broker with auto_mount must mount its shares")
+	}
+	// Record the share's status: the remount of the mismatched source fails.
+	if err := srv.nfsMountReconciler.EnsureShareMounted(context.Background(), "ws1"); err == nil {
+		t.Fatal("EnsureShareMounted on a mounting broker with a mismatched source and failing mounts = nil")
+	}
+	projectPath := writeSettings(t, t.TempDir(), "schema_version: \"1\"\n")
+	if err := srv.checkNFSForDispatch(context.Background(), "agent-1", filepath.Join(projectPath, ".scion"), "", ""); err == nil {
+		t.Fatal("checkNFSForDispatch on a mounting broker with a mismatched source = nil, want the refusal")
+	}
+}
+
+// shareVisible on a verify-only broker does not take the advisory path when
+// the caller's context is done: the reconciler's error is returned, so a
+// cancelled check never admits a dispatch.
+func TestShareVisible_DoneContextReturnsReconcilerError(t *testing.T) {
+	f := newShareVisibleFixture(t, "kubernetes", "10.0.0.2:/scion-workspaces/")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := shareVisible(ctx, f.srv.config.StorageLayout, f.srv.nfsMountReconciler); err == nil {
+		t.Fatal("shareVisible with a done context = nil, want the reconciler's error")
+	}
+	// With a live context the same broker is admitted (the advisory path).
+	if err := shareVisible(context.Background(), f.srv.config.StorageLayout, f.srv.nfsMountReconciler); err != nil {
+		t.Fatalf("shareVisible with a live context = %v, want nil", err)
+	}
+}
