@@ -494,3 +494,94 @@ export class ChatStarsController extends EventTarget {
     this.dispatchEvent(new Event(type));
   }
 }
+
+/** A visible star collection surface reconciles at most this often. */
+export const STAR_SURFACE_RECONCILE_MS = 60_000;
+
+/**
+ * Two return signals closer than this (a tab switch fires both
+ * `visibilitychange` and the window's `focus`) refetch once.
+ */
+const RETURN_DEDUPE_MS = 2_000;
+
+/**
+ * Keeps a visible star collection surface (the header list while open,
+ * the starred-only center) in step when invalidations were missed:
+ *
+ * - while started and the document is visible, `run` is called once
+ *   `intervalMs` has passed since the last refetch, whatever caused it
+ *   (a null interval: no polling, only the return below);
+ * - returning to the page (visibility or window focus) calls `run` at once;
+ * - nothing runs while the document is hidden.
+ *
+ * The surface calls `noteRefetched()` whenever it refetched for another
+ * reason (an SSE invalidation, a reconnect, opening), which restarts the
+ * interval, so polls never add to that traffic.
+ */
+export class VisibleReconciler {
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private last = 0;
+  private active = false;
+
+  constructor(
+    private readonly run: () => void,
+    private readonly intervalMs: number | null = STAR_SURFACE_RECONCILE_MS,
+    private readonly now: () => number = () => Date.now()
+  ) {}
+
+  get started(): boolean {
+    return this.active;
+  }
+
+  start(): void {
+    if (this.active) return;
+    this.active = true;
+    this.last = this.now();
+    document.addEventListener('visibilitychange', this.handleReturn);
+    window.addEventListener('focus', this.handleReturn);
+    this.schedule();
+  }
+
+  stop(): void {
+    if (!this.active) return;
+    this.active = false;
+    document.removeEventListener('visibilitychange', this.handleReturn);
+    window.removeEventListener('focus', this.handleReturn);
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+  }
+
+  /** The surface refetched for another reason: restart the interval. */
+  noteRefetched(): void {
+    if (!this.active) return;
+    this.last = this.now();
+    this.schedule();
+  }
+
+  private schedule(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    if (this.intervalMs === null) return;
+    const wait = Math.max(0, this.last + this.intervalMs - this.now());
+    this.timer = setTimeout(this.tick, wait);
+  }
+
+  private tick = (): void => {
+    this.timer = null;
+    if (!this.active) return;
+    // Hidden: no poll, and no timer either; the return to the page refetches.
+    if (document.visibilityState === 'visible') this.fire();
+  };
+
+  private handleReturn = (): void => {
+    if (!this.active || document.visibilityState !== 'visible') return;
+    if (this.now() - this.last < RETURN_DEDUPE_MS) return;
+    this.fire();
+  };
+
+  private fire(): void {
+    this.last = this.now();
+    this.schedule();
+    this.run();
+  }
+}
