@@ -292,9 +292,12 @@ test.describe('starred messages: header list on a phone', () => {
     expect(ebox.height).toBeGreaterThanOrEqual(44);
 
     const scroller = sheet.locator('.scroll');
-    // The region must really overflow, or a drag has nothing to scroll.
     const room = await scroller.evaluate((el) => el.scrollHeight - el.clientHeight);
-    expect(room).toBeGreaterThan(100);
+    expect(room, 'starred sheet list must overflow before the touch drag').toBeGreaterThan(100);
+    // Measure the list only after the sheet's slide-in has finished, or the drag starts below it.
+    await sheet.evaluate((el) =>
+      Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished)).then(() => undefined)
+    );
     const sbox = (await scroller.boundingBox())!;
     const frameBefore = await page.evaluate(() => document.scrollingElement?.scrollTop ?? 0);
     await touchScroll(page, sbox.x + sbox.width / 2, sbox.y + sbox.height - 30, 0, -200);
