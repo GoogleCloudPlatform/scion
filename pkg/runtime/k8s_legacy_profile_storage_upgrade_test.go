@@ -175,7 +175,11 @@ func TestUpgrade_LegacyProfileNFSSharedDirs_NeverDefaultClassRWXClaim(t *testing
 // upgradeAgentStartSharedDirStorage resolves shared-dir storage for an
 // agent start of profile from vs (the loaded global settings) as the agent
 // manager does, and fills cfg's realization when the layout is shared. It
-// returns the start's refusal, if any.
+// returns the start's refusal, if any. It mirrors the agent manager's call
+// sequence (pkg/runtime cannot import pkg/agent); that Manager.Start itself
+// makes the call is proven in pkg/agent by TestStart_RefusedStorageCreatesNothing
+// and TestStartSharedDirLayout_ProfileOverrideRefused, and at create
+// admission by pkg/runtimebroker TestCreateAgent_StorageRefusalBeforeAnyPreparation.
 func upgradeAgentStartSharedDirStorage(t *testing.T, vs *config.VersionedSettings, profile string, cfg *RunConfig) error {
 	t.Helper()
 	if err := vs.RemovedStorageOverridesForProfile(profile); err != nil {
