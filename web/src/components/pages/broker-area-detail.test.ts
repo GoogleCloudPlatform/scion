@@ -286,7 +286,7 @@ describe('scion-page-broker-area-detail', () => {
     try {
       const el = await mount({ ...FLAT_K8S, workspaceStorage: nfsStorage() });
       expect(fetchMock.mock.calls.some(([u]) => u === '/api/v1/admin/health/summary')).toBe(true);
-      expect(errorSpy).toHaveBeenCalled();
+      expect(errorSpy).toHaveBeenCalledWith('Failed to load broker health:', expect.anything());
       expect(tabs(el)).not.toContain('health');
       const card = el.shadowRoot!.querySelector('scion-broker-storage-card') as Page;
       await card.updateComplete;
