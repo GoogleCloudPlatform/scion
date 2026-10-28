@@ -294,7 +294,8 @@ func TestFlatPolicy_Flat40Gi(t *testing.T) {
 // one process, built from one settings file whose active profile carries
 // its own shared-dir defaults. Creates on the two run concurrently; each
 // agent's PVC has its own instance's defaults, and neither has the active
-// profile's. Run under -race.
+// profile's. A third instance sets no class and does not inherit the
+// profile's either. Run under -race.
 func TestFlatPolicy_TwoInstancesOneProcess(t *testing.T) {
 	writePolicyHome(t, `schema_version: "1"
 active_profile: batch
@@ -323,16 +324,23 @@ server:
           namespace: agents
           shared_dir_storage_class: b-rwx
           shared_dir_size: 20Gi
+      - key: k8s-c
+        name: k8s-c
+        runtime_target:
+          type: kubernetes
+          namespace: agents
+          shared_dir_size: 10Gi
 `)
 	instances, err := config.LoadRuntimeBrokerInstances("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(instances) != 2 {
-		t.Fatalf("want two instances, got %+v", instances)
+	if len(instances) != 3 {
+		t.Fatalf("want three instances, got %+v", instances)
 	}
 	a := newPolicyInstance(t, &instances[0])
 	b := newPolicyInstance(t, &instances[1])
+	c := newPolicyInstance(t, &instances[2])
 
 	// The two instances serve concurrently; each one's own starts are
 	// sequential (they share one project-scoped PVC, whose get-or-create
@@ -366,11 +374,33 @@ server:
 		t.Errorf("instance k8s-b PVC: size %s class %q, want 20Gi b-rwx", pvcSize(pvc), pvcClass(pvc))
 	}
 
+	// The class-less instance reuses its project's existing claim (it has
+	// no class to create one with). Had it inherited profile-rwx, the
+	// runtime would warn that the claim's class differs from it.
+	c.seedSharedDirClaim(t)
+	logs := captureLog(t)
+	if err := c.start("agent-c-0"); err != nil {
+		t.Fatal(err)
+	}
+	c.mu.Lock()
+	created := len(c.pvcs)
+	c.mu.Unlock()
+	if created != 0 {
+		t.Errorf("instance k8s-c created %d PVCs, want it to reuse the existing claim", created)
+	}
+	if out := logs.String(); !strings.Contains(out, "Project RWX PVC already exists, reusing") {
+		t.Errorf("instance k8s-c did not reuse the existing claim; log:\n%s", out)
+	} else if strings.Contains(out, "profile-rwx") {
+		t.Errorf("instance k8s-c requested the active profile's class; log:\n%s", out)
+	}
+
 	// Each server's own decisions read its own policy too.
 	vs := &config.VersionedSettings{ActiveProfile: "batch"}
-	for inst, want := range map[*policyInstance]string{a: "40Gi", b: "20Gi"} {
-		if _, size := inst.srv.settingsView(vs).ResolveSharedDirDefaults(""); size != want {
-			t.Errorf("settingsView size %q, want %q", size, want)
+	for inst, want := range map[*policyInstance]struct{ class, size string }{
+		a: {"a-rwx", "40Gi"}, b: {"b-rwx", "20Gi"}, c: {"", "10Gi"},
+	} {
+		if class, size := inst.srv.settingsView(vs).ResolveSharedDirDefaults(""); class != want.class || size != want.size {
+			t.Errorf("settingsView class %q size %q, want %q %q", class, size, want.class, want.size)
 		}
 	}
 }
