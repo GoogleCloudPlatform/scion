@@ -497,10 +497,16 @@ type authRoundTripper struct {
 }
 
 func (rt *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req == nil {
+		return nil, errors.New("apiclient: nil request")
+	}
 	// Headers are set on a clone so the caller's request is never changed.
 	// Redirect hops do not depend on this: net/http copies their headers
 	// from the initial request before the first send.
 	clone := req.Clone(req.Context())
+	if clone.Header == nil {
+		clone.Header = make(http.Header)
+	}
 	if rt.ua != "" && clone.Header.Get("User-Agent") == "" {
 		clone.Header.Set("User-Agent", rt.ua)
 	}
