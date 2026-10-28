@@ -16,6 +16,8 @@ package runtimebroker
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -24,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // shareVisibleFixture is a broker with a shared nfs Layout whose share is
@@ -122,6 +125,13 @@ func TestSharedHubProjectPath_VerifyOnlyRefusals(t *testing.T) {
 		if !ok || sce == nil || sce.Status != http.StatusServiceUnavailable || sce.Code != ErrCodeProjectStorageUnavailable {
 			t.Fatalf("sharedHubProjectPath = %v, %+v; want the 503 %s refusal", ok, sce, ErrCodeProjectStorageUnavailable)
 		}
+		if want := scionrt.ProjectShareUnavailableText(scionrt.ProjectShareMountPathField, true); sce.Message != want {
+			t.Errorf("message = %q, want %q", sce.Message, want)
+		}
+		assertNoPathValues(t, f, sce.Message)
+		if !errors.Is(sce.OriginalErr, fs.ErrNotExist) {
+			t.Errorf("OriginalErr = %v, want the share directory's not-exist error", sce.OriginalErr)
+		}
 	})
 	t.Run("project-id of another project", func(t *testing.T) {
 		f := newShareVisibleFixture(t, "kubernetes", "10.0.0.2:/scion-workspaces/")
@@ -184,9 +194,11 @@ func TestCheckNFSForDispatch_VerifyOnlySharedLayout(t *testing.T) {
 	if err := os.RemoveAll(f.hostBase); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.srv.checkNFSForDispatch(context.Background(), "agent-1", filepath.Join(projectPath, ".scion"), "", ""); err == nil {
-		t.Fatal("checkNFSForDispatch with the share directory absent = nil, want the not-mounted refusal")
+	err := f.srv.checkNFSForDispatch(context.Background(), "agent-1", filepath.Join(projectPath, ".scion"), "", "")
+	if want := scionrt.ProjectShareUnavailableText(scionrt.ProjectShareMountPathField, true); err == nil || err.Error() != want {
+		t.Fatalf("checkNFSForDispatch with the share directory absent = %v, want %q", err, want)
 	}
+	assertNoPathValues(t, f, err.Error())
 }
 
 // shareTreeListing lists every path under dir (relative), sorted, for checking that
@@ -234,10 +246,15 @@ func TestSharedHubProjectPath_VerifyOnlyEmptyMountPointRefusedNoWrite(t *testing
 	if !ok || sce == nil || sce.Status != http.StatusServiceUnavailable || sce.Code != ErrCodeProjectStorageUnavailable {
 		t.Fatalf("sharedHubProjectPath on an empty mount point = %v, %+v; want the 503 %s refusal", ok, sce, ErrCodeProjectStorageUnavailable)
 	}
-	if want := shareNotVisibleText(shareMountPathField, true); sce.Message != want {
+	if want := scionrt.ProjectShareUnavailableText(scionrt.ProjectShareMountPathField, true); sce.Message != want {
 		t.Errorf("message = %q, want the not-visible text %q", sce.Message, want)
 	}
 	assertNoPathValues(t, f, sce.Message)
+	// The stat error is kept for the broker log (OriginalErr); the 503
+	// body is sce.Message only.
+	if !errors.Is(sce.OriginalErr, fs.ErrNotExist) {
+		t.Errorf("OriginalErr = %v, want the subpath root's not-exist error", sce.OriginalErr)
+	}
 	after := shareTreeListing(t, f.hostBase)
 	if len(before) != len(after) {
 		t.Fatalf("the refused dispatch wrote under the mount point: before %v, after %v", before, after)
@@ -279,7 +296,7 @@ func TestSharedHubProjectPath_MountingBrokerMissingSubpathRoot(t *testing.T) {
 	if !ok || sce == nil || sce.Status != http.StatusServiceUnavailable {
 		t.Fatalf("sharedHubProjectPath = %v, %+v; want 503", ok, sce)
 	}
-	if want := shareNotVisibleText(shareMountPathField, false); sce.Message != want {
+	if want := scionrt.ProjectShareUnavailableText(scionrt.ProjectShareMountPathField, false); sce.Message != want {
 		t.Errorf("message = %q, want %q", sce.Message, want)
 	}
 	assertNoPathValues(t, f, sce.Message)

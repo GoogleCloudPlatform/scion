@@ -9216,16 +9216,21 @@ func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, pro
 			// (sharedHubProjectPath). A dispatch that carries a project
 			// path (not hub-managed) is admitted on directory visibility
 			// alone, with no hub-seeded identity check, as before #4219.
-			if s.config.StorageLayout.Backend.Shared() && r.VerifyOnly() &&
-				shareVisible(ctx, s.config.StorageLayout, r) == nil {
-				s.agentLifecycleLog.Warn("NFS share check is advisory on this broker; the share directory is visible, continuing dispatch",
-					"agent", name, "runtime", runtimeType, "share", shareID, "detail", detail)
-				return nil
+			var visibilityErr error
+			if s.config.StorageLayout.Backend.Shared() && r.VerifyOnly() {
+				if visibilityErr = shareVisible(ctx, s.config.StorageLayout, r); visibilityErr == nil {
+					s.agentLifecycleLog.Warn("NFS share check is advisory on this broker; the share directory is visible, continuing dispatch",
+						"agent", name, "runtime", runtimeType, "share", shareID, "detail", detail)
+					return nil
+				}
 			}
 			if s.config.StorageLayout.Backend.Shared() {
-				s.agentLifecycleLog.Error("NFS share not mounted on the broker; refusing dispatch",
-					"agent", name, "runtime", runtimeType, "share", shareID, "detail", detail)
-				return fmt.Errorf(sharedProjectUnmountedFmt, filepath.Join(nfsCfg.MountRoot, shareID))
+				// The body names the configuration fields, not the path;
+				// the path and both checks' detail go to the log only.
+				s.agentLifecycleLog.Error("NFS share not visible on the broker; refusing dispatch",
+					"agent", name, "runtime", runtimeType, "share", shareID,
+					"host_base", s.config.StorageLayout.HostBase, "detail", detail, "visibility_error", visibilityErr)
+				return errors.New(scionrt.ProjectShareUnavailableText(scionrt.ProjectShareMountPathField, true))
 			}
 			s.agentLifecycleLog.Warn("NFS share not mounted on the broker; continuing dispatch, the runtime mounts the export into the agent",
 				"agent", name, "runtime", runtimeType, "share", shareID, "detail", detail)

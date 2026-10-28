@@ -309,7 +309,10 @@ func TestStartNFSAgentDir_ExportNotMounted(t *testing.T) {
 	_, _, err := startNFSAgentDirAgent(t, "kubernetes", mountRoot, map[string]string{"SCION_WORKSPACE_MODE": "clone-per-agent"}, testGitClone)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrProjectShareNotMounted), "err = %v", err)
-	assert.Contains(t, err.Error(), "mount it or set nfs.auto_mount")
+	// The Kubernetes runtime never mounts the share on the broker: the
+	// remedy names the broker's container, not auto_mount.
+	assert.Contains(t, err.Error(), runtime.ProjectShareUnavailableText(filepath.Join(mountRoot, "share-1"), true))
+	assert.NotContains(t, err.Error(), "auto_mount")
 	assert.NoDirExists(t, mountRoot)
 }
 

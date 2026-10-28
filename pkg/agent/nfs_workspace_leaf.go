@@ -45,6 +45,14 @@ const nfsLeafGroupAccessBits = 0o2000 | 0o020 // S_ISGID | group write
 // not mounted on this broker.
 var ErrProjectShareNotMounted = errors.New("project storage share is not mounted on this broker")
 
+// projectShareError is a refusal for a share the broker does not see: its
+// text is the operator remedy (runtime.ProjectShareUnavailableText) and it
+// matches ErrProjectShareNotMounted for errors.Is.
+type projectShareError struct{ msg string }
+
+func (e *projectShareError) Error() string { return e.msg }
+func (e *projectShareError) Unwrap() error { return ErrProjectShareNotMounted }
+
 // ensureNFSWorkspaceLeaf makes sure the project's NFS workspace directory
 // (<subpath_root>/<projectID>/workspace), its provisioning state directory
 // (<subpath_root>/<projectID>/provision, see runtime.NFSProvisionStateSubPath),
@@ -196,7 +204,12 @@ func ensureNFSWorkspaceLeavesClaim(runtimeName, projectID string, resolved runti
 			// A broker reads and creates project storage through its own
 			// mount of the share; without it the start is refused rather
 			// than left to the node (ptone/scion#5823).
-			return false, false, fmt.Errorf("%w (%s; mount it or set nfs.auto_mount)", ErrProjectShareNotMounted, resolved.HostBase)
+			// This path runs only for the Kubernetes runtime, which never
+			// mounts the share on the broker: the remedy is the broker's
+			// own container, not nfs.auto_mount. The text names the path:
+			// a start failure reaches the client only as fixed text
+			// (runtimeOpError), and the broker logs this error.
+			return false, false, &projectShareError{msg: runtime.ProjectShareUnavailableText(resolved.HostBase, true)}
 		}
 		return false, false, fmt.Errorf("workspace_storage nfs: check export mount %q: %w; %s", resolved.HostBase, err, nfsWorkspaceExportHint)
 	}

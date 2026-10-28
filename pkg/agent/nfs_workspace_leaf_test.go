@@ -524,6 +524,7 @@ func TestEnsureNFSWorkspaceLeaf_ExportNotMountedRefuses(t *testing.T) {
 	preCreated, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, "ws-pv", nil)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrProjectShareNotMounted), "err = %v", err)
+	assert.Equal(t, runtime.ProjectShareUnavailableText(res.HostBase, true), err.Error())
 	assert.False(t, preCreated)
 	_, err = os.Stat(mountRoot)
 	assert.True(t, os.IsNotExist(err), "the mount root must never be created")
