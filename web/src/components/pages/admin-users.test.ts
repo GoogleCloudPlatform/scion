@@ -1326,7 +1326,8 @@ describe('scion-page-admin-users — forced delete and deletion panel', () => {
   /** Fetch handler for the target's blockers, deletes and deletion. */
   function handler(
     users: AdminUser[],
-    deleteRes: (path: string) => Response
+    deleteRes: (path: string) => Response,
+    deletionRes: () => Response = () => jsonResponse(DELETION)
   ): (url: string | URL | Request, init?: RequestInit) => Promise<Response> {
     const base = createFetchHandler(users);
     return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -1335,13 +1336,29 @@ describe('scion-page-admin-users — forced delete and deletion panel', () => {
         return Promise.resolve(jsonResponse(BLOCKERS));
       }
       if (path.endsWith('/api/v1/users/u-target/deletion')) {
-        return Promise.resolve(jsonResponse(DELETION));
+        return Promise.resolve(deletionRes());
       }
       if (init?.method === 'DELETE' && path.includes('/api/v1/users/u-target')) {
         return Promise.resolve(deleteRes(path));
       }
       return base(url, init);
     };
+  }
+
+  /** URLs of the calls to fetch whose URL contains part. */
+  function fetchUrls(part: string): string[] {
+    return vi
+      .mocked(fetch)
+      .mock.calls.map(([url]) => requestUrl(url as string | URL | Request))
+      .filter((u) => u.includes(part));
+  }
+
+  /** Clicks Force delete twice: the first click asks for confirmation. */
+  async function confirmForce(el: PageEl, dialog: Element): Promise<void> {
+    (dialog.querySelector('.force-delete-button') as HTMLElement).click();
+    await settle(el);
+    (dialog.querySelector('.force-delete-button') as HTMLElement).click();
+    await settle(el);
   }
 
   function deleteUrls(): string[] {
@@ -1403,7 +1420,16 @@ describe('scion-page-admin-users — forced delete and deletion panel', () => {
     expect(dialog.querySelector('.force-delete-help')).not.toBeNull();
     const force = dialog.querySelector('.force-delete-button') as HTMLElement;
     expect(force).not.toBeNull();
+    expect(force.textContent?.trim()).toBe('Force delete');
     force.click();
+    await settle(element);
+
+    // The first click asks for confirmation and sends nothing.
+    expect(deleteUrls()).toEqual([]);
+    expect(dialog.querySelector('.force-delete-confirm')).not.toBeNull();
+    const confirmButton = dialog.querySelector('.force-delete-button') as HTMLElement;
+    expect(confirmButton.textContent?.trim()).toBe('Stop 1 agent and delete');
+    confirmButton.click();
     await settle(element);
 
     expect(deleteUrls()).toEqual([expect.stringContaining('/api/v1/users/u-target?force=true')]);
@@ -1433,13 +1459,202 @@ describe('scion-page-admin-users — forced delete and deletion panel', () => {
         )
       )
     );
-    const dialog = await openDeleteDialog(element);
-    (dialog.querySelector('.force-delete-button') as HTMLElement).click();
-    await settle(element);
+    const denied = vi.fn();
+    window.addEventListener('scion:access-denied', denied);
+    try {
+      const dialog = await openDeleteDialog(element);
+      await confirmForce(element, dialog);
+    } finally {
+      window.removeEventListener('scion:access-denied', denied);
+    }
     const alert = element.shadowRoot!.querySelector('.feedback-alert');
     expect(alert?.getAttribute('variant')).toBe('danger');
-    expect(alert?.textContent).toContain('a-1');
+    expect(alert?.textContent).toContain('worker');
+    expect(alert?.textContent).not.toContain('a-1');
+    expect(denied).not.toHaveBeenCalled();
     expect(element.shadowRoot!.querySelector('sl-dialog.deletion-panel')).toBeNull();
+  });
+
+  it('force-deletes at once on a 204: success, no panel, list reloaded', async () => {
+    setForceFlag(true);
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal('fetch', vi.fn(handler([makeUser()], () => new Response(null, { status: 204 }))));
+    const dialog = await openDeleteDialog(element);
+    const listsBefore = fetchUrls('/api/v1/users?').length;
+    await confirmForce(element, dialog);
+    const alert = element.shadowRoot!.querySelector('.feedback-alert');
+    expect(alert?.getAttribute('variant')).toBe('success');
+    expect(element.shadowRoot!.querySelector('sl-dialog.deletion-panel')).toBeNull();
+    expect(fetchUrls('/api/v1/users?').length).toBeGreaterThan(listsBefore);
+  });
+
+  it('shows the hub message when the blockers changed', async () => {
+    setForceFlag(true);
+    element = (await createComponent([makeUser()])) as PageEl;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        handler([makeUser()], () =>
+          jsonResponse(
+            {
+              error: {
+                code: 'user_delete_blockers_changed',
+                message: 'the user has agents that were not authorized; retry',
+              },
+            },
+            409
+          )
+        )
+      )
+    );
+    const dialog = await openDeleteDialog(element);
+    await confirmForce(element, dialog);
+    const alert = element.shadowRoot!.querySelector('.feedback-alert');
+    expect(alert?.getAttribute('variant')).toBe('danger');
+    expect(alert?.textContent).toContain('not authorized; retry');
+  });
+
+  it('shows a completed deletion with no retry or help', async () => {
+    const deleting = makeUser({ status: 'deleting' });
+    element = (await createComponent([deleting])) as PageEl;
+    const completed = {
+      ...DELETION,
+      state: 'completed',
+      completedAt: '2026-10-28T10:05:00Z',
+      agents: [
+        { id: 'a-4', slug: 'waiting', projectId: 'p-1', outcome: 'pending', attempts: 0 },
+        { id: 'a-5', slug: 'busy', projectId: 'p-1', outcome: 'stopping', attempts: 1 },
+      ],
+    };
+    const notFound = (): Response => new Response(null, { status: 404 });
+    vi.stubGlobal('fetch', vi.fn(handler([deleting], notFound, () => jsonResponse(completed))));
+    queryAll(element, 'sl-menu-item.menu-item-deletion')[0].click();
+    await settle(element);
+    const panel = element.shadowRoot!.querySelector('sl-dialog.deletion-panel')!;
+    expect(panel.querySelector('.deletion-summary')!.textContent).toContain('Deleted.');
+    expect(panel.querySelector('.retry-deletion-button')).toBeNull();
+    expect(panel.querySelector('.deletion-help')).toBeNull();
+    const rows = Array.from(panel.querySelectorAll('.deletion-agents li'));
+    expect(rows[0].textContent).toContain('Waiting');
+    expect(rows[1].textContent).toContain('Stopping');
+  });
+
+  it('polls a stopping deletion, reloads the list on completion and stops', async () => {
+    const deleting = makeUser({ status: 'deleting' });
+    element = (await createComponent([deleting])) as PageEl;
+    let state = 'stopping';
+    const notFound = (): Response => new Response(null, { status: 404 });
+    const current = (): Response => jsonResponse({ ...DELETION, state });
+    vi.stubGlobal('fetch', vi.fn(handler([deleting], notFound, current)));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const el = element;
+      const flush = async (ms: number): Promise<void> => {
+        await vi.advanceTimersByTimeAsync(ms);
+        await el.updateComplete;
+      };
+      queryAll(el, 'sl-menu-item.menu-item-deletion')[0].click();
+      await flush(50);
+      expect(fetchUrls('/u-target/deletion')).toHaveLength(1);
+      const listsBefore = fetchUrls('/api/v1/users?').length;
+
+      // A poll while stopping.
+      await flush(mod.DELETION_POLL_INTERVAL_MS);
+      expect(fetchUrls('/u-target/deletion')).toHaveLength(2);
+      expect(fetchUrls('/api/v1/users?').length).toBe(listsBefore);
+
+      // The deletion completes: the panel shows it and the list reloads.
+      state = 'completed';
+      await flush(mod.DELETION_POLL_INTERVAL_MS);
+      expect(fetchUrls('/u-target/deletion')).toHaveLength(3);
+      const panel = el.shadowRoot!.querySelector('sl-dialog.deletion-panel')!;
+      expect(panel.querySelector('.deletion-summary')!.textContent).toContain('Deleted.');
+      expect(fetchUrls('/api/v1/users?').length).toBeGreaterThan(listsBefore);
+
+      // Completed is terminal: no more polls.
+      await flush(mod.DELETION_POLL_INTERVAL_MS * 2);
+      expect(fetchUrls('/u-target/deletion')).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops polling when the panel closes', async () => {
+    const deleting = makeUser({ status: 'deleting' });
+    element = (await createComponent([deleting])) as PageEl;
+    vi.stubGlobal('fetch', vi.fn(handler([deleting], () => new Response(null, { status: 404 }))));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const el = element;
+      queryAll(el, 'sl-menu-item.menu-item-deletion')[0].click();
+      await vi.advanceTimersByTimeAsync(50);
+      await el.updateComplete;
+      const panel = el.shadowRoot!.querySelector('sl-dialog.deletion-panel')!;
+      const close = Array.from(panel.querySelectorAll('sl-button')).find(
+        (b) => b.textContent?.trim() === 'Close'
+      ) as HTMLElement;
+      close.click();
+      await el.updateComplete;
+      expect(el.shadowRoot!.querySelector('sl-dialog.deletion-panel')).toBeNull();
+      await vi.advanceTimersByTimeAsync(mod.DELETION_POLL_INTERVAL_MS * 2);
+      expect(fetchUrls('/u-target/deletion')).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('refreshes the counts on Refresh', async () => {
+    const deleting = makeUser({ status: 'deleting' });
+    element = (await createComponent([deleting])) as PageEl;
+    let stopped = 1;
+    const notFound = (): Response => new Response(null, { status: 404 });
+    const current = (): Response =>
+      jsonResponse({ ...DELETION, counts: { ...DELETION.counts, stopped } });
+    vi.stubGlobal('fetch', vi.fn(handler([deleting], notFound, current)));
+    queryAll(element, 'sl-menu-item.menu-item-deletion')[0].click();
+    await settle(element);
+    const panel = element.shadowRoot!.querySelector('sl-dialog.deletion-panel')!;
+    expect(panel.querySelector('.deletion-counts')!.textContent).toContain('Stopped 1');
+    stopped = 2;
+    const refresh = Array.from(panel.querySelectorAll('sl-button')).find(
+      (b) => b.textContent?.trim() === 'Refresh'
+    ) as HTMLElement;
+    refresh.click();
+    await settle(element);
+    const counts = element.shadowRoot!.querySelector('sl-dialog.deletion-panel .deletion-counts')!;
+    expect(counts.textContent).toContain('Stopped 2');
+  });
+
+  it('shows a deletion completed since the panel loaded when Retry answers 404', async () => {
+    const deleting = makeUser({ status: 'deleting' });
+    element = (await createComponent([deleting])) as PageEl;
+    let state = 'stopping';
+    const userGone = (): Response =>
+      jsonResponse({ error: { code: 'not_found', message: 'User not found' } }, 404);
+    const current = (): Response => jsonResponse({ ...DELETION, state });
+    vi.stubGlobal('fetch', vi.fn(handler([deleting], userGone, current)));
+    queryAll(element, 'sl-menu-item.menu-item-deletion')[0].click();
+    await settle(element);
+    state = 'completed';
+    const panel = element.shadowRoot!.querySelector('sl-dialog.deletion-panel')!;
+    (panel.querySelector('.retry-deletion-button') as HTMLElement).click();
+    await settle(element);
+    const after = element.shadowRoot!.querySelector('sl-dialog.deletion-panel')!;
+    expect(after.querySelector('.deletion-summary')!.textContent).toContain('Deleted.');
+    expect(after.textContent).not.toContain('User not found');
+  });
+
+  it('reloads the panel when Retry answers 204', async () => {
+    const deleting = makeUser({ status: 'deleting' });
+    element = (await createComponent([deleting])) as PageEl;
+    vi.stubGlobal('fetch', vi.fn(handler([deleting], () => new Response(null, { status: 204 }))));
+    queryAll(element, 'sl-menu-item.menu-item-deletion')[0].click();
+    await settle(element);
+    const gets = fetchUrls('/u-target/deletion').length;
+    const panel = element.shadowRoot!.querySelector('sl-dialog.deletion-panel')!;
+    (panel.querySelector('.retry-deletion-button') as HTMLElement).click();
+    await settle(element);
+    expect(fetchUrls('/u-target/deletion').length).toBe(gets + 1);
   });
 
   it('shows a deleting user with its deletion status and retries', async () => {

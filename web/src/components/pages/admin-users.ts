@@ -58,6 +58,8 @@ interface ConfirmAction {
   action: () => Promise<void>;
   /** Delete dialogs only: what blocks the delete, once known. */
   blockers?: UserDeleteBlockers;
+  /** Delete dialogs only: Force delete was clicked once and awaits confirmation. */
+  forceConfirm?: boolean;
 }
 
 /** An agent of the user that blocks the delete. */
@@ -122,6 +124,13 @@ export function parseUserDeleteBlockers(value: unknown): UserDeleteBlockers | nu
 
 function hasDeleteBlockers(b: UserDeleteBlockers | undefined): b is UserDeleteBlockers {
   return !!b && (b.agents.length > 0 || b.edges.length > 0);
+}
+
+/** The confirming label of the Force delete button, naming the agents stopped. */
+function forceDeleteConfirmLabel(b: UserDeleteBlockers | undefined): string {
+  const n = b?.agents.length ?? 0;
+  if (n === 0) return 'Confirm force delete';
+  return `Stop ${n} ${n === 1 ? 'agent' : 'agents'} and delete`;
 }
 
 /**
@@ -207,6 +216,9 @@ export function parseUserDeletion(value: unknown): UserDeletion | null {
     },
   };
 }
+
+/** How often an open deletion panel reloads a deletion in state stopping. */
+export const DELETION_POLL_INTERVAL_MS = 5000;
 
 /** The deletion panel's state. */
 interface DeletionPanel {
@@ -420,6 +432,9 @@ export class ScionPageAdminUsers extends LitElement {
   /** The forced deletion panel, when open. */
   @state()
   private deletionPanel: DeletionPanel | null = null;
+
+  /** The next reload of an open deletion panel in state stopping. */
+  private deletionPollTimer: ReturnType<typeof setTimeout> | null = null;
 
   static override styles = css`
     :host {
@@ -1015,6 +1030,11 @@ export class ScionPageAdminUsers extends LitElement {
     void this.loadUsers();
   }
 
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.stopDeletionPoll();
+  }
+
   private async loadCurrentUser(): Promise<void> {
     try {
       const res = await apiFetch('/auth/me');
@@ -1350,10 +1370,18 @@ export class ScionPageAdminUsers extends LitElement {
    * Sends DELETE /api/v1/users/{id}?force=true. Returns the deletion in
    * progress (202), or null when the user was deleted at once (204).
    * Throws with the hub's message otherwise; a 403
-   * user_delete_force_forbidden names the agents the caller may not delete.
+   * user_delete_force_forbidden names the agents the caller may not delete,
+   * by slug when slugs knows it. The caller shows the error inline, so the
+   * global access-denied toast is suppressed.
    */
-  private async requestForceDelete(user: AdminUser): Promise<UserDeletion | null> {
-    const response = await apiFetch(`/api/v1/users/${user.id}?force=true`, { method: 'DELETE' });
+  private async requestForceDelete(
+    user: AdminUser,
+    slugs?: Map<string, string>
+  ): Promise<UserDeletion | null> {
+    const response = await apiFetch(`/api/v1/users/${user.id}?force=true`, {
+      method: 'DELETE',
+      suppressAccessDeniedToast: true,
+    });
     if (response.status === 204) return null;
     const body = (await response.json().catch(() => null)) as Record<string, unknown> | null;
     if (response.ok) {
@@ -1364,15 +1392,37 @@ export class ScionPageAdminUsers extends LitElement {
     const apiError = (body?.error ?? {}) as Record<string, unknown>;
     if (apiError.code === 'user_delete_force_forbidden') {
       const details = (apiError.details ?? {}) as Record<string, unknown>;
-      const ids = (Array.isArray(details.agents) ? details.agents : [])
+      const names = (Array.isArray(details.agents) ? details.agents : [])
         .map((a) => ((a ?? {}) as Record<string, unknown>).id)
-        .filter((id): id is string => typeof id === 'string');
-      throw new Error(
-        `You may not delete some of this user's agents${ids.length ? `: ${ids.join(', ')}` : ''}.`
-      );
+        .filter((id): id is string => typeof id === 'string')
+        .map((id) => slugs?.get(id) || id);
+      const list = names.length ? `: ${names.join(', ')}` : '';
+      throw new Error(`You may not delete some of this user's agents${list}.`);
     }
     const msg = typeof apiError.message === 'string' ? apiError.message : undefined;
     throw new Error(msg ?? `HTTP ${response.status}`);
+  }
+
+  /** Reloads the users list at the current page. */
+  private reloadUsersPage(): void {
+    void this.loadUsers(
+      this.currentPage > 1 ? this.cursorHistory[this.cursorHistory.length - 1] : undefined
+    );
+  }
+
+  /**
+   * The Force delete button of the delete dialog: the first click asks for
+   * confirmation, naming how many agents are stopped; the second runs the
+   * forced delete.
+   */
+  private onForceDeleteClick(): void {
+    const current = this.confirmAction;
+    if (!current) return;
+    if (!current.forceConfirm) {
+      this.confirmAction = { ...current, forceConfirm: true };
+      return;
+    }
+    void this.executeForceDelete();
   }
 
   /** Runs the forced delete from the delete dialog. */
@@ -1381,19 +1431,21 @@ export class ScionPageAdminUsers extends LitElement {
     if (!current) return;
     const user = current.user;
     const label = user.displayName || user.email;
+    const slugs = new Map<string, string>(
+      (current.blockers?.agents ?? []).map((a): [string, string] => [a.id, a.slug])
+    );
     this.actionInProgress = true;
     try {
-      const deletion = await this.requestForceDelete(user);
+      const deletion = await this.requestForceDelete(user, slugs);
       if (this.confirmAction === current) this.confirmAction = null;
       if (deletion) {
         this.deletionPanel = { user, deletion, loading: false, error: null };
+        this.scheduleDeletionPoll();
         this.showFeedback('primary', `Deleting ${label}: stopping the user's agents.`);
       } else {
         this.showFeedback('success', `${label} has been deleted.`);
       }
-      void this.loadUsers(
-        this.currentPage > 1 ? this.cursorHistory[this.cursorHistory.length - 1] : undefined
-      );
+      this.reloadUsersPage();
     } catch (err) {
       this.showFeedback('danger', err instanceof Error ? err.message : 'Force delete failed');
     } finally {
@@ -1403,18 +1455,51 @@ export class ScionPageAdminUsers extends LitElement {
 
   /** Opens the deletion panel of a user and loads its deletion. */
   private async openDeletionPanel(user: AdminUser): Promise<void> {
+    this.stopDeletionPoll();
     this.deletionPanel = { user, deletion: null, loading: true, error: null };
     await this.refreshDeletionPanel();
   }
 
-  /** Reloads the open deletion panel from GET /api/v1/users/{id}/deletion. */
-  private async refreshDeletionPanel(): Promise<void> {
+  /** Closes the deletion panel and stops reloading it. */
+  private closeDeletionPanel(): void {
+    this.stopDeletionPoll();
+    this.deletionPanel = null;
+  }
+
+  private stopDeletionPoll(): void {
+    if (this.deletionPollTimer !== null) {
+      clearTimeout(this.deletionPollTimer);
+      this.deletionPollTimer = null;
+    }
+  }
+
+  /**
+   * Reloads the open panel after DELETION_POLL_INTERVAL_MS while its
+   * deletion is stopping. Stops on a terminal state or when it closes.
+   */
+  private scheduleDeletionPoll(): void {
+    this.stopDeletionPoll();
+    if (this.deletionPanel?.deletion?.state !== 'stopping') return;
+    this.deletionPollTimer = setTimeout(() => {
+      this.deletionPollTimer = null;
+      void this.refreshDeletionPanel(true);
+    }, DELETION_POLL_INTERVAL_MS);
+  }
+
+  /**
+   * Reloads the open deletion panel from GET /api/v1/users/{id}/deletion.
+   * quiet (a poll) keeps the buttons as they are. When the deletion turns
+   * completed, the users list is reloaded.
+   */
+  private async refreshDeletionPanel(quiet = false): Promise<void> {
     const panel = this.deletionPanel;
     if (!panel) return;
-    this.deletionPanel = { ...panel, loading: true, error: null };
+    if (!quiet) this.deletionPanel = { ...panel, loading: true, error: null };
     let next: DeletionPanel;
     try {
-      const res = await apiFetch(`/api/v1/users/${panel.user.id}/deletion`);
+      const res = await apiFetch(`/api/v1/users/${panel.user.id}/deletion`, {
+        suppressAccessDeniedToast: true,
+      });
       const body: unknown = await res.json().catch(() => null);
       const deletion = res.ok ? parseUserDeletion(body) : null;
       next = deletion
@@ -1423,30 +1508,45 @@ export class ScionPageAdminUsers extends LitElement {
     } catch {
       next = { ...panel, loading: false, error: 'The deletion status is not available.' };
     }
-    if (this.deletionPanel?.user.id === panel.user.id) this.deletionPanel = next;
+    if (this.deletionPanel?.user.id !== panel.user.id) return;
+    this.deletionPanel = next;
+    if (panel.deletion?.state !== 'completed' && next.deletion?.state === 'completed') {
+      this.reloadUsersPage();
+    }
+    this.scheduleDeletionPoll();
   }
 
   /**
    * Asks the hub to retry the deletion: a repeated force request joins
-   * the deletion in progress and retries its agents.
+   * the deletion in progress and retries its agents. A 204, or an error
+   * (a deletion that completed since the panel loaded answers 404), is
+   * followed by a reload of the panel, which then shows what the hub
+   * reports; the error stays shown unless the deletion is completed.
    */
   private async retryDeletion(): Promise<void> {
     const panel = this.deletionPanel;
     if (!panel) return;
     this.deletionPanel = { ...panel, loading: true, error: null };
+    const slugs = new Map<string, string>(
+      (panel.deletion?.agents ?? []).map((a): [string, string] => [a.id, a.slug])
+    );
+    let retryError: string | null = null;
     try {
-      const deletion = await this.requestForceDelete(panel.user);
+      const deletion = await this.requestForceDelete(panel.user, slugs);
       if (this.deletionPanel?.user.id !== panel.user.id) return;
-      this.deletionPanel = deletion
-        ? { ...panel, deletion, loading: false, error: null }
-        : { ...panel, loading: false, error: null };
+      if (deletion) {
+        this.deletionPanel = { ...panel, deletion, loading: false, error: null };
+        this.scheduleDeletionPoll();
+        return;
+      }
     } catch (err) {
-      if (this.deletionPanel?.user.id !== panel.user.id) return;
-      this.deletionPanel = {
-        ...panel,
-        loading: false,
-        error: err instanceof Error ? err.message : 'Retry failed',
-      };
+      retryError = err instanceof Error ? err.message : 'Retry failed';
+    }
+    if (this.deletionPanel?.user.id !== panel.user.id) return;
+    await this.refreshDeletionPanel(true);
+    const latest = this.deletionPanel;
+    if (retryError && latest?.user.id === panel.user.id && latest.deletion?.state !== 'completed') {
+      this.deletionPanel = { ...latest, error: retryError };
     }
   }
 
@@ -2333,6 +2433,11 @@ export class ScionPageAdminUsers extends LitElement {
   private renderConfirmDialog() {
     const action = this.confirmAction;
     if (!action) return nothing;
+    const forceLabel = action.forceConfirm
+      ? forceDeleteConfirmLabel(action.blockers)
+      : 'Force delete';
+    const forceAgents = action.blockers?.agents.length ?? 0;
+    const userLabel = action.user.displayName || action.user.email;
     return html`
       <sl-dialog
         label=${action.title}
@@ -2363,6 +2468,12 @@ export class ScionPageAdminUsers extends LitElement {
           ${hasDeleteBlockers(action.blockers)
             ? this.renderDeleteBlockers(action.blockers)
             : html`<p>${action.message}</p>`}
+          ${action.forceConfirm
+            ? html`<sl-alert class="force-delete-confirm" variant="danger" open>
+                Force delete ends the access of ${userLabel} at once, stops ${forceAgents} of their
+                agents, then deletes the user. This cannot be undone.
+              </sl-alert>`
+            : nothing}
         </div>
         <sl-button
           slot="footer"
@@ -2378,10 +2489,10 @@ export class ScionPageAdminUsers extends LitElement {
               slot="footer"
               class="force-delete-button"
               variant="danger"
-              outline
+              ?outline=${!action.forceConfirm}
               ?loading=${this.actionInProgress}
-              @click=${() => this.executeForceDelete()}
-              >Force delete</sl-button
+              @click=${() => this.onForceDeleteClick()}
+              >${forceLabel}</sl-button
             >`
           : nothing}
         <sl-button
@@ -2408,7 +2519,7 @@ export class ScionPageAdminUsers extends LitElement {
         class="deletion-panel"
         open
         @sl-request-close=${() => {
-          this.deletionPanel = null;
+          this.closeDeletionPanel();
         }}
       >
         <div class="confirm-body">
@@ -2416,7 +2527,9 @@ export class ScionPageAdminUsers extends LitElement {
             <span class="user-name">${panel.user.displayName || panel.user.email}</span>
             <span class="user-email">${panel.user.email}</span>
           </div>
-          ${panel.error ? html`<p class="deletion-error failed">${panel.error}</p>` : nothing}
+          ${panel.error
+            ? html`<p class="deletion-error failed" role="alert">${panel.error}</p>`
+            : nothing}
           ${d
             ? html`
                 <p class="deletion-summary">
@@ -2429,7 +2542,9 @@ export class ScionPageAdminUsers extends LitElement {
                   Failed ${d.counts.failed} · Stopping ${d.counts.stopping} · Waiting
                   ${d.counts.pending}
                 </p>
-                ${d.lastError ? html`<p class="deletion-error failed">${d.lastError}</p>` : nothing}
+                ${d.lastError
+                  ? html`<p class="deletion-error failed" role="alert">${d.lastError}</p>`
+                  : nothing}
                 ${d.agents.length > 0
                   ? html`<ul class="deletion-agents">
                       ${d.agents.map(
@@ -2462,7 +2577,7 @@ export class ScionPageAdminUsers extends LitElement {
           slot="footer"
           variant="default"
           @click=${() => {
-            this.deletionPanel = null;
+            this.closeDeletionPanel();
           }}
           >Close</sl-button
         >

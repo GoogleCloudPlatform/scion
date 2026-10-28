@@ -103,7 +103,7 @@ After a user is deleted, that user's tokens stop working immediately. Requests t
 
 ### Force-deleting a user who has agents
 
-Behind the `hub.user_delete_force_cascade` [experiment](/scion/reference/experiments/) (off by default), an admin can delete a user whom agents or delegations depend on, instead of deleting those agents one by one. On **Admin > Users**, the delete dialog of such a user offers **Force delete**; the API is `DELETE /api/v1/users/{id}?force=true`. While the experiment is off, `force=true` is ignored and the delete is refused as described above.
+Behind the `hub.user_delete_force_cascade` [experiment](/scion/reference/experiments/) (off by default), an admin can delete a user whom agents or delegations depend on, instead of deleting those agents one by one. On **Admin > Users**, the delete dialog of such a user offers **Force delete**, which asks for confirmation naming how many agents it stops; the API is `DELETE /api/v1/users/{id}?force=true`. While the experiment is off, `force=true` is ignored and the delete is refused as described above.
 
 A forced delete needs `user.delete` on the user and, for every one of the user's agents, the same permission an agent delete needs (`agent.delete` on that agent). If you may not delete one or more of them, the request is refused with `403 user_delete_force_forbidden`, `details.agents` lists those agents (`id`, `projectId`), and nothing changes. It needs a sign-in session, like a plain delete. The last super-admin, admin lockout and last-owner guards apply as for a plain delete. If nothing blocks the delete, a forced delete is a plain delete (`204`).
 
@@ -114,7 +114,7 @@ Otherwise the delete runs in two steps:
 
 While the deletion is in progress:
 
-- `GET /api/v1/users/{id}/deletion`, and **Deletion status** on the user's row, show the state (`stopping`, then `completed`), each agent's outcome (`pending`, `stopping`, `failed`, `stopped` or `removed`) with its latest error, and counts per outcome. The resource answers after the user is removed too.
+- `GET /api/v1/users/{id}/deletion`, and **Deletion status** on the user's row, show the state (`stopping`, then `completed`; the panel reloads every few seconds while the deletion is stopping), each agent's outcome (`pending`, `stopping`, `failed`, `stopped` or `removed`) with its latest error, and counts per outcome. The resource answers after the user is removed too.
 - A plain delete, and any change to the user, is refused with `409 user_deletion_in_progress` (with `details.deletionId`). Another forced delete joins the deletion and retries its agents at once (**Retry** in the panel).
 - Creating or restoring an agent for the user (an agent owned by the user, or started by one of the user's agents) is refused with `409 conflict`.
 
