@@ -595,3 +595,34 @@ func TestFlatRestartWithoutProjectPathRefusedBeforeStop(t *testing.T) {
 		t.Fatalf("start without a project path: got %v", err)
 	}
 }
+
+// A flat start whose stored config exists but cannot be parsed is refused
+// before the inline config update, as a restart is refused before its stop;
+// a start of an agent with no stored config yet is not refused for it.
+func TestFlatStartUnreadableStoredConfigRefusedBeforeWrite(t *testing.T) {
+	f := newFlatPlacementInstanceServer(t, flatPlacementTarget())
+	f.seedOwnedAgent(t)
+	path := writeStoredAgentConfig(t, f, `{"max_turns": 3`)
+	before, _ := os.ReadFile(path)
+	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/start"+flatStartQuery,
+		`{"expectedRuntimeTargetId":"`+f.identity.RuntimeTarget.ID+`",`+flatAgentEnv+`,"inlineConfig":{"max_turns":7}}`)
+	expectPlacementRefusal(t, w, placementAgentConfigCause)
+	if after, _ := os.ReadFile(path); string(after) != string(before) {
+		t.Errorf("stored config changed:\n before %s\n after  %s", before, after)
+	}
+	if n := mgrStartCalls(f); n != 0 {
+		t.Fatalf("a refused start started: %d", n)
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Dir(filepath.Dir(filepath.Dir(path)))
+	rp, err := f.srv.resolveFlatPlacement(nil, "test-agent-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.srv.checkStartLegacyPlacement("test-agent-1", projectDir, nil, false, rp); err != nil {
+		t.Fatalf("no stored config yet: got %v, want no refusal", err)
+	}
+}

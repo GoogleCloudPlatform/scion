@@ -641,8 +641,11 @@ func (s *Server) checkRestartLegacyPlacement(agentName, projectPath string, shar
 // conflict it brings is reported as the request's; then the block the
 // inline update would leave (the stored config merged with the request, as
 // applyInlineConfigUpdate merges them), whose remaining conflicts come
-// from the stored config. When the stored config cannot be read, the
-// request's block alone is checked, as for the legacy check.
+// from the stored config. A stored config that exists but cannot be read
+// or parsed fails closed, as on restart. One that does not exist yet (an
+// agent this Runtime Broker has not provisioned) leaves the request's block
+// checked: the inline update writes nothing then, and Manager.Start checks
+// the config it provisions.
 func (s *Server) checkStartOperatorPlacement(agentName, projectPath string, inlineConfig *api.ScionConfig, sharedWorkspace bool, rp *api.ResolvedPlacement) error {
 	refuse := func(err error) error {
 		s.agentLifecycleLog.Warn("Kubernetes placement: the agent's own kubernetes block conflicts with it", "agent", agentName, "error", err)
@@ -658,7 +661,11 @@ func (s *Server) checkStartOperatorPlacement(agentName, projectPath string, inli
 	}
 	loaded, err := readAgentScionConfig(agentName, projectPath, sharedWorkspace)
 	if err != nil {
-		return nil
+		if loaded.stage == "read" && errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		s.agentLifecycleLog.Warn("Kubernetes placement: the agent's config could not be read", "agent", agentName, "stage", loaded.stage, "error", err)
+		return placementRefusal(placementAgentConfigCause)
 	}
 	block := loaded.cfg.Kubernetes
 	if inlineConfig != nil {

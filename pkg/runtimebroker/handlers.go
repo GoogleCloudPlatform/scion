@@ -1605,6 +1605,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// creates start no pod and skip it; a reprovision is always
 	// provision-only.
 	if !req.ProvisionOnly {
+		// On a flat instance this cannot refuse for a foreign runtime: a
+		// profile was refused (422) before the attempt, buildStartContext
+		// resolves only the instance's runtime, and checkFlatCreatePlacement
+		// already checked the policy and its target before the attempt.
 		rp, perr := s.placementForStart(ctx, sc.Resolution, opts.ProjectPath)
 		if perr != nil {
 			span.SetStatus(codes.Error, perr.Error())
