@@ -450,7 +450,7 @@ var compiled = []Experiment{
 		Name:        ChatStarredMessages,
 		Title:       "Starred messages in chat",
 		Description: "Lets each user star chat messages privately and find them again from the conversation header. Gates the Star message action, the starred indicator and the header list (LayerWeb) and the hub's starred-message routes, which answer 404 while it is off (LayerServer). Stars are stored per user and are never shown to anyone else; turning it off keeps them.",
-		Default:     false,
+		Default:     true,
 		Layers:      []Layer{LayerWeb, LayerServer},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#5797",

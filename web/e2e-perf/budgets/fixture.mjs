@@ -178,7 +178,7 @@ export function buildFixture() {
           'web.agent_edit': true,
           'web.artifact_review_editor': false,
           'web.chat_scheduled_send': false,
-          'web.chat_starred_messages': false,
+          'web.chat_starred_messages': true,
           'web.gcs_links': false,
           'web.sse_hidden_tab_close': false,
         },
