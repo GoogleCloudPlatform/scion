@@ -22,6 +22,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -339,9 +340,13 @@ func (s *Server) authorizeRuntimeUserItem(ctx context.Context, ident AgentIdenti
 			// The read is refused and the agent sees denied_by_policy or
 			// unavailable; name the secret and the cause at Warn so a
 			// missing credential can be traced on the hub. Never the value.
-			slog.WarnContext(ctx, "runtime user secret read withheld by the user secret parent ceiling",
-				"agent_id", ident.ID(), "secret", key, "secret_id", meta.ID,
-				"user_id", meta.ScopeID, "deny_cause", string(decision.DenyCause), "reason", decision.Reason)
+			// Rate limited per (agent, secret, cause).
+			if record, suppressed := s.userSecretWithheldWarnLimiter().admit(ident.ID()+"/"+meta.ID, string(decision.DenyCause)+"/"+decision.Reason); record {
+				slog.WarnContext(ctx, "runtime user secret read withheld by authorization",
+					"agent_id", ident.ID(), "secret", key, "secret_id", meta.ID,
+					"user_id", meta.ScopeID, "deny_cause", string(decision.DenyCause), "reason", decision.Reason,
+					"suppressed_since_last", suppressed)
+			}
 			switch decision.DenyCause {
 			case DenyCauseCeilingError, DenyCauseResolutionError:
 				return ItemResult{Candidate: cand, Reason: ReasonBackendError}
@@ -386,4 +391,21 @@ func (s *Server) fetchAuthorizedValue(ctx context.Context, item ItemResult) (*se
 		return nil, ReasonRecordChanged
 	}
 	return sv, ReasonAllowed
+}
+
+// userSecretWithheldWarnInterval is the shortest gap between two Warn lines
+// for the same user secret withheld from the same agent for the same cause.
+const userSecretWithheldWarnInterval = 10 * time.Minute
+
+func newUserSecretWithheldLimiter() *hookRefusalLimiter {
+	return newHookRefusalLimiter(userSecretWithheldWarnInterval, time.Now)
+}
+
+// userSecretWithheldWarnLimiter rate limits the runtime read's withheld
+// Warn; created on first use.
+func (s *Server) userSecretWithheldWarnLimiter() *hookRefusalLimiter {
+	s.userSecretWithheldLimiterOnce.Do(func() {
+		s.userSecretWithheldLimiter = newUserSecretWithheldLimiter()
+	})
+	return s.userSecretWithheldLimiter
 }

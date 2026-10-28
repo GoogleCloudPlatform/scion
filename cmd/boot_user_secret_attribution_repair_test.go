@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -94,4 +95,110 @@ func TestUserSecretAttributionRepair_WritesMarkerAndSkipsOnNextBoot(t *testing.T
 	row, err = s.GetSecret(ctx, "LATE_KEY", store.ScopeUser, owner.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "agent:"+capturer.ID, row.CreatedBy, "the marker stops a second pass")
+}
+
+// usaFlakyListStore fails ListSecrets while failures > 0.
+type usaFlakyListStore struct {
+	store.Store
+	failures int
+}
+
+func (f *usaFlakyListStore) ListSecrets(ctx context.Context, filter store.SecretFilter) ([]store.Secret, error) {
+	if f.failures > 0 {
+		f.failures--
+		return nil, errors.New("fake list failure")
+	}
+	return f.Store.ListSecrets(ctx, filter)
+}
+
+// usaSwapMissStore makes every attribution swap inside a transaction miss.
+type usaSwapMissStore struct{ store.Store }
+
+func (w *usaSwapMissStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return w.Store.WithTx(ctx, func(tx store.Store) error { return fn(usaSwapMissTx{Store: tx}) })
+}
+
+type usaSwapMissTx struct{ store.Store }
+
+func (usaSwapMissTx) AttributeUserSecretToOwner(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+
+// newUSALegacyRow stores an owner, the owner's agent and one user secret
+// attributed to that agent, and returns the owner's ID and the agent ref.
+func newUSALegacyRow(t *testing.T, s store.Store) (string, string) {
+	t.Helper()
+	ctx := context.Background()
+	proj := &store.Project{ID: uuid.NewString(), Name: "p", Slug: uuid.NewString()}
+	require.NoError(t, s.CreateProject(ctx, proj))
+	owner := &store.User{ID: uuid.NewString(), Email: "owner@test.com", DisplayName: "O", Role: "member", Status: store.UserStatusActive}
+	require.NoError(t, s.CreateUser(ctx, owner))
+	a := &store.Agent{
+		ID: uuid.NewString(), Slug: "capturer", Name: "capturer", ProjectID: proj.ID, Phase: "running",
+		CreatedBy: owner.ID, OwnerID: owner.ID, Ancestry: []string{owner.ID},
+	}
+	require.NoError(t, s.CreateAgent(ctx, a))
+	require.NoError(t, s.CreateSecret(ctx, &store.Secret{
+		ID: uuid.NewString(), Key: "LEGACY_KEY", EncryptedValue: "enc-value",
+		Scope: store.ScopeUser, ScopeID: owner.ID, AllowProgeny: true, CreatedBy: "agent:" + a.ID,
+	}))
+	return owner.ID, "agent:" + a.ID
+}
+
+// TestUserSecretAttributionRepair_StoreErrorRetriesNextBoot: a store error
+// aborts the pass with an ERROR and leaves the marker unwritten; the next
+// boot repairs the row and writes the marker.
+func TestUserSecretAttributionRepair_StoreErrorRetriesNextBoot(t *testing.T) {
+	ctx := context.Background()
+	base := newTestStore(t)
+	owner, _ := newUSALegacyRow(t, base)
+	s := &usaFlakyListStore{Store: base, failures: 1}
+
+	buf, restore := captureSlog(t)
+	defer restore()
+
+	runUserSecretAttributionRepair(ctx, s)
+	assert.Contains(t, buf.String(), "pass did not complete; will retry next boot")
+	done, err := IsMigrationComplete(ctx, s, MigrationUserSecretAttributionRepair)
+	require.NoError(t, err)
+	assert.False(t, done, "a failed pass must not write the marker")
+
+	runUserSecretAttributionRepair(ctx, s)
+	done, err = IsMigrationComplete(ctx, s, MigrationUserSecretAttributionRepair)
+	require.NoError(t, err)
+	assert.True(t, done)
+	row, err := s.GetSecret(ctx, "LEGACY_KEY", store.ScopeUser, owner)
+	require.NoError(t, err)
+	assert.Equal(t, owner, row.CreatedBy, "the retry repairs the row")
+}
+
+// TestUserSecretAttributionRepair_RowChangedKeepsMarkerUnwritten: a row
+// still changing after the retries is not a final outcome, so the marker
+// stays unwritten and the next boot runs the pass again.
+func TestUserSecretAttributionRepair_RowChangedKeepsMarkerUnwritten(t *testing.T) {
+	ctx := context.Background()
+	base := newTestStore(t)
+	owner, legacy := newUSALegacyRow(t, base)
+
+	buf, restore := captureSlog(t)
+	defer restore()
+
+	runUserSecretAttributionRepair(ctx, &usaSwapMissStore{Store: base})
+	out := buf.String()
+	assert.Contains(t, out, "row_changed")
+	assert.Contains(t, out, "marker not written, will retry next boot")
+	done, err := IsMigrationComplete(ctx, base, MigrationUserSecretAttributionRepair)
+	require.NoError(t, err)
+	assert.False(t, done)
+	row, err := base.GetSecret(ctx, "LEGACY_KEY", store.ScopeUser, owner)
+	require.NoError(t, err)
+	assert.Equal(t, legacy, row.CreatedBy)
+
+	runUserSecretAttributionRepair(ctx, base)
+	done, err = IsMigrationComplete(ctx, base, MigrationUserSecretAttributionRepair)
+	require.NoError(t, err)
+	assert.True(t, done)
+	row, err = base.GetSecret(ctx, "LEGACY_KEY", store.ScopeUser, owner)
+	require.NoError(t, err)
+	assert.Equal(t, owner, row.CreatedBy)
 }

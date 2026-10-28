@@ -19,7 +19,9 @@ package hub
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -139,7 +141,14 @@ func usaCaptureDefaultLog(t *testing.T) *bytes.Buffer {
 func TestUserSecretAttributionRepair_LegacyRowWithheldThenDelivered(t *testing.T) {
 	f, capturer, capturerToken := newUSAFixture(t, "usa-legacy")
 	other, otherToken := f.direct(t, "usa-legacy-other", true)
+	child, childToken, _ := f.progeny(t, "usa-legacy-progeny", true)
 	defaultLog := usaCaptureDefaultLog(t)
+
+	assert.Equal(t, sdDelivery{}, sdStartDelivery(t, f.disp, f.Store, child),
+		"progeny path: the legacy rows are not in the lineage's progeny set before the repair")
+	assert.False(t, f.read(t, child, childToken, sdAlwaysKey))
+	_, keys := f.listKeys(t, other, otherToken, "user")
+	assert.NotContains(t, keys, sdAlwaysKey, "the agent secret list omits the legacy row before the repair")
 
 	for _, a := range []struct{ id, token string }{{capturer, capturerToken}, {other, otherToken}} {
 		d := f.ceiling(t, a.id, sdAlwaysKey)
@@ -150,13 +159,13 @@ func TestUserSecretAttributionRepair_LegacyRowWithheldThenDelivered(t *testing.T
 		assert.False(t, got.start, "start does not deliver the legacy row")
 		assert.False(t, got.restart, "restart does not deliver the legacy row")
 		assert.Contains(t, got.logs, "level=WARN")
-		assert.Contains(t, got.logs, "start-time user secret withheld by the user secret parent ceiling")
+		assert.Contains(t, got.logs, "start-time user secret withheld by authorization")
 		assert.Contains(t, got.logs, "secret="+sdAlwaysKey)
 		assert.NotContains(t, got.logs, sdAlwaysValue, "the Warn never carries the value")
 		assert.False(t, f.read(t, a.id, a.token, sdAlwaysKey), "the runtime read refuses the legacy row")
 		assert.False(t, f.read(t, a.id, a.token, sdAsNeededKey), "the runtime read refuses the legacy row")
 	}
-	assert.Contains(t, defaultLog.String(), "runtime user secret read withheld by the user secret parent ceiling")
+	assert.Contains(t, defaultLog.String(), "runtime user secret read withheld by authorization")
 	assert.Contains(t, defaultLog.String(), "secret="+sdAsNeededKey)
 	assert.NotContains(t, defaultLog.String(), sdAsNeededValue)
 
@@ -197,10 +206,18 @@ func TestUserSecretAttributionRepair_LegacyRowWithheldThenDelivered(t *testing.T
 		got := usaDispatch(t, f, a.id)
 		assert.True(t, got.start, "start delivers the repaired row")
 		assert.True(t, got.restart, "restart delivers the repaired row")
-		assert.NotContains(t, got.logs, "withheld by the user secret parent ceiling")
+		assert.NotContains(t, got.logs, "withheld by authorization")
 		assert.True(t, f.read(t, a.id, a.token, sdAlwaysKey), "the runtime read returns the repaired row")
 		assert.True(t, f.read(t, a.id, a.token, sdAsNeededKey), "the runtime read returns the repaired row")
 	}
+
+	assert.Equal(t, sdDelivery{always: true, asNeeded: true, private: false}, sdStartDelivery(t, f.disp, f.Store, child),
+		"progeny path: the repaired shared rows are delivered, the unshared row is not")
+	assert.True(t, f.read(t, child, childToken, sdAlwaysKey))
+	code, keys := f.listKeys(t, other, otherToken, "user")
+	require.Equal(t, 200, code)
+	assert.Contains(t, keys, sdAlwaysKey, "the agent secret list includes the repaired row")
+	assert.Contains(t, keys, sdAsNeededKey, "the agent secret list includes the repaired row")
 
 	again, err := RepairLegacyUserSecretAttribution(ctx, f.Store)
 	require.NoError(t, err)
@@ -302,15 +319,24 @@ func TestUserSecretAttributionRepair_SkipReasons(t *testing.T) {
 		Phase: "running", StateVersion: 1, OwnerID: otherUser, CreatedBy: otherUser, Ancestry: []string{otherUser},
 	}))
 	missingUser := uuid.NewString()
+	// Owned by the scope user, but its ancestry root is another user: the
+	// capture handler would have written into that user's scope.
+	rootedElsewhere := tid("usa-skips-rooted-elsewhere")
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
+		ID: rootedElsewhere, Slug: "usa-skips-rooted", Name: "usa-skips-rooted", ProjectID: base.ProjectID,
+		Phase: "running", StateVersion: 1, OwnerID: owner, CreatedBy: owner, Ancestry: []string{otherUser},
+	}))
 
 	usaSetUserSecret(t, backend, owner, "USA_FOREIGN", "v", userSecretAttrAgentRefPrefix+foreignAgent, true, store.InjectionModeAsNeeded)
 	usaSetUserSecret(t, backend, owner, "USA_BADREF", "v", userSecretAttrAgentRefPrefix+"not-a-uuid", true, store.InjectionModeAsNeeded)
+	usaSetUserSecret(t, backend, owner, "USA_ROOTED", "v", userSecretAttrAgentRefPrefix+rootedElsewhere, true, store.InjectionModeAsNeeded)
+	usaSetUserSecret(t, backend, owner, "USA_FEDERATED", "v", userSecretAttrAgentRefPrefix+"https://issuer.example:"+uuid.NewString(), true, store.InjectionModeAsNeeded)
 	usaSetUserSecret(t, backend, missingUser, "USA_NOUSER", "v", userSecretAttrAgentRefPrefix+uuid.NewString(), true, store.InjectionModeAsNeeded)
 	// Not examined: already attributed to its owner, or not an agent reference.
 	usaSetUserSecret(t, backend, owner, "USA_CORRECT", "v", owner, true, store.InjectionModeAsNeeded)
 	usaSetUserSecret(t, backend, owner, "USA_OTHERREF", "v", otherUser, true, store.InjectionModeAsNeeded)
 	untouched := map[string]*store.Secret{}
-	for _, key := range []string{"USA_FOREIGN", "USA_BADREF", "USA_CORRECT", "USA_OTHERREF"} {
+	for _, key := range []string{"USA_FOREIGN", "USA_BADREF", "USA_ROOTED", "USA_FEDERATED", "USA_CORRECT", "USA_OTHERREF"} {
 		row, err := s.GetSecret(ctx, key, store.ScopeUser, owner)
 		require.NoError(t, err)
 		untouched[key] = row
@@ -318,17 +344,20 @@ func TestUserSecretAttributionRepair_SkipReasons(t *testing.T) {
 
 	res, err := RepairLegacyUserSecretAttribution(ctx, s)
 	require.NoError(t, err)
-	assert.Equal(t, 3, res.Examined)
+	assert.Equal(t, 5, res.Examined)
 	assert.Empty(t, res.Repaired)
 	reasons := map[string]string{}
 	for _, sk := range res.Skipped {
 		reasons[sk.Name] = sk.Reason
 	}
 	assert.Equal(t, map[string]string{
-		"USA_FOREIGN": userSecretAttrSkipAgentNotOwnedBy,
-		"USA_BADREF":  userSecretAttrSkipAgentRefInvalid,
-		"USA_NOUSER":  userSecretAttrSkipScopeUserMissing,
+		"USA_FOREIGN":   userSecretAttrSkipAgentNotOwnedBy,
+		"USA_BADREF":    userSecretAttrSkipAgentRefInvalid,
+		"USA_ROOTED":    userSecretAttrSkipAgentNotOwnedBy,
+		"USA_FEDERATED": userSecretAttrSkipFederatedRef,
+		"USA_NOUSER":    userSecretAttrSkipScopeUserMissing,
 	}, reasons)
+	assert.Zero(t, res.RowChanged())
 	for key, before := range untouched {
 		after, err := s.GetSecret(ctx, key, store.ScopeUser, owner)
 		require.NoError(t, err)
@@ -349,39 +378,180 @@ func TestUserSecretAttributionRepair_SkipReasons(t *testing.T) {
 	assert.Equal(t, userSecretAttrSkipScopeOwnerEmpty, reason)
 }
 
-// usaRacingStore bumps every listed legacy row's version after
-// ListSecrets returns, as a concurrent write between list and repair would.
-type usaRacingStore struct {
+// usaListHookStore runs after() once ListSecrets returns, on every listed
+// legacy row, as a concurrent writer between the list and the repair would.
+type usaListHookStore struct {
 	store.Store
+	after func(ctx context.Context, inner store.Store, row store.Secret) error
 }
 
-func (r *usaRacingStore) ListSecrets(ctx context.Context, filter store.SecretFilter) ([]store.Secret, error) {
+func (r *usaListHookStore) ListSecrets(ctx context.Context, filter store.SecretFilter) ([]store.Secret, error) {
 	rows, err := r.Store.ListSecrets(ctx, filter)
 	if err != nil {
 		return nil, err
 	}
 	for _, row := range rows {
-		desc := "changed " + time.Now().String()
-		if _, err := r.Store.UpdateSecretMeta(ctx, row.Key, row.Scope, row.ScopeID, &store.SecretMetaUpdate{Description: &desc}); err != nil {
+		if row.Scope != store.ScopeUser || !strings.HasPrefix(row.CreatedBy, userSecretAttrAgentRefPrefix) {
+			continue
+		}
+		if err := r.after(ctx, r.Store, row); err != nil {
 			return nil, err
 		}
 	}
 	return rows, nil
 }
 
-// TestUserSecretAttributionRepair_RowChangedSkipped: a row written between
-// the list and the repair is skipped (row_changed), not overwritten.
-func TestUserSecretAttributionRepair_RowChangedSkipped(t *testing.T) {
-	f, capturer, _ := newUSAFixture(t, "usa-race")
+// usaTxStore wraps the transaction store a WithTx callback receives.
+type usaTxStore struct {
+	store.Store
+	wrap func(tx store.Store) store.Store
+}
+
+func (w *usaTxStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return w.Store.WithTx(ctx, func(tx store.Store) error { return fn(w.wrap(tx)) })
+}
+
+type usaAuditFailTx struct{ store.Store }
+
+func (usaAuditFailTx) CreateMutationAudit(context.Context, *store.MutationAuditRecord) error {
+	return errors.New("fake audit write failure")
+}
+
+type usaSwapMissTx struct{ store.Store }
+
+func (usaSwapMissTx) AttributeUserSecretToOwner(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+
+// TestUserSecretAttributionRepair_ValueWriteDuringRepair: a value write (a
+// credential refresh) between the list and the repair bumps the version;
+// the repair still applies, because the swap does not depend on it.
+func TestUserSecretAttributionRepair_ValueWriteDuringRepair(t *testing.T) {
+	f, capturer, _ := newUSAFixture(t, "usa-refresh")
 	ctx := context.Background()
-	res, err := RepairLegacyUserSecretAttribution(ctx, &usaRacingStore{Store: f.Store})
+	s := &usaListHookStore{Store: f.Store, after: func(ctx context.Context, inner store.Store, row store.Secret) error {
+		desc := "refreshed " + time.Now().String()
+		_, err := inner.UpdateSecretMeta(ctx, row.Key, row.Scope, row.ScopeID, &store.SecretMetaUpdate{Description: &desc})
+		return err
+	}}
+	res, err := RepairLegacyUserSecretAttribution(ctx, s)
+	require.NoError(t, err)
+	assert.Empty(t, res.Skipped)
+	require.Len(t, res.Repaired, 2)
+	for _, r := range res.Repaired {
+		assert.Equal(t, userSecretAttrBasisAncestryRoot, r.Basis)
+		assert.Equal(t, userSecretAttrAgentRefPrefix+capturer, r.OriginalCreatedBy)
+	}
+	row, err := f.Store.GetSecret(ctx, sdAlwaysKey, store.ScopeUser, f.UserID)
+	require.NoError(t, err)
+	assert.Equal(t, f.UserID, row.CreatedBy)
+}
+
+// TestUserSecretAttributionRepair_ConcurrentAttribution: another writer (a
+// second booting replica) attributes the row to its owner first; the missed
+// swap re-reads the row and counts it as repaired, not as a skip, and this
+// pass writes no audit record for it.
+func TestUserSecretAttributionRepair_ConcurrentAttribution(t *testing.T) {
+	f, capturer, _ := newUSAFixture(t, "usa-concurrent")
+	ctx := context.Background()
+	s := &usaListHookStore{Store: f.Store, after: func(ctx context.Context, inner store.Store, row store.Secret) error {
+		_, err := inner.AttributeUserSecretToOwner(ctx, row.ID, row.CreatedBy)
+		return err
+	}}
+	res, err := RepairLegacyUserSecretAttribution(ctx, s)
+	require.NoError(t, err)
+	assert.Empty(t, res.Skipped)
+	require.Len(t, res.Repaired, 2)
+	for _, r := range res.Repaired {
+		assert.Equal(t, userSecretAttrBasisConcurrent, r.Basis)
+		assert.Equal(t, userSecretAttrAgentRefPrefix+capturer, r.OriginalCreatedBy)
+	}
+	audits, _, err := f.Store.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: mutationTypeUserSecretAttributionRepair})
+	require.NoError(t, err)
+	assert.Empty(t, audits)
+}
+
+// TestUserSecretAttributionRepair_RowDeletedDuringRepair: a row deleted
+// between the list and the repair is dropped, not skipped.
+func TestUserSecretAttributionRepair_RowDeletedDuringRepair(t *testing.T) {
+	f, _, _ := newUSAFixture(t, "usa-deleted")
+	ctx := context.Background()
+	s := &usaListHookStore{Store: f.Store, after: func(ctx context.Context, inner store.Store, row store.Secret) error {
+		return inner.DeleteSecret(ctx, row.Key, row.Scope, row.ScopeID)
+	}}
+	res, err := RepairLegacyUserSecretAttribution(ctx, s)
+	require.NoError(t, err)
+	assert.Equal(t, 2, res.Examined)
+	assert.Equal(t, 2, res.Vanished)
+	assert.Empty(t, res.Repaired)
+	assert.Empty(t, res.Skipped)
+}
+
+// TestUserSecretAttributionRepair_PersistentSwapMissIsRowChanged: a row
+// whose swap keeps missing while it still carries the legacy attribution is
+// retried a bounded number of times, then reported as row_changed (which
+// keeps the boot marker unwritten) and left unchanged.
+func TestUserSecretAttributionRepair_PersistentSwapMissIsRowChanged(t *testing.T) {
+	f, capturer, _ := newUSAFixture(t, "usa-rowchanged")
+	ctx := context.Background()
+	s := &usaTxStore{Store: f.Store, wrap: func(tx store.Store) store.Store { return usaSwapMissTx{Store: tx} }}
+	res, err := RepairLegacyUserSecretAttribution(ctx, s)
 	require.NoError(t, err)
 	assert.Empty(t, res.Repaired)
 	require.Len(t, res.Skipped, 2)
 	for _, sk := range res.Skipped {
 		assert.Equal(t, userSecretAttrSkipRowChanged, sk.Reason)
 	}
+	assert.Equal(t, 2, res.RowChanged())
 	row, err := f.Store.GetSecret(ctx, sdAlwaysKey, store.ScopeUser, f.UserID)
 	require.NoError(t, err)
 	assert.Equal(t, userSecretAttrAgentRefPrefix+capturer, row.CreatedBy)
+}
+
+// TestUserSecretAttributionRepair_AuditFailureRollsBackSwap: when the audit
+// record cannot be written, the attribution swap in the same transaction is
+// rolled back and the pass returns the error.
+func TestUserSecretAttributionRepair_AuditFailureRollsBackSwap(t *testing.T) {
+	f, capturer, _ := newUSAFixture(t, "usa-auditfail")
+	ctx := context.Background()
+	s := &usaTxStore{Store: f.Store, wrap: func(tx store.Store) store.Store { return usaAuditFailTx{Store: tx} }}
+	res, err := RepairLegacyUserSecretAttribution(ctx, s)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fake audit write failure")
+	assert.Empty(t, res.Repaired)
+	for _, key := range []string{sdAlwaysKey, sdAsNeededKey} {
+		row, err := f.Store.GetSecret(ctx, key, store.ScopeUser, f.UserID)
+		require.NoError(t, err)
+		assert.Equal(t, userSecretAttrAgentRefPrefix+capturer, row.CreatedBy, "%s: the swap is rolled back", key)
+	}
+	audits, _, err := f.Store.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: mutationTypeUserSecretAttributionRepair})
+	require.NoError(t, err)
+	assert.Empty(t, audits)
+}
+
+// TestUserSecretWithheldWarn_RateLimited: repeated starts of the same agent
+// log the withheld Warn for a secret once per interval, and repeated
+// runtime reads likewise.
+func TestUserSecretWithheldWarn_RateLimited(t *testing.T) {
+	f, capturer, capturerToken := newUSAFixture(t, "usa-ratelimit")
+	ctx := context.Background()
+	logs := &bytes.Buffer{}
+	d := NewHTTPAgentDispatcherWithClient(f.Store, &mockRuntimeBrokerClient{}, false, slog.New(slog.NewTextHandler(logs, nil)))
+	d.SetSecretBackend(f.Server.secretBackend)
+	d.SetAuthzService(f.Server.authzService)
+	agent, err := f.Store.GetAgent(ctx, capturer)
+	require.NoError(t, err)
+	for i := 0; i < 3; i++ {
+		_, _, err := d.resolveSecrets(ctx, agent)
+		require.NoError(t, err)
+	}
+	assert.Equal(t, 1, strings.Count(logs.String(), "secret="+sdAlwaysKey+" "),
+		"three starts log the withheld Warn once for the secret")
+
+	defaultLog := usaCaptureDefaultLog(t)
+	for i := 0; i < 3; i++ {
+		assert.False(t, f.read(t, capturer, capturerToken, sdAlwaysKey))
+	}
+	assert.Equal(t, 1, strings.Count(defaultLog.String(), "runtime user secret read withheld by authorization"),
+		"three reads log the withheld Warn once")
 }

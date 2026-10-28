@@ -2246,6 +2246,11 @@ type Server struct {
 	hookFireLimiter     *hookRefusalLimiter
 	hookFireLimiterOnce sync.Once
 
+	// userSecretWithheldLimiter rate limits the runtime read's Warn of a
+	// user secret withheld by authorization; created on first use.
+	userSecretWithheldLimiter     *hookRefusalLimiter
+	userSecretWithheldLimiterOnce sync.Once
+
 	// GCP token rate limiter (nil = no rate limiting)
 	gcpTokenRateLimiter *GCPTokenRateLimiter
 

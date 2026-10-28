@@ -759,9 +759,9 @@ func TestUpdateSecretValueIfVersion_ConcurrentSameVersion(t *testing.T) {
 }
 
 // TestAttributeUserSecretToOwner: the repair write moves created_by to
-// scope_id on a matching user-scope row and changes nothing else; a stale
-// version, a different created_by, a non-user row or a missing row is not
-// applied and is not an error.
+// scope_id on a matching user-scope row and changes nothing else; a value
+// write since the row was read does not stop it; a different created_by, a
+// non-user row or a missing row is not applied and is not an error.
 func TestAttributeUserSecretToOwner(t *testing.T) {
 	ss := newTestSecretStore(t)
 	ctx := context.Background()
@@ -781,7 +781,7 @@ func TestAttributeUserSecretToOwner(t *testing.T) {
 
 	t.Run("applies and preserves every other column", func(t *testing.T) {
 		before := newRow("APPLY_KEY", store.ScopeUser, owner)
-		applied, err := ss.AttributeUserSecretToOwner(ctx, before.ID, before.Version, legacy)
+		applied, err := ss.AttributeUserSecretToOwner(ctx, before.ID, legacy)
 		require.NoError(t, err)
 		require.True(t, applied)
 		after, err := ss.GetSecret(ctx, "APPLY_KEY", store.ScopeUser, owner)
@@ -793,32 +793,40 @@ func TestAttributeUserSecretToOwner(t *testing.T) {
 		assert.Equal(t, before.UpdatedBy, after.UpdatedBy)
 		assert.Equal(t, before.AllowProgeny, after.AllowProgeny)
 
-		again, err := ss.AttributeUserSecretToOwner(ctx, before.ID, before.Version, legacy)
+		again, err := ss.AttributeUserSecretToOwner(ctx, before.ID, legacy)
 		require.NoError(t, err)
 		assert.False(t, again, "a second write finds created_by changed")
 	})
 
-	t.Run("stale version", func(t *testing.T) {
-		row := newRow("STALE_KEY", store.ScopeUser, owner)
-		applied, err := ss.AttributeUserSecretToOwner(ctx, row.ID, row.Version+1, legacy)
+	t.Run("a value write since the read does not stop it", func(t *testing.T) {
+		row := newRow("REFRESHED_KEY", store.ScopeUser, owner)
+		applied, err := ss.UpdateSecretValueIfVersion(ctx, "REFRESHED_KEY", store.ScopeUser, owner, row.Version, "enc-refreshed")
 		require.NoError(t, err)
-		assert.False(t, applied)
-		got, err := ss.GetSecret(ctx, "STALE_KEY", store.ScopeUser, owner)
+		require.True(t, applied)
+		applied, err = ss.AttributeUserSecretToOwner(ctx, row.ID, legacy)
 		require.NoError(t, err)
-		assert.Equal(t, legacy, got.CreatedBy)
+		assert.True(t, applied)
+		got, err := ss.GetSecret(ctx, "REFRESHED_KEY", store.ScopeUser, owner)
+		require.NoError(t, err)
+		assert.Equal(t, owner, got.CreatedBy)
+		assert.Equal(t, "enc-refreshed", got.EncryptedValue)
+		assert.Equal(t, row.Version+1, got.Version)
 	})
 
 	t.Run("different created_by", func(t *testing.T) {
 		row := newRow("OTHER_KEY", store.ScopeUser, owner)
-		applied, err := ss.AttributeUserSecretToOwner(ctx, row.ID, row.Version, "agent:"+uuid.New().String())
+		applied, err := ss.AttributeUserSecretToOwner(ctx, row.ID, "agent:"+uuid.New().String())
 		require.NoError(t, err)
 		assert.False(t, applied)
+		got, err := ss.GetSecret(ctx, "OTHER_KEY", store.ScopeUser, owner)
+		require.NoError(t, err)
+		assert.Equal(t, legacy, got.CreatedBy)
 	})
 
 	t.Run("project scope", func(t *testing.T) {
 		project := uuid.New().String()
 		row := newRow("PROJECT_KEY", store.ScopeProject, project)
-		applied, err := ss.AttributeUserSecretToOwner(ctx, row.ID, row.Version, legacy)
+		applied, err := ss.AttributeUserSecretToOwner(ctx, row.ID, legacy)
 		require.NoError(t, err)
 		assert.False(t, applied)
 		got, err := ss.GetSecret(ctx, "PROJECT_KEY", store.ScopeProject, project)
@@ -827,7 +835,7 @@ func TestAttributeUserSecretToOwner(t *testing.T) {
 	})
 
 	t.Run("missing row", func(t *testing.T) {
-		applied, err := ss.AttributeUserSecretToOwner(ctx, uuid.New().String(), 1, legacy)
+		applied, err := ss.AttributeUserSecretToOwner(ctx, uuid.New().String(), legacy)
 		require.NoError(t, err)
 		assert.False(t, applied)
 	})

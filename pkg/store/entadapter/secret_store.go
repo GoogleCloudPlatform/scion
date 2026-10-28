@@ -752,10 +752,11 @@ func (s *SecretStore) ListEnvVars(ctx context.Context, filter store.EnvVarFilter
 }
 
 // AttributeUserSecretToOwner sets created_by to scope_id on the user-scope
-// row with id, while its version and created_by still match. No other
-// column changes: the updated timestamp is written back unchanged and the
-// version is not incremented.
-func (s *SecretStore) AttributeUserSecretToOwner(ctx context.Context, id string, expectedVersion int, expectedCreatedBy string) (bool, error) {
+// row with id, while its created_by still matches. No other column changes:
+// the updated timestamp is written back unchanged and the version is not
+// incremented. The version is deliberately not part of the predicate (see
+// store.SecretStore).
+func (s *SecretStore) AttributeUserSecretToOwner(ctx context.Context, id string, expectedCreatedBy string) (bool, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return false, err
@@ -773,15 +774,14 @@ func (s *SecretStore) AttributeUserSecretToOwner(ctx context.Context, id string,
 		if err != nil {
 			return mapError(err)
 		}
-		if row.Scope != store.ScopeUser || row.ScopeID == "" ||
-			row.Version != expectedVersion || row.CreatedBy != expectedCreatedBy {
+		if row.Scope != store.ScopeUser || row.ScopeID == "" || row.CreatedBy != expectedCreatedBy {
 			return nil
 		}
 		n, err := c.Secret.Update().
 			Where(
 				entsecret.IDEQ(uid),
 				entsecret.ScopeEQ(store.ScopeUser),
-				entsecret.VersionEQ(expectedVersion),
+				entsecret.ScopeIDEQ(row.ScopeID),
 				entsecret.CreatedByEQ(expectedCreatedBy),
 			).
 			SetCreatedBy(row.ScopeID).

@@ -173,6 +173,10 @@ type HTTPAgentDispatcher struct {
 	transportMode     string               // Transport auth mode (iap, cloudrun_invoker)
 	debug             bool
 	log               *slog.Logger
+	// withheldWarn rate limits the Warn of a start-time user secret
+	// withheld by authorization, per (agent, secret, cause). Set by the
+	// constructors; nil logs every occurrence.
+	withheldWarn *hookRefusalLimiter
 	// storageLayout is the hub's projectfs Layout source for
 	// storageLayoutPrecheck (SetStorageLayout); nil disables the check.
 	storageLayout func() (projectfs.Layout, error)
@@ -265,10 +269,11 @@ func NewHTTPAgentDispatcher(s store.Store, debug bool, log *slog.Logger) *HTTPAg
 		log = slog.Default()
 	}
 	return &HTTPAgentDispatcher{
-		store:  s,
-		client: NewHTTPRuntimeBrokerClientWithDebug(debug),
-		debug:  debug,
-		log:    log,
+		store:        s,
+		client:       NewHTTPRuntimeBrokerClientWithDebug(debug),
+		debug:        debug,
+		log:          log,
+		withheldWarn: newUserSecretWithheldLimiter(),
 	}
 }
 
@@ -278,10 +283,11 @@ func NewHTTPAgentDispatcherWithClient(s store.Store, client RuntimeBrokerClient,
 		log = slog.Default()
 	}
 	return &HTTPAgentDispatcher{
-		store:  s,
-		client: client,
-		debug:  debug,
-		log:    log,
+		store:        s,
+		client:       client,
+		debug:        debug,
+		log:          log,
+		withheldWarn: newUserSecretWithheldLimiter(),
 	}
 }
 
@@ -4853,14 +4859,24 @@ func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent 
 				"reason", reason, "scopes", len(scopes))
 		}
 	}
-	// withheld logs, at Warn, a user-scope row of the owner that the user
-	// secret parent ceiling keeps from the agent. The start goes ahead
-	// without it, so without this line a missing harness credential has no
-	// hub-side trace. It names the secret and the cause, never the value.
+	// withheld logs, at Warn, a user-scope row that authorization keeps
+	// from the agent (on the owner path, the user secret parent ceiling).
+	// The start goes ahead without it, so without this line a missing
+	// harness credential has no hub-side trace. It names the secret and the
+	// cause, never the value, and is rate limited per (agent, secret,
+	// cause).
 	withheld := func(path string, s secret.SecretMeta, dec Decision) {
-		d.log.WarnContext(ctx, "start-time user secret withheld by the user secret parent ceiling; the agent starts without it",
+		record, suppressed := true, 0
+		if d.withheldWarn != nil {
+			record, suppressed = d.withheldWarn.admit(agentID+"/"+s.ID, string(dec.DenyCause)+"/"+dec.Reason)
+		}
+		if !record {
+			return
+		}
+		d.log.WarnContext(ctx, "start-time user secret withheld by authorization; the agent starts without it",
 			"path", path, "agent_id", agentID, "secret", s.Name, "secret_id", s.ID,
-			"user_id", s.ScopeID, "deny_cause", string(dec.DenyCause), "reason", dec.Reason)
+			"user_id", s.ScopeID, "deny_cause", string(dec.DenyCause), "reason", dec.Reason,
+			"suppressed_since_last", suppressed)
 	}
 
 	opts := &secret.ResolveOpts{}

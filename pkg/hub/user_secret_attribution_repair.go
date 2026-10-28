@@ -43,22 +43,31 @@ import (
 // delegation chain is recorded. The repair moves created_by to scope_id,
 // the attribution #1557 gives new writes. It does not change the ceiling.
 //
-// A row is repaired only when the attribution is provably the owner's:
+// The capture handler took scope_id from the agent token's ancestry root
+// (OriginUserID, Ancestry[0]) and refused a token without one, and no
+// other writer records "agent:<uuid>". A row is repaired only when the
+// attribution is provably the owner's:
 //   - the referenced agent exists (live or soft-deleted) and the scope user
-//     is its ancestry root, its owner or its creator. The capture handler
-//     took scope_id from the agent token's ancestry root, so this is the
-//     user the agent wrote for;
-//   - or the referenced agent no longer exists and the scope user does. The
-//     capture handler could only write into the capturing agent's own
-//     ancestry root's scope, and no other writer records "agent:<uuid>",
-//     so the row is in its owner's scope by construction.
+//     is the root of its ancestry: this is the user the agent wrote for;
+//   - the referenced agent exists with an empty stored ancestry and the
+//     scope user is its owner or its creator. An agent whose ancestry root
+//     is another user could not have written into this scope, so it is
+//     skipped;
+//   - or the referenced agent no longer exists and the scope user does: the
+//     row is in its owner's scope by construction.
 //
 // Anything else is skipped with a reason and left withheld. Each repair is
-// a compare-and-swap on (id, version, created_by) and writes a mutation
-// audit record in the same transaction that keeps the original created_by
-// (BeforeSummary). Rows already attributed to their owner, and rows whose
-// created_by is not an agent reference, are not touched, so a rerun is a
-// no-op.
+// a compare-and-swap on (id, scope, scope_id, created_by), never on the
+// version, so a concurrent value write such as a credential refresh does
+// not defeat it, and it writes a mutation audit record in the same
+// transaction that keeps the original created_by (BeforeSummary). When the
+// swap misses, the row is re-read and decided again, a bounded number of
+// times; a row another writer already attributed to its owner counts as
+// repaired, and a row that is gone is dropped. A row still missing after
+// the retries is reported as row_changed, and the boot migration then
+// leaves its marker unwritten so the next boot retries. Rows already
+// attributed to their owner, and rows whose created_by is not an agent
+// reference, are not touched, so a rerun is a no-op.
 
 // UserSecretAttributionRepair names a repaired row.
 type UserSecretAttributionRepair struct {
@@ -66,7 +75,10 @@ type UserSecretAttributionRepair struct {
 	Name              string
 	ScopeID           string
 	OriginalCreatedBy string
-	Basis             string
+	// Basis names the rule that proved the attribution, or
+	// userSecretAttrBasisConcurrent when another writer attributed the row
+	// to its owner first.
+	Basis string
 }
 
 // UserSecretAttributionSkip names a row the repair left unchanged, and why.
@@ -84,6 +96,20 @@ type UserSecretAttributionRepairResult struct {
 	Examined int
 	Repaired []UserSecretAttributionRepair
 	Skipped  []UserSecretAttributionSkip
+	// Vanished counts examined rows deleted before they could be repaired.
+	Vanished int
+}
+
+// RowChanged reports whether a skip is row_changed, which is not a final
+// outcome: the boot migration retries the pass on the next boot.
+func (r UserSecretAttributionRepairResult) RowChanged() int {
+	n := 0
+	for _, sk := range r.Skipped {
+		if sk.Reason == userSecretAttrSkipRowChanged {
+			n++
+		}
+	}
+	return n
 }
 
 // Repair bases.
@@ -92,12 +118,14 @@ const (
 	userSecretAttrBasisAgentOwner   = "agent_owner"
 	userSecretAttrBasisAgentCreator = "agent_creator"
 	userSecretAttrBasisAgentGone    = "agent_gone_scope_user_exists"
+	userSecretAttrBasisConcurrent   = "attributed_concurrently"
 )
 
 // Skip reasons.
 const (
 	userSecretAttrSkipScopeOwnerEmpty  = "scope_owner_empty"
 	userSecretAttrSkipAgentRefInvalid  = "agent_ref_invalid"
+	userSecretAttrSkipFederatedRef     = "federated_agent_ref"
 	userSecretAttrSkipAgentNotOwnedBy  = "agent_not_linked_to_scope_user"
 	userSecretAttrSkipScopeUserMissing = "agent_gone_scope_user_missing"
 	userSecretAttrSkipRowChanged       = "row_changed"
@@ -109,6 +137,8 @@ const (
 	// one repaired row.
 	mutationTypeUserSecretAttributionRepair = "user_secret_attribution_repair"
 	userSecretAttrAuditActor                = "user-secret-attribution-repair"
+	// userSecretAttrMaxAttempts bounds the decide-and-swap attempts per row.
+	userSecretAttrMaxAttempts = 3
 )
 
 // RepairLegacyUserSecretAttribution rewrites created_by from an agent
@@ -119,42 +149,82 @@ const (
 // not errors. Secret values are never read.
 func RepairLegacyUserSecretAttribution(ctx context.Context, s store.Store) (UserSecretAttributionRepairResult, error) {
 	var res UserSecretAttributionRepairResult
+	// An empty ScopeID lists every user's rows. SecretFilter documents
+	// ScopeID as required for API callers, but the store does not enforce
+	// it; if it ever did, this call would fail (and the marker would stay
+	// unwritten) rather than silently list nothing.
 	rows, err := s.ListSecrets(ctx, store.SecretFilter{Scope: store.ScopeUser})
 	if err != nil {
 		return res, fmt.Errorf("listing user secrets: %w", err)
 	}
 	for i := range rows {
-		row := &rows[i]
+		row := rows[i]
 		if row.Scope != store.ScopeUser || !strings.HasPrefix(row.CreatedBy, userSecretAttrAgentRefPrefix) {
 			continue
 		}
 		res.Examined++
-		skip := func(reason string) {
-			res.Skipped = append(res.Skipped, UserSecretAttributionSkip{
-				SecretID: row.ID, Name: row.Key, ScopeID: row.ScopeID, CreatedBy: row.CreatedBy, Reason: reason,
-			})
-		}
-		basis, reason, err := legacyUserSecretAttributionBasis(ctx, s, row)
-		if err != nil {
+		if err := repairOneUserSecretAttribution(ctx, s, row, &res); err != nil {
 			return res, fmt.Errorf("secret %s: %w", row.ID, err)
 		}
-		if reason != "" {
-			skip(reason)
-			continue
-		}
-		applied, err := applyUserSecretAttributionRepair(ctx, s, row, basis)
-		if err != nil {
-			return res, fmt.Errorf("secret %s: repairing attribution: %w", row.ID, err)
-		}
-		if !applied {
-			skip(userSecretAttrSkipRowChanged)
-			continue
-		}
-		res.Repaired = append(res.Repaired, UserSecretAttributionRepair{
-			SecretID: row.ID, Name: row.Key, ScopeID: row.ScopeID, OriginalCreatedBy: row.CreatedBy, Basis: basis,
-		})
 	}
 	return res, nil
+}
+
+// repairOneUserSecretAttribution decides and swaps one listed row, re-reading
+// it after a missed swap, and records the outcome in res.
+func repairOneUserSecretAttribution(ctx context.Context, s store.Store, row store.Secret, res *UserSecretAttributionRepairResult) error {
+	original := row.CreatedBy
+	skip := func(cur store.Secret, reason string) {
+		res.Skipped = append(res.Skipped, UserSecretAttributionSkip{
+			SecretID: cur.ID, Name: cur.Key, ScopeID: cur.ScopeID, CreatedBy: cur.CreatedBy, Reason: reason,
+		})
+	}
+	for attempt := 1; ; attempt++ {
+		basis, reason, err := legacyUserSecretAttributionBasis(ctx, s, &row)
+		if err != nil {
+			return err
+		}
+		if reason != "" {
+			skip(row, reason)
+			return nil
+		}
+		applied, err := applyUserSecretAttributionRepair(ctx, s, &row, basis)
+		if err != nil {
+			return fmt.Errorf("repairing attribution: %w", err)
+		}
+		if applied {
+			res.Repaired = append(res.Repaired, UserSecretAttributionRepair{
+				SecretID: row.ID, Name: row.Key, ScopeID: row.ScopeID, OriginalCreatedBy: row.CreatedBy, Basis: basis,
+			})
+			return nil
+		}
+		// The swap missed: the row changed since it was read. Re-read it
+		// by its unique (key, scope, scope_id) and decide again.
+		cur, err := s.GetSecret(ctx, row.Key, row.Scope, row.ScopeID)
+		switch {
+		case errors.Is(err, store.ErrNotFound) || (err == nil && cur == nil) || (err == nil && cur.ID != row.ID):
+			res.Vanished++
+			return nil
+		case err != nil:
+			return fmt.Errorf("re-reading secret: %w", err)
+		}
+		cur.EncryptedValue = ""
+		switch {
+		case cur.CreatedBy == cur.ScopeID:
+			res.Repaired = append(res.Repaired, UserSecretAttributionRepair{
+				SecretID: cur.ID, Name: cur.Key, ScopeID: cur.ScopeID, OriginalCreatedBy: original, Basis: userSecretAttrBasisConcurrent,
+			})
+			return nil
+		case !strings.HasPrefix(cur.CreatedBy, userSecretAttrAgentRefPrefix):
+			// Another writer gave the row an author that is not an agent
+			// reference; it is no longer this migration's to decide.
+			return nil
+		case attempt >= userSecretAttrMaxAttempts:
+			skip(*cur, userSecretAttrSkipRowChanged)
+			return nil
+		}
+		row = *cur
+	}
 }
 
 // legacyUserSecretAttributionBasis decides whether row may be attributed to
@@ -166,6 +236,11 @@ func legacyUserSecretAttributionBasis(ctx context.Context, s store.Store, row *s
 	}
 	agentID := strings.TrimPrefix(row.CreatedBy, userSecretAttrAgentRefPrefix)
 	if _, perr := uuid.Parse(agentID); perr != nil {
+		// A federated agent is recorded as "agent:<issuer>:<id>"
+		// (FederatedAgentIdentity.ID); it is no local agent to check.
+		if strings.Contains(agentID, ":") {
+			return "", userSecretAttrSkipFederatedRef, nil
+		}
 		return "", userSecretAttrSkipAgentRefInvalid, nil
 	}
 	agent, err := s.GetAgent(ctx, agentID)
@@ -174,6 +249,10 @@ func legacyUserSecretAttributionBasis(ctx context.Context, s store.Store, row *s
 		switch {
 		case len(agent.Ancestry) > 0 && agent.Ancestry[0] == owner:
 			return userSecretAttrBasisAncestryRoot, "", nil
+		case len(agent.Ancestry) > 0:
+			// The capture handler wrote into the scope of Ancestry[0],
+			// another user: this agent could not have written the row.
+			return "", userSecretAttrSkipAgentNotOwnedBy, nil
 		case agent.OwnerID == owner:
 			return userSecretAttrBasisAgentOwner, "", nil
 		case agent.CreatedBy == owner:
@@ -215,7 +294,7 @@ func applyUserSecretAttributionRepair(ctx context.Context, s store.Store, row *s
 	}
 	applied := false
 	err = s.WithTx(ctx, func(tx store.Store) error {
-		ok, err := tx.AttributeUserSecretToOwner(ctx, row.ID, row.Version, row.CreatedBy)
+		ok, err := tx.AttributeUserSecretToOwner(ctx, row.ID, row.CreatedBy)
 		if err != nil || !ok {
 			return err
 		}

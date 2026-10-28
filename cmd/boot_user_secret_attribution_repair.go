@@ -30,10 +30,11 @@ import (
 // delegation chain. See hub.RepairLegacyUserSecretAttribution.
 //
 // M-1' semantics: per-row skips are logged at WARN, counted as residuals
-// and do not block the marker; a store error aborts the pass and leaves the
-// marker unwritten so the next boot retries. Only rows still attributed to
-// an agent are touched, so a rerun is safe. Secret values are never read
-// or logged.
+// and do not block the marker, except row_changed: a row that kept changing
+// under the repair is not a final outcome, so the marker stays unwritten
+// and the next boot retries. A store error aborts the pass and also leaves
+// the marker unwritten. Only rows still attributed to an agent are
+// touched, so a rerun is safe. Secret values are never read or logged.
 func runUserSecretAttributionRepair(ctx context.Context, s store.Store) {
 	done, err := IsMigrationComplete(ctx, s, MigrationUserSecretAttributionRepair)
 	if err != nil {
@@ -61,7 +62,12 @@ func runUserSecretAttributionRepair(ctx context.Context, s store.Store) {
 		return
 	}
 	slog.Info("User secret attribution repair: pass completed",
-		"examined", res.Examined, "repaired", len(res.Repaired), "skipped", len(res.Skipped))
+		"examined", res.Examined, "repaired", len(res.Repaired), "skipped", len(res.Skipped), "vanished", res.Vanished)
+	if n := res.RowChanged(); n > 0 {
+		slog.Warn("User secret attribution repair: rows changed during the repair; marker not written, will retry next boot",
+			"row_changed", n)
+		return
+	}
 
 	if markErr := MarkMigrationComplete(ctx, s, MigrationUserSecretAttributionRepair, len(res.Skipped)); markErr != nil {
 		slog.Error("User secret attribution repair: failed to write completion marker; will retry next boot",
