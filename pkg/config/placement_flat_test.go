@@ -264,8 +264,7 @@ func TestPlacementTolerationUnionCanonical(t *testing.T) {
 	if want := []api.K8sToleration{poolToleration(), gpu}; !reflect.DeepEqual(got.Tolerations, want) {
 		t.Fatalf("tolerations = %v, want %v", got.Tolerations, want)
 	}
-	// Distinct effects stay distinct, and with no operator tolerations
-	// (see TestAgentTolerationNotInPolicyRejected) the agent's are kept.
+	// Distinct effects stay distinct.
 	noExec := poolToleration()
 	noExec.Effect = "NoExecute"
 	d.Tolerations = append(d.Tolerations, noExec)
@@ -344,11 +343,11 @@ func TestAgentRuntimeClassWithoutOperatorValueRejected(t *testing.T) {
 	}
 }
 
-// Agent tolerations must each be one of the operator's when the operator
-// sets tolerations: exact (key, operator, value, effect), so a broader
-// operator Exists entry does not cover a different tuple. With no operator
-// tolerations at all they are kept (agentTolerationsRequireOperatorPolicy
-// is false); that row changes if the setting changes.
+// Agent tolerations must each be one of the operator's: exact (key,
+// operator, value, effect), so a broader operator Exists entry does not
+// cover a different tuple. With no operator tolerations, any agent
+// toleration is refused, including an empty-key Exists toleration when
+// there is no operator placement at all.
 func TestAgentTolerationNotInPolicyRejected(t *testing.T) {
 	other := api.K8sToleration{Key: "dedicated", Operator: "Equal", Value: "batch", Effect: "NoSchedule"}
 	err := CheckAgentPlacement(&api.KubernetesConfig{Tolerations: []api.K8sToleration{poolToleration(), other}}, operatorPlacement(), AgentPlacementLayerRequest)
@@ -361,18 +360,22 @@ func TestAgentTolerationNotInPolicyRejected(t *testing.T) {
 		t.Fatal("an operator Exists entry authorized a different agent tuple")
 	}
 
-	// Today's behaviour with no operator tolerations: kept, not refused.
+	// No operator tolerations: refused, with a cause naming the empty case.
 	noTolerations := operatorPlacement()
 	noTolerations.Tolerations = nil
-	got, err := ApplyOperatorPlacement(&api.KubernetesConfig{Tolerations: []api.K8sToleration{other}}, noTolerations, AgentPlacementLayerRequest)
-	if agentTolerationsRequireOperatorPolicy {
-		if err == nil {
-			t.Fatal("agent tolerations with no operator tolerations accepted")
-		}
-		return
+	_, err = ApplyOperatorPlacement(&api.KubernetesConfig{Tolerations: []api.K8sToleration{other}}, noTolerations, AgentPlacementLayerStored)
+	if err == nil || !strings.Contains(err.Error(), "configures no tolerations") || !strings.Contains(err.Error(), "the agent's stored config") ||
+		strings.Contains(err.Error(), "batch") {
+		t.Fatalf("no operator tolerations: got %v", err)
 	}
-	if err != nil || !reflect.DeepEqual(got.Tolerations, []api.K8sToleration{other}) {
-		t.Fatalf("no operator tolerations: got %+v, %v", got, err)
+	// No operator placement at all: an agent match-all toleration is
+	// refused too (the match-all guard applies only while placement is in
+	// effect; membership applies always).
+	for name, d := range map[string]*api.ResolvedPlacement{"empty placement": {OperatorOwned: true}, "nil placement": nil} {
+		if err := CheckAgentPlacement(&api.KubernetesConfig{Tolerations: []api.K8sToleration{{Operator: "Exists"}}}, d, AgentPlacementLayerRequest); err == nil ||
+			!strings.Contains(err.Error(), "configures no tolerations") {
+			t.Errorf("%s: match-all agent toleration got %v", name, err)
+		}
 	}
 }
 
@@ -440,6 +443,22 @@ func TestApplyPlacementLegacyOutputUnchanged(t *testing.T) {
 	// Legacy still accepts an agent runtime class with no placement.
 	if got, _, err := ApplyPlacement(&api.KubernetesConfig{RuntimeClassName: "kata"}, nil); err != nil || got.RuntimeClassName != "kata" {
 		t.Fatalf("legacy without placement: %+v, %v", got, err)
+	}
+	// Legacy still accepts agent tolerations with no operator tolerations:
+	// with placement in effect (a selector only) they merge after the
+	// placement's; with no placement they are kept as they are. The flat
+	// rule refusing them applies only to operator-owned placement.
+	agentTols := []api.K8sToleration{{Key: "dedicated", Operator: "Equal", Value: "batch", Effect: "NoSchedule"}}
+	selectorOnly := &api.ResolvedPlacement{NodeSelector: map[string]string{"pool": "a"}}
+	got, _, err = ApplyPlacement(&api.KubernetesConfig{Tolerations: agentTols}, selectorOnly)
+	if err != nil || !reflect.DeepEqual(got.Tolerations, agentTols) || got.NodeSelector["pool"] != "a" {
+		t.Fatalf("legacy, selector only, agent tolerations: %+v, %v", got, err)
+	}
+	for name, d := range map[string]*api.ResolvedPlacement{"nil": nil, "empty": {}} {
+		got, _, err := ApplyPlacement(&api.KubernetesConfig{Tolerations: append(agentTols, api.K8sToleration{Operator: "Exists"})}, d)
+		if err != nil || len(got.Tolerations) != 2 {
+			t.Fatalf("legacy, %s placement, agent tolerations: %+v, %v", name, got, err)
+		}
 	}
 	errs := ValidatePlacement(map[string]V1RuntimeConfig{"k": {RuntimeClassName: "Bad_Name"}}, nil, nil)
 	if len(errs) != 1 || errs[0].Path != "runtimes.k.runtime_class_name" ||

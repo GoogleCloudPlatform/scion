@@ -1868,7 +1868,7 @@
                 },
                 "additionalProperties": false
               },
-              "description": "Kubernetes only. Tolerations for this instance's agent pods. When set, an agent's own tolerations must each match one of these; when unset, agent tolerations are currently accepted after validation. Set at least one to keep agents off tainted pools. An empty key requires operator Exists; Exists requires an empty value. Never derived from node_selector."
+              "description": "Kubernetes only. Tolerations for this instance's agent pods. An agent's own tolerations must each match one of these; when none are set, agent tolerations are refused. An empty key requires operator Exists; Exists requires an empty value. Never derived from node_selector."
             },
             "runtime_class_name": {
               "type": "string",

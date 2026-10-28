@@ -275,23 +275,16 @@ const (
 	AgentPlacementLayerConfig  = "the agent config"
 )
 
-// agentTolerationsRequireOperatorPolicy is whether agent tolerations are
-// refused when the operator placement sets no tolerations at all. While it
-// is false, such agent tolerations are only validated and then kept;
-// whether to refuse them is a pending product decision. When the operator
-// placement sets tolerations, agent tolerations must always be among them.
-const agentTolerationsRequireOperatorPolicy = false
-
 // CheckAgentPlacement checks the agent's own kubernetes block against
 // operator-owned placement d (nil means none). layer names where the block
 // comes from (AgentPlacementLayerRequest, ...). The block's placement
 // fields are validated even when d has none. Then, an empty-key Exists
 // toleration is refused while d is in effect; a node selector key that d
-// sets must have d's value (other keys are allowed); when d sets
-// tolerations, each toleration must be one of d's, compared by (key,
-// operator with "" as Equal, value, effect), and when d sets none they are
-// currently kept after validation (agentTolerationsRequireOperatorPolicy);
-// and a set runtime class must equal d's, which must then be set.
+// sets must have d's value (other keys are allowed); each toleration must
+// be one of d's, compared by (key, operator with "" as Equal, value,
+// effect), so any toleration is refused when d sets none (including an
+// empty-key Exists toleration with no placement at all); and a set runtime
+// class must equal d's, which must then be set.
 // Errors name fields by key or index and never carry submitted values.
 func CheckAgentPlacement(block *api.KubernetesConfig, d *api.ResolvedPlacement, layer string) error {
 	if block == nil {
@@ -340,12 +333,13 @@ func CheckAgentPlacement(block *api.KubernetesConfig, d *api.ResolvedPlacement, 
 		}
 		return fmt.Errorf("kubernetes.nodeSelector key %q in %s conflicts with the agent runtime's placement; remove it or use the same value", k, layer)
 	}
-	if len(opTolerations) > 0 || agentTolerationsRequireOperatorPolicy {
-		allowed := tolerationSet(opTolerations)
-		for i, t := range block.Tolerations {
-			if _, ok := allowed[identityOfToleration(t)]; !ok {
-				return fmt.Errorf("kubernetes.tolerations[%d] in %s is not one of the agent runtime's tolerations; add it to the agent runtime's placement or remove it from the agent config", i, layer)
-			}
+	if len(block.Tolerations) > 0 && len(opTolerations) == 0 {
+		return fmt.Errorf("kubernetes.tolerations[0] in %s is set, but the agent runtime configures no tolerations; add the toleration to the agent runtime's placement or remove it from the agent config", layer)
+	}
+	allowed := tolerationSet(opTolerations)
+	for i, t := range block.Tolerations {
+		if _, ok := allowed[identityOfToleration(t)]; !ok {
+			return fmt.Errorf("kubernetes.tolerations[%d] in %s is not one of the agent runtime's tolerations; add it to the agent runtime's placement or remove it from the agent config", i, layer)
 		}
 	}
 	if block.RuntimeClassName != "" && block.RuntimeClassName != opRuntimeClass {
@@ -362,9 +356,8 @@ func CheckAgentPlacement(block *api.KubernetesConfig, d *api.ResolvedPlacement, 
 // block; neither input is mutated, and the result shares no map or slice
 // with them. CheckAgentPlacement must pass first (layer names the block's
 // source). The result keeps the agent's other node selector keys and adds
-// d's; its tolerations are d's followed by the agent's that d lacks (the
-// agent's are then all among d's, or d sets none); and its runtime class
-// is d's. Unlike ApplyPlacement, nothing is ignored with a warning.
+// d's; its tolerations are d's (CheckAgentPlacement has made the agent's
+// all members of them); and its runtime class is d's. Unlike ApplyPlacement, nothing is ignored with a warning.
 func ApplyOperatorPlacement(base *api.KubernetesConfig, d *api.ResolvedPlacement, layer string) (*api.KubernetesConfig, error) {
 	if err := CheckAgentPlacement(base, d, layer); err != nil {
 		return nil, err
