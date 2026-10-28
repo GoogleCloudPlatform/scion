@@ -11,20 +11,22 @@
   upkeep's store scanner (`PurgeMessageStarCandidates`) from the start of the table in batches of 500, each under
   its own 30 s context, until it wraps (one sweep), and repeats sweeps until one repairs and purges nothing. At most
   3 sweeps; a run that is still changing stars after the third fails with "run the operation again". The whole run
-  is bounded by `maintenanceRunTimeouts` (30 min). The run log lists every sweep and the totals (examined, repaired,
+  is bounded by `maintenanceRunTimeouts` (30 min); a run that its time limit (or a shutdown) stops fails with that
+  reason, the totals so far and "run the operation again". There is no resume state: every run starts over. The run log lists every sweep and the totals (examined, repaired,
   purged); completion is the run's status (the framework records no result on success). No parameters: the key is
   in `operationParamAllowlist` with an empty list, so any parameter is a 400 before a run is created. Without a
   chat store with star support the run fails visibly.
-- **Concurrency:** the framework's database-backed in-flight check stops a second run of the same operation;
-  overlapping runs on two replicas, or a run beside the replicas' upkeep passes, are harmless because each batch
-  repairs and purges in its own transaction and both steps are idempotent. The operation does not share the
+- **Concurrency:** the framework's in-flight check stops a second run of the same operation on the same instance
+  (check-then-create is serialized only within one process), and usually across instances through the run row.
+  The real guarantee is that concurrent runs, on two replicas or beside the replicas' upkeep passes, are harmless:
+  each batch repairs and purges in its own transaction and both steps are idempotent. The operation does not share the
   upkeep's per-replica `busy` flag, so it never skips or delays an upkeep pass.
 - **Registration:** no new route or authz catalog entry. The operation runs through
   `/api/v1/admin/maintenance/operations/{id}/run`, already under `hub.maintenance.execute`; the key is resolved in
   `resolveMaintenanceExecutor`. No request-path registry change (no new handler reads the path).
 - **Tests:** the driver against a scripted scanner (batching, exact-multiple end, sweep bound, store error,
-  cancellation, invalid limits); a both-dialect contract case in `testMessageStarLifecycleContract` (repairs and
-  purges to exhaustion in two sweeps, overlapping another replica's pass, idempotent re-run); the operation through
+  cancellation, the time limit, invalid limits); a both-dialect contract case in `testMessageStarLifecycleContract` (repairs and
+  purges to exhaustion in two sweeps, between another replica's batches (sequential), idempotent re-run); the operation through
   the operations handler with the experiment off and on; registration (seeded category, parameters refused,
   bounded run context).
 - **Deferred tests folded in:** ptone/scion#6414 (semicolon-separated starred queries in the experiment-off 404
