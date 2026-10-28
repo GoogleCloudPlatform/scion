@@ -298,7 +298,7 @@ func TestRefusal_DirectPathTyped(t *testing.T) {
 // A request that passed the first window check before the leader recorded
 // the refusal, and takes the singleflight lock after the leader released it,
 // must not become a second leader inside the window: one hub call, one
-// back-off step, one log line (round 1, R1). Deterministic: the second
+// back-off step, one log line. Deterministic: the second
 // request is held between its first check and the lock until the leader is
 // done.
 func TestRefusal_LateRequestDoesNotBecomeSecondLeader(t *testing.T) {

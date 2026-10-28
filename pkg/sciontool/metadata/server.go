@@ -996,25 +996,38 @@ func (s *Server) handleServiceAccount(w http.ResponseWriter, r *http.Request, pa
 }
 
 func (s *Server) serveCachedToken(w http.ResponseWriter) bool {
+	body, ok := s.peekCachedToken()
+	if ok {
+		writeCachedToken(w, body)
+	}
+	return ok
+}
+
+// peekCachedToken reads the cached access token without writing a response:
+// the response body, and whether the token has more than 60 s left.
+func (s *Server) peekCachedToken() (map[string]interface{}, bool) {
 	s.mu.RLock()
 	cached := s.cachedToken
 	s.mu.RUnlock()
 
 	if cached == nil {
-		return false
+		return nil, false
 	}
 	elapsed := time.Since(cached.FetchedAt)
 	remaining := time.Duration(cached.ExpiresIn)*time.Second - elapsed
 	if remaining <= 60*time.Second {
-		return false
+		return nil, false
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	return map[string]interface{}{
 		"access_token": cached.AccessToken,
 		"expires_in":   int(remaining.Seconds()),
 		"token_type":   cached.TokenType,
-	})
-	return true
+	}, true
+}
+
+func writeCachedToken(w http.ResponseWriter, body map[string]interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
@@ -1053,8 +1066,9 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		writeRefusal(w, left)
 		return
 	}
-	if s.serveCachedToken(w) {
+	if body, ok := s.peekCachedToken(); ok {
 		s.fetchMu.Unlock()
+		writeCachedToken(w, body)
 		return
 	}
 	s.fetchInFlight = true
@@ -1083,16 +1097,29 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveCachedIDToken(w http.ResponseWriter, audience string) bool {
+	tok, ok := s.peekCachedIDToken(audience)
+	if ok {
+		writeCachedIDToken(w, tok)
+	}
+	return ok
+}
+
+// peekCachedIDToken reads the cached identity token for audience without
+// writing a response, and whether it has more than 60 s left.
+func (s *Server) peekCachedIDToken(audience string) (string, bool) {
 	s.idTokenMu.RLock()
 	cached := s.cachedIDTokens[audience]
 	s.idTokenMu.RUnlock()
 
 	if cached == nil || !time.Now().Before(cached.ExpiresAt.Add(-60*time.Second)) {
-		return false
+		return "", false
 	}
+	return cached.Token, true
+}
+
+func writeCachedIDToken(w http.ResponseWriter, tok string) {
 	w.Header().Set("Content-Type", "text/plain")
-	_, _ = fmt.Fprint(w, cached.Token)
-	return true
+	_, _ = fmt.Fprint(w, tok)
 }
 
 func (s *Server) handleIdentityToken(w http.ResponseWriter, r *http.Request) {
@@ -1135,8 +1162,9 @@ func (s *Server) handleIdentityToken(w http.ResponseWriter, r *http.Request) {
 		writeRefusal(w, left)
 		return
 	}
-	if s.serveCachedIDToken(w, audience) {
+	if tok, ok := s.peekCachedIDToken(audience); ok {
 		s.idFetchMu.Unlock()
+		writeCachedIDToken(w, tok)
 		return
 	}
 	s.idFetchInFlight = true
