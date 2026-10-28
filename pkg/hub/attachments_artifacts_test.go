@@ -73,12 +73,21 @@ func setAttachmentExperiments(t *testing.T, srv *Server, attachmentsOn, artifact
 
 // storeAttachmentArtifactsOverride stores an explicit override of
 // hub.attachment_artifacts in srv's operational settings, as an admin's
-// setting is stored, installing settings over an empty store when srv has
-// none.
+// setting is stored. Turning it off on a server without operational
+// settings installs settings over an empty store; turning it on there
+// stores nothing, because it already resolves on.
 func storeAttachmentArtifactsOverride(t *testing.T, srv *Server, on bool) {
 	t.Helper()
 	ops := srv.GetOperationalSettings()
 	if ops == nil {
+		if on {
+			// Without stored settings the experiment already resolves on
+			// (the deployment default, or the test registry's compiled
+			// default). Installing settings here would also change other
+			// values the server reads from them, such as the conversation
+			// envelope switch the agent messages stream applies.
+			return
+		}
 		ops = NewOperationalSettings(newFakeHubSettingStore(), emptyKoanf(), emptyKoanf())
 		_, err := ops.Refresh(context.Background())
 		require.NoError(t, err)
