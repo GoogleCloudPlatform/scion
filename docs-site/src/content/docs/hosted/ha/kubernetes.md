@@ -831,7 +831,6 @@ If the export is not mounted on the Runtime Broker, or the Runtime Broker is not
 Also refused in inline mode, with a message that says what to change:
 
 - agents with NFS homes (`project_storage.homes: nfs`). Set `pv_name` to use them.
-- a workspace whose `.scion` entry is a file rather than a directory, because an `nfs` volume cannot mount a single file. Set `pv_name`, or make `.scion` a directory.
 - shared directories on the deprecated split `shared_dir_storage` export, which still need that share's `pv_name`.
 
 On exports that map root or all users to an anonymous user, the workspace provisioning init container cannot change file ownership, because the NFS server decides ownership changes. When the Runtime Broker created all of these directories, or found them already in place with setgid and group write (for example `2775`), the provisioning step tries to set ownership to the agent runtime uid (`1000`) and `project_storage.nfs.gid`, logs a warning if that is not allowed, and continues. If any of them already exists without setgid and group write (for example a root-owned `0755` directory left by an earlier kubelet mkdir), or was left to the kubelet, a failed ownership change still stops the Pod; fix that directory's group and mode on the export. Agents get access through the directories' group: set `project_storage.nfs.gid` to the group that owns `<subpath_root>/<project-id>` on the export (the agent Pod uses it as its `fsGroup`), so files created under the setgid directories stay writable by the agent.

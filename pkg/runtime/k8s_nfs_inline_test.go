@@ -327,21 +327,36 @@ func TestBuildPod_InlineOutsideProjectTreeRefused(t *testing.T) {
 	}
 }
 
-// Inline, a .scion marker file cannot be mounted read-only by an NFS
-// volume, so the pod is refused with the fix; a claim still mounts it.
-func TestBuildPod_InlineProjectConfigMarkerFileRefused(t *testing.T) {
+// Inline, a .scion marker file is mounted read-only from the workspace
+// volume by the subPath ".scion", as with a claim (only the volume source
+// differs), and adds no volume of its own.
+func TestBuildPod_InlineProjectConfigMarkerFileMounted(t *testing.T) {
 	cfg, ws := nfsClaimGoldenConfig(t)
+	_, dirPod := buildClaimAndInline(t, cfg)
+
 	require.NoError(t, os.Remove(filepath.Join(ws, ".scion")))
 	require.NoError(t, os.WriteFile(filepath.Join(ws, ".scion"), []byte("marker"), 0o644))
+	claimPod, inlinePod := buildClaimAndInline(t, cfg)
+	assertInlineMatchesClaim(t, claimPod, inlinePod, "proj-123")
+	assertInlineProjectConfigFromWorkspace(t, inlinePod)
 
-	_, err := newNFSTestK8sRuntime().buildPod("default", claimTestConfig(cfg))
-	require.NoError(t, err)
+	entryMount := func(pod *corev1.Pod) corev1.VolumeMount {
+		t.Helper()
+		for _, m := range pod.Spec.Containers[0].VolumeMounts {
+			if m.MountPath == "/workspace/.scion" {
+				return m
+			}
+		}
+		t.Fatal("no /workspace/.scion mount")
+		return corev1.VolumeMount{}
+	}
+	claimEntry, inlineEntry := entryMount(claimPod), entryMount(inlinePod)
+	assert.Equal(t, corev1.VolumeMount{Name: "workspace", MountPath: "/workspace/.scion", SubPath: "projects/proj-123/workspace/.scion", ReadOnly: true}, claimEntry)
+	assert.Equal(t, corev1.VolumeMount{Name: nfsVolWorkspace, MountPath: "/workspace/.scion", SubPath: ".scion", ReadOnly: true}, inlineEntry)
+	assert.Equal(t, path.Join(inlineTestExport, claimEntry.SubPath), path.Join(findVolume(inlinePod, inlineEntry.Name).NFS.Path, inlineEntry.SubPath),
+		"same directory on the export")
 
-	_, err = newNFSTestK8sRuntime().buildPod("default", inlineTestConfig(cfg))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), filepath.Join(ws, ".scion"))
-	assert.Contains(t, err.Error(), "pv_name")
-	assert.Contains(t, err.Error(), "make .scion a directory")
+	assert.Equal(t, dirPod.Spec.Volumes, inlinePod.Spec.Volumes, "a marker file adds no volume")
 }
 
 // Shared dirs with neither a claim nor the share's server and export (the
