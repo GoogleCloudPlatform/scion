@@ -4858,12 +4858,15 @@ func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent 
 			Permission: secretUsePermission,
 		})
 	}
+	// A user-scope secret the start-time checks refuse is withheld from the
+	// start (resolveSecrets, resolveAsNeededForKeys and the launch selection
+	// all skip it; a lower-scope secret of the same name stays in effect).
+	// It is logged at Warn with its name, scope, path and reason, never its
+	// value, so an operator can see why an agent came up without it.
 	deny := func(path string, s secret.SecretMeta, reason string) {
-		if d.debug {
-			d.log.Debug("start-time secret denied by authz", "path", path,
-				"agent_id", agentID, "secret", s.Name, "secret_id", s.ID,
-				"reason", reason, "scopes", len(scopes))
-		}
+		d.log.WarnContext(ctx, "start-time secret withheld: denied by authz", "path", path,
+			"agent_id", agentID, "secret", s.Name, "secret_id", s.ID, "scope", s.Scope,
+			"reason", reason, "scopes", len(scopes))
 	}
 
 	opts := &secret.ResolveOpts{}

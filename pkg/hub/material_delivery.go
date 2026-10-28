@@ -45,6 +45,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -66,8 +67,16 @@ type deliverySelector struct {
 	purpose MaterialPurpose
 	// ident is minted on the first authorize call (mint).
 	ident *hubDeliveryIdentity
-	// denied counts items Decide refused, for the debug log only.
+	// denied counts items Decide refused (the per-start Warn summary).
 	denied int
+}
+
+// logger is the authorization service's logger, or the default logger.
+func (s *deliverySelector) logger() *slog.Logger {
+	if s.authz != nil && s.authz.logger != nil {
+		return s.authz.logger
+	}
+	return slog.Default()
 }
 
 func newDeliverySelector(authz *AuthzService, agent *store.Agent, purpose MaterialPurpose) *deliverySelector {
@@ -118,6 +127,17 @@ func (s *deliverySelector) authorize(ctx context.Context, kind MaterialKind, rec
 	d := s.authz.Decide(ctx, deliveryAuthzRequest(s.ident, kind, res))
 	if !d.Allowed {
 		s.denied++
+		// A launch item the delivery decision refuses is withheld from the
+		// start or restart (the start itself goes ahead). Say so at Warn,
+		// with the item's name, scope and the deny cause, never its value, so
+		// an operator can see why an agent came up without it. The create-time
+		// availability probe decides nothing for delivery and stays quiet.
+		if s.purpose == PurposeDispatch || s.purpose == PurposeRestart {
+			s.logger().WarnContext(ctx, "launch material withheld: not authorized for delivery",
+				"agent_id", s.agent.ID, "purpose", string(s.purpose), "kind", string(kind),
+				"key", key, "scope", scope, "scope_id", scopeID,
+				"deny_cause", string(d.DenyCause), "reason", d.Reason)
+		}
 	}
 	return d.Allowed, nil
 }
@@ -320,8 +340,8 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 		}
 	}
 
-	if d.debug && sel.denied > 0 {
-		d.log.Debug("material delivery: items not authorized", "agent_id", agent.ID, "purpose", string(sel.purpose), "count", sel.denied)
+	if sel.denied > 0 {
+		d.log.WarnContext(ctx, "launch material withheld: items not authorized for delivery", "agent_id", agent.ID, "purpose", string(sel.purpose), "count", sel.denied)
 	}
 	if len(kept) == 0 {
 		return nil, nil

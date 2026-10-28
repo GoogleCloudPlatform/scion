@@ -34,10 +34,13 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -626,4 +629,41 @@ func TestStartDelivery_CrossUserReincarnation(t *testing.T) {
 		assert.Equal(t, sdDelivery{}, sdStartDelivery(t, r.disp, r.s, child.ID),
 			"start refuses the creator's shared secrets at both sites")
 	})
+}
+
+// TestStartDelivery_WithheldOwnerRowLoggedAtWarn: a shared owner row the
+// start-time check refuses (the terminal user's secret.use constraint, S4b) is
+// withheld from the launch selection and logged at Warn with its name, scope,
+// path and reason, never its value.
+func TestStartDelivery_WithheldOwnerRowLoggedAtWarn(t *testing.T) {
+	f := newSDFixture(t, "sd-warn")
+	direct, _ := f.direct(t, "warn-direct", true)
+	constrainAllBut(t, f.Store, "user", f.UserID, secretUsePermission)
+	var buf bytes.Buffer
+	f.disp.log = slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	agent, err := f.Store.GetAgent(context.Background(), direct)
+	require.NoError(t, err)
+	selected, err := f.disp.selectDeliverySecrets(context.Background(), newDeliverySelector(f.disp.authzService, agent, PurposeRestart), agent)
+	require.NoError(t, err)
+	for _, r := range selected {
+		assert.False(t, r.Name == sdAlwaysKey && r.Source == store.ScopeUser, "the refused owner row was delivered")
+	}
+
+	var found map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var rec map[string]any
+		if line == "" || json.Unmarshal([]byte(line), &rec) != nil {
+			continue
+		}
+		if rec["level"] == "WARN" && rec["msg"] == "start-time secret withheld: denied by authz" && rec["secret"] == sdAlwaysKey {
+			found = rec
+		}
+	}
+	require.NotNil(t, found, "no Warn record for the withheld owner row; log: %s", buf.String())
+	assert.Equal(t, "owner", found["path"])
+	assert.Equal(t, store.ScopeUser, found["scope"])
+	assert.Equal(t, direct, found["agent_id"])
+	assert.NotEmpty(t, found["reason"])
+	assert.NotContains(t, buf.String(), sdAlwaysValue, "a withheld secret value was logged")
 }

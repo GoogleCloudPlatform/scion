@@ -22,7 +22,9 @@ package hub
 // availability probe (material_delivery.go).
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -1732,4 +1734,67 @@ func TestDispatchDelivery_UndecryptableSecretFailsStart(t *testing.T) {
 			})
 		}
 	}
+}
+
+// warnRecords decodes a JSON slog buffer and returns the WARN records whose msg equals msg.
+func warnRecords(t *testing.T, raw []byte, msg string) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &rec), "log line %q", line)
+		if rec["level"] == "WARN" && rec["msg"] == msg {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// TestDispatchDelivery_WithheldItemsLoggedAtWarn: a restart of an agent the
+// delivery decision refuses (no delegation edge) withholds its project, hub and
+// broker items and says so at Warn: one record per item with the key, scope,
+// kind and deny cause, and one per-start summary with the count. No value is
+// logged.
+func TestDispatchDelivery_WithheldItemsLoggedAtWarn(t *testing.T) {
+	m := newLDFixture(t, "warn-withheld", ldOptions{noEdge: true})
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	m.authz.logger = logger
+	m.d.log = logger
+	var keys []string
+	for _, scope := range []string{store.ScopeProject, store.ScopeHub, store.ScopeRuntimeBroker} {
+		m.env(t, "MD_WARN_ENV_"+strings.ToUpper(scope), "warn-env-value-"+scope, scope, m.scopeID(scope), false)
+		m.secret(t, "MD_WARN_SECRET_"+strings.ToUpper(scope), "warn-secret-value-"+scope, store.SecretTypeEnvironment, scope, m.scopeID(scope))
+		keys = append(keys, "MD_WARN_ENV_"+strings.ToUpper(scope), "MD_WARN_SECRET_"+strings.ToUpper(scope))
+	}
+
+	require.NoError(t, m.d.DispatchAgentRestart(context.Background(), m.agent))
+	env := m.client.lastRestartResolvedEnv
+	for _, k := range keys {
+		assert.NotContains(t, env, k, "withheld item %s was delivered", k)
+	}
+
+	items := warnRecords(t, buf.Bytes(), "launch material withheld: not authorized for delivery")
+	seen := map[string]map[string]any{}
+	for _, r := range items {
+		k, _ := r["key"].(string)
+		seen[k] = r
+	}
+	for _, k := range keys {
+		r, ok := seen[k]
+		require.True(t, ok, "no Warn record for withheld item %s; records: %v", k, items)
+		assert.Equal(t, m.agent.ID, r["agent_id"])
+		assert.Equal(t, string(PurposeRestart), r["purpose"])
+		assert.NotEmpty(t, r["scope"])
+		assert.NotEmpty(t, r["kind"])
+		assert.NotEmpty(t, r["deny_cause"], "item %s: the deny cause is logged", k)
+	}
+	summary := warnRecords(t, buf.Bytes(), "launch material withheld: items not authorized for delivery")
+	require.Len(t, summary, 1)
+	assert.EqualValues(t, len(keys), summary[0]["count"])
+	assert.NotContains(t, buf.String(), "warn-env-value-", "a withheld env value was logged")
+	assert.NotContains(t, buf.String(), "warn-secret-value-", "a withheld secret value was logged")
 }
