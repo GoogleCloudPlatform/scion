@@ -580,6 +580,9 @@ func TestKeysNeverFormatMaterial(t *testing.T) {
 	if !strings.Contains(StartupNotice(k), "those capabilities, admission tokens and relay-peer signatures only") {
 		t.Fatal("ring notice must state the pilot limitation")
 	}
+	if !strings.Contains(StartupNotice(k), "conduit admission tokens and relay-peer signatures (shared-secret fallback) use signing generations") {
+		t.Fatal("ring notice must state the pilot limitation")
+	}
 	// The identification is still there.
 	if !strings.Contains(fmt.Sprint(k.Signing()), "gen1") || !strings.Contains(fmt.Sprint(*k), "rev-2026-10-21.1") {
 		t.Fatalf("identification missing: %v / %v", k.Signing(), *k)

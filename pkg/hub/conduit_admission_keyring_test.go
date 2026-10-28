@@ -172,19 +172,36 @@ func newAdmPair(t *testing.T, ka, kb *keyring.Keyring) *admPair {
 
 func (p *admPair) at(d time.Duration) { *p.clock = admT0.Add(d) }
 
-// agentHeader is an agent credential of the fixture's agent (agent JWTs
-// still use the legacy entry on both replicas in this release).
-func (p *admPair) agentHeader(t *testing.T) http.Header {
+// agentToken is an agent credential of the fixture's agent, minted on
+// replica A at the current test clock. Agent JWTs are signed by the
+// signing ring since Phase 3 of ptone/scion#1530, so A signs with its
+// active generation, and minting fails once that generation reaches its
+// sign_until. B verifies the JWT while the signing generation verifies
+// there: an ID-less JWT (emit legacy) through B's legacy readers, a
+// versioned one through its key ID, each before that generation's
+// verify_until on B.
+func (p *admPair) agentToken(t *testing.T) string {
 	t.Helper()
 	tok, err := p.cf.srv.GenerateAgentToken(p.cf.agent.ID, p.cf.agent.ProjectID, nil, AgentRoleFull, nil)
 	require.NoError(t, err)
-	return http.Header{"X-Scion-Agent-Token": {tok}}
+	return tok
 }
 
+// agentHeader carries agentToken as the agent credential header.
+func (p *admPair) agentHeader(t *testing.T) http.Header {
+	t.Helper()
+	return http.Header{"X-Scion-Agent-Token": {p.agentToken(t)}}
+}
+
+// refresh refreshes the session on f with a credential minted now.
 func (p *admPair) refresh(t *testing.T, f *relayOpsFixture, sessionID, token string) (string, error) {
 	t.Helper()
-	cred, err := p.cf.srv.GenerateAgentToken(p.cf.agent.ID, p.cf.agent.ProjectID, nil, AgentRoleFull, nil)
-	require.NoError(t, err)
+	return p.refreshWith(t, f, sessionID, token, p.agentToken(t))
+}
+
+// refreshWith refreshes the session on f with the credential cred.
+func (p *admPair) refreshWith(t *testing.T, f *relayOpsFixture, sessionID, token, cred string) (string, error) {
+	t.Helper()
 	var out relay.HubRefreshResponse
 	err = f.hub.Call(context.Background(), relay.HubSessionPath(sessionID, "refresh"),
 		relay.HubRefreshRequest{AdmissionToken: token, Credential: []byte(cred)}, &out)
@@ -307,6 +324,10 @@ func TestAdmissionKeyring_RetiredGenerationAndExpiry(t *testing.T) {
 
 		healthy := p.a.mustAdmit(t, bearer(testDevToken), "s1")
 		agentAdm := p.a.mustAdmit(t, p.agentHeader(t), "s-agent")
+		// Minted now: A's agent JWTs come from the same closing generation,
+		// so none can be minted at sign_until (the credential stays valid:
+		// gen1 verifies until admVerifyUntil, the JWT lasts 10h).
+		cred := p.agentToken(t)
 
 		for _, at := range []time.Time{admSignUntil, admSignUntil.Add(time.Second)} {
 			*p.clock = at
@@ -315,8 +336,12 @@ func TestAdmissionKeyring_RetiredGenerationAndExpiry(t *testing.T) {
 			res := sessionRecheck(t, p.a.hub, relay.HubSessionRecheckItem{SessionID: "s1", AdmissionToken: healthy.AdmissionToken})
 			assert.True(t, res[0].OK, "a healthy session stays open")
 			assert.Empty(t, res[0].AdmissionToken, "but nothing is re-issued under a closed key")
-			_, err = p.refresh(t, p.a, "s-agent", agentAdm.AdmissionToken)
-			assert.Error(t, err, "no refresh under a closed key")
+			// The credential and the agent pass; only re-issuing the
+			// admission token fails (hubRelayRefresh: 500 "refresh failed",
+			// which the hub client reports as unavailable).
+			_, err = p.refreshWith(t, p.a, "s-agent", agentAdm.AdmissionToken, cred)
+			require.ErrorIs(t, err, relay.ErrHubUnavailable, "no refresh under a closed key")
+			assert.ErrorContains(t, err, "HTTP 500", "the re-issue under the closed key fails")
 		}
 		assertNoAdmissionSecret(t, logs.String())
 	})
