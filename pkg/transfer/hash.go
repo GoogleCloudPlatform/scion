@@ -21,16 +21,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"regexp"
 	"sort"
+	"strings"
 )
 
 // HashPrefix is the prefix for SHA-256 hashes.
 const HashPrefix = "sha256:"
-
-// contentHashPattern matches a content hash produced by this package:
-// HashPrefix followed by 64 lowercase hex characters.
-var contentHashPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 // IsContentHash reports whether s is a content hash in the "sha256:<hex64>"
 // form produced by HashBytes, ComputeContentHashV1 and ComputeContentHashV2.
@@ -38,11 +34,17 @@ var contentHashPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 // directory name, so callers use it to tell such a directory name apart from
 // a human-chosen name.
 func IsContentHash(s string) bool {
-	return contentHashPattern.MatchString(s)
+	if len(s) != len(HashPrefix)+64 || !strings.HasPrefix(s, HashPrefix) {
+		return false
+	}
+	for i := len(HashPrefix); i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
-
-// gitBlobHashPattern matches a bare git object ID: 40 lowercase hex characters.
-var gitBlobHashPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
 // IsGitBlobHash reports whether s is formatted as a git blob object ID
 // (40 lowercase hex characters, no algorithm prefix).
@@ -51,7 +53,16 @@ var gitBlobHashPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 // resolution: "sha256:<hex64>" digests produced by this package, and bare git
 // blob object IDs supplied verbatim by GitHub's git trees API.
 func IsGitBlobHash(s string) bool {
-	return gitBlobHashPattern.MatchString(s)
+	if len(s) != 40 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 // GitBlobHashBytes computes the git blob object ID of data, i.e.
@@ -111,15 +122,28 @@ func HashFile(path string) (string, error) {
 		return "", err
 	}
 
-	return HashPrefix + hex.EncodeToString(hasher.Sum(nil)), nil
+	var digest [sha256.Size]byte
+	hasher.Sum(digest[:0])
+	return formatDigest(digest[:]), nil
 }
+
+func formatDigest(digest []byte) string {
+	var buf [len(HashPrefix) + 64]byte
+	copy(buf[:], HashPrefix)
+	hex.Encode(buf[len(HashPrefix):], digest)
+	return string(buf[:])
+}
+
+var (
+	nulByte = []byte{0}
+	nlByte  = []byte{'\n'}
+)
 
 // HashBytes computes the SHA-256 hash of a byte slice.
 // Returns the hash in format "sha256:<hex>".
 func HashBytes(data []byte) string {
-	hasher := sha256.New()
-	hasher.Write(data)
-	return HashPrefix + hex.EncodeToString(hasher.Sum(nil))
+	sum := sha256.Sum256(data)
+	return formatDigest(sum[:])
 }
 
 // ComputeContentHashV1 is the original aggregate content hash: SHA-256 over
@@ -152,10 +176,12 @@ func ComputeContentHashV1(files []FileInfo) string {
 	sorted := sortedByPath(files)
 	hasher := sha256.New()
 	for _, file := range sorted {
-		hasher.Write([]byte(file.Hash))
+		_, _ = io.WriteString(hasher, file.Hash)
 	}
 
-	return HashPrefix + hex.EncodeToString(hasher.Sum(nil))
+	var digest [sha256.Size]byte
+	hasher.Sum(digest[:0])
+	return formatDigest(digest[:])
 }
 
 // ComputeContentHashV2 is the content hash of templates and harness-configs
@@ -176,15 +202,17 @@ func ComputeContentHashV2(files []FileInfo) string {
 	sorted := sortedByPath(files)
 	hasher := sha256.New()
 	for _, file := range sorted {
-		hasher.Write([]byte(file.Path))
-		hasher.Write([]byte{0})
-		hasher.Write([]byte(NormalizedModeString(file.Mode)))
-		hasher.Write([]byte{0})
-		hasher.Write([]byte(file.Hash))
-		hasher.Write([]byte{'\n'})
+		_, _ = io.WriteString(hasher, file.Path)
+		_, _ = hasher.Write(nulByte)
+		_, _ = io.WriteString(hasher, NormalizedModeString(file.Mode))
+		_, _ = hasher.Write(nulByte)
+		_, _ = io.WriteString(hasher, file.Hash)
+		_, _ = hasher.Write(nlByte)
 	}
 
-	return HashPrefix + hex.EncodeToString(hasher.Sum(nil))
+	var digest [sha256.Size]byte
+	hasher.Sum(digest[:0])
+	return formatDigest(digest[:])
 }
 
 // sortedByPath returns a copy of files sorted by path.
