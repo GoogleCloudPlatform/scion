@@ -89,6 +89,9 @@ func TestChatStarredHistory_GateAndValidation(t *testing.T) {
 		starredHistoryPath(f.topicA),
 		chatConversationPath(f.topicA, "messages") + "?starred=false",
 		chatConversationPath(f.topicA, "messages") + "?starred=",
+		// The semicolon-separated form is the starred variant too.
+		chatConversationPath(f.topicA, "messages") + "?x=1;starred=true",
+		chatConversationPath(f.topicA, "messages") + "?starred=true;x=1",
 	} {
 		rec := f.session(t, f.admin, http.MethodGet, p, nil)
 		assert.Equal(t, http.StatusNotFound, rec.Code, p)
