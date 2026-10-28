@@ -4853,6 +4853,15 @@ func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent 
 				"reason", reason, "scopes", len(scopes))
 		}
 	}
+	// withheld logs, at Warn, a user-scope row of the owner that the user
+	// secret parent ceiling keeps from the agent. The start goes ahead
+	// without it, so without this line a missing harness credential has no
+	// hub-side trace. It names the secret and the cause, never the value.
+	withheld := func(path string, s secret.SecretMeta, dec Decision) {
+		d.log.WarnContext(ctx, "start-time user secret withheld by the user secret parent ceiling; the agent starts without it",
+			"path", path, "agent_id", agentID, "secret", s.Name, "secret_id", s.ID,
+			"user_id", s.ScopeID, "deny_cause", string(dec.DenyCause), "reason", dec.Reason)
+	}
 
 	opts := &secret.ResolveOpts{}
 	if len(ancestry) > 1 {
@@ -4877,6 +4886,9 @@ func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent 
 			})
 			if decision.Allowed && s.Scope == store.ScopeUser {
 				decision = secretUse(ident, s)
+				if !decision.Allowed {
+					withheld("progeny", s, decision)
+				}
 			}
 			if !decision.Allowed {
 				deny("progeny", s, decision.Reason)
@@ -4905,14 +4917,14 @@ func (d *HTTPAgentDispatcher) startSecretResolveOpts(ctx context.Context, agent 
 			}
 			switch {
 			case chainErr:
-				deny("owner", s, "delegation chain could not be evaluated")
+				withheld("owner", s, Decision{DenyCause: DenyCauseCeilingError, Reason: "delegation chain could not be evaluated"})
 				return false
 			case chainUnrecorded:
 				return true
 			}
 			ceiling := d.authzService.EvaluateUserSecretParentCeiling(ctx, ident, userSecretResource(s.ID, s.ScopeID))
 			if !ceiling.Allowed {
-				deny("owner", s, ceiling.Reason)
+				withheld("owner", s, Decision{DenyCause: ceiling.DenyCause, Reason: ceiling.Reason})
 			}
 			return ceiling.Allowed
 		}

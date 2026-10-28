@@ -20,6 +20,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
@@ -335,6 +336,12 @@ func (s *Server) authorizeRuntimeUserItem(ctx context.Context, ident AgentIdenti
 			Permission: secretUsePermission,
 		})
 		if !decision.Allowed {
+			// The read is refused and the agent sees denied_by_policy or
+			// unavailable; name the secret and the cause at Warn so a
+			// missing credential can be traced on the hub. Never the value.
+			slog.WarnContext(ctx, "runtime user secret read withheld by the user secret parent ceiling",
+				"agent_id", ident.ID(), "secret", key, "secret_id", meta.ID,
+				"user_id", meta.ScopeID, "deny_cause", string(decision.DenyCause), "reason", decision.Reason)
 			switch decision.DenyCause {
 			case DenyCauseCeilingError, DenyCauseResolutionError:
 				return ItemResult{Candidate: cand, Reason: ReasonBackendError}
