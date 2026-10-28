@@ -121,7 +121,7 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 		// Every start on a flat instance, including an existing agent's
 		// start or restart on the runtime its container was found on,
 		// takes the instance's own placement.
-		return s.resolveFlatPlacement(res.Agent)
+		return s.resolveFlatPlacement(res.Runtime, res.Agent)
 	}
 	if res.Runtime == nil || res.Runtime.Name() != "kubernetes" {
 		s.warnPlacementOffKubernetes(ctx, res)
@@ -317,6 +317,7 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 const (
 	placementFlatUnresolvedCause = "runtime placement is unresolved; reload the broker configuration"
 	placementFlatInvalidCause    = "the instance's runtime_target placement is not valid; fix it in the instance's settings and restart the agent runtime"
+	placementFlatRuntimeCause    = "the agent's runtime is not this instance's runtime target; restart the agent runtime, or re-create the agent on this instance"
 )
 
 // resolveFlatPlacement resolves the placement of a start on this flat
@@ -326,9 +327,12 @@ const (
 // operator-owned (api.ResolvedPlacement.OperatorOwned), even when the
 // target sets none of the fields, so the agent's own fields are always
 // checked against it. Nil for a target other than Kubernetes, which cannot
-// set placement. The target is validated again here; an invalid one
-// refuses the start.
-func (s *Server) resolveFlatPlacement(agentName string) (*api.ResolvedPlacement, error) {
+// set placement. rt is the runtime the start resolved (nil before one is
+// resolved, as for a create's early check); for a Kubernetes target, a
+// runtime other than the instance's own refuses the start rather than
+// placing the pod by this target or starting it without placement. The target is validated again here; an invalid one refuses the
+// start.
+func (s *Server) resolveFlatPlacement(rt scionrt.Runtime, agentName string) (*api.ResolvedPlacement, error) {
 	p := s.flatInstancePolicy()
 	if p == nil {
 		s.agentLifecycleLog.Warn("Kubernetes placement: the flat instance has no activated policy", "agent", agentName)
@@ -337,6 +341,12 @@ func (s *Server) resolveFlatPlacement(agentName string) (*api.ResolvedPlacement,
 	t := p.Target
 	if t.Type != config.RuntimeTargetTypeKubernetes {
 		return nil, nil
+	}
+	if rt != nil {
+		if _, own, _ := s.defaultPair(); rt != own {
+			s.agentLifecycleLog.Warn("Kubernetes placement: the start resolved a runtime other than the instance's own", "agent", agentName, "runtime", rt.Name())
+			return nil, placementRefusal(placementFlatRuntimeCause)
+		}
 	}
 	source := "server.broker.instances[" + p.InstanceKey + "].runtime_target"
 	if errs := config.ValidatePlacementFields(source, t.NodeSelector, t.Tolerations, t.RuntimeClassName); len(errs) > 0 {
@@ -380,7 +390,7 @@ func (s *Server) checkFlatCreatePlacement(req CreateAgentRequest) error {
 	if !s.isFlat() {
 		return nil
 	}
-	rp, err := s.resolveFlatPlacement(req.Name)
+	rp, err := s.resolveFlatPlacement(nil, req.Name)
 	if err != nil || rp == nil {
 		return err
 	}

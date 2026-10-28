@@ -456,11 +456,95 @@ func TestPlacementPresentationDoesNotDriveDispatch(t *testing.T) {
 	report.Target.RuntimeClassName = "from-report"
 	f.srv.config.FlatInstance.Instance.RuntimeTarget.NodeSelector[config.PoolNodeSelectorKey] = "edited-after-activation"
 
-	rp, err := f.srv.resolveFlatPlacement("a1")
+	rp, err := f.srv.resolveFlatPlacement(nil, "a1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if rp.NodeSelector[config.PoolNodeSelectorKey] != "agents" || rp.RuntimeClassName != "gvisor" {
 		t.Fatalf("dispatch used the report or an unactivated edit: %+v", rp)
+	}
+}
+
+// On a flat instance, a start or restart whose resolved runtime is not the
+// instance's own runtime (another runtime object, of the same or another
+// type, as a pin from before the instance went flat would be) fails closed
+// with a validation error: the pod is neither placed by this target nor
+// started without placement.
+func TestFlatPlacementRuntimeMismatchFailsClosed(t *testing.T) {
+	f := newFlatPodFixture(t, "agents", flatPlacementTarget())
+	for name, rt := range map[string]scionrt.Runtime{
+		"another kubernetes runtime": &scionrt.MockRuntime{NameFunc: func() string { return "kubernetes" }},
+		"a docker runtime":           &scionrt.MockRuntime{NameFunc: func() string { return "docker" }},
+	} {
+		for _, how := range []resolutionKind{resolutionUnrecorded, resolutionFlat} {
+			res := runtimeResolution{Runtime: rt, RuntimeType: rt.Name(), How: how, Agent: "a1"}
+			rp, err := f.srv.resolvePlacement(context.Background(), res, nil)
+			var sce *startContextError
+			if rp != nil || !errors.As(err, &sce) || sce.Status != http.StatusBadRequest || sce.Message != placementFlatRuntimeCause {
+				t.Errorf("%s / %v: got %+v, %v", name, how, rp, err)
+			}
+		}
+	}
+	// The instance's own runtime, pinned (unrecorded) or flat, is placed.
+	for _, how := range []resolutionKind{resolutionUnrecorded, resolutionFlat} {
+		res := f.flatRes("a1")
+		res.How = how
+		if rp, err := f.srv.resolvePlacement(context.Background(), res, nil); err != nil || !rp.OperatorOwned || rp.RuntimeClassName != "gvisor" {
+			t.Errorf("own runtime / %v: got %+v, %v", how, rp, err)
+		}
+	}
+}
+
+// A flat restart of an existing agent with no recorded profile, whose
+// container was found on the instance's runtime (a pinned, unrecorded
+// resolution), hands the instance's operator-owned placement to the start
+// (TestDefaultTemplateReceivesFlatPlacement shows such a placement in the
+// pod spec).
+func TestFlatRestartUnrecordedGetsPlacement(t *testing.T) {
+	f := newFlatPlacementInstanceServer(t, flatPlacementTarget())
+	f.seedOwnedAgent(t)
+	writeStoredAgentConfig(t, f, `{"kubernetes": {"nodeSelector": {"disk": "ssd"}}}`)
+	w := serveFlat(f.srv, http.MethodPost, "/api/v1/agents/test-agent-1/restart"+flatStartQuery, flatRestartBody(f))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202: %s", w.Code, w.Body.String())
+	}
+	f.mgr.mu.Lock()
+	defer f.mgr.mu.Unlock()
+	opts := f.mgr.lastStartOpts
+	rp := opts.ResolvedPlacement
+	if !opts.PlacementResolved || rp == nil || !rp.OperatorOwned || rp.RuntimeClassName != "gvisor" ||
+		!reflect.DeepEqual(rp.NodeSelector, map[string]string{config.PoolNodeSelectorKey: "agents"}) ||
+		!reflect.DeepEqual(rp.Tolerations, []api.K8sToleration{flatPoolToleration()}) {
+		t.Fatalf("restart placement = %+v (resolved %v)", rp, opts.PlacementResolved)
+	}
+}
+
+// Each flat instance resolves only its own runtime target's placement: two
+// sibling instances on one host with different pools never see each
+// other's.
+func TestFlatPlacementSiblingInstancesUseOwnTarget(t *testing.T) {
+	other := flatPlacementTarget()
+	other.NodeSelector = map[string]string{config.PoolNodeSelectorKey: "batch"}
+	other.Tolerations = []api.K8sToleration{{Key: config.PoolNodeSelectorKey, Operator: "Equal", Value: "batch", Effect: "NoSchedule"}}
+	other.RuntimeClassName = ""
+	a := newFlatPodFixture(t, "agents", flatPlacementTarget())
+	b := newFlatPodFixture(t, "batch", other)
+	rpA, errA := a.srv.resolvePlacement(context.Background(), a.flatRes("a1"), nil)
+	rpB, errB := b.srv.resolvePlacement(context.Background(), b.flatRes("b1"), nil)
+	if errA != nil || errB != nil {
+		t.Fatalf("errors: %v, %v", errA, errB)
+	}
+	if rpA.NodeSelector[config.PoolNodeSelectorKey] != "agents" || rpA.RuntimeClassName != "gvisor" {
+		t.Errorf("instance agents resolved %+v", rpA)
+	}
+	if rpB.NodeSelector[config.PoolNodeSelectorKey] != "batch" || rpB.RuntimeClassName != "" || rpB.Tolerations[0].Value != "batch" {
+		t.Errorf("instance batch resolved %+v", rpB)
+	}
+	if got := rpB.Sources["node_selector"]; !reflect.DeepEqual(got, []string{"server.broker.instances[batch].runtime_target"}) {
+		t.Errorf("instance batch sources = %v", rpB.Sources)
+	}
+	// Each instance's runtime is foreign to the other.
+	if _, err := a.srv.resolvePlacement(context.Background(), b.flatRes("x"), nil); err == nil {
+		t.Error("instance agents placed a start on instance batch's runtime")
 	}
 }

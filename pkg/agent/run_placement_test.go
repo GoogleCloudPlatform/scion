@@ -180,17 +180,18 @@ func TestApplyStartPlacement_Resolved(t *testing.T) {
 	assert.Equal(t, agentBlock, out)
 }
 
-// A flat instance start whose placement the agent runtime server did not
-// resolve fails when the instance's runtime target sets any placement
-// field, even with no placement anywhere in the global settings; a target
-// without placement proceeds. A resolved operator-owned placement is
-// applied with the operator rules.
+// A Kubernetes start of a flat instance with a Kubernetes runtime target
+// whose placement the agent runtime server did not resolve fails, whether
+// or not the target sets placement fields, even with no placement anywhere
+// in the global settings. A resolved operator-owned placement is applied
+// with the operator rules.
 func TestFlatPlacementRequiresResolution(t *testing.T) {
 	placementGlobalHome(t, "schema_version: \"1\"\n")
 	for name, target := range map[string]config.V1RuntimeTargetConfig{
-		"node selector": {Type: "kubernetes", NodeSelector: map[string]string{"scion.dev/pool": "agents"}},
-		"toleration":    {Type: "kubernetes", Tolerations: []api.K8sToleration{{Key: "scion.dev/pool", Operator: "Exists"}}},
-		"runtime class": {Type: "kubernetes", RuntimeClassName: "gvisor"},
+		"node selector":    {Type: "kubernetes", NodeSelector: map[string]string{"scion.dev/pool": "agents"}},
+		"toleration":       {Type: "kubernetes", Tolerations: []api.K8sToleration{{Key: "scion.dev/pool", Operator: "Exists"}}},
+		"runtime class":    {Type: "kubernetes", RuntimeClassName: "gvisor"},
+		"no placement set": {Type: "kubernetes"},
 	} {
 		ctx := config.WithFlatInstancePolicy(context.Background(), &config.FlatInstancePolicy{InstanceKey: "agents", Target: target})
 		_, _, err := managerOn("kubernetes").applyStartPlacement(ctx, api.StartOptions{Name: "a"}, nil)
@@ -199,8 +200,6 @@ func TestFlatPlacementRequiresResolution(t *testing.T) {
 	}
 	bare := config.WithFlatInstancePolicy(context.Background(), &config.FlatInstancePolicy{InstanceKey: "agents",
 		Target: config.V1RuntimeTargetConfig{Type: "kubernetes"}})
-	_, _, err := managerOn("kubernetes").applyStartPlacement(bare, api.StartOptions{Name: "a"}, nil)
-	assert.NoError(t, err)
 
 	resolved := &api.ResolvedPlacement{NodeSelector: map[string]string{"scion.dev/pool": "agents"}, RuntimeClassName: "gvisor", OperatorOwned: true}
 	out, _, err := managerOn("kubernetes").applyStartPlacement(bare,
