@@ -129,7 +129,8 @@ func (s *Server) forceDeleteUser(w http.ResponseWriter, r *http.Request, actor U
 	// A deletion in progress: join it.
 	if d, err := s.store.GetUserDeletionByUser(ctx, user.ID); err == nil {
 		if d.State == store.UserDeletionStateStopping {
-			s.kickUserDeletion(d.ID)
+			// Joining asks for a retry of failed agents at once.
+			s.kickUserDeletion(d.ID, true)
 			s.writeUserDeletion(w, ctx, http.StatusAccepted, d)
 			return true
 		}
@@ -219,7 +220,7 @@ func (s *Server) forceDeleteUser(w http.ResponseWriter, r *http.Request, actor U
 		// re-check it.
 		s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID})
 	}
-	s.kickUserDeletion(d.ID)
+	s.kickUserDeletion(d.ID, joined)
 	s.writeUserDeletion(w, ctx, http.StatusAccepted, d)
 	return true
 }

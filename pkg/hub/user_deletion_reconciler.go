@@ -82,12 +82,13 @@ func (s *Server) userDeletionLock(id string) *sync.Mutex {
 }
 
 // kickUserDeletion reconciles deletion id in the background, on a context
-// detached from any request.
-func (s *Server) kickUserDeletion(id string) {
+// detached from any request. retryNow claims failed agents again without
+// waiting out their backoff (a repeated force request asks for that).
+func (s *Server) kickUserDeletion(id string, retryNow bool) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), userDeletionReconcileTimeout)
 		defer cancel()
-		s.reconcileUserDeletion(ctx, id)
+		s.reconcileUserDeletion(ctx, id, retryNow)
 	}()
 }
 
@@ -115,7 +116,7 @@ func (s *Server) reconcileUserDeletions(ctx context.Context) {
 			return
 		}
 		rctx, cancel := context.WithTimeout(ctx, userDeletionReconcileTimeout)
-		s.reconcileUserDeletion(rctx, ds[i].ID)
+		s.reconcileUserDeletion(rctx, ds[i].ID, false)
 		cancel()
 	}
 }
@@ -137,8 +138,9 @@ func userDeletionRetryDue(rec *store.UserDeletionAgent, ts time.Time) bool {
 }
 
 // reconcileUserDeletion brings deletion id forward (see the file comment).
-// Errors are recorded on the deletion (last_error) and logged.
-func (s *Server) reconcileUserDeletion(ctx context.Context, id string) {
+// retryNow claims pending and failed agents whatever their backoff. Errors
+// are recorded on the deletion (last_error) and logged.
+func (s *Server) reconcileUserDeletion(ctx context.Context, id string, retryNow bool) {
 	mu := s.userDeletionLock(id)
 	mu.Lock()
 	defer mu.Unlock()
@@ -181,7 +183,7 @@ func (s *Server) reconcileUserDeletion(ctx context.Context, id string) {
 		// claimed again, as an abandoned delete is.
 		abandoned := rec.Outcome == store.UserDeletionOutcomeStopping &&
 			a.DeletionLeaseAt != nil && a.DeletionLeaseAt.Before(ts)
-		if (retryable && userDeletionRetryDue(rec, ts)) || abandoned {
+		if (retryable && (retryNow || userDeletionRetryDue(rec, ts))) || abandoned {
 			claims = append(claims, candidate{rec: rec, agent: a})
 		}
 	}
@@ -380,7 +382,7 @@ func (s *Server) noteUserDeletionAgentFinished(plan *agentDeletionPlan, out dele
 					}
 				}()
 			}
-			s.reconcileUserDeletion(ctx, rec.DeletionID)
+			s.reconcileUserDeletion(ctx, rec.DeletionID, false)
 		}
 	}()
 }

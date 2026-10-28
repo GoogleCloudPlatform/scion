@@ -539,7 +539,7 @@ func TestForceDeleteUser_FailedAgentUntilOperatorRemoves(t *testing.T) {
 		}
 	}
 	// Reconciling again does not complete it.
-	f.srv.reconcileUserDeletion(context.Background(), v.DeletionID)
+	f.srv.reconcileUserDeletion(context.Background(), v.DeletionID, false)
 	assert.Equal(t, store.UserDeletionStateStopping, f.getDeletion(t).State)
 
 	// The operator removes the stuck agent with force.
