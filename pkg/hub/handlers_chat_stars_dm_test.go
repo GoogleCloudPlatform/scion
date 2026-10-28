@@ -572,3 +572,64 @@ func TestChatStars_MessageEditNonCanonicalID(t *testing.T) {
 	require.NoError(t, json.Unmarshal(got[0].Data, &evt))
 	assert.Equal(t, msg, evt["messageId"], "the edited event names the canonical message ID")
 }
+
+// TestChatStars_DMKeyMustBeCanonical pins that the star routes accept a DM
+// only under its canonical key (messages.DMConversationKey: sorted slots,
+// canonical IDs), so a stored DM key is always the external ref of the DM's
+// native conversation (the form the read switch and the Starred rail look
+// up). Under the swapped-slot key, PUT, the star list and the starred-only
+// history each answer 400 and nothing is stored; under the canonical key,
+// PUT, the list, the state route and DELETE work. The state route's
+// handling of a non-canonical key already in storage is
+// TestChatStars_StateLeavesOutNonCanonicalStoredDMKey's.
+func TestChatStars_DMKeyMustBeCanonical(t *testing.T) {
+	f := newStarFixture(t, true)
+	d := f.memberDMs(t)
+	msg := f.dmMsg(t, d.humanKey, d.humanConv, uuid.Nil.String(), "user:"+f.member, f.member, "h", "web", time.Now())
+	parts := strings.Split(d.humanKey, ":")
+	require.Len(t, parts, 5)
+	swapped := strings.Join([]string{"dm", parts[3], parts[4], parts[1], parts[2]}, ":")
+	require.NotEqual(t, d.humanKey, swapped)
+	require.True(t, validDMKey(swapped), "the swapped key is well formed, only not canonical")
+
+	assert.Equal(t, http.StatusBadRequest, f.put(t, f.member, msg, swapped).Code, "PUT under the swapped key")
+	assert.Equal(t, http.StatusBadRequest, f.session(t, f.member, http.MethodGet, starListPath(swapped), nil).Code, "list")
+	assert.Equal(t, http.StatusBadRequest,
+		f.session(t, f.member, http.MethodGet, chatConversationPath(swapped, "messages")+"?starred=true", nil).Code, "starred-only history")
+	got, err := f.stars.GetMessageStar(context.Background(), f.member, msg)
+	require.NoError(t, err)
+	assert.Nil(t, got, "nothing stored under the swapped key")
+
+	// The canonical key works.
+	decodeStarPut(t, f.put(t, f.member, msg, d.humanKey))
+	assert.Len(t, decodeStarPage(t, f.session(t, f.member, http.MethodGet, starListPath(d.humanKey), nil)).Items, 1)
+	assert.Equal(t, []string{msg}, decodeStarState(t, f.session(t, f.member, http.MethodGet, starStatePath(msg), nil)))
+	assert.Equal(t, http.StatusNoContent, f.session(t, f.member, http.MethodDelete, starPath(msg), nil).Code)
+}
+
+// TestChatStars_StateLeavesOutNonCanonicalStoredDMKey pins that a legacy
+// star stored under a DM key that is not canonical (the star routes refuse
+// such a key, so it is inserted directly) is left out of a state batch,
+// alone or mixed with another conversation, under both read-switch
+// settings, instead of failing the batch with 400.
+func TestChatStars_StateLeavesOutNonCanonicalStoredDMKey(t *testing.T) {
+	for _, readSwitch := range []bool{true, false} {
+		f := newStarFixture(t, readSwitch)
+		d := f.memberDMs(t)
+		parts := strings.Split(d.humanKey, ":")
+		require.Len(t, parts, 5)
+		swapped := strings.Join([]string{"dm", parts[3], parts[4], parts[1], parts[2]}, ":")
+		require.NotEqual(t, d.humanKey, swapped)
+		legacy := f.dmMsg(t, swapped, d.humanConv, uuid.Nil.String(), "user:"+f.member, f.member, "legacy", "web", time.Now())
+		_, _, err := f.stars.AddMessageStar(context.Background(), f.member, StarTarget{MessageID: legacy,
+			Selector: StarSelector{ConversationKey: swapped, Channel: "web", ThreadID: swapped}})
+		require.NoError(t, err)
+		thread := f.threadMsg(t, f.topicA, f.projA, "t", time.Now())
+		decodeStarPut(t, f.put(t, f.member, thread, f.topicA))
+
+		assert.Empty(t, decodeStarState(t, f.session(t, f.member, http.MethodGet, starStatePath(legacy), nil)),
+			"switch %t: a batch of only the legacy star answers, without it", readSwitch)
+		assert.Equal(t, []string{thread}, decodeStarState(t, f.session(t, f.member, http.MethodGet, starStatePath(legacy, thread), nil)),
+			"switch %t: a mixed batch keeps the other conversation's answer", readSwitch)
+	}
+}

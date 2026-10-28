@@ -29,6 +29,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -324,6 +325,13 @@ func (s *Server) resolveStarDM(r *http.Request, call starCall, permissionID, key
 		return starConversation{}, "", &chatReadError{kind: chatReadFailure, status: http.StatusBadRequest,
 			code: ErrCodeInvalidRequest, message: "invalid DM key format"}
 	}
+	// Only the canonical key (sorted slots, canonical IDs) is accepted, so a
+	// stored DM key is always the external ref of the DM's native
+	// conversation, the form the read switch and the Starred rail look up.
+	if canonical, err := canonicalStarDMKey(key); err != nil || canonical != key {
+		return starConversation{}, "", &chatReadError{kind: chatReadFailure, status: http.StatusBadRequest,
+			code: ErrCodeInvalidRequest, message: "DM key is not in canonical form"}
+	}
 	userID := call.user.ID()
 	if !isDMParticipant(key, userID) {
 		return starConversation{}, "caller is not a participant of this DM", nil
@@ -375,6 +383,15 @@ func (s *Server) resolveStarDM(r *http.Request, call starCall, permissionID, key
 		}
 	}
 	return sc, "", nil
+}
+
+// canonicalStarDMKey is messages.DMConversationKey of a DM key's slots.
+func canonicalStarDMKey(key string) (string, error) {
+	parts := strings.Split(key, ":")
+	if len(parts) != 5 {
+		return "", errors.New("chat stars: DM key must have five parts")
+	}
+	return messages.DMConversationKey(parts[1], parts[2], parts[3], parts[4])
 }
 
 // resolveStarConversation resolves a conversation for a star route or
@@ -706,8 +723,21 @@ type starStateDecision struct {
 //
 // A never-used DM (no conversation yet) has no starred messages. A real
 // lookup failure (a 500) fails the request either way.
+//
+// A stored DM key that is not canonical (a legacy star under swapped slots,
+// or one that does not canonicalise) is left out, logged, like a drifted
+// conversation: the star routes refuse such a key (400), but it comes from
+// storage here, not from the client, so it must not fail the batch.
 func (s *Server) decideStarState(r *http.Request, call starCall, key string, mixed bool) (starStateDecision, *chatReadError) {
 	type decision = starStateDecision
+	if validDMKey(key) {
+		if canonical, err := canonicalStarDMKey(key); err != nil || canonical != key {
+			// Debug, not Warn: a legacy star repeats this on every state
+			// request that touches it, and only pre-enforcement data has one.
+			slog.Debug("chat stars: state leaves out a stored DM key that is not canonical", "conversation_key", key)
+			return decision{}, nil
+		}
+	}
 	sc, refusal, rerr := s.resolveStarScope(r, call, permInboxRead, key)
 	switch {
 	case refusal != "":

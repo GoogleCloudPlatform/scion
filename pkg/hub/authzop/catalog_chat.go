@@ -949,6 +949,27 @@ var chatOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetConversationRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
+		ID:          "chat.star.conversations",
+		Domain:      "chat",
+		Description: "List the conversations in which the caller has at least one live star (the Starred rail): one row per conversation with its current name, activity and project, no excerpt or count, sorted by activity or name, with a sealed cursor. Each conversation is kept only while the caller can read it now (project:read for a thread; the caller in a user slot of a DM key); a token keeps only conversations it may read under inbox:read (a thread's or agent DM's project inside its boundary, agent:read on a DM's agent; a hub boundary for a DM between users). An optional projectId must be a project the caller can read. 404 while web.chat_starred_messages is off",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/starred-conversations", Method: "GET"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
+		ResourceResolver: "self-principal",
+		BasePermission:   "inbox.read",
+		Effects:          []SecurityEffect{EffectListScoped},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestChatStarredConversations_TokenSelectors"},
+			{Package: "pkg/hub", Function: "TestChatStarredConversations_GroupsAndPaginates"},
+		},
+		Bearer: AdmitOn(BearerTargetSelfRecord, BearerBoundaryProject, BearerBoundaryHub),
+	},
+	{
 		ID:          "chat.conversation.history.starred",
 		Domain:      "chat",
 		Description: "Read only the caller's starred messages of one conversation (?starred=true), in history order with a sealed cursor bound to the conversation, the caller and the filter. Needs the conversation's normal read access (project:read on a thread's project, participation in a DM) and inbox:read: a token needs inbox:read for the thread's or peer agent's project, or a hub boundary for a DM between users. An around target must itself be starred. 404 while web.chat_starred_messages is off, never unfiltered history",

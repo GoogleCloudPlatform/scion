@@ -335,3 +335,19 @@ describe('isFeatureEnabled: shadowed-override logging', () => {
     infoSpy.mockRestore();
   });
 });
+
+describe('feature-flags: change event', () => {
+  it('announces server flags and a set flag on the window', async () => {
+    const { FEATURE_FLAGS_CHANGED_EVENT } = await import('./feature-flags.js');
+    const seen = vi.fn();
+    window.addEventListener(FEATURE_FLAGS_CHANGED_EVENT, seen);
+    try {
+      setServerFlags({ 'test.flag': true });
+      setFeatureFlag('test.flag', false);
+      expect(seen).toHaveBeenCalledTimes(2);
+      expect(isFeatureEnabled('test.flag')).toBe(false);
+    } finally {
+      window.removeEventListener(FEATURE_FLAGS_CHANGED_EVENT, seen);
+    }
+  });
+});

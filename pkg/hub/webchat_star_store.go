@@ -199,6 +199,12 @@ type MessageStarStore interface {
 	// or oldest first when q.Ascending. Total counts every live starred
 	// message of the conversation, whatever the bounds.
 	ListStarredHistory(ctx context.Context, q StarHistoryQuery) (StarHistoryPage, error)
+	// ListStarredConversationCandidates returns one page of the distinct
+	// conversations in which the user has at least one live star (the
+	// Starred rail), grouped by the current conversation key before the
+	// page is cut, in f.Sort order. It applies no read access: the handler
+	// authorizes every candidate.
+	ListStarredConversationCandidates(ctx context.Context, f StarredConversationFilter) (StarredConversationPage, error)
 
 	// Lifecycle. These are not scoped to one owner: they remove or repair
 	// the associations of a message, conversation, user or project that
