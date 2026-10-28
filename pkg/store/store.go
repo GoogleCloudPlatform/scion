@@ -455,6 +455,9 @@ type Store interface {
 	// User Access Token operations
 	UserAccessTokenStore
 
+	// Forced user deletion tombstones (ptone/scion#2143)
+	UserDeletionStore
+
 	// Broker Secret operations (Runtime Broker authentication)
 	BrokerSecretStore
 
@@ -2166,7 +2169,10 @@ type UserStore interface {
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
 
 	// UpdateUser updates an existing user.
-	// Returns ErrNotFound if the user doesn't exist.
+	// Returns ErrNotFound if the user doesn't exist, and ErrUserDeleting if
+	// the user's status is UserStatusDeleting or the update would set it
+	// (only MarkUserDeleting writes that status, and only the deletion's
+	// completion ends it).
 	UpdateUser(ctx context.Context, user *User) error
 
 	// UpdateUserLastLogin sets only the last_login timestamp for a user.
@@ -2178,6 +2184,11 @@ type UserStore interface {
 	// DeleteUser removes a user by ID.
 	// Returns ErrNotFound if the user doesn't exist.
 	DeleteUser(ctx context.Context, id string) error
+
+	// MarkUserDeleting sets the status of user id to UserStatusDeleting
+	// (ptone/scion#2143). It is the only write of that status. Returns
+	// ErrNotFound if the user does not exist.
+	MarkUserDeleting(ctx context.Context, id string) error
 
 	// LockUserRow locks the user row until the surrounding transaction ends
 	// (ptone/scion#2769). On PostgreSQL exclusive=true runs
@@ -2761,6 +2772,10 @@ type UserAccessTokenStore interface {
 
 	// CountUserAccessTokens returns the number of active (non-revoked) tokens for a user.
 	CountUserAccessTokens(ctx context.Context, userID string) (int, error)
+
+	// RevokeUserAccessTokensForUser revokes every unrevoked token of userID
+	// and returns how many it revoked (ptone/scion#2143).
+	RevokeUserAccessTokensForUser(ctx context.Context, userID string) (int, error)
 
 	// DeleteUserAccessTokensByProject permanently removes all "project"-boundary
 	// tokens scoped to projectID. A hub-boundary token belonging to one of the

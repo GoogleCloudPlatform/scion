@@ -135,11 +135,17 @@ var SecurityMutationSymbols = map[string]string{
 	"CreateTestAdminUser": "grant-authority",
 	"UpdateUser":          "change-principal-status",
 	"DeleteUser":          "delete-resource",
+	// MarkUserDeleting is the only write of the deleting status, by a
+	// forced user delete (ptone/scion#2143).
+	"MarkUserDeleting": "change-principal-status",
 
 	// Credential/token mutations — user access tokens
 	"CreateUserAccessToken": "mint-credential",
 	"RevokeUserAccessToken": "revoke-authority",
 	"DeleteUserAccessToken": "revoke-authority",
+	// Every token of a user, revoked by a forced user delete
+	// (ptone/scion#2143).
+	"RevokeUserAccessTokensForUser": "revoke-authority",
 
 	// Credential mutations — agent credentials
 	"CreateAgentCredential":         "mint-credential",
@@ -854,6 +860,18 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/store/storetest/domains_user.go", Function: "UserDomain", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user domain update", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains_user.go", Function: "UserTerminalWorkspaceConformance", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: terminal-workspace conformance user setup", Scope: "pkg/store/storetest"}},
 	{File: "pkg/store/storetest/domains_user.go", Function: "UserTerminalWorkspaceConformance", Symbol: "DeleteUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: terminal-workspace conformance cascade-delete teardown", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_user_deletion.go", Function: "UserDeletionConformance", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user deletion conformance user setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_user_deletion.go", Function: "UserDeletionConformance", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user deletion conformance user setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_user_deletion.go", Function: "UserDeletionConformance", Symbol: "CreateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user deletion conformance user setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_user_deletion.go", Function: "UserDeletionConformance", Symbol: "DeleteUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user deletion conformance, the tombstone outlives the user row", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_user_deletion.go", Function: "UserDeletionConformance", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user deletion conformance, UpdateUser refusals for the deleting status", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_user_deletion.go", Function: "UserDeletionConformance", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user deletion conformance, UpdateUser refusals for the deleting status", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_user_deletion.go", Function: "UserDeletionConformance", Symbol: "UpdateUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user deletion conformance, UpdateUser refusals for the deleting status", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_user_deletion.go", Function: "UserDeletionConformance", Symbol: "CreateUserAccessToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user deletion conformance token setup", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_user_deletion.go", Function: "UserDeletionConformance", Symbol: "MarkUserDeleting", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user deletion conformance deleting status", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_user_deletion.go", Function: "UserDeletionConformance", Symbol: "MarkUserDeleting", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user deletion conformance deleting status", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_user_deletion.go", Function: "UserDeletionConformance", Symbol: "RevokeUserAccessTokensForUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user deletion conformance token revocation", Scope: "pkg/store/storetest"}},
+	{File: "pkg/store/storetest/domains_user_deletion.go", Function: "UserDeletionConformance", Symbol: "RevokeUserAccessTokensForUser", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Store test fixture: user deletion conformance token revocation", Scope: "pkg/store/storetest"}},
 }
 
 // concatOperations joins the per-area operation lists into one catalog.
