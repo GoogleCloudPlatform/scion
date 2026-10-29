@@ -1365,6 +1365,10 @@ export class ScionPageAdminMaintenance extends LitElement {
     }
     this.updateConfirmTarget = target;
     this.updateConfirmOptions = options;
+    // A new update starts at the Update Hub step, never at a confirmation
+    // left over from an earlier target.
+    this.downgradeConfirm = null;
+    this.downgradeTyped = '';
   }
 
   /** Closes the update dialogs (both steps); not while a request is in flight. */

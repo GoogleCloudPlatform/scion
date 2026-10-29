@@ -1971,6 +1971,34 @@ describe('Downgrade confirmation', () => {
     expect(confirmButton(el).hasAttribute('disabled')).toBe(true);
   });
 
+  it('a new update request drops a confirmation left open for an earlier target', async () => {
+    el = await pickDowngradeAndConfirm({
+      runs: [needsConfirmation('nightly-20261020'), STARTED],
+    });
+    expect(dialog(el)).not.toBeNull();
+    // Another update request arrives (for example from the card) while the
+    // confirmation is open.
+    root(el)
+      .querySelector('scion-admin-maintenance-update-card')!
+      .dispatchEvent(
+        new CustomEvent('update-request', {
+          detail: {
+            target: 'nightly-20261022',
+            channel: 'nightly',
+            pin: 'latest',
+            releaseClass: 'same',
+          },
+          bubbles: true,
+          composed: true,
+        })
+      );
+    await settle(el);
+    expect(dialog(el)).toBeNull();
+    expect(root(el).querySelector('sl-dialog[label="Update Hub"]')).not.toBeNull();
+    expect(el.updateConfirmTarget).toBe('nightly-20261022');
+    expect(runBodies).toHaveLength(1);
+  });
+
   it('confirms an older Latest with the tag the hub resolved, not latest:<channel>', async () => {
     el = await mount({
       releases: CATALOG,
