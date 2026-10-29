@@ -403,9 +403,9 @@ An agent that sets its own tolerations or runtime class while the instance's run
 2. Treat `incomplete` as unfinished: fix unreadable agent records or configurations, then run the check again.
 3. For agent tolerations, decide whether each belongs to the instance. If it does, add it to the runtime target's `tolerations`; otherwise remove it from the agent's configuration. Tolerations match by key, operator (empty counts as `Equal`), value and effect; a broad `Exists` toleration on the runtime target does not cover a different agent entry. A toleration added to the runtime target applies to every agent of the instance.
 4. For an agent runtime class, either set `runtime_class_name` on the runtime target or remove the agent's class. An agent cannot choose a class on its own; repeating the runtime target's class is accepted.
-5. Restart the Runtime Broker to activate runtime target changes, then run `scion doctor` again until both counts and `incomplete` are zero.
+5. Restart the Runtime Broker to activate runtime target changes, then run `scion doctor` again until every count and `incomplete` are zero.
 
-The check counts only these two cases, where the runtime target sets no tolerations or no runtime class at all. Once the runtime target sets some tolerations or a runtime class, the check no longer looks at the agents' own values, so an agent toleration that is not among the target's, or an agent class that differs from the target's, is not counted. Such remaining mismatches show up as refusals, naming the field, at the agent's next start or restart.
+The check always shows these two counts. It also counts agents the runtime target would refuse for another reason: a toleration that is not among the target's (`agent_toleration_not_in_policy`), a runtime class that differs from the target's (`agent_runtime_class_differs`), a node selector key the target sets to another value (`agent_pool_selector_conflict` for `scion.dev/pool`, `agent_selector_conflicts_operator` otherwise), a toleration that matches all taints (`agent_match_all_toleration`) and an invalid placement field (`agent_invalid_placement_field`). These appear only when counted.
 
 #### Flat instance agent defaults (`server.broker.instances[].agent_defaults`)
 
