@@ -41,6 +41,7 @@ import {
   LAST_UPDATE_LABELS,
   isOlderClass,
   renderInstallerUnsupported,
+  rollbackTarget,
 } from './admin-maintenance-update-card.js';
 import type {
   LastUpdate,
@@ -246,15 +247,13 @@ export function downgradeConfirmationFrom(
 
 /**
  * The toast for a recorded update result. A rollback names the release
- * the boot-failure guard restored (from) and the one that failed (to).
+ * the boot-failure guard restored (restored, else from) and the one that
+ * failed (to).
  */
 export function lastUpdateMessage(last: LastUpdate): string {
   if (last.status === 'verified') return `Hub updated to ${last.to} (verified).`;
   if (last.status === 'rolled_back') {
-    return (
-      `Update rolled back: ${last.to} failed to start, so the hub restored ` +
-      `${last.from || 'the previous release'}.`
-    );
+    return `Rolled back to ${rollbackTarget(last)} after ${last.to} failed to start.`;
   }
   return `Update to ${last.to} ${LAST_UPDATE_LABELS[last.status] ?? last.status}.`;
 }

@@ -41,6 +41,16 @@ export interface LastUpdate {
   to: string;
   status: 'verified' | 'failed' | 'rolled_back' | (string & {});
   at: string;
+  /**
+   * The release the boot-failure guard restored; only on rolled_back, and
+   * absent from hubs that do not report it (then from is shown).
+   */
+  restored?: string;
+}
+
+/** The release a rolled-back update returned to: restored, else from. */
+export function rollbackTarget(last: LastUpdate): string {
+  return last.restored || last.from || 'the previous release';
 }
 
 /** An update whose hub restart is pending, from system.pending_update. */
@@ -801,8 +811,7 @@ export class ScionAdminMaintenanceUpdateCard extends LitElement {
         <span>
           ${last.status === 'rolled_back'
             ? html`<span class="last-update-rollback"
-                >Rolled back to ${last.from || 'the previous release'} after ${last.to} failed to
-                start</span
+                >Rolled back to ${rollbackTarget(last)} after ${last.to} failed to start</span
               >`
             : html`${last.from ? html`${last.from} &rarr; ` : nothing}${last.to}`}
           <span class="status-badge ${badge}">${label}</span>

@@ -1268,7 +1268,7 @@ describe('Reconnect after an update restart', () => {
       expect(availableFetchCount()).toBe(2);
       expect(banner(el!)?.textContent).toContain('nightly-20261023');
       expect(showToast).toHaveBeenCalledWith(
-        'Update rolled back: nightly-20261023 failed to start, so the hub restored nightly-20261022.',
+        'Rolled back to nightly-20261022 after nightly-20261023 failed to start.',
         'warning'
       );
       expect(
@@ -1382,7 +1382,7 @@ describe('Reconnect after an update restart', () => {
             at: '2026-10-24T00:01:00Z',
           },
         },
-        'Update rolled back: nightly-20261023 failed to start, so the hub restored nightly-20261022.',
+        'Rolled back to nightly-20261022 after nightly-20261023 failed to start.',
       ],
     ] as Array<[string, Json, string]>)(
       'keeps the check result when the new binary answers but the run is %s',
@@ -2096,5 +2096,33 @@ describe('Downgrade confirmation', () => {
     expect(
       root(el).querySelector('sl-dialog[label="Update Hub"] .confirm-snapshot')
     ).not.toBeNull();
+  });
+});
+
+describe('lastUpdateMessage', () => {
+  type Mod = { lastUpdateMessage(last: Json): string };
+  const last = (over: Json): Json => ({
+    runId: 'run-1',
+    from: 'nightly-20261022',
+    to: 'nightly-20261023',
+    status: 'rolled_back',
+    at: '2026-10-24T00:01:00Z',
+    ...over,
+  });
+
+  it('names the restored release of a rollback, else from', async () => {
+    const { lastUpdateMessage } = (await import('./admin-maintenance.js')) as unknown as Mod;
+    expect(lastUpdateMessage(last({ restored: 'nightly-20261021' }))).toBe(
+      'Rolled back to nightly-20261021 after nightly-20261023 failed to start.'
+    );
+    expect(lastUpdateMessage(last({}))).toBe(
+      'Rolled back to nightly-20261022 after nightly-20261023 failed to start.'
+    );
+    expect(lastUpdateMessage(last({ status: 'verified' }))).toBe(
+      'Hub updated to nightly-20261023 (verified).'
+    );
+    expect(lastUpdateMessage(last({ status: 'failed' }))).toBe(
+      'Update to nightly-20261023 failed.'
+    );
   });
 });

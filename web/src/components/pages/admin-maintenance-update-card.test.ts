@@ -23,6 +23,7 @@ import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import {
   NO_SNAPSHOTS_REASON,
   channelSourceLabel,
+  rollbackTarget,
   isReleasesResponse,
   pinLabel,
   releaseBadges,
@@ -906,6 +907,25 @@ describe('Last update', () => {
     expect(lastUpdateText(el)).not.toContain('→');
   });
 
+  it('names the restored release when the hub reports it', async () => {
+    el = await mount(
+      [catalog()],
+      status({
+        lastUpdate: {
+          runId: 'run-4',
+          from: 'nightly-20261021',
+          to: 'nightly-20261022',
+          status: 'rolled_back',
+          at: '2026-10-22T01:00:00Z',
+          restored: 'nightly-20261020',
+        },
+      })
+    );
+    expect(root(el).querySelector('.last-update-rollback')?.textContent?.replace(/\s+/g, ' ')).toBe(
+      'Rolled back to nightly-20261020 after nightly-20261022 failed to start'
+    );
+  });
+
   it('shows a verified update as from → to', async () => {
     el = await mount(
       [catalog()],
@@ -922,5 +942,16 @@ describe('Last update', () => {
     expect(root(el).querySelector('.last-update-rollback')).toBeNull();
     expect(lastUpdateText(el)).toContain('nightly-20261021 → nightly-20261022');
     expect(root(el).querySelector('.last-update .status-badge.completed')).not.toBeNull();
+  });
+});
+
+describe('rollbackTarget', () => {
+  const base = { runId: 'r', from: 'v1', to: 'v2', status: 'rolled_back', at: '' };
+
+  it('prefers restored, then from, then a placeholder', () => {
+    expect(rollbackTarget({ ...base, restored: 'v0' })).toBe('v0');
+    expect(rollbackTarget(base)).toBe('v1');
+    expect(rollbackTarget({ ...base, restored: '' })).toBe('v1');
+    expect(rollbackTarget({ ...base, from: '' })).toBe('the previous release');
   });
 });
