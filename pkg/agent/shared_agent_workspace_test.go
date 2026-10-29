@@ -188,7 +188,8 @@ func TestSharedLayoutAgentWorkspace(t *testing.T) {
 			},
 		}}
 	}
-	ctx := context.Background()
+	// The agent manager records its runtime; the rule applies to Kubernetes.
+	ctx := contextWithAgentRuntime(context.Background(), "kubernetes")
 
 	t.Run("shared Layout", func(t *testing.T) {
 		_, home := sharedConfigProject(t)
@@ -229,6 +230,25 @@ func TestSharedLayoutAgentWorkspace(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, got, "a legacy agent keeps its legacy workspace")
 	})
+
+	// Only Kubernetes creates the agent's directory on the share, so every
+	// other runtime, and a caller that recorded no runtime, keeps
+	// <agentDir>/workspace (the share placement for them is a follow-up).
+	for _, rt := range []string{"docker", "podman", ""} {
+		t.Run("runtime "+rt+" keeps the broker-local workspace", func(t *testing.T) {
+			_, home := sharedConfigProject(t)
+			mountRoot := filepath.Join(t.TempDir(), "nfs")
+			root := filepath.Join(mountRoot, "share-1", "projects", sharedCfgProjectID)
+			scionDir := writeSharedProjectConfig(t, root, sharedCfgProjectID)
+			rtCtx := context.Background()
+			if rt != "" {
+				rtCtx = contextWithAgentRuntime(rtCtx, rt)
+			}
+			got, err := sharedLayoutAgentWorkspace(rtCtx, nfsSettings(t, mountRoot), scionDir, "a1", externalAgentDir(home, sharedCfgProjectID, "a1"))
+			require.NoError(t, err)
+			assert.Empty(t, got, "a non-Kubernetes runtime keeps <agentDir>/workspace")
+		})
+	}
 
 	t.Run("Layout places the project elsewhere", func(t *testing.T) {
 		root, home := sharedConfigProject(t)
@@ -405,7 +425,8 @@ func TestStart_SharedLayoutFreshAgentWorkspaceCreatedByLeafHelper(t *testing.T) 
 }
 
 // The safety net keeps refusing a missing workspace on every backend other
-// than nfs, and skips it for an nfs start.
+// than nfs and on every runtime other than Kubernetes, and skips it for a
+// Kubernetes start on the nfs backend.
 func TestCheckStartWorkspaceExists(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "gone", "workspace")
 	present := t.TempDir()
@@ -416,16 +437,45 @@ func TestCheckStartWorkspaceExists(t *testing.T) {
 	local := &config.VersionedSettings{Server: &config.V1ServerConfig{}}
 	gitOpts := api.StartOptions{GitClone: &api.GitCloneConfig{URL: "https://example.com/repo.git"}}
 
-	err := checkStartWorkspaceExists(missing, local, gitOpts, false)
+	err := checkStartWorkspaceExists("kubernetes", missing, local, gitOpts, false)
 	require.Error(t, err, "local backend, missing workspace")
 	assert.Contains(t, err.Error(), "workspace directory does not exist: "+missing)
-	err = checkStartWorkspaceExists(missing, nil, api.StartOptions{}, false)
+	err = checkStartWorkspaceExists("kubernetes", missing, nil, api.StartOptions{}, false)
 	require.Error(t, err, "no settings, missing workspace")
-	assert.NoError(t, checkStartWorkspaceExists(present, local, gitOpts, false), "local backend, existing workspace")
-	assert.NoError(t, checkStartWorkspaceExists("", local, gitOpts, false), "no workspace")
+	assert.NoError(t, checkStartWorkspaceExists("kubernetes", present, local, gitOpts, false), "local backend, existing workspace")
+	assert.NoError(t, checkStartWorkspaceExists("kubernetes", "", local, gitOpts, false), "no workspace")
 
-	assert.NoError(t, checkStartWorkspaceExists(missing, nfs, gitOpts, false), "nfs backend (shared-plain clone): the leaf helpers create it")
-	assert.NoError(t, checkStartWorkspaceExists(missing, nfs, api.StartOptions{}, true), "nfs backend (empty-per-agent)")
+	assert.NoError(t, checkStartWorkspaceExists("kubernetes", missing, nfs, gitOpts, false), "Kubernetes on the nfs backend (shared-plain clone): the leaf helpers create it")
+	assert.NoError(t, checkStartWorkspaceExists("kubernetes", missing, nfs, api.StartOptions{}, true), "Kubernetes on the nfs backend (empty-per-agent)")
+	// Another runtime on the nfs backend: nothing creates the workspace, so
+	// a missing one is still refused.
+	for _, rt := range []string{"docker", "podman", "apple"} {
+		err = checkStartWorkspaceExists(rt, missing, nfs, gitOpts, false)
+		require.Error(t, err, "%s on the nfs backend, missing workspace", rt)
+		assert.Contains(t, err.Error(), "workspace directory does not exist: "+missing)
+	}
 	assert.True(t, startUsesNFSWorkspaceBackend(nfs, api.StartOptions{}, false), "worktree-per-agent default on nfs")
 	assert.False(t, startUsesNFSWorkspaceBackend(local, gitOpts, false))
+}
+
+// A Docker broker on a shared nfs Layout keeps the pre-existing placement for
+// a clone-per-agent agent: its workspace is the broker-local
+// <agentDir>/workspace, which provisioning creates, nothing is placed in the
+// agent's directory on the share, and the start proceeds. The run is recorded
+// in the agent's state dir (the same dir as its workspace) and read back as
+// delete and launch recovery read it.
+func TestStart_SharedLayoutDockerClonePerAgentKeepsBrokerLocalWorkspace(t *testing.T) {
+	cfg, root, ext, opts, err := sharedLayoutStart(t, "docker", func(o *api.StartOptions) {
+		o.GitClone = &api.GitCloneConfig{URL: "https://example.com/repo.git"}
+		o.Env["SCION_WORKSPACE_MODE"] = "clone-per-agent"
+	})
+	require.NoError(t, err, "the start proceeds with the broker-local workspace")
+	assert.DirExists(t, filepath.Join(ext, "workspace"), "provisioning creates the broker-local workspace")
+	assert.NoDirExists(t, filepath.Join(root, "agents", "test-agent"), "nothing is placed in the agent's directory on the share")
+	assert.Empty(t, cfg.NFSAgentDirName, "a Docker start gets no agent directory on the share")
+
+	assert.FileExists(t, filepath.Join(ext, HostStateFile), "the run is recorded in the agent's state dir")
+	got, err := RecordedRunOwner(RunOwnerTargetFor(opts))
+	require.NoError(t, err)
+	assert.Equal(t, "run-shared-1", got, "delete and launch recovery read the recorded run, not unknown")
 }

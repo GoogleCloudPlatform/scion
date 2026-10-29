@@ -21,7 +21,14 @@ the external root, so the run was not recorded.
 ## Change
 
 - `sharedLayoutAgentWorkspace` (new, `pkg/agent/shared_agent_workspace.go`)
-  returns `Layout.AgentRoot(projectID, agent)/workspace`. It only applies to a
+  returns `Layout.AgentRoot(projectID, agent)/workspace`. It applies only on
+  the Kubernetes runtime (the runtime name the agent manager records in the
+  context in `Start`, `Provision` and `Reprovision`; a caller that records
+  none counts as another runtime), because only Kubernetes creates that
+  directory (the NFS leaf helpers and the workspace init container). Every
+  other runtime keeps the broker-local `<agentDir>/workspace` it had before;
+  placing it on the share there (a provision-side create with the share's
+  ownership) is a follow-up. It only applies to a
   shared project configuration whose project storage Layout
   (`config.ResolveProjectStorage` + `config.ProjectStorageLayout`) is shared,
   and never to an agent whose state is its legacy in-project dir
@@ -45,8 +52,8 @@ the external root, so the run was not recorded.
   is reused by a new agent with the same name, which is the documented NFS
   behaviour of `RemoveNFSAgentFiles`.
 - `Start`'s workspace safety net (the "workspace directory does not exist"
-  check, now `checkStartWorkspaceExists`) is skipped when the start goes
-  through the nfs workspace backend (`startUsesNFSWorkspaceBackend`, the same
+  check, now `checkStartWorkspaceExists`) is skipped when a Kubernetes start
+  goes through the nfs workspace backend (`startUsesNFSWorkspaceBackend`, the same
   `runtime.SelectWorkspaceBackend` choice Start makes later; the Kubernetes
   worktree adjustment does not change it). On nfs the workspace is created
   later in Start: the leaf helpers create it with their atomic claim or return
@@ -55,7 +62,14 @@ the external root, so the run was not recorded.
   the share therefore no longer fails that check before the leaf helper runs.
   The leaf is not created earlier, so the claim (`ownDirCreated`, the move
   rollback mark), `nfsKeepSharedCheckout` and the claim name from
-  `backend.Realize` keep their order. Every other backend keeps the check.
+  `backend.Realize` keep their order. Every other start keeps the check,
+  including an nfs start on another runtime (Docker, Podman, Apple), where
+  nothing creates the workspace and a bind mount of a missing path could
+  create it with the wrong owner.
+- `HostStateRootFor` is runtime-independent: the record lives in the agent's
+  state dir, which on a shared project configuration is the broker-local
+  external dir on every runtime, so on a non-Kubernetes runtime the record
+  and the broker-local workspace are in the same agent dir.
 - `HostStateRootFor`: a shared project configuration's root is the root of the
   agent dir that `config.AgentDirForProject` resolves (the external root for
   every sharing mode, or the legacy dir). The record is written and read in
@@ -89,8 +103,15 @@ the external root, so the run was not recorded.
 - `TestStart_SharedLayoutFreshAgentWorkspaceCreatedByLeafHelper`
   (clone-per-agent, empty-per-agent): with the agent's directory on the share
   absent, Start succeeds and the leaf helper creates it.
+- `TestSharedLayoutAgentWorkspace`: Docker, Podman and no recorded runtime
+  keep `<agentDir>/workspace`.
+- `TestStart_SharedLayoutDockerClonePerAgentKeepsBrokerLocalWorkspace`: a
+  Docker start on a shared nfs Layout keeps the broker-local workspace,
+  proceeds, and records the run in the agent's state dir, read back as delete
+  reads it.
 - `TestCheckStartWorkspaceExists`: a missing workspace is still refused off
-  nfs, and skipped on nfs.
+  nfs and on non-Kubernetes runtimes on nfs, and skipped for Kubernetes on
+  nfs.
 
 ## Notes
 

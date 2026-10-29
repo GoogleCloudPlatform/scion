@@ -285,6 +285,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		ctx = api.ContextWithGitClone(ctx, opts.GitClone)
 	}
 	ctx = contextWithClonePerAgentWorkspace(ctx, opts)
+	ctx = contextWithAgentRuntime(ctx, m.runtimeName())
 	if opts.RecordedOriginURL != "" {
 		// Linked-checkout route: GitClone was cleared, so the recorded origin is
 		// carried separately for the git-lfs endpoint pin.
@@ -1902,8 +1903,9 @@ authDone:
 	}
 
 	// Validate that the workspace directory exists before attempting to mount
-	// it (checkStartWorkspaceExists; skipped for the nfs workspace backend).
-	if err := checkStartWorkspaceExists(effectiveWorkspace, settings, opts, emptyPerAgent); err != nil {
+	// it (checkStartWorkspaceExists; skipped for a Kubernetes start through
+	// the nfs workspace backend).
+	if err := checkStartWorkspaceExists(m.Runtime.Name(), effectiveWorkspace, settings, opts, emptyPerAgent); err != nil {
 		return nil, err
 	}
 

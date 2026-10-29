@@ -26,6 +26,32 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// agentRuntimeKey carries the agent manager's runtime name
+// (contextWithAgentRuntime).
+type agentRuntimeKey struct{}
+
+// contextWithAgentRuntime records the runtime the agent manager starts the
+// agent on, for decisions made below Start, Provision and Reprovision
+// (sharedLayoutAgentWorkspace).
+func contextWithAgentRuntime(ctx context.Context, runtimeName string) context.Context {
+	return context.WithValue(ctx, agentRuntimeKey{}, runtimeName)
+}
+
+// agentRuntimeFromContext is the runtime name contextWithAgentRuntime
+// recorded, or "" when none was.
+func agentRuntimeFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(agentRuntimeKey{}).(string)
+	return v
+}
+
+// runtimeName is the manager's runtime name, or "" without a runtime.
+func (m *AgentManager) runtimeName() string {
+	if m == nil || m.Runtime == nil {
+		return ""
+	}
+	return m.Runtime.Name()
+}
+
 // clonePerAgentWorkspaceKey marks a provisioning or start context whose
 // agent uses the clone-per-agent sharing mode (contextWithClonePerAgentWorkspace).
 type clonePerAgentWorkspaceKey struct{}
@@ -77,6 +103,11 @@ func agentScopedWorkspace(ctx context.Context) bool {
 //
 // It returns "" (and no error) when the rule does not apply, and the caller
 // keeps <agentDir>/workspace:
+//   - the agent's runtime (agentRuntimeFromContext) is not Kubernetes,
+//     including a caller that recorded none. Only Kubernetes creates the
+//     agent's directory on the share (the NFS leaf helpers and the workspace
+//     init container), so every other runtime keeps the broker-local
+//     workspace it had before; placing it on the share there is a follow-up;
 //   - projectDir is not a shared project configuration directory
 //     (config.IsSharedProjectConfigDir);
 //   - agentDir is the agent's legacy in-project directory
@@ -90,6 +121,9 @@ func agentScopedWorkspace(ctx context.Context) bool {
 // directory holding projectDir, is an error: the start is refused rather
 // than placing the workspace somewhere else.
 func sharedLayoutAgentWorkspace(ctx context.Context, settings *config.VersionedSettings, projectDir, agentName, agentDir string) (string, error) {
+	if !isKubernetesRuntime(agentRuntimeFromContext(ctx)) {
+		return "", nil
+	}
 	if !config.IsSharedProjectConfigDir(projectDir) {
 		return "", nil
 	}
@@ -162,7 +196,10 @@ func startWorkspaceSharingMode(opts api.StartOptions, emptyPerAgent bool) store.
 // through the nfs workspace backend (runtime.SelectWorkspaceBackend). The
 // Kubernetes worktree adjustment Start applies later (shared-plain to
 // worktree-per-agent) does not change the answer: the nfs backend serves
-// both modes.
+// both modes. Today the mode argument cannot change the nfs answer for any
+// mode Start passes (shared-plain, worktree-per-agent, empty-per-agent all
+// select nfs when the backend is nfs); it is passed so the answer stays
+// Start's own if SelectWorkspaceBackend changes.
 func startUsesNFSWorkspaceBackend(settings *config.VersionedSettings, opts api.StartOptions, emptyPerAgent bool) bool {
 	if settings == nil || settings.Server == nil {
 		return false
@@ -179,15 +216,18 @@ func startUsesNFSWorkspaceBackend(settings *config.VersionedSettings, opts api.S
 // still missing the start fails with a clear error rather than a cryptic
 // mount error from the container runtime.
 //
-// A start through the nfs workspace backend (startUsesNFSWorkspaceBackend)
-// skips it. There the workspace is created later in Start, by the NFS leaf
-// helpers (which create the leaf, with its atomic claim, or return an
-// error), by the Kubernetes workspace init container, or the start is
-// refused (errEmptyPerAgentNFSNoClaim). An agent-scoped workspace on a
-// shared Layout does not exist yet on a fresh agent, because provisioning
-// leaves it to those helpers. Every other backend keeps the check.
-func checkStartWorkspaceExists(workspace string, settings *config.VersionedSettings, opts api.StartOptions, emptyPerAgent bool) error {
-	if workspace == "" || startUsesNFSWorkspaceBackend(settings, opts, emptyPerAgent) {
+// A Kubernetes start through the nfs workspace backend
+// (startUsesNFSWorkspaceBackend) skips it. There the workspace is created
+// later in Start, by the NFS leaf helpers (which create the leaf, with its
+// atomic claim, or return an error), by the Kubernetes workspace init
+// container, or the start is refused (errEmptyPerAgentNFSNoClaim). An
+// agent-scoped workspace on a shared Layout does not exist yet on a fresh
+// agent, because provisioning leaves it to those helpers. Every other start
+// keeps the check, including an nfs start on another runtime: nothing
+// creates the workspace there, and a bind mount of a missing path could
+// create it with the wrong owner.
+func checkStartWorkspaceExists(runtimeName, workspace string, settings *config.VersionedSettings, opts api.StartOptions, emptyPerAgent bool) error {
+	if workspace == "" || (isKubernetesRuntime(runtimeName) && startUsesNFSWorkspaceBackend(settings, opts, emptyPerAgent)) {
 		return nil
 	}
 	if _, err := os.Stat(workspace); os.IsNotExist(err) {

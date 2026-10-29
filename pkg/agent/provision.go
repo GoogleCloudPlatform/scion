@@ -1109,6 +1109,7 @@ var ErrReprovisionRefused = errors.New("reprovision refused")
 //     agent's own agentDir via checkAgentDirContained/CheckAgentDirContained).
 func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
 	ctx = m.withWorkspaceLock(ctx)
+	ctx = contextWithAgentRuntime(ctx, m.runtimeName())
 	hasGitClone := opts.GitClone != nil
 	if !api.ReincarnateEligible(hasGitClone, opts.Workspace, opts.EmptyPerAgentWorkspace) {
 		return nil, fmt.Errorf("%w: agent %q is neither clone-per-agent, empty-per-agent, nor has an explicit workspace; reincarnate currently supports those workspace modes only", ErrReprovisionRefused, opts.Name)
@@ -1337,6 +1338,7 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 		}
 	}
 	ctx = m.withWorkspaceLock(ctx)
+	ctx = contextWithAgentRuntime(ctx, m.runtimeName())
 	ctx, inlineCfg := buildProvisionContext(ctx, opts)
 	agentDir, agentHome, _, cfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
 	if err != nil {
