@@ -102,6 +102,19 @@ var compressBypassedUntagged = map[string]string{
 	"DELETE /api/v1/secrets/{key}":                      "env/secrets segment",
 	"pending DELETE /api/v1/env/{key}":                  "env/secrets segment",
 	"pending PATCH /api/v1/secrets/{key}":               "env/secrets segment",
+	// The session-only user- and hub-scope variants of the same routes.
+	"DELETE /api/v1/env/{key} #scope=user":     "env/secrets segment",
+	"GET /api/v1/secrets #scope=user":          "env/secrets segment",
+	"GET /api/v1/secrets/{key} #scope=user":    "env/secrets segment",
+	"PUT /api/v1/secrets/{key} #scope=user":    "env/secrets segment",
+	"PATCH /api/v1/secrets/{key} #scope=user":  "env/secrets segment",
+	"DELETE /api/v1/secrets/{key} #scope=user": "env/secrets segment",
+	"DELETE /api/v1/env/{key} #scope=hub":      "env/secrets segment",
+	"GET /api/v1/secrets #scope=hub":           "env/secrets segment",
+	"GET /api/v1/secrets/{key} #scope=hub":     "env/secrets segment",
+	"PUT /api/v1/secrets/{key} #scope=hub":     "env/secrets segment",
+	"PATCH /api/v1/secrets/{key} #scope=hub":   "env/secrets segment",
+	"DELETE /api/v1/secrets/{key} #scope=hub":  "env/secrets segment",
 
 	// Auth routes: /api/v1/auth/ is bypassed as a whole. Token list and get
 	// return the token prefix only.
