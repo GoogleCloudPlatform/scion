@@ -70,6 +70,10 @@ func remoteCacheDir() (string, error) {
 	return filepath.Join(globalDir, "cache", "remote-templates"), nil
 }
 
+// removeAllCache removes a cache directory before a fetch refills it
+// (os.RemoveAll; replaced in tests to force a failure).
+var removeAllCache = os.RemoveAll
+
 // NormalizeTemplateSourceURL normalizes a user-provided template source URL.
 // It handles two cases of user convenience:
 //  1. Missing scheme: if the URL doesn't start with a scheme or rclone prefix,
@@ -186,8 +190,12 @@ func FetchRemoteTemplate(ctx context.Context, uri string, authToken ...string) (
 	templateCachePath := filepath.Join(cacheDir, cacheKey)
 
 	// For now, always fetch fresh (could add caching logic later)
-	// Clean up any existing cache for this URI
-	_ = os.RemoveAll(templateCachePath)
+	// Clean up any existing cache for this URI. If the old directory cannot
+	// be removed, the fetch fails: populating it anyway would mix the new
+	// content with whatever is left of the old.
+	if err := removeAllCache(templateCachePath); err != nil {
+		return "", fmt.Errorf("failed to remove the old cache directory %s: %w", templateCachePath, err)
+	}
 
 	if err := os.MkdirAll(templateCachePath, 0755); err != nil {
 		return "", fmt.Errorf("failed to create cache directory: %w", err)
