@@ -90,6 +90,9 @@ _rb_crash_result() {
 #                     failed/failed-before-auto-restart, then
 #                     activating/auto-restart;
 #   v255-autorestart  systemd 255: already activating/auto-restart;
+#   v255-pending      systemd 255: failed/failed-before-auto-restart in
+#                     every read (ActiveState=failed, but a restart is still
+#                     pending) -- only the SubState check rejects it;
 #   flip-second       failed/failed once, then auto-restart (not settled);
 #   flip-third        failed/failed twice, then auto-restart;
 #   recovered         the hub is running again (active/running).
@@ -105,6 +108,7 @@ _rb_scenario() {
     v249-clean|v255-final-slh) _rb_states "failed failed start-limit-hit $code $status" ;;
     v255-transient) _rb_states "failed failed-before-auto-restart $result $code $status" "activating auto-restart $result $code $status" ;;
     v255-autorestart) _rb_states "activating auto-restart $result $code $status" ;;
+    v255-pending) _rb_states "failed failed-before-auto-restart $result $code $status" ;;
     flip-second) _rb_states "failed failed $result $code $status" "activating auto-restart $result $code $status" ;;
     flip-third) _rb_states "failed failed $result $code $status" "failed failed $result $code $status" "activating auto-restart $result $code $status" ;;
     recovered) _rb_states "active running success 1 0" ;;
@@ -160,7 +164,7 @@ _rb_assert_refused() {
 # else (no runuser, no reset-failed, no start).
 test_rollback_noop_unless_failed_for_good() {
   local sc
-  for sc in v255-transient v255-autorestart flip-second flip-third recovered; do
+  for sc in v255-transient v255-autorestart v255-pending flip-second flip-third recovered; do
     _rb_new_host
     _rb_scenario "$sc"
     RB_BEFORE="$(_rb_state)"
@@ -173,6 +177,21 @@ test_rollback_noop_unless_failed_for_good() {
     assert_eq "" "$(grep -vxF "${RB_SHOW}" "$RB_CALLS")" "${sc}: only the unit state may be read"
     rm -rf "$RB_DIR"
   done
+}
+
+# ActiveState=failed is not enough: while systemd still intends to restart
+# the unit (SubState failed-before-auto-restart), the guard must not act,
+# even if that state holds over all three reads.
+test_rollback_failed_with_pending_restart_is_noop() {
+  _rb_new_host
+  _rb_scenario v255-pending
+  RB_BEFORE="$(_rb_state)"
+  _rb_run
+  assert_eq "0" "$RB_RC" "a pending restart is a successful no-op (output: ${RB_OUT})"
+  assert_contains "$RB_OUT" "failed/failed-before-auto-restart" "the log must show the SubState"
+  assert_eq "$RB_BEFORE" "$(_rb_state)" "nothing may change while a restart is pending"
+  assert_eq "${RB_SHOW}" "$(cat "$RB_CALLS")" "a pending restart is rejected at the first read, with nothing else run"
+  rm -rf "$RB_DIR"
 }
 
 # The settle: a settled failed state is read exactly three times before
