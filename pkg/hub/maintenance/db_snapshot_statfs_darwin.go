@@ -12,14 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build linux || darwin
+//go:build darwin
 
 package maintenance
 
 import "golang.org/x/sys/unix"
 
+// freeDiskSpaceSupported reports that freeDiskSpace works on this platform.
+const freeDiskSpaceSupported = true
+
 // freeDiskSpace returns the bytes available to an unprivileged user in the
-// file system holding dir.
+// file system holding dir. On darwin the block counts are in Bsize units.
 func freeDiskSpace(dir string) (uint64, error) {
 	var st unix.Statfs_t
 	if err := unix.Statfs(dir, &st); err != nil {

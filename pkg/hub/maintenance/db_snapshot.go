@@ -49,6 +49,11 @@ const (
 	snapshotPartialSuffix  = ".partial"
 )
 
+// stalePartialAge is the age after which a leftover ".partial" snapshot
+// file (from a hub killed during a snapshot) is removed even when no newer
+// snapshot exists; no snapshot write takes this long.
+const stalePartialAge = time.Hour
+
 // DBSnapshotStatus says whether the hub can snapshot its database before an
 // update, and where the snapshots go.
 type DBSnapshotStatus struct {
@@ -117,18 +122,22 @@ type SQLiteSnapshotter struct {
 	settings  string
 	keep      int
 	freeSpace func(string) (uint64, error)
-	now       func() time.Time
+	// freeSpaceOK is false when free space cannot be read here (the
+	// platform default always fails), so no snapshot can be taken.
+	freeSpaceOK bool
+	now         func() time.Time
 }
 
 // NewSQLiteSnapshotter returns a SQLiteSnapshotter configured from opts.
 func NewSQLiteSnapshotter(opts SQLiteSnapshotOptions) *SQLiteSnapshotter {
 	s := &SQLiteSnapshotter{
-		db:        opts.DB,
-		dir:       opts.Dir,
-		settings:  opts.SettingsPath,
-		keep:      opts.Keep,
-		freeSpace: opts.FreeSpace,
-		now:       opts.Now,
+		db:          opts.DB,
+		dir:         opts.Dir,
+		settings:    opts.SettingsPath,
+		keep:        opts.Keep,
+		freeSpace:   opts.FreeSpace,
+		freeSpaceOK: opts.FreeSpace != nil || freeDiskSpaceSupported,
+		now:         opts.Now,
 	}
 	if s.keep <= 0 {
 		s.keep = DefaultSnapshotKeep
@@ -142,8 +151,13 @@ func NewSQLiteSnapshotter(opts SQLiteSnapshotOptions) *SQLiteSnapshotter {
 	return s
 }
 
-// SnapshotStatus implements DBSnapshotter.
+// SnapshotStatus implements DBSnapshotter. Snapshots are unsupported on a
+// platform where the free disk space cannot be read: the disk check would
+// refuse every snapshot.
 func (s *SQLiteSnapshotter) SnapshotStatus() DBSnapshotStatus {
+	if !s.freeSpaceOK {
+		return DBSnapshotStatus{Reason: "free disk space cannot be read on this platform"}
+	}
 	return DBSnapshotStatus{Supported: true, Dir: s.dir}
 }
 
@@ -153,12 +167,33 @@ func (s *SQLiteSnapshotter) SnapshotStatus() DBSnapshotStatus {
 // complete (so a snapshot is never partial), copies the settings file to
 // settings-<ts>.yaml the same way, then keeps only the newest Keep of each.
 // Files are created 0600: the database and settings hold secrets.
+//
+// VACUUM INTO runs on the hub's own database handle, whose SQLite pool has
+// a single connection: every other database call of the hub waits until
+// the copy completes (roughly seconds per 100 MB, more on slow disks). The
+// run log states the database size before it starts. The hub restarts
+// right after an update, so the stall is bounded by the copy.
+//
+// Leftover ".partial" files of a killed snapshot are removed first
+// (pruneStalePartials), so they do not count against the free space.
+//
+// Windows: plain os.OpenFile(0600)/MkdirAll(0700) protect nothing there
+// (docs-repo/agents/windows-platform-seams.md), which is acceptable because
+// no snapshot is ever written on Windows: freeDiskSpace fails closed there
+// and SnapshotStatus reports snapshots unsupported.
 func (s *SQLiteSnapshotter) Snapshot(ctx context.Context, fromVersion string, logger io.Writer) (string, error) {
 	if s.db == nil || s.dir == "" {
 		return "", errors.New("database snapshot is not configured")
 	}
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return "", fmt.Errorf("create snapshot directory %s: %w", s.dir, err)
+	}
+	removed, err := pruneStalePartials(s.dir, time.Now())
+	for _, name := range removed {
+		_, _ = fmt.Fprintf(logger, "Removed a leftover partial snapshot %s\n", name)
+	}
+	if err != nil {
+		_, _ = fmt.Fprintf(logger, "Warning: removing leftover partial snapshots failed: %v\n", err)
 	}
 	size, err := sqliteDatabaseSize(ctx, s.db)
 	if err != nil {
@@ -176,6 +211,7 @@ func (s *SQLiteSnapshotter) Snapshot(ctx context.Context, fromVersion string, lo
 
 	ts := s.now().UTC().Format(snapshotTimeFormat)
 	dbPath := filepath.Join(s.dir, dbSnapshotPrefix+snapshotVersionLabel(fromVersion)+"-"+ts+dbSnapshotSuffix)
+	_, _ = fmt.Fprintf(logger, "Writing a database snapshot of %d bytes; the hub's database is busy until it completes.\n", size)
 	start := time.Now()
 	if err := writeAtomically(dbPath, func(tmp string) error {
 		_, err := s.db.ExecContext(ctx, "VACUUM INTO ?", tmp)
@@ -290,6 +326,54 @@ func copySettingsFile(src, dst string) (copied bool, err error) {
 		return err
 	})
 	return err == nil, err
+}
+
+// pruneStalePartials removes the ".partial" files in dir that a killed
+// snapshot left behind: those older than stalePartialAge, or older than the
+// newest completed snapshot (a later snapshot finished, so they are not in
+// use). It returns the names removed.
+func pruneStalePartials(dir string, now time.Time) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var newest time.Time
+	type partial struct {
+		name string
+		mod  time.Time
+	}
+	var partials []partial
+	for _, e := range entries {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		name := e.Name()
+		switch {
+		case strings.HasSuffix(name, snapshotPartialSuffix):
+			partials = append(partials, partial{name: name, mod: info.ModTime()})
+		case strings.HasPrefix(name, dbSnapshotPrefix) && strings.HasSuffix(name, dbSnapshotSuffix):
+			if info.ModTime().After(newest) {
+				newest = info.ModTime()
+			}
+		}
+	}
+	var removed []string
+	var errs []error
+	for _, p := range partials {
+		if now.Sub(p.mod) < stalePartialAge && !p.mod.Before(newest) {
+			continue // possibly in use
+		}
+		if err := os.Remove(filepath.Join(dir, p.name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, err)
+			continue
+		}
+		removed = append(removed, p.name)
+	}
+	return removed, errors.Join(errs...)
 }
 
 // pruneSnapshots removes all but the newest keep files named

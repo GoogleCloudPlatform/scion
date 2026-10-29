@@ -261,3 +261,35 @@ func TestSQLiteSnapshotter_ExistingPartialFails(t *testing.T) {
 		t.Fatal("another writer's partial file was touched")
 	}
 }
+
+func TestSQLiteSnapshotter_StalePartialsFreedBeforeDiskCheck(t *testing.T) {
+	db := openSnapshotTestDB(t)
+	dir := t.TempDir()
+	stale := filepath.Join(dir, "hub-nightly-20261020-20261028T060000Z.db"+snapshotPartialSuffix)
+	if err := os.WriteFile(stale, bytes.Repeat([]byte("x"), 4096), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	var staleAtCheck bool
+	s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{DB: db, Dir: dir, Now: snapshotTestClock(),
+		FreeSpace: func(string) (uint64, error) {
+			_, err := os.Stat(stale)
+			staleAtCheck = err == nil
+			return 1 << 40, nil
+		}})
+	var log bytes.Buffer
+	if _, err := s.Snapshot(context.Background(), "nightly-20261023", &log); err != nil {
+		t.Fatal(err)
+	}
+	if staleAtCheck {
+		t.Fatal("the stale partial still existed at the free-space check")
+	}
+	for _, want := range []string{"Removed a leftover partial snapshot", "Writing a database snapshot of", "busy until it completes"} {
+		if !strings.Contains(log.String(), want) {
+			t.Errorf("log lacks %q:\n%s", want, log.String())
+		}
+	}
+}

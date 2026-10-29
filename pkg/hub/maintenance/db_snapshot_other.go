@@ -21,6 +21,10 @@ import (
 	"fmt"
 )
 
+// freeDiskSpaceSupported reports that freeDiskSpace always fails here, so
+// SQLite snapshots are reported unsupported (SnapshotStatus).
+const freeDiskSpaceSupported = false
+
 // freeDiskSpace is not implemented on this platform, so the snapshot's
 // disk check (and with it the snapshot) fails closed.
 func freeDiskSpace(string) (uint64, error) {

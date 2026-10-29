@@ -304,3 +304,8 @@ func TestBinaryUpdate_FromPublishedAt(t *testing.T) {
 		t.Fatalf("nightly from: err = %v, FromPublishedAt = %v", err, hooked.FromPublishedAt)
 	}
 }
+
+func TestSyncDirToleratesMissingDir(t *testing.T) {
+	syncDir(filepath.Join(t.TempDir(), "missing")) // must not panic
+	syncDir(t.TempDir())
+}

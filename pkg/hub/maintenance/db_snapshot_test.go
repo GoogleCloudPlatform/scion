@@ -20,7 +20,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestSnapshotVersionLabel(t *testing.T) {
@@ -77,5 +79,55 @@ func TestPruneSnapshots(t *testing.T) {
 	}
 	if removed, err := pruneSnapshots(dir, dbSnapshotPrefix, dbSnapshotSuffix, 5); err != nil || len(removed) != 0 {
 		t.Fatalf("under the limit: removed %v, err %v", removed, err)
+	}
+}
+
+func TestPruneStalePartials(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	touch := func(name string, mod time.Time) {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	touch("hub-nightly-20261020-20261029T060000Z.db.partial", now.Add(-2*time.Hour))    // old: stale
+	touch("hub-nightly-20261021-20261029T070000Z.db.partial", now.Add(-20*time.Minute)) // older than the newest snapshot
+	touch("hub-nightly-20261022-20261029T071000Z.db", now.Add(-10*time.Minute))
+	touch("settings-20261029T071500Z.yaml.partial", now.Add(-time.Minute)) // newer than every snapshot: maybe in use
+	touch("unrelated.txt", now.Add(-48*time.Hour))
+
+	removed, err := pruneStalePartials(dir, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(removed)
+	want := []string{"hub-nightly-20261020-20261029T060000Z.db.partial", "hub-nightly-20261021-20261029T070000Z.db.partial"}
+	if !slices.Equal(removed, want) {
+		t.Fatalf("removed = %v, want %v", removed, want)
+	}
+	for _, keep := range []string{"hub-nightly-20261022-20261029T071000Z.db", "settings-20261029T071500Z.yaml.partial", "unrelated.txt"} {
+		if _, err := os.Stat(filepath.Join(dir, keep)); err != nil {
+			t.Errorf("%s was removed: %v", keep, err)
+		}
+	}
+}
+
+func TestSQLiteSnapshotter_StatusWithoutFreeSpace(t *testing.T) {
+	s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{Dir: "/x"})
+	if got := s.SnapshotStatus().Supported; got != freeDiskSpaceSupported {
+		t.Fatalf("default Supported = %v, want freeDiskSpaceSupported %v", got, freeDiskSpaceSupported)
+	}
+	s.freeSpaceOK = false // a platform where free space cannot be read
+	if st := s.SnapshotStatus(); st.Supported || st.Dir != "" || !strings.Contains(st.Reason, "free disk space") {
+		t.Fatalf("status = %+v", st)
+	}
+	injected := NewSQLiteSnapshotter(SQLiteSnapshotOptions{Dir: "/x", FreeSpace: func(string) (uint64, error) { return 1, nil }})
+	if !injected.SnapshotStatus().Supported {
+		t.Fatal("an injected free-space reader must count as supported")
 	}
 }

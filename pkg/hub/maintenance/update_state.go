@@ -156,7 +156,21 @@ func WriteUpdateState(root string, st UpdateState) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("write %s: %w", path, err)
 	}
+	syncDir(root)
 	return nil
+}
+
+// syncDir fsyncs directory dir so a rename in it survives a power loss.
+// Best-effort: some platforms (Windows) cannot fsync a directory, and a
+// lost rename only leaves the previous file, which the guard reads as a
+// target mismatch (no swap).
+func syncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	_ = d.Close()
 }
 
 // PreviousSafe reports whether rolling back to from is safe for a binary
