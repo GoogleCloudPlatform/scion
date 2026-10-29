@@ -15,6 +15,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -313,46 +314,36 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 	}
 
-	hostHome, _ := os.UserHomeDir()
 	expandPath := func(path string, isTarget bool) string {
-		// Expand environment variables first (e.g., ${GOPATH}, $HOME).
-		// Mount paths are visible to the agent, so names refused for
-		// agents expand to empty.
-		expanded, _, refused := util.ExpandEnvRefusing(path, util.IsAgentRefusedHostEnvName)
-		for _, name := range refused {
-			slog.Warn("volume path: host environment variable is reserved and is not expanded", "variable", name)
+		if !isTarget {
+			return expandHostSource(path)
 		}
-
-		// Then handle tilde expansion
+		expanded := expandVolumeEnv(path)
 		if strings.HasPrefix(expanded, "~/") {
-			if isTarget {
-				return filepath.Join(util.GetHomeDir(config.UnixUsername), expanded[2:])
-			}
-			return filepath.Join(hostHome, expanded[2:])
+			return filepath.Join(util.GetHomeDir(config.UnixUsername), expanded[2:])
 		}
 		if expanded == "~" {
-			if isTarget {
-				return util.GetHomeDir(config.UnixUsername)
-			}
-			return hostHome
+			return util.GetHomeDir(config.UnixUsername)
 		}
 		return expanded
 	}
 
-	// Volume deduplication
-	volumeMap := make(map[string]string)
+	// Volume deduplication, by target. The source of each bind is checked
+	// once, when the binds are emitted below (checkBindSource).
+	type bindSpec struct {
+		src string
+		ro  bool
+	}
+	volumeMap := make(map[string]bindSpec)
 	var volumeOrder []string
 
 	registerMount := func(src, tgt string, ro bool, overwrite bool) {
-		val := fmt.Sprintf("%s:%s", src, tgt)
-		if ro {
-			val += ":ro"
-		}
+		spec := bindSpec{src: src, ro: ro}
 		if _, exists := volumeMap[tgt]; !exists {
 			volumeOrder = append(volumeOrder, tgt)
-			volumeMap[tgt] = val
+			volumeMap[tgt] = spec
 		} else if overwrite {
-			volumeMap[tgt] = val
+			volumeMap[tgt] = spec
 		}
 	}
 
@@ -395,9 +386,17 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// own path); registerMount below would not add this one.
 			return
 		}
-		// Agents' own directories under ~/.scion/project-configs hold state
-		// the host relies on; no configured volume may mount them
+		// No configured volume may reach a Runtime Broker control path,
+		// read-only or not (checkConfiguredVolumeSource). Agents' own
+		// directories under ~/.scion/project-configs hold state the host
+		// relies on; no configured volume may mount them either
 		// (checkVolumeSource).
+		if err := checkConfiguredVolumeSource(src); err != nil {
+			if volumeErr == nil {
+				volumeErr = err
+			}
+			return
+		}
 		if err := checkVolumeSource(src, v.ReadOnly); err != nil {
 			if volumeErr == nil {
 				volumeErr = err
@@ -841,7 +840,11 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	if devBinDir := os.Getenv("SCION_DEV_BINARIES"); devBinDir != "" {
 		if abs, err := filepath.Abs(devBinDir); err == nil {
 			if info, err := os.Stat(abs); err == nil && info.IsDir() {
-				registerMount(abs, "/opt/scion/bin", true, true)
+				resolved, err := checkHostFileSource(abs)
+				if err != nil {
+					return nil, err
+				}
+				registerMount(resolved, "/opt/scion/bin", true, true)
 			}
 		}
 	}
@@ -860,9 +863,31 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 	}
 
-	// Add all registered volumes
+	// Add all registered volumes. Every bind source, whatever produced it
+	// (workspace, home, configured volume, shared dir, git, auth file), is
+	// checked here against the Runtime Broker control paths, and the
+	// resolved source is what is mounted.
+	var emittedBinds []BindMount
 	for _, tgt := range volumeOrder {
-		addArg("-v", volumeMap[tgt])
+		spec := volumeMap[tgt]
+		src, err := checkBindSource(spec.src)
+		if err != nil {
+			return nil, err
+		}
+		val := fmt.Sprintf("%s:%s", src, tgt)
+		if spec.ro {
+			val += ":ro"
+		}
+		addArg("-v", val)
+		if !isNamedVolume(src) {
+			emittedBinds = append(emittedBinds, BindMount{Source: src, Destination: tgt})
+		}
+	}
+	// The record of the binds (LabelBindSources) is emitted after every
+	// other label, below.
+	bindSourcesLabel, err := encodeBindSourcesLabel(emittedBinds)
+	if err != nil {
+		return nil, fmt.Errorf("recording container binds: %w", err)
 	}
 
 	// (The whole repo root is never mounted read-write any more: the
@@ -931,10 +956,18 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 	}
 
+	// LabelBindSources is the broker's own record of the binds: no other
+	// label source may set it.
 	for k, v := range config.Labels {
+		if k == LabelBindSources {
+			continue
+		}
 		addArg("--label", fmt.Sprintf("%s=%s", k, v))
 	}
 	for k, v := range config.Annotations {
+		if k == LabelBindSources {
+			continue
+		}
 		addArg("--label", fmt.Sprintf("%s=%s", k, v))
 	}
 
@@ -949,6 +982,10 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	if config.Template != "" {
 		addArg("--label", fmt.Sprintf("scion.template=%s", config.Template))
 	}
+
+	// The record of the binds goes last, so no earlier label can stand in
+	// for it (LabelBindSources).
+	addArg("--label", LabelBindSources+"="+bindSourcesLabel)
 
 	// Get command from harness.
 	// No-auth mode builds a raw shell command string that is embedded
@@ -1757,6 +1794,40 @@ func runSimpleCommand(ctx context.Context, command string, args ...string) (stri
 	return strings.TrimSpace(string(out)), nil
 }
 
+// stdoutCommandTimeout bounds runStdoutCommand. A variable so tests can
+// shorten it.
+var stdoutCommandTimeout = 30 * time.Second
+
+// runStdoutCommand runs command and returns its standard output only, for
+// callers that parse it (container inspect, daemon endpoint resolution): a
+// warning the CLI writes to standard error must not corrupt the parse.
+// Standard error is captured separately and logged with the output on
+// failure. The run is bounded by stdoutCommandTimeout, and WaitDelay stops
+// a child that keeps the output pipes open after the kill, so a hung CLI
+// returns an error instead of blocking its caller. Logging otherwise
+// follows runSimpleCommand.
+func runStdoutCommand(ctx context.Context, command string, args ...string) (string, error) {
+	runtimeLog().Debug("Executing command", "cmd", command, "argc", len(args))
+	ctx, cancel := context.WithTimeout(ctx, stdoutCommandTimeout)
+	defer cancel()
+	start := time.Now()
+	cmd := exec.CommandContext(ctx, command, args...)
+	cmd.WaitDelay = 2 * time.Second
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	elapsed := time.Since(start)
+	if err != nil {
+		logCommandFailure(ctx, command, len(args), elapsed, append(out, stderr.Bytes()...))
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", fmt.Errorf("%s failed: %w (%v)", command, err, ctxErr)
+		}
+		return "", fmt.Errorf("%s failed: %w", command, err)
+	}
+	runtimeLog().Debug("Command completed", "cmd", command, "argc", len(args), "duration", elapsed)
+	return strings.TrimSpace(string(out)), nil
+}
+
 // logCommandFailure logs a failed command's combined stdout/stderr, unless
 // ctx is marked via WithSensitiveExec — in which case the output is omitted
 // (never even truncated or hashed) because it may carry caller-supplied
@@ -2134,6 +2205,12 @@ func applyResolvedAuth(config RunConfig, addEnv func(string, string), addVolume 
 			// intentionally cleared by run.go. Skip the copy/mount.
 			continue
 		}
+		// No auth file may come from a Runtime Broker control path or from
+		// the Scion global directory, whether it is copied or bound.
+		sourcePath, err := checkHostFileSource(f.SourcePath)
+		if err != nil {
+			return err
+		}
 		containerPath := expandTildeTarget(f.ContainerPath, containerHome)
 
 		if config.HomeDir != "" {
@@ -2153,12 +2230,12 @@ func applyResolvedAuth(config RunConfig, addEnv func(string, string), addVolume 
 				}
 				home = h
 			}
-			if err := copyFileIntoHome(f.SourcePath, home, relPath); err != nil {
+			if err := copyFileIntoHome(sourcePath, home, relPath); err != nil {
 				return fmt.Errorf("failed to copy auth file %s → %s: %w", f.SourcePath, dst, err)
 			}
 		} else {
 			// Volume mount mode: register a read-only bind mount
-			registerMount(f.SourcePath, containerPath, true, false)
+			registerMount(sourcePath, containerPath, true, false)
 		}
 	}
 

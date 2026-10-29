@@ -40,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokercontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -885,6 +886,22 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	if req.MoveReincarnationID != "" && !req.ProvisionOnly {
 		ValidationError(w, "moveReincarnationId is only valid on a provision-only request", nil)
 		return
+	}
+	// No volume in the request may reach a Runtime Broker control path;
+	// refused before beginCreateAttempt, so the refusal has no side effect.
+	{
+		var cfgVols, inlineVols []api.VolumeMount
+		if req.Config != nil {
+			cfgVols = req.Config.Volumes
+		}
+		if req.InlineConfig != nil {
+			inlineVols = req.InlineConfig.Volumes
+		}
+		if err := checkRequestVolumes(cfgVols, inlineVols); err != nil {
+			span.SetStatus(codes.Error, brokercontrol.ErrorCode)
+			writeControlPathRefusal(w, err)
+			return
+		}
 	}
 
 	// Flat Runtime Broker target checks (target required, mismatch,
@@ -3872,6 +3889,16 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		return
 	}
 	opts.ResolvedPlacement, opts.PlacementResolved = rp, true
+
+	// No volume in the Hub's inline config may reach a Runtime Broker
+	// control path; refused before it is merged into scion-agent.json.
+	if startReq.InlineConfig != nil {
+		if err := checkRequestVolumes(startReq.InlineConfig.Volumes); err != nil {
+			span.SetStatus(codes.Error, brokercontrol.ErrorCode)
+			writeControlPathRefusal(w, err)
+			return
+		}
+	}
 
 	// Apply updated InlineConfig to scion-agent.json before starting.
 	if startReq.InlineConfig != nil && opts.ProjectPath != "" {

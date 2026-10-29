@@ -607,6 +607,12 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		finalScionCfg = withEnvironment(finalScionCfg, ownEnv.clone())
 		finalScionCfg.Volumes = mergeEnvironmentVolumes(settingsVolumes, fileVolumes, ownEnv.Volumes)
 		applyEnvironmentResources(ctx, finalScionCfg, settings, envProfile, harnessConfigName)
+		// No configured volume (settings, profile, template, harness
+		// config, the requester's own) may reach a Runtime Broker control
+		// path: refuse before anything below persists or runs.
+		if err := runtime.CheckVolumeSources(finalScionCfg.Volumes); err != nil {
+			return nil, err
+		}
 	}
 
 	// Limits (ptone/scion#623): the agent's own max_turns, max_model_calls
@@ -2759,6 +2765,19 @@ authDone:
 			util.Debugf("Start: failed to mark agent error in local config: %v", updateErr)
 		}
 		return nil, classifyLaunchRuntimeError(err, resolvedImage)
+	}
+	// Before anything else happens with the new container, re-check its
+	// actual binds against the Runtime Broker control paths; a refused or
+	// unverifiable bind stops it and fails the start (verifyCreatedMounts).
+	if err := m.verifyCreatedMounts(ctx, runtime.RunRef{ID: id, RunID: runID}, opts.Name); err != nil {
+		if recErr := setStartFailedRunID(RunOwnerTargetFor(opts), runID); recErr != nil {
+			slog.Warn("Start: failed to record the failed start in the host state file",
+				"agent", opts.Name, "run_id", runID, "error", recErr)
+		}
+		if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, "error", m.Runtime.Name(), profileName); updateErr != nil {
+			util.Debugf("Start: failed to mark agent error in local config: %v", updateErr)
+		}
+		return nil, err
 	}
 	slog.Info("agent start: runtime.Run complete", "agent", opts.Name,
 		"total_elapsed_ms", time.Since(startEntry).Milliseconds())
