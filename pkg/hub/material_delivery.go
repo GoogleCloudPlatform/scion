@@ -152,7 +152,10 @@ func (s *deliverySelector) authorize(ctx context.Context, kind MaterialKind, rec
 		// with the item's name, scope and the deny cause, never its value, so
 		// an operator can see why an agent came up without it. The create-time
 		// availability probe decides nothing for delivery and stays quiet.
-		if s.purpose == PurposeDispatch || s.purpose == PurposeRestart {
+		// Not logged once the request has ended: a decision under a
+		// cancelled or expired ctx is the caller's cancel, not a refusal
+		// worth an operator's attention.
+		if (s.purpose == PurposeDispatch || s.purpose == PurposeRestart) && ctx.Err() == nil {
 			s.logger().WarnContext(ctx, "launch material withheld: not authorized for delivery",
 				"agent_id", s.agent.ID, "purpose", string(s.purpose), "kind", string(kind),
 				"key", key, "scope", scope, "scope_id", scopeID,
@@ -387,7 +390,8 @@ func (d *HTTPAgentDispatcher) selectDeliverySecrets(ctx context.Context, sel *de
 		}
 	}
 
-	if sel.denied > 0 {
+	// Not logged once the request has ended (see authorize).
+	if sel.denied > 0 && ctx.Err() == nil {
 		d.log.WarnContext(ctx, "launch material withheld: items not authorized for delivery", "agent_id", agent.ID, "purpose", string(sel.purpose), "count", sel.denied)
 	}
 	if len(kept) == 0 {

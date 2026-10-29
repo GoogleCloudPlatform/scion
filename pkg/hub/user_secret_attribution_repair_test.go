@@ -705,3 +705,70 @@ func TestUserSecretAttributionRepair_RecreatedRowVanishes(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, legacy, row.CreatedBy, "the recreated row is not touched by this pass")
 }
+
+// TestUserSecretAttributionRepair_RereadOtherOwnAgentRepaired: after a
+// missed swap, a re-read that finds the row attributed to a different agent
+// reference, one of the owner's own agents, is decided again on its own
+// facts and repaired on the second attempt. The repair records the author
+// it actually replaced (the re-read reference), with one audit record.
+func TestUserSecretAttributionRepair_RereadOtherOwnAgentRepaired(t *testing.T) {
+	f, capturer, _ := newUSAFixture(t, "usa-reread-own")
+	ctx := context.Background()
+	other, _ := f.direct(t, "usa-reread-own-other", true)
+	require.NotEqual(t, capturer, other)
+	row, err := f.Store.GetSecret(ctx, sdAlwaysKey, store.ScopeUser, f.UserID)
+	require.NoError(t, err)
+	id := row.ID
+	missed := false
+	s := &usaTxStore{Store: f.Store, wrap: func(tx store.Store) store.Store {
+		return usaRewriteOnMissTx{Store: tx, row: *row, newAuthor: userSecretAttrAgentRefPrefix + other, missed: &missed}
+	}}
+	res, err := RepairLegacyUserSecretAttribution(ctx, s)
+	require.NoError(t, err)
+	require.True(t, missed, "the first swap missed")
+	assert.Empty(t, res.Skipped)
+	assert.Zero(t, res.AuthorChanged)
+	var got *UserSecretAttributionRepair
+	for i := range res.Repaired {
+		if res.Repaired[i].Name == sdAlwaysKey {
+			got = &res.Repaired[i]
+		}
+	}
+	require.NotNil(t, got, "the row is repaired on the retry: %+v", res.Repaired)
+	assert.Equal(t, userSecretAttrBasisAncestryRoot, got.Basis)
+	assert.Equal(t, userSecretAttrAgentRefPrefix+other, got.OriginalCreatedBy, "the replaced author is the re-read reference")
+	audits, _, err := f.Store.ListMutationAudits(ctx, store.MutationAuditFilter{MutationType: mutationTypeUserSecretAttributionRepair, TargetID: id})
+	require.NoError(t, err)
+	assert.Len(t, audits, 1, "one audit record for the applied retry")
+}
+
+// usaRewriteOnMissTx makes the first swap of row miss after another writer
+// re-attributed the row to newAuthor (the stored row changes), so the
+// repair's re-read and second swap see newAuthor.
+type usaRewriteOnMissTx struct {
+	store.Store
+	row       store.Secret
+	newAuthor string
+	missed    *bool
+}
+
+func (m usaRewriteOnMissTx) AttributeUserSecretToOwner(ctx context.Context, id, expected string) (bool, error) {
+	if id == m.row.ID && !*m.missed {
+		*m.missed = true
+		cur, err := m.Store.GetSecret(ctx, m.row.Key, m.row.Scope, m.row.ScopeID)
+		if err != nil {
+			return false, err
+		}
+		// UpdateSecret keeps created_by, so the writer replaces the row
+		// under the same ID (the row the repair listed).
+		if err := m.Store.DeleteSecret(ctx, cur.Key, cur.Scope, cur.ScopeID); err != nil {
+			return false, err
+		}
+		cur.CreatedBy = m.newAuthor
+		if err := m.Store.CreateSecret(ctx, cur); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	return m.Store.AttributeUserSecretToOwner(ctx, id, expected)
+}
