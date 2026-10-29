@@ -40,7 +40,7 @@ func TestOpenProjectTree_Canonical(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	if name != projectTreeTestID {
 		t.Errorf("name = %q, want %q", name, projectTreeTestID)
 	}
