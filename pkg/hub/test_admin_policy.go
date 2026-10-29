@@ -442,6 +442,7 @@ var testAdminSettingsSectionPolicy = map[string]testAdminPolicy{
 	"profiling":         testAdminPolicyDeny,
 
 	"agent_delegation_policy": testAdminPolicyDeny,
+	"chat_retention":          testAdminPolicyDeny,
 }
 
 // testAdminSettingsKeyPolicy classifies every operational settings key

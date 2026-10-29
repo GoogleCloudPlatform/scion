@@ -802,6 +802,15 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					hubSrv.SetWebChatStore(webStore)
 					log.Printf("Web chat store initialized")
 
+					// Chat message retention purges the web chat tables
+					// and messages in one transaction on this same DB, so
+					// it is wired only once the webchat tables exist.
+					if crp, ok := s.(interface {
+						ChatRetention() store.ChatRetentionStore
+					}); ok {
+						hubSrv.SetChatRetentionStore(crp.ChatRetention())
+					}
+
 					// W7: Initialize local-disk attachment store.
 					globalDir, err := config.GetGlobalDir()
 					if err != nil {
