@@ -1818,6 +1818,15 @@ authDone:
 	emptyPerAgentWorkspace := ""
 	if emptyPerAgent {
 		emptyPerAgentWorkspace = filepath.Join(agentDir, "workspace")
+		// On a shared Layout it is the agent's directory on the share
+		// (sharedLayoutAgentWorkspace), as GetAgent resolved it.
+		sharedWS, sharedErr := sharedLayoutAgentWorkspace(ctx, settings, projectDir, opts.Name, agentDir)
+		if sharedErr != nil {
+			return nil, sharedErr
+		}
+		if sharedWS != "" {
+			emptyPerAgentWorkspace = sharedWS
+		}
 		if explicitWorkspace || filepath.Clean(effectiveWorkspace) != emptyPerAgentWorkspace {
 			return nil, fmt.Errorf("empty-per-agent agent %q must use its private workspace %s, not %q", opts.Name, emptyPerAgentWorkspace, effectiveWorkspace)
 		}

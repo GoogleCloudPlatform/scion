@@ -1,0 +1,293 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// These tests exercise unix-only, Windows-gated agent storage code.
+//go:build unix
+
+package agent
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+)
+
+// writeSharedProjectConfig seeds the hub's shared project configuration
+// <root>/.scion (project-id, project-slug "web", settings.yaml).
+func writeSharedProjectConfig(t *testing.T, root, projectID string) string {
+	t.Helper()
+	scionDir := filepath.Join(root, config.DotScion)
+	mustMkdirAll(t, scionDir)
+	for name, content := range map[string]string{
+		projectkeys.ProjectIDFile:   projectID + "\n",
+		projectkeys.ProjectSlugFile: "web\n",
+		"settings.yaml":             "schema_version: \"1\"\n",
+	} {
+		require.NoError(t, os.WriteFile(filepath.Join(scionDir, name), []byte(content), 0o644))
+	}
+	return scionDir
+}
+
+// externalAgentDir is the broker-local external agent dir of agent in the
+// shared project projectID (slug "web") under home.
+func externalAgentDir(home, projectID, agent string) string {
+	return filepath.Join(home, config.GlobalDir, config.ProjectConfigsDir,
+		"web__"+strings.ReplaceAll(projectID, "-", "")[:8], config.DotScion, "agents", agent)
+}
+
+// sharedLayoutStart starts agent "test-agent" from the shared project root
+// on an nfs project storage Layout with a mock runtime named rtName, and
+// returns the RunConfig, the project root, the external agent dir and the
+// Start options it used.
+func sharedLayoutStart(t *testing.T, rtName string, mutate func(*api.StartOptions)) (runtime.RunConfig, string, string, api.StartOptions, error) {
+	t.Helper()
+	f := newSharedDirStorageRunFixture(t)
+	mountRoot := filepath.Join(t.TempDir(), "nfs")
+	f.writeGlobalSettings(t, fmt.Sprintf(nfsWorkspaceStartYAML, mountRoot))
+	root := filepath.Join(mountRoot, "share-1", "projects", sharedRootUUID)
+	scionDir := writeSharedProjectConfig(t, root, sharedRootUUID)
+	before := listTree(t, scionDir)
+
+	var cfg runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		NameFunc: func() string { return rtName },
+		RunFunc: func(ctx context.Context, rc runtime.RunConfig) (string, error) {
+			cfg = rc
+			return "mock-id", nil
+		},
+	}
+	opts := api.StartOptions{
+		Name:           "test-agent",
+		ProjectPath:    root,
+		NoAuth:         true,
+		RunID:          "run-dtc1",
+		FreshProvision: true,
+		Env: map[string]string{
+			"SCION_AGENT_ID":   "agent-dtc",
+			"SCION_PROJECT_ID": sharedRootUUID,
+		},
+	}
+	mutate(&opts)
+	_, err := NewManager(mockRT).Start(context.Background(), opts)
+	if after := listTree(t, scionDir); strings.Join(after, "\n") != strings.Join(before, "\n") {
+		t.Errorf("the agent manager wrote into the shared project configuration:\nbefore %v\nafter  %v", before, after)
+	}
+	return cfg, root, externalAgentDir(f.tmpDir, sharedRootUUID, "test-agent"), opts, err
+}
+
+// A clone-per-agent agent on a shared Kubernetes NFS Layout: its workspace
+// is the agent's directory on the share (<HostBase>/projects/<uuid>/agents/
+// <slug>/workspace), which the workspace source guard admits; its state
+// stays in the broker-local external root, with no workspace there; and
+// the run is recorded where delete and launch recovery read it.
+func TestStart_SharedLayoutClonePerAgentWorkspaceOnShare(t *testing.T) {
+	cfg, root, ext, opts, err := sharedLayoutStart(t, "kubernetes", func(o *api.StartOptions) {
+		o.GitClone = &api.GitCloneConfig{URL: "https://example.com/repo.git"}
+		o.Env["SCION_WORKSPACE_MODE"] = "clone-per-agent"
+	})
+	require.NoError(t, err, "the agent's workspace on the share must pass the workspace source guard")
+
+	shareWS := filepath.Join(root, "agents", "test-agent", "workspace")
+	assert.Equal(t, "test-agent", cfg.NFSAgentDirName, "the pod uses the agent's own directory on the share")
+	assert.Equal(t, "scion/test-agent", cfg.NFSAgentBranch)
+	assert.DirExists(t, shareWS, "the NFS leaf helpers create the agent's workspace on the share")
+
+	assert.FileExists(t, filepath.Join(ext, "scion-agent.json"), "agent state stays in the broker-local external root")
+	assert.NoDirExists(t, filepath.Join(ext, "workspace"), "no workspace is created below the broker-local agent dir")
+
+	assert.FileExists(t, filepath.Join(ext, HostStateFile), "the run is recorded in the agent's state dir")
+	got, err := RecordedRunOwner(RunOwnerTargetFor(opts))
+	require.NoError(t, err)
+	assert.Equal(t, "run-dtc1", got, "delete and launch recovery find the recorded run")
+}
+
+// The same for an empty-per-agent agent: the workspace handed to the
+// runtime is the agent's directory on the share.
+func TestStart_SharedLayoutEmptyPerAgentWorkspaceOnShare(t *testing.T) {
+	cfg, root, ext, opts, err := sharedLayoutStart(t, "kubernetes", func(o *api.StartOptions) {
+		o.EmptyPerAgentWorkspace = true
+		o.Env["SCION_WORKSPACE_MODE"] = "empty-per-agent"
+	})
+	require.NoError(t, err, "the agent's workspace on the share must pass the workspace source guard")
+
+	shareWS := filepath.Join(root, "agents", "test-agent", "workspace")
+	assert.Equal(t, shareWS, cfg.Workspace)
+	assert.Equal(t, "test-agent", cfg.NFSAgentDirName)
+	assert.True(t, cfg.NFSAgentDirEmpty)
+	assert.DirExists(t, shareWS)
+	assert.NoDirExists(t, filepath.Join(root, "workspace"), "the project's shared workspace is not created")
+
+	assert.FileExists(t, filepath.Join(ext, "scion-agent.json"))
+	assert.NoDirExists(t, filepath.Join(ext, "workspace"))
+
+	got, err := RecordedRunOwner(RunOwnerTargetFor(opts))
+	require.NoError(t, err)
+	assert.Equal(t, "run-dtc1", got)
+}
+
+// A shared-plain hub-native agent on the same Layout is unaffected: its
+// workspace is the project's NFS workspace leaf (projects/<uuid>/
+// workspace, the backend override), never an agent directory on the share.
+func TestStart_SharedLayoutSharedPlainUnaffected(t *testing.T) {
+	for _, rtName := range []string{"docker", "kubernetes"} {
+		t.Run(rtName, func(t *testing.T) {
+			cfg, root, ext, opts, err := sharedLayoutStart(t, rtName, func(o *api.StartOptions) {
+				o.SharedWorkspace = true
+			})
+			require.NoError(t, err)
+			if rtName == "docker" {
+				assert.Equal(t, filepath.Join(root, "workspace"), cfg.Workspace)
+			} else {
+				assert.Equal(t, "projects/"+sharedRootUUID+"/workspace", cfg.NFSSubPath)
+				assert.Empty(t, cfg.NFSAgentDirName)
+			}
+			assert.NoDirExists(t, filepath.Join(root, "agents"), "a shared-plain agent gets no agent directory on the share")
+			assert.FileExists(t, filepath.Join(ext, "scion-agent.json"))
+			got, err := RecordedRunOwner(RunOwnerTargetFor(opts))
+			require.NoError(t, err)
+			assert.Equal(t, "run-dtc1", got)
+		})
+	}
+}
+
+// sharedLayoutAgentWorkspace applies only to a shared project configuration
+// on a shared Layout, never to a legacy agent dir, and refuses a Layout
+// that places the project elsewhere.
+func TestSharedLayoutAgentWorkspace(t *testing.T) {
+	nfsSettings := func(t *testing.T, mountRoot string) *config.VersionedSettings {
+		t.Helper()
+		return &config.VersionedSettings{Server: &config.V1ServerConfig{
+			WorkspaceStorage: &config.V1WorkspaceStorageConfig{
+				Backend: config.WorkspaceStorageBackendNFS,
+				NFS: &config.V1NFSConfig{
+					MountRoot: mountRoot,
+					Shares:    []config.V1NFSShare{{ID: "share-1", Server: "10.0.0.2", Export: "/scion-workspaces", PVName: "ws-pv"}},
+				},
+			},
+		}}
+	}
+	ctx := context.Background()
+
+	t.Run("shared Layout", func(t *testing.T) {
+		_, home := sharedConfigProject(t)
+		mountRoot := filepath.Join(t.TempDir(), "nfs")
+		root := filepath.Join(mountRoot, "share-1", "projects", sharedCfgProjectID)
+		scionDir := writeSharedProjectConfig(t, root, sharedCfgProjectID)
+		got, err := sharedLayoutAgentWorkspace(ctx, nfsSettings(t, mountRoot), scionDir, "a1", externalAgentDir(home, sharedCfgProjectID, "a1"))
+		require.NoError(t, err)
+		assert.Equal(t, filepath.Join(root, "agents", "a1", "workspace"), got)
+	})
+
+	t.Run("not a shared project configuration", func(t *testing.T) {
+		f := newSharedDirStorageRunFixture(t)
+		got, err := sharedLayoutAgentWorkspace(ctx, nfsSettings(t, t.TempDir()), f.projectScionDir, "a1", filepath.Join(f.projectScionDir, "agents", "a1"))
+		require.NoError(t, err)
+		assert.Empty(t, got, "a non-shared project keeps <agentDir>/workspace")
+	})
+
+	t.Run("local Layout", func(t *testing.T) {
+		root, home := sharedConfigProject(t)
+		got, err := sharedLayoutAgentWorkspace(ctx, &config.VersionedSettings{}, filepath.Join(root, config.DotScion), "a1", externalAgentDir(home, sharedCfgProjectID, "a1"))
+		require.NoError(t, err)
+		assert.Empty(t, got, "a non-shared Layout keeps <agentDir>/workspace")
+	})
+
+	t.Run("legacy agent dir", func(t *testing.T) {
+		_, home := sharedConfigProject(t)
+		mountRoot := filepath.Join(t.TempDir(), "nfs")
+		root := filepath.Join(mountRoot, "share-1", "projects", sharedCfgProjectID)
+		scionDir := writeSharedProjectConfig(t, root, sharedCfgProjectID)
+		legacyScion := filepath.Join(home, config.GlobalDir, config.ProjectsDir, "web", config.DotScion)
+		mustMkdirAll(t, legacyScion)
+		require.NoError(t, config.WriteProjectID(legacyScion, sharedCfgProjectID))
+		legacy := filepath.Join(legacyScion, "agents", "old")
+		mustMkdirAll(t, legacy)
+		require.NoError(t, os.WriteFile(filepath.Join(legacy, "scion-agent.json"), []byte("{}"), 0o644))
+		got, err := sharedLayoutAgentWorkspace(ctx, nfsSettings(t, mountRoot), scionDir, "old", legacy)
+		require.NoError(t, err)
+		assert.Empty(t, got, "a legacy agent keeps its legacy workspace")
+	})
+
+	t.Run("Layout places the project elsewhere", func(t *testing.T) {
+		root, home := sharedConfigProject(t)
+		_, err := sharedLayoutAgentWorkspace(ctx, nfsSettings(t, filepath.Join(t.TempDir(), "other")), filepath.Join(root, config.DotScion), "a1", externalAgentDir(home, sharedCfgProjectID, "a1"))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "refusing to start")
+	})
+}
+
+// The host state root of a shared project configuration is the root of
+// the agent dir config.AgentDirForProject resolves, for every sharing mode:
+// the record is written and read in the agent's state dir.
+func TestHostStateRootFor_SharedProjectConfig(t *testing.T) {
+	root, home := sharedConfigProject(t)
+	ext := externalAgentDir(home, sharedCfgProjectID, "a1")
+	mustMkdirAll(t, ext)
+	extRoot := filepath.Dir(filepath.Dir(filepath.Dir(ext)))
+
+	for _, shared := range []bool{false, true} {
+		for _, hubID := range []string{sharedCfgProjectID, ""} {
+			t.Run(fmt.Sprintf("shared=%v hub id %q", shared, hubID), func(t *testing.T) {
+				target := RunOwnerTarget{ProjectPath: root, AgentName: "a1", HubProjectID: hubID, SharedWorkspace: shared}
+				got, err := HostStateRootFor(target)
+				require.NoError(t, err)
+				assert.Equal(t, extRoot, got)
+			})
+		}
+	}
+
+	target := RunOwnerTarget{ProjectPath: root, AgentName: "a1", HubProjectID: sharedCfgProjectID}
+	require.NoError(t, recordRunOwnerInAgentDir(target, ext, "run-dtc2"))
+	got, err := RecordedRunOwner(target)
+	require.NoError(t, err)
+	assert.Equal(t, "run-dtc2", got)
+	assert.FileExists(t, filepath.Join(ext, HostStateFile))
+	assert.NoFileExists(t, filepath.Join(root, config.DotScion, "agents", "a1", HostStateFile), "nothing is recorded on the share")
+
+	_, err = HostStateRootFor(RunOwnerTarget{ProjectPath: root, AgentName: "a1", HubProjectID: "11111111-2222-4333-8444-555555555555"})
+	assert.ErrorIs(t, err, errHostStateRootRefused, "a hub project ID naming another project is refused")
+}
+
+// A legacy agent of a shared project configuration keeps its record in its
+// legacy in-project dir, where config.AgentDirForProject finds it.
+func TestHostStateRootFor_SharedProjectConfigLegacyAgent(t *testing.T) {
+	root, home := sharedConfigProject(t)
+	legacyRoot := filepath.Join(home, config.GlobalDir, config.ProjectsDir, "web")
+	legacyScion := filepath.Join(legacyRoot, config.DotScion)
+	mustMkdirAll(t, legacyScion)
+	require.NoError(t, config.WriteProjectID(legacyScion, sharedCfgProjectID))
+	legacy := filepath.Join(legacyScion, "agents", "old")
+	mustMkdirAll(t, legacy)
+	require.NoError(t, os.WriteFile(filepath.Join(legacy, "scion-agent.json"), []byte("{}"), 0o644))
+
+	target := RunOwnerTarget{ProjectPath: root, AgentName: "old", HubProjectID: sharedCfgProjectID}
+	got, err := HostStateRootFor(target)
+	require.NoError(t, err)
+	assert.True(t, samePath(legacyRoot, got), "root %q, want the legacy project root %q", got, legacyRoot)
+	require.NoError(t, recordRunOwnerInAgentDir(target, legacy, "run-dtc3"))
+	owner, err := RecordedRunOwner(target)
+	require.NoError(t, err)
+	assert.Equal(t, "run-dtc3", owner)
+}
