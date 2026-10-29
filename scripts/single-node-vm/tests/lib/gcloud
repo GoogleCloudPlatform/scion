@@ -1492,6 +1492,12 @@ STUBERR
         # wiring tests that opt into GCLOUD_STUB_SSH_SUCCEEDS stop at.
         touch "${GCLOUD_STUB_STATE_DIR}/settings-yaml-dev-mode-written"
         ;;
+      *"sudo tee /etc/systemd/system/scion-hub.service"*)
+        # The systemd unit install (with the boot-failure guard before
+        # it), in the create path and in migrate-layout: a sentinel for
+        # tests that stop once the unit is written.
+        touch "${GCLOUD_STUB_STATE_DIR}/hub-unit-installed"
+        ;;
       "curl -s http://localhost:8080/healthz")
         # deploy.sh's wait_for_hub_health poll. GCLOUD_STUB_HEALTHZ_BODY
         # overrides the answer (e.g. a degraded or unhealthy body); the

@@ -432,6 +432,31 @@ install_layout_command() {
     "    rm -f \"\$SCION_LAYOUT_SH\""
 }
 
+# install_guard_command -- prints remote shell text that installs the
+# boot-failure guard: scion-hub-rollback.sh (this directory) root-owned
+# 0755 at /usr/local/libexec/scion/scion-hub-rollback.sh (design D1 as
+# amended: outside the hub-owned ${INSTALL_ROOT}, so the hub user can
+# neither edit nor replace a script root runs), through scion-layout.sh
+# install-guard, which creates /usr/local/libexec/scion root-owned 0755 and
+# checks its directory chain; and the root oneshot scion-hub-rollback.service that
+# scion-hub.service's OnFailure= starts. Idempotent. Shared by the deploy
+# and migrate-layout paths so both install the same guard; the caller
+# writes scion-hub.service afterwards and runs daemon-reload.
+install_guard_command() {
+  printf '%s\n' \
+    "    SCION_ROLLBACK_SH=\"\$(mktemp)\"" \
+    "    cat > \"\$SCION_ROLLBACK_SH\" << 'SCIONROLLBACKEOF'" \
+    "$(cat "${SCRIPT_DIR}/scion-hub-rollback.sh")" \
+    "SCIONROLLBACKEOF"
+  # shellcheck disable=SC2016 # expanded on the VM, not here
+  install_layout_command install-guard '"$SCION_ROLLBACK_SH"'
+  printf '%s\n' \
+    "    rm -f \"\$SCION_ROLLBACK_SH\"" \
+    "    sudo tee /etc/systemd/system/scion-hub-rollback.service > /dev/null << 'SERVICEEOF'" \
+    "$(cat "${SCRIPT_DIR}/config-templates/scion-hub-rollback.service")" \
+    "SERVICEEOF"
+}
+
 # read_current_release ZONE -- prints the release tag ${INSTALL_ROOT}/current
 # points at on the hub VM (e.g. nightly-20261023, or git-<sha12> for an
 # adopted git build). Prints nothing when the VM has no layout yet, is
@@ -1301,6 +1326,7 @@ if [[ "$MIGRATE_LAYOUT_MODE" == "true" ]]; then
     set -euo pipefail
 $(install_layout_command adopt)
 $(install_layout_command set-maintenance /home/scion/.scion/settings.yaml "${MIGRATE_UPDATE_POLICY}")
+$(install_guard_command)
     sudo tee /etc/systemd/system/scion-hub.service > /dev/null << 'SERVICEEOF'
 $(cat "${SCRIPT_DIR}/config-templates/scion-hub.service")
 SERVICEEOF
@@ -3039,6 +3065,8 @@ info "Installing systemd service..."
 gcloud compute ssh "${INSTANCE_NAME}" \
   --zone="${ZONE}" --project="${PROJECT_ID}" \
   --command="
+    set -euo pipefail
+$(install_guard_command)
     sudo tee /etc/systemd/system/scion-hub.service > /dev/null << 'SERVICEEOF'
 $(cat "${SCRIPT_DIR}/config-templates/scion-hub.service")
 SERVICEEOF

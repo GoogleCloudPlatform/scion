@@ -1,0 +1,8 @@
+[Unit]
+Description=Scion Hub boot-failure guard (restores the previous release)
+# Started by scion-hub.service's OnFailure=. The script acts only when the
+# hub hit its start limit after crashing; see the script header.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/scion/scion-hub-rollback.sh

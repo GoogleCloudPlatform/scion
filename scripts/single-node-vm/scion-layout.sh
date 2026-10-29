@@ -51,12 +51,20 @@
 #       keeps notify/disabled, and writes notify when the key is absent.
 #       Run as root, it re-runs itself as the settings file's owner for the
 #       edit, and verifies the result before replacing the file.
+#   scion-layout.sh install-guard ROLLBACK_SCRIPT
+#       Install ROLLBACK_SCRIPT (scion-hub-rollback.sh, the boot-failure
+#       guard) root-owned, mode 0755, at <rollback-path>, creating its
+#       directory root-owned 0755. Outside <root> on purpose: a root-owned
+#       file inside the owner's tree could be replaced by the owner, and
+#       root runs this one. A no-op when the installed copy is identical.
 #
 # Environment (defaults are what deploy.sh uses; tests override them):
 #   SCION_INSTALL_ROOT    install root            (default /opt/scion)
 #   SCION_BIN_LINK        CLI symlink path        (default /usr/local/bin/scion)
 #   SCION_INSTALL_OWNER   user:group owning the root (default scion:scion);
 #                         empty skips chown (tests run unprivileged)
+#   SCION_ROLLBACK_PATH   boot-failure guard script path
+#                         (default /usr/local/libexec/scion/scion-hub-rollback.sh)
 #   SCION_LAYOUT_YAML_TO_JSON
 #                         shell command that parses YAML on stdin to JSON,
 #                         used to verify settings edits (default: python3
@@ -67,6 +75,7 @@ set -euo pipefail
 INSTALL_ROOT="${SCION_INSTALL_ROOT:-/opt/scion}"
 BIN_LINK="${SCION_BIN_LINK:-/usr/local/bin/scion}"
 OWNER="${SCION_INSTALL_OWNER-scion:scion}"
+ROLLBACK_PATH="${SCION_ROLLBACK_PATH:-/usr/local/libexec/scion/scion-hub-rollback.sh}"
 
 # canonical_abs PATH -- an absolute path in plain form: starts with /, no
 # empty, "." or ".." components, no trailing /. Everything below walks
@@ -82,6 +91,7 @@ log() { echo "scion-layout: $*"; }
 die() { echo "scion-layout: ERROR: $*" >&2; exit 1; }
 
 canonical_abs "$INSTALL_ROOT" || die "SCION_INSTALL_ROOT must be an absolute path without '.', '..', '//' or a trailing '/' (got '$INSTALL_ROOT')"
+canonical_abs "$ROLLBACK_PATH" || die "SCION_ROLLBACK_PATH must be an absolute path without '.', '..', '//' or a trailing '/' (got '$ROLLBACK_PATH')"
 canonical_abs "$BIN_LINK" || die "SCION_BIN_LINK must be an absolute path without '.', '..', '//' or a trailing '/' (got '$BIN_LINK')"
 
 # valid_tag TAG -- a release tag (nightly-20261023, v0.3.0-preview.4) or a
@@ -579,6 +589,36 @@ cmd_adopt() {
   link_bin
 }
 
+# cmd_install_guard SCRIPT -- install SCRIPT as <rollback-path>, root-owned
+# 0755, in a directory chain only root can change (dir_chain_is_safe): the
+# root oneshot scion-hub-rollback.service runs it. Missing directories are
+# created one at a time (make_dirs_down_to), root-owned 0755. The new copy
+# is written next to the target under a fresh name and renamed over it, so
+# the path always holds either the old or the complete new script.
+cmd_install_guard() {
+  [[ $# -eq 1 ]] || die "usage: install-guard ROLLBACK_SCRIPT"
+  local src="$1" dir tmp
+  [[ -f "$src" ]] || die "rollback script not found: $src"
+  dir="$(dirname "$ROLLBACK_PATH")"
+  dir_chain_is_safe "$(nearest_existing "$dir")" || die "$UNSAFE_REASON; refusing to install $ROLLBACK_PATH"
+  make_dirs_down_to "$dir"
+  dir_chain_is_safe "$dir" || die "$UNSAFE_REASON; refusing to install $ROLLBACK_PATH"
+  refuse_symlink "$ROLLBACK_PATH"
+  if [[ -f "$ROLLBACK_PATH" ]] && cmp -s "$src" "$ROLLBACK_PATH" \
+     && [[ "$(stat -c '%a|%U' -- "$ROLLBACK_PATH")" == "755|$(id -un)" ]]; then
+    log "$ROLLBACK_PATH already installed"
+    return 0
+  fi
+  tmp="$(mktemp "$ROLLBACK_PATH.XXXXXX")"
+  if ! cp -- "$src" "$tmp" || ! cmp -s "$src" "$tmp"; then
+    rm -f "$tmp"
+    die "copy of $src to $dir is incomplete (disk full?); nothing was changed"
+  fi
+  chmod 0755 "$tmp"
+  mv -fT "$tmp" "$ROLLBACK_PATH"
+  log "installed $ROLLBACK_PATH"
+}
+
 # YAML_TO_JSON_PY -- the default settings parser for verify_settings_edit:
 # PyYAML (a cloud-init dependency, so present on the Ubuntu VM image) with
 # duplicate mapping keys rejected, as the hub's own YAML parser does.
@@ -802,7 +842,8 @@ main() {
     __as-owner) cmd_as_owner "$@" ;;
     adopt) cmd_adopt "$@" ;;
     set-maintenance) cmd_set_maintenance "$@" ;;
-    *) die "usage: scion-layout.sh {install TAG BINARY | adopt | set-maintenance SETTINGS_FILE POLICY}" ;;
+    install-guard) cmd_install_guard "$@" ;;
+    *) die "usage: scion-layout.sh {install TAG BINARY | adopt | set-maintenance SETTINGS_FILE POLICY | install-guard ROLLBACK_SCRIPT}" ;;
   esac
 }
 
