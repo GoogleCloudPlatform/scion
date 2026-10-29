@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package oidckeys
 
 import (
 	"crypto/rand"
@@ -22,12 +22,13 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/apierr"
 	"github.com/go-jose/go-jose/v4/jwt"
 )
 
-// oidcDiscoveryDocument represents the OpenID Connect Provider Metadata
+// OIDCDiscoveryDocument represents the OpenID Connect Provider Metadata
 // returned by the /.well-known/openid-configuration endpoint.
-type oidcDiscoveryDocument struct {
+type OIDCDiscoveryDocument struct {
 	Issuer                           string   `json:"issuer"`
 	JWKSURI                          string   `json:"jwks_uri"`
 	ResponseTypesSupported           []string `json:"response_types_supported"`
@@ -41,13 +42,13 @@ type oidcDiscoveryDocument struct {
 // GET /.well-known/openid-configuration.
 func (h *OIDCHandlers) HandleOIDCDiscovery(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w, http.MethodGet)
+		apierr.MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
 	issuer := h.d.IssuerURL()
 
-	doc := oidcDiscoveryDocument{
+	doc := OIDCDiscoveryDocument{
 		Issuer:                           issuer,
 		JWKSURI:                          issuer + "/.well-known/jwks.json",
 		ResponseTypesSupported:           []string{"id_token"},
@@ -71,7 +72,7 @@ func (h *OIDCHandlers) HandleOIDCDiscovery(w http.ResponseWriter, r *http.Reques
 // HandleJWKS serves the JSON Web Key Set at GET /.well-known/jwks.json.
 func (h *OIDCHandlers) HandleJWKS(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w, http.MethodGet)
+		apierr.MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -88,13 +89,13 @@ func (h *OIDCHandlers) HandleJWKS(w http.ResponseWriter, r *http.Request) {
 // Identity Token Endpoint — POST /api/v1/agent/identity-token
 // ---------------------------------------------------------------------------
 
-// identityTokenRequest is the request body for POST /api/v1/agent/identity-token.
-type identityTokenRequest struct {
+// IdentityTokenRequest is the request body for POST /api/v1/agent/identity-token.
+type IdentityTokenRequest struct {
 	Audience string `json:"audience"`
 }
 
-// identityTokenResponse is the response body for POST /api/v1/agent/identity-token.
-type identityTokenResponse struct {
+// IdentityTokenResponse is the response body for POST /api/v1/agent/identity-token.
+type IdentityTokenResponse struct {
 	Token     string    `json:"token"`
 	ExpiresAt time.Time `json:"expires_at"`
 }
@@ -103,8 +104,8 @@ type identityTokenResponse struct {
 // the hub's OIDC key, so a receiving hub tells a user access credential for
 // a peer hub from an agent identity token by an explicit claim.
 const (
-	tokenKindUser  = "user"
-	tokenKindAgent = "agent"
+	TokenKindUser  = "user"
+	TokenKindAgent = "agent"
 )
 
 // OIDCIdentityTokenClaims defines the claims in a Scion OIDC identity token.
@@ -127,37 +128,37 @@ func (h *OIDCHandlers) HandleAgentIdentityToken(w http.ResponseWriter, r *http.R
 	// 1. Extract agent identity from context.
 	agent, ok := h.d.CallerAgent(r.Context())
 	if !ok {
-		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "agent authentication required", nil)
+		apierr.WriteError(w, http.StatusUnauthorized, apierr.ErrCodeUnauthorized, "agent authentication required", nil)
 		return
 	}
 
 	// 2. Rate limit (per-agent).
 	if rl := h.d.TokenRateLimiter(); rl != nil && !rl.Allow(agent.Subject) {
-		writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "rate limit exceeded for identity token requests", nil)
+		apierr.WriteError(w, http.StatusTooManyRequests, apierr.ErrCodeRateLimited, "rate limit exceeded for identity token requests", nil)
 		return
 	}
 
 	// 3. Parse and validate request body.
-	var req identityTokenRequest
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "invalid request body: "+err.Error(), nil)
+	var req IdentityTokenRequest
+	if err := apierr.ReadJSON(r, &req); err != nil {
+		apierr.WriteError(w, http.StatusBadRequest, apierr.ErrCodeInvalidRequest, "invalid request body: "+err.Error(), nil)
 		return
 	}
 	if req.Audience == "" {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "audience is required", nil)
+		apierr.WriteError(w, http.StatusBadRequest, apierr.ErrCodeInvalidRequest, "audience is required", nil)
 		return
 	}
 
 	// 4. Check scope: agent must have agent:identity:token scope.
 	if !agent.CanRequestIdentityToken {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden, "agent not authorized to request identity tokens", nil)
+		apierr.WriteError(w, http.StatusForbidden, apierr.ErrCodeForbidden, "agent not authorized to request identity tokens", nil)
 		return
 	}
 
 	// 5. Look up agent record from store.
 	agentRecord, err := h.d.Agents().GetAgent(r.Context(), agent.Subject)
 	if err != nil {
-		NotFound(w, "Agent")
+		apierr.NotFound(w, "Agent")
 		return
 	}
 
@@ -167,7 +168,7 @@ func (h *OIDCHandlers) HandleAgentIdentityToken(w http.ResponseWriter, r *http.R
 
 	jti := make([]byte, 16)
 	if _, err := rand.Read(jti); err != nil {
-		writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to generate token ID", nil)
+		apierr.WriteError(w, http.StatusInternalServerError, apierr.ErrCodeRuntimeError, "failed to generate token ID", nil)
 		return
 	}
 
@@ -195,7 +196,7 @@ func (h *OIDCHandlers) HandleAgentIdentityToken(w http.ResponseWriter, r *http.R
 		AgentName: agentName,
 		Ancestry:  agent.Ancestry,
 		RootUser:  rootUser,
-		TokenKind: tokenKindAgent,
+		TokenKind: TokenKindAgent,
 	}
 
 	// 7. Sign with RS256.
@@ -206,7 +207,7 @@ func (h *OIDCHandlers) HandleAgentIdentityToken(w http.ResponseWriter, r *http.R
 			"agent_id", agent.Subject,
 			"error", err,
 		)
-		writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to sign identity token", nil)
+		apierr.WriteError(w, http.StatusInternalServerError, apierr.ErrCodeRuntimeError, "failed to sign identity token", nil)
 		return
 	}
 
@@ -220,7 +221,7 @@ func (h *OIDCHandlers) HandleAgentIdentityToken(w http.ResponseWriter, r *http.R
 	)
 
 	// 9. Return 200 with token and expiry.
-	writeJSON(w, http.StatusOK, identityTokenResponse{
+	apierr.WriteJSON(w, http.StatusOK, IdentityTokenResponse{
 		Token:     token,
 		ExpiresAt: expiresAt,
 	})

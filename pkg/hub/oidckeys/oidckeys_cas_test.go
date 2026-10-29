@@ -14,7 +14,7 @@
 
 //go:build !no_sqlite
 
-package hub
+package oidckeys
 
 import (
 	"context"
@@ -73,9 +73,9 @@ func oidcCASSealForeign(t *testing.T, kid, plaintext string) string {
 func TestOIDCCASLoserUndecryptableFails(t *testing.T) {
 	st := createOIDCTestStore(t)
 	ctx := context.Background()
-	winner, err := generateRSAKeyPair()
+	winner, err := GenerateRSAKeyPair()
 	require.NoError(t, err)
-	winnerPEM, err := encodePEMPrivateKey(winner)
+	winnerPEM, err := EncodePEMPrivateKey(winner)
 	require.NoError(t, err)
 	require.NoError(t, st.CreateSecret(ctx, &store.Secret{ID: oidcSigningKeySecretID(oidcCASTestHubID), Key: SecretKeyOIDCSigningKey,
 		EncryptedValue: oidcCASSealForeign(t, "k2", string(winnerPEM)), Scope: store.ScopeHub, ScopeID: oidcCASTestHubID,
@@ -83,9 +83,9 @@ func TestOIDCCASLoserUndecryptableFails(t *testing.T) {
 	before, err := st.GetSecret(ctx, SecretKeyOIDCSigningKey, store.ScopeHub, oidcCASTestHubID)
 	require.NoError(t, err)
 
-	mine, err := generateRSAKeyPair()
+	mine, err := GenerateRSAKeyPair()
 	require.NoError(t, err)
-	minePEM, err := encodePEMPrivateKey(mine)
+	minePEM, err := EncodePEMPrivateKey(mine)
 	require.NoError(t, err)
 	m := &OIDCKeyManager{store: st, hubID: oidcCASTestHubID, log: slog.Default(), cipher: oidcCASV2Cipher(t, "k2", "k2")}
 	key, err := m.casCreateKeyInStore(ctx, SecretKeyOIDCSigningKey, string(minePEM), oidcCASTestHubID)

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package hub
+package oidckeys
 
 import (
 	"context"
@@ -77,11 +77,11 @@ type OIDCSigningKey struct {
 	Active        bool
 }
 
-// oidcKeyRecord is a JSON-serializable representation of an OIDC signing key,
+// OIDCKeyRecord is a JSON-serializable representation of an OIDC signing key,
 // used to persist the full keyset (active + rotated) to the database. This
 // enables all hub instances to serve an identical JWKS and preserves rotated
 // keys across restarts.
-type oidcKeyRecord struct {
+type OIDCKeyRecord struct {
 	KID           string    `json:"kid"`
 	PrivateKeyPEM string    `json:"private_key_pem"`
 	Active        bool      `json:"active"`
@@ -256,7 +256,7 @@ func (m *OIDCKeyManager) IssuerURL() string {
 // will be removed by CleanupExpiredKeys after oidcKeyOverlapWindow (24h).
 func (m *OIDCKeyManager) RotateKey(ctx context.Context) error {
 	// 1. Generate new RSA-2048 key pair (outside the lock).
-	newPrivKey, err := generateRSAKeyPair()
+	newPrivKey, err := GenerateRSAKeyPair()
 	if err != nil {
 		return fmt.Errorf("generating new OIDC signing key: %w", err)
 	}
@@ -273,7 +273,7 @@ func (m *OIDCKeyManager) RotateKey(ctx context.Context) error {
 	}
 
 	// 3. Persist new key to backend/store BEFORE in-memory swap.
-	pemData, err := encodePEMPrivateKey(newPrivKey)
+	pemData, err := EncodePEMPrivateKey(newPrivKey)
 	if err != nil {
 		return fmt.Errorf("PEM-encoding rotated OIDC key: %w", err)
 	}
@@ -456,7 +456,7 @@ func (m *OIDCKeyManager) loadOrCreateKey(ctx context.Context, cfg OIDCKeyManager
 		sv, err := cfg.Backend.Get(ctx, keyName, store.ScopeHub, hubID)
 		if err == nil {
 			m.log.Info("Loading OIDC signing key from secret backend", "key", keyName)
-			privKey, parseErr := decodePEMPrivateKey([]byte(sv.Value))
+			privKey, parseErr := DecodePEMPrivateKey([]byte(sv.Value))
 			if parseErr != nil {
 				return nil, fmt.Errorf("failed to decode OIDC signing key from secret backend: %w", parseErr)
 			}
@@ -485,7 +485,7 @@ func (m *OIDCKeyManager) loadOrCreateKey(ctx context.Context, cfg OIDCKeyManager
 			}
 			val = plaintext
 			m.log.Info("Loading OIDC signing key from store", "key", keyName)
-			privKey, parseErr := decodePEMPrivateKey([]byte(val))
+			privKey, parseErr := DecodePEMPrivateKey([]byte(val))
 			if parseErr != nil {
 				return nil, fmt.Errorf("failed to decode OIDC signing key from store: %w", parseErr)
 			}
@@ -510,13 +510,13 @@ func (m *OIDCKeyManager) loadOrCreateKey(ctx context.Context, cfg OIDCKeyManager
 			"pre-provision the key via the secret backend or store")
 	}
 
-	privKey, err := generateRSAKeyPair()
+	privKey, err := GenerateRSAKeyPair()
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate OIDC RSA key pair: %w", err)
 	}
 	m.log.Warn("Generated new OIDC signing key; all previously issued identity tokens are invalid", "key", keyName)
 
-	pemData, err := encodePEMPrivateKey(privKey)
+	pemData, err := EncodePEMPrivateKey(privKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to PEM-encode OIDC signing key: %w", err)
 	}
@@ -693,7 +693,7 @@ func (m *OIDCKeyManager) casCreateKeyInStore(ctx context.Context, keyName, pemVa
 	if decErr != nil {
 		return nil, fmt.Errorf("another instance created the OIDC signing key but it could not be decrypted: %w", decErr)
 	}
-	existingKey, parseErr := decodePEMPrivateKey([]byte(plaintext))
+	existingKey, parseErr := DecodePEMPrivateKey([]byte(plaintext))
 	if parseErr != nil {
 		return nil, fmt.Errorf("another instance created the OIDC signing key but it could not be parsed: %w", parseErr)
 	}
@@ -709,14 +709,14 @@ func (m *OIDCKeyManager) saveKeysetToDB(ctx context.Context) error {
 	}
 
 	m.mu.RLock()
-	records := make([]oidcKeyRecord, 0, len(m.allKeys))
+	records := make([]OIDCKeyRecord, 0, len(m.allKeys))
 	for _, k := range m.allKeys {
-		pemData, err := encodePEMPrivateKey(k.PrivateKey)
+		pemData, err := EncodePEMPrivateKey(k.PrivateKey)
 		if err != nil {
 			m.mu.RUnlock()
 			return fmt.Errorf("encoding key %s: %w", k.KeyID, err)
 		}
-		records = append(records, oidcKeyRecord{
+		records = append(records, OIDCKeyRecord{
 			KID:           k.KeyID,
 			PrivateKeyPEM: string(pemData),
 			Active:        k.Active,
@@ -775,14 +775,14 @@ func (m *OIDCKeyManager) loadKeysetFromDB(ctx context.Context) ([]*OIDCSigningKe
 	}
 	val = plaintext
 
-	var records []oidcKeyRecord
+	var records []OIDCKeyRecord
 	if err := json.Unmarshal([]byte(val), &records); err != nil {
 		return nil, fmt.Errorf("unmarshaling OIDC keyset: %w", err)
 	}
 
 	keys := make([]*OIDCSigningKey, 0, len(records))
 	for _, rec := range records {
-		privKey, err := decodePEMPrivateKey([]byte(rec.PrivateKeyPEM))
+		privKey, err := DecodePEMPrivateKey([]byte(rec.PrivateKeyPEM))
 		if err != nil {
 			m.log.Warn("Skipping unparseable key in OIDC keyset", "kid", rec.KID, "error", err)
 			continue
@@ -906,14 +906,14 @@ func oidcKeysetSecretID(hubID string) string {
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("hub-oidc-signing-keyset:"+hubID)).String()
 }
 
-// generateRSAKeyPair generates a new RSA-2048 key pair.
-func generateRSAKeyPair() (*rsa.PrivateKey, error) {
+// GenerateRSAKeyPair generates a new RSA-2048 key pair.
+func GenerateRSAKeyPair() (*rsa.PrivateKey, error) {
 	return rsa.GenerateKey(rand.Reader, oidcRSAKeyBits)
 }
 
-// encodePEMPrivateKey encodes an RSA private key to PEM format using
+// EncodePEMPrivateKey encodes an RSA private key to PEM format using
 // PKCS#8 encoding (standard "PRIVATE KEY" block type).
-func encodePEMPrivateKey(key *rsa.PrivateKey) ([]byte, error) {
+func EncodePEMPrivateKey(key *rsa.PrivateKey) ([]byte, error) {
 	der, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal private key to PKCS#8: %w", err)
@@ -925,8 +925,8 @@ func encodePEMPrivateKey(key *rsa.PrivateKey) ([]byte, error) {
 	return pem.EncodeToMemory(block), nil
 }
 
-// decodePEMPrivateKey decodes a PEM-encoded private key, expecting PKCS#8 format.
-func decodePEMPrivateKey(data []byte) (*rsa.PrivateKey, error) {
+// DecodePEMPrivateKey decodes a PEM-encoded private key, expecting PKCS#8 format.
+func DecodePEMPrivateKey(data []byte) (*rsa.PrivateKey, error) {
 	block, _ := pem.Decode(data)
 	if block == nil {
 		return nil, fmt.Errorf("no PEM block found in key data")
