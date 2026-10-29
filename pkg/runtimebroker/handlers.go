@@ -193,10 +193,15 @@ func (s *Server) nfsHealthDegradesStatus() bool {
 // NFSWarnOnlyRuntime reports whether name is a runtime type on which the
 // platform, not the broker, mounts the NFS export into the agent: the
 // Kubernetes family (the kubelet mounts the volume) and the Cloud Run
-// family. For these the broker never mounts a share and never refuses a
-// dispatch over NFS state; it logs a warning instead. When it is the
-// broker's default runtime the broker only verifies its shares, and
-// scion doctor reports an unmounted share as a warning.
+// family. For these the broker never mounts a share. Off a shared
+// project-storage Layout it never refuses a dispatch over NFS state and
+// logs a warning instead. On a shared Layout it refuses only when the
+// share's directory is not visible on the broker or the project
+// configuration there does not identify the project (shareVisible,
+// checkSharedProjectConfig); the exact mount-table source match is
+// advisory. When it is the broker's default runtime the broker only
+// verifies its shares (a verify-only reconciler), and scion doctor reports
+// an unmounted share as a warning.
 func NFSWarnOnlyRuntime(name string) bool {
 	if isKubernetesRuntimeName(name) {
 		return true
@@ -9171,9 +9176,12 @@ func isLocalhostEndpoint(endpoint string) bool {
 // It is decided by the dispatch's resolved runtime, which is checked before
 // anything is mounted:
 //   - Kubernetes or Cloud Run (NFSWarnOnlyRuntime): the platform
-//     mounts the export into the agent. The broker reads the share's last
-//     recorded status, logs a warning if it is unhealthy, and continues; it
-//     never mounts and never refuses the dispatch.
+//     mounts the export into the agent, and the broker never mounts it. The
+//     broker reads the share's last recorded status. Off a shared
+//     project-storage Layout it logs a warning if the share is unhealthy and
+//     continues. On a shared Layout an unhealthy share refuses the dispatch,
+//     except on a verify-only reconciler, where the status is advisory and
+//     the share's directory being visible admits it (shareVisible).
 //   - Any other (local-container) runtime: the share is checked and, when
 //     the broker mounts shares, mounted. If it is not mounted the dispatch
 //     is refused, since the workspace would otherwise silently land on
@@ -9207,8 +9215,21 @@ func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, pro
 				detail = st.Message
 			}
 			// The broker reads and creates project storage through its
-			// own mount of the share: on a shared Layout an unmounted share
-			// refuses the dispatch (ptone/scion#5823).
+			// own view of the share: on a shared Layout a share that is not
+			// visible refuses the dispatch (ptone/scion#5823). For a
+			// verify-only reconciler the status above is advisory
+			// (shareVisible): a visible share directory admits the
+			// dispatch. A hub-managed dispatch then has the project tree's
+			// identity checked when its project root is resolved
+			// (sharedHubProjectPath). A dispatch that carries a project
+			// path (not hub-managed) is admitted on directory visibility
+			// alone, with no hub-seeded identity check, as before #4219.
+			if s.config.StorageLayout.Backend.Shared() && r.VerifyOnly() &&
+				shareVisible(ctx, s.config.StorageLayout, r) == nil {
+				s.agentLifecycleLog.Warn("NFS share check is advisory on this broker; the share directory is visible, continuing dispatch",
+					"agent", name, "runtime", runtimeType, "share", shareID, "detail", detail)
+				return nil
+			}
 			if s.config.StorageLayout.Backend.Shared() {
 				s.agentLifecycleLog.Error("NFS share not mounted on the broker; refusing dispatch",
 					"agent", name, "runtime", runtimeType, "share", shareID, "detail", detail)

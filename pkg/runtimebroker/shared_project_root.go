@@ -79,12 +79,54 @@ func (s *Server) sharedHubProjectPath(ctx context.Context, projectID string) (pa
 		return "", true, &startContextError{Status: http.StatusServiceUnavailable, Code: ErrCodeProjectStorageUnavailable,
 			Message: fmt.Sprintf(sharedProjectUnmountedFmt, layout.HostBase), OriginalErr: err}
 	}
+	// What the tree shows decides the refusal. A mount point without the
+	// subpath root (<HostBase>/<subpath_root>) is not the share: 503, the
+	// share is not visible, whatever the mount table says. With the subpath
+	// root present, a missing or foreign project configuration is a 409
+	// (checkSharedProjectConfig, unchanged). The reconciler's advisory
+	// mount-table detail goes to the log only, never into the body.
+	mountCheck := shareAdvisoryDetail(layout, s.nfsMountReconciler)
+	if subRoot := filepath.Dir(root.HostPath); projectfs.ShareDirVisible(ctx, subRoot) != nil {
+		s.agentLifecycleLog.Error("Project storage share is not visible on this broker: its mount point has no subpath root",
+			"project_id", projectID, "host_base", layout.HostBase, "subpath_root", subRoot, "mount_check", mountCheck)
+		return "", true, &startContextError{Status: http.StatusServiceUnavailable, Code: ErrCodeProjectStorageUnavailable,
+			Message: shareNotVisibleText(shareMountPathField, NFSWarnOnlyRuntime(s.RuntimeName()))}
+	}
 	if sce := checkSharedProjectConfig(root.HostPath, projectID); sce != nil {
 		s.agentLifecycleLog.Error("Shared project configuration refused", "project_id", projectID,
-			"path", root.HostPath, "reason", sce.Message)
+			"path", root.HostPath, "reason", sce.Message, "mount_check", mountCheck)
 		return "", true, sce
 	}
 	return root.HostPath, true, nil
+}
+
+// shareMountPathField names the share's mount point in refusal bodies, in
+// place of the path (a layout value of the operator's configuration).
+const shareMountPathField = "server.project_storage.nfs.mount_root/shares[0].id"
+
+// shareNotVisibleText is the 503 refusal for a share that is not visible at
+// mountPath (spec-v2 §2), chosen by whether the broker's default runtime
+// mounts the export into agents itself (platformMounts). Bodies pass
+// shareMountPathField, never the path: the path and the
+// mount-table detail go to the broker log.
+func shareNotVisibleText(mountPath string, platformMounts bool) string {
+	if platformMounts {
+		return fmt.Sprintf("project storage share is not visible on this broker (%s): make the share available in this broker's container at %s (the same server and export as server.project_storage.nfs.shares[0])", mountPath, mountPath)
+	}
+	return fmt.Sprintf("project storage share is not mounted on this broker (%s): mount it, or set server.project_storage.nfs.auto_mount: true", mountPath)
+}
+
+// shareAdvisoryDetail is the reconciler's last status message for the
+// layout's share when it is unhealthy (for example the expected and found
+// mount sources), or "". It is for logs and admin views only.
+func shareAdvisoryDetail(layout projectfs.Layout, r *NFSMountReconciler) string {
+	if layout.Backend != projectfs.BackendNFS || r == nil {
+		return ""
+	}
+	if st, ok := r.ShareStatus(layout.Share.ID); ok && !st.Healthy {
+		return st.Message
+	}
+	return ""
 }
 
 // checkSharedProjectConfig checks that projectRoot is a directory (not a
@@ -105,25 +147,47 @@ func checkSharedProjectConfig(projectRoot, projectID string) *startContextError 
 	return nil
 }
 
-// ensureLayoutShareMounted checks that the Layout's share is mounted at its
-// host base: for nfs through the broker's NFS mount reconciler when it has
-// one (EnsureShareMounted, which mounts only with auto_mount on), otherwise
-// by the host base being a directory. A broker without the mount refuses
-// shared-backend dispatches (ptone/scion#5823).
+// ensureLayoutShareMounted checks that the Layout's share is usable at its
+// host base (shareVisible). A broker without it refuses shared-backend
+// dispatches (ptone/scion#5823); the project tree's identity is checked by
+// the caller (checkSharedProjectConfig).
 func (s *Server) ensureLayoutShareMounted(ctx context.Context, layout projectfs.Layout) error {
-	if layout.Backend == projectfs.BackendNFS && s.nfsMountReconciler != nil {
-		if err := s.nfsMountReconciler.EnsureShareMounted(ctx, layout.Share.ID); err != nil {
-			return err
+	return shareVisible(ctx, layout, s.nfsMountReconciler)
+}
+
+// shareVisible is the share check for a shared Layout on this broker.
+//
+//   - A broker that never mounts (its default runtime is Kubernetes or Cloud
+//     Run, NFSWarnOnlyRuntime; its reconciler r is verify-only), or one with
+//     no reconciler: the share is visible when Layout.HostBase is a
+//     directory (projectfs.ShareDirVisible, bounded). The reconciler's
+//     mount-table source match is advisory: the share may be mounted into
+//     the broker's container from a source that differs from server:export
+//     only in form (a trailing slash, a host name for an IP address). A
+//     mismatch is logged as a warning and stays in the reconciler's status,
+//     so health and the descriptor's NFS.Healthy flag still show it; it is
+//     never a precondition.
+//   - A broker that mounts the share (auto_mount on, not verify-only): the
+//     exact source match stays a precondition (EnsureShareMounted), since
+//     the broker owns that mount, and then the directory must be visible.
+//
+// Callers prove the tree's identity afterwards (checkSharedProjectConfig:
+// the hub-seeded project-id under <ProjectRoot>/.scion names the project).
+func shareVisible(ctx context.Context, layout projectfs.Layout, r *NFSMountReconciler) error {
+	if layout.Backend == projectfs.BackendNFS && r != nil {
+		if err := r.EnsureShareMounted(ctx, layout.Share.ID); err != nil {
+			if !r.VerifyOnly() || ctx.Err() != nil {
+				return err
+			}
+			if dirErr := projectfs.ShareDirVisible(ctx, layout.HostBase); dirErr != nil {
+				return dirErr
+			}
+			r.log.Warn("Project storage share check is advisory on a broker that never mounts; the share directory is visible",
+				"host_base", layout.HostBase, "share", layout.Share.ID, "reason", r.VerifyOnlyReason(), "check", err)
+			return nil
 		}
 	}
-	info, err := os.Stat(layout.HostBase)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("%s is not a directory", layout.HostBase)
-	}
-	return nil
+	return projectfs.ShareDirVisible(ctx, layout.HostBase)
 }
 
 // isSharedHubProjectRoot reports whether projectPath is a hub-managed
@@ -170,10 +234,8 @@ func (s *Server) findAgentInSharedProject(ctx context.Context, agentName, projec
 		mountCtx, cancel := context.WithTimeout(ctx, sharedLookupMountTimeout)
 		mountErr = s.ensureLayoutShareMounted(mountCtx, layout)
 		cancel()
-	} else if info, statErr := os.Stat(layout.HostBase); statErr != nil {
-		mountErr = statErr
-	} else if !info.IsDir() {
-		mountErr = fmt.Errorf("%s is not a directory", layout.HostBase)
+	} else {
+		mountErr = projectfs.ShareDirVisible(ctx, layout.HostBase)
 	}
 	if err := mountErr; err != nil {
 		s.agentLifecycleLog.Error("Agent look-up: project storage share is not mounted on this broker", "agent", agentName,

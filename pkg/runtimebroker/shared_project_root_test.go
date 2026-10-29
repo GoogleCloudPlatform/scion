@@ -193,7 +193,14 @@ func TestCreateAgent_SharedLayoutRefusals(t *testing.T) {
 		wantStatus int
 		wantText   string
 	}{
-		{"no configuration", func(t *testing.T, f *sharedRootFixture) {}, sharedRootProjectID, http.StatusConflict, sharedProjectConfigText},
+		{"no configuration", func(t *testing.T, f *sharedRootFixture) {
+			// The subpath root is there (the share is mounted), the project's tree is not.
+			if err := os.MkdirAll(filepath.Join(f.layout.HostBase, "projects"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, sharedRootProjectID, http.StatusConflict, sharedProjectConfigText},
+		{"mount point without the subpath root", func(t *testing.T, f *sharedRootFixture) {}, sharedRootProjectID, http.StatusServiceUnavailable,
+			"project storage share is not mounted on this broker (" + shareMountPathField + ")"},
 		{"project-id of another project", func(t *testing.T, f *sharedRootFixture) {
 			writeSharedSeed(t, f.scionDir, "11111111-2222-3333-4444-555555555555", "web")
 		}, sharedRootProjectID, http.StatusConflict, sharedProjectConfigText},
