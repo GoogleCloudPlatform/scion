@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -352,6 +353,76 @@ func TestResolveSkillVersion_V2TieBreakAndV1First(t *testing.T) {
 	assert.NotEqual(t, v2Holder.ID, got.ID)
 }
 
+// Skill resolution by "@sha256:" (dispatch pre-resolution, which shares
+// resolveRegistrySkillRef with POST /skills/resolve) considers only published
+// and deprecated versions, with the v2 experiment off (v1 lookup only) and on
+// (v1, then v2).
+func TestPreResolveAgentSkills_ContentHashUsesStatusFilter(t *testing.T) {
+	srv, s, alice, _, project := setupSkillAuthzTest(t)
+	ctx := context.Background()
+	skill := createTestSkill(t, s, "hash-status-skill", store.SkillScopeGlobal, "", alice.ID)
+
+	type entry struct {
+		status   string
+		resolves bool
+		version  string
+		files    []store.TemplateFile
+	}
+	entries := []entry{
+		{status: store.SkillVersionStatusPublished, resolves: true},
+		{status: store.SkillVersionStatusDeprecated, resolves: true},
+		{status: store.SkillVersionStatusDraft},
+		{status: store.SkillVersionStatusArchived},
+	}
+	for i := range entries {
+		e := &entries[i]
+		// A distinct file content hash gives each version its own v1 and v2
+		// hash (v1 covers file contents only, so a distinct path is not
+		// enough).
+		e.files = []store.TemplateFile{
+			{Path: "SKILL.md", Size: 10, Hash: skillHashFileA, Mode: "0644"},
+			{Path: "scripts/run.sh", Size: 20, Hash: fmt.Sprintf("sha256:%064x", i+1), Mode: "0755"},
+		}
+		e.version = fmt.Sprintf("1.%d.0", i)
+		require.NoError(t, s.CreateSkillVersion(ctx, &store.SkillVersion{
+			ID:          api.NewUUID(),
+			SkillID:     skill.ID,
+			Version:     e.version,
+			Status:      e.status,
+			ContentHash: computeSkillContentHash(e.files),
+			Files:       e.files,
+		}))
+	}
+
+	resolve := func(hash string) *ResolveSkillsResponse {
+		uri := "skill://scion/global/hash-status-skill@" + hash
+		resp := srv.preResolveAgentSkills(ctx, dispatchTestAgent(alice.ID, project.ID, uri))
+		require.NotNil(t, resp)
+		return resp
+	}
+	check := func(label, hash string, e entry) {
+		t.Helper()
+		resp := resolve(hash)
+		if e.resolves {
+			require.Len(t, resp.Resolved, 1, "%s %s", label, e.status)
+			assert.Equal(t, e.version, resp.Resolved[0].ResolvedVersion, "%s %s", label, e.status)
+			return
+		}
+		assert.Empty(t, resp.Resolved, "%s %s", label, e.status)
+		require.Len(t, resp.Errors, 1, "%s %s", label, e.status)
+		assert.Equal(t, agent.SkillErrCodeNotFound, resp.Errors[0].Code, "%s %s", label, e.status)
+	}
+
+	for _, e := range entries {
+		check("v1, experiment off", computeSkillContentHash(e.files), e)
+	}
+	setSkillContentHashV2Experiment(t, srv, true)
+	for _, e := range entries {
+		check("v1, experiment on", computeSkillContentHash(e.files), e)
+		check("v2, experiment on", computeSkillContentHashV2(e.files), e)
+	}
+}
+
 // skillVersionHasContent must accept exactly the statuses that resolve.
 func TestSkillVersionHasContent(t *testing.T) {
 	files := legacySkillFiles()
@@ -359,6 +430,7 @@ func TestSkillVersionHasContent(t *testing.T) {
 		store.SkillVersionStatusPublished:  true,
 		store.SkillVersionStatusDeprecated: true,
 		store.SkillVersionStatusDraft:      false,
+		store.SkillVersionStatusArchived:   false,
 	} {
 		assert.Equal(t, want, skillVersionHasContent(&store.SkillVersion{Status: status, Files: files}), status)
 	}
