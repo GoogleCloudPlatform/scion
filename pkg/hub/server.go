@@ -3998,8 +3998,9 @@ func logSigningKeyFailure(keyType string, err error) {
 // EncryptedValue is updated — the SecretRef is preserved so the UI and other consumers
 // can see that the secret is backed by Secret Manager.
 //
-// It refuses (errExistingRecordUnreadable) to overwrite an existing record
-// that is unreadable with the configured keys (ptone/scion#1530 §5).
+// It refuses (keymaterial.ErrExistingRecordUnreadable) to overwrite an
+// existing record that is unreadable with the configured keys
+// (ptone/scion#1530 §5).
 func (s *Server) backupSigningKeyToStore(ctx context.Context, keyName, encodedValue, hubID string) error {
 	if err := s.guardBackupOverwrite(ctx, keyName, store.ScopeHub, hubID); err != nil {
 		return err

@@ -16,7 +16,6 @@ package hub
 
 import (
 	"context"
-	"net/http"
 	"time"
 )
 
@@ -66,18 +65,4 @@ func (s *Server) oidcArea() *OIDCHandlers {
 		return h
 	}
 	return NewOIDCHandlers(oidcDeps{s})
-}
-
-// handleOIDCDiscovery, handleJWKS and handleAgentIdentityToken forward to
-// the OIDC handlers; tests call them directly.
-func (s *Server) handleOIDCDiscovery(w http.ResponseWriter, r *http.Request) {
-	s.oidcArea().HandleOIDCDiscovery(w, r)
-}
-
-func (s *Server) handleJWKS(w http.ResponseWriter, r *http.Request) {
-	s.oidcArea().HandleJWKS(w, r)
-}
-
-func (s *Server) handleAgentIdentityToken(w http.ResponseWriter, r *http.Request) {
-	s.oidcArea().HandleAgentIdentityToken(w, r)
 }

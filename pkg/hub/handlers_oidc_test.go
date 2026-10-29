@@ -119,7 +119,7 @@ func TestHandleOIDCDiscovery(t *testing.T) {
 			req := httptest.NewRequest(tc.method, "/.well-known/openid-configuration", nil)
 			w := httptest.NewRecorder()
 
-			srv.handleOIDCDiscovery(w, req)
+			srv.oidcArea().HandleOIDCDiscovery(w, req)
 
 			assert.Equal(t, tc.wantStatus, w.Code)
 
@@ -189,7 +189,7 @@ func TestHandleJWKS(t *testing.T) {
 			req := httptest.NewRequest(tc.method, "/.well-known/jwks.json", nil)
 			w := httptest.NewRecorder()
 
-			srv.handleJWKS(w, req)
+			srv.oidcArea().HandleJWKS(w, req)
 
 			assert.Equal(t, tc.wantStatus, w.Code)
 
@@ -359,7 +359,7 @@ func doIdentityTokenRequest(t *testing.T, srv *Server, claims *AgentTokenClaims,
 	}
 
 	w := httptest.NewRecorder()
-	srv.handleAgentIdentityToken(w, req)
+	srv.oidcArea().HandleAgentIdentityToken(w, req)
 	return w
 }
 

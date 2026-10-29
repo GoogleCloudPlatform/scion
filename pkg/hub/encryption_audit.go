@@ -46,13 +46,6 @@ const readyReasonBackupUnreadable = "backup_unreadable"
 // infrastructure payload does not parse.
 const auditKindInvalidPayload = "invalid_payload"
 
-// errExistingRecordUnreadable refuses a backup or synchronization write
-// over an existing record this instance cannot read: an unreadable record
-// is preserved, never replaced as a startup repair. It is the same error
-// value as keymaterial.ErrExistingRecordUnreadable, so errors.Is matches
-// either name.
-var errExistingRecordUnreadable = keymaterial.ErrExistingRecordUnreadable
-
 // AuditRecord identifies one unreadable stored record: identity and a
 // stable failure classification, never a payload.
 type AuditRecord struct {
@@ -340,7 +333,7 @@ func (s *Server) auditFlagged(key, scope, scopeID string) bool {
 	return false
 }
 
-// guardOverwrite refuses (errExistingRecordUnreadable) a backup or
+// guardOverwrite refuses (keymaterial.ErrExistingRecordUnreadable) a backup or
 // synchronization write over an existing record the startup audit flagged
 // or that this instance cannot decrypt now. It is
 // keymaterial.GuardOverwrite, which the OIDC key manager shares.
