@@ -218,9 +218,10 @@ const AgentPlugins = "hub.agent_plugins"
 
 // AsyncAgentLaunch gates asynchronous agent create (ptone/scion#4991): the
 // hub sends a create to the broker as an async launch only while it is on
-// and the request opted in (acceptAsyncLaunch). It is read at each create
-// send, so toggling needs no restart; launches already accepted finish or
-// are reaped either way.
+// and the request opted in (acceptAsyncLaunch). It is on by default
+// (ptone/scion#6640); an admin override turns it off. It is read at each
+// create send, so toggling needs no restart; launches already accepted
+// finish or are reaped either way.
 const AsyncAgentLaunch = "hub.async_agent_launch"
 
 // AsyncAgentStart gates asynchronous start, resume and restart of existing
@@ -326,8 +327,8 @@ var compiled = []Experiment{
 	{
 		Name:        AsyncAgentLaunch,
 		Title:       "Asynchronous agent create",
-		Description: "Lets the hub answer an agent create as soon as the Runtime Broker accepts it, while the broker finishes the launch in the background; clients that opt in (scion start and resume, the web create form, scheduled creates) follow its progress. Provision-only creates, reprovisioning and brokers without async launch support stay synchronous. Turning it off makes new creates synchronous; launches already accepted finish or time out as before.",
-		Default:     false,
+		Description: "Lets the hub answer an agent create as soon as the Runtime Broker accepts it, while the broker finishes the launch in the background; clients that opt in (scion start and resume, the web create form, scheduled creates) follow its progress. Provision-only creates, reprovisioning and brokers without async launch support stay synchronous. On by default; turning it off makes new creates synchronous, and launches already accepted finish or time out as before.",
+		Default:     true,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,
 		Issue:       "ptone/scion#4991",

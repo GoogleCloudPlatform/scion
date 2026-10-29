@@ -164,11 +164,11 @@ the initial agent create request and any env-gather submission with a 3-minute
 client timeout instead of the standard 30-second client timeout so synchronous
 creates can complete). Each dispatch attempt is bounded at
 120 seconds, so a slow cold start (for example on Kubernetes) can still fail on
-a synchronous launch; enable [asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create) for those. While waiting, each launch step is printed to stderr with a readable label, for example
+a synchronous launch; [asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create), on by default, avoids that limit. While waiting, each launch step is printed to stderr with a readable label, for example
 `my-agent: provisioning (waiting to be scheduled)` (nothing extra under `--format json`). If the
 launch fails, the error gives the failure code (with its label, unless the message already says
 it), the step and the message, for example `agent 'my-agent' create did not complete
-(image_pull_failed) while pulling the image: ...`. A create, including `scion start` of a new
+(image_pull_failed) while preparing the container (image pull, volume mounts): ...`. A create, including `scion start` of a new
 agent, reports `create did not complete`; a start or resume of an existing agent reports `did not
 start`. A launch that ended with an error ends the wait whatever phase the agent reports. If the wait times out, or you press Ctrl-C, only
 the wait stops: the launch continues on the Hub, and re-running `scion start
