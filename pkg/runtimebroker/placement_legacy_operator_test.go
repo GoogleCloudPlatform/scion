@@ -129,7 +129,7 @@ func TestLegacyPathlessRestartRefusedBeforeStop(t *testing.T) {
 		f.mgr.agents[i].ProjectPath = ""
 	}
 	w := postAgentOpFor(t, f.srv, plOrderAgent, "restart", `{}`)
-	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementFlatRestartNoProjectCause) {
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementLegacyRestartNoProjectCause) {
 		t.Fatalf("got %d %s", w.Code, w.Body.String())
 	}
 	expectNoPodEffects(t, f)
@@ -147,7 +147,7 @@ func TestLegacyOrphanedAgentRestartRefusedBeforeStop(t *testing.T) {
 				f.mgr.agents[i].ProjectPath = ""
 			}
 			w := postAgentOpFor(t, f.srv, plOrderAgent, "restart"+query, `{}`)
-			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementFlatRestartNoProjectCause) {
+			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementLegacyRestartNoProjectCause) {
 				t.Fatalf("got %d %s", w.Code, w.Body.String())
 			}
 			expectNoPodEffects(t, f)

@@ -386,7 +386,7 @@ runtimes:
 
 		srv.Handler().ServeHTTP(w, req)
 
-		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementFlatRestartNoProjectCause) {
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementLegacyRestartNoProjectCause) {
 			t.Fatalf("expected 400 refused before the stop, got %d: %s", w.Code, w.Body.String())
 		}
 		if n := mgr.StopCalls(); n != 0 {
@@ -423,7 +423,7 @@ runtimes:
 
 		srv.Handler().ServeHTTP(w, req)
 
-		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementFlatRestartNoProjectCause) {
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementLegacyRestartNoProjectCause) {
 			t.Fatalf("expected 400 refused before the stop, got %d: %s", w.Code, w.Body.String())
 		}
 		if n := mgr.StopCalls(); n != 0 {
@@ -643,7 +643,7 @@ runtimes:
 
 		srv.Handler().ServeHTTP(w, req)
 
-		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementFlatRestartNoProjectCause) {
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementLegacyRestartNoProjectCause) {
 			t.Fatalf("expected 400 refused before the stop, got %d: %s", w.Code, w.Body.String())
 		}
 		if n := mgr.StopCalls(); n != 0 {

@@ -233,7 +233,7 @@ func TestRecordedRuntime_RecordedTypeServesEveryRoute(t *testing.T) {
 					// none: on this legacy Kubernetes runtime it is
 					// refused before the stop (operator-owned placement),
 					// with nothing stopped or started on either runtime.
-					if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementFlatRestartNoProjectCause) {
+					if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementLegacyRestartNoProjectCause) {
 						t.Fatalf("status = %d; body = %s; want 400 refused before the stop", w.Code, w.Body.String())
 					}
 					if a, o := want.acted(), other.acted(); a != 0 || o != 0 {

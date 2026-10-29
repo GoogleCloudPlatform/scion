@@ -911,7 +911,7 @@ func TestRestartAgent_ProfileNamespace_PodGonePathless_RefusedBeforeStop(t *test
 	// stored config cannot be checked against the operator-owned placement
 	// of the legacy Kubernetes runtime: the restart is refused before the
 	// stop, and never proceeds to the start.
-	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementFlatRestartNoProjectCause) {
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementLegacyRestartNoProjectCause) {
 		t.Fatalf("restart status = %d, body %s; want 400 refused before the stop", w.Code, w.Body.String())
 	}
 	if recs := f.logRecords(t, "runtime list failed while searching the other runtimes"); len(recs) == 0 {
@@ -1175,7 +1175,7 @@ func TestOtherRuntimes_SameNamedPodsInTwoNamespaces_Ambiguous(t *testing.T) {
 		// No single container matches, so the restart (which names no
 		// project) has no project path: on this legacy Kubernetes runtime
 		// it is refused before the stop.
-		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementFlatRestartNoProjectCause) {
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementLegacyRestartNoProjectCause) {
 			t.Fatalf("restart status = %d, body %s; want 400 refused before the stop", w.Code, w.Body.String())
 		}
 		if n := runs.Load(); n != 0 {

@@ -344,6 +344,11 @@ const (
 	// instance whose project path is empty after every recovery (the
 	// request's path or slug, the matched container's recorded path).
 	placementFlatRestartNoProjectCause = "cannot check the agent's stored config before restart: no project path; restart the agent from its project"
+	// placementLegacyRestartNoProjectCause is the same refusal on a legacy
+	// Runtime Broker, whose Kubernetes starts use operator-owned placement:
+	// such a restart comes from an older Hub, or for an agent whose project
+	// is gone.
+	placementLegacyRestartNoProjectCause = "cannot check the agent's stored config before restart: no project path; restart the agent from its project, or upgrade the Hub"
 )
 
 // resolveFlatPlacement resolves the placement of a start on this flat
@@ -627,6 +632,9 @@ func (s *Server) checkRestartLegacyPlacement(agentName, projectPath string, shar
 			// checked before it (the request names no project, and no
 			// container of the project recorded one).
 			s.agentLifecycleLog.Warn("Kubernetes placement: refusing a restart whose stored config cannot be checked before the stop", "agent", agentName)
+			if !s.isFlat() {
+				return placementRefusal(placementLegacyRestartNoProjectCause)
+			}
 			return placementRefusal(placementFlatRestartNoProjectCause)
 		}
 		return s.checkRestartOperatorPlacement(agentName, projectPath, sharedWorkspace, rp)
