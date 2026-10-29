@@ -4073,9 +4073,15 @@ func reconcileCloneCredentialHelper(gitconfigPath string, setupGitCmd func(*exec
 		return fmt.Errorf("failed to resolve a trusted git binary for the credential helper: %w", err)
 	}
 	// unset runs `git config --unset-all key [value-pattern]`; exit status 5
-	// means the key is not set (or the file does not exist).
+	// means the key is not set (or the file does not exist). It resolves git
+	// itself so the exec site is provably routed through rootexec.Resolve
+	// (the exec-site guard checks the smallest enclosing function).
 	unset := func(args ...string) error {
-		cmd := exec.Command(gitPath, append([]string{"config", "--file", gitconfigPath, "--unset-all"}, args...)...)
+		unsetGit, err := rootexec.Resolve("git")
+		if err != nil {
+			return err
+		}
+		cmd := exec.Command(unsetGit, append([]string{"config", "--file", gitconfigPath, "--unset-all"}, args...)...)
 		setupGitCmd(cmd)
 		if err := procreap.RunManaged(cmd); err != nil {
 			var exitErr *exec.ExitError
