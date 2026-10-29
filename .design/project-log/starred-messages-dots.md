@@ -1,7 +1,7 @@
 # Starred messages: always-visible More actions dots
 
 **Date:** 2026-10-29
-**Branch:** scion/nc-star-dots (ptone/scion#6556, part of ptone/scion#5797)
+**Issue:** ptone/scion#6556, part of ptone/scion#5797
 
 ## What changed
 
@@ -20,8 +20,8 @@
   `.bubble-content.has-actions` reserves a 2rem right-hand column, so text
   (long words, code blocks, wrapped lines) never runs under the dots. An
   attachment-only message has no text bubble: `.bubble.actions-corner`
-  reserves the same column beside the attachments, and the button sits
-  there. A deleted message keeps the dots in its "This message was deleted"
+  reserves the same column beside the attachments (with `box-sizing:
+  border-box`, so the bubble keeps its max-width), and the button sits there. A deleted message keeps the dots in its "This message was deleted"
   bubble, because the menu still opens for it (see ptone/scion#6566).
 - The tab stop's usage hint (`#actions-help`, the button's
   `aria-describedby`) now renders outside the text bubble, so the bubble's
