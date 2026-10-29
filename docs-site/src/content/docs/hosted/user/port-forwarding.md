@@ -143,7 +143,7 @@ When the hub runs behind an authenticating front proxy, for example Google IAP o
 
 For anything beyond a single self-contained page in such a deployment, use [`scion tunnel`](#tunnels-from-your-machine-scion-tunnel), which does not go through the browser and is not affected.
 
-With the IAP provider, apps served through an agent's port do not receive the IAP assertion or the IAP user email and ID headers. With the JWT provider, they do not receive the configured assertion header.
+With the IAP provider, apps served through an agent's port do not receive the IAP assertion or the IAP user email and ID headers. With the JWT provider, they do not receive the configured assertion header. The hub reads only that header, so configure the front proxy not to add other user identity headers, such as email or ID headers.
 
 ---
 
