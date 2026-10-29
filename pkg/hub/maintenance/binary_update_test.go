@@ -233,7 +233,7 @@ func wantCode(t *testing.T, err error, code string) {
 }
 
 func TestBinaryUpdate_ValidateParams(t *testing.T) {
-	e := NewBinaryUpdateExecutor(BinaryUpdateOptions{CurrentVersion: "nightly-20261022"})
+	e := NewBinaryUpdateExecutor(BinaryUpdateOptions{CurrentVersion: "nightly-20261022", Snapshotter: &fakeDBSnapshotter{}})
 	tests := []struct {
 		name   string
 		params map[string]string
@@ -249,7 +249,8 @@ func TestBinaryUpdate_ValidateParams(t *testing.T) {
 		{"download_url", map[string]string{"target_version": "nightly-20261023", "download_url": "https://evil/x"}, CodeUnknownParam},
 		{"checksums_url", map[string]string{"target_version": "nightly-20261023", "checksums_url": "x"}, CodeUnknownParam},
 		{"current_version", map[string]string{"target_version": "nightly-20261023", "current_version": "dev"}, CodeUnknownParam},
-		{"confirm_downgrade (P3)", map[string]string{"target_version": "nightly-20261023", "confirm_downgrade": "x"}, CodeUnknownParam},
+		{"confirm_downgrade on an upgrade is ignored", map[string]string{"target_version": "nightly-20261023", "confirm_downgrade": "nightly-20261023"}, ""},
+		{"confirm_downgrade not a tag", map[string]string{"target_version": "nightly-20261023", "confirm_downgrade": "yes"}, CodeInvalidParam},
 		{"dryRun", map[string]string{"target_version": "nightly-20261023", "dryRun": "true"}, CodeUnknownParam},
 		{"missing target", map[string]string{}, CodeInvalidParam},
 		{"not a tag", map[string]string{"target_version": "latest"}, CodeInvalidParam},
@@ -261,7 +262,11 @@ func TestBinaryUpdate_ValidateParams(t *testing.T) {
 		{"latest unknown channel", map[string]string{"target_version": "latest:beta"}, CodeInvalidParam},
 		{"latest channel mismatch", map[string]string{"target_version": "latest:nightly", "channel": "preview"}, CodeInvalidParam},
 		{"same", map[string]string{"target_version": "nightly-20261022"}, CodeAlreadyRunning},
-		{"older", map[string]string{"target_version": "nightly-20261021"}, CodeDowngradeNotYetSupported},
+		{"older", map[string]string{"target_version": "nightly-20261021"}, CodeDowngradeRequiresConfirmation},
+		{"older, confirmed", map[string]string{"target_version": "nightly-20261021", "confirm_downgrade": "nightly-20261021"}, ""},
+		{"older, confirmation names another tag", map[string]string{"target_version": "nightly-20261021", "confirm_downgrade": "nightly-20261020"}, CodeDowngradeRequiresConfirmation},
+		{"below the floor", map[string]string{"target_version": "nightly-20261008"}, CodeBelowDowngradeFloor},
+		{"below the floor, confirmed", map[string]string{"target_version": "nightly-20261008", "confirm_downgrade": "nightly-20261008"}, CodeBelowDowngradeFloor},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -280,7 +285,9 @@ func TestBinaryUpdate_ValidateParams(t *testing.T) {
 		if (&RequestError{Code: CodeUnknownParam}).HTTPStatus() != http.StatusBadRequest ||
 			(&RequestError{Code: CodeInvalidParam}).HTTPStatus() != http.StatusBadRequest ||
 			(&RequestError{Code: CodeAlreadyRunning}).HTTPStatus() != http.StatusConflict ||
-			(&RequestError{Code: CodeDowngradeNotYetSupported}).HTTPStatus() != http.StatusConflict {
+			(&RequestError{Code: CodeDowngradeRequiresConfirmation}).HTTPStatus() != http.StatusConflict ||
+			(&RequestError{Code: CodeBelowDowngradeFloor}).HTTPStatus() != http.StatusConflict ||
+			(&RequestError{Code: CodeDowngradeUnsupportedDriver}).HTTPStatus() != http.StatusConflict {
 			t.Fatal("unexpected status mapping")
 		}
 	})
@@ -536,14 +543,15 @@ func TestBinaryUpdate_LatestChannel(t *testing.T) {
 		}
 	})
 
-	t.Run("latest of another channel that is older is refused before download", func(t *testing.T) {
+	t.Run("latest of another channel that is older needs confirmation before download", func(t *testing.T) {
 		gh := newFakeGitHub(t)
 		gh.addRelease("nightly-20261023", "2026-10-23T04:00:00Z", "nightly-20261023")
 		gh.addRelease("v0.3.0-preview.4", "2026-10-22T18:00:00Z", "v0.3.0-preview.4")
 		inst := &fakeInstaller{}
 		e := newTestExecutor(gh, inst, "nightly-20261023")
+		e.snapshots = &fakeDBSnapshotter{}
 		hooked, err := run(e, map[string]string{"target_version": "latest:preview", "channel": "preview"})
-		wantCode(t, err, CodeDowngradeNotYetSupported)
+		wantCode(t, err, CodeDowngradeRequiresConfirmation)
 		if hooked != nil || len(inst.calls) != 1 {
 			t.Fatalf("installer calls = %v, hook = %+v; want preflight only", inst.calls, hooked)
 		}
@@ -594,13 +602,14 @@ func TestBinaryUpdate_LatestChannel(t *testing.T) {
 func TestBinaryUpdate_CrossChannelOrder(t *testing.T) {
 	requireLinux(t)
 
-	t.Run("switch to an older preview is refused before download", func(t *testing.T) {
+	t.Run("switch to an older preview needs confirmation before download", func(t *testing.T) {
 		gh := newFakeGitHub(t)
 		gh.addRelease("v0.3.0-preview.4", "2026-10-22T18:00:00Z", "v0.3.0-preview.4")
 		inst := &fakeInstaller{}
 		e := newTestExecutor(gh, inst, "nightly-20261023")
+		e.snapshots = &fakeDBSnapshotter{}
 		err := e.Run(context.Background(), &bytes.Buffer{}, map[string]string{"target_version": "v0.3.0-preview.4"})
-		wantCode(t, err, CodeDowngradeNotYetSupported)
+		wantCode(t, err, CodeDowngradeRequiresConfirmation)
 		if gh.requested("/releases/download/") {
 			t.Fatal("downloaded a refused target")
 		}
@@ -621,17 +630,22 @@ func TestBinaryUpdate_CrossChannelOrder(t *testing.T) {
 		gh.addRelease("v0.3.0-preview.4", "2026-10-22T18:00:00Z", "v0.3.0-preview.4")
 		gh.addRelease("nightly-20261022", "2026-10-22T04:00:00Z", "nightly-20261022")
 		e := newTestExecutor(gh, &fakeInstaller{}, "v0.3.0-preview.4")
+		e.snapshots = &fakeDBSnapshotter{}
 		err := e.Run(context.Background(), &bytes.Buffer{}, map[string]string{"target_version": "nightly-20261022"})
-		wantCode(t, err, CodeDowngradeNotYetSupported)
+		wantCode(t, err, CodeDowngradeRequiresConfirmation)
 	})
 
-	t.Run("git build without a build time is refused", func(t *testing.T) {
+	t.Run("git build without a build time needs confirmation", func(t *testing.T) {
 		gh := newFakeGitHub(t)
 		gh.addRelease("nightly-20261023", "2026-10-23T04:00:00Z", "nightly-20261023")
 		e := newTestExecutor(gh, &fakeInstaller{}, "")
 		e.current, e.buildTime = "", time.Time{}
+		e.snapshots = &fakeDBSnapshotter{}
 		err := e.Run(context.Background(), &bytes.Buffer{}, map[string]string{"target_version": "nightly-20261023"})
-		wantCode(t, err, CodeDowngradeNotYetSupported)
+		wantCode(t, err, CodeDowngradeRequiresConfirmation)
+		if re, _ := IsRequestError(err); re.Details["class"] != "switch-older" {
+			t.Fatalf("details = %v, want class switch-older for an undecidable order", re.Details)
+		}
 	})
 }
 
