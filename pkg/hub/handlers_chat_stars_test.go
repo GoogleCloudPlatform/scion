@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -151,6 +152,43 @@ func starPageIDs(p starPageResponse) []string {
 	return ids
 }
 
+// tamperStarCursor returns sealed (a c1 list cursor) with one byte of its
+// decoded body flipped, re-encoded canonically. Rewriting base64 characters
+// instead is not a reliable tamper: an overwrite can equal the original, and
+// a changed final character can alter only unused bits and decode to the
+// same bytes. A flipped byte always differs, and AES-GCM's tag check makes
+// Open reject it (errInvalidCursor, a 400).
+func tamperStarCursor(t *testing.T, sealed string) string {
+	t.Helper()
+	body, ok := strings.CutPrefix(sealed, listCursorPrefix)
+	require.True(t, ok, "a c1 cursor: %q", sealed)
+	raw, err := base64.RawURLEncoding.DecodeString(body)
+	require.NoError(t, err)
+	require.NotEmpty(t, raw)
+	raw[len(raw)/2] ^= 0x01
+	return listCursorPrefix + base64.RawURLEncoding.EncodeToString(raw)
+}
+
+// The tamper must change the decoded bytes whatever the cursor ends with,
+// including the "AA" endings that made the old character overwrite a no-op.
+func TestTamperStarCursor_AlwaysChangesBytes(t *testing.T) {
+	for n := 28; n < 31; n++ {
+		for _, last := range []byte{0x00, 0x01, 0xff} {
+			raw := make([]byte, n)
+			for i := range raw {
+				raw[i] = byte(i * 7)
+			}
+			raw[n-1], raw[n-2] = last, 0x00
+			sealed := listCursorPrefix + base64.RawURLEncoding.EncodeToString(raw)
+			tampered := tamperStarCursor(t, sealed)
+			require.NotEqual(t, sealed, tampered)
+			got, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(tampered, listCursorPrefix))
+			require.NoError(t, err)
+			require.NotEqual(t, raw, got, "len %d last %#x", n, last)
+		}
+	}
+}
+
 // starEvents returns the subjects of the star events received on ch.
 func starEvents(t *testing.T, ch <-chan Event) []string {
 	t.Helper()
@@ -272,7 +310,9 @@ func TestChatStars_PutValidation(t *testing.T) {
 		{"unknown field", f.admin, starPath(msg), json.RawMessage(`{"conversationKey":"` + f.topicA + `","userId":"x"}`), http.StatusBadRequest},
 		{"not an object", f.admin, starPath(msg), "text", http.StatusBadRequest},
 		{"unknown query", f.admin, starPath(msg) + "?x=1", map[string]string{"conversationKey": f.topicA}, http.StatusBadRequest},
-		{"DM key (phase 1)", f.admin, starPath(msg), map[string]string{"conversationKey": "dm:user:" + f.admin + ":agent:" + f.agentA.ID}, http.StatusNotFound},
+		{"thread message under a DM key", f.admin, starPath(msg), map[string]string{"conversationKey": "dm:agent:" + f.agentA.ID + ":user:" + f.admin}, http.StatusNotFound},
+		{"DM key not in canonical (sorted) form", f.admin, starPath(msg), map[string]string{"conversationKey": "dm:user:" + f.admin + ":agent:" + f.agentA.ID}, http.StatusBadRequest},
+		{"malformed DM key", f.admin, starPath(msg), map[string]string{"conversationKey": "dm:user:a:user:b"}, http.StatusBadRequest},
 		{"missing thread", f.admin, starPath(msg), map[string]string{"conversationKey": uuid.NewString()}, http.StatusNotFound},
 		{"wrong conversation", f.admin, starPath(msgB), map[string]string{"conversationKey": f.topicA}, http.StatusNotFound},
 		{"missing message", f.admin, starPath(uuid.NewString()), map[string]string{"conversationKey": f.topicA}, http.StatusNotFound},
@@ -398,7 +438,8 @@ func TestChatStars_ListPaginates(t *testing.T) {
 	c := url.QueryEscape(p.NextCursor)
 	assert.Equal(t, http.StatusBadRequest, f.session(t, f.owner, http.MethodGet, starListPath(f.topicA, "cursor="+c), nil).Code)
 	assert.Equal(t, http.StatusBadRequest, f.session(t, f.admin, http.MethodGet, starListPath(f.topicB, "cursor="+c), nil).Code)
-	tampered := p.NextCursor[:len(p.NextCursor)-2] + "AA"
+	tampered := tamperStarCursor(t, p.NextCursor)
+	require.NotEqual(t, p.NextCursor, tampered)
 	assert.Equal(t, http.StatusBadRequest, f.session(t, f.admin, http.MethodGet, starListPath(f.topicA, "cursor="+url.QueryEscape(tampered)), nil).Code)
 	assert.Equal(t, http.StatusBadRequest, f.session(t, f.admin, http.MethodGet, starListPath(f.topicA, "cursor=abc"), nil).Code)
 	// The page size may change between pages.
@@ -416,7 +457,7 @@ func TestChatStars_ListPaginates(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, f.session(t, f.admin, http.MethodGet, bad, nil).Code, bad)
 	}
 	assert.Equal(t, http.StatusNotFound, f.session(t, f.member, http.MethodGet, starListPath(f.topicB), nil).Code, "unreadable thread")
-	assert.Equal(t, http.StatusNotFound, f.session(t, f.admin, http.MethodGet, starListPath("dm:user:a:user:b"), nil).Code)
+	assert.Equal(t, http.StatusBadRequest, f.session(t, f.admin, http.MethodGet, starListPath("dm:user:a:user:b"), nil).Code, "malformed DM key")
 }
 
 func TestChatStars_StateFiltersByAccess(t *testing.T) {
@@ -555,6 +596,7 @@ func TestChatHistory_ReadTargetResolverRegression(t *testing.T) {
 			}
 			assert.Equal(t, []string{web}, got, "web channel only")
 
+			var threadBodies []string
 			for _, c := range []struct {
 				user, path string
 			}{
@@ -565,12 +607,19 @@ func TestChatHistory_ReadTargetResolverRegression(t *testing.T) {
 			} {
 				rec := f.session(t, c.user, http.MethodGet, c.path, nil)
 				assert.Equal(t, http.StatusNotFound, rec.Code, c.path)
+				// A refused read never says whether the caller could post.
+				assert.NotContains(t, rec.Body.String(), "canPost", c.path)
 				if strings.Contains(c.path, "around") {
 					assert.Contains(t, rec.Body.String(), "Message")
 				} else {
 					assert.Contains(t, rec.Body.String(), "Thread")
+					threadBodies = append(threadBodies, rec.Body.String())
 				}
 			}
+			// An unreadable thread and a missing one answer byte-identical
+			// bodies, so the answer does not disclose which it was.
+			require.Len(t, threadBodies, 2)
+			assert.Equal(t, threadBodies[1], threadBodies[0], "unreadable and missing threads answer the same body")
 			rec = f.session(t, f.admin, http.MethodGet, path+"?around="+web, nil)
 			assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 		})

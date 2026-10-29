@@ -19,9 +19,14 @@
  * thread covering long prose, an unbroken URL, code, a table, a list and a
  * blockquote — content shapes known to stress narrow-viewport layout.
  *
- * Sets only `web.native_chat` in `__SCION_FEATURES__` — the one chat feature
- * flag that still exists (`DEFAULT_ON_FLAGS` in feature-flags.ts). There is
- * no longer a separate v2/wave-1 split to account for.
+ * Pins the chat feature flags in `__SCION_FEATURES__` explicitly, so the
+ * suite does not depend on the compiled defaults (`DEFAULT_ON_FLAGS` in
+ * feature-flags.ts; the experiments fetch is not mocked, so the browser
+ * would otherwise fall back to them): `web.native_chat` on, and
+ * `web.chat_starred_messages` off, which keeps the layout, menu and
+ * target-size baselines free of the star controls. The starred-message
+ * specs (star-*.pw.ts) turn it on themselves with a later init script that
+ * spreads these flags.
  */
 
 import type { Page } from '@playwright/test';
@@ -137,7 +142,10 @@ const AGENT_MEMBERS = [
 export async function setupChatMobileMocks(page: Page): Promise<void> {
   await installEventSourceStub(page);
   await page.addInitScript(() => {
-    window.__SCION_FEATURES__ = { 'web.native_chat': true };
+    window.__SCION_FEATURES__ = {
+      'web.native_chat': true,
+      'web.chat_starred_messages': false,
+    };
   });
 
   await page.route('**/auth/me', (route) =>

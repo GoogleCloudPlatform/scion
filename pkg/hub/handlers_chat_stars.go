@@ -29,6 +29,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
@@ -46,8 +47,9 @@ import (
 // native history selector (chat_read_target.go). A missing, deleted,
 // out-of-scope, unstarred or unreadable target is one shared 404. A user
 // access token needs inbox:write to add or remove and inbox:read to read,
-// for the conversation's project. While the experiment is off every route
-// answers 404. Phase 1 serves project threads; a DM key is the shared 404.
+// for the conversation's project (a DM between users needs a hub
+// boundary). While the experiment is off every route answers 404. Project
+// threads, agent DMs and DMs between users are all served.
 
 const (
 	chatStarsDefaultLimit = 30
@@ -258,40 +260,156 @@ func starQuery(w http.ResponseWriter, r *http.Request, allowed []string, repeata
 	return q, true
 }
 
-// resolveStarConversation returns the read target of a conversation the
-// caller may read, or writes the refusal: the shared 404 for a missing or
-// unreadable conversation (and, in phase 1, any DM), 500 when a lookup
-// failed, and the read switch's own errors otherwise.
-func (s *Server) resolveStarConversation(w http.ResponseWriter, r *http.Request, call starCall, permissionID, key string) (chatReadTarget, bool) {
+// starConversation is a conversation the caller may read, as the star
+// routes use it: its native history scope (the shared read target) and
+// where its stars are stored and how they are labelled.
+type starConversation struct {
+	chatReadTarget
+	// ProjectID is the project stars here are stored under: the topic's
+	// project for a thread, the peer agent's project for an agent DM ("" if
+	// the agent or its project no longer exists), "" for a DM between users
+	// (never the project a human DM message happens to be stored with).
+	// chatReadTarget.Project is that project, loaded (nil when "").
+	ProjectID string
+	// PeerAgent is an agent DM's agent, soft-deleted included; nil when it
+	// has no record or the conversation is not an agent DM.
+	PeerAgent *store.Agent
+	// PeerKind is "user" or "agent" for a DM's other participant, "" for a
+	// thread. PeerUserID is that user's ID (the caller's own for a DM with
+	// themselves).
+	PeerKind   string
+	PeerUserID string
+	// PeerID is the DM's other participant's ID as the key names it.
+	PeerID string
+}
+
+// resolveStarScope resolves a conversation key for the star routes
+// without writing a response. A thread needs project read; a DM needs the
+// caller's exact participation (the key names the caller in a user slot).
+// A user access token must also be allowed permissionID for the
+// conversation (chatTokenMayUse: the topic's or peer agent's project, a
+// hub boundary for a DM between users). It returns the conversation, or a
+// refusal reason (answered like a missing conversation), or a resolver
+// error; a failed lookup is never a refusal.
+func (s *Server) resolveStarScope(r *http.Request, call starCall, permissionID, key string) (starConversation, string, *chatReadError) {
 	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
 	if strings.HasPrefix(key, "dm:") {
-		writeStarNotFound(w)
-		return chatReadTarget{}, false
+		return s.resolveStarDM(r, call, permissionID, key)
 	}
 	topic, project, rerr := s.authorizeChatThreadRead(r, call.wcs, key)
 	if rerr != nil {
-		writeStarReadError(w, rerr)
-		return chatReadTarget{}, false
+		return starConversation{}, "", rerr
 	}
 	if call.token != nil {
 		ok, err := s.chatTokenMayUse(ctx, call.token, permissionID, key, topic.ProjectID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "failed to check access", nil)
-			return chatReadTarget{}, false
+			return starConversation{}, "", &chatReadError{kind: chatReadNotFound, err: err}
 		}
 		if !ok {
-			logReferenceRefused(ctx, logging.RequestPath(r), chatTokenRefusalReason, call.token)
-			writeStarNotFound(w)
-			return chatReadTarget{}, false
+			return starConversation{}, chatTokenRefusalReason, nil
 		}
 	}
-	target, rerr := s.resolveChatReadTarget(ctx, call.wcs, key, topic, GetIdentityFromContext(ctx))
+	target, rerr := s.resolveChatReadTarget(ctx, call.wcs, key, topic, identity)
 	if rerr != nil {
-		writeStarReadError(w, rerr)
-		return chatReadTarget{}, false
+		return starConversation{}, "", rerr
 	}
 	target.Project = project
-	return target, true
+	return starConversation{chatReadTarget: target, ProjectID: topic.ProjectID}, "", nil
+}
+
+// resolveStarDM is resolveStarScope for a DM key.
+func (s *Server) resolveStarDM(r *http.Request, call starCall, permissionID, key string) (starConversation, string, *chatReadError) {
+	ctx := r.Context()
+	if !validDMKey(key) {
+		return starConversation{}, "", &chatReadError{kind: chatReadFailure, status: http.StatusBadRequest,
+			code: ErrCodeInvalidRequest, message: "invalid DM key format"}
+	}
+	// Only the canonical key (sorted slots, canonical IDs) is accepted, so a
+	// stored DM key is always the external ref of the DM's native
+	// conversation, the form the read switch and the Starred rail look up.
+	if canonical, err := canonicalStarDMKey(key); err != nil || canonical != key {
+		return starConversation{}, "", &chatReadError{kind: chatReadFailure, status: http.StatusBadRequest,
+			code: ErrCodeInvalidRequest, message: "DM key is not in canonical form"}
+	}
+	userID := call.user.ID()
+	if !isDMParticipant(key, userID) {
+		return starConversation{}, "caller is not a participant of this DM", nil
+	}
+	if call.token != nil {
+		ok, err := s.chatTokenMayUse(ctx, call.token, permissionID, key, "")
+		if err != nil {
+			return starConversation{}, "", &chatReadError{kind: chatReadNotFound, err: err}
+		}
+		if !ok {
+			return starConversation{}, chatTokenRefusalReason, nil
+		}
+	}
+	target, rerr := s.resolveChatReadTarget(ctx, call.wcs, key, nil, GetIdentityFromContext(ctx))
+	if rerr != nil {
+		return starConversation{}, "", rerr
+	}
+	sc := starConversation{chatReadTarget: target}
+	// dm:<kind>:<id>:<kind>:<id>; the peer is the slot that is not the
+	// caller's user slot.
+	parts := strings.Split(key, ":")
+	peerKind, peerID := parts[1], parts[2]
+	if peerKind == "user" && peerID == userID {
+		peerKind, peerID = parts[3], parts[4]
+	}
+	sc.PeerKind = peerKind
+	sc.PeerID = peerID
+	switch peerKind {
+	case "user":
+		sc.PeerUserID = peerID
+	case "agent":
+		agents, err := s.store.GetAgentsByIDsIncludingDeleted(ctx, []string{peerID})
+		if err != nil {
+			return starConversation{}, "", &chatReadError{kind: chatReadNotFound, err: err}
+		}
+		sc.PeerAgent = agents[peerID]
+		if sc.PeerAgent != nil && sc.PeerAgent.ProjectID != "" {
+			project, err := s.store.GetProject(ctx, sc.PeerAgent.ProjectID)
+			switch {
+			case err == nil:
+				sc.Project = project
+				sc.ProjectID = project.ID
+			case errors.Is(err, store.ErrNotFound):
+				// The agent's project is gone: the DM stays readable by its
+				// participants, with no project.
+			default:
+				return starConversation{}, "", &chatReadError{kind: chatReadNotFound, err: err}
+			}
+		}
+	}
+	return sc, "", nil
+}
+
+// canonicalStarDMKey is messages.DMConversationKey of a DM key's slots.
+func canonicalStarDMKey(key string) (string, error) {
+	parts := strings.Split(key, ":")
+	if len(parts) != 5 {
+		return "", errors.New("chat stars: DM key must have five parts")
+	}
+	return messages.DMConversationKey(parts[1], parts[2], parts[3], parts[4])
+}
+
+// resolveStarConversation resolves a conversation for a star route or
+// writes the refusal: the shared 404 for a missing or unreadable
+// conversation (the reason is logged), 400 for a malformed DM key, 500
+// when a lookup failed, and the read switch's own errors otherwise.
+func (s *Server) resolveStarConversation(w http.ResponseWriter, r *http.Request, call starCall, permissionID, key string) (starConversation, bool) {
+	sc, refusal, rerr := s.resolveStarScope(r, call, permissionID, key)
+	if rerr != nil {
+		writeStarReadError(w, rerr)
+		return starConversation{}, false
+	}
+	if refusal != "" {
+		logReferenceRefused(r.Context(), logging.RequestPath(r), refusal, GetIdentityFromContext(r.Context()))
+		writeStarNotFound(w)
+		return starConversation{}, false
+	}
+	return sc, true
 }
 
 // writeStarReadError maps a resolver error to the star routes' answer: a
@@ -333,13 +451,9 @@ func (s *Server) handleStarPut(w http.ResponseWriter, r *http.Request, call star
 	if !ok {
 		return
 	}
-	projectID := ""
-	if target.Topic != nil {
-		projectID = target.Topic.ProjectID
-	}
 	rec, changed, err := call.stars.AddMessageStar(ctx, call.user.ID(), StarTarget{
 		MessageID: messageID,
-		ProjectID: projectID,
+		ProjectID: target.ProjectID,
 		Selector:  target.starSelector(),
 	})
 	if errors.Is(err, store.ErrNotFound) {
@@ -599,54 +713,54 @@ type starStateDecision struct {
 // A conversation whose read target cannot be resolved (the resolver's
 // 409: read-switch drift, or a conversation lookup that failed, which the
 // resolver cannot tell apart) is handled by the batch's shape:
-//   - a batch whose stars are all in one conversation (the Phase 1 client,
-//     which asks for the open conversation's messages) answers the
-//     resolver's error, as list, add and detail do, so the client keeps
-//     the messages "unknown" rather than inferring "unstarred";
+//   - a batch whose stars are all in one conversation (the client asks for
+//     the open conversation's messages) answers the resolver's error, as
+//     list, add and detail do, so the client keeps the messages "unknown"
+//     rather than inferring "unstarred";
 //   - a batch mixing conversations (mixed) leaves that conversation out,
-//     logged, so one drifted thread does not fail every other
+//     logged, so one drifted conversation does not fail every other
 //     conversation's answer.
 //
-// A real lookup failure (a 500) fails the request either way.
+// A never-used DM (no conversation yet) has no starred messages. A real
+// lookup failure (a 500) fails the request either way.
+//
+// A stored DM key that is not canonical (a legacy star under swapped slots,
+// or one that does not canonicalise) is left out, logged, like a drifted
+// conversation: the star routes refuse such a key (400), but it comes from
+// storage here, not from the client, so it must not fail the batch.
 func (s *Server) decideStarState(r *http.Request, call starCall, key string, mixed bool) (starStateDecision, *chatReadError) {
 	type decision = starStateDecision
-	ctx := r.Context()
-	if strings.HasPrefix(key, "dm:") {
-		return decision{}, nil // phase 1: threads only
-	}
-	topic, _, rerr := s.authorizeChatThreadRead(r, call.wcs, key)
-	if rerr != nil {
-		if rerr.kind == chatReadNotFound && rerr.err == nil {
+	if validDMKey(key) {
+		if canonical, err := canonicalStarDMKey(key); err != nil || canonical != key {
+			// Debug, not Warn: a legacy star repeats this on every state
+			// request that touches it, and only pre-enforcement data has one.
+			slog.Debug("chat stars: state leaves out a stored DM key that is not canonical", "conversation_key", key)
 			return decision{}, nil
 		}
+	}
+	sc, refusal, rerr := s.resolveStarScope(r, call, permInboxRead, key)
+	switch {
+	case refusal != "":
+		return decision{}, nil
+	case rerr == nil:
+		return decision{target: sc.chatReadTarget, allowed: true}, nil
+	case rerr.kind == chatReadNotFound && rerr.err == nil, rerr.kind == chatReadAbsent:
+		return decision{}, nil
+	case mixed && rerr.kind == chatReadFailure && rerr.status != http.StatusInternalServerError:
+		slog.Warn("chat stars: state leaves out a conversation whose read target is unresolved",
+			"conversation_key", key, "code", rerr.code)
+		return decision{}, nil
+	default:
 		return decision{}, rerr
 	}
-	if call.token != nil {
-		ok, err := s.chatTokenMayUse(ctx, call.token, permInboxRead, key, topic.ProjectID)
-		if err != nil {
-			return decision{}, &chatReadError{kind: chatReadNotFound, err: err}
-		}
-		if !ok {
-			return decision{}, nil
-		}
-	}
-	target, rerr := s.resolveChatReadTarget(ctx, call.wcs, key, topic, GetIdentityFromContext(ctx))
-	if rerr != nil {
-		if mixed && rerr.kind == chatReadFailure && rerr.status != http.StatusInternalServerError {
-			slog.Warn("chat stars: state leaves out a conversation whose read target is unresolved",
-				"conversation_key", key, "code", rerr.code)
-			return decision{}, nil
-		}
-		return decision{}, rerr
-	}
-	return decision{target: target, allowed: true}, nil
 }
 
-// hydrateStarItems builds the API form of recs, which are stars in
-// target's conversation, from the current message, extension, sender and
+// hydrateStarItems builds the API form of recs, which are stars in sc's
+// conversation, from the current message, extension, sender and
 // conversation records, in batch. A record whose message is gone, deleted
-// or outside the target's history scope is omitted.
-func (s *Server) hydrateStarItems(ctx context.Context, wcs WebChatStore, target chatReadTarget, recs []StarRecord) ([]starItemResponse, error) {
+// or outside the conversation's history scope is omitted. A failed lookup
+// is an error, never a missing record.
+func (s *Server) hydrateStarItems(ctx context.Context, wcs WebChatStore, sc starConversation, recs []StarRecord) ([]starItemResponse, error) {
 	out := make([]starItemResponse, 0, len(recs))
 	if len(recs) == 0 {
 		return out, nil
@@ -664,34 +778,66 @@ func (s *Server) hydrateStarItems(ctx context.Context, wcs WebChatStore, target 
 		return nil, err
 	}
 
-	var userIDs []string
+	var projectName, conversationName string
+	switch {
+	case sc.Topic != nil:
+		conversationName = sc.Topic.Name
+		// The project the read check loaded (resolveStarConversation): no
+		// second lookup a concurrent delete could fail.
+		if sc.Project == nil {
+			return nil, errors.New("chat stars: read target has no project")
+		}
+		projectName = sc.Project.Name
+	case sc.Project != nil:
+		projectName = sc.Project.Name
+	}
+
+	var userIDs, agentIDs []string
+	if sc.PeerUserID != "" {
+		userIDs = append(userIDs, sc.PeerUserID)
+	}
 	for _, msg := range msgs {
-		if strings.HasPrefix(msg.Sender, "user:") && msg.SenderID != "" {
+		if msg == nil || msg.SenderID == "" {
+			continue
+		}
+		switch starSenderKind(msg.Sender) {
+		case "user":
 			userIDs = append(userIDs, msg.SenderID)
+		case "agent":
+			agentIDs = append(agentIDs, msg.SenderID)
 		}
 	}
-	users := map[string]*store.User{}
+	labels := starLabels{}
 	if len(userIDs) > 0 {
-		if users, err = s.store.GetUsersByIDs(ctx, userIDs); err != nil {
+		if labels.users, err = s.store.GetUsersByIDs(ctx, userIDs); err != nil {
 			return nil, err
 		}
 	}
-
-	var projectID, projectName, conversationName string
-	if target.Topic != nil {
-		projectID = target.Topic.ProjectID
-		conversationName = target.Topic.Name
-		// The project the read check loaded (resolveStarConversation): no
-		// second lookup a concurrent delete could fail.
-		if target.Project == nil {
-			return nil, errors.New("chat stars: read target has no project")
+	if len(agentIDs) > 0 {
+		// Including soft-deleted agents, as the DM rail does: a deleted
+		// agent keeps its name.
+		if labels.agents, err = s.store.GetAgentsByIDsIncludingDeleted(ctx, agentIDs); err != nil {
+			return nil, err
 		}
-		projectName = target.Project.Name
+	}
+	if sc.IsDM {
+		switch {
+		case !canonicalStarID(sc.PeerID):
+			// No usable stable ID: the batch lookups skip it, so its absence
+			// says nothing about deletion.
+			conversationName = starKindLabel(sc.PeerKind)
+		case sc.PeerKind == "user":
+			conversationName = starUserLabel(labels.users[sc.PeerUserID])
+		case sc.PeerKind == "agent":
+			conversationName = starAgentLabel(sc.PeerAgent)
+		default:
+			conversationName = starLabelDM
+		}
 	}
 
 	for _, rec := range recs {
 		msg, ok := msgs[rec.MessageID]
-		if !ok || msg == nil || !target.containsMessage(msg) {
+		if !ok || msg == nil || !sc.containsMessage(msg) {
 			continue
 		}
 		ext := exts[rec.MessageID]
@@ -700,42 +846,121 @@ func (s *Server) hydrateStarItems(ctx context.Context, wcs WebChatStore, target 
 		}
 		item := starItemResponse{
 			MessageID:        rec.MessageID,
-			ConversationKey:  target.Key,
+			ConversationKey:  sc.Key,
 			ConversationKind: "thread",
-			ProjectID:        projectID,
 			ProjectName:      projectName,
 			ConversationName: conversationName,
-			SenderName:       starSenderName(msg, users),
+			SenderName:       labels.sender(msg),
 			MessageCreatedAt: msg.CreatedAt.UTC(),
 			StarredAt:        rec.StarredAt.UTC(),
 			Excerpt:          starExcerpt(msg.Msg),
 			Edited:           ext != nil && ext.EditedAt != nil,
-			Permalink:        starPermalink(projectID, target.Key, rec.MessageID),
 		}
-		if target.IsDM {
+		// Project fields come together, and only with a loaded project
+		// (never for a human DM).
+		if sc.Project != nil {
+			item.ProjectID = sc.ProjectID
+		}
+		if sc.IsDM {
 			item.ConversationKind = "dm"
+			item.Permalink = starDMPermalink(sc.Key, rec.MessageID)
+		} else {
+			item.Permalink = starPermalink(sc.ProjectID, sc.Key, rec.MessageID)
 		}
 		out = append(out, item)
 	}
 	return out, nil
 }
 
-// starSenderName is the display label of a message's sender: a user's
-// display name (else the address part of the sender), an agent's slug.
-func starSenderName(msg *store.Message, users map[string]*store.User) string {
+// Neutral labels of the star routes, for a sender or DM peer whose record
+// has no name or no longer exists. A failed lookup never selects one: it
+// fails the request instead.
+const (
+	starLabelUser         = "User"
+	starLabelDeletedUser  = "Deleted user"
+	starLabelAgent        = "Agent"
+	starLabelDeletedAgent = "Deleted agent"
+	starLabelSomeone      = "Someone"
+	starLabelDM           = "DM"
+)
+
+// starLabels holds the batch-loaded records labels are taken from.
+type starLabels struct {
+	users  map[string]*store.User
+	agents map[string]*store.Agent
+}
+
+// starSenderKind is "user" or "agent" for a message sender, "" otherwise.
+func starSenderKind(sender string) string {
 	switch {
-	case strings.HasPrefix(msg.Sender, "user:"):
-		if u, ok := users[msg.SenderID]; ok && u != nil && strings.TrimSpace(u.DisplayName) != "" {
-			return u.DisplayName
-		}
-		return strings.TrimPrefix(msg.Sender, "user:")
-	case strings.HasPrefix(msg.Sender, "agent:"):
-		return strings.TrimPrefix(msg.Sender, "agent:")
-	case msg.Sender == "":
-		return "Someone"
-	default:
-		return msg.Sender
+	case strings.HasPrefix(sender, "user:"):
+		return "user"
+	case strings.HasPrefix(sender, "agent:"):
+		return "agent"
 	}
+	return ""
+}
+
+// sender is the display label of a message's sender. It never falls back
+// to the raw sender address. A sender ID that is not a canonical UUID is no
+// usable stable ID (the batch lookups skip it), so it gets the neutral kind
+// label rather than a "Deleted" one.
+func (l starLabels) sender(msg *store.Message) string {
+	kind := starSenderKind(msg.Sender)
+	switch {
+	case kind == "":
+		return starLabelSomeone
+	case !canonicalStarID(msg.SenderID):
+		return starKindLabel(kind)
+	case kind == "user":
+		return starUserLabel(l.users[msg.SenderID])
+	default:
+		return starAgentLabel(l.agents[msg.SenderID])
+	}
+}
+
+// starKindLabel is the neutral label of a user or agent with no usable ID.
+func starKindLabel(kind string) string {
+	if kind == "agent" {
+		return starLabelAgent
+	}
+	return starLabelUser
+}
+
+// canonicalStarID reports whether id is a canonical (lower-case) UUID, the
+// only form the batched user and agent lookups return records for.
+func canonicalStarID(id string) bool {
+	u, err := uuid.Parse(id)
+	return err == nil && u.String() == id
+}
+
+// starUserLabel labels a looked-up user: its display name, "User" when
+// that is blank, "Deleted user" when it has no record.
+func starUserLabel(u *store.User) string {
+	if u == nil {
+		return starLabelDeletedUser
+	}
+	if name := strings.TrimSpace(u.DisplayName); name != "" {
+		return name
+	}
+	return starLabelUser
+}
+
+// starAgentLabel labels a looked-up agent (soft-deleted included): its
+// name, then its slug, then "Agent"; "Deleted agent" without a record. Ent
+// refuses an empty agent name, so the slug fallback is reached by a
+// whitespace-only name.
+func starAgentLabel(a *store.Agent) string {
+	if a == nil {
+		return starLabelDeletedAgent
+	}
+	if name := strings.TrimSpace(a.Name); name != "" {
+		return name
+	}
+	if slug := strings.TrimSpace(a.Slug); slug != "" {
+		return slug
+	}
+	return starLabelAgent
 }
 
 // starExcerpt is at most chatStarExcerptMax code points of the message's
@@ -757,6 +982,13 @@ func starExcerpt(content string) string {
 // (the web chat's thread route plus #msg-<id>).
 func starPermalink(projectID, key, messageID string) string {
 	return "/chat/space/" + url.PathEscape(projectID) + "/thread/" + url.PathEscape(key) + "#msg-" + url.PathEscape(messageID)
+}
+
+// starDMPermalink is the relative, same-origin link to a DM message: the
+// web chat's DM route with the key encoded as encodeURIComponent encodes
+// it (chatConversationPath), plus #msg-<id>.
+func starDMPermalink(key, messageID string) string {
+	return "/chat/dm/" + strings.ReplaceAll(url.PathEscape(key), ":", "%3A") + "#msg-" + url.PathEscape(messageID)
 }
 
 // messageStarStoreProblem returns why starred messages cannot be served
@@ -783,5 +1015,29 @@ func (s *Server) messageStarStoreProblem() string {
 func (s *Server) validateMessageStarStore() {
 	if problem := s.messageStarStoreProblem(); problem != "" {
 		slog.Error("chat stars: "+experiments.ChatStarredMessages+" is on but starred messages are unavailable", "reason", problem)
+	}
+}
+
+// markChatMessageDeleted soft-deletes a chat message. With a star-capable
+// store, the message's stars go in the same transaction and their owners
+// are returned; otherwise it is SetMessageDeleted and there are none.
+func markChatMessageDeleted(ctx context.Context, wcs WebChatStore, messageID string, at time.Time) ([]string, error) {
+	if stars := messageStarStoreFrom(wcs); stars != nil {
+		return stars.MarkMessageDeletedAndClearStars(ctx, messageID, at)
+	}
+	return nil, wcs.SetMessageDeleted(ctx, messageID, at)
+}
+
+// publishStarsChangedTo sends the content-free stars invalidation to each
+// user's own subject while the experiment is on. No owner list is
+// published anywhere else.
+func (s *Server) publishStarsChangedTo(ctx context.Context, userIDs []string) {
+	if len(userIDs) == 0 || !s.experimentEnabled(experiments.ChatStarredMessages) {
+		return
+	}
+	for _, id := range userIDs {
+		if id != "" {
+			s.events.PublishChatStarsChanged(ctx, id)
+		}
 	}
 }

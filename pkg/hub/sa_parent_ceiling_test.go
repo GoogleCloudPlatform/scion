@@ -46,6 +46,7 @@ func TestSAParentCeiling_UserSourceExactSAAllows(t *testing.T) {
 	d := f.eval(t)
 	assertParentCeilingAllowed(t, d)
 	assert.Equal(t, ParentProof{
+		Kind:                 ParentProofKindParentPermission,
 		Permission:           "gcp_service_account.assign",
 		SourcePrincipal:      ProvenancePrincipal{Kind: store.DelegationPrincipalUser, ID: f.assigner},
 		SourceCredentialKind: store.SourceCredentialSession,
@@ -786,10 +787,14 @@ func TestSAParentCeiling_UseHasNoAgentScopeAndNoSeededRole(t *testing.T) {
 	}
 }
 
-// TestSAParentCeiling_NotCalledFromTokenHandlers pins that the evaluator is
-// not wired into a handler: the GCP token endpoints compose it with the
-// actAs check in a later change, which removes this test.
-func TestSAParentCeiling_NotCalledFromTokenHandlers(t *testing.T) {
+// TestSAParentCeiling_ReachedOnlyThroughDecide pins that no file but
+// authz_resource_parent_ceiling.go names the evaluator: Decide reaches it
+// through step 10 (applyResourceParentCeiling), the GCP token endpoints
+// reach it only through Decide(gcp_service_account.use) in
+// authorizeAgentGCPMint, and the GCS link proxy only through the same step
+// 10 in decideStoredAgentServiceAccountUse, so the audited use decision,
+// the mint and the proxy can never apply different parent rules.
+func TestSAParentCeiling_ReachedOnlyThroughDecide(t *testing.T) {
 	// pkgmove:scan-covers pkg/hub/apierr
 	// scanned through guardScanSubdirs; guards EvaluateServiceAccountParentCeiling callers.
 	// pkgmove:scan-covers pkg/hub/internal/principal

@@ -134,6 +134,62 @@ describe('scion-chat-starred-list', () => {
     ).toBe(false);
   });
 
+  it('drops a deleted message at once, from any conversation, without a request', async () => {
+    apiFetch.mockResolvedValueOnce(json({ items: [item(2), item(1)] }));
+    const el = await mount();
+    await openPanel(el);
+    await vi.waitFor(() => expect(entries(el)).toHaveLength(2));
+    // The state manager wraps SSE payloads as { state, data }.
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-message-deleted', {
+        detail: { data: { conversationKey: 'other', messageId: item(2).messageId } },
+      })
+    );
+    await el.updateComplete;
+    expect(entries(el)).toHaveLength(1);
+    expect(entries(el)[0].textContent).toContain('Mock excerpt 1');
+    expect(el.shadowRoot!.textContent).not.toContain('Mock excerpt 2');
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('a page already in flight when a message is deleted cannot bring its row back', async () => {
+    let release!: (r: Response) => void;
+    apiFetch.mockImplementationOnce(() => new Promise<Response>((resolve) => (release = resolve)));
+    const el = await mount();
+    await openPanel(el);
+    // The first page is in flight; the message is deleted meanwhile.
+    fakeStateManager.dispatchEvent(
+      new CustomEvent('chat-message-deleted', {
+        detail: { data: { conversationKey: 'topic-1', messageId: item(2).messageId } },
+      })
+    );
+    release(json({ items: [item(2), item(1)] }));
+    await vi.waitFor(() => expect(entries(el)).toHaveLength(1));
+    expect(el.shadowRoot!.textContent).not.toContain('Mock excerpt 2');
+  });
+
+  it('lists a DM conversation with its DM permalink', async () => {
+    const dm = {
+      ...item(3),
+      conversationKey: 'dm:user:a:user:b',
+      conversationKind: 'dm' as const,
+      projectId: undefined,
+      projectName: undefined,
+      permalink: `/chat/dm/dm%3Auser%3Aa%3Auser%3Ab#msg-${item(3).messageId}`,
+    };
+    apiFetch.mockResolvedValueOnce(json({ items: [dm] }));
+    const el = document.createElement('scion-chat-starred-list') as ScionChatStarredList;
+    el.conversationKey = 'dm:user:a:user:b';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await openPanel(el);
+    expect(String(apiFetch.mock.calls[0][0])).toBe(
+      '/api/v1/chat/stars?conversationKey=dm%3Auser%3Aa%3Auser%3Ab&limit=20'
+    );
+    await vi.waitFor(() => expect(entries(el)).toHaveLength(1));
+    expect(entries(el)[0].getAttribute('href')).toBe(dm.permalink);
+  });
+
   it('shows the empty state with the action hint', async () => {
     apiFetch.mockResolvedValueOnce(json({ items: [] }));
     const el = await mount();
@@ -212,5 +268,330 @@ describe('scion-chat-starred-list', () => {
     await new Promise((r) => setTimeout(r, 10));
     expect(apiFetch).not.toHaveBeenCalled();
     expect(el).toBeTruthy();
+  });
+});
+
+/** A Load more / Retry button by its text. */
+function slButton(el: ScionChatStarredList, text: string): HTMLElement | undefined {
+  return [...el.shadowRoot!.querySelectorAll<HTMLElement>('sl-button')].find((b) =>
+    b.textContent?.includes(text)
+  );
+}
+
+/** Make the chat's menu-sheet breakpoint match (a phone) or not. */
+function setNarrow(narrow: boolean): void {
+  vi.spyOn(window, 'matchMedia').mockImplementation(
+    (query: string) =>
+      ({
+        matches: narrow && query.includes('max-width'),
+        media: query,
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      }) as unknown as MediaQueryList
+  );
+}
+
+describe('scion-chat-starred-list: final presentation', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    setNarrow(false);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    document.body.innerHTML = '';
+  });
+
+  it('renders each entry as two compact lines with the saved date, author and full sent time', async () => {
+    apiFetch.mockResolvedValueOnce(json({ items: [{ ...item(1), edited: true }] }));
+    const el = await mount();
+    await openPanel(el);
+    await vi.waitFor(() => expect(entries(el)).toHaveLength(1));
+    const entry = entries(el)[0];
+    const time = entry.querySelector('time')!;
+    expect(time.getAttribute('datetime')).toBe(item(1).starredAt);
+    expect(entry.querySelector('.entry-sender')?.textContent).toBe('Example person');
+    expect(entry.querySelector('.entry-excerpt')?.textContent).toBe('Mock excerpt 1');
+    expect(entry.querySelector('.sr-only:last-child')?.textContent).toMatch(/^Sent .+, edited$/);
+    expect(entry.getAttribute('title')).toMatch(/^Sent .+ by Example person\. Starred .+\.$/);
+    // The dialog is named by its visible heading and is not modal on desktop.
+    const panel = el.shadowRoot!.querySelector('.panel')!;
+    const heading = el.shadowRoot!.getElementById(panel.getAttribute('aria-labelledby')!);
+    expect(heading?.textContent).toBe('Starred messages');
+    expect(panel.getAttribute('aria-modal')).toBe('false');
+  });
+
+  it('a reconcile reloads every loaded row and keeps them on screen meanwhile', async () => {
+    const first = Array.from({ length: 20 }, (_, n) => item(40 - n));
+    const second = Array.from({ length: 20 }, (_, n) => item(20 - n));
+    let release: (r: Response) => void = () => {};
+    apiFetch
+      .mockResolvedValueOnce(json({ items: first, nextCursor: 'c1' }))
+      .mockResolvedValueOnce(json({ items: second, nextCursor: 'c2' }))
+      .mockImplementationOnce(() => new Promise<Response>((r) => (release = r)));
+    const el = await mount();
+    await openPanel(el);
+    await vi.waitFor(() => expect(entries(el)).toHaveLength(20));
+    slButton(el, 'Load more')!.click();
+    await vi.waitFor(() => expect(entries(el)).toHaveLength(40));
+
+    fakeStateManager.dispatchEvent(new CustomEvent('chat-stars-updated'));
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(3));
+    expect(String(apiFetch.mock.calls[2][0])).toBe(
+      '/api/v1/chat/stars?conversationKey=topic-1&limit=40'
+    );
+    // Still showing the rows while the reload runs, marked busy.
+    expect(entries(el)).toHaveLength(40);
+    expect(el.shadowRoot!.querySelector('ul')?.getAttribute('aria-busy')).toBe('true');
+    // Busy (announced by the list's aria-busy), but Load more is not disabled:
+    // a keyboard user on it keeps focus.
+    expect(slButton(el, 'Load more')?.hasAttribute('disabled')).toBe(false);
+
+    release(json({ items: [item(99), ...first, ...second].slice(0, 40), nextCursor: 'c3' }));
+    await vi.waitFor(() => expect(entries(el)[0].textContent).toContain('Mock excerpt 99'));
+    expect(entries(el)).toHaveLength(40);
+    expect(el.shadowRoot!.querySelector('ul')?.getAttribute('aria-busy')).toBe('false');
+  });
+
+  it('stops at a short page: the rest of a hub scan runs only on Load more', async () => {
+    apiFetch.mockResolvedValueOnce(json({ items: [], nextCursor: 'scan.1' }));
+    const el = await mount();
+    await openPanel(el);
+    await vi.waitFor(() =>
+      expect(el.shadowRoot!.querySelector('.status')?.textContent).toContain(
+        'No starred messages found yet'
+      )
+    );
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    // Not the empty-collection text: there may be more.
+    expect(el.shadowRoot!.textContent).not.toContain('No starred messages in this conversation');
+    apiFetch.mockResolvedValueOnce(json({ items: [item(1)] }));
+    slButton(el, 'Load more')!.click();
+    await vi.waitFor(() => expect(entries(el)).toHaveLength(1));
+    expect(String(apiFetch.mock.calls[1][0])).toContain('cursor=scan.1');
+  });
+
+  it('a failed reconcile keeps the rows and offers a retry; a failed Load more offers its own', async () => {
+    apiFetch
+      .mockResolvedValueOnce(json({ items: [item(2)], nextCursor: 'c1' }))
+      .mockResolvedValueOnce(json({}, 503));
+    const el = await mount();
+    await openPanel(el);
+    await vi.waitFor(() => expect(entries(el)).toHaveLength(1));
+    slButton(el, 'Load more')!.click();
+    await vi.waitFor(() => expect(slButton(el, 'Retry loading more')).toBeDefined());
+    expect(entries(el)).toHaveLength(1);
+
+    apiFetch.mockResolvedValueOnce(json({}, 503));
+    fakeStateManager.dispatchEvent(new CustomEvent('chat-stars-updated'));
+    await vi.waitFor(() =>
+      expect(el.shadowRoot!.textContent).toContain('Could not refresh starred messages')
+    );
+    expect(entries(el)).toHaveLength(1);
+    apiFetch.mockResolvedValueOnce(json({ items: [item(3), item(2)] }));
+    slButton(el, 'Retry')!.click();
+    await vi.waitFor(() => expect(entries(el)).toHaveLength(2));
+    expect(el.shadowRoot!.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it('an invalidation during Load more drops that page and reloads instead', async () => {
+    let releaseMore: (r: Response) => void = () => {};
+    apiFetch
+      .mockResolvedValueOnce(json({ items: [item(2)], nextCursor: 'c1' }))
+      .mockImplementationOnce(
+        (_url: string, init?: RequestInit) =>
+          new Promise<Response>((r, reject) => {
+            releaseMore = r;
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('', 'AbortError'))
+            );
+          })
+      )
+      .mockResolvedValueOnce(json({ items: [item(5), item(2)] }));
+    const el = await mount();
+    await openPanel(el);
+    await vi.waitFor(() => expect(entries(el)).toHaveLength(1));
+    slButton(el, 'Load more')!.click();
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(2));
+    fakeStateManager.dispatchEvent(new CustomEvent('chat-stars-updated'));
+    await vi.waitFor(() => expect(entries(el)).toHaveLength(2));
+    releaseMore(json({ items: [item(1)] }));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(entries(el).map((a) => a.textContent?.includes('Mock excerpt 1'))).not.toContain(true);
+  });
+
+  it('a conversation switch drops a request still in flight', async () => {
+    let release: (r: Response) => void = () => {};
+    apiFetch.mockImplementationOnce(() => new Promise<Response>((r) => (release = r)));
+    const el = await mount();
+    await openPanel(el);
+    el.conversationKey = 'topic-2';
+    await el.updateComplete;
+    release(json({ items: [item(1)] }));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(el.isOpen).toBe(false);
+    apiFetch.mockResolvedValueOnce(json({ items: [] }));
+    await openPanel(el);
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalledTimes(2));
+    expect(String(apiFetch.mock.calls[1][0])).toContain('conversationKey=topic-2');
+    expect(entries(el)).toHaveLength(0);
+  });
+
+  it('moves keyboard focus to the first new row after Load more', async () => {
+    apiFetch
+      .mockResolvedValueOnce(json({ items: [item(3), item(2)], nextCursor: 'c1' }))
+      .mockResolvedValueOnce(json({ items: [item(1)] }));
+    const el = await mount();
+    await openPanel(el);
+    await vi.waitFor(() => expect(entries(el)).toHaveLength(2));
+    const more = slButton(el, 'Load more')!;
+    more.focus();
+    more.click();
+    await vi.waitFor(() => expect(entries(el)).toHaveLength(3));
+    await vi.waitFor(() => expect(el.shadowRoot!.activeElement).toBe(entries(el)[2]));
+  });
+
+  it('keeps focus in the list when the focused row disappears', async () => {
+    apiFetch
+      .mockResolvedValueOnce(json({ items: [item(3), item(2), item(1)] }))
+      .mockResolvedValueOnce(json({ items: [item(3), item(1)] }));
+    const el = await mount();
+    await openPanel(el);
+    await vi.waitFor(() => expect(entries(el)).toHaveLength(3));
+    entries(el)[1].focus();
+    fakeStateManager.dispatchEvent(new CustomEvent('chat-stars-updated'));
+    await vi.waitFor(() => expect(entries(el)).toHaveLength(2));
+    await vi.waitFor(() => expect(el.shadowRoot!.activeElement).toBe(entries(el)[1]));
+  });
+
+  it('closes when focus moves outside the nonmodal panel, without taking focus back', async () => {
+    apiFetch.mockResolvedValueOnce(json({ items: [item(1)] }));
+    const outside = document.createElement('button');
+    document.body.appendChild(outside);
+    const el = await mount();
+    await openPanel(el);
+    await vi.waitFor(() => expect(entries(el)).toHaveLength(1));
+    entries(el)[0].dispatchEvent(
+      new FocusEvent('focusout', { bubbles: true, composed: true, relatedTarget: outside })
+    );
+    await el.updateComplete;
+    expect(el.isOpen).toBe(false);
+    expect(el.shadowRoot!.activeElement).not.toBe(button(el));
+  });
+
+  it('reconciles once a minute while open and visible, and never while closed', async () => {
+    vi.useFakeTimers();
+    apiFetch.mockResolvedValue(json({ items: [item(1)] }));
+    const el = await mount();
+    await openPanel(el);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(59_000);
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1_100);
+    expect(apiFetch).toHaveBeenCalledTimes(2);
+    button(el).click();
+    await el.updateComplete;
+    await vi.advanceTimersByTimeAsync(180_000);
+    expect(apiFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('on a narrow screen opens a modal sheet with a heading and Close, and returns focus on close', async () => {
+    setNarrow(true);
+    apiFetch.mockResolvedValueOnce(json({ items: [item(1)] }));
+    const el = await mount();
+    await openPanel(el);
+    const dialog = el.shadowRoot!.querySelector<HTMLDialogElement>('dialog.sheet')!;
+    expect(dialog).not.toBeNull();
+    expect(el.shadowRoot!.querySelector('.panel')).toBeNull();
+    expect(dialog.open).toBe(true);
+    expect(
+      el.shadowRoot!.getElementById(dialog.getAttribute('aria-labelledby')!)?.textContent
+    ).toBe('Starred messages');
+    expect(button(el).getAttribute('aria-controls')).toBe(dialog.id);
+    await vi.waitFor(() => expect(entries(el)).toHaveLength(1));
+    const close = el.shadowRoot!.querySelector<HTMLButtonElement>('button.close')!;
+    expect(close.getAttribute('aria-label')).toBe('Close starred messages');
+    close.click();
+    await el.updateComplete;
+    expect(el.isOpen).toBe(false);
+    expect(el.shadowRoot!.querySelector('dialog.sheet')).toBeNull();
+    await vi.waitFor(() => expect(el.shadowRoot!.activeElement).toBe(button(el)));
+  });
+
+  it('the sheet closes on Escape (dialog cancel) and keeps touches to itself', async () => {
+    setNarrow(true);
+    apiFetch.mockResolvedValueOnce(json({ items: [item(1)] }));
+    const el = await mount();
+    const swipe = vi.fn();
+    document.body.addEventListener('touchmove', swipe);
+    await openPanel(el);
+    await vi.waitFor(() => expect(entries(el)).toHaveLength(1));
+    entries(el)[0].dispatchEvent(new Event('touchmove', { bubbles: true, composed: true }));
+    expect(swipe).not.toHaveBeenCalled();
+    const dialog = el.shadowRoot!.querySelector<HTMLDialogElement>('dialog.sheet')!;
+    dialog.dispatchEvent(new Event('cancel', { cancelable: true }));
+    await el.updateComplete;
+    expect(el.isOpen).toBe(false);
+    await vi.waitFor(() => expect(el.shadowRoot!.activeElement).toBe(button(el)));
+  });
+
+  it('Back/Forward closes the list', async () => {
+    apiFetch.mockResolvedValueOnce(json({ items: [] }));
+    const el = await mount();
+    await openPanel(el);
+    window.dispatchEvent(new PopStateEvent('popstate'));
+    await el.updateComplete;
+    expect(el.isOpen).toBe(false);
+  });
+
+  it('names its panel in aria-controls only while open', async () => {
+    apiFetch.mockResolvedValueOnce(json({ items: [] }));
+    const el = await mount();
+    expect(button(el).hasAttribute('aria-controls')).toBe(false);
+    await openPanel(el);
+    const panel = el.shadowRoot!.querySelector('.panel')!;
+    expect(button(el).getAttribute('aria-controls')).toBe(panel.id);
+  });
+
+  it('Escape with focus on the star closes the open list', async () => {
+    apiFetch.mockResolvedValueOnce(json({ items: [] }));
+    const el = await mount();
+    await openPanel(el);
+    button(el).focus();
+    button(el).dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Escape',
+        bubbles: true,
+        composed: true,
+        cancelable: true,
+      })
+    );
+    await el.updateComplete;
+    expect(el.isOpen).toBe(false);
+    await vi.waitFor(() => expect(el.shadowRoot!.activeElement).toBe(button(el)));
+  });
+
+  it('focusTrigger puts focus back on the star', async () => {
+    const el = await mount();
+    el.focusTrigger();
+    expect(el.shadowRoot!.activeElement).toBe(button(el));
+  });
+
+  it('a background reconcile keeps keyboard focus on Load more', async () => {
+    apiFetch
+      .mockResolvedValueOnce(json({ items: [item(2)], nextCursor: 'c1' }))
+      .mockImplementationOnce(() => new Promise<Response>(() => {}));
+    const el = await mount();
+    await openPanel(el);
+    await vi.waitFor(() => expect(slButton(el, 'Load more')).toBeDefined());
+    const more = slButton(el, 'Load more')!;
+    more.focus();
+    fakeStateManager.dispatchEvent(new CustomEvent('chat-stars-updated'));
+    await el.updateComplete;
+    // The reconcile really started (it is held open by the second request).
+    expect(el.shadowRoot!.querySelector('ul[aria-busy="true"]')).not.toBeNull();
+    expect(el.shadowRoot!.activeElement).toBe(more);
+    expect(more.hasAttribute('disabled')).toBe(false);
   });
 });

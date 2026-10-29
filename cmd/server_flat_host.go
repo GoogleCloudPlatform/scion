@@ -383,6 +383,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		if warning := brokerWorkspaceStorageWarning(globalVS); warning != "" {
 			log.Printf("WARNING: %s", warning)
 		}
+		_ = reportRemovedStorageOverridesIn(log.Printf, config.GlobalSettingsSource, globalVS)
 	}
 	if warning := brokerInotifyWarning(hostedMode, brokerAgentsShareHostUser(p.instances, ""), hostlimits.DefaultReader()); warning != "" {
 		log.Printf("WARNING: %s", warning)
@@ -768,6 +769,10 @@ func installColocatedSettingsOverlay(cfg *config.GlobalConfig, hubSrv *hub.Serve
 	if ops := hubSrv.GetOperationalSettings(); ops != nil {
 		snap := ops.Snapshot()
 		overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs)
+		// Removed storage overrides in the stored runtimes and profiles are
+		// reported, not refused: they are fixed through the admin settings
+		// API, which needs a running hub (ptone/scion#6371).
+		_ = reportRemovedStorageOverrides(log.Printf, config.HubStoredSettingsSource, snap.Runtimes, snap.Profiles, nil)
 		// The startup ApplySnapshot ran before this install, so the
 		// image_registry layers are fed here too (ptone/scion#3916).
 		overlay.UpdateImageRegistryInputs(ops.ImageRegistryHubInputs())

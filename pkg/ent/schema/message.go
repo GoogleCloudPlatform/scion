@@ -50,8 +50,9 @@ func (Message) Fields() []ent.Field {
 			NotEmpty(),
 		field.String("recipient_id").
 			Optional(),
-		field.String("msg").
-			NotEmpty(),
+		// msg may be empty: an attachment-only chat message has no text.
+		// Send handlers enforce their own body rules.
+		field.String("msg"),
 		field.String("type").
 			Default("instruction"),
 		field.Bool("urgent").

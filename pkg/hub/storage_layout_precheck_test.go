@@ -143,7 +143,7 @@ func TestHealthSummary_BrokerLayoutMismatch(t *testing.T) {
 		Status: store.BrokerStatusOnline, WorkspaceStorage: &api.BrokerWorkspaceStorage{Backend: "nfs", Homes: "local",
 			NFS: &api.BrokerNFSWorkspaceStorage{Server: "10.0.0.2", Export: "/scion", SubPathRoot: "projects", Healthy: true}},
 	}))
-	list, _, err := srv.healthSummaryBrokers(ctx, nil)
+	list, _, err := srv.healthSummaryBrokers(ctx, nil, "")
 	require.NoError(t, err)
 	rows := map[string]HealthSummaryBroker{}
 	for _, r := range list.Items {

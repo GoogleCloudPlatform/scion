@@ -54,6 +54,37 @@ type starStoreEnv struct {
 	reinit func(t *testing.T)
 	// migrationRows counts the star migration's webchat_migrations rows.
 	migrationRows func(t *testing.T) int
+
+	// The lifecycle contract (webchat_star_lifecycle_test.go) also needs:
+	// projectID is an existing project; addTopic creates topics in it.
+	projectID string
+	// addUser creates a user row.
+	addUser func(t *testing.T, id string)
+	// insertStar stores an association directly, without the add guard
+	// (rows an older binary or a lost race could leave behind).
+	insertStar func(t *testing.T, userID, messageID, key, projectID string, at time.Time)
+	// failDMDelete installs a trigger that refuses every DELETE on
+	// webchat_dm (a promotion's last step, after its star update), and
+	// returns the function that removes it.
+	failDMDelete func(t *testing.T) func()
+
+	// The Starred rail contract (webchat_star_conversations_test.go) also
+	// needs:
+	// setTopic sets a topic's project, name and last activity (nil: none).
+	setTopic func(t *testing.T, id, projectID, name string, activity *time.Time)
+	// addDMRow stores a participant's webchat_dm row.
+	addDMRow func(t *testing.T, participantID, key, peerKind, peerID string, activity time.Time)
+	// addAgent creates an agent record.
+	addAgent func(t *testing.T, id, name, slug string)
+	// addNamedUser creates a user with a display name.
+	addNamedUser func(t *testing.T, id, displayName string)
+	// addNativeConversation creates a native conversation row whose
+	// external_ref is ref (a DM's conversation under the read switch).
+	addNativeConversation func(t *testing.T, id, ref string)
+	// setTopicConversation sets a topic's conversation_id.
+	setTopicConversation func(t *testing.T, topicID, conversationID string)
+	// deleteConversation soft-deletes a conversation row.
+	deleteConversation func(t *testing.T, id string)
 }
 
 func threadSel(key string) StarSelector {
@@ -288,9 +319,65 @@ func TestMessageStarStore_SQLite(t *testing.T) {
 			require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM webchat_migrations WHERE name = ?`, messageStarTableMigration).Scan(&n))
 			return n
 		},
+		projectID: projectID,
+		addUser: func(t *testing.T, id string) {
+			require.NoError(t, s.CreateUser(context.Background(), &store.User{
+				ID: id, Email: id + "@stars.test", DisplayName: "u", Role: "member", Status: store.UserStatusActive,
+			}))
+		},
+		insertStar: func(t *testing.T, userID, messageID, key, projectID string, at time.Time) {
+			_, err := db.Exec(`INSERT INTO webchat_message_star (user_id, message_id, conversation_key, project_id, starred_at) VALUES (?, ?, ?, ?, ?)`,
+				userID, messageID, key, nullableString(projectID), sqliteStarTime(at))
+			require.NoError(t, err)
+		},
+		failDMDelete: func(t *testing.T) func() {
+			_, err := db.Exec(`CREATE TRIGGER star_promote_fails BEFORE DELETE ON webchat_dm BEGIN SELECT RAISE(ABORT, 'dm delete refused'); END`)
+			require.NoError(t, err)
+			return func() {
+				_, err := db.Exec(`DROP TRIGGER star_promote_fails`)
+				require.NoError(t, err)
+			}
+		},
+		setTopic: func(t *testing.T, id, projectID, name string, activity *time.Time) {
+			var at any
+			if activity != nil {
+				at = activity.UTC().Format(time.RFC3339Nano)
+			}
+			_, err := db.Exec(`UPDATE webchat_topic SET project_id = ?, name = ?, last_activity_at = ? WHERE id = ?`, projectID, name, at, id)
+			require.NoError(t, err)
+		},
+		addDMRow: func(t *testing.T, participantID, key, peerKind, peerID string, activity time.Time) {
+			_, err := db.Exec(`INSERT INTO webchat_dm (conversation_key, participant_id, peer_id, peer_kind, last_activity_at) VALUES (?, ?, ?, ?, ?)`,
+				key, participantID, peerID, peerKind, activity.UTC().Format(time.RFC3339Nano))
+			require.NoError(t, err)
+		},
+		addAgent: func(t *testing.T, id, name, slug string) {
+			require.NoError(t, s.CreateAgent(context.Background(), &store.Agent{ID: id, Slug: slug, Name: name, ProjectID: projectID}))
+		},
+		addNamedUser: func(t *testing.T, id, displayName string) {
+			require.NoError(t, s.CreateUser(context.Background(), &store.User{
+				ID: id, Email: id + "@stars.test", DisplayName: displayName, Role: "member", Status: store.UserStatusActive,
+			}))
+		},
+		addNativeConversation: func(t *testing.T, id, ref string) {
+			at := time.Now().UTC()
+			require.NoError(t, s.CreateConversation(context.Background(), &store.Conversation{
+				ID: id, Kind: "direct", Surface: "native", ExternalRef: ref, DriftState: "active", LastActivityAt: at, CreatedAt: at,
+			}))
+		},
+		setTopicConversation: func(t *testing.T, topicID, conversationID string) {
+			_, err := db.Exec(`UPDATE webchat_topic SET conversation_id = ? WHERE id = ?`, conversationID, topicID)
+			require.NoError(t, err)
+		},
+		deleteConversation: func(t *testing.T, id string) {
+			require.NoError(t, s.DeleteConversation(context.Background(), id))
+		},
 	}
 	require.NotNil(t, env.stars)
 	testMessageStarStoreContract(t, env)
+	testMessageStarLifecycleContract(t, env)
+	testStarredHistoryContract(t, env)
+	testStarredConversationsContract(t, env)
 }
 
 // TestMessageStarStore_SQLite_FixedWidthTime pins the SQLite TEXT form:
@@ -327,6 +414,20 @@ func TestMessageStarStore_Postgres(t *testing.T) {
     id uuid PRIMARY KEY, project_id uuid, created timestamptz NOT NULL, channel text, thread_id text,
     conversation_id uuid, msg text, sender text, sender_id text, recipient text, recipient_id text)`)
 	require.NoError(t, err)
+	// The Ent-managed tables the lifecycle contract reaches: users and
+	// projects (existence only) and conversations (a promotion creates one).
+	// users and agents also carry the names the Starred rail sorts DMs by.
+	_, err = db.ExecContext(ctx, `CREATE TABLE users (id uuid PRIMARY KEY, display_name text);
+CREATE TABLE agents (id uuid PRIMARY KEY, name text, slug text);
+CREATE TABLE projects (id uuid PRIMARY KEY);
+CREATE TABLE conversations (
+    id uuid PRIMARY KEY, project_id uuid, kind text, surface text, external_ref text, parent_ref text,
+    display_name text, default_agent_id uuid, drift_state text, last_activity_at timestamptz, created_at timestamptz,
+    deleted_at timestamptz)`)
+	require.NoError(t, err)
+	projectID := uuid.NewString()
+	_, err = db.ExecContext(ctx, `INSERT INTO projects (id) VALUES ($1)`, projectID)
+	require.NoError(t, err)
 	wcs := NewWebChatStore(db, "postgres")
 	require.NoError(t, wcs.Init())
 	env := starStoreEnv{
@@ -347,7 +448,7 @@ VALUES ($1, $2, $3, $4, $5, $6, 'user:x@test.com')`, id, created, channel, threa
 		},
 		addTopic: func(t *testing.T, id string) {
 			_, err := db.Exec(`INSERT INTO webchat_topic (id, project_id, name, created_by, created_at) VALUES ($1, $2, $3, $4, NOW())`,
-				id, uuid.NewString(), "t-"+id[:8], "u")
+				id, projectID, "t-"+id[:8], "u")
 			require.NoError(t, err)
 		},
 		deleteTopic: func(t *testing.T, id string) {
@@ -365,7 +466,63 @@ VALUES ($1, $2, $3, $4, $5, $6, 'user:x@test.com')`, id, created, channel, threa
 			require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM webchat_migrations WHERE name = $1`, messageStarTableMigration).Scan(&n))
 			return n
 		},
+		projectID: projectID,
+		addUser: func(t *testing.T, id string) {
+			_, err := db.Exec(`INSERT INTO users (id) VALUES ($1)`, id)
+			require.NoError(t, err)
+		},
+		insertStar: func(t *testing.T, userID, messageID, key, projectID string, at time.Time) {
+			_, err := db.Exec(`INSERT INTO webchat_message_star (user_id, message_id, conversation_key, project_id, starred_at) VALUES ($1, $2, $3, $4, $5)`,
+				userID, messageID, key, nullableString(projectID), at.UTC().Truncate(starTimePrecision))
+			require.NoError(t, err)
+		},
+		failDMDelete: func(t *testing.T) func() {
+			_, err := db.Exec(`CREATE FUNCTION star_promote_fails() RETURNS trigger AS $f$ BEGIN RAISE EXCEPTION 'dm delete refused'; END $f$ LANGUAGE plpgsql;
+CREATE TRIGGER star_promote_fails BEFORE DELETE ON webchat_dm FOR EACH ROW EXECUTE FUNCTION star_promote_fails()`)
+			require.NoError(t, err)
+			return func() {
+				_, err := db.Exec(`DROP TRIGGER star_promote_fails ON webchat_dm; DROP FUNCTION star_promote_fails()`)
+				require.NoError(t, err)
+			}
+		},
+		setTopic: func(t *testing.T, id, projectID, name string, activity *time.Time) {
+			var at any
+			if activity != nil {
+				at = activity.UTC()
+			}
+			_, err := db.Exec(`UPDATE webchat_topic SET project_id = $1, name = $2, last_activity_at = $3 WHERE id = $4`, projectID, name, at, id)
+			require.NoError(t, err)
+		},
+		addDMRow: func(t *testing.T, participantID, key, peerKind, peerID string, activity time.Time) {
+			_, err := db.Exec(`INSERT INTO webchat_dm (conversation_key, participant_id, peer_id, peer_kind, last_activity_at) VALUES ($1, $2, $3, $4, $5)`,
+				key, participantID, peerID, peerKind, activity.UTC())
+			require.NoError(t, err)
+		},
+		addAgent: func(t *testing.T, id, name, slug string) {
+			_, err := db.Exec(`INSERT INTO agents (id, name, slug) VALUES ($1, $2, $3)`, id, name, slug)
+			require.NoError(t, err)
+		},
+		addNamedUser: func(t *testing.T, id, displayName string) {
+			_, err := db.Exec(`INSERT INTO users (id, display_name) VALUES ($1, $2)`, id, displayName)
+			require.NoError(t, err)
+		},
+		addNativeConversation: func(t *testing.T, id, ref string) {
+			_, err := db.Exec(`INSERT INTO conversations (id, kind, surface, external_ref, drift_state, last_activity_at, created_at)
+VALUES ($1, 'direct', 'native', $2, 'active', NOW(), NOW())`, id, ref)
+			require.NoError(t, err)
+		},
+		setTopicConversation: func(t *testing.T, topicID, conversationID string) {
+			_, err := db.Exec(`UPDATE webchat_topic SET conversation_id = $1 WHERE id = $2`, conversationID, topicID)
+			require.NoError(t, err)
+		},
+		deleteConversation: func(t *testing.T, id string) {
+			_, err := db.Exec(`UPDATE conversations SET deleted_at = NOW() WHERE id = $1`, id)
+			require.NoError(t, err)
+		},
 	}
 	require.NotNil(t, env.stars)
 	testMessageStarStoreContract(t, env)
+	testMessageStarLifecycleContract(t, env)
+	testStarredHistoryContract(t, env)
+	testStarredConversationsContract(t, env)
 }

@@ -965,6 +965,7 @@ experiment is turned off mid-launch.
   "step": "string",           // optional, free-text progress label; truncated to 512 bytes
   "message": "string",        // optional, stored and republished; truncated to 512 bytes
   "errorCode": "string",      // optional, set on a "failed" report; truncated to 512 bytes
+  "runId": "string",          // optional; set on "failed" reports: the run the launch started
   "agent": RemoteAgentInfo,   // present only on "succeeded"
   "at": "2026-01-01T00:00:00Z" // optional, broker-side timestamp
 }
@@ -976,8 +977,15 @@ The request body is bounded to 64 KiB.
 - `200 OK` with `{"result": "applied"}` (or `"duplicate"` for a stale `seq`,
   or `"completed"` for a report on an agent already past `running`). `applied`
   also covers a late `failed` report that refines a launch that already ended
-  `timed_out` or `lost` (the agent is already in `error`); `completed` also
-  covers any report on a launch that already ended `succeeded` or
+  `timed_out` or `lost` (the agent is already in `error`). `applied` also
+  covers a `failed` report on a launch that ended `running_observed` when
+  the report's `runId` equals the agent's current run, the agent is in
+  `running` or `error`, no start claim for another launch is held, no
+  delete holds the agent, no reincarnation is in flight, the error code is
+  not `broker_restarted`, and the agent has no live activity. As for any
+  applied `failed` report, the agent's hub token is revoked under the
+  launch kind's rule. `completed` also covers any report on a launch that
+  already ended `succeeded`, and every other report on a launch that ended
   `running_observed`.
 - `403 Forbidden` with the standard error body (`{"error": {"code": "forbidden", ...}}`),
   not the `{code, reason}` shape below: not the owning broker.
@@ -995,9 +1003,11 @@ The request body is bounded to 64 KiB.
   `other_owner`, `stopped`, or the agent's current launch end reason
   (`timed_out`, `lost`, `failed`, or `not_launched`) when the agent's launch
   already ended with one of those reasons — `succeeded` and
-  `running_observed` never appear here, since either one always answers
-  `200` instead (see above). This set is open — treat any unrecognized
-  `reason` as terminal.
+  `running_observed` never appear here, since either one answers `200`
+  instead (see above). A resend of a `failed` report that was applied
+  after `running_observed` gets `failed` here, because the launch has
+  then ended `failed`. This set is open — treat any unrecognized `reason`
+  as terminal.
 
 ### 5.9 The `launch` Object
 

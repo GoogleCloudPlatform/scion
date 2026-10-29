@@ -1268,3 +1268,25 @@ func TestBuildPod_NK0_LegacyPlacementUnchanged(t *testing.T) {
 		t.Fatalf("pod spec differs from today's:\n got: %s\nwant: %s", got, want)
 	}
 }
+
+// TestKubernetesRuntime_CopiesAgentHome (ptone/scion#5368): the Kubernetes
+// runtime declares CopiedAgentHomeRuntime, so Start keeps its agents at
+// starting until Run returns. Every other runtime does not declare it.
+func TestKubernetesRuntime_CopiesAgentHome(t *testing.T) {
+	if !CopiesAgentHome(&KubernetesRuntime{}) {
+		t.Error("CopiesAgentHome(KubernetesRuntime) = false, want true")
+	}
+	for name, rt := range map[string]Runtime{
+		"docker":           &DockerRuntime{},
+		"podman":           &PodmanRuntime{},
+		"apple":            &AppleContainerRuntime{},
+		"cloudrun":         &CloudRunRuntime{},
+		"cloudrun-sandbox": &CloudRunSandboxRuntime{},
+		"substrate":        &SubstrateRuntime{},
+		"mock":             &MockRuntime{},
+	} {
+		if CopiesAgentHome(rt) {
+			t.Errorf("CopiesAgentHome(%s) = true, want false", name)
+		}
+	}
+}

@@ -21,13 +21,13 @@ import type { Node } from '@milkdown/prose/model';
 
 import { loadDoc, loadDocument, saveDoc, sentinelLeft } from './bridge.js';
 import type { Consumed } from './bridge.js';
-import { consumedAsInSource } from './preserve.js';
+import { consumedAsInSource, makeBaseline } from './preserve.js';
 import { MARKS } from './schema.js';
 import type { Core, MdNode } from './create.js';
 import { docMarkKinds, earlierKept, keyedMarks, marksReadBack, textMarkKinds } from './guard.js';
 import type { MarkRun } from './guard.js';
 import { parseCritic, projectCritic } from '../../../utils/critic.js';
-import { ReviewSession } from './session.js';
+import { ReviewSession, backtickRuns, fenceLines } from './session.js';
 import { corpus, destroyCores, makeCore } from './__fixtures__/core.js';
 
 let core: Core;
@@ -164,6 +164,23 @@ describe('load-time safety net', () => {
 // The two invariants are tested against deliberately broken parts (a
 // parser that moves text, a serializer that rewrites an earlier mark), not
 // only against the constructs known today.
+/**
+ * core with a broken Markdown parser: every document it reads is built by
+ * parse (the trees and definitions are the real parser's).
+ */
+const brokenParse = (parse: (t: string) => Node): Core => ({
+  ...core,
+  parse,
+  read: (t: string) => ({ ...core.read(t), doc: parse(t) }),
+});
+
+/** core whose readings find no link reference definitions (the definition check off). */
+const noDefinitions = (): Core => ({
+  ...core,
+  parseMdRaw: (): MdNode => ({ type: 'root', children: [] }),
+  read: (t: string) => ({ ...core.read(t), definitions: [] }),
+});
+
 describe('load invariant (I1)', () => {
   const md = 'one {==a==}{>>A<<}\n\ntwo {==b==}{>>B<<}\n';
 
@@ -177,7 +194,7 @@ describe('load invariant (I1)', () => {
       [parts[0], parts[1]] = [parts[1], parts[0]];
       return core.parse(parts.join('\n\n'));
     };
-    expect(new ReviewSession({ ...core, parse: swap }).load(md)).toBe(false);
+    expect(new ReviewSession(brokenParse(swap)).load(md)).toBe(false);
   });
 
   it('refuses when a broken parser moves a mark token into another block', () => {
@@ -188,7 +205,7 @@ describe('load invariant (I1)', () => {
       if (i < 1) return core.parse(t);
       return core.parse(t.slice(0, i - 1) + t.slice(i) + t[i - 1]);
     };
-    expect(new ReviewSession({ ...core, parse: move }).load(md)).toBe(false);
+    expect(new ReviewSession(brokenParse(move)).load(md)).toBe(false);
   });
 
   it('refuses when what the pass consumed differs from the source in any way', () => {
@@ -224,12 +241,12 @@ describe('load invariant (I1), read-only units', () => {
   it('refuses when a broken parser changes the text of a mark in an editable unit', () => {
     const src = 'one {++real++} two\n';
     expect(new ReviewSession(core).load(src)).toBe(true);
-    const broken = { ...core, parse: (t: string): Node => core.parse(t.replace('real', 'fake')) };
+    const broken = brokenParse((t: string): Node => core.parse(t.replace('real', 'fake')));
     expect(new ReviewSession(broken).load(src)).toBe(false);
   });
 
   it('refuses when a broken parser changes another mark of that unit', () => {
-    const broken = { ...core, parse: (t: string): Node => core.parse(t.replace('real', 'fake')) };
+    const broken = brokenParse((t: string): Node => core.parse(t.replace('real', 'fake')));
     expect(new ReviewSession(broken).load(md)).toBe(false);
   });
 });
@@ -251,19 +268,13 @@ describe('load invariant (I1), notes by place', () => {
     // An unused definition holding an insertion's opening token.
     const md = '[u]: /x "{++"\n\nhello ++} world\n';
     expect(new ReviewSession(core).load(md)).toBe(false);
-    const s = new ReviewSession({
-      ...core,
-      parseMdRaw: (): MdNode => ({ type: 'root', children: [] }),
-    });
+    const s = new ReviewSession(noDefinitions());
     expect(s.load(md)).toBe(false);
   });
 
   it('refuses the same documents by the note ordinals alone (definition check off)', () => {
     for (const md of nested) {
-      const s = new ReviewSession({
-        ...core,
-        parseMdRaw: (): MdNode => ({ type: 'root', children: [] }),
-      });
+      const s = new ReviewSession(noDefinitions());
       expect(s.load(md), md).toBe(false);
     }
   });
@@ -355,13 +366,87 @@ describe('save invariant (I2)', () => {
     s.markDirty();
   };
 
+  it('refuses the save when the whole text changes outside marks', () => {
+    // A serializer that adds plain text to the edited paragraph: its marks
+    // still read back, so only the whole-text clean check sees it.
+    const src = 'a {++x++} b\n';
+    const broken = {
+      ...core,
+      serialize: (d: Node): string => {
+        const t = core.serialize(d);
+        return t.includes('Z') ? t.replace(' b', ' b more') : t;
+      },
+    };
+    const s = new ReviewSession(broken);
+    expect(s.load(src)).toBe(true);
+    edit(s, broken);
+    expect(s.save()).toBeNull();
+    // Positive control: the real serializer.
+    const ok = new ReviewSession(core);
+    expect(ok.load(src)).toBe(true);
+    edit(ok, core);
+    expect(ok.save()).toBe('a {++x++} b{++ Z++}\n');
+  });
+
+  it("refuses the save when a block written from its source no longer holds the document's marks", () => {
+    // Block 0 holds a mark token inside a link title, so it is read-only
+    // and always written from its source. A mark put there anyway (no
+    // policy here) would vanish from the saved text: only the whole-text
+    // read-back sees it.
+    const src = '[l](u "{++x++}") and {++real++}\n\nsecond para\n';
+    const s = new ReviewSession(core);
+    expect(s.load(src)).toBe(true);
+    expect(s.readOnlyBlocks()).toEqual([0]);
+    const v = core.view;
+    const mark = core.schema.marks[MARKS.ins].create({ mine: true });
+    v.dispatch(v.state.tr.insert(v.state.doc.child(0).nodeSize - 1, core.schema.text('Z', [mark])));
+    s.markDirty();
+    expect(s.save()).toBeNull();
+    // Positive control: the same mark in block 1 saves, with block 0 (and
+    // its token in the title) written from its source.
+    const ok = new ReviewSession(core);
+    expect(ok.load(src)).toBe(true);
+    const end = v.state.doc.child(0).nodeSize + v.state.doc.child(1).nodeSize - 1;
+    v.dispatch(v.state.tr.insert(end, core.schema.text('Z', [mark])));
+    ok.markDirty();
+    expect(ok.save()).toBe('[l](u "{++x++}") and {++real++}\n\nsecond para{++Z++}\n');
+  });
+
+  it('refuses the save when a literal opener in an earlier block would take the new closer', () => {
+    const src = 'Note: {++ stays literal.\n\nlater text\n';
+    const s = new ReviewSession(core);
+    expect(s.load(src)).toBe(true);
+    const v = core.view;
+    const mark = core.schema.marks[MARKS.ins].create({ mine: true });
+    const end = v.state.doc.child(0).nodeSize + v.state.doc.child(1).nodeSize - 1;
+    v.dispatch(v.state.tr.insert(end, core.schema.text(' Z', [mark])));
+    s.markDirty();
+    expect(s.unitCheck(v.state.doc, 1, 1)).toBe('generic');
+    expect(s.save()).toBeNull();
+    // Positive control: the same insertion in a block before the literal
+    // opener.
+    const ok = new ReviewSession(core);
+    const src2 = 'earlier text\n\nNote: {++ stays literal.\n';
+    expect(ok.load(src2)).toBe(true);
+    v.dispatch(
+      v.state.tr.insert(v.state.doc.child(0).nodeSize - 1, core.schema.text(' Z', [mark]))
+    );
+    ok.markDirty();
+    expect(ok.save()).toBe('earlier text{++ Z++}\n\nNote: {++ stays literal.\n');
+  });
+
   it('refuses when the serializer rewrites the earlier mark and writes the own one like it', () => {
     // The own insertion is an emphasised x, as the earlier one is; the
-    // broken serializer rewrites only the first.
+    // broken serializer rewrites only the first, and only in the edited
+    // text (a rewrite in the text before the edit too would cancel out in
+    // the three-way patch).
     const src = 'a {++*x*++} b\n';
     const broken = {
       ...core,
-      serialize: (d: Node): string => core.serialize(d).replace('*x*', '_x_'),
+      serialize: (d: Node): string => {
+        const t = core.serialize(d);
+        return t.split('*x*').length > 2 ? t.replace('*x*', '_x_') : t;
+      },
     };
     const s = new ReviewSession(broken);
     expect(s.load(src)).toBe(true);
@@ -411,14 +496,58 @@ describe('save invariant (I2)', () => {
   });
 
   it('refuses the edit and the save when the serializer rewrites the earlier mark', () => {
+    // Only in the edited text: a rewrite of the text before the edit too
+    // would cancel out in the three-way patch.
     const broken = {
       ...core,
-      serialize: (d: Node): string => core.serialize(d).replace(/\*/g, '_'),
+      serialize: (d: Node): string => {
+        const t = core.serialize(d);
+        return t.includes('Z') ? t.replace(/\*/g, '_') : t;
+      },
     };
     const s = new ReviewSession(broken);
     expect(s.load(md)).toBe(true);
     edit(s, broken);
     expect(s.unitOk(core.view.state.doc, 0, 0)).toBe(false);
     expect(s.save()).toBeNull();
+  });
+});
+
+describe('baseline units', () => {
+  const baseline = (md: string): ReturnType<typeof makeBaseline> => {
+    const a = chooseAlphabet(md)!;
+    const loaded = loadDocument(md, core.parse, core.schema, a)!;
+    return makeBaseline(md, loaded.doc, core.parseMd, a);
+  };
+
+  it('splits a list into items and a table into rows', () => {
+    const list = baseline('* one\n* two\n')!;
+    expect(list.blocks[0].subs).toEqual([
+      { from: 0, to: 5 },
+      { from: 6, to: 11 },
+    ]);
+    const table = baseline('| a | b |\n|---|---|\n| c | d |\n')!;
+    expect(table.blocks[0].subs?.length).toBe(2);
+  });
+
+  it('does not split a list with a mark across two of its items', () => {
+    const b = baseline('- a {++x\n- y++} b\n- c\n')!;
+    expect(b.blocks).toHaveLength(1);
+    expect(b.blocks[0].subs).toBeUndefined();
+  });
+});
+
+describe('code signature', () => {
+  it('counts the lines that would open or close a fence', () => {
+    expect(fenceLines('text\n```js\ncode\n```\nmore')).toBe(2);
+    expect(fenceLines('   ~~~\n    ```')).toBe(1); // four spaces is indented code
+    expect(fenceLines('a ``` b\n``x')).toBe(0);
+    expect(fenceLines('{++```++}')).toBe(0); // a typed run after a token is not at a line start
+  });
+
+  it('lists backtick runs with their lengths and backslashes', () => {
+    expect(backtickRuns('a `b` ``c``')).toBe('1,1,2,2');
+    expect(backtickRuns('a \\` b \\\\` c')).toBe('1e,1');
+    expect(backtickRuns('no ticks')).toBe('');
   });
 });

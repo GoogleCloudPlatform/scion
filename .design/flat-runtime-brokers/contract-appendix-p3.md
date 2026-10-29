@@ -144,6 +144,7 @@ P3 also freezes the **maximum publishable set**: the Go type `config.FlatInstanc
 | `runtime_target.safe_to_evict` | as is, tri-state (unset / true / false) | scheduling default |
 | `runtime_target.shared_dir_storage_backend`, `shared_dir_storage_backends` (dir name → `local`/`nfs`), `home_storage_backend` | as is | backend choice only; NFS server addresses live in `server.shared_dir_storage.nfs`, not in the instance |
 | `runtime_target.home_storage_leaf` | **never** | a host path component |
+| `runtime_target.node_selector`, `tolerations` (`key`, `operator`, `value`, `effect`), `runtime_class_name` | as is, plus the marker `placement_reported` (wire `placementReported`), true when the instance reports placement (a Kubernetes target). Absent or false means not reported, not "no placement"; the Hub stores the marker as received and never sets it | scheduling placement for new agents (amendment: Kubernetes scheduling design v2, P1.1) |
 | `agent_defaults.default_harness_config`, `image_registry`, `clone_depth` | as is | names and values without credentials |
 | `agent_defaults.resources` | as is (requests / limits) | quantities |
 | `agent_defaults.volumes[]` (`api.VolumeMount`) | **`target`, `read_only`, `type` only**; `source`, `bucket`, `prefix`, `server`, `mode`, `volume_name` **never** | host paths and storage locations are node-local layout |
@@ -160,6 +161,7 @@ Normative: **each field keeps its own existing precedence chain, and the instanc
 | `safe_to_evict` | below the agent's own (inline or persisted) `kubernetes.safeToEvict`, which wins whether true or false (`ApplySafeToEvictDefault`); it stays an overridable default, never mandatory policy. Errata (P3.1-b): an earlier text said the template's value wins; a template's `kubernetes` block is not applied to the agent's job config (ptone/scion#4524), so the agent's own config is the outranking tier |
 | `priority_class_name` | below the agent's own (inline or persisted) `kubernetes.priorityClassName`. Errata (P3.1-b): an earlier text said a template's value wins; a template's `kubernetes` block is not applied to the agent's job config (ptone/scion#4524) |
 | `gke` | consumed when the instance runtime is built |
+| `node_selector`, `tolerations`, `runtime_class_name` | operator-owned, not a default (amendment: Kubernetes scheduling design v2, P1.1): the agent's own `kubernetes` block may add node selector keys, but cannot change a key the instance sets or the runtime class, and its tolerations must be among the instance's, so an agent toleration is refused when the instance sets none (`config.ApplyOperatorPlacement`) |
 | `shared_dir_storage_backend(s)` | between the agent's recorded backend (always kept) and `server.shared_dir_storage.backend`; flat order is instance per-dir, instance single, global |
 | `home_storage_backend`, `home_storage_leaf` | above `server.home_storage`; first start only, the recorded decision is kept afterwards |
 | `default_harness_config` | rung 6 of `ResolveHarnessConfigName`: below template and stored rungs, above top-level `default_harness_config` |

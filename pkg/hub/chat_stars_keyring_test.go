@@ -179,17 +179,187 @@ func TestCapabilityKeyring_ChatStarsCursor(t *testing.T) {
 	assert.NotEqual(t, l1.Items[0].MessageID, l2.Items[0].MessageID)
 	assert.True(t, strings.HasPrefix(l2.NextCursor, "c2.gen2."), l2.NextCursor)
 
-	// Issuance closed: no cursor is minted, and the page is refused.
-	cclk := &krClock{t: krT0.Add(time.Hour)}
+	// Issuance closed: no cursor is minted, and the page is refused. An
+	// existing session, with capability issuance closed: the user JWT is
+	// signed by the same ring, so it is minted just before sign_until (T0+1h)
+	// on the ring clock and stays valid at T0+1h (15 min on the same clock).
+	cclk := &krClock{t: krT0.Add(59 * time.Minute)}
 	c := starRingReplica(t, f, capClosing(t), cclk)
-	rec, _ = getStarPage(t, f, c, f.admin, f.topicA, "limit=1")
+	admin, err := f.s.GetUser(context.Background(), f.admin)
+	require.NoError(t, err)
+	session := keyringSessionToken(t, c, admin)
+	cclk.t = krT0.Add(time.Hour)
+	rec = requestWithToken(t, c, session, http.MethodGet, starListPath(f.topicA, "limit=1"), nil)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), "c2.")
 	out := rec.Body.String()
-	rec, all := getStarPage(t, f, c, f.admin, f.topicA, "limit=10")
+	rec = requestWithToken(t, c, session, http.MethodGet, starListPath(f.topicA, "limit=10"), nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	all := decodeStarPage(t, rec)
 	assert.Len(t, all.Items, 3)
 	assert.Empty(t, all.NextCursor)
 	assert.NotContains(t, rec.Body.String(), `"nextCursor"`, "a complete page carries no cursor key")
 	assertNoCapabilityKeyMaterial(t, logs.String()+out+rec.Body.String())
+}
+
+// getAsUser sends a GET for path to srv as userID's interactive session.
+func getAsUser(t *testing.T, f *starFixture, srv *Server, userID, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	user, err := f.s.GetUser(context.Background(), userID)
+	require.NoError(t, err)
+	return doRequestAsUser(t, srv, user, http.MethodGet, path, nil)
+}
+
+// TestCapabilityKeyring_StarredConversationsCursor: the Starred rail
+// continuation (GET /api/v1/chat/starred-conversations;
+// sealStarredConversationsCursor: SealPosition, openStarredConversationsCursor:
+// OpenPosition) end to end in keyring mode. Pages alternate between the two
+// replicas of a rollout, each continuation in the p2.<kid>. form of the
+// replica that sealed it, and list every readable conversation once. A
+// cursor stays bound to its caller and sort; a swapped generation and a
+// retired one get the uniform invalid_cursor. At sign_until a page that
+// needs a continuation is refused with 500 and no cursor, while a complete
+// first page still works. No key material reaches the logs or the body.
+func TestCapabilityKeyring_StarredConversationsCursor(t *testing.T) {
+	allowVersionedRings(t)
+	f := newStarredRailFixture(t, true)
+	want := starredConversationRowKeys(f.rail(t, f.member).Items)
+	require.Len(t, want, 4)
+	logs := captureLogs(t) // before the replicas: their loggers bind the default at New
+	clk := &krClock{t: krT0}
+	ka, kb := capRollout(t, "versioned")
+	a := starRingReplica(t, f.starFixture, ka, clk)
+	b := starRingReplica(t, f.starFixture, kb, clk)
+	railPage := func(srv *Server, userID string, params ...string) *httptest.ResponseRecorder {
+		return getAsUser(t, f.starFixture, srv, userID, starredConversationsURL(params...))
+	}
+
+	// Page 1 on A (gen1), page 2 on B (gen2), and so on, alternating.
+	replicas := []*Server{a, b}
+	prefixes := []string{listPositionPrefixV2 + "gen1.", listPositionPrefixV2 + "gen2."}
+	var got []string
+	var first string
+	cursor := ""
+	for i := 0; ; i++ {
+		require.Less(t, i, len(want)+1, "pagination ends")
+		params := []string{"limit", "1"}
+		if cursor != "" {
+			params = append(params, "cursor", cursor)
+		}
+		page := decodeStarredConversations(t, railPage(replicas[i%2], f.member, params...))
+		got = append(got, starredConversationRowKeys(page.Items)...)
+		if page.NextCursor == "" {
+			break
+		}
+		require.True(t, strings.HasPrefix(page.NextCursor, prefixes[i%2]), "page %d: %s", i, page.NextCursor)
+		if first == "" {
+			first = page.NextCursor
+		}
+		cursor = page.NextCursor
+	}
+	assert.Equal(t, want, got, "each conversation once and in order, across replicas")
+	assert.Len(t, got, len(want))
+
+	// Bound to the caller and the sort.
+	assertInvalidCursor(t, railPage(b, f.owner, "limit", "1", "cursor", first))
+	assertInvalidCursor(t, railPage(b, f.member, "limit", "1", "sort", "alpha", "cursor", first))
+	body := strings.TrimPrefix(first, listPositionPrefixV2+"gen1.")
+	assertInvalidCursor(t, railPage(b, f.member, "limit", "1", "cursor", listPositionPrefixV2+"gen2."+body))
+	assertInvalidCursor(t, railPage(b, f.member, "limit", "1", "cursor", listCursorPrefixV2+"gen1."+body))
+
+	// gen1 verifies on B until its verify_until, and not from that instant.
+	clk.t = krT0.Add(48*time.Hour - time.Second)
+	require.Equal(t, http.StatusOK, railPage(b, f.member, "limit", "1", "cursor", first).Code)
+	clk.t = krT0.Add(48 * time.Hour)
+	assertInvalidCursor(t, railPage(b, f.member, "limit", "1", "cursor", first))
+	assert.Equal(t, http.StatusOK, railPage(b, f.member, "limit", "1").Code, "a fresh first page always works")
+
+	// Issuance closed: the session is minted just before sign_until (T0+1h)
+	// on the ring clock and stays valid at T0+1h.
+	cclk := &krClock{t: krT0.Add(59 * time.Minute)}
+	c := starRingReplica(t, f.starFixture, capClosing(t), cclk)
+	member, err := f.s.GetUser(context.Background(), f.member)
+	require.NoError(t, err)
+	session := keyringSessionToken(t, c, member)
+	cclk.t = krT0.Add(time.Hour)
+	rec := requestWithToken(t, c, session, http.MethodGet, starredConversationsURL("limit", "1"), nil)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), listPositionPrefixV2)
+	out := rec.Body.String()
+	rec = requestWithToken(t, c, session, http.MethodGet, starredConversationsURL("limit", "10"), nil)
+	all := decodeStarredConversations(t, rec)
+	assert.Equal(t, want, starredConversationRowKeys(all.Items))
+	assert.NotContains(t, rec.Body.String(), `"nextCursor"`, "a complete page carries no cursor key")
+	assertNoCapabilityKeyMaterial(t, logs.String()+out+rec.Body.String())
+}
+
+// TestCapabilityKeyring_StarredHistoryCursorRotation: starred-only history
+// (handleStarredHistory: listCursorSealer.Seal; openStarredHistoryCursor)
+// paged across a key rotation. A walk that alternates between the replica
+// still on gen1 and the one that rotated to gen2 returns exactly the
+// single-replica order; a gen1 continuation keeps working on the rotated
+// replica until gen1's verify_until and then fails with invalid_cursor; and
+// a c1. continuation from a legacy-mode replica resumes on the upgraded
+// ring with a versioned continuation.
+func TestCapabilityKeyring_StarredHistoryCursorRotation(t *testing.T) {
+	allowVersionedRings(t)
+	f := newStarFixture(t, true)
+	base := time.Now().UTC().Add(-time.Hour)
+	for i := 0; i < 4; i++ {
+		id := f.threadMsg(t, f.topicA, f.projA, fmt.Sprintf("m%d", i), base.Add(time.Duration(i)*time.Minute))
+		f.starAs(t, f.admin, id, f.topicA)
+	}
+	want := historyIDs(decodeHistory(t, f.session(t, f.admin, http.MethodGet, starredHistoryPath(f.topicA), nil)))
+	require.Len(t, want, 4)
+	clk := &krClock{t: krT0}
+	ka, kb := capRollout(t, "versioned")
+	a := starRingReplica(t, f, ka, clk)
+	b := starRingReplica(t, f, kb, clk)
+	page := func(srv *Server, cursor string) chatHistoryResponse {
+		t.Helper()
+		extra := []string{"limit=1"}
+		if cursor != "" {
+			extra = append(extra, "cursor="+url.QueryEscape(cursor))
+		}
+		return decodeHistory(t, getAsUser(t, f, srv, f.admin, starredHistoryPath(f.topicA, extra...)))
+	}
+
+	replicas := []*Server{a, b}
+	prefixes := []string{listCursorPrefixV2 + "gen1.", listCursorPrefixV2 + "gen2."}
+	var got []string
+	var gen1Cursor string
+	cursor := ""
+	for i := 0; ; i++ {
+		require.Less(t, i, len(want)+1, "pagination ends")
+		p := page(replicas[i%2], cursor)
+		got = append(got, historyIDs(p)...)
+		if p.NextCursor == "" {
+			break
+		}
+		require.True(t, strings.HasPrefix(p.NextCursor, prefixes[i%2]), "page %d: %s", i, p.NextCursor)
+		if gen1Cursor == "" {
+			gen1Cursor = p.NextCursor
+		}
+		cursor = p.NextCursor
+	}
+	assert.Equal(t, want, got, "the same order as one replica, each message once")
+
+	// The rotated replica resumes a gen1 continuation until gen1 retires.
+	clk.t = krT0.Add(48*time.Hour - time.Second)
+	assert.Equal(t, want[1:2], historyIDs(page(b, gen1Cursor)))
+	clk.t = krT0.Add(48 * time.Hour)
+	assertInvalidCursor(t, getAsUser(t, f, b, f.admin, starredHistoryPath(f.topicA, "limit=1", "cursor="+url.QueryEscape(gen1Cursor))))
+	assert.Equal(t, want[:1], historyIDs(page(b, "")), "a fresh first page always works")
+
+	// Upgrade from a legacy-mode replica: its c1. continuation resumes on
+	// the versioned ring, whose own continuation is versioned.
+	uclk := &krClock{t: krT0}
+	_, ub := capRollout(t, "versioned")
+	legacy := starRingReplica(t, f, nil, uclk)
+	upgraded := starRingReplica(t, f, ub, uclk)
+	l1 := page(legacy, "")
+	require.True(t, strings.HasPrefix(l1.NextCursor, listCursorPrefix), l1.NextCursor)
+	l2 := page(upgraded, l1.NextCursor)
+	assert.Equal(t, want[1:2], historyIDs(l2))
+	assert.True(t, strings.HasPrefix(l2.NextCursor, listCursorPrefixV2+"gen2."), l2.NextCursor)
 }

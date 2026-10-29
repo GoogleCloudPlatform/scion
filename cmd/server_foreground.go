@@ -62,6 +62,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubtracing"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/ssemetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/txdiag"
 	scionplugin "github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
@@ -608,6 +609,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 				exit.addFlush(mp.Shutdown)
 
 				hubDBRec = wireHubCoreMetrics(hubSrv, mp)
+				attachTxDiagRecorder(entClient, hubDBRec)
 
 				if hubSrv.GetBrokerAuthService() != nil {
 					otelMetrics, otelAuthErr := hub.NewOTelMetricsRecorder(mp)
@@ -1439,6 +1441,10 @@ func resolveHubProjectStorage(cfg *config.GlobalConfig) error {
 	}
 	cfg.EffectiveProjectStorage = ps
 	cfg.EffectiveProjectStorageWarnings = warnings
+	// Removed per-runtime/per-profile storage overrides in the settings
+	// file are reported (ERROR, degraded health, admin settings), never a
+	// refused start (ptone/scion#6371).
+	cfg.RemovedStorageOverridesFileError = hubRemovedStorageOverridesFileError(log.Printf)
 	return nil
 }
 
@@ -1886,6 +1892,11 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 		ConnMaxLifetime: connMaxLifetime,
 		ConnMaxIdleTime: connMaxIdleTime,
 	}
+	diag, err := txDiagConfig(cfg.Database.TxDiagnostics)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid database config: %w", err)
+	}
+	pool.Diag = diag
 
 	var entClient *ent.Client
 	switch cfg.Database.Driver {
@@ -1966,6 +1977,38 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 	}
 
 	return s, entClient, nil
+}
+
+// txDiagConfig returns the transaction diagnostics config for the hub
+// store's pool, or nil when tx_diagnostics.enabled is false (the pool then
+// opens exactly as without diagnostics).
+func txDiagConfig(c config.TxDiagnosticsConfig) (*txdiag.Config, error) {
+	s, err := c.Settings()
+	if err != nil {
+		return nil, err
+	}
+	if !s.Enabled {
+		return nil, nil
+	}
+	return &txdiag.Config{
+		HoldWarnThreshold:     s.HoldWarnThreshold,
+		LockWaitWarnThreshold: s.LockWaitWarnThreshold,
+		WarnInterval:          s.WarnInterval,
+		Logger:                logging.Subsystem("hub.db"),
+	}, nil
+}
+
+// attachTxDiagRecorder hands the hub DB metrics recorder to the store's
+// transaction diagnostics, when both exist. The Monitor itself is owned by
+// the store's connection pool and closes with it.
+func attachTxDiagRecorder(client *ent.Client, rec dbmetrics.Recorder) {
+	mon, ok := entc.DiagMonitor(client)
+	if !ok {
+		return
+	}
+	if tr, ok := rec.(txdiag.Recorder); ok {
+		mon.SetRecorder(tr)
+	}
 }
 
 // migrateStore runs the schema migration and seed data. On Postgres it is
@@ -2851,17 +2894,21 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		// The shared encryption object the local secret backend holds
 		// (nil: the hub builds it from Keyring or SharedSigningSecret).
 		ValueCipher: serverValueCipher,
+		// A set server.keyring_file makes hub.New refuse to start without
+		// the file keyring (never a fallback to legacy signing keys).
+		KeyringConfigured: cfg.KeyringFile != "",
 		// When SCION_REQUIRE_STABLE_SIGNING_KEY is truthy, the hub refuses to
 		// start rather than silently mint a new signing key it cannot resolve
 		// (which would invalidate every live token after, e.g., a redeploy onto a
 		// new host that changed the HubID). Operators enabling this must supply a
 		// session secret or pre-provision the signing keys.
-		RequireStableSigningKey: parseBoolEnv("SCION_REQUIRE_STABLE_SIGNING_KEY"),
-		OIDCLogin:               cfg.OIDCLogin,
-		OIDCConfig:              cfg.OIDC,
-		Federation:              cfg.Federation,
-		ProjectStorageConfig:    cfg.EffectiveProjectStorage,
-		ProjectStorageWarnings:  cfg.EffectiveProjectStorageWarnings,
+		RequireStableSigningKey:          parseBoolEnv("SCION_REQUIRE_STABLE_SIGNING_KEY"),
+		OIDCLogin:                        cfg.OIDCLogin,
+		OIDCConfig:                       cfg.OIDC,
+		Federation:                       cfg.Federation,
+		ProjectStorageConfig:             cfg.EffectiveProjectStorage,
+		ProjectStorageWarnings:           cfg.EffectiveProjectStorageWarnings,
+		RemovedStorageOverridesFileError: cfg.RemovedStorageOverridesFileError,
 		// nil (no server.native_chat section) means enabled — chat is default-on.
 		NativeChatEnabled: cfg.NativeChat.EnabledSetting(),
 		// server.hub.port_proxy.response_header_timeout (validated at startup).
@@ -2990,6 +3037,12 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		log.Printf("WARNING: hub agent run-scope metrics disabled: %v", runScopeErr)
 	} else {
 		hubSrv.SetAgentRunScopeMetrics(runScopeRec)
+	}
+
+	if legacyFallbackRec, err := hub.NewOTelLegacyAdoptedFallbackMetrics(mp); err != nil {
+		log.Printf("WARNING: hub legacy adopted-agent fallback metrics disabled: %v", err)
+	} else {
+		hubSrv.SetLegacyAdoptedFallbackMetrics(legacyFallbackRec)
 	}
 
 	// Decision logging (remaining-audit P1): the audit writer's
@@ -4209,7 +4262,8 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		if authSvc := hubSrv.GetBrokerAuthService(); authSvc != nil {
 			secretKeyB64, secretErr := authSvc.GenerateAndStoreSecret(ctx, brokerID)
 			if secretErr != nil {
-				log.Printf("Warning: failed to generate/retrieve secret for co-located broker: %v", secretErr)
+				slog.Error("Co-located broker secret could not be generated or loaded; the broker API refuses every request except health checks until the server is restarted with a working secret",
+					"error", secretErr)
 			} else {
 				log.Printf("Broker secret ready for co-located control channel (idempotent)")
 				inMemoryCreds = &brokercredentials.BrokerCredentials{
@@ -4220,7 +4274,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 				}
 			}
 		} else {
-			log.Printf("Warning: BrokerAuthService not available, skipping co-located broker credentials")
+			slog.Error("Co-located broker credentials are unavailable (BrokerAuthService not available); the broker API refuses every request except health checks")
 		}
 	}
 
@@ -4280,6 +4334,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		if warning := brokerWorkspaceStorageWarning(globalVS); warning != "" {
 			log.Printf("WARNING: %s", warning)
 		}
+		_ = reportRemovedStorageOverridesIn(log.Printf, config.GlobalSettingsSource, globalVS)
 	}
 	if warning := brokerInotifyWarning(hostedMode, rt != nil && brokerAgentsShareHostUser(nil, rt.Name()), hostlimits.DefaultReader()); warning != "" {
 		log.Printf("WARNING: %s", warning)
@@ -4309,6 +4364,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		AllowContainerScriptHarnesses: cfg.RuntimeBroker.AllowContainerScriptHarnesses,
 		StateDir:                      rhStateDir,
 		NFSConfig:                     brokerNFS,
+		StorageOverridesCheck:         brokerStorageOverridesCheck,
 		StorageBucket:                 brokerStorageBucket(cfg.Storage),
 		WorkspaceStorageBackend:       workspaceStorageBackend,
 		StorageLayout:                 brokerLayout,

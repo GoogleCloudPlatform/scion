@@ -39,8 +39,9 @@ import { touchMenuItemStyles } from '../touch-styles.js';
 import { RECENT_USERS_LIMIT } from '../../../client/user-directory.js';
 import { LongPressController, type LongPressPoint } from './long-press.js';
 import {
+  MenuFocus,
   placeMenuInViewport,
-  renderMenuRows,
+  renderMenu,
   runMenuAction,
   shouldUseMenuSheet,
   type MenuAction,
@@ -480,8 +481,15 @@ export class ScionChatMembers extends LitElement {
       color: var(--scion-text, #1e293b);
     }
 
-    .context-menu-item:hover {
+    .context-menu-item:hover,
+    .context-menu-item:focus {
       background: var(--scion-bg-subtle, #f1f5f9);
+      outline: none;
+    }
+
+    .context-menu-item:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: -2px;
     }
 
     .context-menu-item sl-icon {
@@ -510,7 +518,9 @@ export class ScionChatMembers extends LitElement {
     super.connectedCallback();
     // Close the context menu on outside click, same as the space rail's.
     this._outsideClickHandler = () => {
-      if (this.contextMenuTarget) this.contextMenuTarget = null;
+      if (!this.contextMenuTarget) return;
+      this.contextMenuTarget = null;
+      this.menuFocus.closed();
     };
     document.addEventListener('click', this._outsideClickHandler);
   }
@@ -538,12 +548,14 @@ export class ScionChatMembers extends LitElement {
       this.checkAgentStateChanges();
     }
     if (this.contextMenuTarget && !this.menuAsSheet) {
-      placeMenuInViewport(
-        this.renderRoot.querySelector<HTMLElement>('.context-menu'),
-        this.contextMenuPos
-      );
+      const menu = this.renderRoot.querySelector<HTMLElement>('.context-menu');
+      placeMenuInViewport(menu, this.contextMenuPos);
+      this.menuFocus.afterRender(menu);
     }
   }
+
+  /** Keyboard focus around the member popup menu. */
+  private readonly menuFocus = new MenuFocus();
 
   /**
    * Compare current agent states against previous to detect changes for wobble.
@@ -647,6 +659,7 @@ export class ScionChatMembers extends LitElement {
     this.contextMenuTarget = { peerId };
     this.contextMenuPos = at;
     this.menuAsSheet = shouldUseMenuSheet();
+    if (!this.menuAsSheet) this.menuFocus.opened();
   }
 
   /** The actions of a member's menu, shared by the popup and the sheet. */
@@ -673,11 +686,14 @@ export class ScionChatMembers extends LitElement {
   private renderContextMenu() {
     if (!this.contextMenuTarget) return nothing;
     const { peerId } = this.contextMenuTarget;
-    return html`
-      <div class="context-menu" @click=${(e: Event) => e.stopPropagation()}>
-        ${renderMenuRows(this.memberMenuActions(peerId))}
-      </div>
-    `;
+    const name = this.memberName(peerId);
+    return renderMenu(this.memberMenuActions(peerId), {
+      label: name ? `Actions for ${name}` : 'Member actions',
+      focus: this.menuFocus,
+      close: () => {
+        this.contextMenuTarget = null;
+      },
+    });
   }
 
   /** The mobile presentation of the member menu. */

@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs/migrate"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
@@ -101,6 +102,14 @@ func (s *Server) projectStorageMigrateInput(ctx context.Context, withObjects boo
 	in.ProvisionLock = func(ws migrate.Tree, section func(lockCtx context.Context) error) error {
 		return withWorkspaceProvisionLocks(ctx, ws, section)
 	}
+	// Step 5 re-reads an agent's phase right before moving its home.
+	in.AgentStopped = func(lockCtx context.Context, projectID, agentID string) (bool, error) {
+		a, err := s.store.GetAgent(lockCtx, agentID)
+		if err != nil {
+			return false, err
+		}
+		return a.ProjectID == projectID && storageMigrateAgentStopped(a.Phase), nil
+	}
 	if stor := s.GetStorage(); withObjects && stor != nil {
 		hubID := s.HubID()
 		in.Objects = storageObjects{stor}
@@ -124,6 +133,11 @@ func (s *Server) storageMigrateProjects(ctx context.Context) ([]migrate.ProjectR
 			p := &page.Items[i]
 			ref := storageMigrateProjectRef(p)
 			ref.LocalBrokerTree = s.localTreeServedByEmbeddedBroker(ctx, p)
+			agents, err := s.storageMigrateAgents(ctx, p.ID)
+			if err != nil {
+				return nil, err
+			}
+			ref.Agents = agents
 			refs = append(refs, ref)
 		}
 		if page.NextCursor == "" || page.NextCursor == cursor {
@@ -131,6 +145,40 @@ func (s *Server) storageMigrateProjects(ctx context.Context) ([]migrate.ProjectR
 		}
 		cursor = page.NextCursor
 	}
+}
+
+// storageMigrateAgents lists a project's agents for migration step 5 (Cloud
+// Run homes, ptone/scion#5825): each agent's ID and slug, and whether it is
+// stopped (stopped or halted: no instance holds its home), the only state
+// in which its home is moved.
+func (s *Server) storageMigrateAgents(ctx context.Context, projectID string) ([]migrate.AgentRef, error) {
+	var refs []migrate.AgentRef
+	cursor := ""
+	for {
+		page, err := s.store.ListAgents(ctx, store.AgentFilter{ProjectID: projectID}, store.ListOptions{Limit: 500, Cursor: cursor, SkipTotalCount: true})
+		if err != nil {
+			return nil, fmt.Errorf("list agents of project %s: %w", projectID, err)
+		}
+		for i := range page.Items {
+			a := &page.Items[i]
+			refs = append(refs, migrate.AgentRef{ID: a.ID, Slug: a.Slug, Stopped: storageMigrateAgentStopped(a.Phase)})
+		}
+		if page.NextCursor == "" || page.NextCursor == cursor {
+			return refs, nil
+		}
+		cursor = page.NextCursor
+	}
+}
+
+// storageMigrateAgentStopped reports whether an agent in phase holds no
+// running instance, so its home can be moved. An agent in phase error may
+// still have a live instance, so it is not.
+func storageMigrateAgentStopped(phase string) bool {
+	switch state.Phase(phase) {
+	case state.PhaseStopped, state.PhaseHalted:
+		return true
+	}
+	return false
 }
 
 // storageMigrateProjectRef maps a project to the migration's view: it has a

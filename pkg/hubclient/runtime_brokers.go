@@ -90,6 +90,7 @@ type AgentLaunchReport struct {
 	Message    string                 `json:"message,omitempty"`
 	ErrorCode  string                 `json:"errorCode,omitempty"`
 	Cause      string                 `json:"cause,omitempty"` // failed runtime_error only: an api.BrokerRuntimeCause code
+	RunID      string                 `json:"runId,omitempty"` // failed only: the run the launch started
 	Agent      *AgentLaunchReportInfo `json:"agent,omitempty"` // succeeded only
 	At         time.Time              `json:"at,omitzero"`
 }
@@ -219,6 +220,10 @@ type ListBrokersOptions struct {
 type ListBrokersResponse struct {
 	Brokers []RuntimeBroker
 	Page    apiclient.PageResult
+	// HubVersion is the fleet hub version each broker's VersionStatus is
+	// compared with: a build token, "mixed", or "" when unknown or when an
+	// older Hub did not send it.
+	HubVersion string
 }
 
 // UpdateBrokerRequest is the request for updating a runtime broker.
@@ -237,6 +242,11 @@ type ListBrokerProjectsResponse struct {
 type BrokerHeartbeat struct {
 	Status   string             `json:"status"`
 	Projects []ProjectHeartbeat `json:"projects,omitempty"`
+	// Version is the broker's build token (version.Short()). The Hub
+	// refreshes the stored broker version from it on a heartbeat the broker
+	// sends itself (ptone/scion#5972). Omitted when empty; an older Hub
+	// ignores it.
+	Version string `json:"version,omitempty"`
 	// Capabilities refreshes the broker's reported capabilities on every
 	// heartbeat (design §3.4 Amendment A2.2(b)). Chosen over a hub->broker live /info query:
 	// no such query path exists today, and adding one would mean a new
@@ -533,6 +543,7 @@ func (s *runtimeBrokerService) List(ctx context.Context, opts *ListBrokersOption
 		Brokers    []RuntimeBroker `json:"brokers"`
 		NextCursor string          `json:"nextCursor,omitempty"`
 		TotalCount int             `json:"totalCount,omitempty"`
+		HubVersion string          `json:"hubVersion,omitempty"`
 	}
 
 	result, err := apiclient.DecodeRequired[listResponse](resp)
@@ -546,6 +557,7 @@ func (s *runtimeBrokerService) List(ctx context.Context, opts *ListBrokersOption
 			NextCursor: result.NextCursor,
 			TotalCount: result.TotalCount,
 		},
+		HubVersion: result.HubVersion,
 	}, nil
 }
 

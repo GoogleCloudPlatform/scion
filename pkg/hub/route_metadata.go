@@ -715,6 +715,15 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
 	},
+	// chat.starredConversations is the Starred rail: the caller's own
+	// conversations with stars, each kept only while the caller can read
+	// it (project.read for a thread), checked per conversation by the
+	// handler.
+	"/api/v1/chat/starred-conversations": {
+		Pattern: "/api/v1/chat/starred-conversations", RouteID: "chat.starredConversations",
+		Classification: RoutePolicy,
+		Permission:     "project.read", Resource: "project", Action: "read",
+	},
 	// chat.attachments.list and chat.attachments.byId are wrapped by
 	// chatAttachmentRoute: an agent credential is admitted on the collection
 	// only, for POST (upload) and GET (the capability probe), and must pass

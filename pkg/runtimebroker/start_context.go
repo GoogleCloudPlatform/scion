@@ -321,6 +321,18 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 			in.OwnedAbandon.projectPath = in.ProjectPath
 		}
 	}()
+	// On a shared storage backend: the Layout's project root
+	// (sharedHubProjectPath), checked, never written.
+	if in.ProjectSlug != "" && in.ProjectPath == "" {
+		sharedPath, shared, sce := s.sharedHubProjectPath(ctx, in.ProjectID)
+		if sce != nil {
+			span.SetStatus(codes.Error, startContextSpanText(sce))
+			return nil, sce
+		}
+		if shared {
+			in.ProjectPath = sharedPath
+		}
+	}
 	if in.ProjectSlug != "" && in.ProjectPath == "" {
 		globalDir, err := config.GetGlobalDir()
 		if err != nil {
@@ -611,32 +623,35 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
-	// 3. Hub auth token. Precedence (highest first):
-	//   1. in.AgentToken — the explicit hub-provided dedicated field (create path).
-	//   2. an existing env["SCION_AUTH_TOKEN"] already populated from in.ResolvedEnv
-	//      above — on the start/resume path the hub mints the agent JWT into
-	//      resolvedEnv, so it is already present here and must be kept.
-	//   3. the broker's own dev SCION_AUTH_TOKEN — last resort only, and only
-	//      for the co-located hub: decided after the hub endpoint below (see
-	//      colocatedHubDevToken) and passed to the agent manager outside env.
-	// The dev-token fallback must NOT clobber a token resolved from the hub:
-	// resume mints a valid JWT into resolvedEnv, and overwriting it with the
-	// broker's dev token caused 401s ("compact JWS format must have three parts").
-	if in.AgentToken != "" {
-		env["SCION_AUTH_TOKEN"] = in.AgentToken
-		// Bootstrap: NOT in argv. Diverted to ~/.scion/scion-token by
-		// pkg/agent/run.go:761-777; read by pkg/hubsync/sync.go:1329.
-		classifyBrokerEnv("SCION_AUTH_TOKEN", api.EnvKindSecretBootstrap)
-		if s.config.Debug {
-			s.agentLifecycleLog.Debug("SCION_AUTH_TOKEN set from agent token", "agent_id", in.AgentID, "length", len(in.AgentToken))
-		}
-	} else if env["SCION_AUTH_TOKEN"] != "" {
-		// Token already resolved from the hub via resolvedEnv (start/resume path); keep it.
-		if s.config.Debug {
-			s.agentLifecycleLog.Debug("SCION_AUTH_TOKEN kept from resolved env", "agent_id", in.AgentID, "length", len(env["SCION_AUTH_TOKEN"]))
-		}
+	// 3. Hub auth token. The agent's hub credential is only the token the
+	// hub issued for this start (opts.HubIssuedToken below):
+	//   - in.AgentToken, the dedicated field of a create request; or
+	//   - on start and restart, the resolved env SCION_AUTH_TOKEN, but only
+	//     when the hub classified it secret-bootstrap, which the hub does
+	//     only for the token it issued (setStartEnvToken). The resolved env
+	//     also carries the agent's config env (AppliedConfig.Env), so an
+	//     unclassified value there is not hub-issued.
+	// A SCION_AUTH_TOKEN from any other source (Config.Env, a config env
+	// value in the resolved env) is dropped from env and never reaches the
+	// agent. This process's own SCION_AUTH_TOKEN is never given to an agent,
+	// co-located hub or not. A hub-dispatched start without a hub-issued
+	// token fails in the agent manager with agent.ErrNoHubToken
+	// (pkg/agent/run.go), relayed to the hub as the start's error message.
+	hubIssuedToken := in.AgentToken
+	if hubIssuedToken == "" && in.EnvClassifications["SCION_AUTH_TOKEN"] == api.EnvKindSecretBootstrap {
+		hubIssuedToken = in.ResolvedEnv["SCION_AUTH_TOKEN"]
 	}
-	hubIssuedToken := env["SCION_AUTH_TOKEN"] != ""
+	if v, ok := env["SCION_AUTH_TOKEN"]; ok && v != hubIssuedToken {
+		// Names no value.
+		s.agentLifecycleLog.Info("SCION_AUTH_TOKEN in the start env is not the hub-issued token; dropped", "agent_id", in.AgentID)
+	}
+	delete(env, "SCION_AUTH_TOKEN")
+	if envCls != nil {
+		delete(envCls, "SCION_AUTH_TOKEN")
+	}
+	if hubIssuedToken != "" && s.config.Debug {
+		s.agentLifecycleLog.Debug("hub-issued agent token present", "agent_id", in.AgentID, "length", len(hubIssuedToken))
+	}
 
 	// 4. Hub endpoint
 	// The hub endpoint (its container-bridge rewrite and the cloudrun-family
@@ -698,24 +713,6 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	var trustedHubEndpoint string
 	if hubEndpointTrusted {
 		trustedHubEndpoint = hubEndpoint
-	}
-
-	// The broker's own dev token (step 3's last resort) is offered only to an
-	// agent with no hub-issued token whose dispatch is bound to the
-	// co-located hub and whose endpoint is operator-derived. It does not go
-	// into env: the agent manager applies it only if the agent's final
-	// endpoint is still trustedHubEndpoint (pkg/agent/run.go).
-	var colocatedDevToken string
-	if !hubIssuedToken {
-		colocatedDevToken = s.colocatedHubDevToken(ctx, in.HTTPRequest, hubConn, trustedHubEndpoint)
-		if colocatedDevToken != "" && s.config.Debug {
-			s.agentLifecycleLog.Debug("co-located hub dev token offered", "agent_id", in.AgentID)
-		}
-		if colocatedDevToken == "" && trustedHubEndpoint != "" && os.Getenv("SCION_AUTH_TOKEN") != "" {
-			// Names no value. Tells an operator why an agent that would once
-			// have received this process's token starts without a hub credential.
-			s.agentLifecycleLog.Info("broker token not passed to agent: dispatch is not from the co-located hub", "agent_id", in.AgentID)
-		}
 	}
 
 	// Colocated bridge override: when the hub and broker are on the same
@@ -895,8 +892,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		ProjectPath:        in.ProjectPath,
 		NoAuth:             in.NoAuth,
 		TrustedHubEndpoint: trustedHubEndpoint,
-		// Applied by the agent manager only for an unchanged endpoint.
-		ColocatedHubDevToken: colocatedDevToken,
+		HubIssuedToken:     hubIssuedToken,
 		// FreshProvision is true only for a create dispatch: GetAgent wipes
 		// and re-clones an existing populated workspace only in that case,
 		// never on start or restart (GoogleCloudPlatform/scion#1931).
@@ -1153,8 +1149,26 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// --- Shared-plain provisioning backstop (shared storage) ---
+	// A git project's shared workspace on the broker's shared Layout is
+	// provisioned by the broker before a local container starts (reuse when
+	// already provisioned, clone otherwise), and the in-container clone is
+	// then not requested (provisionSharedPlainWorkspace).
+	sharedPlainProvisioned := false
+	if !worktreeProvisioned && !linkedCheckout && in.Config != nil && in.Config.GitClone != nil &&
+		(in.Config.SharedWorkspace || in.WorkspaceMode == store.WorkspaceModeShared) && localContainerRuntime(dispatchRuntimeType) {
+		provisioned, err := s.provisionSharedPlainWorkspace(ctx, in, env)
+		if err != nil {
+			s.agentLifecycleLog.Error("Shared workspace provisioning failed", "agent_id", in.AgentID, "project_id", in.ProjectID,
+				"error", sanitizeCloneErrorText(err.Error(), in.Config.GitClone.URL))
+			span.SetStatus(codes.Error, "shared workspace provisioning failed")
+			return nil, &startContextError{Status: http.StatusInternalServerError, Message: "the project's shared workspace could not be provisioned"}
+		}
+		sharedPlainProvisioned = provisioned
+	}
+
 	// --- Git clone mode ---
-	if !worktreeProvisioned && !linkedCheckout && in.Config != nil && in.Config.GitClone != nil {
+	if !worktreeProvisioned && !linkedCheckout && !sharedPlainProvisioned && in.Config != nil && in.Config.GitClone != nil {
 		gc := in.Config.GitClone
 		env["SCION_GIT_CLONE_URL"] = gc.URL
 		// Clone URL may embed credentials — the original #127 bug.
@@ -1223,14 +1237,26 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if emptyPerAgent {
 		// Never git, whatever a stale resolvedEnv claims.
 		isGitWorkspace = false
-		delete(env, "SCION_WORKSPACE_GIT")
-		delete(envCls, "SCION_WORKSPACE_GIT")
 	}
-	if isGitWorkspace {
+	// The broker owns this key: a value from the hub's resolved env (project
+	// env included), the request's env or anywhere else is replaced by the
+	// value computed here. The Kubernetes runtime's shared-repository guard
+	// trusts it, and pkg/agent keeps it as computed here (Manager.Start).
+	delete(env, "SCION_WORKSPACE_GIT")
+	delete(envCls, "SCION_WORKSPACE_GIT")
+	switch {
+	case isGitWorkspace:
 		env["SCION_WORKSPACE_GIT"] = "true"
 		classifyBrokerEnv("SCION_WORKSPACE_GIT", api.EnvKindPlain)
+	case !emptyPerAgent && s.sharedWorkspaceKnownNotGit(ctx, in, &opts, worktreeProvisioned, linkedCheckout):
+		// Explicit only when the broker positively knows the shared
+		// workspace is not a git repository (sharedWorkspaceKnownNotGit).
+		env["SCION_WORKSPACE_GIT"] = "false"
+		classifyBrokerEnv("SCION_WORKSPACE_GIT", api.EnvKindPlain)
 	}
-	// Absent when false — avoids encoding a "false" string agents must parse.
+	// Otherwise absent: git-ness is not known, and readers treat absent as
+	// "not git" except the Kubernetes guard, which then refuses (fail
+	// closed). An empty-per-agent workspace is never git and stays absent.
 
 	// --- Env + telemetry + secrets ---
 	opts.Env = env
@@ -2354,7 +2380,8 @@ func ambiguousNonGitWorkspace(in startContextInputs, worktreeProvisioned bool) s
 	// from the slug before buildStartContext) is checked; a linked
 	// project's own ProjectPath keeps its existing resolution.
 	globalDir, err := config.GetGlobalDir()
-	if err != nil || filepath.Clean(in.ProjectPath) != filepath.Join(globalDir, "projects", in.ProjectSlug) {
+	hubManagedPath := err == nil && filepath.Clean(in.ProjectPath) == filepath.Join(globalDir, "projects", in.ProjectSlug)
+	if !hubManagedPath && !isSharedHubProjectRoot(in.ProjectPath) {
 		return ""
 	}
 	if in.WorkspaceStoragePath != "" {
@@ -2371,6 +2398,16 @@ func ambiguousNonGitWorkspace(in startContextInputs, worktreeProvisioned bool) s
 // project directory and creates its split storage directories. The caller
 // holds the workspace lock on in.ProjectPath.
 func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInputs) {
+	// A shared-backend project root's configuration is hub-seeded and
+	// never written by a broker (sharedHubProjectPath checked it). Only the
+	// broker-local external agents root is created.
+	if isSharedHubProjectRoot(in.ProjectPath) {
+		scionDir := filepath.Join(in.ProjectPath, config.DotScion)
+		if root, err := config.AgentsRootForProject(scionDir, false, in.ProjectID); err == nil {
+			_ = os.MkdirAll(root, 0755)
+		}
+		return
+	}
 	// A broker copy of a hub workspace (~/.scion/projects/<slug>)
 	// records the hub project ID as its identity; see
 	// recordHubProjectIdentity. Done before the checks below, which
@@ -2603,19 +2640,6 @@ func (s *Server) colocatedHostCredentials(ctx context.Context, r *http.Request, 
 		return false
 	}
 	return config.UseHostCredentials(globalDir)
-}
-
-// colocatedHubDevToken returns the dev token this broker process holds
-// (SCION_AUTH_TOKEN, which the workstation server sets to its dev token) when
-// the dispatch is bound to the co-located hub (dispatchFromColocatedHub) and
-// trustedHubEndpoint, the operator-derived endpoint the agent is given, is
-// set. Otherwise it returns "": a dispatch from any other hub, an unbound
-// request, or a creator-supplied endpoint never gets the host's dev token.
-func (s *Server) colocatedHubDevToken(ctx context.Context, r *http.Request, hubConn *HubConnection, trustedHubEndpoint string) string {
-	if trustedHubEndpoint == "" || !s.dispatchFromColocatedHub(ctx, r, hubConn) {
-		return ""
-	}
-	return os.Getenv("SCION_AUTH_TOKEN")
 }
 
 // dispatchFromColocatedHub reports whether this dispatch is bound to the hub

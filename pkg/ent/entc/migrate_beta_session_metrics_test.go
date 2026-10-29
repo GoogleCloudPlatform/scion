@@ -21,7 +21,6 @@ import (
 	"testing"
 	"time"
 
-	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
@@ -126,7 +125,7 @@ func TestMigrateData_SessionMetricsCollisionsKeepEarliest(t *testing.T) {
 	dst := newNamedTestClient(t, "dst")
 
 	// Recreate a source from before the unique index existed.
-	drv, ok := src.Driver().(*entsql.Driver)
+	drv, ok := SQLDriver(src.Driver())
 	require.True(t, ok)
 	_, err := drv.DB().ExecContext(ctx, "DROP INDEX agentsessionmetrics_agent_id_session_id_started_at")
 	require.NoError(t, err)

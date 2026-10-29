@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
 
 // operationParamAllowlist lists, per routine operation, the only parameters
@@ -32,6 +33,8 @@ import (
 var operationParamAllowlist = map[string][]string{
 	"update-binary":  maintenance.UpdateBinaryParams,
 	"rebuild-server": {"branch"},
+	// The star reconciliation takes no parameters.
+	entadapter.ChatStarReconcileKey: {},
 }
 
 // rawRequestParams returns the keys of a run request's "params" object,
@@ -218,6 +221,9 @@ func maintenanceRunInFlight(status string) bool {
 // (image builds, rebuilds) keep running until they finish, as before.
 var maintenanceRunTimeouts = map[string]time.Duration{
 	"update-binary": 20 * time.Minute,
+	// Each batch of the star reconciliation is bounded too; this bounds
+	// the sweeps together.
+	entadapter.ChatStarReconcileKey: messageStarReconcileTimeout,
 }
 
 // maintenanceRunContext returns the context a run of key executes under.

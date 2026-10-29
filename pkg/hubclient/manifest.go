@@ -25,8 +25,6 @@ type ManifestBuilder struct {
 	BasePath string
 	// IgnorePatterns are glob patterns to ignore.
 	IgnorePatterns []string
-
-	builder *transfer.ManifestBuilder
 }
 
 // NewManifestBuilder creates a new manifest builder.
@@ -39,10 +37,11 @@ func NewManifestBuilder(basePath string) *ManifestBuilder {
 	}
 }
 
-// Build walks the template directory and builds a manifest.
+// Build walks the template directory and builds a manifest using the current options.
 func (b *ManifestBuilder) Build() (*TemplateManifest, error) {
-	b.ensureBuilder()
-	manifest, err := b.builder.Build()
+	builder := transfer.NewManifestBuilder(b.BasePath)
+	builder.ExcludePatterns = b.IgnorePatterns
+	manifest, err := builder.Build()
 	if err != nil {
 		return nil, err
 	}
@@ -62,14 +61,6 @@ func (b *ManifestBuilder) Build() (*TemplateManifest, error) {
 		Version: manifest.Version,
 		Files:   files,
 	}, nil
-}
-
-// ensureBuilder creates the underlying transfer.ManifestBuilder if needed.
-func (b *ManifestBuilder) ensureBuilder() {
-	if b.builder == nil {
-		b.builder = transfer.NewManifestBuilder(b.BasePath)
-		b.builder.ExcludePatterns = b.IgnorePatterns
-	}
 }
 
 // ComputeContentHash computes the v2 content hash of a template or

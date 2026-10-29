@@ -434,18 +434,34 @@ func TestDevSignIn_NextIsLocalOnly(t *testing.T) {
 
 func TestLocalRedirectPath(t *testing.T) {
 	for in, want := range map[string]string{
-		"":                          "/",
-		"/":                         "/",
-		"/onboarding":               "/onboarding",
-		"/projects/p1?tab=agents":   "/projects/p1?tab=agents",
-		"//evil.example/":           "/",
-		"/\\evil.example":           "/",
-		"https://evil.example/":     "/",
-		"evil.example":              "/",
-		"javascript:alert(1)":       "/",
-		"/ok\r\nSet-Cookie: x=1":    "/",
-		devSignInPath + "?code=abc": "/",
-		devLaunchPath:               "/",
+		"":                           "/",
+		"/":                          "/",
+		"/onboarding":                "/onboarding",
+		"/projects/p1?tab=agents":    "/projects/p1?tab=agents",
+		"//evil.example/":            "/",
+		"/\\evil.example":            "/",
+		"https://evil.example/":      "/",
+		"evil.example":               "/",
+		"javascript:alert(1)":        "/",
+		"/ok\r\nSet-Cookie: x=1":     "/",
+		devSignInPath + "?code=abc":  "/",
+		devLaunchPath:                "/",
+		"\\evil.example":             "/",
+		"/\t/evil.example":           "/",
+		"/ok\x00":                    "/",
+		"https:/evil.example":        "/",
+		"/%2F%2Fevil.example/x":      "/%2F%2Fevil.example/x",
+		"%2F%2Fevil.example/x":       "/",
+		"/%5Cevil.example":           "/%5Cevil.example",
+		"/ok%0d%0aSet-Cookie:%20x=1": "/ok%0d%0aSet-Cookie:%20x=1",
+		"//user@evil.example/":       "/",
+		" /evil.example":             "/",
+		" //evil.example":            "/",
+		"/\x7f/evil.example":         "/",
+		"/\uFF0Fevil.example":        "/\uFF0Fevil.example",
+		"/\u2215evil.example":        "/\u2215evil.example",
+		"/\u2044evil.example":        "/\u2044evil.example",
+		"/\uFF3Cevil.example":        "/\uFF3Cevil.example",
 	} {
 		assert.Equal(t, want, localRedirectPath(in), in)
 	}
@@ -541,4 +557,240 @@ func TestDevSignIn_LastLoginWriteFailure(t *testing.T) {
 	logged := e.logs.buf.String()
 	e.logs.mu.Unlock()
 	assert.Contains(t, logged, "Failed to update dev-auth last login", "the write failure is logged")
+}
+
+// configureWebGitHubOAuth gives ws a GitHub OAuth provider for web sign-in.
+func configureWebGitHubOAuth(ws *WebServer) {
+	ws.oauthService = NewOAuthService(OAuthConfig{
+		Web: OAuthClientConfig{
+			GitHub: OAuthProviderConfig{
+				ClientID:     "test-client-id",
+				ClientSecret: "test-client-secret",
+			},
+		},
+	}, nil)
+}
+
+// With dev sign-in and an OAuth provider both configured, a signed-out
+// deep link goes to the sign-in page with the requested path as returnTo,
+// and no session cookie is set. An existing dev session is served.
+func TestDevAuthWithOAuth_SignedOutDeepLinkCarriesReturnPath(t *testing.T) {
+	e := newDevSignInEnv(t)
+	configureWebGitHubOAuth(e.ws)
+	sess := sessionCookieOf(e.signIn(e.mintCode(t).SignInPath))
+	require.NotNil(t, sess)
+
+	for path, want := range map[string]string{
+		"/projects/p1/agents/a1":                    "/login?returnTo=%2Fprojects%2Fp1%2Fagents%2Fa1",
+		"/projects/p1?tab=agents":                   "/login?returnTo=%2Fprojects%2Fp1%3Ftab%3Dagents",
+		"/api/v1/agents/a1/ports/8080/proxy/?tab=x": "/login?returnTo=%2Fapi%2Fv1%2Fagents%2Fa1%2Fports%2F8080%2Fproxy%2F%3Ftab%3Dx",
+	} {
+		nav := httptest.NewRequest(http.MethodGet, path, nil)
+		nav.Header.Set("Accept", "text/html")
+		rec := e.serve(nav)
+		assert.Equal(t, http.StatusFound, rec.Code, path)
+		assert.Equal(t, want, rec.Header().Get("Location"), path)
+		assert.Empty(t, rec.Result().Cookies(), "%s: no cookie that would replace the dev session", path)
+	}
+
+	page := withCookies(httptest.NewRequest(http.MethodGet, "/projects", nil), sess)
+	page.Header.Set("Accept", "text/html")
+	rec := e.serve(page)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "__SCION_DATA__")
+
+	rec = e.serve(withCookies(httptest.NewRequest(http.MethodGet, "/auth/me", nil), sess))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var me webSessionUser
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &me))
+	assert.Equal(t, DevUserID, me.UserID)
+}
+
+// A signed-out page request is returned to after sign-in with its query:
+// sessionAuthMiddleware stores the request URI (path and query) as the
+// session's returnTo, and on a dev sign-in server without a session cookie
+// carries it in /login?returnTo=. Both go through localRedirectPath, so a
+// request URI that is not a plain path on this server ends at /.
+func TestSessionAuthMiddleware_ReturnPathKeepsQuery(t *testing.T) {
+	cases := map[string]string{
+		"/projects/p1":                               "/projects/p1",
+		"/projects/p1?tab=agents":                    "/projects/p1?tab=agents",
+		"/projects/p1/agents/a1?tab=logs&q=a%2Fb":    "/projects/p1/agents/a1?tab=logs&q=a%2Fb",
+		"/projects/p1?next=https://evil.example/x":   "/projects/p1?next=https://evil.example/x",
+		"/projects/p1?x=%0d%0aSet-Cookie:%20a=1":     "/projects/p1?x=%0d%0aSet-Cookie:%20a=1",
+		"http://evil.example/projects/p1?tab=agents": "/projects/p1?tab=agents",
+		"/%2F%2Fevil.example/x?tab=a":                "/%2F%2Fevil.example/x?tab=a",
+		"/projects/%2F%2Fevil.example?tab=a":         "/projects/%2F%2Fevil.example?tab=a",
+		"/projects/%5Cevil.example?tab=a":            "/projects/%5Cevil.example?tab=a",
+		"/ok%0d%0aSet-Cookie:%20a=1":                 "/ok%0d%0aSet-Cookie:%20a=1",
+		"//evil.example/x?tab=a":                     "/",
+		"/projects/p1?next=\\evil.example":           "/",
+		"/projects/p1?next=/\\evil.example":          "/",
+	}
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("%s: protected handler reached without a session", r.URL.RequestURI())
+	})
+
+	t.Run("session returnTo", func(t *testing.T) {
+		ws := newTestWebServer(t, WebServerConfig{SessionSecret: "test-session-secret-for-return-path-query-1234"})
+		h := ws.sessionAuthMiddleware(next)
+		for target, want := range cases {
+			req := httptest.NewRequest(http.MethodGet, target, nil)
+			req.Header.Set("Accept", "text/html")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			require.Equal(t, http.StatusFound, rec.Code, target)
+			assert.Equal(t, "/auth/login", rec.Header().Get("Location"), target)
+
+			cookie := sessionCookieOf(rec)
+			require.NotNil(t, cookie, target)
+			sess, err := ws.sessionStore.Get(withCookies(httptest.NewRequest(http.MethodGet, "/", nil), cookie), webSessionName)
+			require.NoError(t, err, target)
+			assert.Equal(t, want, sess.Values[sessKeyReturnTo], target)
+		}
+	})
+
+	t.Run("dev sign-in login returnTo", func(t *testing.T) {
+		ws := newDevAuthWebServer(t)
+		configureWebGitHubOAuth(ws)
+		h := ws.sessionAuthMiddleware(next)
+		for target, want := range cases {
+			req := httptest.NewRequest(http.MethodGet, target, nil)
+			req.Header.Set("Accept", "text/html")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			wantLocation := "/login"
+			if want != "/" {
+				wantLocation = "/login?" + url.Values{"returnTo": {want}}.Encode()
+			}
+			require.Equal(t, http.StatusFound, rec.Code, target)
+			assert.Equal(t, wantLocation, rec.Header().Get("Location"), target)
+			assert.Nil(t, sessionCookieOf(rec), target)
+		}
+	})
+}
+
+// The returnTo carried in the redirect is a path on this server only; an
+// off-site, absolute or sign-in path is never echoed. Without a web OAuth
+// provider, or in proxy mode, the redirect is /auth/login.
+func TestNoSessionLoginLocation(t *testing.T) {
+	ws := newDevAuthWebServer(t)
+	configureWebGitHubOAuth(ws)
+	for in, want := range map[string]string{
+		"/projects/p1":              "/login?returnTo=%2Fprojects%2Fp1",
+		"/projects/p1?tab=agents":   "/login?returnTo=%2Fprojects%2Fp1%3Ftab%3Dagents",
+		"/":                         "/login",
+		"":                          "/login",
+		"//evil.example/x":          "/login",
+		"/\\evil.example":           "/login",
+		"https://evil.example/x":    "/login",
+		"evil.example":              "/login",
+		"/ok\r\nSet-Cookie: x=1":    "/login",
+		devSignInPath + "?code=abc": "/login",
+	} {
+		assert.Equal(t, want, ws.noSessionLoginLocation(in), in)
+	}
+
+	assert.Equal(t, "/auth/login", newDevAuthWebServer(t).noSessionLoginLocation("/projects/p1"), "no OAuth provider")
+
+	proxy := newDevAuthWebServer(t, func(c *WebServerConfig) { c.AuthMode = "proxy" })
+	configureWebGitHubOAuth(proxy)
+	assert.Equal(t, "/auth/login", proxy.noSessionLoginLocation("/projects/p1"), "proxy mode")
+}
+
+// Picking a provider on the sign-in page stores its returnTo for the OAuth
+// callback, limited to a path on this server.
+func TestOAuthLogin_ProviderStoresLocalReturnTo(t *testing.T) {
+	ws := newDevAuthWebServer(t)
+	configureWebGitHubOAuth(ws)
+	h := ws.Handler()
+
+	for returnTo, want := range map[string]string{
+		"/projects/p1/agents/a1":  "/projects/p1/agents/a1",
+		"https://evil.example/x":  "/",
+		"//evil.example/x":        "/",
+		devSignInPath + "?code=a": "/",
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/auth/login/github?returnTo="+url.QueryEscape(returnTo), nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusFound, rec.Code, returnTo)
+		assert.True(t, strings.HasPrefix(rec.Header().Get("Location"), "https://github.com/login/oauth/authorize?"), rec.Header().Get("Location"))
+
+		cookie := sessionCookieOf(rec)
+		require.NotNil(t, cookie, returnTo)
+		sess, err := ws.sessionStore.Get(withCookies(httptest.NewRequest(http.MethodGet, "/", nil), cookie), webSessionName)
+		require.NoError(t, err)
+		assert.Equal(t, want, sess.Values[sessKeyReturnTo], returnTo)
+	}
+}
+
+// Outside dev sign-in, an OAuth server stores the return path in the
+// session cookie and redirects to /auth/login. Only a path on this server
+// is stored; any other value is stored as /.
+func TestLoginRedirect_OAuthWithoutDevAuthUsesSessionReturnPath(t *testing.T) {
+	ws := newTestWebServer(t, WebServerConfig{})
+	configureWebGitHubOAuth(ws)
+	tokenSvc, err := NewUserTokenService(UserTokenConfig{})
+	require.NoError(t, err)
+	ws.SetUserTokenService(tokenSvc)
+	ws.MountHubAPI(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}), func(context.Context) error { return nil })
+	h := ws.Handler()
+
+	for path, want := range map[string]string{
+		"/projects/p1/agents/a1":                                  "/projects/p1/agents/a1",
+		"/api/v1/agents/a1/ports/8080/proxy/?tab=x":               "/api/v1/agents/a1/ports/8080/proxy/?tab=x",
+		"//evil.example/x":                                        "/",
+		"/api/v1/agents/a1/ports/8080/proxy/?next=\\evil.example": "/",
+	} {
+		page := httptest.NewRequest(http.MethodGet, path, nil)
+		page.Header.Set("Accept", "text/html")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, page)
+		assert.Equal(t, http.StatusFound, rec.Code, path)
+		assert.Equal(t, "/auth/login", rec.Header().Get("Location"), path)
+
+		cookie := sessionCookieOf(rec)
+		require.NotNil(t, cookie, path)
+		sess, err := ws.sessionStore.Get(withCookies(httptest.NewRequest(http.MethodGet, "/", nil), cookie), webSessionName)
+		require.NoError(t, err)
+		assert.Equal(t, want, sess.Values[sessKeyReturnTo], path)
+	}
+}
+
+// /auth/login?returnTo= reaches the handler at /auth/login/ with its query,
+// which stores the return path only when it is a path on this server, and
+// / otherwise.
+func TestOAuthLogin_ProviderlessStoresLocalReturnTo(t *testing.T) {
+	ws := newTestWebServer(t, WebServerConfig{})
+	h := ws.Handler()
+
+	for returnTo, want := range map[string]string{
+		"/projects/p1/agents/a1":  "/projects/p1/agents/a1",
+		"/projects/p1?tab=agents": "/projects/p1?tab=agents",
+		"https://evil.example/x":  "/",
+		"//evil.example/x":        "/",
+		"/\\evil.example/x":       "/",
+		"/\t/evil.example/x":      "/",
+		"evil.example/x":          "/",
+	} {
+		query := "?returnTo=" + url.QueryEscape(returnTo)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/auth/login"+query, nil))
+		require.Equal(t, http.StatusTemporaryRedirect, rec.Code, returnTo)
+		assert.Equal(t, "/auth/login/"+query, rec.Header().Get("Location"), returnTo)
+
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/auth/login/"+query, nil))
+		require.Equal(t, http.StatusFound, rec.Code, returnTo)
+		assert.Equal(t, "/login", rec.Header().Get("Location"), returnTo)
+
+		cookie := sessionCookieOf(rec)
+		require.NotNil(t, cookie, returnTo)
+		sess, err := ws.sessionStore.Get(withCookies(httptest.NewRequest(http.MethodGet, "/", nil), cookie), webSessionName)
+		require.NoError(t, err)
+		assert.Equal(t, want, sess.Values[sessKeyReturnTo], returnTo)
+	}
 }
