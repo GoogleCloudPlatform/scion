@@ -48,7 +48,7 @@ This means agents and brokers traversing IAP are identified by their own credent
 
 ### Browser requests that change state
 
-In proxy mode, state-changing API requests from browsers are checked for the hub's expected request properties and content type (JSON, multipart on file upload routes, browser policy reports on the report route). Requests that do not match get `403 Forbidden` or `415 Unsupported Media Type`. Clients that are not browsers (agents, brokers and the CLI) are unaffected.
+In proxy mode, state-changing API requests from browsers are checked for the hub's expected request properties. Browser `POST` requests with a body are also checked for the expected content type (JSON, multipart on file upload routes, browser policy reports on the report route). Requests that do not match get `403 Forbidden` or `415 Unsupported Media Type`. Clients that are not browsers (agents, brokers and the CLI) are unaffected.
 
 The front proxy must pass the public `Host` header through unchanged. IAP does this by default.
 
