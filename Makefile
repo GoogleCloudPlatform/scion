@@ -618,7 +618,8 @@ USER_DELETION_POSTGRES_TESTS := TestForceDeleteUser_RestoreRacesRequest_Postgres
 # test database), the agent delegation issuance vs reincarnation claim
 # race, the broker reservation transfer tests
 # (BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS) and the forced user delete
-# tests (USER_DELETION_POSTGRES_TESTS).
+# tests (USER_DELETION_POSTGRES_TESTS), and the chat retention cascade and
+# replica race test.
 # Each must print a PASS line, and any skip fails (shard.sh postgres).
 HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock \
 	TestScheduledSend_TwoHubReplicasPostgres_OneDelivery \
@@ -628,7 +629,8 @@ HUB_INTEGRATION_POSTGRES_TESTS := TestProjectDeletionService_LockOrderNoDeadlock
 	$(TEST_IDENTITY_POSTGRES_TESTS) \
 	$(BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS) \
 	$(USER_DELETION_POSTGRES_TESTS) \
-	TestHubInternal_ReplayAcrossHubReplicas
+	TestHubInternal_ReplayAcrossHubReplicas \
+	TestChatRetention_Postgres_CascadeAndReplicaRace
 
 ## test-hub-postgres: Run the pkg/hub Postgres tests of shard SHARD=K (SHARD=all: every shard holding one)
 # Requires SCION_TEST_POSTGRES_URL (integration tests) and
