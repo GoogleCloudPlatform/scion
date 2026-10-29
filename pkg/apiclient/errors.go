@@ -168,7 +168,10 @@ const maxErrorResponseBodyBytes = 64 * 1024
 // ParseErrorResponse parses an API error response body.
 func ParseErrorResponse(resp *http.Response) *APIError {
 	if resp == nil {
-		return nil
+		return &APIError{
+			Code:    ErrCodeInternalError,
+			Message: "nil response",
+		}
 	}
 
 	apiErr := &APIError{

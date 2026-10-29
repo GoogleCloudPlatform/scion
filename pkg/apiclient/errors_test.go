@@ -87,8 +87,19 @@ func TestParseErrorResponse_MessageDeniedReason(t *testing.T) {
 }
 
 func TestParseErrorResponse_NilResponse(t *testing.T) {
-	if got := ParseErrorResponse(nil); got != nil {
-		t.Errorf("ParseErrorResponse(nil) = %v, want nil", got)
+	got := ParseErrorResponse(nil)
+	if got == nil {
+		t.Fatal("ParseErrorResponse(nil) = nil, want non-nil *APIError")
+	}
+	if got.Code != ErrCodeInternalError {
+		t.Errorf("Code = %q, want %q", got.Code, ErrCodeInternalError)
+	}
+	if got.Message != "nil response" {
+		t.Errorf("Message = %q, want %q", got.Message, "nil response")
+	}
+	var err error = got
+	if err.Error() == "" {
+		t.Error("err.Error() is empty")
 	}
 }
 
@@ -154,8 +165,7 @@ func TestParseErrorResponse_BoundedBodyRead(t *testing.T) {
 		Header:     http.Header{},
 	}
 	_ = ParseErrorResponse(resp)
-	const maxAllowed = 64 * 1024
-	if reader.totalRead > maxAllowed {
-		t.Errorf("read %d bytes, want <= %d", reader.totalRead, maxAllowed)
+	if reader.totalRead > maxErrorResponseBodyBytes {
+		t.Errorf("read %d bytes, want <= %d", reader.totalRead, maxErrorResponseBodyBytes)
 	}
 }
