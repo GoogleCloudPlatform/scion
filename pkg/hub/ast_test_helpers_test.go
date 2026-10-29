@@ -40,6 +40,7 @@ var guardScanSubdirs = []string{
 	"apierr",
 	"internal/principal",
 	"maintenance",
+	"oidckeys",
 }
 
 // guardScanDirs returns the directories a guard test scans for base, the
