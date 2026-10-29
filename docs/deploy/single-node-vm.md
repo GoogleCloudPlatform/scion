@@ -251,14 +251,22 @@ run as the `scion` user (through `runuser`):
    successfully without doing anything. The unit's `Result` is not used
    for this decision: after a crash loop it is the crash's own result
    (`exit-code`, `signal`, `core-dump`), not `start-limit-hit` (see
-   **systemd versions** below).
+   **systemd versions** below). The failed state alone does not mean the
+   start limit was hit. An operator `systemctl stop` that fails ends there
+   too: the hub outlived `TimeoutStopSec` and was killed (`Result=timeout`),
+   or exited non-zero on `SIGTERM`. So before a rollback (step 3 onwards)
+   the guard also requires that systemd gave up restarting the Hub:
+   `NRestarts` is at least `StartLimitBurst - 1` (4 of 5), read in the same
+   snapshot. A failed stop has few or no automatic restarts and is left
+   alone.
 2. If the Hub's last exit was clean (exit status 0, or `SIGTERM`, `SIGINT`,
    `SIGHUP` or `SIGPIPE`), the limit was reached by restarts, not by a crash
    loop. Every update and **Restart Hub** exits cleanly and is restarted by
    systemd, and those starts count towards the limit too. In that case the
    script restarts the Hub without changing releases. So five intentional
    restarts within 300 seconds (updates, **Restart Hub**,
-   `systemctl restart`) do not roll back a healthy release. A crash (a
+   `systemctl restart`) do not roll back a healthy release. A failed stop
+   never takes this path, because its last exit is not clean. A crash (a
    non-zero exit status, a failure to start the binary, or death by any
    other signal, such as `SIGSEGV`, `SIGABRT` or `SIGKILL`) counts as a
    failure and leads to the rollback below.

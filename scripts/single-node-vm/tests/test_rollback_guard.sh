@@ -46,15 +46,19 @@ _rb_new_host() {
 #!/usr/bin/env bash
 echo "systemctl \$*" >> "${RB_CALLS}"
 if [[ "\$1" == show ]]; then
-  # systemctl show -p ActiveState,SubState,Result,ExecMainCode,ExecMainStatus UNIT:
-  # the next state line (the last one repeats), as KEY=VALUE lines.
+  # systemctl show -p ActiveState,...,StartLimitBurst UNIT: the next state
+  # line (the last one repeats), as KEY=VALUE lines. A "-" field prints an
+  # empty value; the line NONE prints nothing at all.
   n=\$(cat "${RB_DIR}/reads" 2>/dev/null || echo 0)
   n=\$((n + 1))
   echo "\$n" > "${RB_DIR}/reads"
   line=\$(sed -n "\${n}p" "${RB_DIR}/states")
   [[ -n "\$line" ]] || line=\$(tail -n 1 "${RB_DIR}/states")
-  read -r active sub result code status <<< "\$line"
-  printf 'ActiveState=%s\nSubState=%s\nResult=%s\nExecMainCode=%s\nExecMainStatus=%s\n' "\$active" "\$sub" "\$result" "\$code" "\$status"
+  [[ "\$line" == NONE ]] && exit 0
+  read -r active sub result code status nrestarts burst <<< "\$line"
+  v() { [[ "\$1" == - ]] && echo "" || echo "\$1"; }
+  printf 'ActiveState=%s\nSubState=%s\nResult=%s\nExecMainCode=%s\nExecMainStatus=%s\nNRestarts=%s\nStartLimitBurst=%s\n' \
+    "\$(v "\$active")" "\$(v "\$sub")" "\$(v "\$result")" "\$(v "\$code")" "\$(v "\$status")" "\$(v "\$nrestarts")" "\$(v "\$burst")"
 fi
 exit 0
 EOF
@@ -62,7 +66,8 @@ EOF
 }
 
 # _rb_states LINE... -- the unit states the stub replays, one per
-# `systemctl show` ("ACTIVE SUB RESULT EXEC_CODE EXEC_STATUS"); the last
+# `systemctl show` ("ACTIVE SUB RESULT EXEC_CODE EXEC_STATUS NRESTARTS
+# BURST"; "-" for an empty value, or NONE for no output); the last
 # repeats. Resets the read counter.
 _rb_states() {
   printf '%s\n' "$@" > "${RB_DIR}/states"
@@ -95,30 +100,54 @@ _rb_crash_result() {
 #                     pending) -- only the SubState check rejects it;
 #   flip-second       failed/failed once, then auto-restart (not settled);
 #   flip-third        failed/failed twice, then auto-restart;
-#   recovered         the hub is running again (active/running).
-# CODE STATUS default to 1 1 (exit status 1), or 1 0 for v249-clean.
+#   recovered         the hub is running again (active/running);
+#   v249-clean-manual clean MANUAL restarts hit the limit: start-limit-hit,
+#                     clean exit, NRestarts=0 (manual restarts don't count);
+#   v249-stop-timeout / v255-stop-timeout
+#                     an operator `systemctl stop` that outlived
+#                     TimeoutStopSec: SIGKILL, Result=timeout (2:9),
+#                     failed/failed, NRestarts=0 (same on both versions);
+#   v249-stop-exitcode / v255-stop-exitcode
+#                     an operator stop where the hub exited 1 on SIGTERM;
+#   crash-nrestarts-3 a crash with NRestarts one short of StartLimitBurst-1;
+#   crash-nrestarts-5 a crash with NRestarts above StartLimitBurst-1;
+#   crash-no-nrestarts a crash whose NRestarts/StartLimitBurst are empty;
+#   show-empty        `systemctl show` prints nothing;
+#   show-unknown      every property empty (an unknown unit).
+# Crash loops and auto-restarted clean exits have NRestarts=4 with
+# StartLimitBurst=5 (the real systemd 249 value on the VM). CODE STATUS
+# default to 1 1 (exit status 1), or 1 0 for the clean scenarios.
 _rb_scenario() {
   local name="$1" code="${2:-1}" status="${3:-}" result
   if [[ -z "$status" ]]; then
-    if [[ "$name" == v249-clean ]]; then status=0; else status=1; fi
+    case "$name" in v249-clean|v249-clean-manual) status=0 ;; *) status=1 ;; esac
   fi
   result="$(_rb_crash_result "$code")"
+  local x="$code $status 4 5"
   case "$name" in
-    v249-crash|v255-final) _rb_states "failed failed $result $code $status" ;;
-    v249-clean|v255-final-slh) _rb_states "failed failed start-limit-hit $code $status" ;;
-    v255-transient) _rb_states "failed failed-before-auto-restart $result $code $status" "activating auto-restart $result $code $status" ;;
-    v255-autorestart) _rb_states "activating auto-restart $result $code $status" ;;
-    v255-pending) _rb_states "failed failed-before-auto-restart $result $code $status" ;;
-    flip-second) _rb_states "failed failed $result $code $status" "activating auto-restart $result $code $status" ;;
-    flip-third) _rb_states "failed failed $result $code $status" "failed failed $result $code $status" "activating auto-restart $result $code $status" ;;
-    recovered) _rb_states "active running success 1 0" ;;
+    v249-crash|v255-final) _rb_states "failed failed $result $x" ;;
+    v249-clean|v255-final-slh) _rb_states "failed failed start-limit-hit $x" ;;
+    v255-transient) _rb_states "failed failed-before-auto-restart $result $x" "activating auto-restart $result $x" ;;
+    v255-autorestart) _rb_states "activating auto-restart $result $x" ;;
+    v255-pending) _rb_states "failed failed-before-auto-restart $result $x" ;;
+    flip-second) _rb_states "failed failed $result $x" "activating auto-restart $result $x" ;;
+    flip-third) _rb_states "failed failed $result $x" "failed failed $result $x" "activating auto-restart $result $x" ;;
+    recovered) _rb_states "active running success 1 0 0 5" ;;
+    v249-clean-manual) _rb_states "failed failed start-limit-hit $code $status 0 5" ;;
+    v249-stop-timeout|v255-stop-timeout) _rb_states "failed failed timeout 2 9 0 5" ;;
+    v249-stop-exitcode|v255-stop-exitcode) _rb_states "failed failed exit-code 1 1 0 5" ;;
+    crash-nrestarts-3) _rb_states "failed failed $result $code $status 3 5" ;;
+    crash-nrestarts-5) _rb_states "failed failed $result $code $status 5 5" ;;
+    crash-no-nrestarts) _rb_states "failed failed $result $code $status - -" ;;
+    show-empty) _rb_states "NONE" ;;
+    show-unknown) _rb_states "- - - - - - -" ;;
     *) echo "unknown scenario $name" >&2; return 1 ;;
   esac
 }
 
 # RB_SHOW / RB_SHOW3 -- the one systemctl call the guard reads the unit
 # with, and the three settle reads it makes before acting.
-RB_SHOW="systemctl show -p ActiveState,SubState,Result,ExecMainCode,ExecMainStatus scion-hub.service"
+RB_SHOW="systemctl show -p ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,NRestarts,StartLimitBurst scion-hub.service"
 RB_SHOW3="${RB_SHOW}"$'\n'"${RB_SHOW}"$'\n'"${RB_SHOW}"
 
 # _rb_run -- runs scion-hub-rollback.sh unprivileged against the fake host
@@ -164,7 +193,7 @@ _rb_assert_refused() {
 # else (no runuser, no reset-failed, no start).
 test_rollback_noop_unless_failed_for_good() {
   local sc
-  for sc in v255-transient v255-autorestart v255-pending flip-second flip-third recovered; do
+  for sc in v255-transient v255-autorestart v255-pending flip-second flip-third recovered show-empty show-unknown; do
     _rb_new_host
     _rb_scenario "$sc"
     RB_BEFORE="$(_rb_state)"
@@ -208,6 +237,64 @@ test_rollback_settle_reads_three_times() {
   assert_eq "3" "$(grep -cxF "${RB_SHOW}" "$RB_CALLS")" "a state that changes at the third read must still be read three times"
   assert_contains "$RB_OUT" "at read 3 of 3" "the log must name the read that disagreed"
   assert_eq "releases/nightly-20261023" "$(readlink "${RB_ROOT}/current")" "a state that changes at the third read must not be rolled back"
+  rm -rf "$RB_DIR"
+}
+
+# A failed operator stop also ends failed/failed (stable, no restart
+# pending) and fires OnFailure=: a stop that outlived TimeoutStopSec
+# (SIGKILL, Result=timeout) or a hub that exited non-zero on SIGTERM. Its
+# last exit is not clean, but systemd never gave up restarting it
+# (NRestarts=0), so it must stay a no-op -- even with a fresh, unverified
+# switch that the decision table would otherwise roll back.
+test_rollback_failed_operator_stop_is_noop() {
+  local sc
+  for sc in v249-stop-timeout v255-stop-timeout v249-stop-exitcode v255-stop-exitcode; do
+    _rb_new_host
+    _rb_scenario "$sc"
+    _rb_update_state "$(_rb_happy_state)"
+    RB_BEFORE="$(_rb_state)"
+    _rb_run
+    assert_eq "0" "$RB_RC" "${sc}: a failed stop is a successful no-op (output: ${RB_OUT})"
+    assert_contains "$RB_OUT" "without systemd giving up on restarts" "${sc}: the no-op must say why"
+    assert_eq "$RB_BEFORE" "$(_rb_state)" "${sc}: nothing may change"
+    assert_eq "${RB_SHOW3}" "$(cat "$RB_CALLS")" "${sc}: no runuser, no reset-failed, no start"
+    rm -rf "$RB_DIR"
+  done
+}
+
+# The NRestarts threshold: StartLimitBurst - 1 (4 of 5) or more acts; one
+# fewer, or no numeric value at all, does not.
+test_rollback_nrestarts_threshold() {
+  _rb_new_host
+  _rb_scenario crash-nrestarts-5
+  _rb_run
+  assert_eq "releases/nightly-20261020" "$(readlink "${RB_ROOT}/current")" "NRestarts above StartLimitBurst-1 must roll back (output: ${RB_OUT})"
+  rm -rf "$RB_DIR"
+  local sc
+  for sc in crash-nrestarts-3 crash-no-nrestarts; do
+    _rb_new_host
+    _rb_scenario "$sc"
+    RB_BEFORE="$(_rb_state)"
+    _rb_run
+    assert_eq "0" "$RB_RC" "${sc}: must be a successful no-op (output: ${RB_OUT})"
+    assert_eq "$RB_BEFORE" "$(_rb_state)" "${sc}: nothing may change"
+    assert_not_contains "$(cat "$RB_CALLS")" "systemctl start" "${sc}: the hub must not be started"
+    rm -rf "$RB_DIR"
+  done
+}
+
+# Clean manual restarts that hit the limit (NRestarts=0) still only
+# restart the hub: the clean path never swaps, and a failed stop never
+# reaches it (its last exit is not clean).
+test_rollback_clean_manual_restarts_restart_without_swap() {
+  _rb_new_host
+  _rb_scenario v249-clean-manual
+  RB_BEFORE="$(_rb_state)"
+  _rb_run
+  assert_eq "0" "$RB_RC" "clean manual restarts: must succeed (output: ${RB_OUT})"
+  assert_eq "$RB_BEFORE" "$(_rb_state)" "clean manual restarts: no swap and no marker"
+  assert_eq "${RB_SHOW3}"$'\nsystemctl reset-failed scion-hub.service\nsystemctl start scion-hub.service' "$(cat "$RB_CALLS")" \
+    "clean manual restarts: the hub must be started again"
   rm -rf "$RB_DIR"
 }
 
@@ -258,20 +345,20 @@ test_rollback_swaps_current_and_previous() {
   # exit 1, exec failure (203), killed by KILL/SEGV/ABRT, ABRT with core.
   local sc
   for sc in v249-crash v255-final v255-final-slh; do
-  for exit_spec in "1 1" "1 203" "2 9" "2 11" "2 6" "3 6"; do
-    _rb_new_host
-    # shellcheck disable=SC2086 # two words: code and status
-    _rb_scenario "$sc" $exit_spec
-    _rb_run
-    assert_eq "0" "$RB_RC" "crash (${exit_spec}): the rollback must succeed (output: ${RB_OUT})"
-    assert_eq "releases/nightly-20261020" "$(readlink "${RB_ROOT}/current")" "crash (${exit_spec}): current must point at the old previous"
-    assert_eq "releases/nightly-20261023" "$(readlink "${RB_ROOT}/previous")" "crash (${exit_spec}): previous must point at the failed release"
-    assert_false "$([[ -e "${RB_ROOT}/current.new" || -e "${RB_ROOT}/previous.new" || -L "${RB_ROOT}/current.new" ]] && echo true)" \
-      "crash (${exit_spec}): no temporary links may be left"
-    assert_eq "${RB_SHOW3}"$'\nsystemctl reset-failed scion-hub.service\nsystemctl start scion-hub.service' \
-      "$(cat "$RB_CALLS")" "${sc} crash (${exit_spec}): three settle reads, then reset-failed and start, after the swap"
-    rm -rf "$RB_DIR"
-  done
+    for exit_spec in "1 1" "1 203" "2 9" "2 11" "2 6" "3 6"; do
+      _rb_new_host
+      # shellcheck disable=SC2086 # two words: code and status
+      _rb_scenario "$sc" $exit_spec
+      _rb_run
+      assert_eq "0" "$RB_RC" "${sc} crash (${exit_spec}): the rollback must succeed (output: ${RB_OUT})"
+      assert_eq "releases/nightly-20261020" "$(readlink "${RB_ROOT}/current")" "${sc} crash (${exit_spec}): current must point at the old previous"
+      assert_eq "releases/nightly-20261023" "$(readlink "${RB_ROOT}/previous")" "${sc} crash (${exit_spec}): previous must point at the failed release"
+      assert_false "$([[ -e "${RB_ROOT}/current.new" || -e "${RB_ROOT}/previous.new" || -L "${RB_ROOT}/current.new" ]] && echo true)" \
+        "${sc} crash (${exit_spec}): no temporary links may be left"
+      assert_eq "${RB_SHOW3}"$'\nsystemctl reset-failed scion-hub.service\nsystemctl start scion-hub.service' \
+        "$(cat "$RB_CALLS")" "${sc} crash (${exit_spec}): three settle reads, then reset-failed and start, after the swap"
+      rm -rf "$RB_DIR"
+    done
   done
 }
 

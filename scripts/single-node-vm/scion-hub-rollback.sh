@@ -84,24 +84,30 @@
 # It acts only when the hub crash-looped:
 #   - scion-hub must be failed for good: ActiveState=failed AND
 #     SubState=failed (systemd will not restart it), in each of
-#     SETTLE_READS reads SETTLE_INTERVAL_SEC apart. With Restart=always that
-#     happens only when the start limit stops the automatic restarts.
-#     systemd >= 254 passes through a transient failed state between
-#     automatic restart attempts (SubState failed-before-auto-restart, then
-#     activating/auto-restart) and fires OnFailure= there too; requiring
-#     SubState=failed in every read keeps those runs a no-op. The unit's Result is NOT a usable signal:
-#     on systemd 249 (Ubuntu 22.04) a crash loop that hits the start limit
-#     logs "Start request repeated too quickly" but keeps Result=exit-code
-#     (or signal, core-dump, ...); Result=start-limit-hit appears only when
-#     the previous result was success, i.e. after clean restarts. systemd
-#     >= 254 also triggers OnFailure= on every single crash before an
-#     automatic restart; the unit is then still activating (SubState
-#     auto-restart), not failed, and those runs do nothing.
+#     SETTLE_READS reads SETTLE_INTERVAL_SEC apart. systemd >= 254 passes
+#     through a transient failed state between automatic restart attempts
+#     (SubState failed-before-auto-restart, then activating/auto-restart)
+#     and fires OnFailure= there too; requiring SubState=failed in every
+#     read keeps those runs a no-op.
+#   - The unit's Result is NOT a usable signal: on systemd 249 (Ubuntu
+#     22.04) a crash loop that hits the start limit logs "Start request
+#     repeated too quickly" but keeps Result=exit-code (or signal,
+#     core-dump, ...); Result=start-limit-hit appears only when the
+#     previous result was success, i.e. after clean restarts.
+#   - failed/failed is not specific to the start limit: a failed operator
+#     stop (systemctl stop that hits TimeoutStopSec and ends in SIGKILL,
+#     Result=timeout, or a non-zero exit on SIGTERM) ends there too, and
+#     OnFailure= fires. A crash is therefore only rolled back when systemd
+#     gave up restarting: NRestarts >= StartLimitBurst - 1, both read in the
+#     same snapshot (a crash loop stopped by StartLimitBurst=5 has made 4
+#     automatic restarts; a failed stop after a manual start has made few
+#     or none). Missing or non-numeric values count as "not given up".
 #   - The hub's last exit must be a failure. The start limit also counts
 #     clean restarts (an update or Restart Hub exits on SIGTERM and systemd
-#     starts it again), so five of those within five minutes trip it too
-#     (then Result=start-limit-hit). Then the script only restarts the
-#     hub, without swapping.
+#     starts it again; or manual restarts), so five of those within five
+#     minutes trip it too (then Result=start-limit-hit). Then the script
+#     only restarts the hub, without swapping. A failed stop never takes
+#     this path: its last exit is not clean.
 #
 # Privileges: root runs only systemctl. The install root and everything
 # under it belong to the install owner (scion), who can change any entry
@@ -150,6 +156,7 @@ readonly RECENT_SWITCH_WINDOW_SEC=1800
 readonly SETTLE_READS=3
 SETTLE_INTERVAL_SEC="${SCION_ROLLBACK_SETTLE_SEC:-1}"
 [[ "$SETTLE_INTERVAL_SEC" =~ ^[0-9]+$ ]] || SETTLE_INTERVAL_SEC=1
+readonly SETTLE_INTERVAL_SEC
 
 log() { echo "scion-hub-rollback: $*"; }
 die() { echo "scion-hub-rollback: ERROR: $*" >&2; exit 1; }
@@ -343,11 +350,11 @@ run_as_owner() {
 }
 
 # read_hub_state -- one `systemctl show` of scion-hub.service (a consistent
-# snapshot), into HUB_ACTIVE, HUB_SUB, HUB_RESULT, HUB_EXEC_CODE and
-# HUB_EXEC_STATUS.
+# snapshot), into HUB_ACTIVE, HUB_SUB, HUB_RESULT, HUB_EXEC_CODE,
+# HUB_EXEC_STATUS, HUB_NRESTARTS and HUB_BURST.
 read_hub_state() {
   local line key value
-  HUB_ACTIVE="" HUB_SUB="" HUB_RESULT="" HUB_EXEC_CODE="" HUB_EXEC_STATUS=""
+  HUB_ACTIVE="" HUB_SUB="" HUB_RESULT="" HUB_EXEC_CODE="" HUB_EXEC_STATUS="" HUB_NRESTARTS="" HUB_BURST=""
   while IFS= read -r line; do
     key="${line%%=*}"
     value="${line#*=}"
@@ -357,8 +364,17 @@ read_hub_state() {
       Result) HUB_RESULT="$value" ;;
       ExecMainCode) HUB_EXEC_CODE="$value" ;;
       ExecMainStatus) HUB_EXEC_STATUS="$value" ;;
+      NRestarts) HUB_NRESTARTS="$value" ;;
+      StartLimitBurst) HUB_BURST="$value" ;;
     esac
-  done < <(systemctl show -p ActiveState,SubState,Result,ExecMainCode,ExecMainStatus "$HUB_UNIT")
+  done < <(systemctl show -p ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,NRestarts,StartLimitBurst "$HUB_UNIT")
+}
+
+# restarts_exhausted -- in the last snapshot, systemd gave up restarting:
+# NRestarts >= StartLimitBurst - 1, both numeric (fails closed otherwise).
+restarts_exhausted() {
+  [[ "$HUB_NRESTARTS" =~ ^[0-9]+$ && "$HUB_BURST" =~ ^[0-9]+$ ]] || return 1
+  (( HUB_NRESTARTS >= HUB_BURST - 1 ))
 }
 
 # last_exit_was_clean -- the hub's last main process ended the way systemd
@@ -399,7 +415,11 @@ cmd_rollback() {
     restart_hub
     return 0
   fi
-  log "$HUB_UNIT failed after a crash loop (result $HUB_RESULT, last exit $HUB_EXEC_CODE:$HUB_EXEC_STATUS)"
+  if ! restarts_exhausted; then
+    log "$HUB_UNIT failed (result $HUB_RESULT, last exit $HUB_EXEC_CODE:$HUB_EXEC_STATUS) without systemd giving up on restarts (NRestarts '$HUB_NRESTARTS', StartLimitBurst '$HUB_BURST'): not a crash loop (e.g. a failed stop); nothing to do"
+    return 0
+  fi
+  log "$HUB_UNIT failed after a crash loop (result $HUB_RESULT, last exit $HUB_EXEC_CODE:$HUB_EXEC_STATUS, NRestarts $HUB_NRESTARTS of StartLimitBurst $HUB_BURST)"
   run_as_owner || rc=$?
   case "$rc" in
     0) ;;
