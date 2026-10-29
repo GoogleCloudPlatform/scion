@@ -948,6 +948,47 @@ var (
 			},
 		},
 	}
+	// ChatRetentionCursorsColumns holds the columns for the "chat_retention_cursors" table.
+	ChatRetentionCursorsColumns = []*schema.Column{
+		{Name: "phase", Type: field.TypeString},
+		{Name: "cursor_created", Type: field.TypeTime, Nullable: true},
+		{Name: "cursor_id", Type: field.TypeString, Default: ""},
+		{Name: "reset_at", Type: field.TypeTime, Nullable: true},
+		{Name: "last_applied_cutoff", Type: field.TypeTime, Nullable: true},
+		{Name: "updated_at", Type: field.TypeTime},
+	}
+	// ChatRetentionCursorsTable holds the schema information for the "chat_retention_cursors" table.
+	ChatRetentionCursorsTable = &schema.Table{
+		Name:       "chat_retention_cursors",
+		Columns:    ChatRetentionCursorsColumns,
+		PrimaryKey: []*schema.Column{ChatRetentionCursorsColumns[0]},
+	}
+	// ChatRetentionRunsColumns holds the columns for the "chat_retention_runs" table.
+	ChatRetentionRunsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "trigger", Type: field.TypeEnum, Enums: []string{"sweep", "manual", "preview"}},
+		{Name: "dry_run", Type: field.TypeBool, Default: false},
+		{Name: "started_at", Type: field.TypeTime},
+		{Name: "finished_at", Type: field.TypeTime, Nullable: true},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"running", "ok", "partial", "failed"}, Default: "running"},
+		{Name: "actor", Type: field.TypeString, Nullable: true},
+		{Name: "policy", Type: field.TypeJSON, Nullable: true},
+		{Name: "counts", Type: field.TypeJSON, Nullable: true},
+		{Name: "error", Type: field.TypeString, Nullable: true},
+	}
+	// ChatRetentionRunsTable holds the schema information for the "chat_retention_runs" table.
+	ChatRetentionRunsTable = &schema.Table{
+		Name:       "chat_retention_runs",
+		Columns:    ChatRetentionRunsColumns,
+		PrimaryKey: []*schema.Column{ChatRetentionRunsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "chatretentionrun_started_at",
+				Unique:  false,
+				Columns: []*schema.Column{ChatRetentionRunsColumns[3]},
+			},
+		},
+	}
 	// ConduitPrincipalEpochsColumns holds the columns for the "conduit_principal_epochs" table.
 	ConduitPrincipalEpochsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeInt, Increment: true},
@@ -3342,6 +3383,8 @@ var (
 		BrokerSettingsTable,
 		BrokerTargetInventoriesTable,
 		ChatLinkCodesTable,
+		ChatRetentionCursorsTable,
+		ChatRetentionRunsTable,
 		ConduitPrincipalEpochsTable,
 		ConduitSessionsTable,
 		ConversationsTable,
@@ -3460,6 +3503,12 @@ func init() {
 	}
 	ChatLinkCodesTable.Annotation = &entsql.Annotation{
 		Table: "chat_link_codes",
+	}
+	ChatRetentionCursorsTable.Annotation = &entsql.Annotation{
+		Table: "chat_retention_cursors",
+	}
+	ChatRetentionRunsTable.Annotation = &entsql.Annotation{
+		Table: "chat_retention_runs",
 	}
 	ConduitPrincipalEpochsTable.Annotation = &entsql.Annotation{
 		Table: "conduit_principal_epochs",

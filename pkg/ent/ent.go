@@ -34,6 +34,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokertargetinventory"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatretentioncursor"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatretentionrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitprincipalepoch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
@@ -182,6 +184,8 @@ func checkColumn(t, c string) error {
 			brokersetting.Table:                 brokersetting.ValidColumn,
 			brokertargetinventory.Table:         brokertargetinventory.ValidColumn,
 			chatlinkcode.Table:                  chatlinkcode.ValidColumn,
+			chatretentioncursor.Table:           chatretentioncursor.ValidColumn,
+			chatretentionrun.Table:              chatretentionrun.ValidColumn,
 			conduitprincipalepoch.Table:         conduitprincipalepoch.ValidColumn,
 			conduitsession.Table:                conduitsession.ValidColumn,
 			conversation.Table:                  conversation.ValidColumn,

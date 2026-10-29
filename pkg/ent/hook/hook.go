@@ -273,6 +273,30 @@ func (f ChatLinkCodeFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ChatLinkCodeMutation", m)
 }
 
+// The ChatRetentionCursorFunc type is an adapter to allow the use of ordinary
+// function as ChatRetentionCursor mutator.
+type ChatRetentionCursorFunc func(context.Context, *ent.ChatRetentionCursorMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f ChatRetentionCursorFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.ChatRetentionCursorMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ChatRetentionCursorMutation", m)
+}
+
+// The ChatRetentionRunFunc type is an adapter to allow the use of ordinary
+// function as ChatRetentionRun mutator.
+type ChatRetentionRunFunc func(context.Context, *ent.ChatRetentionRunMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f ChatRetentionRunFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.ChatRetentionRunMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.ChatRetentionRunMutation", m)
+}
+
 // The ConduitPrincipalEpochFunc type is an adapter to allow the use of ordinary
 // function as ConduitPrincipalEpoch mutator.
 type ConduitPrincipalEpochFunc func(context.Context, *ent.ConduitPrincipalEpochMutation) (ent.Value, error)
