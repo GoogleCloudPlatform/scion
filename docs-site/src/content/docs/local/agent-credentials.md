@@ -487,6 +487,7 @@ Two diagnostic commands help troubleshoot auth and connectivity:
   The check fails when init's credential has expired or its requests are refused (401/403). When the credential has expired or the Hub refused it, doctor says how to reload the credential.
   In the 20 seconds after a new token file is written, init may still be switching to it, so doctor only warns and asks you to run it again.
   Init publishes this state in a root-owned file. Where init does not run as root, doctor reports the state as unavailable.
+  When the Hub refuses a GCP access or identity token request (`401`/`403` or `scn-gcp-token-unavailable`), the in-container metadata server caches that refusal for 30 seconds (`Retry-After: 30`, or up to 5 minutes when the Hub sends a `Retry-After` header) so credential helpers do not tight-loop the Hub, while transient `5xx` or network errors are not cached; concurrent identity-token requests are also deduplicated per target audience.
 
 ## Agent Progeny & Secret Access
 
@@ -519,6 +520,9 @@ The Runtime Broker refused the start before creating a container (see [No-Auth F
 
 ### "agent secrets could not be resolved" or "agent environment settings could not be read"
 Create, start, restart, resume and waking an agent for a direct message fail closed with `503` when the Hub cannot resolve the agent's configured secrets or read its stored environment settings, instead of starting the agent without them. A start leaves the agent as it was, a restart leaves it stopped (its stop leg has already run), and a failed create is rolled back. A provision-only create still succeeds; the agent's later start fails closed. A reincarnation answers `202` and then fails at its start leg: it is recorded as failed with the same message and the previous config is restored. This points to a secret backend or database problem on the Hub, not a missing credential (an agent with no secrets or settings starts normally). Retry once the Hub's backend is healthy; the Hub's server log has the cause.
+
+### "the hub issued no agent token for this start"
+A Hub-dispatched create, start, or restart requires a Hub-issued agent token (`StartOptions.HubIssuedToken`). If the Hub issues none, the Runtime Broker removes any previous `~/.scion/scion-token` file from the agent's home directory and fails the start with `500 runtime_error` (`the hub issued no agent token for this start; check the hub's agent token service`) without starting a container; on a restart, the running container is stopped first, leaving the agent stopped. Check the Hub's agent token signing configuration (`server.keyring_file` / JWT signing keys) and server logs. Setting `SCION_AUTH_TOKEN` in an agent's or harness-config's `env` does not satisfy this requirement: in Runtime Broker mode that variable is stripped and ignored with a start warning.
 
 ### "unknown auth type"
 The value you passed to `--harness-auth` (or `auth_selectedType`) is not one this harness supports. Valid universal types are `api-key`, `oauth-token`, `auth-file`, and `vertex-ai`, but each harness only accepts a subset — see the [auth capability matrix](/scion/supported-harnesses/#feature-capability-matrix).

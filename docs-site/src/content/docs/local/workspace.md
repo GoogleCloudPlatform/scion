@@ -337,7 +337,11 @@ the agent start or workspace pull rather than being ignored.
   A git token is supplied only through a credential helper scoped to the clone URL's host (so it is
   offered to that host and no other, in particular not to an LFS endpoint), and only for an `http(s)`
   URL; for any other URL the token is ignored. The scoped helper also disables any other configured
-  credential helper for the command, so nothing persists the token.
+  credential helper for the command, so nothing persists the token. On a shared storage layout
+  (`server.project_storage`), the Hub provisions `shared-plain` git workspaces; if a Runtime Broker
+  reaches its backstop clone path because the Hub's provisioning sentinel is missing, it passes no git
+  token and sets no token remote, so a private repository fails with the "needs credentials" error
+  until provisioned through the Hub.
 - **Updating a shared workspace** (pull) fetches from the project's clone URL known to the Hub, not
   from the remote configured in the clone, then fast-forwards the current branch.
 

@@ -13,7 +13,7 @@ The Scion Hub provides a RESTful API (mostly JSON) for managing the state of the
 Most endpoints require a `Bearer` token in the `Authorization` header.
 - **User Tokens**: Obtained via OAuth or Dev Auth.
 - **Agent Tokens**: Issued to agents at startup for state reporting.
-- **Broker Tokens**: Used for broker-to-hub communication, often combined with HMAC request signing.
+- **Broker Tokens**: Used for Runtime Broker-to-Hub and Hub-to-Runtime Broker communication with HMAC request signing (`X-Scion-Broker-ID`, `X-Scion-Timestamp`, `X-Scion-Nonce`, `X-Scion-Signature`). Every signed request with a body must declare its length (`Content-Length`; `401` on chunked or unknown-length bodies) and must not exceed 2 MiB (`413 payload_too_large` before signature verification). Nonces are recorded only after the signature verifies (and on external-relay Conduit ingress dials, deferred to the relay's `Admit` call); see [Runtime Broker Authentication (HMAC)](/scion/reference/security/#14-runtime-broker-authentication-hmac).
 
 ### Pagination
 
@@ -229,7 +229,7 @@ Published files and bundles with stable, versioned `scion://artifact/<id>[@<seq>
 - `GET /`: The number of chat conversations with unread messages for the signed-in user. Response: `{"conversations": <threads + dms>, "threads": <n>, "dms": <n>}`. A thread counts when the caller is a member of it, can read its project, has not muted it, and has not read its latest message. A DM counts when the caller is one of its parties, has not muted it, and has not read its latest message. Requires a user identity. The Web Dashboard shows `conversations` on the Chat mode badge and in the tab title. This replaces the chat `MENTION` and `DM_RECEIVED` notification rows, which the Hub no longer creates.
 
 #### Chat Starred Messages (`/api/v1/chat/stars`)
-Behind the `web.chat_starred_messages` [experiment](/scion/reference/experiments/) (`404` while off; stored stars are kept while the experiment is off). Stars are private to each user (`user.<id>.chat.stars` SSE events sync changes across the user's open tabs) and cover both project space threads (`thread:project:...`) and direct messages (`dm:user:...` and `dm:agent:...`). User access tokens require `inbox:write` for `PUT` and `DELETE` and `inbox:read` for `GET`, and for `PUT` and `GET`, live read access to the thread's project (or participant access to the DM) within the token's boundary (`DELETE` always answers `204` and removes only a star inside the token's boundary). Deleting a message removes its stars in the same transaction; promoting an agent DM to a project thread moves its messages' stars into the thread; deleting a thread, DM, user, or project removes matching stars. See [Starred messages](/scion/hosted/user/messaging/#starred-messages).
+Gated by the `web.chat_starred_messages` [experiment](/scion/reference/experiments/) (on by default; when an admin turns it off, every route answers `404` while stored stars are kept, and `POST /api/v1/admin/maintenance/operations/chat-star-reconcile/run` removes any orphaned stars). Stars are private to each user (`user.<id>.chat.stars` SSE events sync changes across the user's open tabs) and cover both project space threads (`thread:project:...`) and direct messages (`dm:user:...` and `dm:agent:...`). User access tokens require `inbox:write` for `PUT` and `DELETE` and `inbox:read` for `GET`, and for `PUT` and `GET`, live read access to the thread's project (or participant access to the DM) within the token's boundary (`DELETE` always answers `204` and removes only a star inside the token's boundary). Deleting a message removes its stars in the same transaction; promoting an agent DM to a project thread moves its messages' stars into the thread; deleting a thread, DM, user, or project removes matching stars. See [Starred messages](/scion/hosted/user/messaging/#starred-messages).
 - `PUT /:messageId`: Star a message in a project thread or DM. Body: `{"conversationKey": "<key>"}`. Idempotent: returns `200` `{"starred": true, "starredAt": "..."}` (keeping the original `starredAt` when already starred).
 - `DELETE /:messageId`: Remove the caller's star on the message (`204`).
 - `GET /?conversationKey=<key>[&limit=1..100][&cursor=...]`: List the caller's starred messages in that conversation, most recently starred first (default `limit` 30; paginated with a sealed `nextCursor`).
@@ -509,7 +509,7 @@ The Quota System API enforces fail-closed limits. Route guards strictly separate
 
 ## Runtime Broker API
 
-The Runtime Broker exposes a local API (usually on port 9800) for agent execution and management.
+The Runtime Broker exposes a local API (usually on port 9800) for agent execution and management. Requests signed with Runtime Broker HMAC (`X-Scion-Broker-ID`, `X-Scion-Timestamp`, `X-Scion-Nonce`, `X-Scion-Signature`) must declare their body length (`Content-Length`; `401` on chunked or unknown-length bodies) and must not exceed 2 MiB (`413 payload_too_large` before signature verification); see [Runtime Broker Authentication (HMAC)](/scion/reference/security/#14-runtime-broker-authentication-hmac).
 
 ### Control Channel (WebSocket)
 Brokers maintain a persistent outbound WebSocket connection to the Hub. The Hub uses this tunnel to send commands (e.g., `CreateAgent`) to brokers that might be behind NAT.
