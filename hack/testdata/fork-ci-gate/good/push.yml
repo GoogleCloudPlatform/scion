@@ -1,0 +1,28 @@
+name: CI
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  changes:
+    name: Detect changes
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+        if: always()
+
+  test:
+    needs: changes
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (!cancelled() && needs.changes.outputs.go == 'true') }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+
+  result:
+    needs: [changes, test]
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (always()) }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
