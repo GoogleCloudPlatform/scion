@@ -69,8 +69,13 @@ func mustRefuseSeed(t *testing.T, raw, wantKey, marker string) *RepoConfigRefuse
 	if !strings.Contains(msg, wantKey) {
 		t.Errorf("error does not name the key %q: %s", wantKey, msg)
 	}
-	if !strings.Contains(msg, "move the setting to your own global git config, or remove it from the repository's .git/config") {
+	if !strings.Contains(msg, "remove it from the repository's .git/config") {
 		t.Errorf("error does not carry the seed remedy: %s", msg)
+	}
+	// The agent never reads the user's global git config, so the remedy must
+	// not point there.
+	if strings.Contains(msg, "global") {
+		t.Errorf("seed remedy points at a global git config: %s", msg)
 	}
 	if marker != "" {
 		if !strings.Contains(raw, marker) {
@@ -92,7 +97,7 @@ func TestPrepareSeededGitConfig_RefusesCommandKeyWithoutValue(t *testing.T) {
 }
 
 // The host-side refusal keeps its own wording; only a seed refusal names the
-// global-config remedy.
+// per-layer remedy (and never a global config).
 func TestRepoConfigRefusedError_HostWordingUnchanged(t *testing.T) {
 	host := (&RepoConfigRefusedError{Dir: "/r", Key: "core.sshcommand", Value: "v-marker", Reason: "x"}).Error()
 	want := "git in /r refused: repository config sets core.sshcommand, which is x; remove it from the repository's .git/config (or config.worktree)"

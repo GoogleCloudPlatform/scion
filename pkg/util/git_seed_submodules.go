@@ -185,7 +185,8 @@ func seedGitlinks(ctx context.Context, gitDir, commonDir string) ([]string, erro
 // "", "". The target must be one of dirs and must not hold a commondir entry.
 func resolveSeedGitlink(workspace, p string, dirs []seedAdminDir) (target, wt string, err error) {
 	if p == "" || strings.HasPrefix(p, "/") || filepath.IsAbs(filepath.FromSlash(p)) {
-		return "", "", refuseGitlink(p, "a submodule git link with an absolute or empty path")
+		// p is not printed: a fixed label stands in for an absolute or empty path.
+		return "", "", newRepoConfigRefusedError("", "submodule <absolute or empty path>", "<gitlink>", "", "a submodule git link with an absolute or empty path", true)
 	}
 	comps := strings.Split(p, "/")
 	cur := workspace

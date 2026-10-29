@@ -32,6 +32,10 @@ const maxSeedConfigLayerSize = 1 << 20 // 1 MiB
 const (
 	seedLayerCommonWorktree = "config.worktree"
 	seedLayerOwnWorktree    = "the worktree's config.worktree"
+	// seedLayerCombined labels a cross-check over .git/config and the
+	// config.worktree layers above, where the differing key may come from any
+	// of them.
+	seedLayerCombined = ".git/config or a config.worktree"
 )
 
 // CheckSeedRepoConfigLayers checks, before an agent is seeded, the repository
@@ -61,7 +65,7 @@ func CheckSeedRepoConfigLayers(ctx context.Context, commonDir, adminName string)
 // passed in, so a test can make the parsed set differ from what git reads and
 // see the cross-check refuse.
 func checkSeedRepoConfigLayers(ctx context.Context, commonDir, adminName string, read func(path, label string) ([]gitConfigVar, error)) error {
-	if err := refuseRootCommonDirRedirect(filepath.Dir(commonDir)); err != nil {
+	if err := refuseRootCommonDirRedirect(filepath.Dir(commonDir), true); err != nil {
 		return err
 	}
 	type layer struct {
@@ -89,7 +93,7 @@ func checkSeedRepoConfigLayers(ctx context.Context, commonDir, adminName string,
 		}
 		parsed = append(parsed, vars...)
 	}
-	return crossCheckAgainstGit(ctx, commonDir, seedGitEnv(gitDir, commonDir), parsed, "", true)
+	return crossCheckAgainstGit(ctx, commonDir, seedGitEnv(gitDir, commonDir), parsed, seedLayerCombined, true)
 }
 
 // readSeedConfigLayer reads one config file as data (no symlink followed, no
