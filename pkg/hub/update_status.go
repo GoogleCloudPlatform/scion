@@ -41,6 +41,10 @@ const (
 	// HubSettingSectionLastUpdate holds the LastUpdate result of the most
 	// recent reconciled update.
 	HubSettingSectionLastUpdate = "system.last_update"
+	// HubSettingSectionReleaseSelection holds the operator's ReleaseSelection.
+	// Only a verified update writes it (boot reconciliation), never a
+	// settings PUT.
+	HubSettingSectionReleaseSelection = "system.release_selection"
 )
 
 // LastUpdate statuses.
@@ -58,13 +62,22 @@ const (
 	UpdateModeRelease = "release"
 )
 
-// Channel sources reported by update-status.
+// Channel sources reported by update-status. ChannelSourceSelection means
+// an operator-initiated update (an explicit target, channel and pin from the
+// API or UI) was verified and recorded as system.release_selection; it then
+// takes precedence over the configured release_channel. Auto-updates never
+// record a selection, so on a hub without one the configured channel stays
+// in effect, and a later config edit applies.
 const (
-	ChannelSourceConfig   = "config"
-	ChannelSourceDetected = "detected"
+	ChannelSourceSelection = "selection"
+	ChannelSourceConfig    = "config"
+	ChannelSourceDetected  = "detected"
 )
 
 // PendingUpdate is the system.pending_update row.
+//
+// Channel, Pin and SetBy were added in Phase 2. A row written by an older
+// hub lacks them; it is still reconciled, but writes no release selection.
 type PendingUpdate struct {
 	RunID    string `json:"runId"`
 	From     string `json:"from"`
@@ -72,6 +85,25 @@ type PendingUpdate struct {
 	Snapshot string `json:"snapshot"`
 	Strategy string `json:"strategy"`
 	At       string `json:"at"`
+	// Channel is the installed release's channel.
+	Channel string `json:"channel,omitempty"`
+	// Pin is maintenance.PinLatest or the installed tag.
+	Pin string `json:"pin,omitempty"`
+	// SetBy is who started the update run (its started_by).
+	SetBy string `json:"setBy,omitempty"`
+}
+
+// ReleaseSelection is the system.release_selection row: how the operator
+// last chose to run this hub, recorded when that update was verified on
+// boot (design D5).
+type ReleaseSelection struct {
+	Mode    string `json:"mode"`    // UpdateModeRelease (UpdateModeGit from Phase 4)
+	Channel string `json:"channel"` // the selected channel
+	Pin     string `json:"pin"`     // maintenance.PinLatest or a release tag
+	Version string `json:"version"` // the version installed by the selection
+	SetBy   string `json:"set_by"`
+	SetAt   string `json:"set_at"`
+	RunID   string `json:"run_id"`
 }
 
 // LastUpdate is the system.last_update row.
@@ -83,10 +115,13 @@ type LastUpdate struct {
 	At     string `json:"at"`
 }
 
-// effectiveUpdateMode is how this hub is updated: "git" for a source-tier
-// hub (rebuild from the maintenance repo), "release" otherwise. In Phase 1
-// it derives from deployment_tier only.
-func effectiveUpdateMode(mc MaintenanceConfig) string {
+// effectiveUpdateMode is how this hub is updated: the release selection's
+// mode when there is one, else "git" for a source-tier hub (rebuild from the
+// maintenance repo) and "release" otherwise.
+func effectiveUpdateMode(mc MaintenanceConfig, sel *ReleaseSelection) string {
+	if sel != nil && sel.Mode != "" {
+		return sel.Mode
+	}
 	if mc.DeploymentTier == "source" {
 		return UpdateModeGit
 	}
@@ -94,14 +129,71 @@ func effectiveUpdateMode(mc MaintenanceConfig) string {
 }
 
 // effectiveReleaseChannel is the channel updates are checked and installed
-// from: the configured release_channel, else the running version's channel
-// ("" for a git build). source is ChannelSourceConfig or
+// from: the release selection's channel, else the configured
+// release_channel, else the running version's channel ("" for a git build).
+// source is ChannelSourceSelection, ChannelSourceConfig or
 // ChannelSourceDetected.
-func effectiveReleaseChannel(mc MaintenanceConfig, running string) (channel, source string) {
+func effectiveReleaseChannel(mc MaintenanceConfig, running string, sel *ReleaseSelection) (channel, source string) {
+	if sel != nil && sel.Channel != "" {
+		return sel.Channel, ChannelSourceSelection
+	}
 	if mc.ReleaseChannel != "" {
 		return mc.ReleaseChannel, ChannelSourceConfig
 	}
 	return update.DetectChannel(running), ChannelSourceDetected
+}
+
+// effectivePin is the release selection's pin, maintenance.PinLatest when
+// there is no selection.
+func effectivePin(sel *ReleaseSelection) string {
+	if sel != nil && sel.Pin != "" {
+		return sel.Pin
+	}
+	return maintenance.PinLatest
+}
+
+// readReleaseSelection returns system.release_selection, nil when there is
+// none. An unreadable row is ignored with a warning (the hub falls back to
+// its configuration, as without a selection); a store error is returned.
+func (s *Server) readReleaseSelection(ctx context.Context) (*ReleaseSelection, error) {
+	var sel ReleaseSelection
+	found, err := s.readHubSettingJSON(ctx, HubSettingSectionReleaseSelection, &sel)
+	if found && err != nil {
+		s.maintenanceLog.Warn("Ignoring an unreadable release selection", "error", err)
+		return nil, nil
+	}
+	if err != nil || !found {
+		return nil, err
+	}
+	return &sel, nil
+}
+
+// selectionFromPending is the release selection a verified pending update
+// records. Only an operator-initiated update records one: skip says why
+// none is recorded for a row written before Phase 2 (no channel) or for an
+// auto-update run (started by system:auto-update). Neither carried an
+// operator choice, and recording one would silently override the configured
+// release_channel from then on.
+func selectionFromPending(p PendingUpdate, at time.Time) (sel ReleaseSelection, skip string) {
+	switch {
+	case p.Channel == "":
+		return ReleaseSelection{}, "the pending update has no channel (written before release selections)"
+	case p.SetBy == autoUpdateStartedBy:
+		return ReleaseSelection{}, "the update was started by the auto-update policy, not an operator"
+	}
+	pin := p.Pin
+	if pin == "" {
+		pin = maintenance.PinLatest
+	}
+	return ReleaseSelection{
+		Mode:    UpdateModeRelease,
+		Channel: p.Channel,
+		Pin:     pin,
+		Version: p.To,
+		SetBy:   p.SetBy,
+		SetAt:   at.UTC().Format(time.RFC3339),
+		RunID:   p.RunID,
+	}, ""
 }
 
 // updateInstaller returns the Installer detected at startup, or an
@@ -182,9 +274,10 @@ func updateOutcome(p PendingUpdate, running string) string {
 
 // reconcilePendingUpdate runs at startup, before AbortRunningMaintenanceOps.
 // When system.pending_update exists it completes the update run it names:
-// "completed" with system.last_update status "verified" (and the
-// update-available notification cleared) when the hub now runs the target
-// version, "failed" otherwise (the notification stays). It then clears the row. It
+// "completed" with system.last_update status "verified" (the release
+// selection recorded from the row, and the update-available notification
+// cleared) when the hub now runs the target version, "failed" otherwise
+// (the notification and the previous selection stay). It then clears the row. It
 // is idempotent (a re-run after a partial failure converges), tolerates a
 // missing run row, and fails any other update-binary run still left
 // "restarting" (its restart was never confirmed), so no stale run blocks
@@ -218,6 +311,19 @@ func (s *Server) reconcilePendingUpdate(ctx context.Context, running string) err
 		}
 		if err := s.writeHubSettingJSON(ctx, HubSettingSectionLastUpdate, last); err != nil {
 			return err
+		}
+		// The operator's choice (channel, pin) takes effect only once the
+		// hub runs it. A failed write keeps pending_update, so the next
+		// boot records it.
+		if status == LastUpdateVerified {
+			if sel, skip := selectionFromPending(p, time.Now()); skip == "" {
+				if err := s.writeHubSettingJSON(ctx, HubSettingSectionReleaseSelection, sel); err != nil {
+					return err
+				}
+			} else {
+				log.Debug("No release selection recorded for the verified update",
+					"run_id", p.RunID, "to", p.To, "reason", skip)
+			}
 		}
 		// The update is confirmed only now; the update-binary hook leaves
 		// the banner in place so a failed or rolled-back attempt can be
@@ -350,7 +456,10 @@ type updateStatusMode struct {
 type updateStatusChannel struct {
 	Effective  string `json:"effective"`
 	Configured string `json:"configured"`
-	Source     string `json:"source"`
+	// Source is where Effective came from: ChannelSourceSelection (an
+	// operator-initiated update's recorded choice; auto-updates never
+	// record one), ChannelSourceConfig or ChannelSourceDetected.
+	Source string `json:"source"`
 }
 
 // runningBuild identifies the running binary for update-status.
@@ -368,7 +477,11 @@ func currentRunningBuild() runningBuild {
 // maintenance repo path is reported only as configured or not.
 func (s *Server) buildUpdateStatus(ctx context.Context, cur runningBuild) (*updateStatusResponse, error) {
 	mc := s.config.MaintenanceConfig
-	channel, source := effectiveReleaseChannel(mc, cur.Version)
+	sel, err := s.readReleaseSelection(ctx)
+	if err != nil {
+		return nil, err
+	}
+	channel, source := effectiveReleaseChannel(mc, cur.Version, sel)
 	isGit := !update.IsReleaseTag(cur.Version)
 	displayVersion := cur.Version
 	if displayVersion == "" {
@@ -389,7 +502,7 @@ func (s *Server) buildUpdateStatus(ctx context.Context, cur runningBuild) (*upda
 			IsGitBuild: isGit,
 		},
 		Mode: updateStatusMode{
-			Effective:      effectiveUpdateMode(mc),
+			Effective:      effectiveUpdateMode(mc, sel),
 			RepoConfigured: mc.RepoPath != "",
 			RepoBranch:     mc.RepoBranch,
 		},
@@ -398,7 +511,7 @@ func (s *Server) buildUpdateStatus(ctx context.Context, cur runningBuild) (*upda
 			Configured: mc.ReleaseChannel,
 			Source:     source,
 		},
-		Pin:          "latest",
+		Pin:          effectivePin(sel),
 		Installer:    redactInstallerStatus(s.updateInstaller().Status(), mc.RepoPath),
 		UpdatePolicy: mc.UpdatePolicy,
 	}

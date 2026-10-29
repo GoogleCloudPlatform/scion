@@ -9794,6 +9794,7 @@
 | http_route | GET | `/api/v1/admin/maintenance/update-available` |
 | http_route | DELETE | `/api/v1/admin/maintenance/update-available` |
 | http_route | GET | `/api/v1/admin/maintenance/update-status` |
+| http_route | GET | `/api/v1/admin/maintenance/releases` |
 
 **Principals:** `user`
 

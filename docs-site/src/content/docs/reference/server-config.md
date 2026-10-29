@@ -1049,7 +1049,7 @@ Configuring a modest concurrency limit (such as the default `2`) is highly recom
 
 ### Maintenance (`server.maintenance`)
 
-Controls how the Hub checks for and applies its own updates. The **deployment tier** sets the update mode: a `binary` Hub updates from release binaries (it checks the effective channel's latest release in the `LATEST.json` manifest), while a `source` Hub rebuilds from its git checkout.
+Controls how the Hub checks for and applies its own updates. The **deployment tier** sets the update mode: a `binary` Hub updates from release binaries (it checks the effective channel's latest installable release in the Hub's release catalog, read from the GitHub Releases API), while a `source` Hub rebuilds from its git checkout.
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
@@ -1057,10 +1057,18 @@ Controls how the Hub checks for and applies its own updates. The **deployment ti
 | `release_channel` | string | Detected from the running version | Release channel to track: `nightly`, `preview`, or `stable`. When empty, the channel is derived from the version string (`v0.5.0` → `stable`, `v0.5.0-preview.1` or `v0.5.0-rc1` → `preview`, `nightly-*` → `nightly`). Development builds have no channel and skip scheduled checks. A Hub configured for another channel than the one it runs is offered that channel's latest release once it was published after the running one (for example, a nightly Hub set to `preview`). |
 | `update_policy` | string | `notify` for `binary`, `disabled` for `source` | `notify` checks on a schedule and shows an update-available banner in the admin UI, where an admin applies or dismisses it. `auto` checks on a schedule and installs the channel's latest release automatically, through the same installer as the admin UI. `disabled` turns off scheduled checks; manual checks from the admin UI still work. |
 | `check_interval_hours` | integer | `6` | How often the scheduled release check runs. Minimum `1`. Each run is jittered by up to ±30 minutes. |
-| `github_repo` | string | `GoogleCloudPlatform/scion` | GitHub repository used for release and manifest lookups. |
+| `github_repo` | string | `GoogleCloudPlatform/scion` | GitHub repository whose releases the Hub lists and installs. |
 | `install_root` | string | `/opt/scion` | Versioned install root (`releases/<tag>/scion`, `current`, `previous`) used by release self-update. `SCION_MAINTENANCE_INSTALL_ROOT` overrides it. The single-node VM deploy script writes it. |
 
 Scheduled checks run whenever `update_policy` is not `disabled`; a Hub in `source` mode skips them. Before `update_policy` defaulted to `notify`, a `binary` Hub defaulted to `auto`; set `auto` explicitly to keep unattended updates.
+
+**Release selection.** An update that an operator starts from the Maintenance page or the API (an explicit target release, channel and pin) records that choice once the Hub has restarted on the new release and verified it. Auto-updates (`update_policy: auto`) never record a selection, so they never change which channel the Hub follows. update-status reports where the **effective channel** came from in `channel.source`:
+
+- `selection`: the recorded operator choice. It takes precedence over `release_channel`, so a later edit of `release_channel` has no effect until the operator picks a channel again on the Maintenance page.
+- `config`: `release_channel` is set and no selection was recorded.
+- `detected`: neither is set, so the channel is derived from the running version.
+
+The pin (update-status `pin`) is `latest` when the operator picked the channel's latest release, or the release tag otherwise; without a selection it is `latest`. Under `auto`, a Hub pinned to a release is not updated automatically; it only shows the update-available banner.
 
 **How a release is installed.** At startup the Hub detects an installer strategy for its host, shown on the Maintenance page:
 
@@ -1076,7 +1084,7 @@ Hubs with no repository path used to update through whatever `sudo` the `scion` 
 
 On the `preview` channel, a weekly workflow (Fridays at 14:00 UTC) publishes the next `vX.Y.Z-preview.N` build. It fast-forwards the newest `release/vX.Y` branch to the newest `nightly-YYYYMMDD` tag that the branch does not yet contain and whose `Build & Test` check succeeded, tags it, and builds the release, which updates `LATEST.json` and the `preview` branch. A week with no such nightly publishes no preview. If the release branch has commits that are not on `main` (for example, fixes cherry-picked during a freeze before stable), the weekly run fails instead of force-pushing. Maintainers then tag previews by hand until the line is promoted to `vX.Y.Z` on `stable` or the branch is realigned.
 
-The related admin endpoints are `GET /api/v1/admin/maintenance/update-status` (running version, update mode, effective channel, installer, and the pending and last update), `POST /api/v1/admin/maintenance/check-updates` (manual check) and `GET` / `DELETE` on `/api/v1/admin/maintenance/update-available` (read or dismiss a pending update notification). All require the `hub.maintenance.execute` permission.
+The related admin endpoints are `GET /api/v1/admin/maintenance/update-status` (running version, update mode, effective channel with its `channel.source` (`selection`, `config` or `detected`, see Release selection above) and `pin`, installer, and the pending and last update), `GET /api/v1/admin/maintenance/releases?refresh=0|1` (the release catalog per channel, each release classified against the running version; refresh is limited to one GitHub fetch a minute and the list is otherwise cached for 15 minutes), `POST /api/v1/admin/maintenance/check-updates` (manual check) and `GET` / `DELETE` on `/api/v1/admin/maintenance/update-available` (read or dismiss a pending update notification). All require the `hub.maintenance.execute` permission.
 
 ```yaml
 server:

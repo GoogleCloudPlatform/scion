@@ -24,6 +24,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
@@ -35,6 +36,16 @@ import { canReissueAllScopes } from '../../lib/admin-permissions.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { showToast } from '../../utils/toast.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { renderReleaseNotesLink } from '../../utils/release-notes-link.js';
+import { LAST_UPDATE_LABELS, renderInstallerUnsupported } from './admin-maintenance-update-card.js';
+import type {
+  LastUpdate,
+  PendingUpdate,
+  UpdateRequestDetail,
+  UpdateStatus,
+} from './admin-maintenance-update-card.js';
+
+export type { LastUpdate, PendingUpdate, UpdateStatus };
 
 interface MaintenanceOperation {
   id: string;
@@ -137,51 +148,6 @@ interface UpdateAvailableResponse {
   };
 }
 
-/** Result of the last update, from the system.last_update hub setting. */
-export interface LastUpdate {
-  runId: string;
-  from: string;
-  to: string;
-  status: 'verified' | 'failed' | 'rolled_back' | (string & {});
-  at: string;
-}
-
-/** An update whose hub restart is pending, from system.pending_update. */
-export interface PendingUpdate {
-  runId: string;
-  from: string;
-  to: string;
-  snapshot?: string;
-  strategy?: string;
-  at: string;
-}
-
-/**
- * GET /api/v1/admin/maintenance/update-status. Later phases add fields
- * (for example downgrade); unknown fields are ignored.
- */
-export interface UpdateStatus {
-  current: {
-    version: string;
-    channel: string;
-    commit: string;
-    buildTime?: string;
-    isGitBuild: boolean;
-  };
-  mode: { effective: 'git' | 'release'; repoConfigured: boolean; repoBranch?: string };
-  channel: { effective: string; configured?: string; source: string };
-  pin: string;
-  installer: {
-    strategy: 'symlink' | 'sudo-install' | 'unsupported' | (string & {});
-    supported: boolean;
-    reason?: string;
-    migrateHint?: string;
-  };
-  updatePolicy: string;
-  pendingUpdate: PendingUpdate | null;
-  lastUpdate: LastUpdate | null;
-}
-
 /** Whether a parsed body has the parts of an update-status the page relies on. */
 function isUpdateStatus(data: unknown): data is UpdateStatus {
   if (!data || typeof data !== 'object') return false;
@@ -193,12 +159,6 @@ function isUpdateStatus(data: unknown): data is UpdateStatus {
     (d.mode?.effective === 'git' || d.mode?.effective === 'release')
   );
 }
-
-const LAST_UPDATE_LABELS: Record<string, string> = {
-  verified: 'verified',
-  failed: 'failed',
-  rolled_back: 'rolled back',
-};
 
 /**
  * A readable message for a rejected update-binary run request, by the
@@ -229,6 +189,19 @@ interface TrackedUpdate {
   expectVersion: string | null;
   /** Last run status seen by a successful poll. */
   lastStatus: string;
+  /**
+   * The version the hub ran when the update started (or when this page
+   * picked the run up); undefined when not known. Recorded once, so a
+   * status reload during the restart does not change it.
+   */
+  fromVersion?: string | undefined;
+}
+
+/** Channel, pin and class of an update picked in the release picker. */
+interface UpdateConfirmOptions {
+  channel: string;
+  pin: string;
+  releaseClass: string;
 }
 
 /** How long hubErrorEnvelope waits for an error body. */
@@ -546,6 +519,13 @@ export class ScionPageAdminMaintenance extends LitElement {
   /** Target tag of the update being confirmed in the dialog (null: closed). */
   @state()
   private updateConfirmTarget: string | null = null;
+
+  /**
+   * Channel, pin and class of a target picked in the release picker; null
+   * for the banner and the operation card, which post pin 'latest' only.
+   */
+  @state()
+  private updateConfirmOptions: UpdateConfirmOptions | null = null;
 
   /** The update run followed through the restart (null: none). */
   @state()
@@ -1056,28 +1036,6 @@ export class ScionPageAdminMaintenance extends LitElement {
 
     /* -- Update available banner (top-level) ------------------------------- */
 
-    .server-version sl-alert {
-      margin-top: 0.75rem;
-    }
-
-    .server-version sl-alert sl-button {
-      margin-left: 0.5rem;
-    }
-
-    .channel-badge {
-      margin-left: 0.5rem;
-    }
-
-    .last-update .status-badge {
-      margin: 0 0.25rem;
-    }
-
-    .update-reconnecting {
-      align-items: center;
-      gap: 0.5rem;
-      margin-top: 0.75rem;
-    }
-
     .update-available-banner {
       display: flex;
       align-items: center;
@@ -1292,33 +1250,44 @@ export class ScionPageAdminMaintenance extends LitElement {
     this.openUpdateConfirm(channel ? `latest:${channel}` : null);
   }
 
-  private openUpdateConfirm(target: string | null): void {
+  private openUpdateConfirm(
+    target: string | null,
+    options: UpdateConfirmOptions | null = null
+  ): void {
     if (!target) {
       showToast('No update target is known: update status has not loaded.');
       return;
     }
     this.updateConfirmTarget = target;
+    this.updateConfirmOptions = options;
   }
 
   private closeUpdateConfirm(): void {
     if (!this.applyUpdateLoading) {
       this.updateConfirmTarget = null;
+      this.updateConfirmOptions = null;
     }
   }
 
   /**
    * Starts update-binary for the confirmed target. The request carries only
-   * target_version and pin; the hub resolves the release assets itself.
+   * target_version, pin and (from the release picker) channel; the hub
+   * resolves the release assets itself.
    */
   private async applyUpdate(): Promise<void> {
     const target = this.updateConfirmTarget;
     if (!target) return;
+    const options = this.updateConfirmOptions;
+    const params: Record<string, string> = options
+      ? { target_version: target, channel: options.channel, pin: options.pin }
+      : { target_version: target, pin: 'latest' };
+    const fromVersion = this.updateStatus?.current.version;
     this.applyUpdateLoading = true;
     try {
       const response = await apiFetch('/api/v1/admin/maintenance/operations/update-binary/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ params: { target_version: target, pin: 'latest' } }),
+        body: JSON.stringify({ params }),
       });
 
       if (!response.ok) {
@@ -1332,6 +1301,7 @@ export class ScionPageAdminMaintenance extends LitElement {
         'success'
       );
       this.updateConfirmTarget = null;
+      this.updateConfirmOptions = null;
       this.updateAvailable = null;
       this.updateReconnectError = null;
       if (started.runId) {
@@ -1340,6 +1310,7 @@ export class ScionPageAdminMaintenance extends LitElement {
           target,
           expectVersion: target.startsWith('latest:') ? null : target,
           lastStatus: 'running',
+          fromVersion,
         };
       } else {
         // Without a run id no result can be tied to this update; the run
@@ -1377,6 +1348,7 @@ export class ScionPageAdminMaintenance extends LitElement {
       target: pending.to,
       expectVersion: pending.to || null,
       lastStatus: 'restarting',
+      fromVersion: pending.from || this.updateStatus?.current.version,
     };
     void this.reconnectAfterUpdate();
   }
@@ -1401,6 +1373,7 @@ export class ScionPageAdminMaintenance extends LitElement {
         target: '',
         expectVersion: null,
         lastStatus: 'running',
+        fromVersion: this.updateStatus?.current.version,
       };
     }
     const tracked = this.trackedUpdate;
@@ -1414,8 +1387,57 @@ export class ScionPageAdminMaintenance extends LitElement {
       void this.reconnectAfterUpdate();
     } else if (!isRunInProgress(run.status) && !this.updateReconnecting) {
       this.trackedUpdate = null;
-      void this.fetchUpdateStatus().then(() => this.reportUpdateResult(tracked, run.status));
+      void this.fetchUpdateStatus().then(() => {
+        this.refreshUpdateNoticesAfterRun(tracked);
+        this.reportUpdateResult(tracked, run.status);
+      });
     }
+  }
+
+  /**
+   * The version the hub ran before a tracked update: the one recorded when
+   * the run was tracked, else the hub's own record for this run
+   * (pendingUpdate.from while it restarts, lastUpdate.from once settled).
+   * A run adopted on first load may be tracked before update-status has
+   * loaded. Undefined when none is known.
+   */
+  private updateFromVersion(tracked: TrackedUpdate): string | undefined {
+    if (tracked.fromVersion) return tracked.fromVersion;
+    const pending = this.updateStatus?.pendingUpdate ?? null;
+    if (pending && pending.runId === tracked.runId && pending.from) return pending.from;
+    const last = this.updateStatus?.lastUpdate ?? null;
+    if (last && last.runId === tracked.runId && last.from) return last.from;
+    return undefined;
+  }
+
+  /**
+   * Brings the "Update available" notices up to date once an update run
+   * has ended and update-status has been reloaded (ptone/scion#6557).
+   *
+   * - The hub recorded this run as verified and runs a different version
+   *   than before it: the notices were computed against the old version.
+   *   The update check result is dropped, and the stored notification is
+   *   cleared and re-read.
+   * - Otherwise (failed, rolled back, not verified yet, or a version not
+   *   known): the check result stays, and the stored notification is only
+   *   re-read. Starting the update hid the banner, and the hub keeps the
+   *   notification for a retry, so the banner comes back.
+   *
+   * fetchUpdateAvailable handles its own errors and is not awaited.
+   */
+  private refreshUpdateNoticesAfterRun(tracked: TrackedUpdate): void {
+    const from = this.updateFromVersion(tracked);
+    const after = this.updateStatus?.current.version;
+    const last = this.updateStatus?.lastUpdate ?? null;
+    const verified = !!last && last.runId === tracked.runId && last.status === 'verified';
+    if (verified && from && after && from !== after) {
+      this.updateCheckResult = null;
+      this.updateCheckError = null;
+      // Cleared first: if the re-read fails, a notice about the old
+      // version must not stay up.
+      this.updateAvailable = null;
+    }
+    void this.fetchUpdateAvailable();
   }
 
   /** When the restart wait last checked the run status (epoch ms). */
@@ -1506,16 +1528,17 @@ export class ScionPageAdminMaintenance extends LitElement {
       // wait ran out): show what it recorded.
       await this.fetchUpdateStatus();
       await this.loadData(true);
-      if (result.ok) {
-        this.reportUpdateResult(tracked, 'restarted');
-        return;
-      }
       const run = this.updateBinaryRun();
       const runIsTracked = !!run && run.id === tracked.runId;
-      if (runIsTracked && run.status === 'running') {
+      if (!result.ok && runIsTracked && run.status === 'running') {
         // A blip, not a restart: the run is still going; keep polling it.
         this.trackedUpdate = { ...tracked, lastStatus: 'running' };
         this.startPolling();
+        return;
+      }
+      this.refreshUpdateNoticesAfterRun(tracked);
+      if (result.ok) {
+        this.reportUpdateResult(tracked, 'restarted');
         return;
       }
       const recorded = this.updateStatus?.lastUpdate?.runId === tracked.runId;
@@ -1957,141 +1980,63 @@ export class ScionPageAdminMaintenance extends LitElement {
   }
 
   /**
-   * "Server Version & Updates": the running version, channel, commit and
-   * installer from update-status, the last update result and the state of
-   * an update restart in progress.
+   * "Server Version & Updates" card. It shows update-status and picks a
+   * release; the update itself (confirm, run, restart wait) stays here.
    */
   private renderServerVersion() {
+    const busy =
+      this.applyUpdateLoading ||
+      this.updateReconnecting ||
+      isRunInProgress(this.updateBinaryRun()?.status);
     return html`
-      <div class="section server-version">
-        <h2 class="section-title">Server Version &amp; Updates</h2>
-        ${this.updateStatusError
-          ? html`
-              <sl-alert variant="danger" open class="update-status-error">
-                <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
-                Could not load update status: ${this.updateStatusError}
-                <sl-button size="small" @click=${() => this.fetchUpdateStatus()}>
-                  <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
-                  Reload status
-                </sl-button>
-              </sl-alert>
-            `
-          : this.updateStatus
-            ? this.renderServerVersionBody(this.updateStatus)
-            : html`<div class="empty-inline">Loading update status...</div>`}
-        ${this.updateReconnecting
-          ? html`
-              <div class="card-meta update-reconnecting">
-                <sl-spinner></sl-spinner>
-                <span>
-                  Waiting for the hub to
-                  restart${this.trackedUpdate?.expectVersion
-                    ? html` on ${this.trackedUpdate.expectVersion}`
-                    : nothing}...
-                </span>
-              </div>
-            `
-          : nothing}
-        ${this.updateReconnectError
-          ? html`
-              <sl-alert variant="warning" open class="update-reconnect-error">
-                <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
-                ${this.updateReconnectError}
-              </sl-alert>
-            `
-          : nothing}
-      </div>
+      <scion-admin-maintenance-update-card
+        .status=${this.updateStatus}
+        .statusError=${this.updateStatusError}
+        ?reconnecting=${this.updateReconnecting}
+        .reconnectVersion=${this.trackedUpdate?.expectVersion ?? null}
+        .reconnectError=${this.updateReconnectError}
+        ?busy=${busy}
+        @reload-status=${() => this.fetchUpdateStatus()}
+        @view-run=${(e: CustomEvent<{ runId: string }>) =>
+          void this.viewRunDetail({
+            id: e.detail.runId,
+            operationKey: 'update-binary',
+            status: '',
+            startedAt: '',
+          })}
+        @update-request=${(e: CustomEvent<UpdateRequestDetail>) =>
+          this.openUpdateConfirm(e.detail.target, {
+            channel: e.detail.channel,
+            pin: e.detail.pin,
+            releaseClass: e.detail.releaseClass,
+          })}
+      ></scion-admin-maintenance-update-card>
     `;
   }
 
-  private renderServerVersionBody(st: UpdateStatus) {
-    const cur = st.current;
-    const version = cur.version || (cur.isGitBuild ? 'git build' : 'unknown');
-    const commit = cur.commit ? cur.commit.slice(0, 12) : '';
-    const inst = st.installer;
+  /** What a picker update changes besides the version: channel and pin. */
+  private renderUpdateConfirmDetails(
+    target: string,
+    options: UpdateConfirmOptions | null
+  ): TemplateResult | typeof nothing {
+    if (!options) return nothing;
+    const from = this.updateStatus?.channel.effective || this.updateStatus?.current.channel;
     return html`
-      <div class="card">
-        <div class="release-info">
-          <div class="release-field">
-            <span class="release-label">Version:</span>
-            <span class="current-version">${version}</span>
-            ${cur.channel
-              ? html`<sl-badge variant="primary" pill class="channel-badge"
-                  >${cur.channel}</sl-badge
-                >`
-              : nothing}
-          </div>
-          ${commit
-            ? html`
-                <div class="release-field">
-                  <span class="release-label">Commit:</span>
-                  <code class="current-commit">${commit}</code>
-                </div>
-              `
-            : nothing}
-          <div class="release-field">
-            <span class="release-label">Updates from:</span>
-            <span class="update-mode"
-              >${st.mode.effective === 'git' ? 'Git build' : 'Release binary'}${st.channel.effective
-                ? html` (${st.channel.effective} channel)`
-                : nothing}</span
-            >
-          </div>
-          <div class="release-field">
-            <span class="release-label">Installer:</span>
-            <span class="installer-strategy">${inst.strategy}</span>
-          </div>
-          ${st.lastUpdate ? this.renderLastUpdate(st.lastUpdate) : nothing}
-        </div>
-        ${inst.supported ? nothing : this.renderInstallerUnsupported(st)}
-      </div>
-    `;
-  }
-
-  private renderInstallerUnsupported(st: UpdateStatus) {
-    return html`
-      <sl-alert variant="warning" open class="installer-unsupported">
-        <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
-        <strong>This hub cannot install updates itself.</strong>
-        ${st.installer.reason
-          ? html`<div class="installer-reason">${st.installer.reason}</div>`
-          : nothing}
-        ${st.installer.migrateHint
-          ? html`<div class="installer-hint">${st.installer.migrateHint}</div>`
-          : nothing}
-      </sl-alert>
-    `;
-  }
-
-  private renderLastUpdate(last: LastUpdate) {
-    const label = LAST_UPDATE_LABELS[last.status] ?? last.status;
-    const badge =
-      last.status === 'verified' ? 'completed' : last.status === 'failed' ? 'failed' : 'pending';
-    return html`
-      <div class="release-field last-update">
-        <span class="release-label">Last update:</span>
-        <span>
-          ${last.from ? html`${last.from} &rarr; ` : nothing}${last.to}
-          <span class="status-badge ${badge}">${label}</span>
-          ${last.at ? html`${this.formatRelativeTime(last.at)}` : nothing}
-          ${last.runId
-            ? html`<a
-                href="#"
-                class="last-update-run"
-                @click=${(e: Event) => {
-                  e.preventDefault();
-                  void this.viewRunDetail({
-                    id: last.runId,
-                    operationKey: 'update-binary',
-                    status: '',
-                    startedAt: '',
-                  });
-                }}
-                >View run</a
-              >`
-            : nothing}
-        </span>
-      </div>
+      ${options.releaseClass === 'switch-newer' || (from && from !== options.channel)
+        ? html`<p class="confirm-channel-switch">
+            This switches the
+            hub${from ? html` from the <strong>${from}</strong> channel` : nothing} to the
+            <strong>${options.channel}</strong> channel.
+          </p>`
+        : nothing}
+      ${options.pin === 'latest'
+        ? html`<p class="confirm-pin">
+            The hub follows the latest <strong>${options.channel}</strong> release.
+          </p>`
+        : html`<p class="confirm-pin">
+            The hub stays pinned to <strong>${target}</strong>: automatic updates do not move it
+            until you pick Latest again.
+          </p>`}
     `;
   }
 
@@ -2109,12 +2054,13 @@ export class ScionPageAdminMaintenance extends LitElement {
                   <strong>${latestChannel}</strong> channel?`
               : html`Update the hub to <strong>${target}</strong>?`}
           </p>
+          ${this.renderUpdateConfirmDetails(target, this.updateConfirmOptions)}
           <p style="color: var(--sl-color-warning-700, #a16207); font-weight: 500;">
             The hub restarts once the new binary is installed. You will temporarily lose
             connectivity; this page reconnects when the hub is back.
           </p>
           ${unsupported && this.updateStatus
-            ? this.renderInstallerUnsupported(this.updateStatus)
+            ? renderInstallerUnsupported(this.updateStatus)
             : nothing}
         </div>
         <sl-button
@@ -3086,10 +3032,7 @@ export class ScionPageAdminMaintenance extends LitElement {
             ? html`
                 <div class="release-field">
                   <span class="release-label">Release notes:</span>
-                  <a href="${r.release_url}" target="_blank" rel="noopener noreferrer">
-                    View Release Notes
-                    <sl-icon name="box-arrow-up-right" style="font-size: 0.75rem;"></sl-icon>
-                  </a>
+                  ${renderReleaseNotesLink(r.release_url)}
                 </div>
               `
             : nothing}

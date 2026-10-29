@@ -118,7 +118,7 @@ var requestPathSites = []requestPathSite{
 	{"lifecycle_hook_executor.go", "HTTPExecutor.doHTTPRequest", "URL(bare)", 1, "not a request URL: a lifecycle hook action's configured URL"},
 	{"lifecycle_hook_executor.go", "HTTPExecutor.recordAudit", "URL(bare)", 2, "not a request URL: a lifecycle hook action's configured URL (only its host is recorded)"},
 	{"binary_update.go", "BinaryUpdateExecutor.RunWithBeforeRestart", "URL(bare)", 4, "not a request URL: outbound GitHub release asset download URLs (ReleaseAsset.URL), pinned by CheckAssetURL to the configured repo and tag before they are fetched or logged"},
-	{"release_check.go", "CheckForReleaseUpdates", "URL(bare)", 1, "not a request URL: a release's page URL from the LATEST.json manifest"},
+	{"releases.go", "GitHubReleases.FetchChecksums", "URL(bare)", 2, "not a request URL: the outbound SHA256SUMS asset download URL (ReleaseAsset.URL) of the release catalog, a public GitHub release-asset URL checked by CheckAssetURL against the configured repo and tag before it is fetched; it may appear in a logged fetch or pin-check error, but it is never a hub request path"},
 	{"perftrace_middleware.go", "perfHeadersAllowed", "URL.Path", 1, "comparison: decides whether timing headers may be added"},
 	{"pty_handlers.go", "Server.handleAgentPTY", "URL.Path", 1, "routing: extracts the agent id"},
 	{"redact.go", "IsCredentialURL", "URL(bare)", 1, "the redaction predicate"},
