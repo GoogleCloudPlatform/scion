@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -68,9 +69,11 @@ func TestMessagesParticipantIndexes_AutoMigrate(t *testing.T) {
 }
 
 // TestListMessages_InteragentFiltersReturnSameRows pins the rows the two
-// inter-agent lookups return: ParticipantID matches sender_id or
-// recipient_id in any project, newest first, across keyset pages; the
-// project + sender lookup matches only that sender text in that project.
+// inter-agent lookups return. ParticipantID matches sender_id or
+// recipient_id in any project, once per row even when both match, in
+// (created, id) order in both directions and across keyset pages, with the
+// COUNT of the same rows. The project + sender lookup matches only that
+// sender text in that project.
 func TestListMessages_InteragentFiltersReturnSameRows(t *testing.T) {
 	ctx := context.Background()
 	s := newTestMessageStore(t)
@@ -92,7 +95,8 @@ func TestListMessages_InteragentFiltersReturnSameRows(t *testing.T) {
 	sentB := add(3, projectB, "agent:dm", agentID, "other-4")
 	legacy := add(4, projectA, "agent:dm", "", "other-5")
 	add(5, projectB, "agent:dm", "", "other-6")
-	recvA := add(6, projectA, "user:alice", "user-1", agentID)
+	self := add(6, projectA, "agent:dm", agentID, agentID)
+	recvA := add(7, projectA, "user:alice", "user-1", agentID)
 
 	ids := func(items []store.Message) []string {
 		out := make([]string, 0, len(items))
@@ -101,33 +105,51 @@ func TestListMessages_InteragentFiltersReturnSameRows(t *testing.T) {
 		}
 		return out
 	}
+	newestFirst := []string{recvA, self, sentB, recvB, sentA}
 
 	participant := store.MessageFilter{ParticipantID: agentID}
 	all, err := s.ListMessages(ctx, participant, store.ListOptions{})
 	require.NoError(t, err)
-	assert.Equal(t, []string{recvA, sentB, recvB, sentA}, ids(all.Items))
-	assert.Equal(t, 4, all.TotalCount)
+	assert.Equal(t, newestFirst, ids(all.Items))
+	assert.Equal(t, len(newestFirst), all.TotalCount)
+	assert.Empty(t, all.NextCursor)
 
-	first, err := s.ListMessages(ctx, participant, store.ListOptions{Limit: 3})
-	require.NoError(t, err)
-	assert.Equal(t, []string{recvA, sentB, recvB}, ids(first.Items))
-	require.NotEmpty(t, first.NextCursor)
-	rest, err := s.ListMessages(ctx, participant, store.ListOptions{Limit: 3, Cursor: first.NextCursor})
-	require.NoError(t, err)
-	assert.Equal(t, []string{sentA}, ids(rest.Items))
-	assert.Empty(t, rest.NextCursor)
+	for _, dir := range []string{"desc", "asc"} {
+		want := append([]string(nil), newestFirst...)
+		if dir == "asc" {
+			slices.Reverse(want)
+		}
+		var got []string
+		cursor := ""
+		for range len(want) {
+			res, err := s.ListMessages(ctx, participant, store.ListOptions{Limit: 2, Cursor: cursor, SortDir: dir})
+			require.NoError(t, err)
+			got = append(got, ids(res.Items)...)
+			if res.NextCursor == "" {
+				break
+			}
+			cursor = res.NextCursor
+		}
+		assert.Equal(t, want, got, "keyset pages, %s", dir)
+	}
 
 	bySender, err := s.ListMessages(ctx, store.MessageFilter{ProjectID: projectA, Sender: "agent:dm"}, store.ListOptions{})
 	require.NoError(t, err)
-	assert.Equal(t, []string{legacy, sentA}, ids(bySender.Items))
-	assert.Equal(t, 2, bySender.TotalCount)
+	assert.Equal(t, []string{self, legacy, sentA}, ids(bySender.Items))
+	assert.Equal(t, 3, bySender.TotalCount)
 }
 
 // TestListMessages_InteragentQueriesUseIndexes pins the SQLite plans for the
-// exact SQL the inter-agent lookups issue, both the COUNT and the page
-// SELECT: the participant OR must be a MULTI-INDEX OR over the sender_id and
-// recipient_id indexes with no table scan, and the project + sender lookup
-// must search its index in index order, with no sort.
+// exact SQL the inter-agent lookups issue, on a skewed table (one busy
+// participant), both as migrated (no statistics, as on a Hub) and after
+// ANALYZE.
+//   - Participant COUNT: a MULTI-INDEX OR over the sender_id and
+//     recipient_id indexes, with no table scan.
+//   - Participant page: one SELECT per branch, each searching its own index
+//     in index order with no sort, so each reads at most limit+1 rows
+//     however many rows the participant has.
+//   - Project + sender COUNT and page: the project/sender index, with no
+//     scan or sort.
 func TestListMessages_InteragentQueriesUseIndexes(t *testing.T) {
 	enttest.SkipOnPostgres(t, "inspects SQLite EXPLAIN QUERY PLAN output")
 	ctx := context.Background()
@@ -136,9 +158,20 @@ func TestListMessages_InteragentQueriesUseIndexes(t *testing.T) {
 	s := NewMessageStore(ent.NewClient(ent.Driver(rec)))
 
 	projectID := uuid.NewString()
-	agentID := uuid.NewString()
-	m := newTestMessage(projectID, agentID)
-	require.NoError(t, s.CreateMessage(ctx, m))
+	busy := uuid.NewString()
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 300; i++ {
+		recipient := uuid.NewString()
+		if i%3 != 0 {
+			recipient = busy
+		}
+		m := newTestMessage(projectID, recipient)
+		if i%3 == 1 {
+			m.Sender, m.SenderID, m.RecipientID = "agent:busy", busy, uuid.NewString()
+		}
+		m.CreatedAt = at.Add(time.Duration(i) * time.Second)
+		require.NoError(t, s.CreateMessage(ctx, m))
+	}
 
 	explain := func(t *testing.T, q recordedQuery) string {
 		t.Helper()
@@ -157,55 +190,78 @@ func TestListMessages_InteragentQueriesUseIndexes(t *testing.T) {
 	}
 
 	cases := []struct {
-		name    string
-		filter  store.MessageFilter
-		want    []string
-		notWant []string
+		name      string
+		filter    store.MessageFilter
+		countWant []string
+		pageWant  [][]string // one entry per ordered SELECT, in issue order
 	}{
 		{
-			name:    "participant",
-			filter:  store.MessageFilter{ParticipantID: agentID},
-			want:    []string{"MULTI-INDEX OR", messageSenderIDCreatedIDIndex, messageRecipientIDCreatedIDIndex},
-			notWant: []string{"SCAN messages"},
+			name:      "participant",
+			filter:    store.MessageFilter{ParticipantID: busy},
+			countWant: []string{"MULTI-INDEX OR", messageSenderIDCreatedIDIndex, messageRecipientIDCreatedIDIndex},
+			pageWant:  [][]string{{messageRecipientIDCreatedIDIndex}, {messageSenderIDCreatedIDIndex}},
 		},
 		{
-			name:    "project_sender",
-			filter:  store.MessageFilter{ProjectID: projectID, Sender: "agent:coder"},
-			want:    []string{messageProjectSenderCreatedIDIndex},
-			notWant: []string{"SCAN messages", "TEMP B-TREE"},
+			name:      "project_sender",
+			filter:    store.MessageFilter{ProjectID: projectID, Sender: "agent:busy"},
+			countWant: []string{messageProjectSenderCreatedIDIndex},
+			pageWant:  [][]string{{messageProjectSenderCreatedIDIndex}},
 		},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			rec.mu.Lock()
-			rec.queries = nil
-			rec.mu.Unlock()
-			_, err := s.ListMessages(ctx, tc.filter, store.ListOptions{Limit: 200})
+	check := func(t *testing.T) {
+		for _, tc := range cases {
+			first, err := s.ListMessages(ctx, tc.filter, store.ListOptions{Limit: 50})
 			require.NoError(t, err)
+			require.NotEmpty(t, first.NextCursor, "the seed must fill more than one page")
+			for _, pc := range []struct {
+				name string
+				opts store.ListOptions
+			}{
+				{"first_page", store.ListOptions{Limit: 50}},
+				{"cursor_page", store.ListOptions{Limit: 50, Cursor: first.NextCursor}},
+				{"cursor_page_asc", store.ListOptions{Limit: 50, Cursor: first.NextCursor, SortDir: "asc"}},
+			} {
+				t.Run(tc.name+"_"+pc.name, func(t *testing.T) {
+					rec.mu.Lock()
+					rec.queries = nil
+					rec.mu.Unlock()
+					_, err := s.ListMessages(ctx, tc.filter, pc.opts)
+					require.NoError(t, err)
 
-			rec.mu.Lock()
-			queries := append([]recordedQuery(nil), rec.queries...)
-			rec.mu.Unlock()
-			var count, page int
-			for _, q := range queries {
-				switch {
-				case strings.Contains(q.sql, "COUNT("):
-					count++
-				case strings.Contains(q.sql, "ORDER BY"):
-					page++
-				default:
-					continue
-				}
-				plan := explain(t, q)
-				for _, w := range tc.want {
-					assert.Contains(t, plan, w, "query: %s", q.sql)
-				}
-				for _, nw := range tc.notWant {
-					assert.NotContains(t, plan, nw, "query: %s", q.sql)
-				}
+					rec.mu.Lock()
+					queries := append([]recordedQuery(nil), rec.queries...)
+					rec.mu.Unlock()
+					var counts, pages []recordedQuery
+					for _, q := range queries {
+						switch {
+						case strings.Contains(q.sql, "COUNT("):
+							counts = append(counts, q)
+						case strings.Contains(q.sql, "ORDER BY"):
+							pages = append(pages, q)
+						}
+					}
+					require.Len(t, counts, 1, "ListMessages must issue one COUNT")
+					require.Len(t, pages, len(tc.pageWant), "ordered SELECTs")
+
+					plan := explain(t, counts[0])
+					for _, w := range tc.countWant {
+						assert.Contains(t, plan, w, "COUNT plan for %s", counts[0].sql)
+					}
+					assert.NotContains(t, plan, "SCAN messages", "COUNT plan for %s", counts[0].sql)
+					for i, q := range pages {
+						plan := explain(t, q)
+						for _, w := range tc.pageWant[i] {
+							assert.Contains(t, plan, w, "page plan for %s", q.sql)
+						}
+						assert.NotContains(t, plan, "MULTI-INDEX OR", "page plan for %s", q.sql)
+						assert.NotContains(t, plan, "SCAN messages", "page plan for %s", q.sql)
+						assert.NotContains(t, plan, "TEMP B-TREE", "page plan for %s", q.sql)
+					}
+				})
 			}
-			assert.Equal(t, 1, count, "ListMessages must issue one COUNT")
-			assert.Equal(t, 1, page, "ListMessages must issue one ordered SELECT")
-		})
+		}
 	}
+	t.Run("no_stats", check)
+	require.NoError(t, base.Driver().Exec(ctx, "ANALYZE", []any{}, nil))
+	t.Run("analyzed", check)
 }

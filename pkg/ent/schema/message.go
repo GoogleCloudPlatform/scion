@@ -148,9 +148,11 @@ func (Message) Indexes() []ent.Index {
 		index.Fields("project_id", "created", "id"),
 		// Participant reads (the agent DM inter-agent view, a user's message
 		// listing) filter on recipient_id = X OR sender_id = X across all
-		// projects. One index per column lets SQLite run a MULTI-INDEX OR
-		// and Postgres a BitmapOr, instead of scanning the whole table. The
-		// trailing created, id also serves single-column filters in order.
+		// projects. ListMessages reads each branch as its own query, and the
+		// trailing created, id serves its ORDER BY ... LIMIT in index order,
+		// so a page reads at most limit+1 rows per branch however busy the
+		// participant is. The COUNT of the OR uses both indexes (a
+		// multi-index OR on SQLite) instead of scanning the whole table.
 		index.Fields("sender_id", "created", "id"),
 		index.Fields("recipient_id", "created", "id"),
 		// The inter-agent view's legacy lookup filters on project_id and
