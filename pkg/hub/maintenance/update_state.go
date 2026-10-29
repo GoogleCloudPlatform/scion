@@ -161,9 +161,12 @@ func WriteUpdateState(root string, st UpdateState) error {
 }
 
 // syncDir fsyncs directory dir so a rename in it survives a power loss.
-// Best-effort: some platforms (Windows) cannot fsync a directory, and a
-// lost rename only leaves the previous file, which the guard reads as a
-// target mismatch (no swap).
+// Every write of the file (WriteUpdateState) calls it, the verified write
+// included. That one matters most: if its rename were lost, the previous
+// file (matching target, verified=false) would let the guard swap a
+// healthy release back. On Linux, where the guard runs, a directory fsync
+// is supported. It is best-effort only because some platforms (Windows)
+// cannot fsync a directory, and those have no boot-failure guard.
 func syncDir(dir string) {
 	d, err := os.Open(dir)
 	if err != nil {

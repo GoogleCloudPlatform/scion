@@ -15,12 +15,14 @@
 package hub
 
 import (
+	"fmt"
+	"log/slog"
 	"net"
 )
 
 // listenThenNotify binds the TCP address addr and, once it is bound, runs
-// onListening (when set) in its own goroutine, so a slow or failing hook
-// never delays serving. A bind failure returns the error and never runs
+// onListening (when set) in its own goroutine, so a slow, failing or
+// panicking hook never delays serving or crashes the process. A bind failure returns the error and never runs
 // the hook. Server.Start and WebServer.Start use it in place of
 // http.Server.ListenAndServe (which is net.Listen then Serve).
 func listenThenNotify(addr string, onListening func()) (net.Listener, error) {
@@ -29,9 +31,21 @@ func listenThenNotify(addr string, onListening func()) (net.Listener, error) {
 		return nil, err
 	}
 	if onListening != nil {
-		go onListening()
+		go runOnListening(onListening)
 	}
 	return ln, nil
+}
+
+// runOnListening runs an on-listening hook. A panic in it is logged and
+// recovered: it runs outside Serve, so an unrecovered panic would end the
+// process.
+func runOnListening(hook func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("On-listening hook panicked", "panic", fmt.Sprint(r))
+		}
+	}()
+	hook()
 }
 
 // SetOnListening sets a hook run once the hub API listener is bound
