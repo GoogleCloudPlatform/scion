@@ -15,6 +15,7 @@
 package config
 
 import (
+	"reflect"
 	"sort"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -158,4 +159,35 @@ func mayTargetSameNamespace(a, b V1RuntimeConfig) bool {
 	ctx := a.Context == b.Context || a.Context == "" || b.Context == ""
 	ns := a.Namespace == b.Namespace || a.Namespace == "" || b.Namespace == ""
 	return ctx && ns
+}
+
+// PlacementSiblingEntries returns the runtime entries a legacy start on
+// runtime entry rtKey merges placement from: rtKey and every other
+// Kubernetes entry with the same literal context and namespace, leaving
+// out built-in default entries kept as the defaults define them (which are
+// not the operator's), sorted. disagree names the first such entry whose
+// placement differs from rtKey's (SiblingPlacementAgrees), or is "" when
+// they all agree; a legacy start refuses then.
+func PlacementSiblingEntries(runtimes map[string]V1RuntimeConfig, rtKey string) (entries []string, disagree string) {
+	rt := runtimes[rtKey]
+	entries = []string{rtKey}
+	builtins := defaultBuiltinCatalog().Runtimes
+	for name, other := range runtimes {
+		if name == rtKey || !IsKubernetesRuntimeEntry(name, other) {
+			continue
+		}
+		if b, ok := builtins[name]; ok && reflect.DeepEqual(b, other) {
+			continue
+		}
+		if other.Context == rt.Context && other.Namespace == rt.Namespace {
+			entries = append(entries, name)
+		}
+	}
+	sort.Strings(entries)
+	for _, name := range entries {
+		if !SiblingPlacementAgrees(rt, runtimes[name]) {
+			return entries, name
+		}
+	}
+	return entries, ""
 }

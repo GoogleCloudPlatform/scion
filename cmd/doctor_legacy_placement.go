@@ -40,11 +40,20 @@ const legacyPlacementPreflightRemedy = "Settings counted here are refused when r
 // pre-upgrade scan on this host: its global settings file's runtime entries
 // and profiles, and the stored configurations of the agents in the global
 // project, the hub-managed projects under the global directory and the
-// current project. ok is false on a host with flat instances (the flat
-// check covers it) and on a host that configures no Kubernetes runtime
-// entry.
+// current project. It runs on every legacy host, including one that
+// configures no Kubernetes runtime entry (its Kubernetes agents run on the
+// built-in entry, with an empty operator policy). ok is false only on a
+// host with flat instances, which the flat check covers. Settings that
+// cannot be read give a warning line with incomplete coverage, never a
+// missing line.
 func checkDoctorLegacyPlacementPreflightHere() (scionruntime.CheckResult, bool) {
-	if instances, err := config.LoadRuntimeBrokerInstances(""); err != nil || len(instances) > 0 {
+	instances, err := config.LoadRuntimeBrokerInstances("")
+	if err != nil {
+		return scionruntime.CheckResult{Name: "legacy-placement-preflight", Status: "warn",
+			Message:     "Could not load server.broker.instances to tell a legacy host from a flat one; Kubernetes placement coverage incomplete",
+			Remediation: "Fix server.broker.instances (scion config validate), then run scion doctor again"}, true
+	}
+	if len(instances) > 0 {
 		return scionruntime.CheckResult{}, false
 	}
 	vs, _, err := config.LoadGlobalSettings()
@@ -55,15 +64,6 @@ func checkDoctorLegacyPlacementPreflightHere() (scionruntime.CheckResult, bool) 
 	}
 	configured, known := config.ConfiguredRuntimeNames()
 	isConfigured := func(name string) bool { return !known || configured[name] }
-	kube := false
-	for name, rt := range vs.Runtimes {
-		if config.IsKubernetesRuntimeEntry(name, rt) && isConfigured(name) {
-			kube = true
-		}
-	}
-	if !kube {
-		return scionruntime.CheckResult{}, false
-	}
 
 	settings := config.ScanSettingsPlacement(vs.Runtimes, vs.Profiles)
 	settings.AddGlobalSettingsFileRaw()

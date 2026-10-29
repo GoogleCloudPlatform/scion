@@ -151,3 +151,62 @@ func TestProfileConversionGroupPlacementConflict(t *testing.T) {
 		t.Fatal("a set and an unset toleration list agree")
 	}
 }
+
+// Conversion matches sibling runtime entries as a legacy start does: with
+// an agreeing sibling the converted flat target equals the legacy policy;
+// with a disagreeing sibling (a legacy start refuses) the profile is not
+// converted and the disagreement is a blocking finding.
+func TestProfileConversionSiblingPlacement(t *testing.T) {
+	pool := map[string]string{PoolNodeSelectorKey: "agents"}
+	agree := &VersionedSettings{
+		Runtimes: map[string]V1RuntimeConfig{
+			"a": {Type: "kubernetes", Context: "c1", Namespace: "agents", NodeSelector: pool},
+			"b": {Type: "kubernetes", Context: "c1", Namespace: "agents", NodeSelector: pool},
+		},
+		Profiles: map[string]V1ProfileConfig{"p": {Runtime: "a", RuntimeClassName: "gvisor"}},
+	}
+	got := ConvertProfilesToInstances(ProfileConversionInput{Settings: agree, Profiles: []string{"p"}})
+	if got.ProfileMap["p"] == "" || len(got.Instances) != 1 {
+		t.Fatalf("agreeing siblings: %+v", got)
+	}
+	target := got.Instances[0].RuntimeTarget
+	legacy, ok := ResolveLegacyPolicyOffline(agree.Runtimes, agree.Profiles, nil, "p")
+	if !ok || !reflect.DeepEqual(target.NodeSelector, legacy.NodeSelector) || target.RuntimeClassName != legacy.RuntimeClassName ||
+		!reflect.DeepEqual(tolerationSet(target.Tolerations), tolerationSet(legacy.Tolerations)) {
+		t.Fatalf("flat target %+v, legacy %+v (ok %v)", target, legacy, ok)
+	}
+
+	disagree := &VersionedSettings{
+		Runtimes: map[string]V1RuntimeConfig{
+			"a": {Type: "kubernetes", Context: "c1", Namespace: "agents", NodeSelector: pool},
+			"b": {Type: "kubernetes", Context: "c1", Namespace: "agents"},
+		},
+		Profiles: map[string]V1ProfileConfig{"p": {Runtime: "a"}},
+	}
+	got = ConvertProfilesToInstances(ProfileConversionInput{Settings: disagree, Profiles: []string{"p"}})
+	if _, mapped := got.ProfileMap["p"]; mapped {
+		t.Fatalf("a profile on disagreeing siblings converted: %+v", got.ProfileMap)
+	}
+	found := false
+	for _, f := range got.Findings {
+		if f.Path == "runtimes.a" && f.Code == ConversionProfileConflict && f.Severity == ConversionSeverityBlocking {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no blocking sibling finding: %+v", got.Findings)
+	}
+	if _, ok := ResolveLegacyPolicyOffline(disagree.Runtimes, disagree.Profiles, nil, "p"); ok {
+		t.Fatal("the legacy policy resolved for disagreeing siblings")
+	}
+
+	// A built-in default entry kept as the defaults define it is not a
+	// sibling of the operator's entries.
+	entries, other := PlacementSiblingEntries(map[string]V1RuntimeConfig{
+		"a":          {Type: "kubernetes", NodeSelector: pool},
+		"kubernetes": defaultBuiltinCatalog().Runtimes["kubernetes"],
+	}, "a")
+	if other != "" || !reflect.DeepEqual(entries, []string{"a"}) {
+		t.Fatalf("built-in entry counted as a sibling: %v %q", entries, other)
+	}
+}

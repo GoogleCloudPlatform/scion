@@ -32,7 +32,7 @@ func TestPlacementPreflightAgentTolerationsWithoutOperatorPolicy(t *testing.T) {
 	r.Add(agent, nil)
 	r.Add(agent, &api.ResolvedPlacement{NodeSelector: map[string]string{"scion.dev/pool": "agents"}, OperatorOwned: true})
 	r.Add(agent, &api.ResolvedPlacement{Tolerations: []api.K8sToleration{{Key: "dedicated", Operator: "Exists"}}, OperatorOwned: true})
-	r.AddIncomplete() // the same agent with an unresolved policy
+	addUnresolvedLegacyAgent(t, &r, agent) // the same agent with an unresolved policy
 	if r.Counts[PreflightAgentTolerationsWithoutOperatorPolicy] != 2 || r.Counts[PreflightAgentRuntimeClassWithoutOperatorPolicy] != 0 {
 		t.Fatalf("counts = %v", r.Counts)
 	}
@@ -54,7 +54,7 @@ func TestPlacementPreflightAgentRuntimeClassWithoutOperatorPolicy(t *testing.T) 
 	var r PlacementPreflightReport
 	r.Add(agent, nil)
 	r.Add(agent, &api.ResolvedPlacement{RuntimeClassName: "gvisor", OperatorOwned: true})
-	r.AddIncomplete()
+	addUnresolvedLegacyAgent(t, &r, agent)
 	if r.Counts[PreflightAgentRuntimeClassWithoutOperatorPolicy] != 1 || r.Counts[PreflightAgentTolerationsWithoutOperatorPolicy] != 0 || r.Incomplete != 1 {
 		t.Fatalf("report = %+v", r)
 	}
@@ -194,5 +194,34 @@ func TestPlacementPreflightNotCoveredIsIncomplete(t *testing.T) {
 	}
 	if (PlacementPreflightReport{Scanned: 1}).NeedsAttention() {
 		t.Fatal("a complete clean scan needs attention")
+	}
+}
+
+// addUnresolvedLegacyAgent sends agent through the real offline policy
+// resolution with a recorded profile the settings do not define: the
+// policy cannot be resolved, so the agent must count as incomplete and in
+// no category.
+func addUnresolvedLegacyAgent(t *testing.T, r *PlacementPreflightReport, agent *api.KubernetesConfig) {
+	t.Helper()
+	runtimes := map[string]V1RuntimeConfig{"k": {Type: "kubernetes"}}
+	before := map[PlacementPreflightCategory]int{}
+	for c, n := range r.Counts {
+		before[c] = n
+	}
+	incomplete := r.Incomplete
+	// The scan's decision: categorize against a resolved policy, else
+	// count the agent as incomplete.
+	if policy, ok := ResolveLegacyPolicyOffline(runtimes, nil, nil, "missing-profile"); ok {
+		r.Add(agent, policy)
+	} else {
+		r.AddIncomplete()
+	}
+	for _, c := range PlacementPreflightCategories {
+		if r.Counts[c] != before[c] {
+			t.Fatalf("an agent with an unresolved policy was categorized in %s", c)
+		}
+	}
+	if r.Incomplete != incomplete+1 {
+		t.Fatal("an agent with an unresolved policy was not counted as incomplete")
 	}
 }

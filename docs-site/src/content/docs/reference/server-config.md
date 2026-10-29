@@ -407,6 +407,16 @@ An agent that sets its own tolerations or runtime class while the instance's run
 
 The check always shows these two counts. It also counts agents the runtime target would refuse for another reason: a toleration that is not among the target's (`agent_toleration_not_in_policy`), a runtime class that differs from the target's (`agent_runtime_class_differs`), a node selector key the target sets to another value (`agent_pool_selector_conflict` for `scion.dev/pool`, `agent_selector_conflicts_operator` otherwise), a toleration that matches all taints (`agent_match_all_toleration`) and an invalid placement field (`agent_invalid_placement_field`). These appear only when counted.
 
+#### Legacy host placement check
+
+On a host without flat instances, `scion doctor` reports a `legacy-placement-preflight` line. It changes nothing and shows counts only, never names or values. It covers this host's global settings file and the agents in the global project, the hub-managed projects and the project you run it in.
+
+- **Settings:** runtime entries and profiles whose placement the Hub refuses when they are saved: `settings_malformed_placement` (a misspelt key such as `nodeSelector`, or a wrong shape), `settings_invalid_placement_field`, `settings_placement_on_non_kubernetes`, `settings_profile_runtime_missing` (a profile with placement whose runtime entry does not exist), `settings_sibling_placement_disagreement` (entries with the same context and namespace but different placement) and `settings_pool_selector_conflict` (a profile that changes `scion.dev/pool`). The line names the sections to repair.
+- **Agents:** the same agent categories as the flat check, against the runtime entry and profile each agent uses. With no Kubernetes placement configured, agent tolerations and runtime classes count as `agent_tolerations_without_operator_policy` and `agent_runtime_class_without_operator_policy`.
+- **Incomplete coverage:** `incomplete` counts agents whose record, configuration, profile or runtime cannot be read or resolved here. `not enumerated` names sources the check cannot list: linked projects other than the current one (run `scion doctor` inside each). Neither is a clean result.
+
+Settings stored in the Hub are reported by `placement_preflight` in the server config view (see [admin settings](/scion/reference/admin-settings/)). Repair the named settings first, then the counted agents, and run the check again.
+
 #### Flat instance agent defaults (`server.broker.instances[].agent_defaults`)
 
 An optional block of workload defaults for the agents a flat Runtime Broker instance runs. A flat instance does not use Runtime Broker profiles, so these take the place of the matching profile settings. Each value sits exactly where the profile value sat in its own precedence order: a template, the agent's own configuration or the request still wins wherever it won over a profile, and an unset value falls through to the same lower settings. The block is read from `settings.yaml` only and is never sent to the Hub. Unknown keys are refused at startup, naming the settings path.

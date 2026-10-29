@@ -15,6 +15,8 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -55,5 +57,78 @@ func TestCheckDoctorLegacyPlacementPreflight(t *testing.T) {
 	res = checkDoctorLegacyPlacementPreflight(clean, partial)
 	if res.Status != "warn" || !strings.Contains(res.Message, "not enumerated: linked projects") {
 		t.Fatalf("unlisted linked projects: got %+v", res)
+	}
+}
+
+// legacyDoctorHome makes a temp HOME with the global settings file content
+// (none when empty) and an isolated working directory, and returns the
+// global directory.
+func legacyDoctorHome(t *testing.T, settings string) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(t.TempDir())
+	globalDir := filepath.Join(home, ".scion")
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if settings != "" {
+		if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settings), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return globalDir
+}
+
+// A legacy host with no configured Kubernetes runtime entry still gets the
+// line: its Kubernetes agents run on the built-in entry, whose operator
+// policy is empty, so an agent toleration there is counted.
+func TestCheckDoctorLegacyPlacementPreflightBuiltinEntry(t *testing.T) {
+	globalDir := legacyDoctorHome(t, "schema_version: \"1\"\n")
+	projectDir, err := config.GetResolvedProjectDir("global")
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := config.GetAgentHomePath(projectDir, "tol-agent")
+	agentDir := config.GetAgentDir(projectDir, "tol-agent", false)
+	for _, d := range []string{home, agentDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(home, "agent-info.json"), []byte(`{"runtime":"kubernetes"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{"kubernetes":{"tolerations":[{"key":"dedicated","operator":"Exists"}]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, ok := checkDoctorLegacyPlacementPreflightHere()
+	if !ok || res.Name != "legacy-placement-preflight" || res.Status != "warn" {
+		t.Fatalf("got %v %+v (global dir %s)", ok, res, globalDir)
+	}
+	if !strings.Contains(res.Message, "agents: scanned 1, incomplete 0") || !strings.Contains(res.Message, "agent_tolerations_without_operator_policy 1") {
+		t.Fatalf("message %q", res.Message)
+	}
+}
+
+// Settings that cannot be read give a warning line with incomplete
+// coverage, never a missing line; a host with flat instances gets none
+// (the flat check covers it).
+func TestCheckDoctorLegacyPlacementPreflightUnreadableSettings(t *testing.T) {
+	legacyDoctorHome(t, "schema_version: \"1\"\nserver:\n  broker:\n    instances: not-a-list\n")
+	res, ok := checkDoctorLegacyPlacementPreflightHere()
+	if !ok || res.Status != "warn" || !strings.Contains(res.Message, "coverage incomplete") {
+		t.Fatalf("unreadable instances: got %v %+v", ok, res)
+	}
+
+	legacyDoctorHome(t, "schema_version: [\n")
+	res, ok = checkDoctorLegacyPlacementPreflightHere()
+	if !ok || res.Status != "warn" || !strings.Contains(res.Message, "coverage incomplete") {
+		t.Fatalf("unparseable settings: got %v %+v", ok, res)
+	}
+
+	legacyDoctorHome(t, "schema_version: \"1\"\nserver:\n  broker:\n    enabled: true\n    instances:\n      - key: local-docker\n        name: example-docker\n        runtime_target:\n          type: docker\n          display_name: Local Docker\n")
+	if res, ok := checkDoctorLegacyPlacementPreflightHere(); ok {
+		t.Fatalf("a flat host got a legacy line: %+v", res)
 	}
 }

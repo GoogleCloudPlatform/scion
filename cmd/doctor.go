@@ -684,8 +684,7 @@ func (r *doctorReport) localSettingsChecks() {
 		r.add(&r.HubChecks, d13)
 	}
 	// D14: legacy placement pre-upgrade scan (local check, read-only,
-	// counts only). Reported only on a legacy host with a Kubernetes
-	// runtime entry.
+	// counts only). Reported on every host without flat instances.
 	if d14, ok := checkDoctorLegacyPlacementPreflightHere(); ok {
 		r.add(&r.HubChecks, d14)
 	}

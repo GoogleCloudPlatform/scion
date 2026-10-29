@@ -337,6 +337,16 @@ func foldProfile(st *convState, vs *VersionedSettings, name string, prof V1Profi
 			fmt.Sprintf("profiles.%s.node_selector sets %s to a different value than its runtime entry %s; a profile cannot change the runtime entry's pool, so use the same value on both (or move the profile to a runtime entry for that pool) before converting", name, PoolNodeSelectorKey, rtKey), name)
 		ok = false
 	}
+	placementEntries := []string{rtKey}
+	if typ == RuntimeTargetTypeKubernetes {
+		var other string
+		placementEntries, other = PlacementSiblingEntries(vs.Runtimes, rtKey)
+		if other != "" {
+			st.add(ConversionProfileConflict, ConversionSeverityBlocking, strings.TrimSuffix(rp, "."),
+				SiblingDisagreementCause(rtKey, other)+"; a legacy start on that cluster and namespace is refused, so give them the same placement before converting", name)
+			ok = false
+		}
+	}
 	if prof.DefaultTemplate != "" {
 		st.add(ConversionLegacyFieldNoEffect, ConversionSeverityNotice, pp+"default_template",
 			fmt.Sprintf("profiles.%s.default_template has no effect today (the default template comes from the top-level default_template and the Hub agent_defaults); it is not converted", name), name)
@@ -389,9 +399,10 @@ func foldProfile(st *convState, vs *VersionedSettings, name string, prof V1Profi
 			set("kubernetes_service_account_mappings."+gsa, ksa, pp+"kubernetes_service_account_mappings."+gsa)
 		}
 	}
-	// Placement: the runtime entry's, with the profile's over it, merged
+	// Placement: the runtime entry's (and its agreeing siblings', as a
+	// legacy start matches them), with the profile's over it, merged
 	// exactly as a legacy start merges them (LegacyPlacementPolicy).
-	placement := LegacyPlacementPolicy(vs.Runtimes, []string{rtKey}, name, &prof)
+	placement := LegacyPlacementPolicy(vs.Runtimes, placementEntries, name, &prof)
 	placementSrc := func(field string, inProfile bool) string {
 		if inProfile {
 			return pp + field
