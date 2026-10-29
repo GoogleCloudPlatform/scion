@@ -1377,8 +1377,30 @@ export class ScionPageAdminMaintenance extends LitElement {
       void this.reconnectAfterUpdate();
     } else if (!isRunInProgress(run.status) && !this.updateReconnecting) {
       this.trackedUpdate = null;
-      void this.fetchUpdateStatus().then(() => this.reportUpdateResult(tracked, run.status));
+      const before = this.updateStatus?.current.version;
+      void this.fetchUpdateStatus().then(() => {
+        this.clearUpdateNoticesIfVersionChanged(before);
+        this.reportUpdateResult(tracked, run.status);
+      });
     }
+  }
+
+  /**
+   * After an update, when the reloaded update-status shows the hub on a
+   * different version than before, the "Update available" notices were
+   * computed against the old version (ptone/scion#6557): drop the update
+   * check result and re-read the stored notification. Nothing changes when
+   * the version is the same or either version is unknown.
+   */
+  private clearUpdateNoticesIfVersionChanged(before: string | undefined): void {
+    const after = this.updateStatus?.current.version;
+    if (!before || !after || before === after) return;
+    this.updateCheckResult = null;
+    this.updateCheckError = null;
+    // Cleared first: if the re-read fails, a notice about the old version
+    // must not stay up. fetchUpdateAvailable handles its own errors.
+    this.updateAvailable = null;
+    void this.fetchUpdateAvailable();
   }
 
   /** When the restart wait last checked the run status (epoch ms). */
@@ -1438,6 +1460,9 @@ export class ScionPageAdminMaintenance extends LitElement {
     // This run is handled here: if it is still restarting after the wait,
     // the post-wait reload must not adopt it for a second wait.
     this.peekedRestartingRunId = tracked.runId;
+    // The version the hub ran before the restart; the status is not
+    // reloaded before the wait, so this is still the old one.
+    const before = this.updateStatus?.current.version;
     this.updateReconnecting = true;
     this.updateReconnectError = null;
     this.stopPolling();
@@ -1468,6 +1493,7 @@ export class ScionPageAdminMaintenance extends LitElement {
       // The hub answers (on the target, or on another version after the
       // wait ran out): show what it recorded.
       await this.fetchUpdateStatus();
+      this.clearUpdateNoticesIfVersionChanged(before);
       await this.loadData(true);
       if (result.ok) {
         this.reportUpdateResult(tracked, 'restarted');
