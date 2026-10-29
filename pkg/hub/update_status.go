@@ -367,9 +367,6 @@ func (s *Server) reconcilePendingUpdate(ctx context.Context, running string) err
 			return fmt.Errorf("clear pending_update: %w", err)
 		}
 	}
-	// The hub runs the update-state target (an update run's, or a deploy.sh
-	// install's): the boot-failure guard must not roll it back any more.
-	s.markUpdateStateVerified(running)
 	if marker != nil {
 		// A rollback with no matching pending update (an update not made
 		// by this hub, or a marker older than the update): reported in the

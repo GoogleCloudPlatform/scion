@@ -17,9 +17,22 @@ package cmd
 import (
 	"log/slog"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
+
+// maintenanceInstallRoot resolves only the maintenance install root
+// (SCION_MAINTENANCE_INSTALL_ROOT > server.maintenance.install_root >
+// /opt/scion), the same value resolveMaintenanceConfig sets, without the
+// rest of the maintenance config.
+func maintenanceInstallRoot() string {
+	var maint *config.V1MaintenanceConfig
+	if vs, err := loadServerVersionedSettings(); err == nil && vs.Server != nil {
+		maint = vs.Server.Maintenance
+	}
+	return config.MaintenanceInstallRoot(maint)
+}
 
 // markUpdateStateBooting records, in <install_root>/update-state.json, that
 // this binary is about to touch the database of an update that targets it:

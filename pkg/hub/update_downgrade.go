@@ -29,6 +29,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
 // updateSnapshotDirName is the snapshot directory next to the SQLite
@@ -263,8 +264,20 @@ func (s *Server) writeUpdateStateBeforeRestart(runID string, p maintenance.Pendi
 	}
 }
 
-// markUpdateStateVerified sets verified=true in the update-state file once
-// the hub runs its target (best-effort, logged), whether the target was
+// MarkUpdateStateVerified sets verified=true in the update-state file when
+// this binary is its target. Call it once the listener serving the hub API
+// is bound (SetOnListening on the hub or, in combined mode, the web
+// server): only a binary that got that far counts as healthy, so a target
+// that crash-loops before it listens (a port clash, a failing init) stays
+// unverified and the boot-failure guard can still roll it back. It does
+// not depend on boot reconciliation or the database. Best-effort: a
+// failure is logged.
+func (s *Server) MarkUpdateStateVerified() {
+	s.markUpdateStateVerified(version.Version)
+}
+
+// markUpdateStateVerified sets verified=true in the update-state file when
+// running is its target (best-effort, logged), whether the target was
 // installed by an update run or by deploy.sh.
 func (s *Server) markUpdateStateVerified(running string) {
 	changed, err := maintenance.MarkUpdateStateVerified(s.config.MaintenanceConfig.InstallRoot, running)

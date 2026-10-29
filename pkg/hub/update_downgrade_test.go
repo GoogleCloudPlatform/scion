@@ -621,7 +621,15 @@ func TestMarkRunRestarting_WritesUpdateState(t *testing.T) {
 	})
 }
 
-func TestReconcilePendingUpdate_UpdateStateVerified(t *testing.T) {
+// reconcileFailStore fails every hub-setting read, so boot reconciliation
+// returns an error.
+type reconcileFailStore struct{ store.Store }
+
+func (reconcileFailStore) GetHubSetting(context.Context, string) (*store.HubSetting, error) {
+	return nil, errors.New("database unavailable")
+}
+
+func TestUpdateStateVerified_AfterListening(t *testing.T) {
 	ctx := context.Background()
 	write := func(t *testing.T, root, runID string) {
 		t.Helper()
@@ -630,8 +638,16 @@ func TestReconcilePendingUpdate_UpdateStateVerified(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	verified := func(t *testing.T, root string) bool {
+		t.Helper()
+		st, err := maintenance.ReadUpdateState(root)
+		if err != nil || st == nil {
+			t.Fatalf("st = %+v, err = %v", st, err)
+		}
+		return st.Verified
+	}
 
-	t.Run("a verified update run", func(t *testing.T) {
+	t.Run("reconciliation alone does not verify; the listening hook does", func(t *testing.T) {
 		srv, s := newTestServerWithStore(t)
 		root := t.TempDir()
 		srv.config.MaintenanceConfig.InstallRoot = root
@@ -641,8 +657,12 @@ func TestReconcilePendingUpdate_UpdateStateVerified(t *testing.T) {
 		if err := srv.reconcilePendingUpdate(ctx, "nightly-20261024"); err != nil {
 			t.Fatal(err)
 		}
-		if st, _ := maintenance.ReadUpdateState(root); st == nil || !st.Verified {
-			t.Fatalf("st = %+v, want verified", st)
+		if verified(t, root) {
+			t.Fatal("verified before the listener was bound")
+		}
+		srv.markUpdateStateVerified("nightly-20261024")
+		if !verified(t, root) {
+			t.Fatal("not verified after the listening hook")
 		}
 	})
 
@@ -651,26 +671,80 @@ func TestReconcilePendingUpdate_UpdateStateVerified(t *testing.T) {
 		root := t.TempDir()
 		srv.config.MaintenanceConfig.InstallRoot = root
 		write(t, root, maintenance.UpdateStateRunIDDeploy)
-		if err := srv.reconcilePendingUpdate(ctx, "nightly-20261024"); err != nil {
-			t.Fatal(err)
+		srv.markUpdateStateVerified("nightly-20261024")
+		if !verified(t, root) {
+			t.Fatal("deploy.sh install not verified")
 		}
-		if st, _ := maintenance.ReadUpdateState(root); st == nil || !st.Verified {
-			t.Fatalf("st = %+v, want verified", st)
+	})
+
+	t.Run("a failed reconciliation does not block it (R1)", func(t *testing.T) {
+		_, s := newTestServerWithStore(t)
+		srv := &Server{store: reconcileFailStore{s}, maintenanceLog: logging.Subsystem("hub.maintenance")}
+		root := t.TempDir()
+		srv.config.MaintenanceConfig.InstallRoot = root
+		write(t, root, "r1")
+		if err := srv.reconcilePendingUpdate(ctx, "nightly-20261024"); err == nil {
+			t.Fatal("want a reconciliation error")
+		}
+		srv.markUpdateStateVerified("nightly-20261024")
+		if !verified(t, root) {
+			t.Fatal("a reconciliation error kept the target unverified")
 		}
 	})
 
 	t.Run("a rolled-back hub leaves it unverified", func(t *testing.T) {
-		srv, s := newTestServerWithStore(t)
+		srv, _ := newTestServerWithStore(t)
 		root := t.TempDir()
 		srv.config.MaintenanceConfig.InstallRoot = root
-		run := newRestartingRun(t, s)
-		write(t, root, run.ID)
-		putPendingUpdate(t, s, PendingUpdate{RunID: run.ID, From: "nightly-20261023", To: "nightly-20261024", At: "2026-10-24T03:00:00Z"})
-		if err := srv.reconcilePendingUpdate(ctx, "nightly-20261023"); err != nil {
-			t.Fatal(err)
-		}
-		if st, _ := maintenance.ReadUpdateState(root); st == nil || st.Verified {
-			t.Fatalf("st = %+v, want unverified", st)
+		write(t, root, "r1")
+		srv.markUpdateStateVerified("nightly-20261023")
+		if verified(t, root) {
+			t.Fatal("verified a target the hub does not run")
 		}
 	})
+
+	t.Run("the exported hook uses the running version", func(t *testing.T) {
+		setRunningVersion(t, "nightly-20261024")
+		srv, _ := newTestServerWithStore(t)
+		root := t.TempDir()
+		srv.config.MaintenanceConfig.InstallRoot = root
+		write(t, root, "r1")
+		srv.MarkUpdateStateVerified()
+		if !verified(t, root) {
+			t.Fatal("MarkUpdateStateVerified did not verify the running target")
+		}
+	})
+}
+
+func TestListenThenNotify(t *testing.T) {
+	fired := make(chan struct{}, 1)
+	ln, err := listenThenNotify("127.0.0.1:0", func() { fired <- struct{}{} })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	select {
+	case <-fired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the hook did not run after a successful bind")
+	}
+
+	// The port is now taken: the bind fails and the hook never runs.
+	called := make(chan struct{}, 1)
+	if ln2, err := listenThenNotify(ln.Addr().String(), func() { called <- struct{}{} }); err == nil {
+		_ = ln2.Close()
+		t.Fatal("binding a taken port succeeded")
+	}
+	select {
+	case <-called:
+		t.Fatal("the hook ran after a failed bind")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// No hook is fine.
+	ln3, err := listenThenNotify("127.0.0.1:0", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = ln3.Close()
 }

@@ -276,6 +276,7 @@ type WebServer struct {
 	hubShutdown    func(context.Context) error // Hub resource cleanup, or nil
 	shutdownMark   shutdownState               // BeginShutdown mark (ptone/scion#5054)
 	shutdownHooks  ShutdownHooks               // optional shutdown seams (SetShutdownHooks)
+	onListening    func()                      // optional hook once the listener is bound (SetOnListening)
 	maintenance    *MaintenanceState           // runtime maintenance mode state (shared with Hub)
 	demotionSafe   *atomic.Bool                // shared with Hub; nil-safe (nil = false = don't demote)
 	authzService   *AuthzService               // authorization service for SSE subject checks
@@ -4374,9 +4375,15 @@ func (ws *WebServer) Start(ctx context.Context) error {
 
 	ws.logger().Info("Web frontend server starting", "host", ws.config.Host, "port", ws.config.Port, "h2c", true)
 
+	// Bind first, so the on-listening hook (SetOnListening) runs only once
+	// the port is ours; then serve.
+	ln, err := listenThenNotify(ws.httpServer.Addr, ws.onListening)
+	if err != nil {
+		return err
+	}
 	errCh := make(chan error, 1)
 	go func() {
-		if err := ws.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := ws.httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 		close(errCh)
