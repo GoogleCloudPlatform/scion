@@ -2920,7 +2920,8 @@ func hasAgentReplyAfter(ctx context.Context, s store.Store, threadID string, aft
 	const pageSize = 50
 	cursor := ""
 	for {
-		opts := store.ListOptions{Limit: pageSize}
+		// The scan reads only Items and NextCursor, so it skips the count.
+		opts := store.ListOptions{Limit: pageSize, SkipTotalCount: true}
 		if cursor != "" {
 			opts.Cursor = cursor
 		}

@@ -181,3 +181,31 @@ func TestInteragent_SkipsTotalCount(t *testing.T) {
 	}
 	assertListMessagesSkippedCount(t, rs, "interagent")
 }
+
+// The edit/delete guard scan pages through every later message without a
+// COUNT on any page. 60 non-agent messages make it read two pages and
+// find no agent reply.
+func TestHasAgentReplyAfter_SkipsTotalCount(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	proj := &store.Project{ID: tid("reply-guard-skip-count-proj"), Slug: "reply-guard-skip-count", Name: "Reply Guard Skip Count"}
+	if err := s.CreateProject(ctx, proj); err != nil {
+		t.Fatalf("CreateProject: %v", err)
+	}
+	threadID := tid("reply-guard-skip-count-thread")
+	seedHistoryMessages(t, s, proj.ID, threadID, 60)
+
+	rs := &listOptsRecordingStore{Store: s}
+	if hasAgentReplyAfter(ctx, rs, threadID, time.Now().Add(-time.Hour)) {
+		t.Fatal("hasAgentReplyAfter = true, want false: no agent sent a message")
+	}
+
+	rs.mu.Lock()
+	calls := len(rs.opts)
+	rs.mu.Unlock()
+	if calls != 2 {
+		t.Errorf("expected 2 ListMessages pages, got %d", calls)
+	}
+	assertListMessagesSkippedCount(t, rs, "reply guard scan")
+}
