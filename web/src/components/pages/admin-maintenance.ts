@@ -189,6 +189,12 @@ interface TrackedUpdate {
   expectVersion: string | null;
   /** Last run status seen by a successful poll. */
   lastStatus: string;
+  /**
+   * The version the hub ran when the update started (or when this page
+   * picked the run up); undefined when not known. Recorded once, so a
+   * status reload during the restart does not change it.
+   */
+  fromVersion?: string;
 }
 
 /** Channel, pin and class of an update picked in the release picker. */
@@ -1275,6 +1281,7 @@ export class ScionPageAdminMaintenance extends LitElement {
     const params: Record<string, string> = options
       ? { target_version: target, channel: options.channel, pin: options.pin }
       : { target_version: target, pin: 'latest' };
+    const fromVersion = this.updateStatus?.current.version;
     this.applyUpdateLoading = true;
     try {
       const response = await apiFetch('/api/v1/admin/maintenance/operations/update-binary/run', {
@@ -1303,6 +1310,7 @@ export class ScionPageAdminMaintenance extends LitElement {
           target,
           expectVersion: target.startsWith('latest:') ? null : target,
           lastStatus: 'running',
+          fromVersion,
         };
       } else {
         // Without a run id no result can be tied to this update; the run
@@ -1340,6 +1348,7 @@ export class ScionPageAdminMaintenance extends LitElement {
       target: pending.to,
       expectVersion: pending.to || null,
       lastStatus: 'restarting',
+      fromVersion: pending.from || this.updateStatus?.current.version,
     };
     void this.reconnectAfterUpdate();
   }
@@ -1364,6 +1373,7 @@ export class ScionPageAdminMaintenance extends LitElement {
         target: '',
         expectVersion: null,
         lastStatus: 'running',
+        fromVersion: this.updateStatus?.current.version,
       };
     }
     const tracked = this.trackedUpdate;
@@ -1377,29 +1387,37 @@ export class ScionPageAdminMaintenance extends LitElement {
       void this.reconnectAfterUpdate();
     } else if (!isRunInProgress(run.status) && !this.updateReconnecting) {
       this.trackedUpdate = null;
-      const before = this.updateStatus?.current.version;
       void this.fetchUpdateStatus().then(() => {
-        this.clearUpdateNoticesIfVersionChanged(before);
+        this.refreshUpdateNoticesAfterRun(tracked.fromVersion);
         this.reportUpdateResult(tracked, run.status);
       });
     }
   }
 
   /**
-   * After an update, when the reloaded update-status shows the hub on a
-   * different version than before, the "Update available" notices were
-   * computed against the old version (ptone/scion#6557): drop the update
-   * check result and re-read the stored notification. Nothing changes when
-   * the version is the same or either version is unknown.
+   * Brings the "Update available" notices up to date once an update run
+   * has ended and update-status has been reloaded (ptone/scion#6557).
+   *
+   * - The hub is on a different version than when the update started: the
+   *   notices were computed against the old version. The update check
+   *   result is dropped, and the stored notification is cleared and
+   *   re-read.
+   * - Same version (the update failed or was rolled back) or a version not
+   *   known: the check result stays, and the stored notification is only
+   *   re-read. Starting the update hid the banner, and the hub keeps the
+   *   notification for a retry, so the banner comes back.
+   *
+   * fetchUpdateAvailable handles its own errors and is not awaited.
    */
-  private clearUpdateNoticesIfVersionChanged(before: string | undefined): void {
+  private refreshUpdateNoticesAfterRun(fromVersion: string | undefined): void {
     const after = this.updateStatus?.current.version;
-    if (!before || !after || before === after) return;
-    this.updateCheckResult = null;
-    this.updateCheckError = null;
-    // Cleared first: if the re-read fails, a notice about the old version
-    // must not stay up. fetchUpdateAvailable handles its own errors.
-    this.updateAvailable = null;
+    if (fromVersion && after && fromVersion !== after) {
+      this.updateCheckResult = null;
+      this.updateCheckError = null;
+      // Cleared first: if the re-read fails, a notice about the old
+      // version must not stay up.
+      this.updateAvailable = null;
+    }
     void this.fetchUpdateAvailable();
   }
 
@@ -1460,9 +1478,6 @@ export class ScionPageAdminMaintenance extends LitElement {
     // This run is handled here: if it is still restarting after the wait,
     // the post-wait reload must not adopt it for a second wait.
     this.peekedRestartingRunId = tracked.runId;
-    // The version the hub ran before the restart; the status is not
-    // reloaded before the wait, so this is still the old one.
-    const before = this.updateStatus?.current.version;
     this.updateReconnecting = true;
     this.updateReconnectError = null;
     this.stopPolling();
@@ -1493,18 +1508,18 @@ export class ScionPageAdminMaintenance extends LitElement {
       // The hub answers (on the target, or on another version after the
       // wait ran out): show what it recorded.
       await this.fetchUpdateStatus();
-      this.clearUpdateNoticesIfVersionChanged(before);
       await this.loadData(true);
-      if (result.ok) {
-        this.reportUpdateResult(tracked, 'restarted');
-        return;
-      }
       const run = this.updateBinaryRun();
       const runIsTracked = !!run && run.id === tracked.runId;
-      if (runIsTracked && run.status === 'running') {
+      if (!result.ok && runIsTracked && run.status === 'running') {
         // A blip, not a restart: the run is still going; keep polling it.
         this.trackedUpdate = { ...tracked, lastStatus: 'running' };
         this.startPolling();
+        return;
+      }
+      this.refreshUpdateNoticesAfterRun(tracked.fromVersion);
+      if (result.ok) {
+        this.reportUpdateResult(tracked, 'restarted');
         return;
       }
       const recorded = this.updateStatus?.lastUpdate?.runId === tracked.runId;

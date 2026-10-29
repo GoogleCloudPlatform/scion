@@ -1049,6 +1049,11 @@ describe('Reconnect after an update restart', () => {
     type Notices = { updateCheckResult: unknown; updateAvailable: unknown };
     const notices = (e: Page): Notices => e as unknown as Notices;
 
+    /** The top "Update available" banner (not the unit-drift banner). */
+    function banner(e: Page): Element | null {
+      return root(e).querySelector('.update-available-banner:not(.unit-drift-banner)');
+    }
+
     function availableFetchCount(): number {
       return fetchMock.mock.calls.filter(
         (c) => pathOf(c[0] as string) === '/api/v1/admin/maintenance/update-available'
@@ -1128,11 +1133,82 @@ describe('Reconnect after an update restart', () => {
       await settle(el!);
 
       expect(waitForHubRestart).not.toHaveBeenCalled();
+      expect(versionSection(el!).querySelector('.current-version')?.textContent).toBe(
+        'nightly-20261023'
+      );
       expect(notices(el!).updateCheckResult).toBeNull();
+      expect(root(el!).querySelector('.update-check-banner')).toBeNull();
       expect(availableFetchCount()).toBe(2);
+      expect(notices(el!).updateAvailable).toEqual({ update_available: false });
+      expect(banner(el!)).toBeNull();
     });
 
-    it('keeps the check result when the hub comes back on the same version', async () => {
+    it('keeps the check result and brings the banner back when a run fails before the restart', async () => {
+      const hub = await startUpdate('nightly-20261023', {
+        checkUpdates: CHECK_AVAILABLE,
+        updateAvailable: () => NOTIFIED,
+      });
+      await (el as unknown as { checkForUpdates(): Promise<void> }).checkForUpdates();
+      await settle(el!);
+      // Starting the update hid the banner.
+      expect(banner(el!)).toBeNull();
+      // The poll sees the run failed on the old version (no restart).
+      hub.setOps(withRun('failed'));
+      hub.setStatus(failed('run-1'));
+      await el!.loadData(true);
+      await settle(el!);
+
+      expect(waitForHubRestart).not.toHaveBeenCalled();
+      expect(versionSection(el!).querySelector('.current-version')?.textContent).toBe(
+        'nightly-20261022'
+      );
+      expect(notices(el!).updateCheckResult).toEqual(CHECK_AVAILABLE);
+      expect(root(el!).querySelector('.update-check-banner')?.textContent).toContain(
+        'nightly-20261023'
+      );
+      // The stored notification is re-read and shown again for a retry.
+      expect(availableFetchCount()).toBe(2);
+      expect(notices(el!).updateAvailable).toEqual(NOTIFIED);
+      expect(banner(el!)?.textContent).toContain('nightly-20261023');
+      expect(showToast).toHaveBeenCalledWith('Update to nightly-20261023 failed.', 'warning');
+    });
+
+    it('clears them when a status reload during the wait already shows the new version', async () => {
+      let calls = 0;
+      let hub: Awaited<ReturnType<typeof startUpdate>> | null = null;
+      vi.mocked(waitForHubRestart).mockImplementation(async () => {
+        hub!.setOps(withRun('completed'));
+        hub!.setStatus(verified('run-1'));
+        // The user presses Reload status while the wait runs.
+        root(el!)
+          .querySelector('scion-admin-maintenance-update-card')!
+          .dispatchEvent(new CustomEvent('reload-status', { bubbles: true, composed: true }));
+        await settle(el!);
+        expect(versionSection(el!).querySelector('.current-version')?.textContent).toBe(
+          'nightly-20261023'
+        );
+        return {
+          ok: true,
+          observed: { version: 'nightly-20261023', uptime: '3s', uptimeSeconds: 3 },
+        };
+      });
+      hub = await startUpdate('nightly-20261023', {
+        checkUpdates: CHECK_AVAILABLE,
+        updateAvailable: () => (calls++ === 0 ? NOTIFIED : { update_available: false }),
+      });
+      await (el as unknown as { checkForUpdates(): Promise<void> }).checkForUpdates();
+      await settle(el!);
+      hub.setOps(withRun('restarting'));
+      await el!.loadData(true);
+      await settle(el!);
+
+      expect(notices(el!).updateCheckResult).toBeNull();
+      expect(root(el!).querySelector('.update-check-banner')).toBeNull();
+      expect(availableFetchCount()).toBe(2);
+      expect(banner(el!)).toBeNull();
+    });
+
+    it('keeps the check result and brings the banner back when the hub comes back on the same version', async () => {
       await updateAndComeBack(
         () => NOTIFIED,
         (hub) => {
@@ -1152,8 +1228,10 @@ describe('Reconnect after an update restart', () => {
       expect(root(el!).querySelector('.update-check-banner')?.textContent).toContain(
         'nightly-20261023'
       );
-      // Only the read on connect.
-      expect(availableFetchCount()).toBe(1);
+      // Re-read (not cleared): the hub keeps the notification for a retry.
+      expect(availableFetchCount()).toBe(2);
+      expect(notices(el!).updateAvailable).toEqual(NOTIFIED);
+      expect(banner(el!)?.textContent).toContain('nightly-20261023');
       expect(showToast).toHaveBeenCalledWith('Update to nightly-20261023 failed.', 'warning');
     });
 
