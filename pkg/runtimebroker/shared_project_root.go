@@ -376,14 +376,9 @@ func (s *Server) applySharedBootstrap(ctx context.Context, ws, rel string, apply
 		return false, fmt.Errorf("resolve host base: %w", err)
 	}
 	stateRel := filepath.Join(filepath.Dir(rel), provision.ProvisionStateDirName)
-	for _, leaf := range []string{rel, stateRel} {
-		fd, _, err := shareddirs.EnsureLeaf(base, leaf)
-		if err != nil {
-			return false, fmt.Errorf("create %s: %w", filepath.Base(leaf), err)
-		}
-		if err := shareddirs.CloseFd(fd); err != nil {
-			return false, err
-		}
+	owner := shareddirs.Owner{UID: s.config.StorageLayout.UID, GID: s.config.StorageLayout.GID}
+	if err := ensureWorkspaceAndStateLeaves(base, rel, stateRel, owner); err != nil {
+		return false, err
 	}
 	wsPath := filepath.Join(base, rel)
 	err = provision.WithWorkspaceProvisionLocks(ctx, wsPath, func(lockCtx context.Context) error {
@@ -401,6 +396,29 @@ func (s *Server) applySharedBootstrap(ctx context.Context, ws, rel string, apply
 		return provision.MarkProvisioned(provision.ProjectStateDir(wsPath))
 	})
 	return skipped, err
+}
+
+// ensureWorkspaceAndStateLeaves creates (or verifies) a project's shared
+// workspace leaf wsRel and its provisioning state directory stateRel below
+// base with the broker's leaf contract (shareddirs.EnsureLeaf). A root
+// broker gives the workspace leaf, which agents use, the Layout's owner
+// (shareddirs.EnsureLeafOwned). The provisioning state directory keeps the
+// zero owner: it holds the provisioning locks and sentinel, only Scion
+// components write it, and it must never be agent-writable.
+func ensureWorkspaceAndStateLeaves(base, wsRel, stateRel string, owner shareddirs.Owner) error {
+	for _, leaf := range []struct {
+		rel   string
+		owner shareddirs.Owner
+	}{{wsRel, owner}, {stateRel, shareddirs.Owner{}}} {
+		fd, _, err := shareddirs.EnsureLeafOwned(base, leaf.rel, leaf.owner)
+		if err != nil {
+			return fmt.Errorf("create %s: %w", filepath.Base(leaf.rel), err)
+		}
+		if err := shareddirs.CloseFd(fd); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // localContainerRuntime reports whether runtimeName runs agents as local
@@ -449,14 +467,9 @@ func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startCont
 		return false, fmt.Errorf("resolve host base: %w", err)
 	}
 	stateRel := filepath.Join(filepath.Dir(r.RelPath), provision.ProvisionStateDirName)
-	for _, leaf := range []string{r.RelPath, stateRel} {
-		fd, _, err := shareddirs.EnsureLeaf(base, leaf)
-		if err != nil {
-			return false, fmt.Errorf("create %s: %w", filepath.Base(leaf), err)
-		}
-		if err := shareddirs.CloseFd(fd); err != nil {
-			return false, err
-		}
+	// ProvisionShared below sets the workspace content's ownership as before.
+	if err := ensureWorkspaceAndStateLeaves(base, r.RelPath, stateRel, r.Owner()); err != nil {
+		return false, err
 	}
 	ws := filepath.Join(base, r.RelPath)
 	stateDir := provision.ProjectStateDir(ws)
