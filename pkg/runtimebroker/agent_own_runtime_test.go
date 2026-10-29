@@ -243,7 +243,7 @@ func newOwnRTFixtureWith(t *testing.T, opts ownRTOptions) *ownRTFixture {
 	defaultRT := runtime.NewKubernetesRuntime(client)
 	defaultRT.DefaultNamespace = "default"
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	f.srv = New(cfg, agent.NewManager(defaultRT), defaultRT, config.RuntimeBuildRecord{})
@@ -648,7 +648,7 @@ func TestDeleteAgent_DockerOwnRuntime_ContainerIDUnchanged(t *testing.T) {
 		Labels: map[string]string{projectkeys.LabelProjectID: ownRTProjectID},
 	}}}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	srv := New(cfg, mgr, rt, config.RuntimeBuildRecord{})
 	srv.resolveAuxiliaryRuntime = withoutRecord(func(string, string, string) runtime.Runtime {

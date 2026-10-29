@@ -292,3 +292,248 @@ SELECT st.message_id, st.conversation_key, COALESCE(st.project_id, ''),
 	}
 	return out, nil
 }
+
+func (s *pgWebChatStore) ListStarredHistory(ctx context.Context, q StarHistoryQuery) (StarHistoryPage, error) {
+	if !validStarHistoryQuery(q) {
+		return StarHistoryPage{}, fmt.Errorf("webchat store: list starred history: %w", store.ErrInvalidInput)
+	}
+	messagesTable, err := s.table(ctx, "messages")
+	if err != nil {
+		return StarHistoryPage{}, err
+	}
+	a := &pgArgs{}
+	conds := []string{
+		"st.user_id = " + a.add(q.UserID),
+		"st.conversation_key = " + a.add(q.Selector.ConversationKey),
+		pgStarSelectorSQL(a, q.Selector),
+		"NOT EXISTS (SELECT 1 FROM webchat_message_ext e WHERE e.message_id = st.message_id AND e.deleted_at IS NOT NULL)",
+	}
+	from := `
+  FROM webchat_message_star st
+  JOIN ` + messagesTable + ` m ON m.id = st.message_id::uuid
+ WHERE `
+
+	page := StarHistoryPage{Items: []MessagePosition{}}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*)`+from+strings.Join(conds, " AND "), a.vals...).Scan(&page.Total); err != nil {
+		return StarHistoryPage{}, fmt.Errorf("webchat store: list starred history: count: %w", err)
+	}
+
+	cmp, dir := "<", "DESC"
+	if q.Ascending {
+		cmp, dir = ">", "ASC"
+	}
+	if q.Cursor != nil {
+		at := a.add(q.Cursor.Created.UTC())
+		id := a.add(strings.ToLower(q.Cursor.ID))
+		conds = append(conds, "(m.created "+cmp+" "+at+"::timestamptz OR (m.created = "+at+"::timestamptz AND m.id "+cmp+" "+id+"::uuid))")
+	}
+	limit := a.add(q.Limit + 1)
+	rows, err := s.db.QueryContext(ctx, `SELECT m.id::text, m.created`+from+strings.Join(conds, " AND ")+`
+ ORDER BY m.created `+dir+`, m.id `+dir+`
+ LIMIT `+limit, a.vals...)
+	if err != nil {
+		return StarHistoryPage{}, fmt.Errorf("webchat store: list starred history: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var p MessagePosition
+		if err := rows.Scan(&p.ID, &p.Created); err != nil {
+			return StarHistoryPage{}, fmt.Errorf("webchat store: list starred history: %w", err)
+		}
+		p.Created = p.Created.UTC()
+		page.Items = append(page.Items, p)
+	}
+	if err := rows.Err(); err != nil {
+		return StarHistoryPage{}, fmt.Errorf("webchat store: list starred history: %w", err)
+	}
+	return trimStarHistoryPage(page, q.Limit), nil
+}
+
+// ---------------------------------------------------------------------------
+// Postgres lifecycle
+// ---------------------------------------------------------------------------
+
+// pgUUIDText casts a TEXT expression to uuid only when it is a canonical
+// UUID (NULL otherwise), so one malformed stored value cannot fail a
+// statement over many rows; NULL never matches a uuid key.
+func pgUUIDText(expr string) string {
+	return `(CASE WHEN ` + expr + ` ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (` + expr + `)::uuid END)`
+}
+
+// markMessageDeletedTx is the deletion transaction SetMessageDeleted and
+// MarkMessageDeletedAndClearStars share. It first locks the messages row
+// (as AddMessageStar and a promotion's re-key do), so a concurrent star
+// add either commits first and its star is deleted here, or waits and
+// then finds the message deleted; the owners are collected after the lock.
+func (s *pgWebChatStore) markMessageDeletedTx(ctx context.Context, messageID string, deletedAt time.Time) ([]string, error) {
+	const query = `
+INSERT INTO webchat_message_ext (message_id, deleted_at)
+VALUES ($1, $2)
+ON CONFLICT (message_id)
+DO UPDATE SET deleted_at = EXCLUDED.deleted_at
+`
+	messagesTable, err := s.table(ctx, "messages")
+	if err != nil {
+		return nil, err
+	}
+	// One transaction: the soft delete, its mention cleanup and its star
+	// cleanup land together, so a deleted message never keeps lighting a
+	// mention dot or a star.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: set message deleted begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	// A message that is already gone (or an ID that is not a UUID, which
+	// no message has) has no row to lock; the cleanup still runs.
+	var one int
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM `+messagesTable+` WHERE id = `+pgUUIDText("$1::text")+` FOR UPDATE`, messageID).Scan(&one)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("webchat store: set message deleted: lock message: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, query, messageID, deletedAt); err != nil {
+		return nil, fmt.Errorf("webchat store: set message deleted: %w", err)
+	}
+	// A deleted message no longer mentions anyone.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM webchat_mention WHERE message_id = $1`, messageID); err != nil {
+		return nil, fmt.Errorf("webchat store: delete message mentions: %w", err)
+	}
+	owners, err := queryStarOwners(ctx, tx,
+		`WITH gone AS (DELETE FROM webchat_message_star WHERE message_id = $1 RETURNING user_id)
+		 SELECT DISTINCT user_id FROM gone ORDER BY user_id`, messageID)
+	if err != nil {
+		return nil, fmt.Errorf("webchat store: delete message stars: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("webchat store: set message deleted: %w", err)
+	}
+	return owners, nil
+}
+
+func (s *pgWebChatStore) MarkMessageDeletedAndClearStars(ctx context.Context, messageID string, deletedAt time.Time) ([]string, error) {
+	return s.markMessageDeletedTx(ctx, messageID, deletedAt)
+}
+
+func (s *pgWebChatStore) DeleteMessageStarsForConversation(ctx context.Context, conversationKey string) (int64, error) {
+	return s.deleteStarsWhere(ctx, "conversation", `conversation_key = $1`, conversationKey)
+}
+
+func (s *pgWebChatStore) DeleteMessageStarsForUser(ctx context.Context, userID string) (int64, error) {
+	return s.deleteStarsWhere(ctx, "user", `user_id = $1`, userID)
+}
+
+func (s *pgWebChatStore) DeleteMessageStarsForProject(ctx context.Context, projectID string) (int64, error) {
+	return s.deleteStarsWhere(ctx, "project", `project_id = $1`, projectID)
+}
+
+func (s *pgWebChatStore) deleteStarsWhere(ctx context.Context, what, cond, value string) (int64, error) {
+	if value == "" {
+		return 0, fmt.Errorf("webchat store: delete message stars for %s: %w", what, store.ErrInvalidInput)
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM webchat_message_star WHERE `+cond, value)
+	if err != nil {
+		return 0, fmt.Errorf("webchat store: delete message stars for %s: %w", what, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("webchat store: delete message stars for %s: %w", what, err)
+	}
+	return n, nil
+}
+
+func (s *pgWebChatStore) PurgeMessageStarCandidates(ctx context.Context, after StarCleanupPosition, limit int) (StarCleanupResult, error) {
+	if limit < 1 {
+		return StarCleanupResult{}, fmt.Errorf("webchat store: purge message stars: %w", store.ErrInvalidInput)
+	}
+	messagesTable, err := s.table(ctx, "messages")
+	if err != nil {
+		return StarCleanupResult{}, err
+	}
+	usersTable, err := s.table(ctx, "users")
+	if err != nil {
+		return StarCleanupResult{}, err
+	}
+	projectsTable, err := s.table(ctx, "projects")
+	if err != nil {
+		return StarCleanupResult{}, err
+	}
+	// The (user_id, message_id) order compares TEXT under the database
+	// collation; IDs are canonical lowercase UUIDs, so it matches the byte
+	// order and the PK index (see ListMessageStarCandidates).
+	rows, err := s.db.QueryContext(ctx, `
+SELECT user_id, message_id FROM webchat_message_star
+ WHERE user_id > $1 OR (user_id = $1 AND message_id > $2)
+ ORDER BY user_id, message_id
+ LIMIT $3`, after.UserID, after.MessageID, limit)
+	if err != nil {
+		return StarCleanupResult{}, fmt.Errorf("webchat store: purge message stars: %w", err)
+	}
+	first, last, n, err := starCleanupRange(rows)
+	if err != nil {
+		return StarCleanupResult{}, fmt.Errorf("webchat store: purge message stars: %w", err)
+	}
+	res := StarCleanupResult{Examined: n}
+	if n == limit {
+		res.Next = last
+	}
+	if n == 0 {
+		return res, nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return StarCleanupResult{}, fmt.Errorf("webchat store: purge message stars: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	const rng = `(st.user_id > $1 OR (st.user_id = $1 AND st.message_id >= $2))
+   AND (st.user_id < $3 OR (st.user_id = $3 AND st.message_id <= $4))`
+	rngArgs := []any{first.UserID, first.MessageID, last.UserID, last.MessageID}
+
+	// Repair first: a star whose live message sits in a different live
+	// topic follows it (owner and save time unchanged). Messages in a topic
+	// never move again, so the values written are current.
+	repaired, err := tx.ExecContext(ctx, `
+UPDATE webchat_message_star st
+   SET conversation_key = t.id, project_id = t.project_id
+  FROM `+messagesTable+` m
+  JOIN webchat_topic t ON t.id = m.thread_id AND t.deleted_at IS NULL
+ WHERE m.id = `+pgUUIDText("st.message_id")+`
+   AND `+rng+`
+   AND (st.conversation_key <> t.id OR st.project_id IS DISTINCT FROM t.project_id)
+   AND NOT EXISTS (SELECT 1 FROM webchat_message_ext e WHERE e.message_id = st.message_id AND e.deleted_at IS NOT NULL)`, rngArgs...)
+	if err != nil {
+		return StarCleanupResult{}, fmt.Errorf("webchat store: repair message stars: %w", err)
+	}
+	if res.Repaired, err = repaired.RowsAffected(); err != nil {
+		return StarCleanupResult{}, fmt.Errorf("webchat store: repair message stars: %w", err)
+	}
+
+	// Then purge targets that are permanently gone. Nothing here reads a
+	// permission or a user's status.
+	purged, err := tx.ExecContext(ctx, `
+DELETE FROM webchat_message_star st
+ WHERE `+rng+`
+   AND (NOT EXISTS (SELECT 1 FROM `+usersTable+` u WHERE u.id = `+pgUUIDText("st.user_id")+`)
+     OR NOT EXISTS (SELECT 1 FROM `+messagesTable+` m WHERE m.id = `+pgUUIDText("st.message_id")+`)
+     OR EXISTS (SELECT 1 FROM webchat_message_ext e
+                 WHERE e.message_id = st.message_id AND e.deleted_at IS NOT NULL)
+     OR (COALESCE(st.project_id, '') <> ''
+         AND NOT EXISTS (SELECT 1 FROM `+projectsTable+` p WHERE p.id = `+pgUUIDText("st.project_id")+`))
+     OR (left(st.conversation_key, 3) <> 'dm:'
+         AND NOT EXISTS (SELECT 1 FROM webchat_topic t
+                          WHERE t.id = st.conversation_key AND t.deleted_at IS NULL))
+     OR EXISTS (SELECT 1 FROM `+messagesTable+` m JOIN webchat_topic t ON t.id = m.thread_id
+                 WHERE m.id = `+pgUUIDText("st.message_id")+` AND t.deleted_at IS NOT NULL))`, rngArgs...)
+	if err != nil {
+		return StarCleanupResult{}, fmt.Errorf("webchat store: purge message stars: %w", err)
+	}
+	if res.Purged, err = purged.RowsAffected(); err != nil {
+		return StarCleanupResult{}, fmt.Errorf("webchat store: purge message stars: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return StarCleanupResult{}, fmt.Errorf("webchat store: purge message stars: %w", err)
+	}
+	return res, nil
+}

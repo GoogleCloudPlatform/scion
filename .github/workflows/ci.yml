@@ -189,6 +189,11 @@ jobs:
 
   build-and-test:
     name: Build & Test
+    # Stays on ubuntu-latest for now. Routed, it would add 15-20 runner-minutes
+    # to every run, more than the cr-ci runners (MAX_CONCURRENT_RUNNERS 4)
+    # absorb at the fork's peak hours. It moves to the cr-ci runner in its own
+    # change once capacity is raised (the 15-runner quota), with a warm-cache
+    # timing measurement (cr-ci-rev-16 O1).
     runs-on: ubuntu-latest
     # Sized from data (ptone/scion#3183): over the 267 successful upstream
     # runs of this job on 2026-10-04/05, the job took p50 13.4m / p95 14.4m /
@@ -464,6 +469,26 @@ jobs:
             echo "::error title=Store delete callers::A direct store DeleteAgent or DeleteProject reference does not match hack/store-delete-callers-allowlist.txt. The store methods do not deactivate delegation edges or service-account assignments; remove agents and projects through the delete engine or ProjectDeletionService, or deactivate first and add an allowlist entry. If calls were removed, lower the allowlist count. Details are in the step log."
           elif [ "$rc" -ne 0 ]; then
             echo "::error title=Store delete callers NOT checked::check-store-delete-callers could not run (exit $rc) — nothing was analysed."
+          fi
+          exit "$rc"
+
+      - name: Check ent driver assertions
+        run: |
+          set +e
+          ./hack/check-entsql-driver-assert.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=Ent driver assertions NOT checked::check-entsql-driver-assert --self-test failed (exit $rc) — the guard itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-entsql-driver-assert.sh
+          rc=$?
+          set -e
+          if [ "$rc" -eq 1 ]; then
+            echo "::error title=Ent driver assertions::A type assertion to *entsql.Driver fails when the store's driver is wrapped by the transaction diagnostics. Use entc.SQLDriver or entc.SQLDB, which unwrap. Details are in the step log."
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error title=Ent driver assertions NOT checked::check-entsql-driver-assert could not run (exit $rc) — nothing was analysed."
           fi
           exit "$rc"
 
@@ -1526,12 +1551,19 @@ jobs:
       # The binary is cached on its own key; like the Go caches, only pushes
       # to main save it. The build uses its own GOCACHE/GOMODCACHE so that
       # golangci-lint's dependencies stay out of the lint workload's cache.
+      # The key includes runner.environment (github-hosted or self-hosted):
+      # the restored binary is executed, so a runner type only runs binaries
+      # it built itself (ptone/scion#5979). The Go build and module caches
+      # keep one key for both runner types (cr-ci/workflows/README.md, "Cache
+      # scope"), but the build cache is warm only for the type that saved it:
+      # the cr-ci image has no C compiler, so Go builds there with cgo off
+      # and its package keys differ from ubuntu-latest's.
       - name: Restore patched golangci-lint
         id: golangci-lint-bin
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/golangci-lint-patched
-          key: golangci-lint-patched-${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-${{ hashFiles('cr-ci/runner/golangci-lint/**', '!cr-ci/runner/golangci-lint/README.md') }}
+          key: golangci-lint-patched-${{ runner.environment }}-${{ runner.os }}-${{ runner.arch }}-go${{ steps.go.outputs.go-version }}-${{ hashFiles('cr-ci/runner/golangci-lint/**', '!cr-ci/runner/golangci-lint/README.md') }}
 
       - name: Build patched golangci-lint
         shell: bash
@@ -1625,17 +1657,22 @@ jobs:
 
   shellcheck:
     name: shellcheck
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
 
+      # The cr-ci runner image has no sudo and ships Ubuntu 24.04's shellcheck,
+      # the version apt installs here; install only when it is missing.
       - name: Install shellcheck
         run: |
-          sudo apt-get update
-          sudo apt-get install -y shellcheck
+          if ! command -v shellcheck >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y shellcheck
+          fi
           shellcheck --version
 
       # Positive control -- this gate is not a no-op.
@@ -1756,7 +1793,7 @@ jobs:
 
   ent-generate-check:
     name: ent generated code drift
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - name: Checkout code

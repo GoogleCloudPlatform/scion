@@ -962,6 +962,7 @@ func (s *Server) handleTopicDelete(w http.ResponseWriter, r *http.Request, topic
 
 	s.events.PublishChatTopicEvent(r.Context(), topic.ProjectID, "deleted", *topic)
 	s.deleteScheduledMessagesOfConversation(r.Context(), topicID)
+	s.deleteMessageStarsOfConversation(r.Context(), topicID)
 	s.removeDeletedTopicFromThreadGroups(r.Context(), topic)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
@@ -2720,6 +2721,10 @@ func (s *Server) handleMessageEdit(w http.ResponseWriter, r *http.Request, key, 
 		NotFound(w, "Message")
 		return
 	}
+	// From here on use the stored, canonical ID: the path may spell the same
+	// UUID another way (upper case, braces), and the edit marker, content
+	// write and event are keyed by the canonical form.
+	messageID = msg.ID
 
 	// Verify the caller is the message sender.
 	if msg.SenderID != user.ID() {
@@ -2833,6 +2838,10 @@ func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key
 		NotFound(w, "Message")
 		return
 	}
+	// From here on use the stored, canonical ID: the path may spell the same
+	// UUID another way (upper case, braces), and the deletion, its mention
+	// and star cleanup and the event are all keyed by the canonical form.
+	messageID = msg.ID
 
 	// Verify the caller is the message sender.
 	if msg.SenderID != user.ID() {
@@ -2866,7 +2875,10 @@ func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key
 	// Soft-delete: set deleted_at in extension table and redact content
 	// in the main messages table so no other component can read it.
 	now := time.Now().UTC()
-	if err := wcs.SetMessageDeleted(ctx, messageID, now); err != nil {
+	// The stars of the message go in the same transaction; their owners
+	// are told to refetch after the commit (markChatMessageDeleted).
+	starOwners, err := markChatMessageDeleted(ctx, wcs, messageID, now)
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to delete message", nil)
 		return
 	}
@@ -2882,6 +2894,7 @@ func (s *Server) handleMessageDelete(w http.ResponseWriter, r *http.Request, key
 		MessageID:       messageID,
 		DeletedAt:       now.Format(time.RFC3339Nano),
 	})
+	s.publishStarsChangedTo(ctx, starOwners)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"messageId": messageID,
@@ -2938,7 +2951,13 @@ func hasAgentReplyAfter(ctx context.Context, s store.Store, threadID string, aft
 //   - limit: page size (default 50, max 200)
 //   - cursor: keyset pagination cursor from the previous page's nextCursor (optional)
 //   - around: message ID to center the page around (optional)
+//   - starred: "true" lists only the caller's starred messages
+//     (handleStarredHistory); any other value is a 400
 func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Request, key string) {
+	if rawQueryHasKey(r.URL.RawQuery, "starred") {
+		s.handleStarredHistory(w, r, key)
+		return
+	}
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {
 		Forbidden(w)
@@ -3105,6 +3124,16 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	writeJSON(w, http.StatusOK, s.chatHistoryPage(ctx, wcs, key, historyConvID, result, canPost))
+}
+
+// chatHistoryPage enriches one page of conversation history for the
+// response: attachment metadata, the extension data (reply-to, edited,
+// deleted; a deleted message's text is stripped), reply previews of this
+// conversation's messages and the viewer's artifact references. Ordinary
+// history and the starred-only variant (handleStarredHistory) share it,
+// so the filtered page carries everything a normal page does.
+func (s *Server) chatHistoryPage(ctx context.Context, wcs WebChatStore, key, historyConvID string, result *store.ListResult[store.Message], canPost *bool) chatHistoryResponse {
 	if result.Items == nil {
 		result.Items = []store.Message{}
 	}
@@ -3238,7 +3267,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	writeJSON(w, http.StatusOK, chatHistoryResponse{
+	return chatHistoryResponse{
 		Messages:                    result.Items,
 		NextCursor:                  result.NextCursor,
 		TotalCount:                  result.TotalCount,
@@ -3248,7 +3277,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		MessageArtifactsUnavailable: messageArtifactsUnavailable,
 		MessageExtensions:           messageExtensions,
 		ReplyPreviews:               replyPreviews,
-	})
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -4138,6 +4167,9 @@ func (s *Server) handleConversationPromote(w http.ResponseWriter, r *http.Reques
 	// 14. Publish SSE events (outside transaction — best-effort)
 	s.events.PublishChatTopicEvent(ctx, projectID, "created", *result)
 	s.events.PublishDMPromotedEvent(ctx, key, *result)
+	// Stars of the moved messages now belong to the new thread: the DM's
+	// users refetch their collections (content-free, own subjects only).
+	s.publishStarsChangedTo(ctx, dmUserParticipants(key))
 
 	// 15. Return created topic
 	writeJSON(w, http.StatusCreated, promoteResponse{
@@ -6307,7 +6339,7 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 	// Defence in depth: markup is refused at upload and only raster images
 	// are served inline, but if either check ever lets active content
 	// through, the sandbox keeps it off the hub's origin.
-	w.Header().Set("Content-Security-Policy", untrustedContentSandboxCSP)
+	setUntrustedContentHeaders(w.Header(), untrustedContentSandboxCSP)
 
 	// Content-Disposition: inline for images, attachment for everything else.
 	disposition := "attachment"

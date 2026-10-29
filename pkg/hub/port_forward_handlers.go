@@ -525,7 +525,7 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	// Hub-controlled response headers: the proxied content cannot override
 	// these, so it is sandboxed to an opaque origin and cannot set cookies
 	// on the hub origin.
-	w.Header().Set("Content-Security-Policy", untrustedContentSandboxCSP)
+	setUntrustedContentHeaders(w.Header(), agentServedPageSandboxCSP)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if resp.Status == 0 {
 		resp.Status = http.StatusOK

@@ -109,6 +109,18 @@ func (r *NFSMountReconciler) SetVerifyOnly(reason string) {
 	r.verifyOnlyReason = reason
 }
 
+// VerifyOnly reports whether SetVerifyOnly was called: the broker's default
+// runtime mounts the export into each agent itself, so this reconciler only
+// checks shares and never mounts them.
+func (r *NFSMountReconciler) VerifyOnly() bool {
+	return r.verifyOnlyReason != ""
+}
+
+// VerifyOnlyReason is the reason given to SetVerifyOnly, or "".
+func (r *NFSMountReconciler) VerifyOnlyReason() string {
+	return r.verifyOnlyReason
+}
+
 // MountsShares reports whether the reconciler mounts shares itself:
 // AutoMount is on and the reconciler is not verify-only.
 func (r *NFSMountReconciler) MountsShares() bool {
@@ -466,12 +478,19 @@ func (r *NFSMountReconciler) HealthCheckCodes() string {
 	return "unhealthy: " + strings.Join(unhealthy, "; ")
 }
 
-// EnsureShareMounted is called before each NFS-backed dispatch to a
-// local-container runtime to verify the share for a given share ID is still
-// mounted. It re-reconciles the share, mounting it when MountsShares is true.
-// Returns an error if the share cannot be verified or mounted, or if ctx
-// (the dispatch request's context) is done first; ctx also bounds any mount
-// command it runs.
+// EnsureShareMounted re-reconciles the share with the given ID before a
+// dispatch and reports whether it is healthy: mounted at its target from
+// exactly the configured server:export, mounting it when MountsShares is
+// true. It returns an error if the share cannot be verified or mounted, or
+// if ctx (the dispatch request's context) is done first; ctx also bounds any
+// mount command it runs.
+//
+// Callers decide what an unhealthy share means. A broker that mounts its
+// shares refuses the dispatch. A verify-only reconciler (the broker's
+// default runtime is Kubernetes or Cloud Run, so it never mounts) treats
+// the result as advisory (shareVisible): it refuses only when the share's
+// directory is not visible or the project configuration there does not
+// identify the project, not over an exact mount-table source match.
 func (r *NFSMountReconciler) EnsureShareMounted(ctx context.Context, shareID string) error {
 	if r.cfg == nil {
 		return fmt.Errorf("NFS config is nil")

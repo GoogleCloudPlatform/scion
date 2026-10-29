@@ -164,7 +164,7 @@ describe('opening a starred message from the header', () => {
     open(page, M1);
     held.get(M1)?.(star(M1, 'topic-a'));
     await settle();
-    expect(thread.scrollToMessageById).toHaveBeenCalledWith(M1);
+    expect(thread.scrollToMessageById).toHaveBeenCalledWith(M1, true, true);
     expect(navigateTo).not.toHaveBeenCalled();
   });
 
@@ -196,5 +196,56 @@ describe('opening a starred message from the header', () => {
     await settle();
     expect(apiFetch.mock.calls.length).toBe(before);
     expect(navigateTo).not.toHaveBeenCalled();
+  });
+
+  it('gives focus back to the star button when the star is no longer available or the request fails', async () => {
+    const page = document.createElement('scion-page-chat') as ChatInternals;
+    page.v2Conversation = conversation('topic-a');
+    withThread(page);
+    const refocus = vi.fn();
+    (page as unknown as { refocusStarredTrigger: () => void }).refocusStarredTrigger = refocus;
+    open(page, M1);
+    held.get(M1)?.(new Response('{}', { status: 404 }));
+    await settle();
+    expect(refocus).toHaveBeenCalledTimes(1);
+    expect(showToastMock).toHaveBeenCalledWith(
+      'This starred message is no longer available',
+      'warning'
+    );
+
+    open(page, M2);
+    held.get(M2)?.(new Response('{}', { status: 500 }));
+    await settle();
+    expect(refocus).toHaveBeenCalledTimes(2);
+    expect(navigateTo).not.toHaveBeenCalled();
+  });
+
+  it('the real refocus moves focus from the body to the star button, and leaves other focus alone', async () => {
+    const PageClass = customElements.get('scion-page-chat') as unknown as {
+      prototype: { refocusStarredTrigger(this: { shadowRoot: ShadowRoot | null }): void };
+    };
+    const refocus = PageClass.prototype.refocusStarredTrigger;
+    // A connected stand-in for the page's shadow tree, holding a real list.
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const root = host.attachShadow({ mode: 'open' });
+    const list = document.createElement('scion-chat-starred-list') as HTMLElement & {
+      conversationKey: string;
+      updateComplete: Promise<boolean>;
+    };
+    list.conversationKey = 'topic-a';
+    root.appendChild(list);
+    await list.updateComplete;
+    const trigger = list.shadowRoot!.querySelector<HTMLButtonElement>('button.trigger')!;
+
+    (document.activeElement as HTMLElement | null)?.blur();
+    refocus.call({ shadowRoot: root });
+    expect(list.shadowRoot!.activeElement).toBe(trigger);
+
+    const other = document.createElement('button');
+    document.body.appendChild(other);
+    other.focus();
+    refocus.call({ shadowRoot: root });
+    expect(document.activeElement).toBe(other);
   });
 });

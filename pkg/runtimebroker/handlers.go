@@ -128,6 +128,11 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		}
 	}
 
+	if s.storageOverridesError() != nil {
+		checks[storageOverridesCheck] = storageOverridesCheckDegraded
+		status = degradeHealthStatus(status)
+	}
+
 	return &HealthResponse{
 		Status:  status,
 		Version: s.version,
@@ -188,10 +193,15 @@ func (s *Server) nfsHealthDegradesStatus() bool {
 // NFSWarnOnlyRuntime reports whether name is a runtime type on which the
 // platform, not the broker, mounts the NFS export into the agent: the
 // Kubernetes family (the kubelet mounts the volume) and the Cloud Run
-// family. For these the broker never mounts a share and never refuses a
-// dispatch over NFS state; it logs a warning instead. When it is the
-// broker's default runtime the broker only verifies its shares, and
-// scion doctor reports an unmounted share as a warning.
+// family. For these the broker never mounts a share. Off a shared
+// project-storage Layout it never refuses a dispatch over NFS state and
+// logs a warning instead. On a shared Layout it refuses only when the
+// share's directory is not visible on the broker or the project
+// configuration there does not identify the project (shareVisible,
+// checkSharedProjectConfig); the exact mount-table source match is
+// advisory. When it is the broker's default runtime the broker only
+// verifies its shares (a verify-only reconciler), and scion doctor reports
+// an unmounted share as a warning.
 func NFSWarnOnlyRuntime(name string) bool {
 	if isKubernetesRuntimeName(name) {
 		return true
@@ -880,6 +890,31 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// attempt, the registration and any file work (design wave 3 §1 C-e).
 	if s.refuseIfDraining(w, "create", req.ID) {
 		return
+	}
+
+	// A profile (or its runtime entry) that still carries a removed storage
+	// override is refused here, before the dispatch attempt and any
+	// preparation of the start: no workspace bootstrap, download or
+	// provisioning, and no cluster object (ptone/scion#6371). Manager.Start
+	// repeats the check as a backstop.
+	if err := agent.CheckProfileStorageRefusal(ctx, createRequestProfile(req)); err != nil {
+		if se, ok := storageMigrationRequiredFrom(err); ok {
+			span.SetStatus(codes.Error, ErrCodeStorageMigrationRequired)
+			s.writeStorageMigrationRequired(w, se, "create agent", req.ID, nil)
+			return
+		}
+	}
+
+	// A flat instance's placement is its operator's: the request's own
+	// kubernetes block is checked against it here, before the dispatch
+	// attempt and any preparation of the start. Provision-only creates
+	// start no pod.
+	if !req.ProvisionOnly {
+		if perr := s.checkFlatCreatePlacement(req); perr != nil {
+			span.SetStatus(codes.Error, perr.Error())
+			s.writeStartContextError(w, perr, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
+			return
+		}
 	}
 
 	attemptKey := req.ID
@@ -1575,6 +1610,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// creates start no pod and skip it; a reprovision is always
 	// provision-only.
 	if !req.ProvisionOnly {
+		// On a flat instance this cannot refuse for a foreign runtime: a
+		// profile was refused (422) before the attempt, buildStartContext
+		// resolves only the instance's runtime, and checkFlatCreatePlacement
+		// already checked the policy and its target before the attempt.
 		rp, perr := s.placementForStart(ctx, sc.Resolution, opts.ProjectPath)
 		if perr != nil {
 			span.SetStatus(codes.Error, perr.Error())
@@ -1926,11 +1965,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		isSkillErr := errors.As(err, &skillErr)
 		policyDecision, isPolicyErr := harnessPolicyRefusalFrom(err)
 		unusableErr, isUnusable := unusableProvisionerFrom(err)
+		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
 		switch {
 		case isPolicyErr:
 			markAttemptFailed(policyDecision.HTTPStatus, policyDecision.detail())
 		case isUnusable:
 			markAttemptFailed(http.StatusUnprocessableEntity, unusableErr.PublicMessage())
+		case isStorageRefusal:
+			markAttemptFailed(http.StatusUnprocessableEntity, storageErr.PublicMessage())
 		case notFoundErr:
 			markAttemptFailed(http.StatusNotFound, "failed to create agent")
 		case isSkillErr:
@@ -2012,6 +2054,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			s.writeHarnessPolicyRefusal(w, policyDecision, "create agent", req.ID, nil)
 		case isUnusable:
 			s.writeUnusableProvisioner(w, unusableErr, "create agent", req.ID, nil)
+		case isStorageRefusal:
+			s.writeStorageMigrationRequired(w, storageErr, "create agent", req.ID, nil)
 		case errors.Is(err, agent.ErrContainerNameInUse):
 			// Fixed text, as restart and the async launch give: a wrapped
 			// error can carry runtime detail. The full error is logged above.
@@ -3594,13 +3638,6 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		}
 	}
 
-	// Parity with the create path: populate the dedicated AgentToken field from
-	// the hub-minted token in ResolvedEnv so buildStartContext treats it as an
-	// explicit token rather than relying on the resolvedEnv-kept fallback. The
-	// precedence in buildStartContext step 3 keeps this token regardless, but
-	// setting it here makes the start path behave like create.
-	startContextAgentToken := startReq.ResolvedEnv["SCION_AUTH_TOKEN"]
-
 	// The URL path segment (id) is the agent's slug, not the Hub UUID: the
 	// broker's own dispatch client sends agent.Slug there. It is also the
 	// stable on-disk identity: create keys the agent directory, container
@@ -3682,7 +3719,6 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		EnvClassifications:       startReq.EnvClassifications,
 		ResolvedSecrets:          startReq.ResolvedSecrets,
 		SharedDirs:               startReq.SharedDirs,
-		AgentToken:               startContextAgentToken,
 		WorkspaceMode:            startReq.WorkspaceMode,
 		RunID:                    startReq.RunID,
 		TemplateName:             startReq.TemplateName,
@@ -3901,9 +3937,12 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
 		var skillErr *agent.SkillResolutionError
 		ue, unusable := unusableProvisionerFrom(err)
+		storageErr, isStorageRefusal := storageMigrationRequiredFrom(err)
 		switch {
 		case unusable:
 			s.writeUnusableProvisioner(w, ue, "start agent", id, details)
+		case isStorageRefusal:
+			s.writeStorageMigrationRequired(w, storageErr, "start agent", id, details)
 		case errors.Is(err, agent.ErrContainerNameInUse):
 			// Fixed text, as restart and the async launch give: a wrapped
 			// error can carry runtime detail. The full error is logged above.
@@ -5018,6 +5057,18 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	}
 	opts.ResolvedPlacement, opts.PlacementResolved = rp, true
 
+	// A profile (or its runtime entry) that still carries a removed storage
+	// override is refused before this endpoint's stop, with the profile the
+	// start resolved above: the refusal leaves the agent running
+	// (ptone/scion#6371). Manager.Start repeats the check as a backstop.
+	if err := agent.CheckProfileStorageRefusal(ctx, opts.Profile); err != nil {
+		if se, ok := storageMigrationRequiredFrom(err); ok {
+			trace.SpanFromContext(ctx).SetStatus(codes.Error, ErrCodeStorageMigrationRequired)
+			s.writeStorageMigrationRequired(w, se, "restart agent", id, nil)
+			return
+		}
+	}
+
 	// Stop then start — tolerate stop errors since the container may already
 	// be exited and the subsequent start will handle cleanup.
 	// The lookup also returns the manager whose runtime reported the
@@ -5081,6 +5132,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
 		if ue, ok := unusableProvisionerFrom(err); ok {
 			s.writeUnusableProvisioner(w, ue, "restart agent", id, details)
+			return
+		}
+		if se, ok := storageMigrationRequiredFrom(err); ok {
+			s.writeStorageMigrationRequired(w, se, "restart agent", id, details)
 			return
 		}
 		// Start can re-provision the agent: a required skill reference that
@@ -9121,9 +9176,12 @@ func isLocalhostEndpoint(endpoint string) bool {
 // It is decided by the dispatch's resolved runtime, which is checked before
 // anything is mounted:
 //   - Kubernetes or Cloud Run (NFSWarnOnlyRuntime): the platform
-//     mounts the export into the agent. The broker reads the share's last
-//     recorded status, logs a warning if it is unhealthy, and continues; it
-//     never mounts and never refuses the dispatch.
+//     mounts the export into the agent, and the broker never mounts it. The
+//     broker reads the share's last recorded status. Off a shared
+//     project-storage Layout it logs a warning if the share is unhealthy and
+//     continues. On a shared Layout an unhealthy share refuses the dispatch,
+//     except on a verify-only reconciler, where the status is advisory and
+//     the share's directory being visible admits it (shareVisible).
 //   - Any other (local-container) runtime: the share is checked and, when
 //     the broker mounts shares, mounted. If it is not mounted the dispatch
 //     is refused, since the workspace would otherwise silently land on
@@ -9157,8 +9215,21 @@ func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, pro
 				detail = st.Message
 			}
 			// The broker reads and creates project storage through its
-			// own mount of the share: on a shared Layout an unmounted share
-			// refuses the dispatch (ptone/scion#5823).
+			// own view of the share: on a shared Layout a share that is not
+			// visible refuses the dispatch (ptone/scion#5823). For a
+			// verify-only reconciler the status above is advisory
+			// (shareVisible): a visible share directory admits the
+			// dispatch. A hub-managed dispatch then has the project tree's
+			// identity checked when its project root is resolved
+			// (sharedHubProjectPath). A dispatch that carries a project
+			// path (not hub-managed) is admitted on directory visibility
+			// alone, with no hub-seeded identity check, as before #4219.
+			if s.config.StorageLayout.Backend.Shared() && r.VerifyOnly() &&
+				shareVisible(ctx, s.config.StorageLayout, r) == nil {
+				s.agentLifecycleLog.Warn("NFS share check is advisory on this broker; the share directory is visible, continuing dispatch",
+					"agent", name, "runtime", runtimeType, "share", shareID, "detail", detail)
+				return nil
+			}
 			if s.config.StorageLayout.Backend.Shared() {
 				s.agentLifecycleLog.Error("NFS share not mounted on the broker; refusing dispatch",
 					"agent", name, "runtime", runtimeType, "share", shareID, "detail", detail)

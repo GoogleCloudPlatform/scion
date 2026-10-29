@@ -99,7 +99,7 @@ func (s *Server) hubAdmit(w http.ResponseWriter, r *http.Request, peer string, b
 		return
 	}
 	u := &url.URL{Scheme: "http", Host: req.Host, Path: "/api/v1/conduit", RawQuery: req.RawQuery}
-	fwd, err := http.NewRequestWithContext(r.Context(), http.MethodGet, u.String(), nil)
+	fwd, err := http.NewRequestWithContext(withConduitAdmitNonce(r.Context()), http.MethodGet, u.String(), nil)
 	if err != nil {
 		http.Error(w, "invalid admit request", http.StatusBadRequest)
 		return

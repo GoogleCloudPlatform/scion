@@ -17,8 +17,9 @@
 /**
  * Display labels for async launch steps and failure codes (design wave 3
  * §3 E-e, ptone/scion#4670). The keys are the wire values in
- * pkg/api/launch_codes.go, plus the broker codes skill_resolution_failed and
- * harness_config_unusable, which also reach launch.error. The CLI
+ * pkg/api/launch_codes.go, plus the broker codes skill_resolution_failed,
+ * harness_config_unusable and storage_migration_required, which also reach
+ * launch.error. The CLI
  * (cmd/launch_wait.go) uses the same wording, so change both together.
  *
  * Labels are lower case with no final period, so they read inside a
@@ -67,6 +68,7 @@ export const LAUNCH_CODE_LABELS: Readonly<Record<string, string>> = {
   agent_state_unavailable: "the agent's state on the broker is unavailable",
   agent_state_conflict: "the agent's state on the broker cannot be used",
   skill_resolution_failed: 'a required skill could not be resolved',
+  storage_migration_required: "the agent's storage settings must be migrated first",
   image_pull_failed: 'the agent image could not be pulled',
   invalid_image: 'the agent image reference is not valid',
   container_config: 'the agent container could not be configured',

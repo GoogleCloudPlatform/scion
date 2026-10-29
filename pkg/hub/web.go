@@ -1241,10 +1241,12 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 			// redirect to login instead of letting the Hub return a raw JSON 401.
 			if isBrowserRequest(r) && isProxyRoute(r.URL.Path) {
 				if !ws.keepsNoAnonymousSession(r) {
-					session.Values[sessKeyReturnTo] = r.URL.RequestURI()
+					session.Values[sessKeyReturnTo] = localRedirectPath(r.URL.RequestURI())
 					_ = session.Save(r, w)
+					http.Redirect(w, r, "/auth/login", http.StatusFound)
+					return
 				}
-				http.Redirect(w, r, "/auth/login", http.StatusFound)
+				http.Redirect(w, r, ws.noSessionLoginLocation(r.URL.RequestURI()), http.StatusFound)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -3659,13 +3661,15 @@ func (ws *WebServer) sessionAuthMiddleware(next http.Handler) http.Handler {
 
 		// No authenticated user
 		if isBrowserRequest(r) {
-			// Store returnTo for post-login redirect (not on a dev sign-in
-			// server for a request without a session cookie, see
-			// keepsNoAnonymousSession).
-			if !ws.keepsNoAnonymousSession(r) {
-				session.Values[sessKeyReturnTo] = r.URL.Path
-				_ = session.Save(r, w)
+			// Store returnTo for post-login redirect. On a dev sign-in
+			// server, a request without a session cookie carries it in
+			// the redirect instead (see keepsNoAnonymousSession).
+			if ws.keepsNoAnonymousSession(r) {
+				http.Redirect(w, r, ws.noSessionLoginLocation(r.URL.RequestURI()), http.StatusFound)
+				return
 			}
+			session.Values[sessKeyReturnTo] = localRedirectPath(r.URL.RequestURI())
+			_ = session.Save(r, w)
 			http.Redirect(w, r, "/auth/login", http.StatusFound)
 			return
 		}
@@ -3694,7 +3698,7 @@ func (ws *WebServer) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 			session, _ = ws.sessionStore.New(r, webSessionName)
 		}
 		if returnTo := r.URL.Query().Get("returnTo"); returnTo != "" {
-			session.Values[sessKeyReturnTo] = returnTo
+			session.Values[sessKeyReturnTo] = localRedirectPath(returnTo)
 			_ = session.Save(r, w)
 		}
 		http.Redirect(w, r, "/login", http.StatusFound)
@@ -3732,6 +3736,11 @@ func (ws *WebServer) handleOAuthLogin(w http.ResponseWriter, r *http.Request) {
 		session, _ = ws.sessionStore.New(r, webSessionName)
 	}
 	session.Values[sessKeyOAuthState] = state
+	// The sign-in page passes returnTo on when a provider is picked; only
+	// a path on this server is stored.
+	if returnTo := r.URL.Query().Get("returnTo"); returnTo != "" {
+		session.Values[sessKeyReturnTo] = localRedirectPath(returnTo)
+	}
 	if err := session.Save(r, w); err != nil {
 		ws.logger().Error("Failed to save OAuth state to session", "error", err)
 		http.Error(w, "session error", http.StatusInternalServerError)
@@ -3792,7 +3801,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	// Check for error from provider
 	if errParam := r.URL.Query().Get("error"); errParam != "" {
 		ws.logger().Warn("OAuth provider returned error", "provider", provider, "error", errParam)
-		http.Redirect(w, r, "/login?error="+errParam, http.StatusFound)
+		http.Redirect(w, r, "/login?error="+url.QueryEscape(errParam), http.StatusFound)
 		return
 	}
 
@@ -3828,7 +3837,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	if denial := checkSignInDenial(ctx, userInfo.Email, ws.authorizedDomains(), ws.adminEmails(), ws.userAccessMode(), ws.store); denial != "" {
 		ws.logger().Warn("Unauthorized user", "email", userInfo.Email, "reason", denial)
 		ws.auditSignInDenied(ctx, userInfo.Email, denial)
-		http.Redirect(w, r, "/login?error="+denial, http.StatusFound)
+		http.Redirect(w, r, "/login?error="+url.QueryEscape(denial), http.StatusFound)
 		return
 	}
 
@@ -4006,10 +4015,9 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if returnTo == "" {
-		returnTo = "/"
-	}
-	http.Redirect(w, r, returnTo, http.StatusFound)
+	// The redirect goes to a path on this server only, whatever the
+	// session holds.
+	http.Redirect(w, r, localRedirectPath(returnTo), http.StatusFound)
 }
 
 // handleLogout clears the session and redirects to login (or returns JSON for API).
@@ -4244,6 +4252,11 @@ func sessionString(session *sessions.Session, key string) string {
 	return ""
 }
 
+// webPermissionsPolicy is the Permissions-Policy on every hub response.
+// untrustedContentPermissionsPolicy replaces it on user- and agent-written
+// content and must deny everything this one denies.
+const webPermissionsPolicy = "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()"
+
 // securityHeadersMiddleware adds security headers to all responses. Each
 // response gets its own script nonce (see web_csp.go); the SPA shell reads
 // it from the request context and puts it on its inline script.
@@ -4256,7 +4269,7 @@ func (ws *WebServer) securityHeadersMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
-		w.Header().Set("Permissions-Policy", "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()")
+		w.Header().Set("Permissions-Policy", webPermissionsPolicy)
 		next.ServeHTTP(w, r)
 	})
 }

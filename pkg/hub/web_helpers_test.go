@@ -389,6 +389,16 @@ func hubPageHeaderValues(t *testing.T) map[string]string {
 	return out
 }
 
+// proxiedPageHeaderValues is hubPageHeaderValues for a page served from an
+// agent's port: the hub's own values, except that the untrusted-content
+// Permissions-Policy replaces the web pages' one.
+func proxiedPageHeaderValues(t *testing.T) map[string]string {
+	t.Helper()
+	out := hubPageHeaderValues(t)
+	out["Permissions-Policy"] = untrustedContentPermissionsPolicy
+	return out
+}
+
 // agentPageHeaders are the values a proxied app sends for
 // hubPageHeaderNames in the agent port tests; each differs from the hub's.
 var agentPageHeaders = map[string]string{

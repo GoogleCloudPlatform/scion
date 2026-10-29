@@ -33,8 +33,9 @@ import (
 // On a shared backend the directory is reached by pkg/shareddirs' anchored
 // walk, which opens every component below HostBase with O_NOFOLLOW and
 // checks that the Root opened is the directory the walk saw. With create,
-// a missing leaf is first created by shareddirs.EnsureLeaf (its own
-// O_NOFOLLOW walk, which applies the leaf mode and ACL).
+// a missing leaf is first created by shareddirs.EnsureLeafOwned (its own
+// O_NOFOLLOW walk, which applies the leaf mode and ACL, and which gives a
+// root creator's new directories the Layout's owner, Resolved.Owner).
 //
 // On the local backend the directory itself must not be a symlink (rooting
 // at a symlink would confine to wherever it points); its parents are
@@ -51,7 +52,7 @@ func (r Resolved) Open(create bool) (*os.Root, error) {
 			return nil, err
 		}
 		if create {
-			leafFd, _, err := shareddirs.EnsureLeaf(base, r.RelPath)
+			leafFd, _, err := shareddirs.EnsureLeafOwned(base, r.RelPath, r.Owner())
 			if err != nil {
 				return nil, fmt.Errorf("create %s %q: %w", r.Kind, r.Name, err)
 			}
@@ -119,7 +120,10 @@ func (r Resolved) VerifyNoSymlinks() (string, error) {
 // workspace/, inside no Mount), through pkg/shareddirs'
 // O_NOFOLLOW component walk, and returns its host path. A newly created
 // directory gets mode 2755 and no default ACL: only Scion components write
-// it. Missing intermediates are created as the brokers create them.
+// it. Missing intermediates are created as the brokers create them. It
+// always keeps the zero owner (the creator's uid and gid), never the
+// Layout's nfs owner: the directory holds the project's identity
+// (project-id, project-slug) and must never be agent-writable.
 func (l Layout) EnsureProjectConfigDir(projectID string) (string, error) {
 	cfg, err := l.ProjectConfig(projectID)
 	if err != nil {

@@ -802,3 +802,24 @@ func TestWithRequestTimeout_OverridesClientTimeoutPerRequest(t *testing.T) {
 		t.Fatalf("Transport client timeout changed to %s", tr.HTTPClient.Timeout)
 	}
 }
+
+func TestWithTimeout_NilHTTPClient(t *testing.T) {
+	tr := NewTransport("http://hub.example", WithHTTPClient(nil), WithTimeout(5*time.Second))
+	if tr.HTTPClient == nil {
+		t.Fatal("HTTPClient is nil after WithTimeout")
+	}
+	if tr.HTTPClient.Timeout != 5*time.Second {
+		t.Errorf("HTTPClient.Timeout = %v, want 5s", tr.HTTPClient.Timeout)
+	}
+}
+
+func TestTransport_PrepareNilHeader(t *testing.T) {
+	tr := NewTransport("http://hub.example", WithUserAgent("custom-agent"))
+	req := &http.Request{}
+	if err := tr.prepare(req); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if got := req.Header.Get("User-Agent"); got != "custom-agent" {
+		t.Errorf("User-Agent = %q, want %q", got, "custom-agent")
+	}
+}

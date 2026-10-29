@@ -71,11 +71,15 @@ func DefaultBrokerAuthConfig() BrokerAuthConfig {
 // This verifies that requests from the Hub are properly signed.
 type BrokerAuthMiddleware struct {
 	config BrokerAuthConfig
+	// seen remembers the signed requests already served (by their verified
+	// signature bytes), until their timestamps leave the accepted window, so
+	// each is served once.
+	seen *seenOnce
 }
 
 // NewBrokerAuthMiddleware creates a new broker authentication middleware.
 func NewBrokerAuthMiddleware(cfg BrokerAuthConfig) *BrokerAuthMiddleware {
-	return &BrokerAuthMiddleware{config: cfg}
+	return &BrokerAuthMiddleware{config: cfg, seen: newSeenOnce()}
 }
 
 // Middleware returns an HTTP middleware handler that validates HMAC signatures.
@@ -121,6 +125,17 @@ func (m *BrokerAuthMiddleware) Middleware(next http.Handler) http.Handler {
 			m.writeError(w, "missing X-Scion-Signature header")
 			return
 		}
+		if nonce == "" {
+			m.writeError(w, "missing X-Scion-Nonce header")
+			return
+		}
+
+		// Bound the body before anything reads it: the canonical string
+		// below hashes the body before the signature is checked.
+		if err := apiclient.LimitSignedRequestBody(w, r); err != nil {
+			writeSignedBodyTooLarge(w)
+			return
+		}
 
 		// Validate timestamp
 		ts, err := strconv.ParseInt(timestamp, 10, 64)
@@ -129,8 +144,9 @@ func (m *BrokerAuthMiddleware) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
+		now := time.Now()
 		requestTime := time.Unix(ts, 0)
-		clockSkew := time.Since(requestTime)
+		clockSkew := now.Sub(requestTime)
 		if clockSkew < 0 {
 			clockSkew = -clockSkew
 		}
@@ -146,6 +162,13 @@ func (m *BrokerAuthMiddleware) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// A signed body must declare its length. BuildCanonicalString
+		// covers the body either way; this refuses unsized framing early.
+		if err := apiclient.CheckSignedBodyFraming(r); err != nil {
+			m.writeError(w, err.Error())
+			return
+		}
+
 		// Build canonical string and verify signature
 		canonical := apiclient.BuildCanonicalString(r, timestamp, nonce)
 		if !apiclient.VerifyHMAC(m.config.SecretKey, canonical, sigBytes) {
@@ -153,9 +176,28 @@ func (m *BrokerAuthMiddleware) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// Serve each signed request once while its timestamp is accepted.
+		// The key is the verified signature bytes: they depend only on the
+		// canonical signed input, so every header encoding of one signed
+		// request (signature text spellings, a nonce that takes in a signed
+		// header line) has the same key.
+		if !m.seen.add(string(sigBytes), requestTime.Add(m.config.MaxClockSkew), now) {
+			m.writeError(w, "request already served")
+			return
+		}
+
 		// Signature valid, continue to handler
 		next.ServeHTTP(w, r)
 	})
+}
+
+// writeSignedBodyTooLarge answers a signed request whose body exceeds
+// apiclient.MaxSignedRequestBodyBytes with 413, in the same JSON error shape
+// as the authentication errors.
+func writeSignedBodyTooLarge(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusRequestEntityTooLarge)
+	_, _ = fmt.Fprintf(w, `{"error":{"code":"payload_too_large","message":%q}}`, apiclient.SignedBodyTooLargeMessage)
 }
 
 // writeError writes an authentication error response.
@@ -190,6 +232,11 @@ type MultiKeyBrokerAuthMiddleware struct {
 	maxClockSkew         time.Duration
 	allowUnauthenticated bool
 	enabled              bool
+	// seen remembers the signed requests already served (by their verified
+	// signature bytes), until their timestamps leave the accepted window, so
+	// each is served once. It is this middleware's own set, not the conduit
+	// guard's: a conduit request passes the guard and then this middleware.
+	seen *seenOnce
 }
 
 // NewMultiKeyBrokerAuthMiddleware creates a new multi-key broker authentication middleware.
@@ -198,6 +245,7 @@ func NewMultiKeyBrokerAuthMiddleware(enabled bool, maxClockSkew time.Duration, a
 		enabled:              enabled,
 		maxClockSkew:         maxClockSkew,
 		allowUnauthenticated: allowUnauthenticated,
+		seen:                 newSeenOnce(),
 	}
 }
 
@@ -265,6 +313,17 @@ func (m *MultiKeyBrokerAuthMiddleware) ServeWith(w http.ResponseWriter, r *http.
 		m.writeError(w, "missing X-Scion-Signature header")
 		return
 	}
+	if nonce == "" {
+		m.writeError(w, "missing X-Scion-Nonce header")
+		return
+	}
+
+	// Bound the body before anything reads it: the canonical string below
+	// hashes the body before the signature is checked.
+	if err := apiclient.LimitSignedRequestBody(w, r); err != nil {
+		writeSignedBodyTooLarge(w)
+		return
+	}
 
 	// Validate timestamp
 	ts, err := strconv.ParseInt(timestamp, 10, 64)
@@ -273,8 +332,9 @@ func (m *MultiKeyBrokerAuthMiddleware) ServeWith(w http.ResponseWriter, r *http.
 		return
 	}
 
+	now := time.Now()
 	requestTime := time.Unix(ts, 0)
-	clockSkew := time.Since(requestTime)
+	clockSkew := now.Sub(requestTime)
 	if clockSkew < 0 {
 		clockSkew = -clockSkew
 	}
@@ -290,12 +350,27 @@ func (m *MultiKeyBrokerAuthMiddleware) ServeWith(w http.ResponseWriter, r *http.
 		return
 	}
 
+	// A signed body must declare its length. BuildCanonicalString
+	// covers the body either way; this refuses unsized framing early.
+	if err := apiclient.CheckSignedBodyFraming(r); err != nil {
+		m.writeError(w, err.Error())
+		return
+	}
+
 	// Build canonical string
 	canonical := apiclient.BuildCanonicalString(r, timestamp, nonce)
 
 	// Try each key until one matches
 	for _, entry := range keys {
 		if apiclient.VerifyHMAC(entry.secretKey, canonical, sigBytes) {
+			// Serve each signed request once while its timestamp is
+			// accepted. The key is the verified signature bytes: they
+			// depend only on the canonical signed input, so every header
+			// encoding of one signed request has the same key.
+			if !m.seen.add(string(sigBytes), requestTime.Add(maxSkew), now) {
+				m.writeError(w, "request already served")
+				return
+			}
 			if entry.hubName != "" {
 				r = r.WithContext(context.WithValue(r.Context(), authenticatingHubConnCtxKey{}, entry.hubName))
 			}

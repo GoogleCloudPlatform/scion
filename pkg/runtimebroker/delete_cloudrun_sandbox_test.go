@@ -70,7 +70,7 @@ func TestDeleteAgent_CloudRunSandbox_HubNameDeletesSandbox(t *testing.T) {
 	}
 	rt := runtime.NewCloudRunSandboxRuntimeForTest(bin, statePath, filepath.Join(dir, "scion"))
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	srv := New(cfg, agent.NewManager(rt), rt, config.RuntimeBuildRecord{})
