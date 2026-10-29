@@ -389,6 +389,10 @@ A stored interactive login (from `scion hub auth login`) takes precedence over
 a dedicated OS user, an isolated `HOME`, or log out first (`scion hub auth logout`).
 :::
 
+User- and hub-scope environment variables and secrets (`scion hub env` and `scion hub secret`
+without `--project` or `--broker`) need an interactive login (`scion hub auth login`); the Hub
+refuses access tokens on them, whatever their boundary or scopes.
+
 ### Scopes for CLI use
 
 Most CLI commands that run in a project look the project up on the Hub first, which needs
