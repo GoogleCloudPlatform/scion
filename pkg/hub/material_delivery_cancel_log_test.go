@@ -76,10 +76,41 @@ func TestDispatchDelivery_LegacyFallbackWarnQuietAfterRequestEnds(t *testing.T) 
 	buf := lgLogger(m)
 
 	ended := endedCtx{context.Background()}
-	_, _, _ = m.d.selectDeliveryEnv(ended, newDeliverySelector(m.d.authzService, m.agent, PurposeRestart), m.agent)
+	env, _, err := m.d.selectDeliveryEnv(ended, newDeliverySelector(m.d.authzService, m.agent, PurposeRestart), m.agent)
+	require.NoError(t, err)
+	assert.Equal(t, "v", env["LG_ENDED_ENV"], "the ended run reached the legacy fallback and delivered the item")
 	assert.Empty(t, warnRecords(t, buf.Bytes(), lgFallbackMsg), "no legacy Warn after the request ended")
 
 	require.NoError(t, m.d.DispatchAgentRestart(context.Background(), m.agent))
 	assert.Equal(t, "v", m.client.lastRestartResolvedEnv["LG_ENDED_ENV"])
 	assert.Len(t, warnRecords(t, buf.Bytes(), lgFallbackMsg), 1, "the live delivery is still logged within the window")
+}
+
+// TestProvisionCredentials_RefusalWarnQuietAfterRequestEnds: the provision
+// refusal summary Warn is logged for a live request and not once the
+// request has ended.
+func TestProvisionCredentials_RefusalWarnQuietAfterRequestEnds(t *testing.T) {
+	const msg = "ProvisionCredentials not authorized for delivery to the agent; not sent"
+	for _, tc := range []struct {
+		name  string
+		ctx   context.Context
+		wantW bool
+	}{
+		{"live", context.Background(), true},
+		{"ended", endedCtx{context.Background()}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec, buf := newProvisionCredsFixture(t, "pc-ended-"+tc.name, ldOptions{edge: withBoundedCeiling("agent.read")})
+			m.secret(t, "GH_ACME", "project-value", store.SecretTypeEnvironment, store.ScopeProject, m.agent.ProjectID)
+
+			assert.Nil(t, m.d.resolveProvisionCredentials(tc.ctx, m.agent, "DispatchAgentStart"))
+			assert.Empty(t, fetchedNames(rec), "a refused secret is never fetched")
+			warn := findProvisionCredsRecord(buf.records(t), "WARN", msg)
+			if tc.wantW {
+				require.NotNil(t, warn, "a live request logs the refusal; log: %s", buf.String())
+			} else {
+				assert.Nil(t, warn, "no refusal Warn after the request ended; log: %s", buf.String())
+			}
+		})
+	}
 }
