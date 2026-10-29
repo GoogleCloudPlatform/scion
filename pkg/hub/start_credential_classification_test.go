@@ -198,3 +198,23 @@ func TestDispatchStartAndRestartClassifyIssuedCredential(t *testing.T) {
 		})
 	}
 }
+
+// TestSetStartEnvToken_NilClassifications: classifying the credential into
+// a nil classifications map allocates the map, so the caller must read the
+// map back after setStartEnvToken (as both dispatchers do when they set
+// StartExtras.EnvClassifications) rather than keep an earlier nil copy.
+func TestSetStartEnvToken_NilClassifications(t *testing.T) {
+	env := map[string]string{}
+	var cls map[string]api.EnvKind
+	setStartEnvToken(env, &cls, "fake.issued.credential")
+	require.NotNil(t, cls)
+	assert.Equal(t, api.EnvKindSecretBootstrap, cls[startCredentialEnvKey])
+	assert.Equal(t, "fake.issued.credential", env[startCredentialEnvKey])
+
+	// No credential issued: nothing is written, and a nil map stays nil.
+	env = map[string]string{}
+	cls = nil
+	setStartEnvToken(env, &cls, "")
+	assert.Nil(t, cls)
+	assert.Empty(t, env)
+}
