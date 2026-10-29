@@ -37,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -1668,6 +1669,22 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Pull from the project's clone URL as the hub knows it, not from the
+	// remote configured in the workspace, which agents can change. The
+	// fetch runs on the hub host: the URL is checked before any workspace
+	// or git work and refused (never rewritten) unless it is an https, ssh
+	// or git URL, as for the clone.
+	cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
+	localFixture := localCloneFixtureAllowed(cloneURL)
+	if !localFixture {
+		if err := provision.CheckHostCloneURL(cloneURL); err != nil {
+			if !writeSharedCloneSourceRefused(w, err) {
+				InternalError(w)
+			}
+			return
+		}
+	}
+
 	resolved, err := s.resolveProjectWorkspace(ctx, project)
 	if err != nil {
 		if !writeWorkspaceStorageUnavailable(w, err) {
@@ -1693,12 +1710,15 @@ func (s *Server) handleProjectWorkspacePull(w http.ResponseWriter, r *http.Reque
 	_ = root.Close()
 	workspacePath := resolved.HostPath
 
-	token := s.resolveCloneToken(ctx, project)
-
-	// Pull from the project's clone URL as the hub knows it, not from the
-	// remote configured in the workspace, which agents can change.
-	cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
-	pullResult, err := util.PullSharedWorkspace(workspacePath, cloneURL, token)
+	// The fetch runs hardened, and the project's token goes only to its own
+	// recorded remote (hostGitAccess).
+	var pullResult *util.PullResult
+	if localFixture {
+		pullResult, err = util.PullSharedWorkspace(workspacePath, cloneURL, "")
+	} else {
+		token, hardening := s.hostGitAccess(ctx, project, cloneURL)
+		pullResult, err = util.PullSharedWorkspaceHardened(workspacePath, cloneURL, token, hardening)
+	}
 	if err != nil {
 		slog.Warn("shared workspace pull failed",
 			"project_id", project.ID, "error", err.Error())
