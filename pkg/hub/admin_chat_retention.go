@@ -90,18 +90,21 @@ type chatRetentionPutRequest struct {
 //   - every save is written with a compare-and-set on the read revision and
 //     is recorded in the mutation audit before it is written.
 func (s *Server) handleAdminChatRetention(w http.ResponseWriter, r *http.Request) {
+	// The method is checked first, so an unsupported method gets 405
+	// whether or not the experiment is on (like handleGCSObject).
+	if r.Method != http.MethodGet && r.Method != http.MethodPut {
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut)
+		return
+	}
 	if !s.experimentEnabled(experiments.ChatRetention) {
 		NotFound(w, "route")
 		return
 	}
-	switch r.Method {
-	case http.MethodGet:
+	if r.Method == http.MethodGet {
 		s.writeChatRetentionResponse(r.Context(), w)
-	case http.MethodPut:
-		s.handlePutChatRetention(w, r)
-	default:
-		MethodNotAllowed(w, http.MethodGet, http.MethodPut)
+		return
 	}
+	s.handlePutChatRetention(w, r)
 }
 
 func chatRetentionResponseFor(cfg opsettings.ChatRetentionConfig, revision int64, cutoff *time.Time) chatRetentionResponse {

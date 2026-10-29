@@ -929,6 +929,25 @@ func Spec() []TableFixture {
 			},
 		}},
 
+		// ---- Chat message retention (hub.chat_retention; policy and
+		// per-project counts only, never message IDs or content) ----
+		{Table: "chat_retention_runs", Rows: []row{
+			{
+				"id": "5b0c1e2d-3f4a-4b5c-8d6e-7f8091a2b3c4", "trigger": "sweep", "dry_run": false,
+				"started_at": baseTime, "finished_at": baseTime, "status": "ok",
+				"actor":  nil,
+				"policy": `{"messages_retention_days":30,"main_cutoff":"2025-12-02T12:00:00Z"}`,
+				"counts": `{"` + projectID + `":{"main":12,"addressees":12,"mentions":3,"stars":1,"ext":12}}`,
+				"error":  nil,
+			},
+		}},
+		{Table: "chat_retention_cursors", Rows: []row{
+			{
+				"phase": "main", "cursor_created": baseTime, "cursor_id": "6c1d2e3f-4a5b-4c6d-9e7f-8091a2b3c4d5",
+				"reset_at": baseTime, "last_applied_cutoff": baseTime, "updated_at": baseTime,
+			},
+		}},
+
 		// ---- Secret encryption policy and migrations (ptone/scion#1530
 		// §6; key IDs and progress only, never key material) ----
 		{Table: "hub_encryption_policy", Rows: []row{
