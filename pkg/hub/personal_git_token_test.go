@@ -142,6 +142,8 @@ func newPersonalTokenFixture(t *testing.T, o personalTokenOpts) *personalTokenFi
 	require.NoError(t, st.CreateAgent(ctx, agent))
 	agent, err := st.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
+	// Start and restart deliver launch secrets only under a delivery grant.
+	grantLaunchDelivery(t, st, d, agent)
 	return &personalTokenFixture{st: st, client: client, d: d, project: project, agent: agent}
 }
 
