@@ -66,6 +66,12 @@ type ProfileConversionInput struct {
 	Profiles []string
 	// Choices are explicit operator choices from a reviewed manifest.
 	Choices []ConversionChoice
+	// ConfiguredRuntimes reports whether a runtime entry is the operator's
+	// (ConfiguredRuntimeNames), as a legacy start decides when it matches
+	// sibling entries for placement. nil counts every Kubernetes entry as
+	// the operator's (fail closed: a built-in entry with different
+	// placement then blocks the profile).
+	ConfiguredRuntimes func(string) bool
 }
 
 // ConversionChoice is one operator choice. A Split choice sets TargetGroup
@@ -205,7 +211,7 @@ func ConvertProfilesToInstances(in ProfileConversionInput) ProfileConversionResu
 				fmt.Sprintf("profile %s is not defined in these settings; remove it from the profiles in scope", name), name)
 			continue
 		}
-		if cp := foldProfile(st, vs, name, prof); cp != nil {
+		if cp := foldProfile(st, vs, in.ConfiguredRuntimes, name, prof); cp != nil {
 			profiles = append(profiles, cp)
 		}
 	}
@@ -280,7 +286,7 @@ func flatTargetType(t string) string {
 // foldProfile resolves profile name's target and folds its values per
 // field. It returns nil when the profile cannot become a flat instance
 // (a blocking finding says why).
-func foldProfile(st *convState, vs *VersionedSettings, name string, prof V1ProfileConfig) *convProfile {
+func foldProfile(st *convState, vs *VersionedSettings, configured func(string) bool, name string, prof V1ProfileConfig) *convProfile {
 	pp := "profiles." + name + "."
 	if prof.Runtime == "" {
 		st.add(ConversionUnsupportedFlatTargetType, ConversionSeverityBlocking, pp+"runtime",
@@ -330,6 +336,21 @@ func foldProfile(st *convState, vs *VersionedSettings, name string, prof V1Profi
 		if f.set {
 			st.add(ConversionLegacyFieldNoEffect, ConversionSeverityNotice, rp+f.key,
 				fmt.Sprintf("runtimes.%s.%s has no effect today and has no flat Runtime Broker instance field; it is not converted", rtKey, f.key), name)
+		}
+	}
+	if typ == RuntimeTargetTypeKubernetes && ProfilePoolConflict(rt, prof) {
+		st.add(ConversionProfileConflict, ConversionSeverityBlocking, pp+"node_selector",
+			fmt.Sprintf("profiles.%s.node_selector sets %s to a different value than its runtime entry %s; a profile cannot change the runtime entry's pool, so use the same value on both (or move the profile to a runtime entry for that pool) before converting", name, PoolNodeSelectorKey, rtKey), name)
+		ok = false
+	}
+	placementEntries := []string{rtKey}
+	if typ == RuntimeTargetTypeKubernetes {
+		var other string
+		placementEntries, other = PlacementSiblingEntries(vs.Runtimes, rtKey, configured)
+		if other != "" {
+			st.add(ConversionProfileConflict, ConversionSeverityBlocking, strings.TrimSuffix(rp, "."),
+				fmt.Sprintf("runtime entries %s, %s may target the same cluster and namespace (equal, or empty context or namespace) with different placement; a legacy start there is refused, so give them the same placement before converting", rtKey, other), name)
+			ok = false
 		}
 	}
 	if prof.DefaultTemplate != "" {
@@ -383,6 +404,25 @@ func foldProfile(st *convState, vs *VersionedSettings, name string, prof V1Profi
 		if ksa != "" {
 			set("kubernetes_service_account_mappings."+gsa, ksa, pp+"kubernetes_service_account_mappings."+gsa)
 		}
+	}
+	// Placement: the runtime entry's (and its agreeing siblings', as a
+	// legacy start matches them), with the profile's over it, merged
+	// exactly as a legacy start merges them (LegacyPlacementPolicy).
+	placement := LegacyPlacementPolicy(vs.Runtimes, placementEntries, name, &prof)
+	placementSrc := func(field string, inProfile bool) string {
+		if inProfile {
+			return pp + field
+		}
+		return rp + field
+	}
+	if len(placement.NodeSelector) > 0 {
+		set("node_selector", placement.NodeSelector, placementSrc("node_selector", len(prof.NodeSelector) > 0))
+	}
+	if len(placement.Tolerations) > 0 {
+		set("tolerations", placement.Tolerations, placementSrc("tolerations", len(prof.Tolerations) > 0))
+	}
+	if placement.RuntimeClassName != "" {
+		set("runtime_class_name", placement.RuntimeClassName, placementSrc("runtime_class_name", prof.RuntimeClassName != ""))
 	}
 	// The per-profile and per-runtime storage overrides are removed
 	// (design OQ2-A): each one set is reported and none is converted.
@@ -441,7 +481,7 @@ func foldProfile(st *convState, vs *VersionedSettings, name string, prof V1Profi
 func isKubernetesOnlyTargetField(field string) bool {
 	switch field {
 	case "gke", "priority_class_name", "shared_dir_storage_class", "shared_dir_size", "safe_to_evict",
-		"kubernetes_block_service_account":
+		"kubernetes_block_service_account", "node_selector", "tolerations", "runtime_class_name":
 		return true
 	}
 	return strings.HasPrefix(field, "kubernetes_service_account_mappings.")
@@ -463,6 +503,8 @@ func reportDockerKubernetesFields(st *convState, name, rtKey string, prof V1Prof
 		{"safe_to_evict", prof.SafeToEvict != nil},
 		{"kubernetes_service_account_mappings", len(prof.KubernetesServiceAccountMappings) > 0},
 		{"kubernetes_block_service_account", prof.KubernetesBlockServiceAccount != ""},
+		{"node_selector", len(prof.NodeSelector) > 0}, {"tolerations", len(prof.Tolerations) > 0},
+		{"runtime_class_name", prof.RuntimeClassName != ""},
 	} {
 		if f.set {
 			report(pp + f.key)
@@ -478,6 +520,8 @@ func reportDockerKubernetesFields(st *convState, name, rtKey string, prof V1Prof
 		{"safe_to_evict", rt.SafeToEvict != nil},
 		{"kubernetes_service_account_mappings", len(rt.KubernetesServiceAccountMappings) > 0},
 		{"kubernetes_block_service_account", rt.KubernetesBlockServiceAccount != ""},
+		{"node_selector", len(rt.NodeSelector) > 0}, {"tolerations", len(rt.Tolerations) > 0},
+		{"runtime_class_name", rt.RuntimeClassName != ""},
 	} {
 		if f.set {
 			report(rp + f.key)
@@ -874,8 +918,14 @@ func buildGroupInstance(st *convState, g *convGroup, choices map[string]*fieldCh
 // conversionValuesEqual is rule 3's deep equality. A missing value (nil)
 // differs from every set one, so false and unset safe_to_evict differ.
 // Lists are order-sensitive, except secret declarations, which compare as
-// a set keyed by key.
+// a set keyed by key, and tolerations, which compare as a set of (key,
+// operator with "" as Equal, value, effect).
 func conversionValuesEqual(field string, a, b interface{}) bool {
+	if field == "tolerations" {
+		at, aok := a.([]api.K8sToleration)
+		bt, bok := b.([]api.K8sToleration)
+		return aok == bok && reflect.DeepEqual(tolerationSet(at), tolerationSet(bt))
+	}
 	if field == "secrets" {
 		as, _ := a.([]api.RequiredSecret)
 		bs, _ := b.([]api.RequiredSecret)
@@ -944,6 +994,12 @@ func setInstanceField(t *V1RuntimeTargetConfig, d *V1InstanceAgentDefaults, fiel
 		t.SafeToEvict = &b
 	case "kubernetes_block_service_account":
 		t.KubernetesBlockServiceAccount = v.(string)
+	case "node_selector":
+		t.NodeSelector = copyStringMap(v.(map[string]string))
+	case "tolerations":
+		t.Tolerations = append([]api.K8sToleration(nil), v.([]api.K8sToleration)...)
+	case "runtime_class_name":
+		t.RuntimeClassName = v.(string)
 	case "default_harness_config":
 		d.DefaultHarnessConfig = v.(string)
 	case "image_registry":
