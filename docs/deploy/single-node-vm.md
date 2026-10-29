@@ -287,13 +287,31 @@ run as the `scion` user (through `runuser`):
 3. A crash is rolled back only if `/opt/scion/start-attempts` (read as the
    `scion` user: a regular file, not a symlink, in exactly the format the
    counter writes) names the release `current` points at with a count of at
-   least `StartLimitBurst` (5, read from the same `systemctl show`): that
-   release has crash-looped through the whole start limit since it was
-   switched to. A failed operator stop of a release that ran fine has a low
-   count since its switch, or its update is verified (step 5). A missing,
-   unreadable or mismatched file leaves the Hub stopped. This also applies
-   when `update-state.json` is missing and the guard falls back to the
-   switch time.
+   least 2: that release failed at least one restart since it was switched
+   to. The threshold is not `StartLimitBurst`: systemd's start limit counts
+   every start in its five-minute window, the previous release's included,
+   while the counter starts over at each switch, so after a **Restart Hub**
+   or another update shortly before, a real crash loop can end well below
+   five. A missing, unreadable or mismatched file leaves the Hub stopped.
+   This also applies when `update-state.json` is missing and the guard falls
+   back to the switch time.
+
+   The count does not tell a crash loop from a failed operator stop: a
+   release restarted once from the UI has a count of 2. What keeps the guard
+   from swapping a Hub you stopped is `Result=timeout` being excluded, and
+   the update state (step 5): a release that ran is verified as soon as its
+   listener binds, and an unverified update is rolled back only within 30
+   minutes of the switch. Two residual cases are accepted:
+
+   - If the previous release used four or more of the window's five starts
+     (for example **Restart Hub** several times, then an update within five
+     minutes), a crash-looping new release can stop at a count of 1. The
+     guard then leaves the Hub stopped; restore it by hand (see
+     [Restoring after a failed update](#restoring-after-a-failed-update)).
+   - A release older than the update-state contract never marks its update
+     verified. Within 30 minutes of switching to it, after two or more
+     starts, a failed `systemctl stop` that exits non-zero is rolled back
+     like a crash loop.
 4. It refuses unless `/opt/scion/current` and `/opt/scion/previous` each
    resolve to a release directory directly inside `/opt/scion/releases/`,
    and `previous` contains a `scion` binary. A link that leaves `releases/`
@@ -357,8 +375,8 @@ one JSON object:
 The guard compares no versions. It reads the file as the `scion` user,
 without following a symlink and up to 4 KiB, and decides as below. Every
 "Rolls back" row also needs the start-attempts check of step 3 (the
-current release started at least `StartLimitBurst` times since its
-switch), including the last row:
+current release started at least twice since its switch), including the
+last row:
 
 | File | Guard |
 |---|---|

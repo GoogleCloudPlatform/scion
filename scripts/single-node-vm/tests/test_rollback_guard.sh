@@ -309,15 +309,17 @@ test_rollback_timeout_result_is_noop_even_with_full_count() {
   done
 }
 
-# The start-attempts gate: StartLimitBurst (5) or more starts of the
-# current release act; fewer, another release, or a missing, garbled or
-# symlinked file do not -- also on the switch-time fallback (no update
-# state). Under both versions.
+# The start-attempts gate: at least MIN_START_ATTEMPTS (2) starts of the
+# current release act -- 2 is the burst-adjacent case: the previous release
+# used 3 of the 5 starts in systemd's window just before the switch, so the
+# new release reached the start limit after 2 starts. One start, another
+# release, or a missing, garbled or symlinked file do not -- also on the
+# switch-time fallback (no update state). Under both versions.
 test_rollback_start_attempts_gate() {
   local sc
   for sc in v249-crash v255-final; do
     local count
-    for count in 5 7; do
+    for count in 2 5 7; do
       _rb_new_host
       _rb_scenario "$sc"
       _rb_attempts nightly-20261023 "$count"
@@ -326,7 +328,7 @@ test_rollback_start_attempts_gate() {
       rm -rf "$RB_DIR"
     done
     local a
-    for a in "nightly-20261023 4" "nightly-20261023 1" "nightly-20261020 9" "missing" "garbled" "symlink"; do
+    for a in "nightly-20261023 1" "nightly-20261023 0" "nightly-20261020 9" "missing" "garbled" "symlink"; do
       _rb_new_host
       _rb_scenario "$sc"
       # shellcheck disable=SC2086 # target and count
@@ -334,11 +336,66 @@ test_rollback_start_attempts_gate() {
       RB_BEFORE="$(_rb_state)"
       _rb_run
       assert_eq "0" "$RB_RC" "${sc}, start-attempts '${a}': must be a successful no-op (output: ${RB_OUT})"
-      assert_contains "$RB_OUT" "not a crash loop of the current release through the start limit" "${sc}, start-attempts '${a}': the no-op must say why"
+      assert_contains "$RB_OUT" "no failed restart of the current release on record" "${sc}, start-attempts '${a}': the no-op must say why"
       assert_eq "$RB_BEFORE" "$(_rb_state)" "${sc}, start-attempts '${a}': nothing may change"
       assert_not_contains "$(cat "$RB_CALLS")" "systemctl start" "${sc}, start-attempts '${a}': the hub must not be started"
       rm -rf "$RB_DIR"
     done
+  done
+}
+
+# Documented residual (fail closed): the previous release used 4 of the 5
+# starts in systemd's window right before the switch (Restart Hub, then an
+# update within five minutes), so the crash-looping new release hit the
+# start limit after a single start: count 1. The hub stays stopped and the
+# log points to the restore procedure.
+test_rollback_burst_used_by_previous_release_stays_stopped() {
+  _rb_new_host
+  _rb_attempts nightly-20261023 1
+  _rb_update_state "$(_rb_happy_state)"
+  RB_BEFORE="$(_rb_state)"
+  _rb_run
+  assert_eq "0" "$RB_RC" "count 1: a successful no-op (output: ${RB_OUT})"
+  assert_eq "$RB_BEFORE" "$(_rb_state)" "count 1: nothing may change"
+  assert_contains "$RB_OUT" "Restoring after a failed update" "count 1: the log must point to the restore procedure"
+  rm -rf "$RB_DIR"
+}
+
+# The real protection against swapping a hub the operator stopped is the
+# update state, not the count: a release that ran (verified, set once its
+# listener bound) and was restarted from the UI (count 3) is not rolled
+# back when a later stop fails non-zero.
+test_rollback_failed_stop_of_verified_release_with_count_is_noop() {
+  local sc
+  for sc in v249-stop-exitcode v255-stop-exitcode; do
+    _rb_new_host
+    _rb_scenario "$sc"
+    _rb_attempts nightly-20261023 3
+    _rb_update_state "$(_rb_happy_state verified=true)"
+    RB_BEFORE="$(_rb_state)"
+    _rb_run
+    assert_eq "0" "$RB_RC" "${sc}: a successful no-op (output: ${RB_OUT})"
+    assert_contains "$RB_OUT" "was verified" "${sc}: the no-op must say why"
+    assert_eq "$RB_BEFORE" "$(_rb_state)" "${sc}: nothing may change"
+    rm -rf "$RB_DIR"
+  done
+}
+
+# Accepted residual, pinned: a release that predates the update-state
+# contract never sets verified. Within RECENT_SWITCH_WINDOW_SEC of its
+# switch, after 2+ starts, a failed operator stop that exits non-zero on
+# SIGTERM IS rolled back (it is indistinguishable from a crash loop).
+test_rollback_residual_precontract_failed_stop_swaps() {
+  local sc
+  for sc in v249-stop-exitcode v255-stop-exitcode; do
+    _rb_new_host
+    _rb_scenario "$sc"
+    _rb_attempts nightly-20261023 2
+    _rb_update_state "$(_rb_happy_state)"
+    _rb_run
+    assert_eq "0" "$RB_RC" "${sc}: the residual case rolls back (output: ${RB_OUT})"
+    assert_eq "releases/nightly-20261020" "$(readlink "${RB_ROOT}/current")" "${sc}: pre-contract + recent + count 2 + failed non-zero stop: rolled back (accepted residual)"
+    rm -rf "$RB_DIR"
   done
 }
 
@@ -645,7 +702,7 @@ test_rollback_root_path_hands_install_root_to_owner() {
   _rb_root_shims
   _rb_run_as_root
   assert_eq "0" "$RB_RC" "the root path must succeed (output: ${RB_OUT})"
-  assert_eq "${RB_SHOW3}"$'\nrunuser -u scion -- env SCION_INSTALL_ROOT='"${RB_ROOT}"$' SCION_INSTALL_OWNER= SCION_START_LIMIT_BURST=5 bash -s -- __swap\nsystemctl reset-failed scion-hub.service\nsystemctl start scion-hub.service' \
+  assert_eq "${RB_SHOW3}"$'\nrunuser -u scion -- env SCION_INSTALL_ROOT='"${RB_ROOT}"$' SCION_INSTALL_OWNER= bash -s -- __swap\nsystemctl reset-failed scion-hub.service\nsystemctl start scion-hub.service' \
     "$(cat "$RB_CALLS")" \
     "root must only query systemctl, hand the checks, swap and marker to the owner via runuser, then reset-failed and start"
   assert_eq "releases/nightly-20261020" "$(readlink "${RB_ROOT}/current")" "the owner step must have swapped current"

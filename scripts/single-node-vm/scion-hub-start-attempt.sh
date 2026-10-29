@@ -29,15 +29,20 @@
 # temp file renamed over it, so a planted symlink is replaced, never written
 # through), mode 0644. An existing symlink is never read.
 #
-# The guard rolls back a crash only if count >= StartLimitBurst for the
-# release current points at: a release that crash-looped through the whole
-# start limit since it was switched to. A failed operator stop of a release
-# that has run fine has a low count since its switch, or is verified.
+# The guard rolls back a crash only if count >= 2 for the release current
+# points at (at least one failed restart since its switch). The count does
+# not separate a crash loop from a failed operator stop; the guard's other
+# conditions do (an unverified, recently switched release, Result not
+# timeout). See scion-hub-rollback.sh.
 #
 # Environment (defaults are what the VM uses; tests override them):
 #   SCION_INSTALL_ROOT    install root            (default /opt/scion)
 
 set -uo pipefail
+
+# The temp file of the current write, removed on any exit.
+TMP_FILE=""
+trap 'rm -f "${TMP_FILE:-}"' EXIT
 
 INSTALL_ROOT="${SCION_INSTALL_ROOT:-/opt/scion}"
 readonly ATTEMPTS_MAX_BYTES=4096
@@ -79,21 +84,22 @@ previous_count() {
 }
 
 main() {
-  local tag count tmp
+  local tag count
   if ! tag="$(current_tag)"; then
     log "$INSTALL_ROOT/current is not a symlink to a release; not counting this start"
     return 0
   fi
   count=$(( $(previous_count "$tag") + 1 ))
-  if ! tmp="$(mktemp "$INSTALL_ROOT/start-attempts.XXXXXX" 2>/dev/null)"; then
+  if ! TMP_FILE="$(mktemp "$INSTALL_ROOT/start-attempts.XXXXXX" 2>/dev/null)"; then
+    TMP_FILE=""
     log "cannot write in $INSTALL_ROOT; not counting this start"
     return 0
   fi
-  if printf '{"target":"%s","count":%d}\n' "$tag" "$count" > "$tmp" \
-     && chmod 0644 "$tmp" && mv -fT "$tmp" "$INSTALL_ROOT/start-attempts"; then
+  if printf '{"target":"%s","count":%d}\n' "$tag" "$count" > "$TMP_FILE" \
+     && chmod 0644 "$TMP_FILE" && mv -fT "$TMP_FILE" "$INSTALL_ROOT/start-attempts"; then
+    TMP_FILE=""
     return 0
   fi
-  rm -f "$tmp"
   log "could not update $INSTALL_ROOT/start-attempts; not counting this start"
   return 0
 }

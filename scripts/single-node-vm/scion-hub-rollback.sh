@@ -107,14 +107,27 @@
 #     {"target":"<release>","count":N}, the number of starts since current
 #     was switched to that release. A crash is rolled back only if the file
 #     is readable (a regular file, not a symlink, exactly that format),
-#     target is the release current points at, and count >= StartLimitBurst
-#     (from the same systemctl snapshot): the release crash-looped through
-#     the whole start limit since its switch. A failed stop of a release
-#     that ran fine has a low count since its switch (or is verified, see
-#     "Update state"). A missing, unreadable or mismatched file means no
-#     swap. The check runs in the owner step (root never reads the install
-#     root), before the update-state decision table, so it applies to the
-#     switch-time fallback too.
+#     target is the release current points at, and count >=
+#     MIN_START_ATTEMPTS (2): this release failed at least one restart
+#     since its switch. Not StartLimitBurst: systemd's start limit counts
+#     every start in its window, the previous release's included, while the
+#     counter resets on a switch, so after a Restart Hub or another update
+#     shortly before, a real crash loop can end well below the burst. A
+#     missing, unreadable or mismatched file means no swap. The check runs
+#     in the owner step (root never reads the install root), before the
+#     update-state decision table, so it applies to the switch-time
+#     fallback too.
+#   - The count does not tell a crash loop from a failed operator stop (a
+#     release restarted once from the UI has count 2). The protection
+#     against swapping a hub the operator stopped is: Result=timeout is
+#     excluded, the update must be unverified (verified is set as soon as
+#     the hub's listener binds, so a release that ran is verified), and the
+#     switch must be recent (RECENT_SWITCH_WINDOW_SEC). Residuals, both fail
+#     closed or accepted: if the previous release used 4+ of the window's
+#     starts, a crash-looping new release can end at count 1 and the hub
+#     stays stopped (restore by hand); a release that predates the
+#     update-state contract never sets verified, so within the window, after
+#     2+ starts, a failed non-zero stop of it is rolled back.
 #   - Result=timeout (a stop that timed out) is never acted on.
 #   - A clean last exit (an update or Restart Hub exits on SIGTERM and
 #     systemd starts it again; or manual restarts) only restarts the hub,
@@ -171,6 +184,10 @@ readonly SETTLE_READS=3
 SETTLE_INTERVAL_SEC="${SCION_ROLLBACK_SETTLE_SEC:-1}"
 [[ "$SETTLE_INTERVAL_SEC" =~ ^[0-9]+$ ]] || SETTLE_INTERVAL_SEC=1
 readonly SETTLE_INTERVAL_SEC
+
+# The fewest starts of the current release (start-attempts) that count as
+# a crash loop: the first start plus at least one failed restart.
+readonly MIN_START_ATTEMPTS=2
 
 log() { echo "scion-hub-rollback: $*"; }
 die() { echo "scion-hub-rollback: ERROR: $*" >&2; exit 1; }
@@ -329,16 +346,12 @@ cmd_swap() {
     exit "$ALREADY_ROLLED_BACK"
   fi
   # The start attempts since current was switched (scion-hub-start-attempt.sh)
-  # must cover the whole start limit: only then did this release crash-loop
-  # through StartLimitBurst starts. Applies to the switch-time fallback too.
-  local burst="${SCION_START_LIMIT_BURST:-${HUB_BURST:-}}" att_target att_count
-  if [[ ! "$burst" =~ ^[1-9][0-9]*$ ]]; then
-    log "no valid StartLimitBurst ('$burst'): not rolling back. Nothing changed; the hub stays stopped."
-    exit "$LEAVE_STOPPED"
-  fi
+  # must show at least one failed restart of this release. Applies to the
+  # switch-time fallback too.
+  local att_target att_count
   read -r att_target att_count <<< "$(start_attempts)"
-  if [[ "$att_target" != "$cur" || ! "$att_count" =~ ^[0-9]+$ ]] || (( att_count < burst )); then
-    log "start-attempts shows ${att_count:-?} start(s) of '${att_target:-?}', not >= $burst of releases/$cur: this is not a crash loop of the current release through the start limit (e.g. a failed stop): not rolling back. Nothing changed; the hub stays stopped."
+  if [[ "$att_target" != "$cur" || ! "$att_count" =~ ^[0-9]+$ ]] || (( att_count < MIN_START_ATTEMPTS )); then
+    log "start-attempts shows ${att_count:-?} start(s) of '${att_target:-?}', not >= $MIN_START_ATTEMPTS of releases/$cur: no failed restart of the current release on record: not rolling back. Nothing changed; the hub stays stopped. If the previous release used most of the start limit just before, follow docs/deploy/single-node-vm.md, Restoring after a failed update."
     exit "$LEAVE_STOPPED"
   fi
   local decision state_from run_id age
@@ -384,7 +397,6 @@ cmd_swap() {
 run_as_owner() {
   if [[ "$(id -u)" == "0" && -n "$OWNER" ]]; then
     runuser -u "${OWNER%%:*}" -- env SCION_INSTALL_ROOT="$INSTALL_ROOT" SCION_INSTALL_OWNER="" \
-      SCION_START_LIMIT_BURST="$HUB_BURST" \
       bash -s -- __swap < "${BASH_SOURCE[0]}"
   else
     (cmd_swap)
