@@ -2438,7 +2438,7 @@ authDone:
 				if seedBranch == "" {
 					seedBranch = api.Slugify(opts.Name)
 				}
-				src, seedErr := seedPrivateGitConfig(filepath.Join(repoRoot, ".git", "config"), agentDir, seedBranch)
+				src, seedErr := seedCheckedPrivateGitConfig(ctx, repoRoot, effectiveWorkspace, agentDir, seedBranch)
 				if seedErr != nil {
 					return nil, fmt.Errorf("seed private git config for agent %q: %w", opts.Name, seedErr)
 				}

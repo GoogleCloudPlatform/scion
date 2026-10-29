@@ -4587,6 +4587,13 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 					}
 				}
 				if err := util.CreateWorktreeWithOrigin(agentWorkspace, targetBranch, recordedOrigin); err != nil {
+					// A repository config refusal is a policy decision, not a failed
+					// recovery: refuse the start rather than continue without a
+					// workspace.
+					var refused *util.RepoConfigRefusedError
+					if errors.As(err, &refused) {
+						return "", "", "", nil, fmt.Errorf("recreate the missing worktree for agent %q: %w", agentName, err)
+					}
 					slog.Warn("GetAgent: could not recreate the missing worktree; continuing without a workspace",
 						"agent", agentName, "path", agentWorkspace, "branch", targetBranch, "error", err)
 					agentWorkspace = ""
