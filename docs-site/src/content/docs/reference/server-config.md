@@ -529,12 +529,25 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS brokerdispatch_state_updated_at ON broke
 ```
 :::
 
-:::caution[Postgres: `messages` index on upgrade]
-On Postgres, auto-migrate creates the `message_project_id_created_id` index on `messages (project_id, created, id)`, which speeds up project message pages, with a plain `CREATE INDEX`. That blocks writes to messages until the startup migration commits; during a rolling deploy, writes from the other Hub instances wait too. On a large deployment, create the index before upgrading so auto-migrate finds it already in place:
+:::caution[`messages` indexes on upgrade]
+On Postgres, auto-migrate creates these `messages` indexes with a plain `CREATE INDEX`:
+
+- `message_project_id_created_id` on `(project_id, created, id)`, for project message pages.
+- `message_sender_id_created_id` on `(sender_id, created, id)` and `message_recipient_id_created_id` on `(recipient_id, created, id)`, for participant reads such as the agent DM inter-agent view.
+- `message_project_id_sender_created_id` on `(project_id, sender, created, id)`, for the inter-agent view's lookup by sender name.
+
+Each build blocks writes to messages until the startup migration commits; during a rolling deploy, writes from the other Hub instances wait too. On a large deployment, create the indexes before upgrading so auto-migrate finds them already in place:
 
 ```sql
 CREATE INDEX CONCURRENTLY IF NOT EXISTS message_project_id_created_id ON messages (project_id, created, id);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS message_sender_id_created_id ON messages (sender_id, created, id);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS message_recipient_id_created_id ON messages (recipient_id, created, id);
+CREATE INDEX CONCURRENTLY IF NOT EXISTS message_project_id_sender_created_id ON messages (project_id, sender, created, id);
 ```
+
+On SQLite, the first start after upgrading builds the same indexes before the Hub serves requests, holding the database write lock: allow a few seconds per million messages.
+
+The three participant and sender indexes take disk space too: about 370 MiB per million messages on SQLite. The cost is per message, whatever the message length.
 :::
 
 ### Authentication (`server.auth`)
