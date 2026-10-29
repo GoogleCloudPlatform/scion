@@ -84,6 +84,45 @@ those brokers on a shared backend, was refused with the same 409 until the
 next hub-start pass. Registered projects therefore do not always dispatch
 with a project path, and they are now seeded at register time as well.
 
+## Hub-native workspace leaf at create, and its backfill (ruling (ii))
+
+On a shared backend the first agent of a hub-native project (no git remote)
+used to find no workspace leaf: nothing created `projects/<uuid>/workspace`
+until an agent or a Files-tab write did. Now:
+
+- **At create:** `initHubManagedProject` first runs
+  `provisionHubNativeWorkspace`, which is the same `provisionSharedWorkspace`
+  that shared-workspace git projects use, with no clone. That means:
+  - the workspace leaf and `<ProjectRoot>/provision` are created through the
+    confined `EnsureLeaf` walk (mode 2775, default ACL);
+  - `PrepareStateDir` runs;
+  - then `provision.ProvisionShared` runs (shared-plain,
+    `SentinelDir = <ProjectRoot>/provision`, the Layout uid/gid), which chowns
+    the leaf and writes the sentinel.
+- **On failure:** the provisioning failure maps to
+  `errWorkspaceStorageUnavailable`, with no clone wording and no host path.
+  The create (and a project clone) is rolled back with 503, and a project
+  root that this create made is removed.
+- **No workspace lock:** a hub-native workspace gets no legacy lock in its
+  root (`LegacyDir` is empty). That lock only excludes an older pod that may
+  be cloning a git workspace, so the workspace stays empty.
+- **Startup backfill:** the startup pass (`ensureProjectConfigIdentities`)
+  provisions the leaf the same way for an existing hub-native project whose
+  leaf is absent, only after its identity is confirmed (never next to a
+  mismatch). It is best-effort, logs per project with ids only, and counts
+  `workspaces_provisioned` and `workspaces_failed` in the summary line. A
+  present leaf is left alone.
+- **Never** for a git project (any mode), an empty-per-agent project or the
+  global project (`hubNativeWorkspaceProvisioned`), so a hub-created leaf
+  cannot change a git project's provisioning decision.
+- **Tests (all default shard 5):**
+  - `TestCreateHubNativeProject_SharedBackend_ProvisionsWorkspaceLeaf`
+    (2775, the Layout owner, empty, the sentinel);
+  - `TestEnsureProjectConfigIdentities_BackfillsHubNativeWorkspace`;
+  - `TestEnsureProjectConfigIdentities_GitProjectsGetNoWorkspaceLeaf`;
+  - `TestCreateHubNativeProject_LocalBackend_NoShareWrites`;
+  - `TestCreateHubNativeProject_SharedBackend_ProvisioningFailureRollsBack`.
+
 ## Follow-ups (not in this change)
 
 - **N-3:** request-path NFS I/O at create (the identity write through the
@@ -92,7 +131,8 @@ with a project path, and they are now seeded at register time as well.
 - **N-4:** error-path hygiene in the shared helpers: make the warning texts
   and returned errors of `seedSharedProjectIdentity` and
   `ensureSharedProjectIdentityBestEffort` uniform, and make sure no host path
-  beyond what the confined helpers report reaches a log line.
+  beyond what the confined helpers report reaches a log line. That includes
+  `provisionSharedWorkspace`'s own step warnings, which the backfill reuses.
 
 `TestRequestPathSites` impact: none. The change adds no request-path use and
 logs only `project_id` and `error`.

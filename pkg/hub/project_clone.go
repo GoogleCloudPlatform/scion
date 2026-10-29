@@ -420,7 +420,7 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 			return
 		}
 	} else if clone.GitRemote == "" {
-		if err := s.initHubManagedProject(clone); err != nil {
+		if err := s.initHubManagedProject(ctx, clone); err != nil {
 			// Workspace storage did not respond: return before committed is
 			// set, so the deferred rollback stack removes the clone, and
 			// answer 503. Other failures stay best-effort, as before.

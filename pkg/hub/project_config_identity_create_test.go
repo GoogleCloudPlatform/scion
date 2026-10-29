@@ -19,12 +19,15 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -270,4 +273,160 @@ func TestRegisterProject_ReRegisterExisting_LeavesIdentityUnchanged(t *testing.T
 	require.False(t, again.Created, "fixture check: the existing project is re-registered")
 	assert.Equal(t, other+"\n", readIdentityFile(t, cfgDir, projectkeys.ProjectIDFile), "a re-register never touches project-id")
 	assert.Equal(t, "stale\n", readIdentityFile(t, cfgDir, projectkeys.ProjectSlugFile), "a re-register writes nothing")
+}
+
+// useNFSOwnedBySelf configures the NFS backend with this process's own
+// uid:gid as the Layout owner, so the provisioning chown succeeds unprivileged
+// and the owner can be asserted.
+func (f workspaceLayoutFixture) useNFSOwnedBySelf() {
+	cfg := nfsConfig(f.mountRoot)
+	cfg.NFS.UID = os.Getuid()
+	cfg.NFS.GID = os.Getgid()
+	f.srv.config.ProjectStorageConfig = projectStorageFromWorkspace(cfg)
+}
+
+// assertHubNativeWorkspaceProvisioned checks the provisioned hub-native
+// workspace of projectID: the leaf at mode 2775 owned by this process (the
+// Layout uid:gid of useNFSOwnedBySelf), empty, and the provisioning sentinel
+// in <ProjectRoot>/provision.
+func assertHubNativeWorkspaceProvisioned(t *testing.T, f workspaceLayoutFixture, projectID string) {
+	t.Helper()
+	projectRoot := filepath.Join(f.shareBase, "projects", projectID)
+	ws := filepath.Join(projectRoot, "workspace")
+	info, err := os.Lstat(ws)
+	require.NoError(t, err, "the workspace leaf exists")
+	require.True(t, info.IsDir())
+	assert.Equal(t, os.FileMode(0o775), info.Mode().Perm(), "leaf mode 2775 (permission bits)")
+	assert.NotZero(t, info.Mode()&os.ModeSetgid, "leaf mode 2775 (setgid)")
+	st, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	assert.Equal(t, uint32(os.Getuid()), st.Uid, "the leaf is owned by the Layout uid")
+	assert.Equal(t, uint32(os.Getgid()), st.Gid, "the leaf is owned by the Layout gid")
+	entries, err := os.ReadDir(ws)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "the hub-native workspace is empty: no lock file, no sentinel inside")
+	assert.FileExists(t, filepath.Join(projectRoot, provision.ProvisionStateDirName, provision.ProvisionSentinelFile),
+		"the provisioning sentinel is in <ProjectRoot>/provision")
+}
+
+// TestCreateHubNativeProject_SharedBackend_ProvisionsWorkspaceLeaf: a new
+// hub-native project on a shared backend gets projects/<uuid>/workspace
+// provisioned at create (mode 2775, the Layout owner, the sentinel), so the
+// first agent finds a provisioned workspace.
+func TestCreateHubNativeProject_SharedBackend_ProvisionsWorkspaceLeaf(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	f.useNFSOwnedBySelf()
+	project, _ := createTestHubManagedProject(t, f.srv, "Native Leaf")
+	assertHubNativeWorkspaceProvisioned(t, f, project.ID)
+	assert.FileExists(t, filepath.Join(f.shareBase, "projects", project.ID, ".scion", projectkeys.ProjectIDFile),
+		"the project configuration is seeded as before")
+}
+
+// TestEnsureProjectConfigIdentities_BackfillsHubNativeWorkspace: at hub start
+// an existing hub-native project without the workspace leaf gets it
+// provisioned; a second pass changes nothing.
+func TestEnsureProjectConfigIdentities_BackfillsHubNativeWorkspace(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	f.useNFSOwnedBySelf()
+	project := &store.Project{ID: "aaaaaaaa-0000-4000-8000-0000000000a7", Name: "Native Existing", Slug: "native-existing"}
+	require.NoError(t, f.s.CreateProject(context.Background(), project))
+	_, err := os.Stat(filepath.Join(f.shareBase, "projects", project.ID, "workspace"))
+	require.True(t, os.IsNotExist(err), "fixture check: no workspace leaf yet")
+
+	counts := f.srv.ensureProjectConfigIdentities(context.Background())
+	assert.Equal(t, 1, counts.workspacesProvisioned)
+	assert.Zero(t, counts.workspacesFailed+counts.failed)
+	assertHubNativeWorkspaceProvisioned(t, f, project.ID)
+
+	counts = f.srv.ensureProjectConfigIdentities(context.Background())
+	assert.Zero(t, counts.workspacesProvisioned, "a present leaf is left alone")
+	assert.Zero(t, counts.workspacesFailed)
+}
+
+// TestEnsureProjectConfigIdentities_GitProjectsGetNoWorkspaceLeaf: the
+// startup pass never creates a workspace leaf for a git project
+// (clone-per-agent, worktree-per-agent or shared-workspace), nor for an
+// empty-per-agent project, and a per-agent git create gets none either: a
+// hub-created leaf must not change a git project's provisioning decision.
+func TestEnsureProjectConfigIdentities_GitProjectsGetNoWorkspaceLeaf(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	f.useNFSOwnedBySelf()
+	projects := []*store.Project{
+		{ID: "aaaaaaaa-0000-4000-8000-0000000000b7", Name: "Git Per Agent", Slug: "git-per-agent", GitRemote: "github.com/test/git-per-agent",
+			Labels: map[string]string{store.LabelWorkspaceMode: store.WorkspaceModePerAgent}},
+		{ID: "aaaaaaaa-0000-4000-8000-0000000000b8", Name: "Git Worktree", Slug: "git-worktree", GitRemote: "github.com/test/git-worktree",
+			Labels: map[string]string{store.LabelWorkspaceMode: store.WorkspaceModeWorktreePerAgent}},
+		{ID: "aaaaaaaa-0000-4000-8000-0000000000b9", Name: "Git Shared", Slug: "git-shared", GitRemote: "github.com/test/git-shared",
+			Labels: map[string]string{store.LabelWorkspaceMode: store.WorkspaceModeShared}},
+		{ID: "aaaaaaaa-0000-4000-8000-0000000000ba", Name: "Empty Per Agent", Slug: "empty-per-agent-x",
+			Labels: map[string]string{store.LabelWorkspaceMode: string(store.SharingModeEmptyPerAgent)}},
+	}
+	for _, p := range projects {
+		require.NoError(t, f.s.CreateProject(context.Background(), p))
+	}
+	require.True(t, projects[3].IsEmptyPerAgent(), "fixture check: empty-per-agent")
+	counts := f.srv.ensureProjectConfigIdentities(context.Background())
+	assert.Zero(t, counts.workspacesProvisioned)
+	assert.Zero(t, counts.workspacesFailed)
+	for _, p := range projects {
+		_, err := os.Stat(filepath.Join(f.shareBase, "projects", p.ID, "workspace"))
+		assert.True(t, os.IsNotExist(err), "%s gets no workspace leaf from the startup pass", p.Name)
+		_, err = os.Stat(filepath.Join(f.shareBase, "projects", p.ID, provision.ProvisionStateDirName))
+		assert.True(t, os.IsNotExist(err), "%s gets no provisioning state from the startup pass", p.Name)
+	}
+
+	created := createProjectOverHTTP(t, f.srv, CreateProjectRequest{
+		Name: "Git Per Agent Created", GitRemote: "github.com/test/git-per-agent-created", WorkspaceMode: "per-agent",
+	})
+	_, err := os.Stat(filepath.Join(f.shareBase, "projects", created.ID, "workspace"))
+	assert.True(t, os.IsNotExist(err), "a per-agent git create gets no workspace leaf")
+}
+
+// TestCreateHubNativeProject_LocalBackend_NoShareWrites: on the local
+// backend a hub-native create provisions nothing on a share and keeps its
+// existing ~/.scion/projects/<slug> workspace.
+func TestCreateHubNativeProject_LocalBackend_NoShareWrites(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	_, workspacePath := createTestHubManagedProject(t, f.srv, "Native Local")
+	assert.DirExists(t, workspacePath, "the local workspace is created as before")
+	_, err := os.Stat(filepath.Join(f.shareBase, "projects"))
+	assert.True(t, os.IsNotExist(err), "nothing is written to the (unconfigured) share")
+	_, err = os.Stat(filepath.Join(workspacePath, provision.ProvisionSentinelFile))
+	assert.True(t, os.IsNotExist(err), "no provisioning sentinel on the local backend")
+}
+
+// TestCreateHubNativeProject_SharedBackend_ProvisioningFailureRollsBack: a
+// failed hub-native workspace provisioning rolls the create back with 503
+// (no host path, no clone wording) and removes the project tree it created.
+func TestCreateHubNativeProject_SharedBackend_ProvisioningFailureRollsBack(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	f.useNFSOwnedBySelf()
+	orig := provisionSharedClone
+	var seen []provision.ProvisionInput
+	provisionSharedClone = func(in provision.ProvisionInput) error {
+		seen = append(seen, in)
+		return errors.New("simulated provisioning failure at " + in.Resolved.HostPath)
+	}
+	t.Cleanup(func() { provisionSharedClone = orig })
+
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{Name: "Native Fails"})
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), f.mountRoot, "no host path in the response")
+	assert.NotContains(t, rec.Body.String(), "clone", "no clone wording for a hub-native workspace")
+	require.Len(t, seen, 1, "ProvisionShared was called once")
+	assert.Nil(t, seen[0].GitClone, "a hub-native workspace is never cloned")
+	assert.Empty(t, seen[0].LegacyDir, "no workspace lock for a hub-native workspace")
+	assert.Equal(t, store.SharingModeSharedPlain, seen[0].Mode)
+
+	result, err := f.s.ListProjects(context.Background(), store.ProjectFilter{}, store.ListOptions{})
+	require.NoError(t, err)
+	for _, p := range result.Items {
+		assert.NotEqual(t, "Native Fails", p.Name, "the project is rolled back")
+	}
+	entries, err := os.ReadDir(filepath.Join(f.shareBase, "projects"))
+	if err == nil {
+		assert.Empty(t, entries, "the project tree the failed create made is removed")
+	} else {
+		assert.True(t, os.IsNotExist(err))
+	}
 }

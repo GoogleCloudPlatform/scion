@@ -618,7 +618,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if project.GitRemote == "" {
 		// Hub-native project (no git remote): create workspace directory.
-		if err := s.initHubManagedProject(project); err != nil {
+		if err := s.initHubManagedProject(ctx, project); err != nil {
 			// Workspace storage did not respond: the workspace (and its
 			// seeded .scion/settings.yaml) cannot be created, so roll back
 			// like the clone failure above and answer 503. Other failures
@@ -1111,14 +1111,20 @@ func writeWorkspaceStorageUnavailable(w http.ResponseWriter, err error) bool {
 // On the local workspace backend this is ~/.scion/projects/<slug>/.scion,
 // inside the workspace directory it also creates (unchanged). On a shared
 // backend it is <ProjectRoot(uuid)>/.scion beside workspace/, which no
-// agent mounts; the workspace itself is created by the
-// first agent or the first Files-tab write. Unlike linked projects,
+// agent mounts, and the hub first provisions the empty workspace leaf
+// (provisionHubNativeWorkspace: the leaf at mode 2775 with the default ACL,
+// chowned to the Layout uid:gid, and the provisioning sentinel), so the
+// first agent finds a provisioned workspace. Unlike linked projects,
 // hub-managed projects keep their settings directly in that directory (no
 // split storage or marker files).
 //
-// A shared workspace storage the hub cannot use returns an error wrapping
-// errWorkspaceStorageUnavailable; callers roll the create back.
-func (s *Server) initHubManagedProject(project *store.Project) error {
+// A shared workspace storage the hub cannot use, or a failed workspace
+// provisioning, returns an error wrapping errWorkspaceStorageUnavailable;
+// callers roll the create back.
+func (s *Server) initHubManagedProject(ctx context.Context, project *store.Project) error {
+	if err := s.provisionHubNativeWorkspace(ctx, project); err != nil {
+		return err
+	}
 	scionDir, err := s.ensureProjectConfigDir(project, true)
 	if err != nil {
 		return err
@@ -1256,7 +1262,8 @@ func (s *Server) writeHubConnectionSettings(project *store.Project, scionDir str
 }
 
 // provisionSharedWorkspace provisions a shared-workspace git project's
-// workspace on a shared backend through provision.ProvisionShared with the
+// workspace, or (with no clone and no workspace lock) a hub-native project's
+// empty workspace, on a shared backend through provision.ProvisionShared with the
 // Kubernetes init container's layout: the uuid workspace leaf
 // (Resolve(workspace)), shared-plain, the sentinel and lock in
 // <ProjectRoot>/provision (provision.ProjectStateDir), the legacy lock in
@@ -1359,6 +1366,14 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 	if cloneCfg != nil && project.GitRemote != "" {
 		cloneToken = s.resolveCloneToken(ctx, project)
 	}
+	// The legacy lock in the workspace itself excludes an older pod that may
+	// already be provisioning a git workspace. A hub-native workspace is new
+	// (or absent) and is never cloned, so it takes only the state-directory
+	// lock and gets no lock file in its root.
+	legacyLockDir := res.HostPath
+	if project.GitRemote == "" {
+		legacyLockDir = ""
+	}
 	err = provisionSharedClone(provision.ProvisionInput{
 		Ctx:              ctx,
 		Resolved:         provision.ResolvedWorkspace{HostPath: res.HostPath},
@@ -1371,15 +1386,47 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 		NFSUID:           layout.UID,
 		NFSGID:           layout.GID,
 		SentinelDir:      stateDir,
-		LegacyDir:        res.HostPath,
+		LegacyDir:        legacyLockDir,
 	})
 	if err != nil {
 		s.projectsLogger().Warn("shared workspace provisioning failed",
 			"project_id", project.ID, "error", err.Error())
 		cleanup()
+		if cloneCfg == nil {
+			// No clone ran (a hub-native workspace): a storage failure, not a git one.
+			return fmt.Errorf("shared workspace provisioning: %w", errWorkspaceStorageUnavailable)
+		}
 		return sharedWorkspaceCloneError(err)
 	}
 	return nil
+}
+
+// provisionHubNativeWorkspace provisions the empty workspace of a hub-native
+// project (no git remote) on a shared backend at create, through the same
+// provisionSharedWorkspace a shared-workspace git project uses, with no
+// clone: the workspace leaf and the provisioning state directory through the
+// confined EnsureLeaf walk (mode 2775, default ACL), PrepareStateDir, then
+// provision.ProvisionShared (shared-plain, SentinelDir =
+// <ProjectRoot>/provision, the Layout uid/gid), which chowns the leaf and
+// writes the sentinel. A no-op on the local backend, for any git project,
+// for an empty-per-agent project (no project workspace) and for the global
+// project. Errors wrap errWorkspaceStorageUnavailable (no host path); a
+// project root this call created is removed again on failure.
+func (s *Server) provisionHubNativeWorkspace(ctx context.Context, project *store.Project) error {
+	if !hubNativeWorkspaceProvisioned(s, project) {
+		return nil
+	}
+	return s.provisionSharedWorkspace(ctx, project)
+}
+
+// hubNativeWorkspaceProvisioned reports whether the hub provisions project's
+// workspace itself (provisionHubNativeWorkspace): a shared backend and a
+// hub-native project (no git remote, not empty-per-agent, not the global
+// project). Never true for a git project: a hub-created leaf must not change
+// a git project's provisioning decision.
+func hubNativeWorkspaceProvisioned(s *Server, project *store.Project) bool {
+	return s.workspaceBackendShared() && project != nil && project.GitRemote == "" &&
+		!project.IsEmptyPerAgent() && !isGlobalHubProject(project.Slug)
 }
 
 // sharedWorkspaceCloneError maps a provisioning failure to a *util.GitError
