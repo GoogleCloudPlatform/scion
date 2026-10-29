@@ -137,6 +137,14 @@ scion tunnel my-agent --port 5173 --local-port 5173
 
 Then open `http://127.0.0.1:5173/` in your browser. The app behaves as it does on its own machine.
 
+### Behind an authenticating front proxy
+
+When the hub runs behind an authenticating front proxy, for example Google IAP or another [proxy-auth](/scion/hosted/ha/auth-proxy-iap/) deployment (`auth.mode: proxy`), the front proxy sits in front of every request, including the requests a page opened through the proxy URL makes back to its app. Depending on how the front proxy is configured, some of those requests may be answered by the front proxy's own sign-in flow instead of by the app, so a multi-file page can behave unpredictably: the page opens, and some of its parts load while others do not.
+
+For anything beyond a single self-contained page in such a deployment, use [`scion tunnel`](#tunnels-from-your-machine-scion-tunnel), which does not go through the browser and is not affected.
+
+With the IAP or JWT provider, apps served through an agent's port do not receive the front proxy's identity assertion or its user email and ID headers.
+
 ---
 
 ## Manual Port Management
