@@ -11,9 +11,10 @@
 #     pull_request_target, schedule and workflow_dispatch on ubuntu-latest);
 #   - a routed job cannot or must not run there: it has services:, container:,
 #     a uses: docker:// step or a docker command in a step (docker run, build,
-#     buildx, compose, pull, push, exec, login, create, start, or docker-compose;
-#     no Docker on Cloud Run; other uses of the word, such as "Dockerfile", do not
-#     match), its permissions (its
+#     buildx, compose, pull, push, exec, login, create, start, also after global
+#     options such as -H host or --log-level debug, or docker-compose; no Docker on
+#     Cloud Run; other uses of the word, such as "Dockerfile", do not match), its
+#     permissions (its
 #     own, or the workflow's when it has none) grant write, or its workflow is
 #     triggered by pull_request_target;
 #   - a routed job has no timeout-minutes, or one outside 1-35 (the runner's
@@ -102,8 +103,12 @@ check_file() {
     }
     /uses:[[:space:]]*["\047]?docker:\/\// { dock = 1 }
     # A docker command anywhere in the job (comment lines were skipped above); the
-    # first one is reported.
-    !dcmd && /(^|[;&|(`[:space:]])docker[[:space:]]+(run|build|buildx|compose|pull|push|exec|login|create|start)([[:space:]]|$)|(^|[;&|(`[:space:]])docker-compose([[:space:]]|$)/ { dcmd = NR }
+    # first one is reported. Global options may come between docker and the
+    # subcommand (docker -H host run, docker --log-level debug build,
+    # docker --context x compose up, docker -D pull): each is a token starting with
+    # "-", optionally followed by one value token that does not. A false match only
+    # keeps a job on ubuntu-latest.
+    !dcmd && /(^|[;&|(`[:space:]])docker([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)*[[:space:]]+(run|build|buildx|compose|pull|push|exec|login|create|start)([[:space:]]|$)|(^|[;&|(`[:space:]])docker-compose([[:space:]]|$)/ { dcmd = NR }
     /^    runs-on:.*vars\.SCION_LARGE_RUNNER/ {
       line = $0; sub(/[[:space:]]+$/, "", line)
       if (line == "    " canon) routed = 1
