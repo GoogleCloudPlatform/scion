@@ -1381,6 +1381,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// kept (ptone/scion#6580; mergeRuntimeEntries). The row revision read
 	// is the CAS base.
 	var runtimeMergeWarnings []string
+	var runtimesBefore map[string]config.V1RuntimeConfig
 	if _, ok := sectionDocs["runtimes"]; ok {
 		var rowValue []byte
 		rev := int64(0)
@@ -1393,6 +1394,13 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			slog.Error("PUT server-config: failed to read runtimes section", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
 			return
+		}
+		// The stored runtimes for the placement save checks: the row, or
+		// the effective runtimes when there is no row or it does not
+		// decode (a bootstrap-origin hub), so a stored value never counts
+		// as one this save sets.
+		if len(bytes.TrimSpace(rowValue)) == 0 || json.Unmarshal(rowValue, &runtimesBefore) != nil {
+			runtimesBefore = ops.Snapshot().Runtimes
 		}
 		merged, warnings, err := mergeRuntimesRow(rowValue, req.Runtimes, sentRuntimesObject(rawBody))
 		if err != nil {
@@ -1616,6 +1624,21 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 				profiles = snap.Profiles
 			}
 			saveWarnings = safeToEvictSaveWarnings(runtimes, profiles)
+			// Kubernetes placement and identity fields (ptone/scion#6580):
+			// a problem this save causes is refused; one already stored
+			// that the save does not touch is a warning.
+			profilesBefore := snap.Profiles
+			if !hasRuntimes {
+				runtimesBefore = snap.Runtimes
+			}
+			pErrs, pWarnings := config.RuntimeSaveChecks(runtimesBefore, runtimes, profilesBefore, profiles)
+			if len(pErrs) > 0 {
+				writeResourceQuantityError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, pErrs)
+				return
+			}
+			saveWarnings = append(saveWarnings, resourceQuantityWarnings(pWarnings)...)
+			saveWarnings = append(saveWarnings, config.PlacementIgnoredWarnings(runtimes, profiles)...)
+			saveWarnings = append(saveWarnings, config.PlacementSettingsWarnings(runtimes, profiles)...)
 		}
 		// Resource quantities (ptone/scion#6581): the profiles the body
 		// sends, and default_resources when the body sends it.

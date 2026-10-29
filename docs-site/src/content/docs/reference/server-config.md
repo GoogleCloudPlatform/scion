@@ -1677,6 +1677,13 @@ Because env overrides on Layer-1 keys reintroduce per-node drift, the system war
 
 **Schema endpoint**: `GET /api/v1/admin/server-config/schema` returns JSON-schema fragments and koanf key paths per section for UI form generation and CLI validation.
 
+#### Kubernetes placement and identity checks
+
+A save checks the Kubernetes placement and identity fields of runtime entries and profiles with the rules `scion config validate` applies: `node_selector` keys and values, `tolerations` (an empty key needs operator `Exists`; `Exists` takes no value; the effect is empty, `NoSchedule`, `PreferNoSchedule` or `NoExecute`), `runtime_class_name`, `priority_class_name` (runtime entries), `kubernetes_service_account_mappings` (lowercase GCP service account email to Kubernetes ServiceAccount name) and `kubernetes_block_service_account`, and that runtime entries targeting the same cluster and namespace (the same context and namespace) agree on placement.
+
+- A problem the save causes is refused (`422` in DB mode, `400` in `settings.yaml` mode), naming the field: an invalid value in a field the save sets or changes, an invalid value on a new entry, or a disagreement in a sibling group where the save adds an entry or changes a member's placement, context or namespace.
+- A problem already stored that the save does not touch is accepted with a warning in `warnings`, so a stored problem never blocks an unrelated edit. Fixing a stored disagreement in the save is accepted.
+
 #### Resource quantities
 
 `default_resources`, `profiles.<name>.resources` and `profiles.<name>.harness_overrides.<harness>.resources` take Kubernetes quantities: `cpu` in cores or millicores (`2`, `500m`), `memory` and `disk` in bytes with a unit (`512Mi`, `16Gi`, `20Gi`; `Ki`, `Mi`, `Gi` and `Ti` are powers of 1024, `k`, `M`, `G` and `T` powers of 1000). A memory or disk value without a unit is a byte count, so `memory: "16"` is 16 bytes, not 16 GiB. A pod with such a limit starts but fails: its in-memory volumes are sized from the memory limit, so writes fail with `ENOSPC`.
