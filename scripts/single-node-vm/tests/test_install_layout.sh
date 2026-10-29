@@ -679,9 +679,19 @@ _layout_assert_guard() {
     "${what}: the guard must be in place before scion-hub.service names it in OnFailure="
 }
 
+# _layout_deploy_to_unit_install CONFIG_JSON -- layout_deploy_through_settings,
+# stopped inside the unit install call: the stub holds deploy.sh there
+# (GCLOUD_STUB_UNIT_INSTALL_BLOCKS) until it is stopped, so it never races
+# ahead into later phases while the test stops it.
+_layout_deploy_to_unit_install() {
+  export GCLOUD_STUB_UNIT_INSTALL_BLOCKS=true
+  layout_deploy_through_settings "$@"
+  unset GCLOUD_STUB_UNIT_INSTALL_BLOCKS
+}
+
 test_layout_deploy_installs_boot_failure_guard() {
   fresh_gcloud_state
-  LAYOUT_SENTINEL=hub-unit-installed layout_deploy_through_settings "$(layout_config_json "$HUB" notify)"
+  LAYOUT_SENTINEL=hub-unit-installed _layout_deploy_to_unit_install "$(layout_config_json "$HUB" notify)"
   assert_eq "true" "$LAYOUT_REACHED_SETTINGS" "deploy must reach the unit install (log: ${DEPLOY_LOG: -400})"
   local cmd
   cmd="$(_layout_unit_install_cmd "$(gcloud_log)")"
@@ -694,7 +704,7 @@ test_layout_deploy_installs_boot_failure_guard() {
 # gcloud even starts. Each command carries scion-layout.sh at most once.
 test_layout_vm_commands_fit_one_argument() {
   fresh_gcloud_state
-  LAYOUT_SENTINEL=hub-unit-installed layout_deploy_through_settings "$(layout_config_json "$HUB" notify)"
+  LAYOUT_SENTINEL=hub-unit-installed _layout_deploy_to_unit_install "$(layout_config_json "$HUB" notify)"
   local unit_cmd migrate_cmd limit=131072
   unit_cmd="$(_layout_unit_install_cmd "$(gcloud_log)")"
   fresh_gcloud_state
@@ -713,7 +723,7 @@ test_layout_vm_commands_fit_one_argument() {
 
 test_layout_deploy_and_migrate_install_the_same_guard() {
   fresh_gcloud_state
-  LAYOUT_SENTINEL=hub-unit-installed layout_deploy_through_settings "$(layout_config_json "$HUB" notify)"
+  LAYOUT_SENTINEL=hub-unit-installed _layout_deploy_to_unit_install "$(layout_config_json "$HUB" notify)"
   local deploy_guard migrate_guard
   deploy_guard="$(_layout_guard_block "$(_layout_unit_install_cmd "$(gcloud_log)")")"
   fresh_gcloud_state

@@ -1497,6 +1497,12 @@ STUBERR
         # it), in the create path and in migrate-layout: a sentinel for
         # tests that stop once the unit is written.
         touch "${GCLOUD_STUB_STATE_DIR}/hub-unit-installed"
+        # GCLOUD_STUB_UNIT_INSTALL_BLOCKS=true holds deploy.sh inside this
+        # call until the test stops it, so it never runs on into later
+        # phases (and their temp files) while being stopped.
+        if [[ "${GCLOUD_STUB_UNIT_INSTALL_BLOCKS:-false}" == "true" ]]; then
+          sleep 60
+        fi
         ;;
       "curl -s http://localhost:8080/healthz")
         # deploy.sh's wait_for_hub_health poll. GCLOUD_STUB_HEALTHZ_BODY
