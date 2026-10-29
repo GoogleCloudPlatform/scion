@@ -37,7 +37,11 @@ import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { showToast } from '../../utils/toast.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { renderReleaseNotesLink } from '../../utils/release-notes-link.js';
-import { LAST_UPDATE_LABELS, renderInstallerUnsupported } from './admin-maintenance-update-card.js';
+import {
+  LAST_UPDATE_LABELS,
+  isOlderClass,
+  renderInstallerUnsupported,
+} from './admin-maintenance-update-card.js';
 import type {
   LastUpdate,
   PendingUpdate,
@@ -160,21 +164,99 @@ function isUpdateStatus(data: unknown): data is UpdateStatus {
   );
 }
 
+/** A string field of a hub error's details, or '' when absent or not a string. */
+function detailString(details: Record<string, unknown> | undefined, key: string): string {
+  const v = details?.[key];
+  return typeof v === 'string' ? v : '';
+}
+
 /**
  * A readable message for a rejected update-binary run request, by the
- * error code the hub sends.
+ * error code the hub sends. details is the error envelope's details,
+ * when the hub sent any.
  */
-export function describeUpdateRunError(code: string, message: string, target: string): string {
+export function describeUpdateRunError(
+  code: string,
+  message: string,
+  target: string,
+  details?: Record<string, unknown>
+): string {
+  const tag = detailString(details, 'target') || target;
   switch (code) {
     case 'already_running':
       return `The hub is already running ${target}. ${message}`;
-    case 'downgrade_not_yet_supported':
-      return `${target} is older than the running version; downgrades are not supported yet. ${message}`;
+    case 'below_downgrade_floor': {
+      const floor = detailString(details, 'floor');
+      return (
+        `${tag} is older than this hub's downgrade floor` +
+        `${floor ? ` (${floor})` : ''} and cannot be installed. ${message}`
+      );
+    }
+    case 'downgrade_unsupported_driver':
+      return (
+        `${tag} is older than the running version, and this hub's database ` +
+        `cannot be snapshotted for a rollback, so it cannot be installed. ${message}`
+      );
+    case 'downgrade_requires_confirmation':
+      return `${tag} is older than the running version and needs a typed confirmation. ${message}`;
+    case 'invalid_param':
+      return `The hub rejected the update request (invalid parameter): ${message}`;
     case 'unknown_param':
       return `The hub rejected the update request (unknown parameter): ${message}`;
     default:
       return `Update to ${target} could not start: ${message}`;
   }
+}
+
+/**
+ * The details of a 409 downgrade_requires_confirmation: what the operator
+ * confirms by typing target, the resolved tag the hub will install.
+ */
+export interface DowngradeConfirmation {
+  target: string;
+  /** The running version, or "(git build)". */
+  current: string;
+  /** downgrade or switch-older. */
+  releaseClass: string;
+  floor: string;
+  /** The directory the database snapshot is written to. */
+  snapshotPath: string;
+  risks: string[];
+}
+
+/**
+ * The typed-confirmation facts of a downgrade_requires_confirmation error,
+ * or null when its details lack the target tag.
+ */
+export function downgradeConfirmationFrom(
+  details: Record<string, unknown> | undefined
+): DowngradeConfirmation | null {
+  const target = detailString(details, 'target');
+  if (!target) return null;
+  const risks = details?.['risks'];
+  return {
+    target,
+    current: detailString(details, 'current'),
+    releaseClass: detailString(details, 'class'),
+    floor: detailString(details, 'floor'),
+    snapshotPath: detailString(details, 'snapshotPath'),
+    risks: Array.isArray(risks) ? risks.filter((r): r is string => typeof r === 'string') : [],
+  };
+}
+
+/**
+ * The toast for a recorded update result. A rollback names the release
+ * the boot-failure guard restored (from) and the one that failed (to).
+ */
+export function lastUpdateMessage(last: LastUpdate): string {
+  if (last.status === 'verified') return `Hub updated to ${last.to} (verified).`;
+  if (last.status === 'rolled_back') {
+    return (
+      `Update rolled back: ${last.to} failed to start, so the hub restored ` +
+      `${last.from || 'the previous release'}.`
+    );
+  }
+  return `Update to ${last.to} ${LAST_UPDATE_LABELS[last.status] ?? last.status}.`;
 }
 
 /**
@@ -526,6 +608,18 @@ export class ScionPageAdminMaintenance extends LitElement {
    */
   @state()
   private updateConfirmOptions: UpdateConfirmOptions | null = null;
+
+  /**
+   * The hub's downgrade_requires_confirmation facts while the typed
+   * confirmation is open (null: closed). It replaces the Update Hub dialog
+   * for the same target and options.
+   */
+  @state()
+  private downgradeConfirm: DowngradeConfirmation | null = null;
+
+  /** What the operator typed in the downgrade confirmation. */
+  @state()
+  private downgradeTyped = '';
 
   /** The update run followed through the restart (null: none). */
   @state()
@@ -973,6 +1067,18 @@ export class ScionPageAdminMaintenance extends LitElement {
       line-height: 1.5;
     }
 
+    .downgrade-risks {
+      margin: -0.5rem 0 0 0;
+      padding-left: 1.25rem;
+      color: var(--scion-text, #1e293b);
+      font-size: 0.875rem;
+      line-height: 1.5;
+    }
+
+    .downgrade-risks li + li {
+      margin-top: 0.25rem;
+    }
+
     /* -- Empty state ------------------------------------------------------ */
 
     .empty-inline {
@@ -1262,25 +1368,41 @@ export class ScionPageAdminMaintenance extends LitElement {
     this.updateConfirmOptions = options;
   }
 
-  private closeUpdateConfirm(): void {
-    if (!this.applyUpdateLoading) {
-      this.updateConfirmTarget = null;
-      this.updateConfirmOptions = null;
+  /** Closes the update dialogs (both steps); not while a request is in flight. */
+  private closeUpdateConfirm(e?: Event): void {
+    if (this.applyUpdateLoading) {
+      e?.preventDefault();
+      return;
     }
+    this.updateConfirmTarget = null;
+    this.updateConfirmOptions = null;
+    this.downgradeConfirm = null;
+    this.downgradeTyped = '';
+  }
+
+  /** Re-posts the update with confirm_downgrade once the typed tag matches. */
+  private confirmDowngrade(): void {
+    const d = this.downgradeConfirm;
+    if (!d || this.downgradeTyped !== d.target || this.applyUpdateLoading) return;
+    void this.applyUpdate(d.target);
   }
 
   /**
    * Starts update-binary for the confirmed target. The request carries only
    * target_version, pin and (from the release picker) channel; the hub
-   * resolves the release assets itself.
+   * resolves the release assets itself. An older target is refused with
+   * 409 downgrade_requires_confirmation; its details open the typed
+   * confirmation, which posts again with confirmDowngrade, the resolved tag
+   * the operator typed.
    */
-  private async applyUpdate(): Promise<void> {
+  private async applyUpdate(confirmDowngrade?: string): Promise<void> {
     const target = this.updateConfirmTarget;
     if (!target) return;
     const options = this.updateConfirmOptions;
     const params: Record<string, string> = options
       ? { target_version: target, channel: options.channel, pin: options.pin }
       : { target_version: target, pin: 'latest' };
+    if (confirmDowngrade) params['confirm_downgrade'] = confirmDowngrade;
     const fromVersion = this.updateStatus?.current.version;
     this.applyUpdateLoading = true;
     try {
@@ -1292,7 +1414,24 @@ export class ScionPageAdminMaintenance extends LitElement {
 
       if (!response.ok) {
         const info = await parseApiError(response, `HTTP ${response.status}`);
-        throw new Error(describeUpdateRunError(info.code, info.message, target));
+        const confirmation =
+          info.code === 'downgrade_requires_confirmation'
+            ? downgradeConfirmationFrom(info.details)
+            : null;
+        if (confirmation) {
+          if (confirmDowngrade) {
+            // The confirmed tag no longer matches (for example latest moved):
+            // ask again for the tag the hub resolves now.
+            showToast(
+              `The hub now resolves the update to ${confirmation.target}; type that tag to confirm.`,
+              'warning'
+            );
+          }
+          this.downgradeConfirm = confirmation;
+          this.downgradeTyped = '';
+          return;
+        }
+        throw new Error(describeUpdateRunError(info.code, info.message, target, info.details));
       }
       const started = (await response.json().catch(() => ({}))) as { runId?: string };
 
@@ -1302,6 +1441,8 @@ export class ScionPageAdminMaintenance extends LitElement {
       );
       this.updateConfirmTarget = null;
       this.updateConfirmOptions = null;
+      this.downgradeConfirm = null;
+      this.downgradeTyped = '';
       this.updateAvailable = null;
       this.updateReconnectError = null;
       if (started.runId) {
@@ -1567,14 +1708,7 @@ export class ScionPageAdminMaintenance extends LitElement {
   private reportUpdateResult(tracked: TrackedUpdate, runStatus: string): void {
     const last = this.updateStatus?.lastUpdate;
     if (last && tracked.runId && last.runId === tracked.runId) {
-      if (last.status === 'verified') {
-        showToast(`Hub updated to ${last.to} (verified).`, 'success');
-      } else {
-        showToast(
-          `Update to ${last.to} ${LAST_UPDATE_LABELS[last.status] ?? last.status}.`,
-          'warning'
-        );
-      }
+      showToast(lastUpdateMessage(last), last.status === 'verified' ? 'success' : 'warning');
     } else if (runStatus === 'failed') {
       const target = tracked.target || 'the new version';
       showToast(`Update to ${target} failed. See the run log.`, 'warning');
@@ -2043,10 +2177,11 @@ export class ScionPageAdminMaintenance extends LitElement {
   private renderUpdateConfirmDialog() {
     const target = this.updateConfirmTarget;
     if (!target) return nothing;
+    if (this.downgradeConfirm) return this.renderDowngradeConfirmDialog(this.downgradeConfirm);
     const latestChannel = target.startsWith('latest:') ? target.slice('latest:'.length) : null;
     const unsupported = this.updateStatus ? !this.updateStatus.installer.supported : false;
     return html`
-      <sl-dialog label="Update Hub" open @sl-request-close=${() => this.closeUpdateConfirm()}>
+      <sl-dialog label="Update Hub" open @sl-request-close=${(e: Event) => this.closeUpdateConfirm(e)}>
         <div class="dialog-body">
           <p>
             ${latestChannel
@@ -2055,6 +2190,17 @@ export class ScionPageAdminMaintenance extends LitElement {
               : html`Update the hub to <strong>${target}</strong>?`}
           </p>
           ${this.renderUpdateConfirmDetails(target, this.updateConfirmOptions)}
+          ${isOlderClass(this.updateConfirmOptions?.releaseClass)
+            ? html`<p class="confirm-older">
+                <strong>${target}</strong> is older than the running version. The hub lists the
+                risks next, and you confirm by typing the tag.
+              </p>`
+            : nothing}
+          ${this.updateStatus?.downgrade?.snapshotsSupported
+            ? html`<p class="confirm-snapshot">
+                The hub takes a database snapshot before it installs the new binary.
+              </p>`
+            : nothing}
           <p style="color: var(--sl-color-warning-700, #a16207); font-weight: 500;">
             The hub restarts once the new binary is installed. You will temporarily lose
             connectivity; this page reconnects when the hub is back.
@@ -2080,6 +2226,83 @@ export class ScionPageAdminMaintenance extends LitElement {
         >
           <sl-icon slot="prefix" name="download"></sl-icon>
           Update &amp; Restart
+        </sl-button>
+      </sl-dialog>
+    `;
+  }
+
+  /**
+   * Second step for an older target: the hub's risk list from the 409
+   * downgrade_requires_confirmation, and a field where the operator types
+   * the exact tag. Confirm stays disabled until it matches; Cancel ends the
+   * update without another request.
+   */
+  private renderDowngradeConfirmDialog(d: DowngradeConfirmation): TemplateResult {
+    const matches = this.downgradeTyped === d.target;
+    const label = d.releaseClass === 'switch-older' ? 'Confirm Older Release' : 'Confirm Downgrade';
+    return html`
+      <sl-dialog
+        class="downgrade-confirm"
+        label=${label}
+        open
+        @sl-request-close=${(e: Event) => this.closeUpdateConfirm(e)}
+      >
+        <div class="dialog-body">
+          <p class="downgrade-versions">
+            Install <strong>${d.target}</strong>, which is older than the running version
+            <strong>${d.current || 'unknown'}</strong>?
+          </p>
+          ${d.risks.length
+            ? html`<p>Risks:</p>
+                <ul class="downgrade-risks">
+                  ${d.risks.map((r) => html`<li>${r}</li>`)}
+                </ul>`
+            : nothing}
+          ${d.snapshotPath
+            ? html`<p class="downgrade-snapshot">
+                A database snapshot is written to <code>${d.snapshotPath}</code> before the
+                install.
+              </p>`
+            : nothing}
+          ${d.floor
+            ? html`<p class="downgrade-floor">
+                This hub cannot go below its downgrade floor, <strong>${d.floor}</strong>.
+              </p>`
+            : nothing}
+          <sl-input
+            class="downgrade-typed"
+            label=${`Type ${d.target} to confirm`}
+            autocomplete="off"
+            spellcheck="false"
+            autofocus
+            .value=${this.downgradeTyped}
+            ?disabled=${this.applyUpdateLoading}
+            @sl-input=${(e: Event) => {
+              this.downgradeTyped = (e.target as HTMLElement & { value: string }).value;
+            }}
+            @keydown=${(e: KeyboardEvent) => {
+              if (e.key === 'Enter') this.confirmDowngrade();
+            }}
+          ></sl-input>
+        </div>
+        <sl-button
+          slot="footer"
+          variant="default"
+          class="downgrade-cancel"
+          ?disabled=${this.applyUpdateLoading}
+          @click=${() => this.closeUpdateConfirm()}
+          >Cancel</sl-button
+        >
+        <sl-button
+          slot="footer"
+          variant="danger"
+          class="confirm-downgrade"
+          ?loading=${this.applyUpdateLoading}
+          ?disabled=${!matches}
+          @click=${() => this.confirmDowngrade()}
+        >
+          <sl-icon slot="prefix" name="download"></sl-icon>
+          Install ${d.target} &amp; Restart
         </sl-button>
       </sl-dialog>
     `;
