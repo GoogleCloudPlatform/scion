@@ -32,16 +32,24 @@ import { setPreferredTimeZone } from '../../../utils/time.js';
 // A stand-in for marked + DOMPurify. It reproduces the shapes the mention
 // post-processing has to cope with — paragraphs, fenced code, inline code and
 // links — without pulling the real parser into the test.
-vi.mock('../../../utils/markdown.js', () => ({
-  getMarkdownRenderer: () =>
-    Promise.resolve({
-      render: (markdown: string) =>
-        `<p>${markdown
-          .replace(/```([\s\S]*?)```/g, '</p><pre><code>$1</code></pre><p>')
-          .replace(/`([^`]+)`/g, '<code>$1</code>')
-          .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" title="see $1">$1</a>')}</p>`,
-    }),
-}));
+vi.mock('../../../utils/markdown.js', () => {
+  const render = (markdown: string): string =>
+    `<p>${markdown
+      .replace(/```([\s\S]*?)```/g, '</p><pre><code>$1</code></pre><p>')
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" title="see $1">$1</a>')}</p>`;
+  return {
+    getMarkdownRenderer: () =>
+      Promise.resolve({
+        render,
+        renderFragment: (markdown: string) => {
+          const tpl = document.createElement('template');
+          tpl.innerHTML = render(markdown);
+          return tpl.content;
+        },
+      }),
+  };
+});
 
 // The real editor pulls the CodeMirror bundle in on connect; the preview
 // tests only care about what the message hands it.
