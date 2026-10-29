@@ -299,6 +299,9 @@ func (sw *chatRetentionSweeper) RunTick(ctx context.Context, p chatRetentionPoli
 	}
 	cfg := p.Config
 	start := sw.now()
+	// The time left before ctx's deadline, measured at the same instant
+	// as start, so budgetEnd applies both terms to one moment.
+	remaining, hasDeadline := chatRetentionTimeLeft(ctx)
 
 	run, err := sw.store.LatestChatRetentionRun(ctx, store.ChatRetentionTriggerSweep, start.Add(-chatRetentionRunWindow))
 	if err != nil {
@@ -334,7 +337,7 @@ func (sw *chatRetentionSweeper) RunTick(ctx context.Context, p chatRetentionPoli
 		cursorDirty = true
 	}
 
-	tickErr := sw.walk(ctx, p, &cursor, run, &res, sw.budgetEnd(ctx, start, cfg), &cursorDirty)
+	tickErr := sw.walk(ctx, p, &cursor, run, &res, chatRetentionBudgetEnd(start, remaining, hasDeadline, cfg), &cursorDirty)
 
 	// The end-of-tick writes record what the tick committed even when ctx
 	// is done (the scheduler's handler deadline, or a shutdown): they run
@@ -389,16 +392,25 @@ func (sw *chatRetentionSweeper) RunTick(ctx context.Context, p chatRetentionPoli
 	return res, tickErr
 }
 
-// budgetEnd is when the tick's walk must stop: start + tick_budget_seconds,
-// or earlier when ctx has a deadline, so that a last chunk (at most
+// chatRetentionTimeLeft returns the wall-clock time left before ctx's
+// deadline, and false when ctx has none.
+func chatRetentionTimeLeft(ctx context.Context) (time.Duration, bool) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return 0, false
+	}
+	return time.Until(deadline), true
+}
+
+// chatRetentionBudgetEnd is when the tick's walk must stop: start +
+// tick_budget_seconds, or earlier when the tick's context has a deadline
+// (remaining, measured at start), so that a last chunk (at most
 // chatRetentionChunkTimeout) and the end-of-tick writes still fit before
-// it. The deadline is measured on the wall clock and applied to the
-// sweeper's clock.
-func (sw *chatRetentionSweeper) budgetEnd(ctx context.Context, start time.Time, cfg opsettings.ChatRetentionConfig) time.Time {
+// it. remaining is wall-clock time applied to the sweeper's clock.
+func chatRetentionBudgetEnd(start time.Time, remaining time.Duration, hasDeadline bool, cfg opsettings.ChatRetentionConfig) time.Time {
 	end := start.Add(cfg.TickBudget())
-	if deadline, ok := ctx.Deadline(); ok {
-		byDeadline := start.Add(time.Until(deadline) - chatRetentionChunkTimeout - chatRetentionDeadlineMargin)
-		if byDeadline.Before(end) {
+	if hasDeadline {
+		if byDeadline := start.Add(remaining - chatRetentionChunkTimeout - chatRetentionDeadlineMargin); byDeadline.Before(end) {
 			end = byDeadline
 		}
 	}

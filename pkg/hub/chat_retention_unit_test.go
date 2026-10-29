@@ -682,3 +682,15 @@ func TestChatHistoryRetentionMarker_Conditions(t *testing.T) {
 		})
 	}
 }
+
+// TestChatRetentionBudgetEnd: the walk ends at start + budget, or at start +
+// the time left before the deadline minus one chunk timeout and the margin,
+// whichever is first; both terms are anchored at start.
+func TestChatRetentionBudgetEnd(t *testing.T) {
+	start := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	cfg := chatRetentionTestConfig(func(c *opsettings.ChatRetentionConfig) { c.TickBudgetSeconds = 40 })
+	assert.Equal(t, start.Add(40*time.Second), chatRetentionBudgetEnd(start, 0, false, cfg), "no deadline")
+	assert.Equal(t, start.Add(40*time.Second), chatRetentionBudgetEnd(start, 55*time.Second, true, cfg), "55 s handler: the budget governs")
+	assert.Equal(t, start.Add(3*time.Second), chatRetentionBudgetEnd(start, 10*time.Second, true, cfg), "10 s left: 10 - 5 - 2")
+	assert.True(t, chatRetentionBudgetEnd(start, 5*time.Second, true, cfg).Before(start), "under 7 s left: no chunk")
+}
