@@ -228,6 +228,19 @@ func TestRecordedRuntime_RecordedTypeServesEveryRoute(t *testing.T) {
 
 				w := serveRR(srv, tc.method, "/api/v1/agents/"+rrAgent+tc.action+rrQuery(recorded), tc.body)
 
+				if tc.name == "restart" && recorded != "docker" {
+					// The restart names no project and the pod records
+					// none: on this legacy Kubernetes runtime it is
+					// refused before the stop (operator-owned placement),
+					// with nothing stopped or started on either runtime.
+					if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementFlatRestartNoProjectCause) {
+						t.Fatalf("status = %d; body = %s; want 400 refused before the stop", w.Code, w.Body.String())
+					}
+					if a, o := want.acted(), other.acted(); a != 0 || o != 0 {
+						t.Errorf("acted on: recorded runtime %d, other %d; want none", a, o)
+					}
+					return
+				}
 				if w.Code >= 400 {
 					t.Fatalf("status = %d; body = %s", w.Code, w.Body.String())
 				}

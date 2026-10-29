@@ -108,6 +108,18 @@ func TestLegacyRestartPersistedConflictRejectedBeforeStop(t *testing.T) {
 	expectNoPodEffects(t, f)
 }
 
+// A legacy restart whose stored config exists but does not parse is
+// refused before the stop; one with no stored config yet is left to the
+// start, which checks the config it provisions.
+func TestLegacyRestartUnreadableConfigRefusedBeforeStop(t *testing.T) {
+	f, _ := newOrderFixture(t, plGlobal(""), plGoodRecord(), `{"kubernetes": `)
+	w := postAgentOpFor(t, f.srv, plOrderAgent, "restart", projectBody(f.dotScion, ""))
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementAgentConfigCause) {
+		t.Fatalf("got %d %s", w.Code, w.Body.String())
+	}
+	expectNoPodEffects(t, f)
+}
+
 // A legacy restart on the Kubernetes runtime whose project path is empty
 // after every recovery cannot read the stored config before the stop, so
 // it is refused before the stop.
@@ -121,6 +133,26 @@ func TestLegacyPathlessRestartRefusedBeforeStop(t *testing.T) {
 		t.Fatalf("got %d %s", w.Code, w.Body.String())
 	}
 	expectNoPodEffects(t, f)
+}
+
+// An orphaned agent (no project ID, or its project deleted) is restarted by
+// a current Hub with neither projectPath nor projectSlug, and with or
+// without the old project ID; with no project recorded by its container
+// either, the restart is refused before the stop, like an older Hub's.
+func TestLegacyOrphanedAgentRestartRefusedBeforeStop(t *testing.T) {
+	for name, query := range map[string]string{"no project ID": "", "deleted project": "?projectId=gone-project"} {
+		t.Run(name, func(t *testing.T) {
+			f, _ := newOrderFixture(t, plBareGlobal, plGoodRecord(), `{}`)
+			for i := range f.mgr.agents {
+				f.mgr.agents[i].ProjectPath = ""
+			}
+			w := postAgentOpFor(t, f.srv, plOrderAgent, "restart"+query, `{}`)
+			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementFlatRestartNoProjectCause) {
+				t.Fatalf("got %d %s", w.Code, w.Body.String())
+			}
+			expectNoPodEffects(t, f)
+		})
+	}
 }
 
 // Malformed or invalid placement in the Hub's stored runtimes and profiles

@@ -657,7 +657,10 @@ runtimes:
 		assertAccepted(t, w, mgr)
 	})
 
-	t.Run("restart", func(t *testing.T) {
+	// A restart that names no project, of an agent whose container records
+	// none, is refused on a legacy Kubernetes runtime before the stop: its
+	// stored config cannot be checked against the operator-owned placement.
+	t.Run("restart without a project is refused before the stop", func(t *testing.T) {
 		srv, mgr := newKubernetesServer(t)
 		mgr.agents = []api.AgentInfo{{ID: "gcp-block-k8s-restart", Name: "gcp-block-k8s-restart", Phase: "running"}}
 		body := `{"resolvedEnv": {"SCION_METADATA_MODE": "block", "SCION_METADATA_MODE_SOURCE": "hub"}}`
@@ -665,7 +668,15 @@ runtimes:
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(w, req)
-		assertAccepted(t, w, mgr)
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementFlatRestartNoProjectCause) {
+			t.Fatalf("expected 400 refused before the stop, got %d: %s", w.Code, w.Body.String())
+		}
+		if n := mgr.StopCalls(); n != 0 {
+			t.Errorf("stop calls = %d, want 0", n)
+		}
+		if n := mgr.StartCalls(); n != 0 {
+			t.Errorf("start calls = %d, want 0", n)
+		}
 	})
 }
 

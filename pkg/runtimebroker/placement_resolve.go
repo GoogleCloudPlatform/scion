@@ -612,6 +612,13 @@ func (s *Server) checkStartLegacyPlacement(agentName, projectPath string, inline
 // checkRestartLegacyPlacement checks, before the restart endpoint's stop,
 // the agent's persisted kubernetes block against the placement in effect. A
 // config that cannot be read fails closed.
+//
+// On a legacy Runtime Broker every Kubernetes start is operator-owned
+// (placementForStart). An agent with no stored config yet has nothing to
+// check before the stop: Manager.Start checks the config it provisions with
+// the same operator rules (config.ApplyPlacement), as checkStartOperatorPlacement
+// leaves it on start. A stored config that exists but cannot be read or
+// parsed still fails closed, and so does a restart with no project path.
 func (s *Server) checkRestartLegacyPlacement(agentName, projectPath string, sharedWorkspace bool, rp *api.ResolvedPlacement) error {
 	if rp != nil && rp.OperatorOwned {
 		if projectPath == "" {
@@ -689,6 +696,9 @@ func (s *Server) checkStartOperatorPlacement(agentName, projectPath string, inli
 // config that cannot be read fails closed.
 func (s *Server) checkRestartOperatorPlacement(agentName, projectPath string, sharedWorkspace bool, rp *api.ResolvedPlacement) error {
 	loaded, err := readAgentScionConfig(agentName, projectPath, sharedWorkspace)
+	if err != nil && !s.isFlat() && loaded.stage == "read" && errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
 		s.agentLifecycleLog.Warn("Kubernetes placement: the agent's config could not be read", "agent", agentName, "stage", loaded.stage, "error", err)
 		return placementRefusal(placementAgentConfigCause)

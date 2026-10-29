@@ -896,31 +896,29 @@ func TestEnsureAgentOwnRuntime_ProfileEditedResolvesAgain(t *testing.T) {
 
 // Restart of an agent whose pod is already gone, in the issue's setup: the
 // best-effort search of the other runtimes meets the Forbidden default
-// namespace, which is logged and skipped (no 503 lookup failure); the
-// restart goes on to start the agent.
-func TestRestartAgent_ProfileNamespace_PodGone_ProceedsToStart(t *testing.T) {
+// namespace, which is logged and skipped (no 503 lookup failure). On a
+// legacy Kubernetes runtime the pathless restart is then refused before
+// the stop (operator-owned placement).
+func TestRestartAgent_ProfileNamespace_PodGonePathless_RefusedBeforeStop(t *testing.T) {
 	f := newOwnRTFixture(t, "agents", false)
-	// The start below reads the global settings only. Clear the embedded
-	// default harness config, so it fails on the missing project path and
-	// not on resolving that harness config (whose "not found" error the
-	// handler reports as a missing agent, ptone/scion#5433).
 	globalDir := filepath.Dir(filepath.Dir(filepath.Dir(f.projectDir)))
 	if err := os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte("schema_version: \"1\"\ndefault_harness_config: \"\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	w := f.do(t, http.MethodPost, "/api/v1/agents/"+ownRTAgent+"/restart?projectId="+ownRTProjectID+"&runtime=kubernetes")
-	// The start that follows fails: with the pod gone, restart has no
-	// project path for the agent (unchanged behaviour), so it answers 500,
-	// not the 503 a failed lookup would give.
-	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "Failed to restart agent") {
-		t.Fatalf("restart status = %d, body %s; want 500 from the start", w.Code, w.Body.String())
+	// With the pod gone, restart has no project path for the agent, so the
+	// stored config cannot be checked against the operator-owned placement
+	// of the legacy Kubernetes runtime: the restart is refused before the
+	// stop, and never proceeds to the start.
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementFlatRestartNoProjectCause) {
+		t.Fatalf("restart status = %d, body %s; want 400 refused before the stop", w.Code, w.Body.String())
 	}
 	if recs := f.logRecords(t, "runtime list failed while searching the other runtimes"); len(recs) == 0 {
 		t.Fatalf("no skipped-runtime warning; logs:\n%s", f.logs.String())
 	}
-	if recs := f.logRecords(t, "agent not found in project, proceeding with start"); len(recs) != 1 {
-		t.Fatalf("restart did not proceed to start; logs:\n%s", f.logs.String())
+	if recs := f.logRecords(t, "agent not found in project, proceeding with start"); len(recs) != 0 {
+		t.Fatalf("restart proceeded to start; logs:\n%s", f.logs.String())
 	}
 }
 
@@ -1142,8 +1140,8 @@ func TestHandleAgentAttach_PassesProjectPathHint(t *testing.T) {
 
 // Two same-named pods of the agent in two other namespaces, and none in the
 // agent's own runtime: they are two candidates (not one by pod name), so
-// restart fails as ambiguous without stopping or starting anything, and
-// delete fails without removing either.
+// restart (with no project path left, refused before the stop) stops and
+// starts nothing, and delete fails as ambiguous without removing either.
 func TestOtherRuntimes_SameNamedPodsInTwoNamespaces_Ambiguous(t *testing.T) {
 	setup := func(t *testing.T) (*ownRTFixture, *atomic.Int32) {
 		f := newOwnRTFixture(t, "agents", false)
@@ -1174,10 +1172,11 @@ func TestOtherRuntimes_SameNamedPodsInTwoNamespaces_Ambiguous(t *testing.T) {
 	t.Run("restart", func(t *testing.T) {
 		f, runs := setup(t)
 		w := f.do(t, http.MethodPost, "/api/v1/agents/"+ownRTAgent+"/restart?projectId="+ownRTProjectID+"&runtime=kubernetes")
-		// The HTTP body is the generic runtime-op message; the logged error
-		// carries the reason.
-		if w.Code < 400 || !strings.Contains(f.logs.String(), "ambiguous") {
-			t.Fatalf("restart status = %d, body %s; want an ambiguity failure; logs:\n%s", w.Code, w.Body.String(), f.logs.String())
+		// No single container matches, so the restart (which names no
+		// project) has no project path: on this legacy Kubernetes runtime
+		// it is refused before the stop.
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), placementFlatRestartNoProjectCause) {
+			t.Fatalf("restart status = %d, body %s; want 400 refused before the stop", w.Code, w.Body.String())
 		}
 		if n := runs.Load(); n != 0 {
 			t.Fatalf("starts = %d, want 0", n)
