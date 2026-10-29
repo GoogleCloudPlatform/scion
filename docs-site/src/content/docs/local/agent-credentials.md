@@ -487,7 +487,7 @@ Two diagnostic commands help troubleshoot auth and connectivity:
   The check fails when init's credential has expired or its requests are refused (401/403). When the credential has expired or the Hub refused it, doctor says how to reload the credential.
   In the 20 seconds after a new token file is written, init may still be switching to it, so doctor only warns and asks you to run it again.
   Init publishes this state in a root-owned file. Where init does not run as root, doctor reports the state as unavailable.
-  When the Hub refuses a GCP access or identity token request (`401`/`403` or `scn-gcp-token-unavailable`), the in-container metadata server caches that refusal for 30 seconds (`Retry-After: 30`, or up to 5 minutes when the Hub sends a `Retry-After` header) so credential helpers do not tight-loop the Hub, while transient `5xx` or network errors are not cached; concurrent identity-token requests are also deduplicated per target audience.
+  When the Hub refuses a GCP credential request with HTTP `403`, the in-container metadata server opens a capped exponential back-off window with jitter (base 10 seconds, max 5 minutes), tracked separately for the access token and for identity tokens: during the window, token requests receive the cached `403` refusal (`credential refused by hub; retry after ...`) without calling the Hub and one log line is written per back-off step. A successful fetch resets the back-off, as does a change to the agent's assignment (its service account or Hub credential), which is retried at once; any other error returns `502` with no back-off. Concurrent identity-token fetches are deduplicated per target audience.
 
 ## Agent Progeny & Secret Access
 
