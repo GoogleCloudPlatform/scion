@@ -904,6 +904,14 @@ type StartExtras struct {
 	// (wire key previousProjectIds; see previousProjectIDs). Set on start
 	// and restart; empty sends nothing.
 	PreviousProjectIDs []string
+	// EnvClassifications is the hub's classification of the resolved env
+	// sent on this start or restart (wire key envClassifications), the
+	// same map create sends. The broker accepts the agent credential the
+	// hub issued for the start from the resolved env only when this map
+	// classifies it secret-bootstrap (setStartEnvToken). Nil sends
+	// nothing, which the broker reads as "classification unavailable"; an
+	// empty non-nil map is sent as an empty object.
+	EnvClassifications map[string]api.EnvKind
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -1001,6 +1009,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.LaunchKeepaliveSeconds > 0 {
 		payload["launchKeepaliveSeconds"] = extras.LaunchKeepaliveSeconds
+	}
+	if extras.EnvClassifications != nil {
+		payload["envClassifications"] = extras.EnvClassifications
 	}
 }
 
