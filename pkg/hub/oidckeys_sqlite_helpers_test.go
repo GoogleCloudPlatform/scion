@@ -19,13 +19,15 @@ package hub
 import (
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// createOIDCTestStore creates an in-memory SQLite store for OIDC tests.
+// createOIDCTestStore creates a migrated in-memory SQLite store for OIDC
+// tests.
 func createOIDCTestStore(t *testing.T) store.Store {
 	t.Helper()
-	s, err := newTestStore(t, ":memory:")
+	s, err := hubtestutil.OpenMigratedTestStore(t)
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
