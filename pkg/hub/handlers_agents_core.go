@@ -5819,6 +5819,20 @@ func projectStorageRefusalMessage(msg string) string {
 	return projectStorageRefusalFallback
 }
 
+// brokerProjectStorageRefusal reports whether err carries a runtime broker's
+// 503 project_storage_unavailable, and returns its status, code and message
+// filtered by projectStorageRefusalMessage. Every hub path that reports
+// that refusal, as a response or as recorded text, uses it, so an older
+// broker's path-bearing message never reaches a client.
+func brokerProjectStorageRefusal(err error) (status int, code, message string, ok bool) {
+	var se *brokerStatusError
+	if !errors.As(err, &se) || se == nil || se.StatusCode != http.StatusServiceUnavailable ||
+		se.brokerErrorCode() != projectStorageUnavailableErrorCode {
+		return 0, "", "", false
+	}
+	return se.StatusCode, projectStorageUnavailableErrorCode, projectStorageRefusalMessage(se.brokerErrorMessage()), true
+}
+
 // skillResolutionClientDetails keeps the skill and cause entries of a
 // broker skill resolution failure's details, or returns nil when neither is
 // present.

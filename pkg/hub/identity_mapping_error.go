@@ -212,9 +212,10 @@ func identityMappingFailureText(err error) (string, bool) {
 // dispatch, wherever the failure is reported as text rather than as an HTTP
 // response: a reincarnation record, and the warning of a provision-only
 // create. It is the hub's identity_not_mapped or identity_ksa_mismatch
-// message for a Kubernetes identity mapping refusal (ptone/scion#4024),
-// otherwise err's own text, and "" for a nil err or a typed nil
-// *brokerStatusError.
+// message for a Kubernetes identity mapping refusal (ptone/scion#4024), the
+// code and filtered message of a broker 503 project_storage_unavailable
+// (brokerProjectStorageRefusal), otherwise err's own text, and "" for a nil
+// err or a typed nil *brokerStatusError.
 func dispatchFailureText(err error) string {
 	if err == nil {
 		return ""
@@ -227,6 +228,9 @@ func dispatchFailureText(err error) string {
 	}
 	if text, ok := identityMappingFailureText(err); ok {
 		return text
+	}
+	if _, code, msg, ok := brokerProjectStorageRefusal(err); ok {
+		return code + ": " + msg
 	}
 	return err.Error()
 }
