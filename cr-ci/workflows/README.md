@@ -243,6 +243,44 @@ step prints both the reported and the physical path.
   that key on ubuntu-latest and check that the entries land in
   `/home/runner/.cache/go-build`.
 
+## Fork CI gate
+
+Forks of `GoogleCloudPlatform/scion` (such as `ptone/scion`) are for staging
+pull requests, so a fork does not run CI on `push` or `schedule`. Every job in
+a workflow triggered by a branch push or a schedule starts its job-level `if:`
+with the same gate:
+
+```yaml
+if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
+```
+
+A job that already had an `if:` keeps it, ANDed after the gate:
+`${{ (<gate>) && (<old condition>) }}`. Upstream, the gate is always true, so
+push and schedule runs are unchanged. `pull_request`, `pull_request_target`
+and `workflow_dispatch` runs are unchanged everywhere, the fork included. On
+a fork push or schedule every job is skipped, including the `always()`
+summary jobs, so nothing turns red and no check is left pending. Jobs that
+already carry the stricter upstream-only guard
+(`if: github.repository == 'GoogleCloudPlatform/scion'`, in
+`build-nightly.yml` and `build-preview-weekly.yml`) keep it as it is. No
+variable or other fork-side setting is involved.
+
+As a result, the routing expression's `push` branch routes nothing for now.
+Upstream, `SCION_LARGE_RUNNER` is unset, and on a fork the push run is
+skipped. On a fork, cr-ci serves only same-repository pull requests.
+
+To run push CI on a fork anyway, start the workflow with `workflow_dispatch`
+where it has that trigger (`docs.yml`, `full-test-suite.yml`, `web-e2e.yml`,
+`build-nightly.yml`, `build-preview-weekly.yml`, `race-detection.yml`), or
+edit the gate in that fork's copy of the workflow.
+
+`hack/check-fork-ci-gate.sh` (the `fork-ci-gate-check` job in `ci.yml`, with
+fixtures in `hack/testdata/fork-ci-gate/`) fails when such a job lacks the
+gate. It skips push triggers that filter only tags.
+
+`build-release.yml` (tag pushes) is not gated yet; its jobs carry the
+upstream-only repository guard instead.
+
 ## PoC success criteria
 
 These are part of the full P6 list in

@@ -32,6 +32,8 @@ concurrency:
 permissions:
   contents: read
 
+# Fork CI gate (hack/check-fork-ci-gate.sh, cr-ci/workflows/README.md): on push
+# and schedule every job runs only in GoogleCloudPlatform/scion; forks stage PRs.
 jobs:
   # Path detection for jobs that only matter when specific files change
   # (ptone/scion#2845). Gating uses this job plus a job-level `if:` (or a
@@ -46,6 +48,7 @@ jobs:
   # If the diff itself fails, the outputs fall back to 'true' (fail open).
   changes:
     name: Detect changed paths
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     outputs:
       single_node_vm: ${{ steps.diff.outputs.single_node_vm }}
@@ -175,7 +178,7 @@ jobs:
     name: Runner routing check
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    if: github.event_name == 'pull_request'
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (github.event_name == 'pull_request') }}
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -186,6 +189,26 @@ jobs:
         run: |
           ./hack/check-runner-routing.sh --selftest
           ./hack/check-runner-routing.sh
+
+  # Fork CI gate (hack/check-fork-ci-gate.sh, cr-ci/workflows/README.md). Forks
+  # are for staging PRs, so on push and schedule every job runs only in
+  # GoogleCloudPlatform/scion. This keeps every job of a push- or
+  # schedule-triggered workflow carrying the gate in its if:.
+  fork-ci-gate-check:
+    name: Fork CI gate check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (github.event_name == 'pull_request') }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Check the fork CI gate (selftest, then the workflows)
+        run: |
+          ./hack/check-fork-ci-gate.sh --selftest
+          ./hack/check-fork-ci-gate.sh
 
   build-and-test:
     name: Build & Test
@@ -229,7 +252,7 @@ jobs:
     # Build Web UI is NOT gated: web/embed.go embeds web/dist/client into
     # the Go build, and the Go tests and Build Binary below need it.
     needs: changes
-    if: ${{ !cancelled() }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (!cancelled()) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -905,6 +928,7 @@ jobs:
   # main, so the check is always reported.
   windows-cross-build:
     name: Windows cross-build (guard)
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -938,6 +962,7 @@ jobs:
 
   sqlite-nonhub-tests:
     name: SQLite Tests (non-hub)
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     timeout-minutes: 70
     steps:
@@ -1017,6 +1042,7 @@ jobs:
   # hack/hubshard (hub-shard-plan), so the shard count lives in one place.
   hub-shard-plan:
     name: pkg/hub shard plan
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -1072,6 +1098,7 @@ jobs:
 
   hub-shard:
     name: pkg/hub shard ${{ matrix.shard }}/${{ needs.hub-shard-plan.outputs.count }}
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     needs: hub-shard-plan
     # The runner label comes from hub-shard-plan (outputs.runner), the
     # single place to change it for every pkg/hub shard job.
@@ -1192,6 +1219,7 @@ jobs:
   # one, so this job always has at least one shard.
   hub-shard-postgres-integration:
     name: pkg/hub shard ${{ matrix.shard }}/${{ needs.hub-shard-plan.outputs.count }} Postgres (integration)
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     needs: hub-shard-plan
     runs-on: ${{ needs.hub-shard-plan.outputs.runner }}
     timeout-minutes: 45
@@ -1254,7 +1282,7 @@ jobs:
   hub-sqlite-tests:
     name: pkg/hub SQLite Tests
     needs: [hub-shard-plan, hub-shard, hub-shard-postgres-integration]
-    if: ${{ always() }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (always()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1288,6 +1316,7 @@ jobs:
   # be 1..N in order (the run step checks part == job-index + 1).
   launch-store-postgres-entadapter:
     name: T1 Launch Store PostgreSQL Tests (entadapter ${{ matrix.part }}/${{ strategy.job-total }})
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     # 90m: the whole entadapter suite took ~29-39m of the old single job on
     # main, but ~57m on a runner 2-3x slower than usual
@@ -1373,6 +1402,7 @@ jobs:
   # The T1 Postgres packages other than pkg/store/entadapter.
   launch-store-postgres-others:
     name: T1 Launch Store PostgreSQL Tests (other packages)
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     # The old single job took ~20m, of which ~7m was this job's part; 45m
     # leaves room for a runner 2-3x slower than usual.
@@ -1460,7 +1490,7 @@ jobs:
   launch-store-postgres-tests:
     name: T1 Launch Store PostgreSQL Tests
     needs: [launch-store-postgres-entadapter, launch-store-postgres-others]
-    if: ${{ always() }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (always()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -1476,6 +1506,7 @@ jobs:
 
   workstation-smoke:
     name: Workstation smoke test
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1520,7 +1551,7 @@ jobs:
     # the regex in the changes job), and always on push to main. Fails open:
     # if the changes job did not succeed, lint runs anyway. A job skipped by
     # its `if:` still reports the golangci-lint check, as success.
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go == 'true') }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go == 'true')) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -1657,6 +1688,7 @@ jobs:
 
   shellcheck:
     name: shellcheck
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
@@ -1793,6 +1825,7 @@ jobs:
 
   ent-generate-check:
     name: ent generated code drift
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
@@ -1861,7 +1894,7 @@ jobs:
     # Runs only when scripts/single-node-vm/** or this workflow changed, and
     # always on push to main. Fails open: if the changes job did not succeed,
     # the harness runs anyway.
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.single_node_vm == 'true') }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.single_node_vm == 'true')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -1887,7 +1920,7 @@ jobs:
     # Runs only when scripts/starter-hub/** or this workflow changed, and
     # always on push to main. Fails open: if the changes job did not succeed,
     # the tests run anyway.
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.starter_hub == 'true') }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.starter_hub == 'true')) }}
     runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && vars.SCION_LARGE_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
@@ -1918,7 +1951,7 @@ jobs:
   chat-mobile-e2e:
     name: Chat mobile E2E (shard ${{ matrix.shard }}/2)
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.web == 'true') }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.web == 'true')) }}
     runs-on: ubuntu-latest
     # Above the config's CI globalTimeout (20m) plus setup (~2-4m), so a
     # slow or hung run stops inside Playwright, writes its report, and the
@@ -1983,7 +2016,7 @@ jobs:
   chat-mobile-e2e-result:
     name: Chat mobile E2E
     needs: [changes, chat-mobile-e2e]
-    if: ${{ always() }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (always()) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -2014,7 +2047,7 @@ jobs:
   perf-budgets-web:
     name: Web perf budgets
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.web == 'true') }}
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (!cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.web == 'true')) }}
     runs-on: ubuntu-latest
     # Above the config's CI globalTimeout (15m) plus setup (npm ci and the
     # Chromium install), so a slow run stops inside Playwright with a report.
