@@ -25,8 +25,9 @@ import (
 
 // The exact neutral end-state message. Hard-coded here (not referencing
 // the constant) so a change to the wording is caught by this test.
-const wantK8sRefusal = "Kubernetes does not support git projects that share one repository across agents " +
-	"(worktree-per-agent or shared-workspace on NFS). Re-create the agent as clone-per-agent, " +
+const wantK8sRefusal = "Kubernetes does not support agents that share one git repository on NFS: this agent is " +
+	"worktree-per-agent, or uses the project's shared workspace and the runtime broker cannot confirm " +
+	"that the shared workspace is not a git repository. Re-create the agent as clone-per-agent, " +
 	"or run it on a local or Docker broker. Work not pushed from the existing agent remains in " +
 	"the project's shared checkout on the workspace storage."
 

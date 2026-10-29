@@ -347,6 +347,14 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		delete(env, "SCION_WORKSPACE_GIT")
 		opts.Env = env
 	}
+	// SCION_WORKSPACE_GIT as the caller (the runtime broker's start context)
+	// computed it, snapshotted before any settings-driven env merging can
+	// fill the absent key: the harness-config env overlay
+	// (resolveAuthEnvOverlay), the config env layer and the hub default env
+	// (buildAgentEnv). The final env carries exactly this value
+	// (enforceWorkspaceGitEnv), because the Kubernetes runtime's
+	// shared-repository guard trusts it.
+	dispatchWorkspaceGit, dispatchWorkspaceGitSet := opts.Env["SCION_WORKSPACE_GIT"]
 	if finalScionCfg != nil {
 		util.Debugf("Start: GetAgent returned config: harness=%q harnessConfig=%q defaultHarnessConfig=%q image=%q",
 			finalScionCfg.Harness, finalScionCfg.HarnessConfig, finalScionCfg.DefaultHarnessConfig, finalScionCfg.Image)
@@ -2364,6 +2372,9 @@ authDone:
 	// container's env and label cannot disagree. Any value from the
 	// request or template env is replaced.
 	agentEnv = withLaunchIDEnv(agentEnv, runID)
+	// Only the caller's SCION_WORKSPACE_GIT reaches the container env; a
+	// value any merged layer added is removed (see dispatchWorkspaceGit).
+	agentEnv = enforceWorkspaceGitEnv(agentEnv, dispatchWorkspaceGit, dispatchWorkspaceGitSet)
 
 	// The template env layer is never part of agentEnv: it travels as
 	// RunConfig.FallbackEnv, which every runtime applies as the LAST step
