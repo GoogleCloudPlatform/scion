@@ -302,6 +302,27 @@ func TestSharedHubProjectPath_MountingBrokerMissingSubpathRoot(t *testing.T) {
 	assertNoPathValues(t, f, sce.Message)
 }
 
+// A broker that mounts its shares itself (auto_mount on) and fails to mount
+// the share answers with the mount-failure text, never the advice to set
+// auto_mount, and the body names no path.
+func TestSharedHubProjectPath_MountingBrokerMountFails(t *testing.T) {
+	f := newShareVisibleFixture(t, "docker", "") // not in the mount table; the gate server's mounts fail
+	if !f.srv.nfsMountReconciler.MountsShares() {
+		t.Fatal("a docker broker with auto_mount must mount its shares")
+	}
+	_, ok, sce := f.srv.sharedHubProjectPath(context.Background(), sharedRootProjectID)
+	if !ok || sce == nil || sce.Status != http.StatusServiceUnavailable || sce.Code != ErrCodeProjectStorageUnavailable {
+		t.Fatalf("sharedHubProjectPath = %v, %+v; want the 503 %s refusal", ok, sce, ErrCodeProjectStorageUnavailable)
+	}
+	if want := scionrt.ProjectShareMountFailedText(scionrt.ProjectShareMountPathField); sce.Message != want {
+		t.Errorf("message = %q, want %q", sce.Message, want)
+	}
+	if strings.Contains(sce.Message, "auto_mount") {
+		t.Errorf("a broker whose auto_mount is on must not be told to set it: %q", sce.Message)
+	}
+	assertNoPathValues(t, f, sce.Message)
+}
+
 // The NFS dispatch pre-flight of a broker that mounts its shares keeps the
 // exact source match: a Kubernetes dispatch on a shared Layout whose share
 // is mounted from a cosmetically different source, which the broker failed

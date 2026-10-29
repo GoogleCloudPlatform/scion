@@ -812,8 +812,10 @@ func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op str
 		return http.StatusInternalServerError
 	}
 	if sce.Status == http.StatusServiceUnavailable && sce.Code == ErrCodeProjectStorageUnavailable {
-		// Its message names only the share's mount point (operator
-		// configuration) and the remedy.
+		// Its message is one of the path-free project storage texts
+		// (runtime.ProjectShareClientTexts): it names the mount point only
+		// as "its configured mount point" and gives the remedy; the path is
+		// in the broker log.
 		writeError(w, sce.Status, sce.Code, sce.Message, sce.Details)
 		return sce.Status
 	}

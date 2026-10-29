@@ -625,7 +625,9 @@ func TestCreateAgent_NFSGate_Returns503(t *testing.T) {
 			if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "nfs_unavailable") {
 				t.Fatalf("create = %d %s, want 503 nfs_unavailable", rec.Code, rec.Body.String())
 			}
-			if want := runtime.ProjectShareUnavailableText(runtime.ProjectShareMountPathField, false); !strings.Contains(rec.Body.String(), want) {
+			// auto_mount is on and the mount failed: the mount-failure text,
+			// not the advice to set auto_mount.
+			if want := runtime.ProjectShareMountFailedText(runtime.ProjectShareMountPathField); !strings.Contains(rec.Body.String(), want) {
 				t.Errorf("body = %s, want it to contain %q", rec.Body.String(), want)
 			}
 			for _, v := range []string{"ws1", "/mnt/nfs", "10.0.0.2", "/scion-workspaces"} {

@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,7 +38,7 @@ const (
 	harnessPolicyMessage    = `harness-config "scripted" uses scripted provisioning but this broker has allow_container_script_harnesses=false.`
 	// The broker's text names configuration fields, never the path
 	// (runtime.ProjectShareUnavailableText).
-	projectStorageMessage = `project storage share is not visible on this broker (server.project_storage.nfs.mount_root/shares[0].id): make the share available in this broker's container at server.project_storage.nfs.mount_root/shares[0].id (the same server and export as server.project_storage.nfs.shares[0])`
+	projectStorageMessage = `project storage share is not visible on this broker at its configured mount point: make the share (the same storage the hub uses) available in this broker's container at that path`
 )
 
 // brokerHarnessConfigErr is a broker error answer as it reaches the hub.
@@ -202,4 +203,25 @@ func TestSubmitAgentEnv_OtherBrokerErrorsStay502(t *testing.T) {
 			require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
 		})
 	}
+}
+
+// A broker 503 project_storage_unavailable is relayed with its status and
+// code, but its message only when it is one of the known path-free texts. A
+// broker built before those texts named the host mount path in the message;
+// the hub answers with a fixed text instead, never the path.
+func TestDispatchCreateErrorResponse_ProjectStorageMessageFiltered(t *testing.T) {
+	for _, known := range scionrt.ProjectShareClientTexts() {
+		w := httptest.NewRecorder()
+		dispatchCreateErrorResponse(w, brokerHarnessConfigErr(http.StatusServiceUnavailable, "project_storage_unavailable", known), "")
+		assertBrokerRefusalRelayed(t, w, http.StatusServiceUnavailable, "project_storage_unavailable", known)
+	}
+	old := "project storage share is not mounted on this broker (/mnt/nfs/hub-a; mount it or set nfs.auto_mount)"
+	w := httptest.NewRecorder()
+	dispatchCreateErrorResponse(w, brokerHarnessConfigErr(http.StatusServiceUnavailable, "project_storage_unavailable", old), "")
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "project_storage_unavailable", resp.Error.Code)
+	assert.Equal(t, projectStorageRefusalFallback, resp.Error.Message)
+	assert.NotContains(t, w.Body.String(), "/mnt/nfs", "an older broker's mount path must not reach the client")
 }

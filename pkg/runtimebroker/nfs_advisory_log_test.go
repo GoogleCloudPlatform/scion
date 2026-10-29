@@ -30,16 +30,20 @@ import (
 // is not visible, or a failure on a broker that may mount, stays an error.
 func TestNFSShareFailureLogLevel(t *testing.T) {
 	cases := []struct {
-		name       string
-		verifyOnly bool
-		dirExists  bool
-		inTable    bool
-		wantLevel  slog.Level
-		advisory   bool
+		name          string
+		verifyOnly    bool
+		dirExists     bool
+		subPathExists bool
+		inTable       bool
+		wantLevel     slog.Level
+		advisory      bool
 	}{
-		{name: "verify-only, directory visible, source differs", verifyOnly: true, dirExists: true, inTable: true, wantLevel: slog.LevelWarn, advisory: true},
+		{name: "verify-only, directory visible, source differs", verifyOnly: true, dirExists: true, subPathExists: true, inTable: true, wantLevel: slog.LevelWarn, advisory: true},
+		// The same rule as the start refusal and the health check: a mount
+		// point without the subpath root is not the share.
+		{name: "verify-only, mount point visible without the subpath root", verifyOnly: true, dirExists: true, inTable: true, wantLevel: slog.LevelError},
 		{name: "verify-only, directory absent", verifyOnly: true, wantLevel: slog.LevelError},
-		{name: "check-only broker that may mount, directory visible, source differs", dirExists: true, inTable: true, wantLevel: slog.LevelError},
+		{name: "check-only broker that may mount, directory visible, source differs", dirExists: true, subPathExists: true, inTable: true, wantLevel: slog.LevelError},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -51,6 +55,12 @@ func TestNFSShareFailureLogLevel(t *testing.T) {
 			target := filepath.Join(mountRoot, "ws1")
 			if tc.dirExists {
 				if err := os.MkdirAll(target, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.subPathExists {
+				// The default subpath root (cfg.SubPathRoot is empty).
+				if err := os.MkdirAll(filepath.Join(target, "projects"), 0o755); err != nil {
 					t.Fatal(err)
 				}
 			}

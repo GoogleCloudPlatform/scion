@@ -79,7 +79,7 @@ func (s *Server) sharedHubProjectPath(ctx context.Context, projectID string) (pa
 		s.agentLifecycleLog.Error("Project storage share is not visible on this broker", "project_id", projectID,
 			"host_base", layout.HostBase, "error", err)
 		return "", true, &startContextError{Status: http.StatusServiceUnavailable, Code: ErrCodeProjectStorageUnavailable,
-			Message: s.shareUnavailableText(), OriginalErr: err}
+			Message: s.shareMountCheckText(), OriginalErr: err}
 	}
 	// What the tree shows decides the refusal. A mount point without the
 	// subpath root (<HostBase>/<subpath_root>) is not the share: 503, the
@@ -108,6 +108,17 @@ func (s *Server) sharedHubProjectPath(ctx context.Context, projectID string) (pa
 // gives the remedy for the broker's default runtime.
 func (s *Server) shareUnavailableText() string {
 	return scionrt.ProjectShareUnavailableText(scionrt.ProjectShareMountPathField, NFSWarnOnlyRuntime(s.RuntimeName()))
+}
+
+// shareMountCheckText is the client-safe refusal for a failed share check
+// (ensureLayoutShareMounted): on a broker that mounts its shares itself
+// (nfs.auto_mount on), the mount failed, so it is the mount-failure text,
+// not the advice to set auto_mount; otherwise shareUnavailableText.
+func (s *Server) shareMountCheckText() string {
+	if r := s.nfsMountReconciler; r != nil && r.MountsShares() {
+		return scionrt.ProjectShareMountFailedText(scionrt.ProjectShareMountPathField)
+	}
+	return s.shareUnavailableText()
 }
 
 // projectShareNotMountedText is the client text for a start refused with

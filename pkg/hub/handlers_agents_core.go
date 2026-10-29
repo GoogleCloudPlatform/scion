@@ -35,6 +35,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -5784,9 +5785,12 @@ func relayBrokerRefusal(w http.ResponseWriter, err error) bool {
 	case se.StatusCode == http.StatusUnprocessableEntity && code == harnessConfigUnusableErrorCode:
 	case se.StatusCode == http.StatusUnprocessableEntity && code == storageMigrationRequiredErrorCode:
 	case se.StatusCode == http.StatusServiceUnavailable && code == projectStorageUnavailableErrorCode:
-		// The broker does not see the project storage share. Its message
-		// names configuration fields only (never the path) and gives the
-		// remedy, so it is relayed as is.
+		// The broker does not see the project storage share. Its message is
+		// relayed only when it is one of the known path-free texts; a broker
+		// built before those texts put the host mount path in the message,
+		// so anything else is replaced by a fixed text.
+		writeError(w, se.StatusCode, code, projectStorageRefusalMessage(se.brokerErrorMessage()), nil)
+		return true
 	case se.StatusCode == http.StatusConflict && code == ErrCodeConflict:
 	case se.StatusCode == http.StatusForbidden && code == ErrCodeForbidden:
 		// Harness-config policy is today the broker's only producer of a
@@ -5798,6 +5802,21 @@ func relayBrokerRefusal(w http.ResponseWriter, err error) bool {
 	}
 	writeError(w, se.StatusCode, code, se.brokerErrorMessage(), nil)
 	return true
+}
+
+// projectStorageRefusalFallback is the hub's text for a broker's 503
+// project_storage_unavailable whose message is not one of the known
+// path-free texts (scionrt.ProjectShareClientTexts).
+const projectStorageRefusalFallback = "project storage share is not available on the runtime broker; the broker log has the details"
+
+// projectStorageRefusalMessage returns msg when it is one of the runtime
+// broker's known path-free project storage refusal texts, and
+// projectStorageRefusalFallback otherwise.
+func projectStorageRefusalMessage(msg string) string {
+	if slices.Contains(scionrt.ProjectShareClientTexts(), msg) {
+		return msg
+	}
+	return projectStorageRefusalFallback
 }
 
 // skillResolutionClientDetails keeps the skill and cause entries of a

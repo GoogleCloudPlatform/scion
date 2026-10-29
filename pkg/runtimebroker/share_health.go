@@ -17,7 +17,6 @@ package runtimebroker
 import (
 	"context"
 	"log/slog"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -56,7 +55,7 @@ type shareHealthState struct {
 // every project tree lives in. A mount point without it is not the share
 // (the same rule as the start-time refusal in sharedHubProjectPath).
 func shareHealthPath(layout projectfs.Layout) string {
-	return filepath.Join(layout.HostBase, layout.SubPathRoot)
+	return projectfs.ShareSubPathRootDir(layout.HostBase, layout.SubPathRoot)
 }
 
 // checkShareHealth re-evaluates whether the project storage share is

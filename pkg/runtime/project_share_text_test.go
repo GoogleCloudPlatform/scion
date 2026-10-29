@@ -21,22 +21,33 @@ import (
 
 func TestProjectShareUnavailableText(t *testing.T) {
 	if got, want := ProjectShareUnavailableText("/mnt/nfs/ws1", true),
-		"project storage share is not visible on this broker (/mnt/nfs/ws1): make the share available in this broker's container at /mnt/nfs/ws1 (the same server and export as server.project_storage.nfs.shares[0])"; got != want {
+		"project storage share is not visible on this broker at /mnt/nfs/ws1: make the share (the same storage the hub uses) available in this broker's container at that path"; got != want {
 		t.Errorf("platform-mounting broker:\n got %q\nwant %q", got, want)
 	}
 	if got, want := ProjectShareUnavailableText("/mnt/nfs/ws1", false),
-		"project storage share is not mounted on this broker (/mnt/nfs/ws1): mount it, or set server.project_storage.nfs.auto_mount: true"; got != want {
+		"project storage share is not mounted on this broker at /mnt/nfs/ws1: mount it there, or set server.project_storage.nfs.auto_mount: true"; got != want {
 		t.Errorf("host-mounting broker:\n got %q\nwant %q", got, want)
 	}
-	// A platform-mounting broker is never told to set auto_mount: it has no effect there.
-	if strings.Contains(ProjectShareUnavailableText("/mnt/nfs/ws1", true), "auto_mount") {
-		t.Error("the platform-mounting text must not advise auto_mount")
+	if got, want := ProjectShareMountFailedText("/mnt/nfs/ws1"),
+		"project storage share could not be mounted on this broker at /mnt/nfs/ws1: check that the NFS server and export (server.project_storage.nfs.shares[0]) are reachable from the broker; the broker log has the details"; got != want {
+		t.Errorf("mount failure:\n got %q\nwant %q", got, want)
 	}
-	// The client-safe form carries the field name, never the path.
-	for _, pm := range []bool{true, false} {
-		got := ProjectShareUnavailableText(ProjectShareMountPathField, pm)
+	// A platform-mounting broker is never told to set auto_mount: it has no effect there.
+	// Nor is a broker whose auto_mount is already on and failed.
+	for _, s := range []string{ProjectShareUnavailableText("/mnt/nfs/ws1", true), ProjectShareMountFailedText("/mnt/nfs/ws1")} {
+		if strings.Contains(s, "auto_mount") {
+			t.Errorf("text must not advise auto_mount: %q", s)
+		}
+	}
+	// The client-safe forms carry the neutral mount point name, never a path,
+	// and are exactly the client texts.
+	texts := ProjectShareClientTexts()
+	if len(texts) != 3 {
+		t.Fatalf("ProjectShareClientTexts = %d texts, want 3", len(texts))
+	}
+	for _, got := range texts {
 		if strings.Contains(got, "/mnt/") || !strings.Contains(got, ProjectShareMountPathField) {
-			t.Errorf("client-safe form (platformMounts=%v) = %q", pm, got)
+			t.Errorf("client text = %q", got)
 		}
 	}
 }

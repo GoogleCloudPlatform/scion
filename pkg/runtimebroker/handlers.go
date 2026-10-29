@@ -9277,7 +9277,8 @@ func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, pro
 	if err := r.EnsureShareMounted(ctx, shareID); err != nil {
 		s.agentLifecycleLog.Error("NFS share not mounted on the broker; refusing dispatch",
 			"agent", name, "runtime", runtimeType, "share", shareID, "error", err)
-		return errors.New(scionrt.ProjectShareUnavailableText(scionrt.ProjectShareMountPathField, false))
+		// auto_mount is on here (checked above): the mount failed.
+		return errors.New(scionrt.ProjectShareMountFailedText(scionrt.ProjectShareMountPathField))
 	}
 	return nil
 }

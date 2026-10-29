@@ -364,13 +364,18 @@ func (r *NFSMountReconciler) setStatus(shareID, target string, healthy bool, mes
 // advisoryFailure reports whether a failed check of the share mounted at
 // target is advisory only: the reconciler is verify-only (the broker never
 // mounts the share; its runtime mounts the export into each agent) and the
-// share's directory is visible on the broker (projectfs.ShareDirVisible).
+// share's subpath root (<target>/<subpath_root>, projectfs.ShareSubPathRootDir,
+// the directory the start refusal and the health check test) is visible on
+// the broker (projectfs.ShareDirVisible).
 // Such a failure is usually a mount-table source that differs from the
 // configuration in form only, and it does not refuse a dispatch, so it is
 // logged as a warning. A share directory that is not visible, or any
 // failure on a broker that mounts its shares, stays an error.
 func (r *NFSMountReconciler) advisoryFailure(target string) bool {
-	return r.VerifyOnly() && target != "" && projectfs.ShareDirVisible(context.Background(), target) == nil
+	if !r.VerifyOnly() || target == "" || r.cfg == nil {
+		return false
+	}
+	return projectfs.ShareDirVisible(context.Background(), projectfs.ShareSubPathRootDir(target, r.cfg.SubPathRoot)) == nil
 }
 
 // UnhealthyAdvisoryOnly reports whether at least one share is unhealthy
