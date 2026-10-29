@@ -24,7 +24,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
-import type { TemplateResult } from 'lit';
+import type { PropertyValues, TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
@@ -220,8 +220,7 @@ export interface DowngradeConfirmation {
   /** downgrade or switch-older. */
   releaseClass: string;
   floor: string;
-  /** The directory the database snapshot is written to. */
-  snapshotPath: string;
+  /** The hub's risk list; it names the version order and the snapshot path. */
   risks: string[];
 }
 
@@ -240,7 +239,6 @@ export function downgradeConfirmationFrom(
     current: detailString(details, 'current'),
     releaseClass: detailString(details, 'class'),
     floor: detailString(details, 'floor'),
-    snapshotPath: detailString(details, 'snapshotPath'),
     risks: Array.isArray(risks) ? risks.filter((r): r is string => typeof r === 'string') : [],
   };
 }
@@ -619,6 +617,13 @@ export class ScionPageAdminMaintenance extends LitElement {
   /** What the operator typed in the downgrade confirmation. */
   @state()
   private downgradeTyped = '';
+
+  /**
+   * Whether the downgrade sl-dialog is open. It is rendered closed and
+   * opened after its first update (see focusDowngradeConfirm).
+   */
+  @state()
+  private downgradeDialogOpen = false;
 
   /** The update run followed through the restart (null: none). */
   @state()
@@ -1067,7 +1072,7 @@ export class ScionPageAdminMaintenance extends LitElement {
     }
 
     .downgrade-risks {
-      margin: -0.5rem 0 0 0;
+      margin: 0;
       padding-left: 1.25rem;
       color: var(--scion-text, #1e293b);
       font-size: 0.875rem;
@@ -1367,8 +1372,14 @@ export class ScionPageAdminMaintenance extends LitElement {
     this.updateConfirmOptions = options;
     // A new update starts at the Update Hub step, never at a confirmation
     // left over from an earlier target.
+    this.resetDowngradeConfirm();
+  }
+
+  /** Ends the typed confirmation step. */
+  private resetDowngradeConfirm(): void {
     this.downgradeConfirm = null;
     this.downgradeTyped = '';
+    this.downgradeDialogOpen = false;
   }
 
   /** Closes the update dialogs (both steps); not while a request is in flight. */
@@ -1379,8 +1390,41 @@ export class ScionPageAdminMaintenance extends LitElement {
     }
     this.updateConfirmTarget = null;
     this.updateConfirmOptions = null;
-    this.downgradeConfirm = null;
-    this.downgradeTyped = '';
+    this.resetDowngradeConfirm();
+  }
+
+  /**
+   * Moves focus into the typed confirmation. An sl-dialog created already
+   * open skips Shoelace's open handling (its initial focus, [autofocus] and
+   * focus trap run only when open changes after the first update), so the
+   * dialog is rendered closed and opened here once it has updated. On a
+   * re-prompt for another tag the dialog is already open; the input is
+   * focused directly once it is enabled again.
+   */
+  private async focusDowngradeConfirm(): Promise<void> {
+    const dialog = this.renderRoot.querySelector<
+      HTMLElement & { updateComplete?: Promise<unknown> }
+    >('sl-dialog.downgrade-confirm');
+    if (!dialog) return;
+    if (!this.downgradeDialogOpen) {
+      await dialog.updateComplete;
+      if (this.downgradeConfirm) this.downgradeDialogOpen = true;
+      return;
+    }
+    await this.updateComplete;
+    const input = this.renderRoot.querySelector<
+      HTMLElement & { updateComplete?: Promise<unknown> }
+    >('sl-input.downgrade-typed');
+    // sl-input enables its inner input in its own update.
+    await input?.updateComplete;
+    input?.focus();
+  }
+
+  protected override updated(changed: PropertyValues): void {
+    super.updated(changed);
+    if (changed.has('downgradeConfirm') && this.downgradeConfirm) {
+      void this.focusDowngradeConfirm();
+    }
   }
 
   /** Re-posts the update with confirm_downgrade once the typed tag matches. */
@@ -1422,7 +1466,7 @@ export class ScionPageAdminMaintenance extends LitElement {
             ? downgradeConfirmationFrom(info.details)
             : null;
         if (confirmation) {
-          if (confirmDowngrade) {
+          if (confirmDowngrade && confirmation.target !== confirmDowngrade) {
             // The confirmed tag no longer matches (for example latest moved):
             // ask again for the tag the hub resolves now.
             showToast(
@@ -1444,8 +1488,7 @@ export class ScionPageAdminMaintenance extends LitElement {
       );
       this.updateConfirmTarget = null;
       this.updateConfirmOptions = null;
-      this.downgradeConfirm = null;
-      this.downgradeTyped = '';
+      this.resetDowngradeConfirm();
       this.updateAvailable = null;
       this.updateReconnectError = null;
       if (started.runId) {
@@ -2242,7 +2285,10 @@ export class ScionPageAdminMaintenance extends LitElement {
    * Second step for an older target: the hub's risk list from the 409
    * downgrade_requires_confirmation, and a field where the operator types
    * the exact tag. Confirm stays disabled until it matches; Cancel ends the
-   * update without another request.
+   * update without another request. The risks are the hub's own (they
+   * already name the version order and the snapshot path); the floor,
+   * which they do not include, is added, and the versions are spelled out
+   * only when the hub sent no risks.
    */
   private renderDowngradeConfirmDialog(d: DowngradeConfirmation): TemplateResult {
     const matches = this.downgradeTyped === d.target;
@@ -2251,25 +2297,18 @@ export class ScionPageAdminMaintenance extends LitElement {
       <sl-dialog
         class="downgrade-confirm"
         label=${label}
-        open
+        ?open=${this.downgradeDialogOpen}
         @sl-request-close=${(e: Event): void => this.closeUpdateConfirm(e)}
       >
         <div class="dialog-body">
-          <p class="downgrade-versions">
-            Install <strong>${d.target}</strong>, which is older than the running version
-            <strong>${d.current || 'unknown'}</strong>?
-          </p>
           ${d.risks.length
-            ? html`<p>Risks:</p>
-                <ul class="downgrade-risks">
-                  ${d.risks.map((r) => html`<li>${r}</li>`)}
-                </ul>`
-            : nothing}
-          ${d.snapshotPath
-            ? html`<p class="downgrade-snapshot">
-                A database snapshot is written to <code>${d.snapshotPath}</code> before the install.
-              </p>`
-            : nothing}
+            ? html`<ul class="downgrade-risks">
+                ${d.risks.map((r) => html`<li>${r}</li>`)}
+              </ul>`
+            : html`<p class="downgrade-versions">
+                Install <strong>${d.target}</strong>, which is older than the running version
+                <strong>${d.current || 'unknown'}</strong>?
+              </p>`}
           ${d.floor
             ? html`<p class="downgrade-floor">
                 This hub cannot go below its downgrade floor, <strong>${d.floor}</strong>.

@@ -1860,20 +1860,18 @@ describe('Downgrade confirmation', () => {
     expect(root(el).querySelector('sl-dialog[label="Update Hub"]')).toBeNull();
     const d = dialog(el)!;
     expect(d.getAttribute('label')).toBe('Confirm Downgrade');
-    const text = d.textContent!.replace(/\s+/g, ' ');
-    expect(text).toContain(
-      'Install nightly-20261020, which is older than the running version nightly-20261022'
-    );
+    // Rendered closed, then opened after its first update (focus: see
+    // admin-maintenance-downgrade-focus.test.ts).
+    expect(d.hasAttribute('open')).toBe(true);
+    // The hub's risks are the single source; the floor is added.
     expect(
       Array.from(d.querySelectorAll('.downgrade-risks li')).map((li) => li.textContent)
     ).toEqual(RISKS);
-    expect(d.querySelector('.downgrade-snapshot code')?.textContent).toBe('/opt/scion/snapshots');
+    expect(d.querySelector('.downgrade-versions')).toBeNull();
     expect(d.querySelector('.downgrade-floor')?.textContent).toContain('nightly-20261009');
 
-    // Labelled input that takes focus when the dialog opens.
     const input = d.querySelector('sl-input.downgrade-typed')!;
     expect(input.getAttribute('label')).toBe('Type nightly-20261020 to confirm');
-    expect(input.hasAttribute('autofocus')).toBe(true);
     expect(confirmButton(el).hasAttribute('disabled')).toBe(true);
 
     await type(el, 'nightly-20261020');
@@ -1917,6 +1915,57 @@ describe('Downgrade confirmation', () => {
     await settle(el);
     expect(runBodies).toHaveLength(1);
     expect(dialog(el)).not.toBeNull();
+  });
+
+  it('spells out the versions only when the hub sends no risks', async () => {
+    const bare = needsConfirmation('nightly-20261020');
+    const details = (bare.body['error'] as { details: Json }).details;
+    details['risks'] = [];
+    el = await pickDowngradeAndConfirm({ runs: [bare, STARTED] });
+    const d = dialog(el)!;
+    expect(d.querySelector('.downgrade-risks')).toBeNull();
+    expect(d.querySelector('.downgrade-versions')?.textContent?.replace(/\s+/g, ' ')).toContain(
+      'Install nightly-20261020, which is older than the running version nightly-20261022'
+    );
+  });
+
+  it('falls back to a toast when the 409 details lack the target', async () => {
+    el = await pickDowngradeAndConfirm({
+      runs: [
+        {
+          status: 409,
+          body: {
+            error: {
+              code: 'downgrade_requires_confirmation',
+              message: 'confirm it',
+              details: { class: 'downgrade', risks: RISKS },
+            },
+          },
+        },
+      ],
+    });
+    expect(dialog(el)).toBeNull();
+    expect(showToast).toHaveBeenCalledTimes(1);
+    const msg = vi.mocked(showToast).mock.calls[0][0];
+    expect(msg).toContain('nightly-20261020 is older than the running version');
+    expect(msg).toContain('needs a typed confirmation');
+    expect(msg).toContain('confirm it');
+    // The Update Hub dialog stays open, as for other refusals.
+    expect(root(el).querySelector('sl-dialog[label="Update Hub"]')).not.toBeNull();
+    expect(runBodies).toHaveLength(1);
+  });
+
+  it('asks again without the "now resolves" toast when the hub repeats the same tag', async () => {
+    el = await pickDowngradeAndConfirm({
+      runs: [needsConfirmation('nightly-20261020'), needsConfirmation('nightly-20261020')],
+    });
+    await type(el, 'nightly-20261020');
+    confirmButton(el).click();
+    await settle(el);
+    expect(runBodies).toHaveLength(2);
+    expect(showToast).not.toHaveBeenCalled();
+    expect(dialog(el)).not.toBeNull();
+    expect(confirmButton(el).hasAttribute('disabled')).toBe(true);
   });
 
   it('confirms with Enter once the tag matches', async () => {
