@@ -189,6 +189,8 @@ The user who registers a Runtime Broker becomes its owner. Registration admits a
 
 Registering a broker never associates it with a project. Brokers registered before ownership was recorded get an owner assigned automatically when the Hub boots.
 
+The deprecated embedded broker path of `POST /api/v1/projects/register` returns `secretKey` only when it creates the broker's first HMAC secret. When the broker already has a secret, the response leaves `secretKey` out and the stored secret is unchanged. To get a new secret, rotate it (`POST /api/v1/brokers/{id}/rotate-secret`) or register again with `POST /api/v1/brokers` and join with the new token.
+
 Register, re-register, rotate, link, unlink and update events in the audit log record the credential kind and credential ID next to the user, so you can tell whether a sign-in or a specific token was used.
 
 With the `hub.conduit` [experiment](/scion/reference/experiments/) on, each of the Runtime Broker's Conduit sessions is tied to the secret it was admitted with. Deregistering the Runtime Broker, rotating or replacing its secret, or a secret that is no longer active closes those sessions with `4401 authz_expired`. The Runtime Broker retries with backoff (1 to 60 seconds); after a rotation it is admitted again with its new secret. A session that cannot be checked (for example during a database error) stays open until the next check.

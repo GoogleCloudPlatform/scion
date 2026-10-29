@@ -95,7 +95,7 @@ type RegisterProjectResponse struct {
 	Created     bool                     `json:"created"`
 	Matches     []hubclient.ProjectMatch `json:"matches,omitempty"`     // Populated when multiple projects share the same git remote
 	BrokerToken string                   `json:"brokerToken,omitempty"` // DEPRECATED: use two-phase registration
-	SecretKey   string                   `json:"secretKey,omitempty"`   // DEPRECATED: secrets only from /brokers/join
+	SecretKey   string                   `json:"secretKey,omitempty"`   // DEPRECATED: secrets only from /brokers/join; set only when this request minted the broker's first secret
 }
 
 // AddProviderRequest is the request for adding a broker as a project provider.
@@ -1882,10 +1882,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// SECURITY-GATE: the embedded-broker form of register (req.Broker set)
-	// creates or re-registers a broker and returns its secret, so it is
-	// session-only (CREDENTIAL_MANAGEMENT): every credential other than an
-	// interactive session or a dev credential is refused before any lookup
-	// or write. A token registers brokers through POST /api/v1/brokers.
+	// creates or re-registers a broker and can return a newly minted secret
+	// (never a stored one), so it is session-only (CREDENTIAL_MANAGEMENT):
+	// every credential other than an interactive session or a dev
+	// credential is refused before any lookup or write. A token registers
+	// brokers through POST /api/v1/brokers.
 	if req.Broker != nil {
 		if _, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonCredentialManagement); !ok {
 			return
@@ -2527,10 +2528,14 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Generate HMAC credentials for the broker if broker auth service is available
-		// (deprecated flow only - new flow gets secrets from /brokers/join)
+		// (deprecated flow only - new flow gets secrets from /brokers/join).
+		// The response carries a secret only when this request minted the
+		// broker's first one. A broker that already has a secret gets none
+		// back: its stored secret is never returned here, and a new one comes
+		// only from POST /brokers/{id}/rotate-secret or /brokers/join.
 		if s.brokerAuthService != nil {
 			var err error
-			secretKey, err = s.brokerAuthService.GenerateAndStoreSecret(ctx, broker.ID)
+			secretKey, _, err = s.brokerAuthService.MintSecretIfAbsent(ctx, broker.ID)
 			if err != nil {
 				// Log but don't fail - broker is registered, can complete join later
 				util.Debugf("Warning: failed to generate broker secret: %v", err)
