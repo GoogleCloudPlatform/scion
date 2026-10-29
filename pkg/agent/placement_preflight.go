@@ -129,3 +129,41 @@ func agentDirNames(root string) ([]string, error) {
 	sort.Strings(names)
 	return names, nil
 }
+
+// ScanColocatedLegacyPlacement scans the agents of the co-located legacy
+// Runtime Broker colocatedBrokerID from the hub's rows (as the profile
+// reference count reads them), on this host. An agent on another Runtime
+// Broker, or not placed on one yet, is counted as not covered: its pod
+// takes the placement of whichever Runtime Broker starts it. An agent of
+// the co-located broker whose project row is missing or resolves to no
+// path is incomplete.
+func ScanColocatedLegacyPlacement(globalDir, colocatedBrokerID string, in ProfileRefInputs, policy PlacementPolicyFunc) config.PlacementPreflightReport {
+	var r config.PlacementPreflightReport
+	localPaths := make(map[string]string, len(in.Providers))
+	for _, pv := range in.Providers {
+		localPaths[pv.ProjectID] = pv.LocalPath
+	}
+	projects := make(map[string]*ProfileRefProject, len(in.Projects))
+	for i := range in.Projects {
+		projects[in.Projects[i].ID] = &in.Projects[i]
+	}
+	for _, a := range in.Agents {
+		if colocatedBrokerID == "" || a.RuntimeBrokerID != colocatedBrokerID {
+			r.NotCovered++
+			continue
+		}
+		pr := projects[a.ProjectID]
+		if pr == nil {
+			r.AddIncomplete()
+			continue
+		}
+		path, slug := config.ProjectDispatchLocation(localPaths[pr.ID], pr.Slug, config.IsGlobalProjectSlug(pr.Slug))
+		projectPath := config.BrokerProjectPath(globalDir, path, slug)
+		if projectPath == "" {
+			r.AddIncomplete()
+			continue
+		}
+		AddLegacyAgentPlacement(&r, projectPath, a.Slug, pr.SharedWorkspace, policy)
+	}
+	return r
+}

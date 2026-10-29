@@ -89,6 +89,8 @@ For `soft_delete_retention` and `soft_delete_retain_files`, `GET` returns that r
 - Each profile's field shows only a value saved for that profile. A hint shows what the profile inherits and from where. Typing a value saves it.
 - `image_registry_provenance` in the `GET` response is read-only and tells you where the value in effect comes from: the Hub-wide source and value, every Runtime Broker that reports `SCION_IMAGE_REGISTRY` (which beats every saved or file value for that Runtime Broker's agents), and each profile's value. The page shows it as one badge on the field. Every value in the report has its credentials part (everything up to the last `@` that is not part of a digest, after any scheme) replaced with `***`, as in `***@registry.example.com` for `user:password@registry.example.com`.
 
+`placement_preflight` in the `GET` response is a read-only Kubernetes placement report, with counts only (no entry names or values). `settings_counts` counts the stored runtimes and profiles that placement validation refuses, by category, and `settings_repair_sections` names the sections to fix. `agent_counts` counts the agents of the co-located legacy Runtime Broker whose stored configuration would be refused at their next start or restart. `agents_incomplete`, `agents_not_covered` (agents of other Runtime Brokers, or not yet placed) and `agents_not_enumerated` are incomplete coverage, not clean results.
+
 #### Save report
 
 A database-backed save (`PUT /api/v1/admin/server-config`) returns a `reload` object:

@@ -94,6 +94,10 @@ type ServerConfigDBResponse struct {
 	// reports a node env, and each profile's value (ptone/scion#3916).
 	// Read-only.
 	ImageRegistryProvenance *ImageRegistryProvenance `json:"image_registry_provenance,omitempty"`
+
+	// PlacementPreflight is the read-only Kubernetes placement pre-upgrade
+	// report (counts only). Set by the GET handler only.
+	PlacementPreflight *PlacementPreflightView `json:"placement_preflight,omitempty"`
 }
 
 // SupersededKey represents a bootstrap-material key whose value in the
@@ -148,6 +152,7 @@ func (s *Server) handleGetServerConfigDB(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	resp.StorageOverrideErrors = s.removedStorageOverrideErrors()
+	resp.PlacementPreflight = s.placementPreflight(r.Context(), ops)
 	writeJSON(w, http.StatusOK, resp)
 }
 
