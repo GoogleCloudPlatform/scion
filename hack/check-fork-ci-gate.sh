@@ -41,6 +41,25 @@ GATE="(github.event_name != 'push' && github.event_name != 'schedule') || github
 REPO_GUARD="github.repository == 'GoogleCloudPlatform/scion'"
 SKIP_FILES="build-release.yml"
 
+# One private temp dir for gated()'s probe files, created here in the main
+# shell (an EXIT trap is not inherited by $(...) subshells, so a dir made
+# lazily inside one could leak) and removed on any exit: normal, early under
+# set -e, or on INT/TERM. On a signal the handler cleans up, restores the
+# default action and re-sends the signal to $$, which is the main script
+# even inside a $(...) subshell, so the script dies of that signal. A plain
+# "exit 130" run inside a subshell would end only the subshell, and the
+# main shell would carry on.
+PROBE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/check-fork-ci-gate.XXXXXX")
+cleanup() { rm -rf -- "$PROBE_DIR"; }
+on_signal() {
+  trap - "$1"
+  cleanup
+  kill -"$1" "$$"
+}
+trap cleanup EXIT
+trap 'on_signal INT' INT
+trap 'on_signal TERM' TERM
+
 # check_file FILE: prints one error per line. Triggers are read from the
 # top-level on: (block map, block list or inline); job-level keys are at 4
 # spaces under the top-level jobs: map (2-space indentation, as every workflow
@@ -184,13 +203,12 @@ gated() {
   # Reuse check_file on a copy with every job removed: in scope iff an
   # injected job without an if: is reported. Grep for that one error, as
   # layout errors are printed whatever the triggers are.
-  local tmp
-  tmp=$(mktemp)
+  # The probe lives in PROBE_DIR, which the EXIT/INT/TERM trap removes.
+  local tmp="$PROBE_DIR/probe.yml"
   awk '/^jobs:/ { exit } { print }' "$f" >"$tmp"
   printf 'jobs:\n  probe:\n    runs-on: x\n' >>"$tmp"
   local o
   o=$(check_file "$tmp")
-  rm -f "$tmp"
   grep -qF 'job probe has no if:' <<<"$o"
 }
 
