@@ -24,6 +24,8 @@ import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 
 vi.mock('../../utils/toast.js', () => ({ showToast: vi.fn() }));
 
+import { deepActiveElement } from '../shared/deep-active-element.js';
+
 type Json = Record<string, unknown>;
 
 const STATUS: Json = {
@@ -153,13 +155,6 @@ function dialog(e: Page): HTMLElement | null {
 
 function typedInput(e: Page): HTMLElement & { value: string } {
   return dialog(e)!.querySelector<HTMLElement & { value: string }>('sl-input.downgrade-typed')!;
-}
-
-/** The focused element, followed through open shadow roots. */
-function deepActiveElement(): Element | null {
-  let a: Element | null = document.activeElement;
-  while (a?.shadowRoot?.activeElement) a = a.shadowRoot.activeElement;
-  return a;
 }
 
 /** Whether focus is on the typed input (the sl-input or its inner input). */
