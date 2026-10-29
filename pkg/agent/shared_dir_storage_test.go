@@ -29,6 +29,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokercontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -1472,4 +1473,40 @@ func TestResolveSharedDirs_NFS_InlinePermissionDeniedRefused(t *testing.T) {
 	assert.Equal(t, "scion-shared", realization.PVClaimName)
 	assert.Len(t, volumes, 1)
 	assert.NoDirExists(t, filepath.Join(projectDir, "shared-dirs"))
+}
+
+// Inline NFS shared dirs and the Runtime Broker control-path check
+// (brokercontrol, runtime.CheckVolumeSources): a shared-dir volume carries
+// the broker host path of its directory under the share's mount root (the
+// Kubernetes pod builder turns it into an nfs volume of the server path),
+// so the check judges that host path. A legitimate inline share passes;
+// a share whose mount root lies inside the Scion global directory, outside
+// its agent-data subtrees, is refused as a control-path mount.
+func TestResolveSharedDirs_NFS_InlineControlPathCheck(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion"), 0o755))
+	dirs := []api.SharedDir{{Name: "scratchpad"}}
+
+	hostBase := t.TempDir()
+	cfg := nfsSharedDirStorageCfg(filepath.Dir(hostBase))
+	cfg.NFS.Shares[0].ID = filepath.Base(hostBase)
+	cfg.NFS.Shares[0].PVName = ""
+	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, cfg), false, "/unused", "pid-1", "kubernetes", dirs, "/workspace")
+	require.NoError(t, err)
+	require.NotNil(t, realization)
+	require.Len(t, volumes, 1)
+	require.NoError(t, runtime.CheckVolumeSources(volumes), "a legitimate inline share is not refused")
+
+	mountRoot := filepath.Join(home, ".scion", "nfs")
+	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share"), 0o755))
+	ctl := nfsSharedDirStorageCfg(mountRoot)
+	ctl.NFS.Shares[0].ID = "share"
+	ctl.NFS.Shares[0].PVName = ""
+	volumes, _, err = resolveSharedDirs(sdLayoutFor(t, ctl), false, "/unused", "pid-1", "kubernetes", dirs, "/workspace")
+	require.NoError(t, err)
+	require.Len(t, volumes, 1)
+	err = runtime.CheckVolumeSources(volumes)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, brokercontrol.ErrControlPathMount), "got %v", err)
 }
