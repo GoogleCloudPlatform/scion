@@ -617,7 +617,10 @@ _rb_case() {
 test_rollback_update_state_decision_table() {
   # Readable and matching: the booleans decide, whatever the switch time.
   _rb_case swap "happy path (fresh)" fresh "safe to undo" '_rb_update_state "$(_rb_happy_state)"'
-  _rb_case swap "happy path (stale current: the file overrides the timer)" stale "safe to undo" '_rb_update_state "$(_rb_happy_state)"'
+  # Valid, matching and unverified also needs a recent switch (a release
+  # that never sets verified must not be rolled back days later).
+  _rb_case stay "valid, unverified, stale current" stale "too old to roll back automatically" '_rb_update_state "$(_rb_happy_state)"'
+  _rb_case stay "valid, unverified, migrated and safe, stale current" stale "too old to roll back automatically" '_rb_update_state "$(_rb_happy_state migrated=true)"'
   _rb_case stay "verified" fresh "was verified" '_rb_update_state "$(_rb_happy_state verified=true)"'
   _rb_case stay "migrated, previous not safe" fresh "below its downgrade floor" '_rb_update_state "$(_rb_happy_state migrated=true previous_safe=false)"'
   _rb_case stay "migrated, previous_safe missing" fresh "Restoring after a failed update" '_rb_update_state "$(_rb_happy_state migrated=true previous_safe=)"'
@@ -644,6 +647,23 @@ test_rollback_update_state_decision_table() {
     '_rb_happy_state > "${RB_DIR}/happy.json"; ln -s "${RB_DIR}/happy.json" "${RB_ROOT}/update-state.json"'
   _rb_case swap "symlink, fresh (fallback)" fresh "is unreadable; current was switched" \
     '_rb_happy_state > "${RB_DIR}/happy.json"; ln -s "${RB_DIR}/happy.json" "${RB_ROOT}/update-state.json"'
+}
+
+# The same window applies to a valid, matching, unverified state.
+test_rollback_update_state_window() {
+  _rb_new_host
+  _rb_update_state "$(_rb_happy_state)"
+  touch -h -d '1700 seconds ago' "${RB_ROOT}/current"
+  _rb_run
+  _rb_expect swap "valid, unverified, switched 1700 s ago" "switched 1700s ago, safe to undo"
+  rm -rf "$RB_DIR"
+  _rb_new_host
+  _rb_update_state "$(_rb_happy_state)"
+  touch -h -d '1900 seconds ago' "${RB_ROOT}/current"
+  RB_BEFORE="$(_rb_state)"
+  _rb_run
+  _rb_expect stay "valid, unverified, switched 1900 s ago" "too old to roll back automatically"
+  rm -rf "$RB_DIR"
 }
 
 # The window edge of the fallback: 1700 s ago swaps, 1900 s ago does not.

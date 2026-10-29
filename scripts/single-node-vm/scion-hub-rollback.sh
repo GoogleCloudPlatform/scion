@@ -67,6 +67,11 @@
 #       - migrated is true and previous_safe is not true (false, missing
 #         or not a boolean): no swap (the previous release may not run on
 #         the migrated database; restore the snapshot);
+#       - current was switched more than RECENT_SWITCH_WINDOW_SEC ago: no
+#         swap. A release that never marks its update verified (any
+#         release older than the update-state contract, e.g. after a
+#         downgrade) would otherwise leave verified=false forever, and a
+#         crash loop days later would roll it "back" to the newer release;
 #       - otherwise: swap;
 #   - target or from does not match: no swap. The links were changed by
 #     something other than the update the file describes;
@@ -272,7 +277,12 @@ cmd_swap() {
   read -r decision state_from run_id <<< "$(update_state_decision "$cur" "$prev")"
   case "$decision" in
     swap)
-      log "update-state.json: failed update $state_from -> $cur (run $run_id), safe to undo" ;;
+      age="$(switched_seconds_ago)" || die "cannot read when $INSTALL_ROOT/current was switched; nothing changed"
+      if (( age > RECENT_SWITCH_WINDOW_SEC )); then
+        log "update-state.json: the update $state_from -> $cur (run $run_id) is not verified, but current was switched ${age}s ago, more than ${RECENT_SWITCH_WINDOW_SEC}s: update not verified but too old to roll back automatically. Nothing changed; the hub stays stopped. See docs/deploy/single-node-vm.md, Restoring after a failed update."
+        exit "$LEAVE_STOPPED"
+      fi
+      log "update-state.json: failed update $state_from -> $cur (run $run_id), switched ${age}s ago, safe to undo" ;;
     mismatch)
       log "update-state.json describes another update (run $run_id, from $state_from) than current releases/$cur with previous releases/$prev; the links were changed by hand or by another tool: not rolling back. Nothing changed; the hub stays stopped. See docs/deploy/single-node-vm.md, Restoring after a failed update."
       exit "$LEAVE_STOPPED" ;;

@@ -321,7 +321,8 @@ without following a symlink and up to 4 KiB, and decides:
 
 | File | Guard |
 |---|---|
-| `target` is the release `current` points at and `from` the one `previous` points at, `verified` is `false`, and not (`migrated` is `true` and `previous_safe` is not `true`) | Rolls back |
+| `target` is the release `current` points at and `from` the one `previous` points at, `verified` is `false`, not (`migrated` is `true` and `previous_safe` is not `true`), and `current` was switched within the last 1800 seconds | Rolls back |
+| As above, but `current` was switched longer ago | Leaves the Hub stopped: the update is not verified but too old to roll back automatically. A release older than this file never marks its update verified (for example after a downgrade to it), so an old unverified state is not taken as a failed update |
 | As above, but `verified` is `true` | Leaves the Hub stopped: the update succeeded, so the crash loop has another cause |
 | As above, but `migrated` is `true` and `previous_safe` is `false`, missing or not a boolean | Leaves the Hub stopped: restore the snapshot |
 | `target` or `from` does not match the links | Leaves the Hub stopped: the links were changed by something other than that update |
