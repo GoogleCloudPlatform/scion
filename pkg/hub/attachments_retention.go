@@ -56,9 +56,6 @@ const attachmentRetentionLinkProbe = 100
 type attachmentRetention struct {
 	mu   sync.Mutex
 	last time.Time
-	// copyCleanupDone records that the one-shot web chat copy cleanup
-	// (webChatCopyCleanupOnce) completed.
-	copyCleanupDone bool
 }
 
 // due reports whether a sweep should run at now, and records it as run.
@@ -95,7 +92,6 @@ func (s *Server) sweepAttachmentRetention(ctx context.Context, now time.Time) {
 	if !s.attachmentRetention.due(now) {
 		return
 	}
-	s.webChatCopyCleanupOnce(ctx)
 	if n := s.sweepAttachmentProjections(ctx, s.projectionRetentionCutoff(now)); n > 0 {
 		slog.InfoContext(ctx, "attachments: swept scratchpad projections older than the inbox retention", "count", n)
 	}
