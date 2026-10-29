@@ -459,7 +459,9 @@ func TestResolveAttachMode_FallbackReason(t *testing.T) {
 			require.Contains(t, err.Error(), "outside allowed roots")
 			require.Empty(t, fallback)
 		})
-		require.Empty(t, stderr)
+		// resolveAttachmentPath's own outside-roots warning may print; the
+		// fallback line does not.
+		require.NotContains(t, stderr, "attachments are staged")
 	})
 	t.Run("artifact", func(t *testing.T) {
 		_, srv := newAttachHub(t, "artifact")
