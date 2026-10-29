@@ -64,7 +64,7 @@ func gitInitDir(t *testing.T, dir string) {
 
 func (f *workspaceGitFixture) start(t *testing.T, in startContextInputs) map[string]string {
 	t.Helper()
-	in.Name = "dtb-agent"
+	in.Name = "workspace-git-agent"
 	in.ProjectID = workspaceGitProjectID
 	in.HTTPRequest = httptest.NewRequest("POST", "/api/v1/agents", nil)
 	if in.Operation == "" {

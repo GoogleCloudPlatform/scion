@@ -59,7 +59,7 @@ harness_configs:
     image: test-image:latest
     env:
       SCION_WORKSPACE_GIT: "` + projectValue + `"
-      DTB_PROBE_SETTINGS: "1"
+      WORKSPACE_GIT_PROBE_SETTINGS: "1"
 profiles:
   local:
     runtime: docker
@@ -71,7 +71,7 @@ profiles:
 	if err := os.MkdirAll(hcDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	hc := "harness: gemini\nuser: scion\nimage: test-image:latest\nenv:\n  SCION_WORKSPACE_GIT: \"" + projectValue + "\"\n  DTB_PROBE_HC: \"1\"\n"
+	hc := "harness: gemini\nuser: scion\nimage: test-image:latest\nenv:\n  SCION_WORKSPACE_GIT: \"" + projectValue + "\"\n  WORKSPACE_GIT_PROBE_HC: \"1\"\n"
 	if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte(hc), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -130,13 +130,13 @@ func TestStart_WorkspaceGitEnvIsTheCallers(t *testing.T) {
 				if strings.HasPrefix(kv, "SCION_WORKSPACE_GIT=") {
 					got = append(got, strings.TrimPrefix(kv, "SCION_WORKSPACE_GIT="))
 				}
-				if k, _, _ := strings.Cut(kv, "="); strings.HasPrefix(k, "DTB_PROBE_") {
+				if k, _, _ := strings.Cut(kv, "="); strings.HasPrefix(k, "WORKSPACE_GIT_PROBE_") {
 					probes[k] = true
 				}
 			}
 			// Both layers must reach the container env, or the test would
 			// not exercise that merge path.
-			for _, k := range []string{"DTB_PROBE_SETTINGS", "DTB_PROBE_HC"} {
+			for _, k := range []string{"WORKSPACE_GIT_PROBE_SETTINGS", "WORKSPACE_GIT_PROBE_HC"} {
 				if !probes[k] {
 					t.Fatalf("probe %s did not reach the container env (env %v): its env layer is not exercised", k, captured.Env)
 				}
