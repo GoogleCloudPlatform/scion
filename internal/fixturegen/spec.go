@@ -123,6 +123,11 @@ func Spec() []TableFixture {
 				"kind": "federated", "home_issuer": visitorIssuer,
 				"federated_email": "visitor@" + visitorDomain, "created_at": baseTime,
 			},
+			{ // user of the stopping forced deletion below: status deleting
+				"id": "22222222-2222-2222-2222-2222222222d1", "email": "deleting@example.com",
+				"display_name": "Deleting", "role": "member", "status": "deleting",
+				"created_at": baseTime,
+			},
 		}},
 		{Table: "runtime_brokers", Rows: []row{
 			{
@@ -994,6 +999,39 @@ func Spec() []TableFixture {
 				"workload_sub": "100000000000000000001", "scope": "test_identity:issue",
 				"member_cap": 2, "label": "", "created_at": baseTime,
 				"expires_at": baseTime.Add(time.Hour), "revoked_at": baseTime.Add(time.Minute), "revoked_by": userID,
+			},
+		}},
+
+		// ---- Forced user deletions (ptone/scion#2143): a tombstone in state
+		// stopping (NULL completed_at) and a completed one whose user row is
+		// gone; their agents, one per outcome kind that leaves a record ----
+		{Table: "user_deletions", Rows: []row{
+			{
+				"id": "de100000-0000-0000-0000-000000000001", "user_id": "22222222-2222-2222-2222-2222222222d1",
+				"state": "stopping", "requested_by_kind": "user", "requested_by_id": userID,
+				"credential_kind": "session", "requested_at": baseTime, "completed_at": nil,
+				"last_reconciled_at": baseTime.Add(time.Minute),
+				"before_summary":     `{"role":"member","status":"active","kind":"human"}`,
+				"orphaned_by_revoke": `[{"agentId":"` + agentID + `","edgeId":"ed100000-0000-0000-0000-000000000001"}]`,
+				"last_error":         "agent 33333333: runtime broker unavailable",
+			},
+			{
+				"id": "de100000-0000-0000-0000-000000000002", "user_id": "22222222-2222-2222-2222-2222222222d2",
+				"state": "completed", "requested_by_kind": "user", "requested_by_id": userID,
+				"credential_kind": "session", "requested_at": baseTime, "completed_at": baseTime.Add(10 * time.Minute),
+				"last_reconciled_at": nil, "before_summary": "", "orphaned_by_revoke": "[]", "last_error": "",
+			},
+		}},
+		{Table: "user_deletion_agents", Rows: []row{
+			{
+				"id": "de200000-0000-0000-0000-000000000001", "deletion_id": "de100000-0000-0000-0000-000000000001",
+				"agent_id": agentID, "slug": "fixture-agent", "project_id": projectID, "outcome": "failed",
+				"attempts": 3, "last_error": "runtime broker unavailable", "updated_at": baseTime.Add(time.Minute),
+			},
+			{
+				"id": "de200000-0000-0000-0000-000000000002", "deletion_id": "de100000-0000-0000-0000-000000000002",
+				"agent_id": "33333333-3333-3333-3333-3333333333d2", "slug": "", "project_id": "", "outcome": "removed",
+				"attempts": 1, "last_error": "", "updated_at": baseTime.Add(9 * time.Minute),
 			},
 		}},
 	}

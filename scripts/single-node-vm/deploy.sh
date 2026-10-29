@@ -495,6 +495,116 @@ proxy_sa_name() {
   printf '%s' "$name"
 }
 
+# Project roles granted to the hub VM's service account (Phase 2). The
+# create path grants HUB_SA_BASE_ROLES, plus HUB_SA_MINTING_ROLE when
+# hub_sa_minting is true. Teardown removes all of them, whatever
+# hub_sa_minting says now, since an earlier deploy may have granted the
+# minting role. Both paths read these lists, so they cannot drift apart.
+# The proxy SA and the deployer get no project roles here that teardown
+# owns (see Phase 2 and the IAP tunnel note in the teardown flow).
+HUB_SA_BASE_ROLES=(roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent roles/artifactregistry.writer roles/aiplatform.user)
+HUB_SA_MINTING_ROLE="roles/iam.serviceAccountAdmin"
+
+# _project_binding_absent TEXT -- true when TEXT (gcloud's stderr from
+# projects remove-iam-policy-binding) says the member/role binding is not
+# in the policy. Real gcloud exits 1 in that case rather than no-op, with
+# one of the IamPolicyBindingNotFound messages: "Policy binding with the
+# specified principal, role, and condition not found!" (what
+# --condition=None gets), "... principal and role not found!", or the
+# plural "Policy bindings with the specified principal and role not
+# found!". Older SDKs say "member" where newer ones say "principal".
+_project_binding_absent() {
+  if printf '%s\n' "$1" | grep -qiE 'permission|forbidden'; then
+    return 1
+  fi
+  printf '%s\n' "$1" | grep -qiE 'Policy bindings? with the specified (principal|member).* not found'
+}
+
+# remove_hub_sa_project_bindings PROJECT_ID SA_EMAIL ROLE...
+#
+# Removes the project IAM bindings of SA_EMAIL for exactly the given
+# roles, one remove-iam-policy-binding call per role and member, always
+# with --condition=None, never set-iam-policy. Members removed are the
+# live "serviceAccount:SA_EMAIL" and any "deleted:serviceAccount:SA_EMAIL
+# ?uid=..." tombstones GCP left from an earlier SA delete. No other
+# member and no other role is touched. Conditional bindings are skipped:
+# deploy.sh never creates one, and --condition=None cannot remove one.
+# Each role and member gets at most one call.
+#
+# The policy is read once to find what is bound. If that read fails, it
+# falls back to one blind removal of the live member per role, where an
+# absent binding is not an error; tombstones then stay and are reported.
+#
+# Sets HUB_SA_BINDINGS_REMOVED (count) and HUB_SA_BINDINGS_FAILED (count).
+# Never exits: a binding that could not be removed is warned about, and
+# a later --delete removes its tombstone.
+remove_hub_sa_project_bindings() {
+  local project="$1" sa_email="$2"
+  shift 2
+  local live_member="serviceAccount:${sa_email}"
+  local tombstone_prefix="deleted:serviceAccount:${sa_email}?uid="
+  local -a targets=()
+  local role member cond_title cond_expr policy_rows policy_err_file err_text wanted r t
+  HUB_SA_BINDINGS_REMOVED=0
+  HUB_SA_BINDINGS_FAILED=0
+
+  policy_err_file="$(mktemp)"
+  if policy_rows="$(gcloud projects get-iam-policy "${project}" \
+      --flatten="bindings[].members" \
+      --format="value(bindings.role,bindings.members,bindings.condition.title,bindings.condition.expression)" 2>"${policy_err_file}")"; then
+    # Tab is IFS whitespace, so empty condition fields collapse: an
+    # unconditional row leaves cond_title and cond_expr both empty, and any
+    # condition at all leaves at least one of them set. --flatten makes
+    # each row a single member, so member is compared whole.
+    while IFS=$'\t' read -r role member cond_title cond_expr; do
+      [[ -z "$role" || -z "$member" ]] && continue
+      [[ -n "$cond_title" || -n "$cond_expr" ]] && continue
+      wanted=false
+      for r in "$@"; do
+        [[ "$r" == "$role" ]] && wanted=true
+      done
+      [[ "$wanted" == "true" ]] || continue
+      if [[ "$member" == "$live_member" || "$member" == "$tombstone_prefix"* ]]; then
+        wanted=true
+        for t in ${targets[@]+"${targets[@]}"}; do
+          [[ "$t" == "${role}"$'\t'"${member}" ]] && wanted=false
+        done
+        [[ "$wanted" == "true" ]] && targets+=("${role}"$'\t'"${member}")
+      fi
+    done <<< "$policy_rows"
+    if [[ ${#targets[@]} -eq 0 ]]; then
+      echo "  No project role bindings left for ${sa_email}."
+    fi
+  else
+    warn "Could not read the IAM policy of project ${project}; removing ${sa_email}'s role bindings without it. Tombstones (deleted:serviceAccount:...) of an earlier SA delete are not checked:"
+    print_gcloud_error "$(cat "${policy_err_file}")"
+    for role in "$@"; do
+      targets+=("${role}"$'\t'"${live_member}")
+    done
+  fi
+  rm -f "${policy_err_file}"
+
+  local target
+  for target in ${targets[@]+"${targets[@]}"}; do
+    role="${target%%$'\t'*}"
+    member="${target#*$'\t'}"
+    if err_text="$(gcloud projects remove-iam-policy-binding "${project}" \
+        --member="${member}" \
+        --role="${role}" \
+        --condition=None \
+        --quiet 2>&1 >/dev/null)"; then
+      echo "  Removed: ${role} from ${member}"
+      HUB_SA_BINDINGS_REMOVED=$((HUB_SA_BINDINGS_REMOVED + 1))
+    elif _project_binding_absent "$err_text"; then
+      echo "  Not bound: ${role} for ${member}"
+    else
+      warn "Could not remove ${role} from ${member}:"
+      print_gcloud_error "$err_text"
+      HUB_SA_BINDINGS_FAILED=$((HUB_SA_BINDINGS_FAILED + 1))
+    fi
+  done
+}
+
 # Validate config file exists if specified
 if [[ -n "$CONFIG_FILE" ]]; then
   if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -605,6 +715,9 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   # this can never drift from what create actually named the SA.
   PROXY_SA_NAME="$(proxy_sa_name "$HUB_NAME")"
   PROXY_SA_EMAIL="${PROXY_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+  # Every role the create path may have granted SA_EMAIL, minting role
+  # included whatever hub_sa_minting says now.
+  HUB_SA_TEARDOWN_ROLES=("${HUB_SA_BASE_ROLES[@]}" "${HUB_SA_MINTING_ROLE}")
 
   echo ""
   echo "Checking hybrid-tier firewall rule ownership:"
@@ -700,6 +813,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   echo "  Cloud NAT:         ${NAT_NAME} (router: ${ROUTER_NAME})"
   echo "  Cloud Router:      ${ROUTER_NAME} (region: ${REGION})"
   echo "  Service account:   ${SA_EMAIL}"
+  echo "  Project roles:     ${HUB_SA_TEARDOWN_ROLES[*]} (bindings for ${SA_EMAIL}, and its deleted:serviceAccount tombstones, only)"
   echo "  Proxy SA:          ${PROXY_SA_EMAIL}"
   echo "  Service account:   $(hybrid_transport_sa_name "${HUB_NAME}")@${PROJECT_ID}.iam.gserviceaccount.com (hybrid tier agent transport; if present and marked)"
   echo "  Firewall rule:     ${FW_RULE_NAME}"
@@ -733,6 +847,9 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   ROUTER_NOT_FOUND=false
   SA_DELETED=false
   SA_NOT_FOUND=false
+  HUB_SA_BINDINGS_ATTEMPTED=false
+  HUB_SA_BINDINGS_REMOVED=0
+  HUB_SA_BINDINGS_FAILED=0
   PROXY_SA_DELETED=false
   PROXY_SA_NOT_FOUND=false
   FW_RULE_DELETED=false
@@ -868,6 +985,13 @@ if [[ "$DELETE_MODE" == "true" ]]; then
       warn "Cloud Router ${ROUTER_NAME} could not be deleted: $(cat "${ROUTER_DELETE_ERR}")"
     fi
     rm -f "${ROUTER_DELETE_ERR}"
+
+    # Before the SA delete: once the SA is gone, GCP keeps its bindings as
+    # deleted:serviceAccount:...?uid= tombstones. Those of an earlier
+    # delete are removed here too.
+    info "Removing the service account's project role bindings..."
+    HUB_SA_BINDINGS_ATTEMPTED=true
+    remove_hub_sa_project_bindings "${PROJECT_ID}" "${SA_EMAIL}" "${HUB_SA_TEARDOWN_ROLES[@]}"
 
     info "Deleting service account..."
     SA_DELETE_ERR="$(mktemp)"
@@ -1028,6 +1152,12 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     echo "  Not found service account:  ${SA_EMAIL}"
   else
     echo "  Kept service account:       ${SA_EMAIL}"
+  fi
+  if [[ "$HUB_SA_BINDINGS_ATTEMPTED" == "true" ]]; then
+    echo "  Removed project bindings:   ${HUB_SA_BINDINGS_REMOVED} for ${SA_EMAIL}"
+    if [[ "$HUB_SA_BINDINGS_FAILED" -gt 0 ]]; then
+      echo "  Kept project bindings:      ${HUB_SA_BINDINGS_FAILED} for ${SA_EMAIL} (removal failed; re-run teardown)"
+    fi
   fi
   if [[ "$PROXY_SA_DELETED" == "true" ]]; then
     echo "  Deleted proxy SA:           ${PROXY_SA_EMAIL}"
@@ -2087,9 +2217,9 @@ fi
 # read and set IAM policy on it, and delete it if a follow-up grant fails.
 # serviceAccountCreator alone is not enough for that flow. Skipped when
 # hub_sa_minting is false.
-HUB_SA_ROLES=(roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent roles/artifactregistry.writer roles/aiplatform.user)
+HUB_SA_ROLES=("${HUB_SA_BASE_ROLES[@]}")
 if [[ "$HUB_SA_MINTING" == "true" ]]; then
-  HUB_SA_ROLES+=(roles/iam.serviceAccountAdmin)
+  HUB_SA_ROLES+=("${HUB_SA_MINTING_ROLE}")
 fi
 info "Binding IAM roles..."
 for ROLE in "${HUB_SA_ROLES[@]}"; do

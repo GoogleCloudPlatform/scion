@@ -95,8 +95,12 @@ Settings for the in-process conduit relay and its stream grants. They take effec
 | :--- | :--- | :--- | :--- |
 | `grant_key_activation` | duration | `"15m"` | Delay between publishing a new grant signing key and signing with it. Minimum `"1m"`. Targets must refresh their keys at least this often. Flag: `--conduit-grant-key-activation`. Env: `SCION_SERVER_HUB_CONDUIT_GRANTKEYACTIVATION`. |
 | `tcp_allowed_ports` | list of int | `[]` | Additional agent-local ports a TCP stream grant may target, on every agent, besides that agent's exposed ports. The reserved ports (9810, 18380) are always refused. Empty means exposed ports only; this setting never narrows access to exposed ports. Flag: `--conduit-tcp-allowed-ports`. Env: `SCION_SERVER_HUB_CONDUIT_TCPALLOWEDPORTS` (comma-separated). |
-| `internal_listen` | string | | `host:port` of the internal relay API listener, used by multi-node deployments. It serves only the internal relay API and must be reachable only inside the cluster or VPC, never publicly. Setting `internal_advertise` without it is a setting error: an HA hub refuses to start, and a single-node hub logs it and runs without the relay. Flag: `--internal-listen`. Env: `SCION_SERVER_HUB_CONDUIT_INTERNALLISTEN`. |
-| `internal_advertise` | string | | Base URL (`http(s)://host:port`) other hub nodes use to reach this node's internal listener. Default: `POD_IP` with the listen port, else the listen host if it is not a wildcard. Flag: `--internal-advertise`. Env: `SCION_SERVER_HUB_CONDUIT_INTERNALADVERTISE`. |
+| `internal_listen` | string | | `host:port` of the internal relay API listener, used by multi-node deployments. It serves only the internal relay API and must be reachable only inside the cluster or VPC, never publicly. Without `internal_tls_cert_file` and `internal_tls_key_file` it must be a loopback address (a loopback IP literal: 127.0.0.0/8 or `::1`, not `localhost`); see **TLS on the internal hop** below. Setting `internal_advertise` without it is a setting error: an HA hub refuses to start, and a single-node hub logs it and runs without the relay. Flag: `--internal-listen`. Env: `SCION_SERVER_HUB_CONDUIT_INTERNALLISTEN`. |
+| `internal_advertise` | string | | Base URL (`http(s)://host:port`) other hub nodes use to reach this node's internal listener. It must be `https://` unless its host is loopback (a loopback IP literal: 127.0.0.0/8 or `::1`, not `localhost`). Default: `POD_IP` with the listen port, else the listen host if it is not a wildcard, with `https://` when the listener serves TLS. Flag: `--internal-advertise`. Env: `SCION_SERVER_HUB_CONDUIT_INTERNALADVERTISE`. |
+| `internal_tls_cert_file` | string | | Path of the PEM certificate chain the internal listener serves TLS with. Set together with `internal_tls_key_file`. Re-read when the file changes (at most once a minute), so a rotated certificate needs no restart. Flag: `--internal-tls-cert-file`. Env: `SCION_SERVER_HUB_CONDUIT_INTERNALTLSCERTFILE`. |
+| `internal_tls_key_file` | string | | Path of the PEM private key of `internal_tls_cert_file`. Flag: `--internal-tls-key-file`. Env: `SCION_SERVER_HUB_CONDUIT_INTERNALTLSKEYFILE`. |
+| `internal_tls_ca_file` | string | | Path of the PEM CA bundle every internal hop client verifies peers with. When set it replaces the system roots. A private or internal CA **requires** it: the system roots do not validate such a certificate, and the hop then fails. Read at startup. Flag: `--internal-tls-ca-file`. Env: `SCION_SERVER_HUB_CONDUIT_INTERNALTLSCAFILE`. |
+| `internal_tls_server_name` | string | | Name internal hop clients verify in the peer certificate instead of the dialed host, so one certificate (for example with the name `scion-relay.internal`) can serve every node dialed by its pod IP. Set the same value on every node. Default: the dialed host. Flag: `--internal-tls-server-name`. Env: `SCION_SERVER_HUB_CONDUIT_INTERNALTLSSERVERNAME`. |
 | `peer_auth` | string | `"auto"` | Relay-peer authentication: `auto`, `oidc` or `hmac`. Requests between relays are always signed with a key derived from the hub's signing secret, which is required in every mode. `oidc` also requires a Google OIDC ID token, `auto` adds the ID token on GCP, and `hmac` uses the signature alone. Used only when this node serves the internal relay API (`internal_listen` set, or any HA hub): a single-node hub without `internal_listen` starts its relay with no relay-peer authentication and refuses requests to and from other relays. Env: `SCION_SERVER_HUB_CONDUIT_PEERAUTH`. |
 | `peer_service_accounts` | list | own service account | With OIDC peer auth, the service-account emails allowed to call the internal relay API. The hub logs a warning at startup when the default resolves to a Compute Engine default service account. Env: `SCION_SERVER_HUB_CONDUIT_PEERSERVICEACCOUNTS` (comma-separated). |
 | `peer_audience` | string | `"scion-conduit-relay-peer"` | With OIDC peer auth, the ID token audience. It must be identical on every hub node. Env: `SCION_SERVER_HUB_CONDUIT_PEERAUDIENCE`. |
@@ -118,7 +122,12 @@ Settings for the in-process conduit relay and its stream grants. They take effec
 
 **Upgrading hub replicas.** Upgrade all hub replicas to this version before the next grant key rotation, and not within one overlap window of a rotation (the activation delay plus the overlap, about 1 hour 15 minutes with the defaults). An upgraded hub does not rewrite a stored key ring that has one active key and no successor.
 
-**TLS on the internal hop.** Use TLS for the internal relay endpoint (for example a service mesh or a TLS-terminating proxy) and advertise it as `https://`. Plain `http://` is accepted.
+**TLS on the internal hop.** The internal hop (between hub nodes, and between hubs and separate relays) carries user and agent credentials and session content, so it is never plaintext off the host. With `internal_listen` set, the hub or relay refuses to start when:
+
+- `internal_listen` is not a loopback address (a loopback IP literal: 127.0.0.0/8 or `::1`, not `localhost`) and `internal_tls_cert_file` and `internal_tls_key_file` are not set;
+- `internal_advertise`, or on a separate relay `server.relay.hub_internal_url`, is `http://` to a host that is not loopback.
+
+Hub and relay clients also refuse to send anything to a peer endpoint that is `http://` to a host that is not loopback. Only loopback IP literals count; a host name, `localhost` included, is never resolved for this decision and is refused. There is no override. To fix a refusal, give every node a certificate and set `internal_tls_cert_file` and `internal_tls_key_file`. If that certificate comes from a private or internal CA, also set `internal_tls_ca_file` on every node. Alternatively, bind `internal_listen` to `127.0.0.1` behind a TLS terminator on the same host, and advertise that terminator's `https://` address. When upgrading multi-node hubs or separate relays, set these keys on every node in the settings file or the environment (not as `--internal-tls-*` flags, which older binaries refuse) before upgrading, then upgrade all hubs and relays together; see [Upgrading](/scion/hosted/ha/separate-relay/#upgrading).
 
 **Hosted HA.** In an HA deployment each hub node runs a relay that other nodes must reach directly, so the hub refuses to start when:
 
@@ -282,7 +291,7 @@ A separate relay requires targets (agents and Runtime Brokers) on version X or l
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `hub_internal_url` | string | | Base URL (`http(s)://host:port`) of the hub internal API the relay calls for admission, RPCs and re-checks. Any hub replica serves it, so it may be a load-balanced internal address; it must be reachable only inside the cluster or VPC. Layer 0; restart required. Env: `SCION_SERVER_RELAY_HUBINTERNALURL` (or `SCION_SERVER_RELAY_HUB_INTERNAL_URL`). |
+| `hub_internal_url` | string | | Base URL (`http(s)://host:port`) of the hub internal API the relay calls for admission, RPCs and re-checks. Any hub replica serves it, so it may be a load-balanced internal address; it must be reachable only inside the cluster or VPC. It must be `https://` unless its host is loopback (a loopback IP literal: 127.0.0.0/8 or `::1`, not `localhost`; see **TLS on the internal hop** in the conduit settings above). Layer 0; restart required. Env: `SCION_SERVER_RELAY_HUBINTERNALURL` (or `SCION_SERVER_RELAY_HUB_INTERNAL_URL`). |
 | `public_url` | string | | The relay's own public URL, recorded as its `relay_instances.public_endpoint`. A user authenticated by Google IAP is admitted through a relay only with the hub's own IAP configuration (`auth.proxy.iap` with its audience, Google's issuer and key endpoint), so clients must reach the hub's IAP backend; trusted-proxy identity headers are never accepted from a relay. Layer 0; restart required. Env: `SCION_SERVER_RELAY_PUBLICURL` (or `SCION_SERVER_RELAY_PUBLIC_URL`). |
 | `singleton` | bool | `false` | Experimental. Asserts a non-HA singleton relay. Required on Cloud Run (`K_SERVICE` set), where the relay refuses to start without it; set it together with `max_instances=1`, `min_instances=1` and `cpu_idle=false`. Allowed elsewhere, where it labels the relay non-HA. The relay lists the feature `singleton` in its `relay_instances` row, retries its startup self-check for up to 60s, and reports other live relays sharing its internal endpoint in the gauge `scion.relay.singleton_endpoint_peers`. Upgrade the hubs, which migrate the database, before the relays. Layer 0; restart required. Env: `SCION_SERVER_RELAY_SINGLETON`. |
 
@@ -345,8 +354,58 @@ The runtime target of one flat Runtime Broker instance, and the instance's own i
 | `safe_to_evict` | bool | kubernetes | `false` adds the `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` annotation to agent pods (on GKE Autopilot this requests extended run duration). `true` or unset adds nothing. An agent's own `kubernetes.safeToEvict`, `true` or `false`, wins. |
 | `priority_class_name` | string | kubernetes | Default PriorityClass of agent pods (DNS-1123 subdomain). The PriorityClass must already exist on the cluster. An agent's own `kubernetes.priorityClassName` wins. |
 | `gke` | bool | kubernetes | `true` turns on GKE mode for the instance. `false` or unset detects a GKE cluster automatically. |
+| `node_selector` | map | kubernetes | Node labels (key to value) every agent pod of the instance must match. See [Flat instance placement](#flat-instance-placement). |
+| `tolerations` | list | kubernetes | Tolerations of every agent pod of the instance, each with `key`, `operator` (`Equal` or `Exists`; empty means `Equal`), `value` and `effect` (`NoSchedule`, `PreferNoSchedule`, `NoExecute`, or empty for any). An empty key requires `Exists`, and `Exists` requires an empty value. |
+| `runtime_class_name` | string | kubernetes | RuntimeClass of every agent pod of the instance (DNS-1123 subdomain). The RuntimeClass must already exist on the cluster. |
 
 A runtime target does not choose where its agents' storage lives: [`server.project_storage`](#project-storage-serverproject_storage) does, for every instance of the process. The former `shared_dir_storage_backend`, `shared_dir_storage_backends`, `home_storage_backend` and `home_storage_leaf` fields are removed. A flat instance that sets them refuses startup with an error that names the field, `server.project_storage` and `volumes:`. On runtimes and profiles, startup reports them and agent start refuses them; see [Removed storage overrides](#removed-storage-overrides). For a node-local directory, use a `volumes:` entry.
+
+#### Flat instance placement
+
+`node_selector`, `tolerations` and `runtime_class_name` place the instance's agent pods on the nodes the operator chooses, whatever template the agent uses, including `default`. Unlike the other defaults in the table, the operator owns them, so an agent's own value does not win:
+
+- An agent's `kubernetes.nodeSelector` may add keys the runtime target does not set. It cannot change the value of a key the runtime target sets, including the pool key `scion.dev/pool`. A differing value refuses the start.
+- Each of an agent's `kubernetes.tolerations` must match one of the runtime target's tolerations exactly: the same key, operator (empty counts as `Equal`), value and effect. A broader `Exists` toleration does not cover a different entry. When the runtime target sets no tolerations, any agent toleration is refused, including one with an empty key and `Exists`. While placement is set, an agent toleration with an empty key and `Exists` is refused even when the runtime target has the same entry.
+- An agent cannot choose or change the runtime class. An agent `kubernetes.runtimeClassName` must be empty or equal to the runtime target's value.
+
+A refused start is reported as a validation error that names the field and whether it comes from the request or the agent's stored configuration. The check runs before the start creates, changes or stops anything. Node selector entries combine: an agent-added key narrows placement further, and a key with no matching nodes leaves the pod pending. An agent-added key can also steer a pod onto any pool whose nodes carry no taint, because only the runtime target's keys are fixed. Tolerations stay limited to the runtime target's. A node selector and a toleration are independent: Scion never derives one from the other, so a tainted pool needs both.
+
+The values are read from the instance's settings when it starts, so a change takes effect when the Runtime Broker restarts. Existing pods keep their placement. The Brokers page shows the instance's reported placement read-only, as defaults for new agents. In GCP identity `block` mode the Workload Identity node label is still added after this placement.
+
+```yaml
+server:
+  broker:
+    instances:
+      - key: agents
+        name: agents
+        runtime_target:
+          type: kubernetes
+          namespace: agents
+          node_selector:
+            scion.dev/pool: agents
+          tolerations:
+            - key: scion.dev/pool
+              operator: Equal
+              value: agents
+              effect: NoSchedule
+          runtime_class_name: gvisor
+```
+
+`gvisor` is an example: Scion does not create RuntimeClasses or check that one exists.
+
+This release checks and enforces these rules for flat instances only. Runtime entries and profiles of a regular Runtime Broker keep their current behaviour and follow in a later release.
+
+##### Before upgrading
+
+An agent that sets its own tolerations or runtime class while the instance's runtime target sets none is refused at its next start or restart. Running agents keep their pods until then. Before upgrading a host with flat instances:
+
+1. Run `scion doctor` with the new release. The `flat-placement-preflight` check scans the stored configuration of every agent each flat instance owns, without changing anything, and reports counts per instance: agents with tolerations while the runtime target sets none (`agent_tolerations_without_operator_policy`), agents with a runtime class while the runtime target sets none (`agent_runtime_class_without_operator_policy`), and agents it could not check (`incomplete`). It shows no agent names or configuration values. An agent can be counted in both categories.
+2. Treat `incomplete` as unfinished: fix unreadable agent records or configurations, then run the check again.
+3. For agent tolerations, decide whether each belongs to the instance. If it does, add it to the runtime target's `tolerations`; otherwise remove it from the agent's configuration. Tolerations match by key, operator (empty counts as `Equal`), value and effect; a broad `Exists` toleration on the runtime target does not cover a different agent entry. A toleration added to the runtime target applies to every agent of the instance.
+4. For an agent runtime class, either set `runtime_class_name` on the runtime target or remove the agent's class. An agent cannot choose a class on its own; repeating the runtime target's class is accepted.
+5. Restart the Runtime Broker to activate runtime target changes, then run `scion doctor` again until both counts and `incomplete` are zero.
+
+The check counts only these two cases, where the runtime target sets no tolerations or no runtime class at all. Once the runtime target sets some tolerations or a runtime class, the check no longer looks at the agents' own values, so an agent toleration that is not among the target's, or an agent class that differs from the target's, is not counted. Such remaining mismatches show up as refusals, naming the field, at the agent's next start or restart.
 
 #### Flat instance agent defaults (`server.broker.instances[].agent_defaults`)
 
@@ -402,6 +461,27 @@ Persistence settings for the Hub.
 | `conn_max_lifetime` | duration | sqlite: unlimited; postgres: `"30m"` | Maximum time a connection may be reused (Go duration, for example `"30m"`). Empty takes the default; `"0"` means unlimited. Settings file only: no environment variable sets it. |
 | `conn_max_idle_time` | duration | sqlite: no limit; postgres: `"5m"` | Maximum time a connection may sit idle in the pool before it is closed (Go duration). Set it shorter than the server-side or proxy idle timeout so idle connections are recycled first. Empty takes the default; `"0"` means no idle limit. Settings file only: no environment variable sets it. |
 | `allow_shadowed_schema` | bool | `false` | PostgreSQL only. Lets the Hub start, and the maintenance commands that migrate its database run, when the schema migration would create a new table set that hides existing Hub tables in a later schema on the `search_path`. See [PostgreSQL `search_path` check](#postgresql-search_path-check). Env: `SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA`. |
+| `tx_diagnostics` | object | see below | Transaction-hold and lock-wait diagnostics. See [Transaction diagnostics](#transaction-diagnostics). Settings file only. |
+
+#### Transaction diagnostics
+
+The Hub measures how long each database transaction and connection checkout holds its connection, and how long each request waits to get one. SQLite runs one writer at a time, and the Hub's SQLite pool has a single connection, so one slow holder makes every other database request wait behind it. These diagnostics name the holder and the waiters.
+
+| Field (`server.database.tx_diagnostics.*`) | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `enabled` | bool | `true` | Install the diagnostics. `false` opens the database exactly as without them. |
+| `hold_warn_threshold` | duration | `"2s"` | Log a transaction or connection checkout held at least this long. `"0"` turns these lines off; metrics are still recorded. |
+| `lock_wait_warn_threshold` | duration | `"1s"` | Log a request that waited at least this long for a connection. `"0"` turns these lines off. |
+| `warn_interval` | duration | `"1m"` | At most one line per call site and kind per interval. Must be positive; `"0"` or a negative value fails startup. Lines dropped by this limit are counted in the next line's `suppressed`. |
+
+The lines are WARN records from the `hub.db` subsystem:
+
+- `db_tx_long_hold`: `kind` (`tx`, or on SQLite `conn` for a held connection with no transaction line), `op` (the calling function), `site` (the first three calling frames), `hold_ms`, `begin_ms`, `stmts`, `stmt_ms` (time in SQL), `commit_ms` (time in the transaction's COMMIT; on SQLite that includes writing and syncing the WAL, so a slow disk shows up here; on a `kind=conn` line, `begin_ms` and `commit_ms` add up the transactions run during that checkout), `idle_ms` (time the connection was held outside BEGIN, SQL and COMMIT, such as Go work inside a transaction), `max_stmt_ms`, `rows_affected`, `outcome`, and on SQLite `waiters_max` (requests from the ent client that waited during the hold) and `busy`.
+- `db_lock_wait`: `op`, `site`, `wait_ms`, `req` (`tx`, `exec` or `query`) and `outcome` (`acquired`, `canceled`, `deadline` or `error`). On SQLite it also names who held the connection during the wait: `holders` (how many connection checkouts overlapped the wait; many short ones mean a queue rather than one slow holder), `top_holder_op` and `top_holder_ms` (the holder with the most time in the wait), and, when the waiter gave up, `holder_open_op` and `holder_open_ms` (the checkout still holding the connection at that moment).
+
+A write made outside an explicit transaction commits inside its own statement, so its commit time is part of that statement's `stmt_ms` and is not reported as `commit_ms`. Both carry `suppressed` and `dropped` (lines lost because the log queue was full). Per-waiter lines cover requests made through the ent client. Waits of the raw-SQL stores appear in aggregate, in the `scion.db.pool.connections.wait_duration` metric. Startup schema migrations run through the same path, so a long migration can log one or more lines at boot; they are expected and are not a stall.
+
+When metrics export is on, the Hub also records the histograms `scion.db.tx.hold.duration` (labels `op`, `kind`, `outcome`, `pool`), `scion.db.tx.lock_wait.duration` and `scion.db.tx.commit.duration` (labels `op`, `outcome`, `pool`), the counter `scion.db.pool.connections.wait_duration` (ms), and `scion.db.diag.warn.dropped`. The `op` label is capped at 256 values; further call sites are reported as `other`.
 
 #### PostgreSQL `search_path` check
 
@@ -631,7 +711,7 @@ The operational content of the deprecated sections still applies to the same fie
 
 #### Configuration source (Layer-0)
 
-`server.project_storage` is a [Layer-0](#layer-0--bootstrap-file--env-only) setting. The Hub and every Runtime Broker read it from their own global `settings.yaml` at startup; the Hub also reads `SCION_SERVER_PROJECT_STORAGE_*` environment variables. It is never read from the database or from a project's settings, cannot be written through the admin settings API, and a change needs a restart. Configure the same block on the Hub and on every Runtime Broker that serves its hub-native projects (see [Layout identity check](#layout-identity-check)).
+`server.project_storage` is a [Layer-0](#layer-0--bootstrap-file--env-only) setting. The Hub and every Runtime Broker read it from their own global `settings.yaml` at startup; the Hub also reads `SCION_SERVER_PROJECT_STORAGE_*` environment variables. It is never read from the database or from a project's settings. On a workstation Hub, a `PUT /api/v1/admin/server-config` body that sets `server.project_storage` writes it into `settings.yaml` and lists the key in the response's `reload.requires_restart`; a hosted Hub refuses it with `422` (see [Layer-0 edits by deployment mode](/scion/reference/admin-settings/#layer-0-edits-by-deployment-mode)). The admin UI has no field for it. Either way, a change needs a restart. Configure the same block on the Hub and on every Runtime Broker that serves its hub-native projects (see [Layout identity check](#layout-identity-check)).
 
 #### Validation
 

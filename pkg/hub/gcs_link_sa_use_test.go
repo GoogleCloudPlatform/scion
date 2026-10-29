@@ -247,6 +247,8 @@ func (s *switchedConstraintsStore) ListAccessConstraints(ctx context.Context, li
 // is installed on the authorization service right after the fixture is
 // built and delegates until its switch is armed.
 func TestGCSLink_SAUse_AccessConstraintFailuresDeny(t *testing.T) {
+	require.Equal(t, "access constraint load error (fail-closed)", reasonStoredAgentConstraintLoadError,
+		"the constraint-load deny names the failure")
 	injected := errors.New("injected store failure")
 	for _, tc := range []struct {
 		name   string
@@ -265,7 +267,7 @@ func TestGCSLink_SAUse_AccessConstraintFailuresDeny(t *testing.T) {
 			func(inner store.Store, fault *storeFaultSwitch) store.Store {
 				return &switchedConstraintsStore{Store: inner, fault: fault, err: injected}
 			},
-			"restriction removed permission: access_constraint_error - restriction has no check function (fail closed)",
+			reasonStoredAgentConstraintLoadError,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

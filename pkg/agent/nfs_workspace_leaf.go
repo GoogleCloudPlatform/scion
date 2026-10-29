@@ -15,14 +15,15 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"os"
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
@@ -186,8 +187,11 @@ func ensureNFSWorkspaceLeavesClaim(runtimeName, projectID string, resolved runti
 		}
 	}
 
-	info, err := os.Stat(resolved.HostBase)
-	if err != nil {
+	// The share-visibility predicate shared with the broker's own checks
+	// (projectfs.ShareDirVisible, bounded): the share's mount point must be
+	// a directory on this broker. No mount-table source match is required
+	// here: this runtime never mounts the share on the broker.
+	if err := projectfs.ShareDirVisible(context.Background(), resolved.HostBase); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			// A broker reads and creates project storage through its own
 			// mount of the share; without it the start is refused rather
@@ -195,9 +199,6 @@ func ensureNFSWorkspaceLeavesClaim(runtimeName, projectID string, resolved runti
 			return false, false, fmt.Errorf("%w (%s; mount it or set nfs.auto_mount)", ErrProjectShareNotMounted, resolved.HostBase)
 		}
 		return false, false, fmt.Errorf("workspace_storage nfs: check export mount %q: %w; %s", resolved.HostBase, err, nfsWorkspaceExportHint)
-	}
-	if !info.IsDir() {
-		return false, false, fmt.Errorf("workspace_storage nfs: check export mount %q: not a directory; %s", resolved.HostBase, nfsWorkspaceExportHint)
 	}
 
 	resolvedHostBase, err := filepath.EvalSymlinks(resolved.HostBase)

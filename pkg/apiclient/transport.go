@@ -53,6 +53,9 @@ func WithHTTPClient(c *http.Client) TransportOption {
 // WithTimeout sets the default request timeout.
 func WithTimeout(d time.Duration) TransportOption {
 	return func(t *Transport) {
+		if t.HTTPClient == nil {
+			t.HTTPClient = &http.Client{}
+		}
 		t.HTTPClient.Timeout = d
 	}
 }
@@ -294,6 +297,12 @@ func bodyRewindable(req *http.Request) bool {
 // prepare applies the headers and authentication every send path (Do and
 // DoNoRetry) needs before handing req to an *http.Client.
 func (t *Transport) prepare(req *http.Request) error {
+	if req == nil {
+		return errors.New("apiclient: nil request")
+	}
+	if req.Header == nil {
+		req.Header = make(http.Header)
+	}
 	if t.UserAgent != "" {
 		req.Header.Set("User-Agent", t.UserAgent)
 	}
@@ -488,10 +497,16 @@ type authRoundTripper struct {
 }
 
 func (rt *authRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req == nil {
+		return nil, errors.New("apiclient: nil request")
+	}
 	// Headers are set on a clone so the caller's request is never changed.
 	// Redirect hops do not depend on this: net/http copies their headers
 	// from the initial request before the first send.
 	clone := req.Clone(req.Context())
+	if clone.Header == nil {
+		clone.Header = make(http.Header)
+	}
 	if rt.ua != "" && clone.Header.Get("User-Agent") == "" {
 		clone.Header.Set("User-Agent", rt.ua)
 	}

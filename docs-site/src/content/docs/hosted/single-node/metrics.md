@@ -203,7 +203,7 @@ When an agent starts, the broker:
 
 Scion includes a native OTel metrics pipeline that captures operational data from agent sessions. This data is recorded as counters and histograms, providing a time-series view of agent performance. 
 
-To enable harness-aware telemetry, Scion injects the `SCION_HARNESS` environment variable into every agent container, and `SCION_MODEL` when the agent's configuration names a model. When a usage source reports no model of its own and `SCION_MODEL` is unset, the `model` label on `gen_ai.api.calls`, `gen_ai.api.duration` and `scion.usage.tokens` is `unknown`.
+To enable harness-aware telemetry, Scion injects the `SCION_HARNESS` environment variable into every agent container, and `SCION_MODEL` when the agent's configuration names a model. `SCION_HARNESS` names the harness the start launched (after a harness-config switch, the new one), and it selects which native usage-parsing rules apply. It sets the `harness` label on `gen_ai.api.calls` and `scion.usage.tokens` (one shared label set, described under the canonical point labels below) and the `harness` field of the `agent.usage` and `telemetry.health` events. When the plain Generic implementation runs, its value is `generic`: no usage rule exists for it, so native usage for that agent stays unknown rather than being parsed with another harness's rules, and with the native usage source `telemetry.health` reports usage collection `disabled` with the reason `no_harness_rule`. An explicit `SCION_HARNESS` in the start request's env or in the settings `harness_configs.<name>.env` still wins (see [settings precedence](/scion/reference/settings-precedence/)). When a usage source reports no model of its own and `SCION_MODEL` is unset, the `model` label on `gen_ai.api.calls`, `gen_ai.api.duration` and `scion.usage.tokens` is `unknown`.
 
 ### Enriched Resource Attributes
 
@@ -444,7 +444,7 @@ Harness hook events are automatically converted to OTLP spans:
 | `model-start` | `gen_ai.api.request` | model (only when the hook payload names one) |
 | `model-end` | `gen_ai.api.response` | success, model (only when the hook payload names one) |
 
-Each hook event in the table, and the turn, notification, response-complete and container lifecycle (`agent.lifecycle.pre_start`, `agent.lifecycle.post_start`, `agent.lifecycle.pre_stop`) events, is also emitted as a correlated OpenTelemetry log record whose `event.name` is the span name. When the GCP exporter is configured, `sciontool` also writes normalized `agent.usage` events, delivered durably and deduplicated, and periodic `telemetry.health` snapshots of its usage-source selection and delivery diagnostics to the dedicated `scion-analytics` Cloud Logging log.
+Each hook event in the table, and the turn, notification, response-complete and container lifecycle (`agent.lifecycle.pre_start`, `agent.lifecycle.post_start`, `agent.lifecycle.pre_stop`) events, is also emitted as a correlated OpenTelemetry log record whose `event.name` is the span name. When the GCP exporter is configured, `sciontool` also writes normalized `agent.usage` events, delivered durably and deduplicated, and periodic `telemetry.health` snapshots of its usage-source selection and delivery diagnostics to the dedicated `scion-analytics` Cloud Logging log. Both carry the launched harness (`SCION_HARNESS`, see [Native Metrics Pipeline](#native-metrics-pipeline)) in their `harness` field, or `unknown` when it is unset.
 
 ### Session Metrics (Gemini)
 

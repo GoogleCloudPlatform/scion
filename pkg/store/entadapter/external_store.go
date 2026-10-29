@@ -799,6 +799,25 @@ func (s *ExternalStore) CountUserAccessTokens(ctx context.Context, userID string
 		Count(ctx)
 }
 
+// RevokeUserAccessTokensForUser revokes every unrevoked token of a user and returns how many it revoked (ptone/scion#2143).
+func (s *ExternalStore) RevokeUserAccessTokensForUser(ctx context.Context, userID string) (int, error) {
+	uid, err := parseUUID(userID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := s.client.UserAccessToken.Update().
+		Where(
+			useraccesstoken.UserIDEQ(uid),
+			useraccesstoken.RevokedEQ(false),
+		).
+		SetRevoked(true).
+		Save(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
 // DeleteUserAccessTokensByProject permanently removes all "project"-boundary
 // tokens scoped to a project. Hub-boundary tokens have a NULL project_id and
 // so would never match ProjectIDEQ anyway, but the explicit boundary_kind

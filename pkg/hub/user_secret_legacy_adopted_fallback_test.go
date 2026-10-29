@@ -512,7 +512,7 @@ func TestLegacyAdoptedFallback_MixedRoleCohorts(t *testing.T) {
 // lafRecordingMetrics records (path, role) of each fallback use.
 type lafRecordingMetrics struct{ uses []string }
 
-func (m *lafRecordingMetrics) RecordLegacyAdoptedFallback(path, role string) {
+func (m *lafRecordingMetrics) RecordLegacyAdoptedFallback(_ context.Context, path, role string) {
 	m.uses = append(m.uses, path+"/"+role)
 }
 
