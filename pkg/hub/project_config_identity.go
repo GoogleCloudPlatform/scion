@@ -260,9 +260,10 @@ func (s *Server) ensureProjectConfigIdentities(ctx context.Context) projectConfi
 // hub-native project on a shared backend when the leaf is absent, with the
 // create-time provisioning (provisionHubNativeWorkspace). It reports whether
 // it provisioned one. A present leaf is left alone, whatever it holds; a git
-// project, an empty-per-agent project and the global project get nothing.
+// project, a linked project, an empty-per-agent project and the global
+// project get nothing (hubNativeWorkspaceProject).
 func (s *Server) backfillHubNativeWorkspace(ctx context.Context, project *store.Project) (bool, error) {
-	if !hubNativeWorkspaceProvisioned(s, project) {
+	if !s.hubNativeWorkspaceProject(ctx, project) {
 		return false, nil
 	}
 	res, err := s.projectWorkspaceResolved(project)

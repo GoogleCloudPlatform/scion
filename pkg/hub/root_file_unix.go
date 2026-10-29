@@ -43,7 +43,12 @@ import (
 //     directory entry and never follows a link).
 //
 // A symbolic link, FIFO or other special file is refused and left unchanged.
-// The temporary file is removed on every error path.
+// The temporary file is removed on every error path. Accepted limits: a swap
+// to a symlink between the re-check and the rename replaces the link entry
+// itself (Rename never follows it, nothing is written through it); the share
+// must support hard links (a documented requirement of the shared backend);
+// a crash can leave a uniquely named .<name>.tmp-* file, which no reader
+// enumerates.
 func writeRootFile(root *os.Root, name, content string) error {
 	tmp, err := writeRootTempFile(root, name, content)
 	if err != nil {

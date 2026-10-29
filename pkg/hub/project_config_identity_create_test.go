@@ -432,7 +432,7 @@ func TestCreateHubNativeProject_SharedBackend_ProvisioningFailureRollsBack(t *te
 	}
 }
 
-// TestWriteRootFile_AtomicReplaceLeavesNoTempFile (sec L2): an identity
+// TestWriteRootFile_AtomicReplaceLeavesNoTempFile: an identity
 // file is replaced by a temp file plus rename (a new inode, so a concurrent
 // reader never sees a truncated file), a new file is published whole, and
 // neither a rewrite, a create nor a refused write leaves a temporary file.
@@ -468,7 +468,7 @@ func TestWriteRootFile_AtomicReplaceLeavesNoTempFile(t *testing.T) {
 	assert.ElementsMatch(t, []string{projectkeys.ProjectSlugFile, "linked"}, names, "no temporary file is left behind")
 }
 
-// TestCreateAndRegisterProject_RejectNonCanonicalClientID (sec INFO): a
+// TestCreateAndRegisterProject_RejectNonCanonicalClientID: a
 // client-supplied project ID must be a canonical lowercase UUID on create and
 // on register; anything else is a 400 before any lookup or write.
 func TestCreateAndRegisterProject_RejectNonCanonicalClientID(t *testing.T) {
@@ -496,7 +496,7 @@ func TestCreateAndRegisterProject_RejectNonCanonicalClientID(t *testing.T) {
 	assert.Equal(t, valid, project.ID, "a canonical UUID is accepted")
 }
 
-// TestSanitizedStorageError_NoPath (sec L1): the operator-log rendering of a
+// TestSanitizedStorageError_NoPath: the operator-log rendering of a
 // storage error keeps the operation and errno and never a path.
 func TestSanitizedStorageError_NoPath(t *testing.T) {
 	hostPath := "/mnt/nfs/share1/projects/aaaaaaaa-0000-4000-8000-0000000000d9/.scion/project-id"
@@ -514,4 +514,101 @@ func TestSanitizedStorageError_NoPath(t *testing.T) {
 	assert.NotContains(t, got, "/mnt")
 	assert.Contains(t, got, "rename")
 	assert.Empty(t, sanitizedStorageError(nil))
+}
+
+// TestCreateHubNativeProject_SharedBackend_ExistingRootNotProvisioned: a
+// hub-native create whose project root already exists (a tree another hub on
+// the same share made, or one left behind) provisions nothing: no sentinel,
+// no state directory, the existing workspace untouched, and a project-id
+// naming another project left unchanged. The leaf is left to the
+// identity-confirmed startup backfill.
+func TestCreateHubNativeProject_SharedBackend_ExistingRootNotProvisioned(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	f.useNFSOwnedBySelf()
+	const id = "aaaaaaaa-0000-4000-8000-0000000000aa"
+	const other = "bbbbbbbb-0000-4000-8000-0000000000ab"
+	projectRoot := filepath.Join(f.shareBase, "projects", id)
+	ws := filepath.Join(projectRoot, "workspace")
+	require.NoError(t, os.MkdirAll(ws, 0o700))
+	require.NoError(t, os.Chmod(ws, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "existing.txt"), []byte("keep\n"), 0o600))
+	cfgDir := filepath.Join(projectRoot, ".scion")
+	require.NoError(t, os.MkdirAll(cfgDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(cfgDir, projectkeys.ProjectIDFile), []byte(other+"\n"), 0o644))
+
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{ID: id, Name: "Native Existing Root"})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	_, err := os.Stat(filepath.Join(projectRoot, provision.ProvisionStateDirName))
+	assert.True(t, os.IsNotExist(err), "no provisioning state or sentinel is written into an existing tree at create")
+	info, err := os.Lstat(ws)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm(), "the existing workspace is not re-moded or re-owned")
+	got, err := os.ReadFile(filepath.Join(ws, "existing.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "keep\n", string(got))
+	assert.Equal(t, other+"\n", readIdentityFile(t, cfgDir, projectkeys.ProjectIDFile), "a foreign project-id is never overwritten")
+}
+
+// TestCreateHubNativeProject_SharedBackend_LaterFailureRemovesCreatedRoot:
+// when this create made the project root and a later storage step fails
+// (here the project configuration directory cannot be created), the create
+// is rolled back with 503 and the tree it made is removed.
+func TestCreateHubNativeProject_SharedBackend_LaterFailureRemovesCreatedRoot(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	f.useNFSOwnedBySelf()
+	const id = "aaaaaaaa-0000-4000-8000-0000000000ac"
+	projectRoot := filepath.Join(f.shareBase, "projects", id)
+	orig := provisionSharedClone
+	provisionSharedClone = func(in provision.ProvisionInput) error {
+		if err := orig(in); err != nil {
+			return err
+		}
+		// A regular file where the project configuration directory goes:
+		// the next storage step (EnsureProjectConfigDir) fails.
+		return os.WriteFile(filepath.Join(projectRoot, ".scion"), []byte("not a directory\n"), 0o644)
+	}
+	t.Cleanup(func() { provisionSharedClone = orig })
+
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{ID: id, Name: "Native Seed Fails"})
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	_, err := os.Lstat(projectRoot)
+	assert.True(t, os.IsNotExist(err), "the project tree this create made is removed")
+	_, err = f.s.GetProject(context.Background(), id)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the project row is rolled back")
+}
+
+// TestEnsureProjectConfigIdentities_LinkedProjectsGetNoWorkspaceLeaf: the
+// startup backfill skips a project linked from an existing checkout (origin
+// label linked) and an unlabeled project with a provider-registered local
+// path, and provisions an unlabeled project with no local path (the default
+// for projects older than the origin label).
+func TestEnsureProjectConfigIdentities_LinkedProjectsGetNoWorkspaceLeaf(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	f.useNFSOwnedBySelf()
+	ctx := context.Background()
+	linked := &store.Project{ID: "aaaaaaaa-0000-4000-8000-0000000000ad", Name: "Linked Label", Slug: "linked-label",
+		Labels: map[string]string{store.LabelProjectOrigin: store.ProjectOriginLinked}}
+	withPath := &store.Project{ID: "aaaaaaaa-0000-4000-8000-0000000000ae", Name: "Unlabeled With Path", Slug: "unlabeled-with-path"}
+	plain := &store.Project{ID: "aaaaaaaa-0000-4000-8000-0000000000af", Name: "Unlabeled Plain", Slug: "unlabeled-plain"}
+	for _, p := range []*store.Project{linked, withPath, plain} {
+		require.NoError(t, f.s.CreateProject(ctx, p))
+	}
+	b := addProviderBroker(t, f.s, withPath.ID, "linked-path")
+	providers, err := f.s.GetProjectProviders(ctx, withPath.ID)
+	require.NoError(t, err)
+	require.Len(t, providers, 1)
+	providers[0].LocalPath = "/home/dev/checkout"
+	require.NoError(t, f.s.AddProjectProvider(ctx, &providers[0]), "fixture: register the provider's local path (broker %s)", b.ID)
+	providers, err = f.s.GetProjectProviders(ctx, withPath.ID)
+	require.NoError(t, err)
+	require.Equal(t, "/home/dev/checkout", providers[0].LocalPath, "fixture check: the local path is stored")
+
+	counts := f.srv.ensureProjectConfigIdentities(ctx)
+	assert.Equal(t, 1, counts.workspacesProvisioned)
+	for _, p := range []*store.Project{linked, withPath} {
+		_, err := os.Stat(filepath.Join(f.shareBase, "projects", p.ID, "workspace"))
+		assert.True(t, os.IsNotExist(err), "%s gets no workspace leaf", p.Name)
+	}
+	assertHubNativeWorkspaceProvisioned(t, f, plain.ID)
 }

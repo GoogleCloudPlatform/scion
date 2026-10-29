@@ -1129,9 +1129,19 @@ func writeWorkspaceStorageUnavailable(w http.ResponseWriter, err error) bool {
 // A shared workspace storage the hub cannot use, or a failed workspace
 // provisioning, returns an error wrapping errWorkspaceStorageUnavailable;
 // callers roll the create back.
-func (s *Server) initHubManagedProject(ctx context.Context, project *store.Project) error {
-	if err := s.provisionHubNativeWorkspace(ctx, project); err != nil {
+func (s *Server) initHubManagedProject(ctx context.Context, project *store.Project) (err error) {
+	createdRoot, err := s.provisionHubNativeWorkspace(ctx, project)
+	if err != nil {
 		return err
+	}
+	if createdRoot {
+		// This create made the project root: a later storage failure rolls
+		// the create back (the callers remove the row), so the tree goes too.
+		defer func() {
+			if errors.Is(err, errWorkspaceStorageUnavailable) {
+				s.removeCreatedProjectRoot(project)
+			}
+		}()
 	}
 	scionDir, err := s.ensureProjectConfigDir(project, true)
 	if err != nil {
@@ -1367,7 +1377,7 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 	}
 	storageErr := func(step string, err error) error {
 		s.projectsLogger().Warn("shared workspace provisioning: storage step failed",
-			"project_id", project.ID, "step", step, "error", err)
+			"project_id", project.ID, "step", step, "error", sanitizedStorageError(err))
 		return fmt.Errorf("shared workspace provisioning: %w", errWorkspaceStorageUnavailable)
 	}
 	pr, err := layout.ProjectRoot(project.ID)
@@ -1389,7 +1399,7 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 		}
 		if err := shareddirs.DeleteProjectRoot(base, pr.SubPathRoot, project.ID); err != nil {
 			s.projectsLogger().Warn("shared workspace provisioning: could not remove the failed project tree",
-				"project_id", project.ID, "error", err)
+				"project_id", project.ID, "error", sanitizedStorageError(err))
 		}
 	}
 	root, err := res.Open(true)
@@ -1445,7 +1455,7 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 	})
 	if err != nil {
 		s.projectsLogger().Warn("shared workspace provisioning failed",
-			"project_id", project.ID, "error", err.Error())
+			"project_id", project.ID, "error", sanitizedStorageError(err))
 		cleanup()
 		if cloneCfg == nil {
 			// No clone ran (a hub-native workspace): a storage failure, not a git one.
@@ -1467,21 +1477,116 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 // for an empty-per-agent project (no project workspace) and for the global
 // project. Errors wrap errWorkspaceStorageUnavailable (no host path); a
 // project root this call created is removed again on failure.
-func (s *Server) provisionHubNativeWorkspace(ctx context.Context, project *store.Project) error {
-	if !hubNativeWorkspaceProvisioned(s, project) {
-		return nil
+//
+// It provisions only when this create makes the project root, and reports
+// whether it did. A project root that already exists (a tree another hub on
+// the same share made, or one left behind) is not touched here: its
+// identity is unconfirmed until the project configuration is checked, so its
+// leaf is left to the identity-confirmed startup backfill
+// (backfillHubNativeWorkspace).
+func (s *Server) provisionHubNativeWorkspace(ctx context.Context, project *store.Project) (createdRoot bool, err error) {
+	if !s.hubNativeWorkspaceProject(ctx, project) {
+		return false, nil
 	}
-	return s.provisionSharedWorkspace(ctx, project)
+	exists, err := s.sharedProjectRootExists(project)
+	if err != nil {
+		s.projectsLogger().Warn("hub-native workspace provisioning: could not check the project root",
+			"project_id", project.ID, "error", sanitizedStorageError(err))
+		return false, fmt.Errorf("shared workspace provisioning: %w", errWorkspaceStorageUnavailable)
+	}
+	if exists {
+		s.projectsLogger().Info("hub-native workspace provisioning: the project root already exists; left to the startup backfill",
+			"project_id", project.ID)
+		return false, nil
+	}
+	if err := s.provisionSharedWorkspace(ctx, project); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
-// hubNativeWorkspaceProvisioned reports whether the hub provisions project's
-// workspace itself (provisionHubNativeWorkspace): a shared backend and a
-// hub-native project (no git remote, not empty-per-agent, not the global
-// project). Never true for a git project: a hub-created leaf must not change
-// a git project's provisioning decision.
-func hubNativeWorkspaceProvisioned(s *Server, project *store.Project) bool {
-	return s.workspaceBackendShared() && project != nil && project.GitRemote == "" &&
-		!project.IsEmptyPerAgent() && !isGlobalHubProject(project.Slug)
+// hubNativeWorkspaceProject reports whether the hub provisions project's
+// workspace itself (provisionHubNativeWorkspace, backfillHubNativeWorkspace):
+// a shared backend and a hub-native project. This is the one predicate for
+// "hub-native" here:
+//   - never a git project (a hub-created leaf must not change a git project's
+//     provisioning decision), an empty-per-agent project or the global project;
+//   - never a project linked from an existing checkout (origin label linked);
+//   - a project created on the hub (origin label hub) is hub-native;
+//   - a project with no origin label (created before the label existed) is
+//     hub-native only when no provider has a registered local path for it,
+//     since a linked project is registered with one.
+func (s *Server) hubNativeWorkspaceProject(ctx context.Context, project *store.Project) bool {
+	if !s.workspaceBackendShared() || project == nil || project.GitRemote != "" ||
+		project.IsEmptyPerAgent() || isGlobalHubProject(project.Slug) || project.IsLinkedOrigin() {
+		return false
+	}
+	if project.Labels[store.LabelProjectOrigin] == store.ProjectOriginHub {
+		return true
+	}
+	providers, err := s.store.GetProjectProviders(ctx, project.ID)
+	if err != nil {
+		return false
+	}
+	for _, p := range providers {
+		if p.LocalPath != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// sharedProjectRootExists reports whether project's root
+// (<HostBase>/<subpath_root>/<uuid>) exists on the shared backend.
+func (s *Server) sharedProjectRootExists(project *store.Project) (bool, error) {
+	layout, err := s.workspaceLayout()
+	if err != nil {
+		return false, err
+	}
+	pr, err := layout.ProjectRoot(project.ID)
+	if err != nil {
+		return false, err
+	}
+	base, err := pr.ResolvedHostBase()
+	if err != nil {
+		return false, err
+	}
+	switch _, err := os.Lstat(filepath.Join(base, pr.RelPath)); {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
+// removeCreatedProjectRoot removes the project root a failed create made,
+// with everything under it, through the confined shareddirs.DeleteProjectRoot.
+// Best-effort: a failure is logged with ids only.
+func (s *Server) removeCreatedProjectRoot(project *store.Project) {
+	if err := s.deleteSharedProjectRoot(project); err != nil {
+		s.projectsLogger().Warn("project create rollback: could not remove the project tree this create made",
+			"project_id", project.ID, "error", sanitizedStorageError(err))
+	}
+}
+
+// deleteSharedProjectRoot removes project's root on the shared backend with
+// everything under it (shareddirs.DeleteProjectRoot: the confined walk).
+func (s *Server) deleteSharedProjectRoot(project *store.Project) error {
+	layout, err := s.workspaceLayout()
+	if err != nil {
+		return err
+	}
+	pr, err := layout.ProjectRoot(project.ID)
+	if err != nil {
+		return err
+	}
+	base, err := pr.ResolvedHostBase()
+	if err != nil {
+		return err
+	}
+	return shareddirs.DeleteProjectRoot(base, pr.SubPathRoot, project.ID)
 }
 
 // sharedWorkspaceCloneError maps a provisioning failure to a *util.GitError
