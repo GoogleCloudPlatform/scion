@@ -11,6 +11,12 @@ import {
   valueAtPath,
   type PayloadScope,
 } from './__fixtures__/settings-registry.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
+
+// A runtime type switch that clears fields asks first; the tests accept.
+vi.mock('../shared/confirm-dialog.js', () => ({
+  showConfirm: vi.fn(() => Promise.resolve(true)),
+}));
 
 // ── Shared mock data builders ──
 
@@ -3273,8 +3279,13 @@ describe('scion-page-admin-server-config', () => {
             s.querySelector('sl-option[value="cloudrun-instances"]')
           ) as HTMLElement & { value: string };
           expect(typeSelect).toBeDefined();
+          vi.mocked(showConfirm).mockClear();
           typeSelect.value = to;
           typeSelect.dispatchEvent(new Event('sl-change'));
+          // The switch clears the loaded block, so it is confirmed first.
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          expect(showConfirm).toHaveBeenCalledTimes(1);
+          expect(vi.mocked(showConfirm).mock.calls[0][0]).toContain(fromBlock);
           await (element as any).updateComplete;
 
           const { project, location } = cloudRunInputs(element);
@@ -3289,7 +3300,9 @@ describe('scion-page-admin-server-config', () => {
           expect(capturedPayload).not.toBeNull();
           const crun = capturedPayload!.runtimes.crun;
           expect(crun.type).toBe(to);
-          expect(fromBlock in crun).toBe(false);
+          // A key removed from a loaded entry is sent as null, so the hub
+          // clears it (ptone/scion#6580).
+          expect(crun[fromBlock]).toBeNull();
           expect(crun[toBlock]).toEqual(toFields);
           expect(crun.env).toEqual({ FOO: 'bar' });
           expect(crun.sync).toBe('tar');
@@ -3337,7 +3350,7 @@ describe('scion-page-admin-server-config', () => {
           expect(capturedPayload).not.toBeNull();
           const crun = capturedPayload!.runtimes.crun;
           expect(crun.type).toBe(type);
-          expect(block in crun).toBe(false);
+          expect(crun[block]).toBeNull();
           expect(crun.env).toEqual({ FOO: 'bar' });
         });
 
@@ -3353,17 +3366,230 @@ describe('scion-page-admin-server-config', () => {
           expect(typeSelect).toBeDefined();
           typeSelect.value = 'docker';
           typeSelect.dispatchEvent(new Event('sl-change'));
+          await new Promise((resolve) => setTimeout(resolve, 0));
           await saveAndCapture(element);
 
           expect(capturedPayload).not.toBeNull();
           const crun = capturedPayload!.runtimes.crun;
           expect(crun.type).toBe('docker');
-          expect('cloudrun' in crun).toBe(false);
-          expect('cloudrun_instances' in crun).toBe(false);
+          // The loaded block is sent as null; the other was never set.
+          expect(crun[block]).toBeNull();
+          const other = block === 'cloudrun' ? 'cloudrun_instances' : 'cloudrun';
+          expect(other in crun).toBe(false);
           expect(crun.env).toEqual({ FOO: 'bar' });
         });
       }
     }
+  });
+
+  describe('runtime keys and resource quantities (ptone/scion#6580, ptone/scion#6581)', () => {
+    const k8sRuntime = {
+      type: 'kubernetes',
+      namespace: 'agents',
+      node_selector: { 'scion.dev/pool': 'agents' },
+      tolerations: [
+        { key: 'scion.dev/pool', operator: 'Equal', value: 'agents', effect: 'NoSchedule' },
+      ],
+      kubernetes_service_account_mappings: { 'sa@example.iam.gserviceaccount.com': 'agent-ksa' },
+    };
+
+    async function clickSave(el: HTMLElement): Promise<void> {
+      await (el as any).updateComplete;
+      const saveBtn = queryAll(el, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      ) as HTMLElement;
+      saveBtn.click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    // Shoelace is not loaded in these tests, so read the disabled attribute
+    // Lit's ?disabled binding sets.
+    function saveDisabled(el: HTMLElement): boolean {
+      const btn = queryAll(el, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      ) as HTMLElement;
+      return btn.hasAttribute('disabled');
+    }
+
+    function inputByLabel(el: HTMLElement, label: string): HTMLElement & { value: string } {
+      const field = queryAll(el, '.runtime-card .form-field').find(
+        (f) => f.querySelector('label')?.textContent?.trim() === label
+      );
+      return field?.querySelector('sl-input') as HTMLElement & { value: string };
+    }
+
+    for (const [mode, tier] of [
+      ['file', {}],
+      ['db', { settings_tier: 'db' }],
+    ] as const) {
+      it(`${mode} mode: a save keeps unrendered keys and sends null for a cleared field`, async () => {
+        let captured: Record<string, any> | null = null;
+        element = await createComponent(
+          createFetchHandler(makeBaseConfig({ ...tier, runtimes: { gke: k8sRuntime } }), {
+            schemaResponse: {
+              sections: { ...SCHEMA_RESPONSE.sections, runtimes: { koanf_paths: ['runtimes'] } },
+            },
+            putHandler: (body) => {
+              if ('runtimes' in body) captured = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          })
+        );
+        const ns = inputByLabel(element, 'Namespace');
+        expect(ns.getAttribute('value')).toBe('agents');
+        ns.value = '';
+        ns.dispatchEvent(new Event('sl-input'));
+        await clickSave(element);
+
+        expect(captured).not.toBeNull();
+        const gke = captured!.runtimes.gke;
+        expect(gke.namespace).toBeNull();
+        expect(gke.type).toBe('kubernetes');
+        expect(gke.node_selector).toEqual(k8sRuntime.node_selector);
+        expect(gke.tolerations).toEqual(k8sRuntime.tolerations);
+        expect(gke.kubernetes_service_account_mappings).toEqual(
+          k8sRuntime.kubernetes_service_account_mappings
+        );
+      });
+    }
+
+    it('a removed runtime is left out of the payload', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({ runtimes: { gke: k8sRuntime, local: { type: 'docker' } } }),
+          {
+            putHandler: (body) => {
+              if ('runtimes' in body) captured = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          }
+        )
+      );
+      const removeBtn = queryAll(
+        element,
+        '.runtime-card sl-button[variant="danger"]'
+      )[1] as HTMLElement;
+      removeBtn.click();
+      await clickSave(element);
+      expect(Object.keys(captured!.runtimes)).toEqual(['gke']);
+    });
+
+    it('cancelling a type switch that clears fields keeps the runtime as it was', async () => {
+      let captured: Record<string, any> | null = null;
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ runtimes: { gke: k8sRuntime } }), {
+          putHandler: (body) => {
+            if ('runtimes' in body) captured = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+      vi.mocked(showConfirm).mockClear();
+      vi.mocked(showConfirm).mockResolvedValueOnce(false);
+      const typeSelect = queryAll(element, 'sl-select').find((s) =>
+        s.querySelector('sl-option[value="cloudrun-instances"]')
+      ) as HTMLElement & { value: string };
+      typeSelect.value = 'cloudrun';
+      typeSelect.dispatchEvent(new Event('sl-change'));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(showConfirm).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(showConfirm).mock.calls[0][0]).toContain('namespace');
+      await (element as any).updateComplete;
+      expect(typeSelect.value).toBe('kubernetes');
+      await clickSave(element);
+      expect(captured!.runtimes.gke.type).toBe('kubernetes');
+      expect(captured!.runtimes.gke.namespace).toBe('agents');
+    });
+
+    it('a type switch that clears nothing does not ask', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ runtimes: { d: { type: 'docker' } } }))
+      );
+      vi.mocked(showConfirm).mockClear();
+      const typeSelect = queryAll(element, 'sl-select').find((s) =>
+        s.querySelector('sl-option[value="cloudrun-instances"]')
+      ) as HTMLElement & { value: string };
+      typeSelect.value = 'kubernetes';
+      typeSelect.dispatchEvent(new Event('sl-change'));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(showConfirm).not.toHaveBeenCalled();
+    });
+
+    function profileConfig(memory: string) {
+      return makeBaseConfig({
+        runtimes: { gke: { type: 'kubernetes' } },
+        profiles: { gke: { runtime: 'gke', resources: { limits: { memory } } } },
+      });
+    }
+
+    it('a unitless memory value below 1Mi is an error that blocks Save', async () => {
+      element = await createComponent(createFetchHandler(profileConfig('16')));
+      await (element as any).updateComplete;
+      const err = query(
+        element,
+        '[data-quantity-error="profiles.gke.resources.limits.memory"]'
+      ) as HTMLElement | null;
+      expect(err).not.toBeNull();
+      expect(err!.textContent).toContain('16 bytes');
+      expect(err!.textContent).toContain('16Gi');
+      expect(saveDisabled(element)).toBe(true);
+      expect(query(element, '.resource-quantity-blocked')).not.toBeNull();
+    });
+
+    it('fixing the value enables Save again', async () => {
+      element = await createComponent(createFetchHandler(profileConfig('16')));
+      const input = query(element, 'sl-input[placeholder="e.g. 4Gi"]') as HTMLElement & {
+        value: string;
+      };
+      input.value = '16Gi';
+      input.dispatchEvent(new Event('sl-input'));
+      await (element as any).updateComplete;
+      expect(query(element, '[data-quantity-error]')).toBeNull();
+      expect(saveDisabled(element)).toBe(false);
+    });
+
+    it('a unitless byte count is a warning that allows Save', async () => {
+      element = await createComponent(createFetchHandler(profileConfig('2147483648')));
+      await (element as any).updateComplete;
+      const warn = query(
+        element,
+        '[data-quantity-warning="profiles.gke.resources.limits.memory"]'
+      ) as HTMLElement | null;
+      expect(warn).not.toBeNull();
+      expect(warn!.textContent).toContain('2Gi');
+      expect(saveDisabled(element)).toBe(false);
+    });
+
+    it('default resources are checked too', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ default_resources: { requests: { memory: '512Ki' } } }))
+      );
+      await (element as any).updateComplete;
+      expect(
+        query(element, '[data-quantity-error="default_resources.requests.memory"]')
+      ).not.toBeNull();
+      expect(saveDisabled(element)).toBe(true);
+    });
+
+    it('shows the warnings a save returns', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ runtimes: { gke: k8sRuntime } }), {
+          putHandler: () => ({
+            status: 200,
+            body: {
+              reload: { applied: [] },
+              warnings: ['runtimes.gke.resources is not a runtime setting and has no effect'],
+            },
+          }),
+        })
+      );
+      await clickSave(element);
+      await (element as any).updateComplete;
+      const notice = query(element, '.save-warnings-notice');
+      expect(notice).not.toBeNull();
+      expect(notice!.textContent).toContain('runtimes.gke.resources');
+    });
   });
 
   describe('Regression ptone/scion#1871 — masked secrets are not sent back', () => {
