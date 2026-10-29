@@ -4621,6 +4621,20 @@ nightly: "20261029"
 {{- end }}
 
 {{/*
+The off-remedy for the relay TLS image check, by the path that triggered it.
+Takes "wiring" (conduit.internalTls is on) or "extra" (a non-loopback
+config.extra internal_listen with the wiring off). Used by the render-time
+messages and by NOTES.txt, so the two say the same thing.
+*/}}
+{{- define "scion-hub.relayOffRemedy" -}}
+{{- if eq (toString .) "extra" -}}
+remove the config.extra internal_listen (or bind it to loopback)
+{{- else -}}
+set conduit.internalTls.enabled: false
+{{- end -}}
+{{- end }}
+
+{{/*
 Checks the hub image against scion-hub.relayTlsMinHub when the relay wiring is
 on, and returns "ok" or "unverified". It fails the render for a tag that is
 older. The tag is image.tag, else .Chart.AppVersion.
@@ -4635,8 +4649,7 @@ older. The tag is image.tag, else .Chart.AppVersion.
 "extra": a non-loopback config.extra internal_listen with the wiring off). The
 via value picks the off-remedy the operator can act on. */}}
 {{- $root := .root }}
-{{- $off := "set conduit.internalTls.enabled: false" }}
-{{- if eq (toString .via) "extra" }}{{- $off = "remove the config.extra internal_listen (or bind it to loopback)" }}{{- end }}
+{{- $off := include "scion-hub.relayOffRemedy" (toString .via) }}
 {{- $min := include "scion-hub.relayTlsMinHub" $root | fromYaml }}
 {{- $tag := trim (toString ($root.Values.image.tag | default $root.Chart.AppVersion)) }}
 {{- /* What to do about an older tag. With image.tag unset, the tag is the

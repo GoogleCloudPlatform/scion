@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=268   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 16 (workspaceStorage.nfs: thirteen refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check) + 3 (relay hop: cert-without-key refusals on non-loopback and loopback listeners, no relay-level trusted_proxies) + 3 (internal_listen loopback needs host:port and a valid 127.x: no-port IP, no-port localhost, out-of-range octet) + 5 (internal_listen: leading and trailing whitespace, port 65536, port 0, no port with TLS files) + 4 (TLS settings as written: server name with a slash, server name with trailing whitespace, blank cert path, padded key path) + 9 (minimum hub image for the relay wiring: older and minimum semver, newer semver, older and minimum nightly, no gate with the relay off, the unverified annotation, no annotation on a checked tag, the NOTES warning present and absent) + 8 (older tag with build metadata, minimum with build metadata, pre-release of the minimum, malformed version, config.extra listener on an older tag and on a digest, the digest annotation, padded CA path; the gate block now runs 16 rows) + 4 (overflowing version number, newer pre-release, newer tag with build metadata, config.extra loopback listener on an older tag; the gate block now runs 20 rows) + 1 (localhost:port without TLS is not loopback, as the hub reads it) + 1 (the default-tag refusal names image.tag and image.digest; the gate block now runs 21 rows) + 6 (the semver refusal names no placeholder floor, so the gate block now runs 22 rows; whitespace-only listen: spaces and tab, with TLS files and without; SCION_SERVER_HUB_CONDUIT_INTERNAL* refused in hub.extraEnv) + 2 (the malformed-version remedy by mode; the config.extra path names removing that listener; the gate block now runs 24 rows) + 1 (the NOTES warning on the config.extra path names removing that listener; the gate block now runs 25 rows).
+EXPECTED_TOTAL=269   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 16 (workspaceStorage.nfs: thirteen refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check) + 3 (relay hop: cert-without-key refusals on non-loopback and loopback listeners, no relay-level trusted_proxies) + 3 (internal_listen loopback needs host:port and a valid 127.x: no-port IP, no-port localhost, out-of-range octet) + 5 (internal_listen: leading and trailing whitespace, port 65536, port 0, no port with TLS files) + 4 (TLS settings as written: server name with a slash, server name with trailing whitespace, blank cert path, padded key path) + 9 (minimum hub image for the relay wiring: older and minimum semver, newer semver, older and minimum nightly, no gate with the relay off, the unverified annotation, no annotation on a checked tag, the NOTES warning present and absent) + 8 (older tag with build metadata, minimum with build metadata, pre-release of the minimum, malformed version, config.extra listener on an older tag and on a digest, the digest annotation, padded CA path; the gate block now runs 16 rows) + 4 (overflowing version number, newer pre-release, newer tag with build metadata, config.extra loopback listener on an older tag; the gate block now runs 20 rows) + 1 (localhost:port without TLS is not loopback, as the hub reads it) + 1 (the default-tag refusal names image.tag and image.digest; the gate block now runs 21 rows) + 6 (the semver refusal names no placeholder floor, so the gate block now runs 22 rows; whitespace-only listen: spaces and tab, with TLS files and without; SCION_SERVER_HUB_CONDUIT_INTERNAL* refused in hub.extraEnv) + 2 (the malformed-version remedy by mode; the config.extra path names removing that listener; the gate block now runs 24 rows) + 1 (the NOTES warning on the config.extra path names removing that listener; the gate block now runs 25 rows) + 1 (the same NOTES check for an image.digest; the gate block now runs 26 rows).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -1116,8 +1116,8 @@ RT_TAG=(--set conduit.internalTls.enabled=true --set conduit.internalTls.existin
 # nightly floor.
 if [ -n "$_rt_min" ]; then _rt_ok_tag="$_rt_min"; _rt_semver_refusal="is older than ${_rt_min}"; else _rt_ok_tag="nightly-${_rt_min_n}"; _rt_semver_refusal="no versioned hub release serves the relay hop"; fi
 if [ "$_rt_vlines" -ne 1 ] || [ -z "$_rt_min_n" ] || { [ -n "$_rt_min" ] && ! [[ "$_rt_major" =~ ^[0-9]+$ ]]; }; then
-  executed=$((executed + 25)); failed=$((failed + 25))
-  echo "FAIL  relay image gate: could not read scion-hub.relayTlsMinHub (version lines $_rt_vlines, version '$_rt_min', nightly '$_rt_min_n'); none of its 25 rows ran"
+  executed=$((executed + 26)); failed=$((failed + 26))
+  echo "FAIL  relay image gate: could not read scion-hub.relayTlsMinHub (version lines $_rt_vlines, version '$_rt_min', nightly '$_rt_min_n'); none of its 26 rows ran"
 else
   reject "relay wiring with an older semver tag" "$_rt_semver_refusal" "${RT_TAG[@]}" --set-string image.tag=0.0.1
   if [ -n "$_rt_min" ]; then
@@ -1241,10 +1241,15 @@ else
   if cp -r "$CHART" "$_rt_tmp/c" && mv "$_rt_tmp/c/templates/NOTES.txt" "$_rt_tmp/c/templates/zz-notes-probe.txt"; then
     _rt_n_latest="$(_rt_notes --set-string image.tag=latest)"
     _rt_n_ok="$(_rt_notes --set-string "image.tag=${_rt_ok_tag}")"
-    # The config.extra path (wiring off): rendered without RT_TAG.
-    _rt_n_extra="$("$HELM" template t "$_rt_tmp/c" --debug "${BASE[@]}" --set-string image.tag=latest \
-      --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0:9443","internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":"/x/tls.key"}}}}' \
-      --show-only templates/zz-notes-probe.txt 2>/dev/null | sed -n '/^# Source: .*zz-notes-probe\.txt$/,$p')"
+    # The config.extra path (wiring off), on a tag and on a digest: rendered
+    # without RT_TAG.
+    _rt_notes_extra() {
+      "$HELM" template t "$_rt_tmp/c" --debug "${BASE[@]}" "$@" \
+        --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0:9443","internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":"/x/tls.key"}}}}' \
+        --show-only templates/zz-notes-probe.txt 2>/dev/null | sed -n '/^# Source: .*zz-notes-probe\.txt$/,$p'
+    }
+    _rt_n_extra="$(_rt_notes_extra --set-string image.tag=latest)"
+    _rt_n_extra_digest="$(_rt_notes_extra --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000)"
   fi
   if printf '%s\n' "$_rt_n_latest" | grep -qF 'SCHEMA_VERSION IS LOAD-BEARING' && printf '%s\n' "$_rt_n_ok" | grep -qF 'SCHEMA_VERSION IS LOAD-BEARING' \
     && printf '%s\n' "$_rt_n_latest" | grep -qF "$_rt_warn" && ! printf '%s\n' "$_rt_n_ok" | grep -qF "$_rt_warn"; then
@@ -1253,17 +1258,21 @@ else
     echo "FAIL  relay image gate: the NOTES warning is missing for tag latest, present for a checked tag, or the NOTES probe rendered nothing"; failed=$((failed + 1))
   fi
   # On the config.extra path the NOTES warning names removing that listener (or
-  # binding it to loopback), not turning off conduit.internalTls.
-  executed=$((executed + 1))
-  if printf '%s\n' "$_rt_n_extra" | grep -qF 'SCHEMA_VERSION IS LOAD-BEARING' && printf '%s\n' "$_rt_n_extra" | grep -qF "$_rt_warn" \
-    && printf '%s\n' "$_rt_n_extra" | grep -qF 'remove the config.extra internal_listen (or bind it to loopback)' \
-    && ! printf '%s\n' "$_rt_n_extra" | grep -qF 'conduit.internalTls.enabled: false'; then
-    echo "ok    NOTES.txt on the config.extra path names removing that listener, not conduit.internalTls.enabled: false"
-  else
-    echo "FAIL  relay image gate: the NOTES remedy on the config.extra path is wrong, or the probe rendered nothing"; failed=$((failed + 1))
-  fi
+  # binding it to loopback), not turning off conduit.internalTls: for tag latest
+  # and for an image.digest.
+  for _rt_case in "tag latest:$_rt_n_extra" "image.digest:$_rt_n_extra_digest"; do
+    _rt_label="${_rt_case%%:*}"; _rt_out="${_rt_case#*:}"
+    executed=$((executed + 1))
+    if printf '%s\n' "$_rt_out" | grep -qF 'SCHEMA_VERSION IS LOAD-BEARING' && printf '%s\n' "$_rt_out" | grep -qF "$_rt_warn" \
+      && printf '%s\n' "$_rt_out" | grep -qF 'remove the config.extra internal_listen (or bind it to loopback)' \
+      && ! printf '%s\n' "$_rt_out" | grep -qF 'conduit.internalTls.enabled: false'; then
+      echo "ok    NOTES.txt on the config.extra path ($_rt_label) names removing that listener, not conduit.internalTls.enabled: false"
+    else
+      echo "FAIL  relay image gate: the NOTES remedy on the config.extra path ($_rt_label) is wrong, or the probe rendered nothing"; failed=$((failed + 1))
+    fi
+  done
   case "$_rt_tmp" in /tmp/*) rm -rf "$_rt_tmp" ;; esac
-  unset -f _rt_notes; unset _rt_n_latest _rt_n_ok _rt_n_extra _rt_warn
+  unset -f _rt_notes _rt_notes_extra; unset _rt_n_latest _rt_n_ok _rt_n_extra _rt_n_extra_digest _rt_warn _rt_case _rt_label _rt_out
 fi
 unset _rt_min _rt_min_n _rt_major _rt_latest _rt_ok _rt_tmp RT_TAG _rt_vlines _rt_ok_tag _rt_semver_refusal
 

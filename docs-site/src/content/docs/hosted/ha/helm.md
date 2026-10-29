@@ -464,7 +464,8 @@ or set `image.digest`.
 **Rolling back.** Hub releases before the one that adds relay TLS ignore the
 `internal_tls_*` settings and would serve this listener in plaintext. If you roll
 the hub image back below that release, roll the chart back with it, or set
-`conduit.internalTls.enabled: false` first.
+`conduit.internalTls.enabled: false` first (for a listener set through
+`config.extra`, remove it or bind it to loopback).
 
 A relay listener that is not bound to loopback and has no TLS fails the render,
 including one set through `config.extra`. `conduit.internalTls` is refused
