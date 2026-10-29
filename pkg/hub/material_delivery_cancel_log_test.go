@@ -58,8 +58,28 @@ func TestDispatchDelivery_WithheldWarnsQuietAfterRequestEnds(t *testing.T) {
 	// Ended request: the selection runs to its end and logs neither.
 	buf.Reset()
 	ended := endedCtx{context.Background()}
-	_, err = m.d.selectDeliverySecrets(ended, newDeliverySelector(m.d.authzService, m.agent, PurposeRestart), m.agent)
+	sel := newDeliverySelector(m.d.authzService, m.agent, PurposeRestart)
+	_, err = m.d.selectDeliverySecrets(ended, sel, m.agent)
 	require.NoError(t, err, "the selection reaches its summary point")
+	assert.Positive(t, sel.denied, "the item was denied; only the Warns are suppressed")
 	assert.Empty(t, warnRecords(t, buf.Bytes(), itemMsg), "no per-item Warn after the request ended")
 	assert.Empty(t, warnRecords(t, buf.Bytes(), summaryMsg), "no summary Warn after the request ended")
+}
+
+// TestDispatchDelivery_LegacyFallbackWarnQuietAfterRequestEnds: an item
+// delivered through the legacy fallback under an ended request logs
+// nothing and does not use the Warn's rate-limit slot, so the next live
+// delivery within the window is still logged.
+func TestDispatchDelivery_LegacyFallbackWarnQuietAfterRequestEnds(t *testing.T) {
+	m := newLDFixture(t, "lg-ended", ldOptions{noEdge: true})
+	m.env(t, "LG_ENDED_ENV", "v", store.ScopeProject, m.agent.ProjectID, false)
+	buf := lgLogger(m)
+
+	ended := endedCtx{context.Background()}
+	_, _, _ = m.d.selectDeliveryEnv(ended, newDeliverySelector(m.d.authzService, m.agent, PurposeRestart), m.agent)
+	assert.Empty(t, warnRecords(t, buf.Bytes(), lgFallbackMsg), "no legacy Warn after the request ended")
+
+	require.NoError(t, m.d.DispatchAgentRestart(context.Background(), m.agent))
+	assert.Equal(t, "v", m.client.lastRestartResolvedEnv["LG_ENDED_ENV"])
+	assert.Len(t, warnRecords(t, buf.Bytes(), lgFallbackMsg), 1, "the live delivery is still logged within the window")
 }

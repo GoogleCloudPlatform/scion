@@ -172,9 +172,11 @@ func (s *deliverySelector) authorize(ctx context.Context, kind MaterialKind, rec
 // item (AuthzService.legacyDeliveryLog), an item delivered only through the legacy
 // fallback (material_delivery_legacy.go): names and cohort, never a value.
 // The admission memo holds the outcome step 10 used for this permission.
-// The availability probe delivers nothing and stays quiet.
+// The availability probe delivers nothing and stays quiet. Once the request
+// has ended nothing is logged and the rate-limit slot is not used, so a
+// later live delivery of the item is still logged.
 func (s *deliverySelector) warnLegacyFallback(ctx context.Context, kind MaterialKind, key, scope, scopeID string) {
-	if s.purpose == PurposeAvailabilityProbe || s.ident == nil || s.ident.admission == nil {
+	if s.purpose == PurposeAvailabilityProbe || s.ident == nil || s.ident.admission == nil || ctx.Err() != nil {
 		return
 	}
 	o, ok := s.ident.admission.load(deliverPermissionForKind(kind))

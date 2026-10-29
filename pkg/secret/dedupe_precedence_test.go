@@ -23,13 +23,15 @@ import (
 // for a shared target is decided by scope precedence (runtime_broker < hub
 // < project < user), not by name or by input order: secrets with distinct
 // names and one target, across every scope, in ascending and descending
-// order. Names are chosen so that name order disagrees with scope order.
+// order. Names put each expected winner strictly in the middle by name, in
+// the full set and in the subset, so neither the first nor the last name
+// in sorted order would win.
 func TestDeduplicateByTarget_ScopePrecedenceAcrossNames(t *testing.T) {
 	ascending := []SecretWithValue{
 		{SecretMeta: SecretMeta{Name: "d-broker", SecretType: TypeEnvironment, Target: "SHARED_TARGET", Scope: ScopeRuntimeBroker}, Value: "broker"},
-		{SecretMeta: SecretMeta{Name: "c-hub", SecretType: TypeEnvironment, Target: "SHARED_TARGET", Scope: ScopeHub}, Value: "hub"},
-		{SecretMeta: SecretMeta{Name: "b-project", SecretType: TypeEnvironment, Target: "SHARED_TARGET", Scope: ScopeProject}, Value: "project"},
-		{SecretMeta: SecretMeta{Name: "a-user", SecretType: TypeEnvironment, Target: "SHARED_TARGET", Scope: ScopeUser}, Value: "user"},
+		{SecretMeta: SecretMeta{Name: "a-hub", SecretType: TypeEnvironment, Target: "SHARED_TARGET", Scope: ScopeHub}, Value: "hub"},
+		{SecretMeta: SecretMeta{Name: "c-project", SecretType: TypeEnvironment, Target: "SHARED_TARGET", Scope: ScopeProject}, Value: "project"},
+		{SecretMeta: SecretMeta{Name: "b-user", SecretType: TypeEnvironment, Target: "SHARED_TARGET", Scope: ScopeUser}, Value: "user"},
 	}
 	descending := slices.Clone(ascending)
 	slices.Reverse(descending)
@@ -46,7 +48,7 @@ func TestDeduplicateByTarget_ScopePrecedenceAcrossNames(t *testing.T) {
 			if len(got) != 1 {
 				t.Fatalf("expected one secret for the shared target, got %d: %+v", len(got), got)
 			}
-			if got[0].Scope != ScopeUser || got[0].Name != "a-user" || got[0].Value != "user" {
+			if got[0].Scope != ScopeUser || got[0].Name != "b-user" || got[0].Value != "user" {
 				t.Fatalf("expected the user-scope secret to win, got %s (%s)", got[0].Name, got[0].Scope)
 			}
 		})
