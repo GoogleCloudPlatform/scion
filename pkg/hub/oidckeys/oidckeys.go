@@ -106,7 +106,7 @@ type OIDCKeyManager struct {
 	// flagged reports a record the startup encryption audit found
 	// unreadable (nil: none); such a record is never overwritten.
 	flagged func(key, scope, scopeID string) bool
-	// source is the signingKeySource* label of the startup key (set once by
+	// source is the keymaterial.Source* label of the startup key (set once by
 	// loadOrCreateKey, never key material).
 	source string
 }
@@ -209,7 +209,7 @@ func NewOIDCKeyManager(ctx context.Context, cfg OIDCKeyManagerConfig) (*OIDCKeyM
 	return mgr, nil
 }
 
-// Source returns the signingKeySource* label of the key resolved at startup
+// Source returns the keymaterial.Source* label of the key resolved at startup
 // (secret backend, store or generated). It never returns key material.
 func (m *OIDCKeyManager) Source() string {
 	if m == nil {
