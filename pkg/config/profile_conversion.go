@@ -1046,8 +1046,14 @@ func buildSplitInstances(st *convState, sp *convSplit, choices map[string]*field
 		defaults := &V1InstanceAgentDefaults{}
 		for _, field := range sp.fields {
 			switch {
-			case !sp.conflicting[field] || splitField[field]:
-				// Agreed by the group, or by this part (it is split on).
+			case !sp.conflicting[field]:
+				// Agreed by the group: copied as the group's first profile
+				// writes it, so every part carries the same value.
+				if cv, set := g.profiles[0].fields[field]; set {
+					setInstanceField(target, defaults, field, cv.v)
+				}
+			case splitField[field]:
+				// Agreed by this part, which is split on the field.
 				if cv, set := part.profiles[0].fields[field]; set {
 					setInstanceField(target, defaults, field, cv.v)
 				}
