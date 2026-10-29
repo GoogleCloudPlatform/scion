@@ -53,9 +53,10 @@ func assertCloneURLRefusal(t *testing.T, status int, message, mode string) {
 	assert.NotContains(t, message, "refused.example", "the refusal names no URL")
 }
 
-// clonePathServer is a broker whose dispatches resolve to runtimeName.
+// clonePathServer is a broker whose dispatches resolve to runtimeName. Broker
+// auth is off (testServerConfig), so requests reach the handlers.
 func clonePathServer(runtimeName string) (*Server, *gitCloneCapturingManager) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.ForceRuntime = "mock"
