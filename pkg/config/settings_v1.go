@@ -1953,6 +1953,19 @@ type V1RuntimeTargetConfig struct {
 	// and an explicit false or true is kept as written. The agent's own
 	// kubernetes.safeToEvict wins over it. Kubernetes only.
 	SafeToEvict *bool `json:"safe_to_evict,omitempty" yaml:"safe_to_evict,omitempty" koanf:"safe_to_evict"`
+	// NodeSelector, Tolerations and RuntimeClassName are this Kubernetes
+	// instance's pod placement: the flat counterpart of the runtime entry
+	// fields of the same names. Unlike the defaults above, the operator owns
+	// them: an agent may add node selector keys, but it cannot change a key
+	// set here or the runtime class, and its tolerations must be among
+	// these, so none are allowed when none are set here
+	// (config.ApplyOperatorPlacement).
+	// Read from the activated
+	// instance policy on every start; a change takes effect on restart.
+	// Kubernetes only.
+	NodeSelector     map[string]string   `json:"node_selector,omitempty" yaml:"node_selector,omitempty" koanf:"node_selector"`
+	Tolerations      []api.K8sToleration `json:"tolerations,omitempty" yaml:"tolerations,omitempty" koanf:"tolerations"`
+	RuntimeClassName string              `json:"runtime_class_name,omitempty" yaml:"runtime_class_name,omitempty" koanf:"runtime_class_name"`
 	// SharedDirStorageBackend, SharedDirStorageBackends, HomeStorageBackend
 	// and HomeStorageLeaf are removed per-instance storage overrides
 	// (design: no per-runtime storage overrides): server.project_storage places every agent's storage.
@@ -1986,6 +1999,9 @@ type V1DatabaseConfig struct {
 	// create a new table set that hides existing hub tables
 	// later on the search_path. See DatabaseConfig.AllowShadowedSchema.
 	AllowShadowedSchema bool `json:"allow_shadowed_schema,omitempty" yaml:"allow_shadowed_schema,omitempty" koanf:"allow_shadowed_schema"`
+	// TxDiagnostics configures transaction-hold and lock-wait diagnostics.
+	// See TxDiagnosticsConfig.
+	TxDiagnostics *TxDiagnosticsConfig `json:"tx_diagnostics,omitempty" yaml:"tx_diagnostics,omitempty" koanf:"tx_diagnostics"`
 }
 
 // V1AuthConfig holds authentication settings.
@@ -4396,6 +4412,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			gc.Database.ConnMaxIdleTime = v1.Database.ConnMaxIdleTime
 		}
 		gc.Database.AllowShadowedSchema = v1.Database.AllowShadowedSchema
+		if v1.Database.TxDiagnostics != nil {
+			gc.Database.TxDiagnostics = *v1.Database.TxDiagnostics
+		}
 	}
 
 	// Auth config
@@ -4782,6 +4801,9 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		ConnMaxIdleTime: gc.Database.ConnMaxIdleTime,
 
 		AllowShadowedSchema: gc.Database.AllowShadowedSchema,
+	}
+	if td := gc.Database.TxDiagnostics; td != (TxDiagnosticsConfig{}) {
+		v1.Database.TxDiagnostics = &td
 	}
 
 	// Auth config

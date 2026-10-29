@@ -77,6 +77,17 @@ describe('feature-flags: web.agent_edit', () => {
   });
 });
 
+describe('feature-flags: web.chat_starred_messages', () => {
+  it('defaults ON (in DEFAULT_ON_FLAGS) with no server value or override', () => {
+    expect(isFeatureEnabled('web.chat_starred_messages')).toBe(true);
+  });
+
+  it('the server can still turn it off', () => {
+    setServerFlags({ 'web.chat_starred_messages': false });
+    expect(isFeatureEnabled('web.chat_starred_messages')).toBe(false);
+  });
+});
+
 describe('feature-flags: access boundary flags removed', () => {
   it('does not export ACCESS_BOUNDARIES_READ_FLAG', () => {
     expect(ACCESS_BOUNDARIES_READ_FLAG).toBeUndefined();

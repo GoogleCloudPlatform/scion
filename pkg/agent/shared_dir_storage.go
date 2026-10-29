@@ -190,7 +190,9 @@ func resolveSharedDirs(
 		}
 		for i, d := range dirs {
 			rel := resolved[i].RelPath // relative to HostBase, e.g. projects/<pid>/shared-dirs/<name>
-			leafFd, _, walkErr := ensureSharedDirLeaf(resolvedHostBase, rel)
+			// A root broker gives the directories it creates the
+			// shared-dir Layout's owner (its nfs uid and gid).
+			leafFd, _, walkErr := ensureSharedDirLeaf(resolvedHostBase, rel, resolved[i].Owner())
 			if walkErr != nil && isNFSLeafPermissionError(walkErr) && kubeletMayCreateSharedDirs(runtimeName, sdLayout, split) {
 				// As for the workspace directory on the same export
 				// (ensureNFSWorkspaceLeaf): the broker may not be allowed
@@ -271,9 +273,9 @@ func kubeletMayCreateSharedDirs(runtimeName string, sdLayout projectfs.Layout, s
 	return isKubernetesRuntime(runtimeName) && sdLayout.Backend == projectfs.BackendNFS && !split
 }
 
-// ensureSharedDirLeaf is shareddirs.EnsureLeaf, replaceable in tests to
-// replace a path component after the walk and reach the backstop check.
-var ensureSharedDirLeaf = shareddirs.EnsureLeaf
+// ensureSharedDirLeaf is shareddirs.EnsureLeafOwned, replaceable in tests
+// to replace a path component after the walk and reach the backstop check.
+var ensureSharedDirLeaf = shareddirs.EnsureLeafOwned
 
 // fdGID is shareddirs.FdGID, replaceable in tests to simulate a failed stat.
 var fdGID = shareddirs.FdGID

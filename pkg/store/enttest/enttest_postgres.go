@@ -50,6 +50,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/txdiag"
 
 	// pgx stdlib driver registration ("pgx"). entc/driver_postgres.go also
 	// imports it, but we keep it explicit so this file is self-describing.
@@ -148,7 +149,9 @@ func newClient(t *testing.T) *ent.Client {
 	if err != nil {
 		t.Fatalf("enttest: building client URL: %v", err)
 	}
-	client, err := entc.OpenPostgres(clientURL, entc.PoolConfig{MaxOpenConns: 5, MaxIdleConns: 2})
+	// Diag runs Postgres store tests through the transaction diagnostics
+	// wrapper, as in production (output discarded).
+	client, err := entc.OpenPostgres(clientURL, entc.PoolConfig{MaxOpenConns: 5, MaxIdleConns: 2, Diag: txdiag.QuietConfig()})
 	if err != nil {
 		t.Fatalf("enttest: opening postgres ent client: %v", err)
 	}
@@ -190,7 +193,7 @@ func NewSchemaURL(t *testing.T) string {
 
 	// Migrate once so the schema is fully provisioned; callers open their own
 	// clients/pools against clientURL afterwards.
-	client, err := entc.OpenPostgres(clientURL, entc.PoolConfig{MaxOpenConns: 2, MaxIdleConns: 1})
+	client, err := entc.OpenPostgres(clientURL, entc.PoolConfig{MaxOpenConns: 2, MaxIdleConns: 1, Diag: txdiag.QuietConfig()})
 	if err != nil {
 		t.Fatalf("enttest: opening migrate client for schema %s: %v", schema, err)
 	}

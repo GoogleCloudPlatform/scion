@@ -289,6 +289,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		// do not read Depth from the ctx copy.
 		ctx = api.ContextWithGitClone(ctx, opts.GitClone)
 	}
+	ctx = contextWithClonePerAgentWorkspace(ctx, opts)
+	ctx = contextWithAgentRuntime(ctx, m.runtimeName())
 	if opts.RecordedOriginURL != "" {
 		// Linked-checkout route: GitClone was cleared, so the recorded origin is
 		// carried separately for the git-lfs endpoint pin.
@@ -352,6 +354,14 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		delete(env, "SCION_WORKSPACE_GIT")
 		opts.Env = env
 	}
+	// SCION_WORKSPACE_GIT as the caller (the runtime broker's start context)
+	// computed it, snapshotted before any settings-driven env merging can
+	// fill the absent key: the harness-config env overlay
+	// (resolveAuthEnvOverlay), the config env layer and the hub default env
+	// (buildAgentEnv). The final env carries exactly this value
+	// (enforceWorkspaceGitEnv), because the Kubernetes runtime's
+	// shared-repository guard trusts it.
+	dispatchWorkspaceGit, dispatchWorkspaceGitSet := opts.Env["SCION_WORKSPACE_GIT"]
 	if finalScionCfg != nil {
 		util.Debugf("Start: GetAgent returned config: harness=%q harnessConfig=%q defaultHarnessConfig=%q image=%q",
 			finalScionCfg.Harness, finalScionCfg.HarnessConfig, finalScionCfg.DefaultHarnessConfig, finalScionCfg.Image)
@@ -1563,15 +1573,26 @@ authDone:
 
 	// The only hub credential an agent ever gets is the token the hub issued
 	// for it, written to the token file below. No other token is substituted,
-	// this process's own included: a hub-dispatched agent without one starts
-	// with no hub credential, and the start says so, in the log and in the
-	// hub's response.
-	noHubTokenWarning := noHubCredentialWarning(opts)
-	if noHubTokenWarning != "" {
-		slog.Warn("agent start: the hub issued no agent token; the agent starts without a hub credential",
-			"agent_id", agentID, "name", opts.Name)
-		warnings = append(warnings, noHubTokenWarning)
+	// this process's own included. In broker mode that token is
+	// opts.HubIssuedToken, which only the runtime broker sets: a
+	// SCION_AUTH_TOKEN in opts.Env (from the request's config env or the
+	// broker's harness-config env) is not hub-issued, so it is dropped here
+	// and buildAgentEnv drops one from the agent config env. A hub-dispatched
+	// agent without a hub-issued token could neither report to the hub nor
+	// call it, so its start fails (below, after any earlier token file is
+	// removed) with ErrNoHubToken.
+	if opts.BrokerMode {
+		if _, ok := opts.Env["SCION_AUTH_TOKEN"]; ok {
+			delete(opts.Env, "SCION_AUTH_TOKEN")
+			slog.Warn("agent start: a SCION_AUTH_TOKEN the hub did not issue is ignored",
+				"agent_id", agentID, "name", opts.Name)
+			warnings = append(warnings, ignoredAuthTokenWarning)
+		}
+		if opts.HubIssuedToken != "" {
+			opts.Env["SCION_AUTH_TOKEN"] = opts.HubIssuedToken
+		}
 	}
+	missingHubToken := hubDispatchedWithoutToken(opts)
 
 	// Write the agent token to the canonical token file in the agent home
 	// directory so that all processes inside the container read from the file
@@ -1612,6 +1633,11 @@ authDone:
 		// the container reads that file first. Refusing to start when it
 		// cannot be removed is the same choice as for a failed write above.
 		return nil, fmt.Errorf("cannot start agent %q: remove the previous hub credential: %w", opts.Name, err)
+	}
+	if missingHubToken {
+		slog.Error("agent start refused: the hub issued no agent token",
+			"agent_id", agentID, "name", opts.Name)
+		return nil, fmt.Errorf("cannot start agent %q: %w", opts.Name, ErrNoHubToken)
 	}
 
 	// Resolve host networking: when the hub endpoint is localhost or was
@@ -1742,10 +1768,6 @@ authDone:
 	// Host networking and the GCP metadata mode: refuse assign, warn the
 	// user for block. Decided on the merged env, before any container work.
 	var relayedWarnings []string
-	if noHubTokenWarning != "" {
-		// Relayed to the hub too: the user sees it in the start response.
-		relayedWarnings = append(relayedWarnings, noHubTokenWarning)
-	}
 	hostNetWarning, hostNetErr := checkHostNetworkMetadata(opts.Name, m.Runtime.Name(), networkMode, agentEnv)
 	if hostNetErr != nil {
 		slog.Warn("Start: refusing agent start: GCP metadata mode under host networking",
@@ -1823,6 +1845,15 @@ authDone:
 	emptyPerAgentWorkspace := ""
 	if emptyPerAgent {
 		emptyPerAgentWorkspace = filepath.Join(agentDir, "workspace")
+		// On a shared Layout it is the agent's directory on the share
+		// (sharedLayoutAgentWorkspace), as GetAgent resolved it.
+		sharedWS, sharedErr := sharedLayoutAgentWorkspace(ctx, settings, projectDir, opts.Name, agentDir)
+		if sharedErr != nil {
+			return nil, sharedErr
+		}
+		if sharedWS != "" {
+			emptyPerAgentWorkspace = sharedWS
+		}
 		if explicitWorkspace || filepath.Clean(effectiveWorkspace) != emptyPerAgentWorkspace {
 			return nil, fmt.Errorf("empty-per-agent agent %q must use its private workspace %s, not %q", opts.Name, emptyPerAgentWorkspace, effectiveWorkspace)
 		}
@@ -1896,14 +1927,11 @@ authDone:
 		repoRoot = resolvedRepoRoot
 	}
 
-	// Validate that the workspace directory exists before attempting to mount it.
-	// This is a safety net — GetAgent should have created/recreated it, but if
-	// the directory is still missing we fail early with a clear error rather than
-	// letting the container runtime produce a cryptic mount error.
-	if effectiveWorkspace != "" {
-		if _, err := os.Stat(effectiveWorkspace); os.IsNotExist(err) {
-			return nil, fmt.Errorf("workspace directory does not exist: %s (try deleting and recreating the agent)", effectiveWorkspace)
-		}
+	// Validate that the workspace directory exists before attempting to mount
+	// it (checkStartWorkspaceExists; skipped for a Kubernetes start through
+	// the nfs workspace backend).
+	if err := checkStartWorkspaceExists(m.Runtime.Name(), effectiveWorkspace, settings, opts, emptyPerAgent); err != nil {
+		return nil, err
 	}
 
 	// Telemetry defaults to enabled when not explicitly set to false.
@@ -2064,18 +2092,7 @@ authDone:
 
 	preBackendWorkspace := effectiveWorkspace
 	if settings != nil && settings.Server != nil && settings.Server.EffectiveWorkspaceStorage() != nil {
-		sharingMode := store.SharingModeWorktreePerAgent
-		if opts.SharedWorkspace || opts.GitClone != nil {
-			sharingMode = store.SharingModeSharedPlain
-		}
-		// Empty-per-agent never takes the WorktreePerAgent default above: it
-		// has no shared checkout. Without NFS storage it is node-local (or
-		// pod-local EmptyDir on Kubernetes). With NFS storage it gets its
-		// own agent directory on the export (design #2703 P3), which only
-		// the Kubernetes runtime can mount: see nfsEmptyAgentDirSelection.
-		if emptyPerAgent {
-			sharingMode = store.SharingModeEmptyPerAgent
-		}
+		sharingMode := startWorkspaceSharingMode(opts, emptyPerAgent)
 		// The agent's own directory on the export, if it gets one
 		// (nfsOwnAgentDirSelection): empty-per-agent, or a git project
 		// dispatched in clone-per-agent mode on Kubernetes, with a
@@ -2208,9 +2225,11 @@ authDone:
 			}
 
 			workspaceBackendName = backend.Name()
-			// Empty-per-agent keeps its private node-local path as the
-			// workspace source: mount.HostPath is the project's shared
-			// workspace, which this agent must never see.
+			// Empty-per-agent keeps its own workspace as the workspace
+			// source (on a shared Layout, its directory on the share,
+			// sharedLayoutAgentWorkspace; otherwise its private node-local
+			// path): mount.HostPath is the project's shared workspace,
+			// which this agent must never see.
 			if mount.HostPath != "" && !nfsAgentDirEmpty {
 				effectiveWorkspace = mount.HostPath
 			}
@@ -2369,6 +2388,9 @@ authDone:
 	// container's env and label cannot disagree. Any value from the
 	// request or template env is replaced.
 	agentEnv = withLaunchIDEnv(agentEnv, runID)
+	// Only the caller's SCION_WORKSPACE_GIT reaches the container env; a
+	// value any merged layer added is removed (see dispatchWorkspaceGit).
+	agentEnv = enforceWorkspaceGitEnv(agentEnv, dispatchWorkspaceGit, dispatchWorkspaceGitSet)
 
 	// The template env layer is never part of agentEnv: it travels as
 	// RunConfig.FallbackEnv, which every runtime applies as the LAST step
@@ -3679,6 +3701,12 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaul
 					expandedValue = hostVal
 				}
 			}
+			if brokerMode && expandedKey == "SCION_AUTH_TOKEN" {
+				// Not hub-issued: a hub-dispatched agent's hub token comes
+				// only from the hub (StartOptions.HubIssuedToken).
+				warnings = append(warnings, ignoredAuthTokenWarning)
+				continue
+			}
 			combined[expandedKey] = expandedValue
 		}
 	}
@@ -3688,6 +3716,9 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaul
 	}
 	// Lowest tier: fill only what no layer above set.
 	for k, v := range defaultEnv {
+		if brokerMode && k == "SCION_AUTH_TOKEN" {
+			continue
+		}
 		if combined[k] == "" {
 			combined[k] = v
 		}
@@ -3718,18 +3749,27 @@ func refuseHostEnvForAgent(name string) bool {
 	return util.IsAgentRefusedHostEnvName(name)
 }
 
-// noHubCredentialWarning returns the start warning for a hub-dispatched
-// agent (broker mode, with SCION_HUB_ENDPOINT or SCION_HUB_URL set) that has
-// no hub-issued token in opts.Env, or "" otherwise. It names no credential
-// value. The hub issues every agent a token unless its agent token service
-// is unavailable, so the warning points the operator at the hub log.
-func noHubCredentialWarning(opts api.StartOptions) string {
-	if !opts.BrokerMode || (opts.Env["SCION_HUB_ENDPOINT"] == "" && opts.Env["SCION_HUB_URL"] == "") || opts.Env["SCION_AUTH_TOKEN"] != "" {
-		return ""
-	}
-	return fmt.Sprintf("Warning: the hub issued no agent token, so agent %s starts without a hub credential "+
-		"and cannot report its status to the hub or call it. Check the hub log: its agent token service may have failed to start.", opts.Name)
+// ErrNoHubToken is the error a hub-dispatched start fails with when the hub
+// issued no agent token for it. Its text names the cause and no credential
+// value; the runtime broker returns it to the hub as the start's error
+// message.
+var ErrNoHubToken = errors.New("the hub issued no agent token for this start; " +
+	"check the hub's agent token service (see the hub log)")
+
+// hubDispatchedWithoutToken reports whether opts is a hub-dispatched start
+// (broker mode, with SCION_HUB_ENDPOINT or SCION_HUB_URL set) with no
+// hub-issued token (opts.HubIssuedToken).
+func hubDispatchedWithoutToken(opts api.StartOptions) bool {
+	return opts.BrokerMode &&
+		(opts.Env["SCION_HUB_ENDPOINT"] != "" || opts.Env["SCION_HUB_URL"] != "") &&
+		opts.HubIssuedToken == ""
 }
+
+// ignoredAuthTokenWarning is the start warning for a SCION_AUTH_TOKEN that
+// reached a hub-dispatched start from anywhere but the hub (the request's
+// config env, the agent config env, a harness-config env). It names no value.
+const ignoredAuthTokenWarning = "Warning: SCION_AUTH_TOKEN is set in the agent's environment configuration and is ignored: " +
+	"the agent's hub credential is only the token the hub issues for it."
 
 // expandConfigHubEndpoint returns the SCION_HUB_ENDPOINT value from a scion
 // config env section with ${VAR} references expanded from the host env, or ""

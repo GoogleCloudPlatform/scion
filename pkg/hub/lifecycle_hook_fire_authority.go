@@ -184,8 +184,8 @@ func (s *Server) authorizeHookFire(ctx context.Context, hook *store.LifecycleHoo
 	}, sa)
 	if err != nil {
 		// EvaluateActAs has already forced the outcome to indeterminate.
-		slog.Warn("lifecycle hook fire-time actAs check failed",
-			"hook_id", hook.ID, "sa_id", sa.ID, "error", err.Error())
+		slog.WarnContext(ctx, "lifecycle hook fire-time actAs check failed",
+			"hook_id", hook.ID, "sa_id", sa.ID, "error", err)
 	}
 	if result.Outcome != store.ActAsAllowed {
 		return hookFireDeny(HookFireWriterActAsDenied,
@@ -242,7 +242,11 @@ func (r *rateLimitedActAsAuditSink) RecordSAAssignment(ctx context.Context, even
 const hookRefusalAuditInterval = 10 * time.Minute
 
 // hookRefusalLimiterMaxEntries bounds the limiter's memory; past it, entries
-// older than the interval are pruned.
+// older than the interval are pruned. The prune scans the whole map, so it
+// runs at most once per interval (an entry cannot expire sooner). A scan
+// keeps the entries recorded within the interval before it, and the next
+// scan is an interval later, so at worst the map holds the hooks first
+// refused within about two intervals.
 const hookRefusalLimiterMaxEntries = 1024
 
 // hookRefusalLimiter rate limits refusal audit records per hook. It is safe
@@ -253,6 +257,8 @@ type hookRefusalLimiter struct {
 
 	mu      sync.Mutex
 	entries map[string]*hookRefusalEntry
+	// lastPrune is when the last prune scan ran (zero: never).
+	lastPrune time.Time
 }
 
 type hookRefusalEntry struct {
@@ -283,7 +289,8 @@ func (l *hookRefusalLimiter) admit(hookID, cause string) (record bool, suppresse
 	if ok {
 		suppressed = e.suppressed
 	}
-	if !ok && len(l.entries) >= hookRefusalLimiterMaxEntries {
+	if !ok && len(l.entries) >= hookRefusalLimiterMaxEntries && now.Sub(l.lastPrune) >= l.interval {
+		l.lastPrune = now
 		for id, old := range l.entries {
 			if now.Sub(old.recorded) >= l.interval {
 				delete(l.entries, id)

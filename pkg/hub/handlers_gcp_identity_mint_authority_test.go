@@ -629,6 +629,7 @@ func TestGCPServiceAccountUse_DecisionCarriesParentProof(t *testing.T) {
 	assert.Equal(t, DeniedByDelegationCeiling, d.DeniedBy)
 	assert.Equal(t, DenyCauseCeilingProvenanceMissing, d.DenyCause)
 	require.NotNil(t, d.parentProof)
+	assert.Equal(t, ParentProofKindParentPermission, d.parentProof.Kind)
 }
 
 // TestEvaluateResourceParentCeiling_UnmappedOrMismatchedDenies: a resource of
@@ -642,11 +643,13 @@ func TestEvaluateResourceParentCeiling_UnmappedOrMismatchedDenies(t *testing.T) 
 	d := authz.evaluateResourceParentCeiling(context.Background(), m, tid("agent"), Resource{Type: "secret", ID: tid("sa")})
 	assert.False(t, d.Allowed)
 	assert.Equal(t, DenyCauseCeilingError, d.DenyCause)
+	assert.Equal(t, ParentProofKindParentPermission, d.Proof.Kind, "the deny proof names its kind, as EvaluateServiceAccountParentCeiling's do")
 
 	unknown := ResourceParentCeiling{DecisionPermission: "made.up", ParentPermission: "made.parent", ResourceType: "secret"}
 	d = authz.evaluateResourceParentCeiling(context.Background(), unknown, tid("agent"), Resource{Type: "secret", ID: tid("x")})
 	assert.False(t, d.Allowed)
 	assert.Equal(t, DenyCauseCeilingError, d.DenyCause)
+	assert.Equal(t, ParentProofKindParentPermission, d.Proof.Kind)
 }
 
 // TestApplyResourceParentCeiling_NonAgentIdentityDenies: an agent-kind
@@ -666,6 +669,8 @@ func TestApplyResourceParentCeiling_NonAgentIdentityDenies(t *testing.T) {
 			assert.False(t, d.Allowed)
 			assert.Equal(t, DeniedByDelegationCeiling, d.DeniedBy)
 			assert.Equal(t, DenyCauseCeilingError, d.DenyCause)
+			require.NotNil(t, d.parentProof)
+			assert.Equal(t, ParentProofKindParentPermission, d.parentProof.Kind)
 		})
 	}
 }

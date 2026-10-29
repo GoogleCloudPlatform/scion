@@ -112,20 +112,31 @@ func TestStartRefusesAnIncompleteEnvironment(t *testing.T) {
 	full := map[string]string{
 		"SCION_HUB_ENDPOINT": "http://127.0.0.1:1",
 		"SCION_AGENT_ID":     "agent-1",
-		"SCION_AUTH_TOKEN":   "token",
 	}
-	for _, key := range []string{"SCION_HUB_ENDPOINT", "SCION_AGENT_ID", "SCION_AUTH_TOKEN"} {
+	for _, key := range []string{"SCION_HUB_ENDPOINT", "SCION_AGENT_ID"} {
 		env := map[string]string{}
 		for k, v := range full {
 			if k != key {
 				env[k] = v
 			}
 		}
-		if _, err := s.start(api.StartOptions{Name: "port-proxy-legacy", Env: env}); err == nil {
+		if _, err := s.start(api.StartOptions{Name: "port-proxy-legacy", Env: env, HubIssuedToken: "token"}); err == nil {
 			t.Errorf("start without %s succeeded", key)
 		}
 	}
-	if _, err := s.start(api.StartOptions{Name: "worker", Env: full}); err == nil {
+	if _, err := s.start(api.StartOptions{Name: "port-proxy-legacy", Env: full}); err == nil {
+		t.Error("start without a hub-issued token succeeded")
+	}
+	// A SCION_AUTH_TOKEN in the start environment is not the hub-issued
+	// token: the runtime broker never puts the agent's token there.
+	withEnvToken := map[string]string{"SCION_AUTH_TOKEN": "token"}
+	for k, v := range full {
+		withEnvToken[k] = v
+	}
+	if _, err := s.start(api.StartOptions{Name: "port-proxy-legacy", Env: withEnvToken}); err == nil {
+		t.Error("start with the token only in the environment succeeded")
+	}
+	if _, err := s.start(api.StartOptions{Name: "worker", Env: full, HubIssuedToken: "token"}); err == nil {
 		t.Error("start of an agent whose name names no transport succeeded")
 	}
 	if got := s.list(nil); len(got) != 0 {
@@ -151,14 +162,14 @@ func TestStartCarriesTheRunID(t *testing.T) {
 	s := newAgentSet(8080)
 	defer s.stopAll()
 	info, err := s.start(api.StartOptions{
-		Name:  "port-proxy-legacy",
-		RunID: "run-1",
+		Name:           "port-proxy-legacy",
+		RunID:          "run-1",
+		HubIssuedToken: "token",
 		Env: map[string]string{
 			// Nothing listens here: the agent keeps retrying the port
 			// registration until stopAll.
 			"SCION_HUB_ENDPOINT": "http://127.0.0.1:1",
 			"SCION_AGENT_ID":     "agent-1",
-			"SCION_AUTH_TOKEN":   "token",
 		},
 	})
 	if err != nil {

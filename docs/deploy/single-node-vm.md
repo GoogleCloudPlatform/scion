@@ -602,10 +602,11 @@ The teardown flow prompts for the hub name and region, then deletes:
 1. The Cloud Run IAP proxy service
 2. The GCE VM instance
 3. The Cloud NAT and Cloud Router (unless they were reused from a pre-existing gateway on the network/region)
-4. The hub VM's service account
-5. The Cloud Run proxy's service account
-6. The IAP SSH firewall rule
-7. The proxy-to-VM firewall rule (tcp:8080)
+4. The hub VM's service account's project role bindings (also any `deleted:serviceAccount:` tombstones of it on those roles)
+5. The hub VM's service account
+6. The Cloud Run proxy's service account
+7. The IAP SSH firewall rule
+8. The proxy-to-VM firewall rule (tcp:8080)
 
 **Note:** IAP access bindings are scoped to the region, not to the service.
 Teardown does not remove them. To clean up IAP bindings manually:

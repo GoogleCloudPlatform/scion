@@ -19,8 +19,6 @@ import (
 	"database/sql"
 	"testing"
 
-	entsql "entgo.io/ent/dialect/sql"
-
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 )
 
@@ -166,7 +164,7 @@ func withSQLiteDB(t testing.TB, dbPath string, fn func(*sql.DB), migrate bool) {
 			t.Fatalf("migrate sqlite %s: %v", dbPath, err)
 		}
 	}
-	drv, ok := client.Driver().(*entsql.Driver)
+	drv, ok := entc.SQLDriver(client.Driver())
 	if !ok {
 		t.Fatalf("sqlite client has no database/sql driver")
 	}

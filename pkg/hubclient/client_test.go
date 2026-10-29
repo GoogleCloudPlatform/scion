@@ -1246,3 +1246,17 @@ func TestHealth_AbsentContentType_NonJSON(t *testing.T) {
 		t.Errorf("expected decode error, got: %v", err)
 	}
 }
+
+func TestWithTimeout_NilHTTPClient(t *testing.T) {
+	c, err := New("http://hub.example", WithHTTPClient(nil), WithTimeout(10*time.Second))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	concrete := c.(*client)
+	if concrete.transport.HTTPClient == nil {
+		t.Fatal("transport.HTTPClient is nil")
+	}
+	if concrete.transport.HTTPClient.Timeout != 10*time.Second {
+		t.Errorf("Timeout = %v, want 10s", concrete.transport.HTTPClient.Timeout)
+	}
+}

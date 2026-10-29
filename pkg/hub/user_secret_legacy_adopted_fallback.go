@@ -145,7 +145,7 @@ const legacyFallbackPathStart = "start"
 // legacyAdoptedFallbackMetrics counts uses of the fallback, so the policy V2
 // backfill can show when the exception is no longer needed.
 type legacyAdoptedFallbackMetrics interface {
-	RecordLegacyAdoptedFallback(path, role string)
+	RecordLegacyAdoptedFallback(ctx context.Context, path, role string)
 }
 
 // OTelLegacyAdoptedFallbackMetrics counts fallback uses as
@@ -168,8 +168,8 @@ func NewOTelLegacyAdoptedFallbackMetrics(mp metric.MeterProvider) (*OTelLegacyAd
 }
 
 // RecordLegacyAdoptedFallback implements legacyAdoptedFallbackMetrics.
-func (m *OTelLegacyAdoptedFallbackMetrics) RecordLegacyAdoptedFallback(path, role string) {
-	m.total.Add(context.Background(), 1, metric.WithAttributes(
+func (m *OTelLegacyAdoptedFallbackMetrics) RecordLegacyAdoptedFallback(ctx context.Context, path, role string) {
+	m.total.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("path", path),
 		attribute.String("role", role),
 	))
@@ -201,7 +201,7 @@ func (a *AuthzService) recordLegacyAdoptedFallback(ctx context.Context, path str
 	}
 	total := a.legacyFallbackUses.Add(1)
 	if m := a.legacyFallbackMetrics; m != nil {
-		m.RecordLegacyAdoptedFallback(path, fb.Role)
+		m.RecordLegacyAdoptedFallback(ctx, path, fb.Role)
 	}
 	a.legacyFallbackWarnOnce.Do(func() {
 		a.legacyFallbackWarn = newHookRefusalLimiter(legacyAdoptedFallbackWarnInterval, time.Now)
