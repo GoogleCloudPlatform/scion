@@ -455,14 +455,15 @@ func localContainerRuntime(runtimeName string) bool {
 // not fatal). An already provisioned workspace (sentinel present, as after
 // the hub's provisioning at project create) takes the reuse path; a lost
 // sentinel or a project from before that provisioning gets the clone, under
-// the provisioning lock. The clone gets no git token: the agent's token is
-// not passed to it and no token remote is set, so a private repository is
-// not cloned here and the start fails with the provisioner's "needs
-// credentials" error. It reports whether it
+// the provisioning lock. The clone gets the agent's git token only when the
+// clone URL names the project's recorded remote (gc.TokenRemote, which the
+// hub sets from the project record): https, the same host and owner/repo
+// (provision.CloneTokenAllowed). A clone URL naming any other host or
+// repository, or no recorded remote, gets no token, and a private
+// repository then fails with the provisioner's "needs credentials" error. It reports whether it
 // provisioned (the caller then suppresses the in-container clone); false
-// with no error when the request is not such a dispatch. The agent's
-// resolved environment (the third argument) is deliberately not read.
-func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startContextInputs, _ map[string]string) (bool, error) {
+// with no error when the request is not such a dispatch.
+func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startContextInputs, env map[string]string) (bool, error) {
 	layout := s.config.StorageLayout
 	if !layout.Backend.Shared() || !isSharedHubProjectRoot(in.ProjectPath) || in.Config == nil || in.Config.GitClone == nil {
 		return false, nil
@@ -490,6 +491,13 @@ func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startCont
 	if err := provision.PrepareStateDir(stateDir, uid, gid, false); err != nil {
 		return false, err
 	}
+	// The token is bound to the recorded remote, never to the clone URL:
+	// runGitClone treats an empty CloneTokenRemote as unbound, so without a
+	// match the token itself is withheld.
+	var cloneToken string
+	if provision.CloneTokenAllowed(gc.TokenRemote, gc.URL) {
+		cloneToken = env[provision.GitTokenEnv]
+	}
 	err = provisionSharedFn(provision.ProvisionInput{
 		Ctx:                 ctx,
 		Resolved:            provision.ResolvedWorkspace{HostPath: ws, ServerRelativePath: r.RelPath, HostBase: base, Backend: string(layout.Backend)},
@@ -497,6 +505,8 @@ func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startCont
 		AgentID:             in.AgentID,
 		Mode:                store.SharingModeSharedPlain,
 		GitClone:            &gc,
+		CloneToken:          cloneToken,
+		CloneTokenRemote:    gc.TokenRemote,
 		HostGitHardened:     true,
 		NFSUID:              uid,
 		NFSGID:              gid,

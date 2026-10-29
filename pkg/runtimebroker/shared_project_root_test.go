@@ -639,6 +639,7 @@ func TestCreateAgent_SharedPlainBackstopInput(t *testing.T) {
 	if in.Mode != store.SharingModeSharedPlain || in.ProjectID != sharedRootProjectID || in.GitClone == nil || in.GitClone.URL != "https://github.example/org/repo.git" {
 		t.Errorf("input: %+v", in)
 	}
+	// createSharedGitAgent sends no token remote, so the clone gets no token.
 	if in.CloneToken != "" || in.CloneTokenRemote != "" || in.CloneWithToken || !in.HostGitHardened || in.RequireChownSuccess {
 		t.Errorf("token/hardening: token set %v remote %q withToken %v hardened %v requireChown %v", in.CloneToken != "", in.CloneTokenRemote, in.CloneWithToken, in.HostGitHardened, in.RequireChownSuccess)
 	}
@@ -906,9 +907,20 @@ func TestFindAgentInSharedProject_NoProbe(t *testing.T) {
 // with a git token in its resolved env and cloneURL as its clone URL.
 func createSharedPlainAgentForURL(t *testing.T, f *sharedRootFixture, cloneURL string) *httptest.ResponseRecorder {
 	t.Helper()
+	return createSharedPlainAgentWith(t, f, cloneURL, "")
+}
+
+// createSharedPlainAgentWith is createSharedPlainAgentForURL with the token
+// remote the hub sends ("" sends none).
+func createSharedPlainAgentWith(t *testing.T, f *sharedRootFixture, cloneURL, tokenRemote string) *httptest.ResponseRecorder {
+	t.Helper()
+	gitClone := map[string]string{"url": cloneURL, "branch": "main"}
+	if tokenRemote != "" {
+		gitClone["tokenRemote"] = tokenRemote
+	}
 	cfg, err := json.Marshal(map[string]any{
 		"template": "claude", "sharedWorkspace": true,
-		"gitClone": map[string]string{"url": cloneURL, "branch": "main"},
+		"gitClone": gitClone,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -959,6 +971,47 @@ func TestCreateAgent_SharedPlainBackstopClonesWithoutGitToken(t *testing.T) {
 			}
 			if in.CloneTokenRemote != "" {
 				t.Errorf("CloneTokenRemote = %q, want none", in.CloneTokenRemote)
+			}
+			if in.CloneWithToken {
+				t.Error("the backstop clone asked for the environment's git token")
+			}
+		})
+	}
+}
+
+// With the project's recorded remote sent by the hub (gc.TokenRemote), the
+// shared-plain backstop clone gets the agent's git token only when the clone
+// URL names that remote; any other host or repository, or no recorded
+// remote, gets none, and the binding passed on is always the recorded remote.
+func TestCreateAgent_SharedPlainBackstopTokenBoundToRecordedRemote(t *testing.T) {
+	const cloneURL = "https://github.example/org/repo.git"
+	for _, tc := range []struct {
+		name, tokenRemote, wantToken string
+	}{
+		{"recorded remote names the clone URL", "github.example/org/repo", "tok-123"},
+		{"recorded remote on another host", "recorded.example/org/repo", ""},
+		{"recorded remote names another repository", "github.example/org/other", ""},
+		{"no recorded remote", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSharedRootFixture(t, true)
+			var got []provision.ProvisionInput
+			old := provisionSharedFn
+			provisionSharedFn = func(in provision.ProvisionInput) error { got = append(got, in); return nil }
+			t.Cleanup(func() { provisionSharedFn = old })
+
+			if w := createSharedPlainAgentWith(t, f, cloneURL, tc.tokenRemote); w.Code >= 300 {
+				t.Fatalf("create = %d: %s", w.Code, w.Body.String())
+			}
+			if len(got) != 1 {
+				t.Fatalf("ProvisionShared calls = %d, want 1", len(got))
+			}
+			in := got[0]
+			if in.CloneToken != tc.wantToken {
+				t.Errorf("CloneToken set %v, want %v", in.CloneToken != "", tc.wantToken != "")
+			}
+			if in.CloneTokenRemote != tc.tokenRemote {
+				t.Errorf("CloneTokenRemote = %q, want the recorded remote %q (never the clone URL)", in.CloneTokenRemote, tc.tokenRemote)
 			}
 			if in.CloneWithToken {
 				t.Error("the backstop clone asked for the environment's git token")
