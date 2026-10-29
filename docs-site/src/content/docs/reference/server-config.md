@@ -546,6 +546,8 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS message_project_id_sender_created_id ON 
 ```
 
 On SQLite, the first start after upgrading builds the same indexes before the Hub serves requests, holding the database write lock: allow a few seconds per million messages.
+
+The three participant and sender indexes take disk space too: about 370 MiB per million messages on SQLite, close to half the size of the `messages` table itself.
 :::
 
 ### Authentication (`server.auth`)

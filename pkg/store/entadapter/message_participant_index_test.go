@@ -140,6 +140,64 @@ func TestListMessages_InteragentFiltersReturnSameRows(t *testing.T) {
 	assert.Equal(t, 3, bySender.TotalCount)
 }
 
+// TestListMessages_ParticipantBranchTiesOrderByID pins the merge of the two
+// ParticipantID branches when rows from different branches share a created
+// time: they order by id, in both directions and across keyset pages of one
+// row. The received row (read in the first branch) has the lower id, so a
+// merge that kept branch order instead of comparing ids would fail.
+func TestListMessages_ParticipantBranchTiesOrderByID(t *testing.T) {
+	ctx := context.Background()
+	s := newTestMessageStore(t)
+	projectID := uuid.NewString()
+	agentID := uuid.NewString()
+	tie := time.Date(2026, 1, 1, 0, 0, 5, 0, time.UTC)
+
+	add := func(id, senderID, recipientID string, at time.Time) string {
+		m := newTestMessage(projectID, recipientID)
+		m.ID = id
+		m.Sender = "agent:x"
+		m.SenderID = senderID
+		m.CreatedAt = at
+		require.NoError(t, s.CreateMessage(ctx, m))
+		return id
+	}
+	older := add("00000000-0000-4000-8000-000000000003", agentID, "other-0", tie.Add(-time.Second))
+	received := add("00000000-0000-4000-8000-000000000001", "other-1", agentID, tie)
+	sent := add("00000000-0000-4000-8000-000000000002", agentID, "other-2", tie)
+	newer := add("00000000-0000-4000-8000-000000000000", "other-3", agentID, tie.Add(time.Second))
+
+	participant := store.MessageFilter{ParticipantID: agentID}
+	all, err := s.ListMessages(ctx, participant, store.ListOptions{})
+	require.NoError(t, err)
+	got := make([]string, 0, len(all.Items))
+	for _, m := range all.Items {
+		got = append(got, m.ID)
+	}
+	newestFirst := []string{newer, sent, received, older}
+	assert.Equal(t, newestFirst, got)
+
+	for _, dir := range []string{"desc", "asc"} {
+		want := append([]string(nil), newestFirst...)
+		if dir == "asc" {
+			slices.Reverse(want)
+		}
+		var paged []string
+		cursor := ""
+		for range len(want) + 1 {
+			res, err := s.ListMessages(ctx, participant, store.ListOptions{Limit: 1, Cursor: cursor, SortDir: dir})
+			require.NoError(t, err)
+			for _, m := range res.Items {
+				paged = append(paged, m.ID)
+			}
+			if res.NextCursor == "" {
+				break
+			}
+			cursor = res.NextCursor
+		}
+		assert.Equal(t, want, paged, "keyset pages of one row, %s", dir)
+	}
+}
+
 // TestListMessages_InteragentQueriesUseIndexes pins the SQLite plans for the
 // exact SQL the inter-agent lookups issue, on a table where one busy
 // participant is in a quarter of the rows. The table has no statistics, as

@@ -546,11 +546,10 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 // participantPage returns the first n rows, in (created, id) order, of base
 // filtered by any of branches. Each branch is read as its own query, served
 // by its (column, created, id) index in index order, so each one stops after
-// n rows. A single query with the OR would fetch and sort every row the
-// participant has: SQLite plans it as a multi-index OR plus a temp B-tree
-// sort, and Postgres as a BitmapOr plus a sort, which is slow for busy
-// agents (ptone/scion#6572). The branches are merged here and rows that match
-// more than one branch are kept once.
+// n rows. With the OR in a single query, SQLite plans a multi-index OR plus
+// a temp B-tree sort, which fetches and sorts every row the participant has
+// and is slow for busy agents (ptone/scion#6572). The branches are merged
+// here and rows that match more than one branch are kept once.
 //
 // The merge compares created as time and id as UUID bytes. That is the
 // order the database uses, except for the legacy SQLite rows described in
