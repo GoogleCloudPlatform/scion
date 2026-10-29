@@ -70,7 +70,7 @@ type ProfileConversionInput struct {
 	// (ConfiguredRuntimeNames), as a legacy start decides when it matches
 	// sibling entries for placement. nil counts every Kubernetes entry as
 	// the operator's (fail closed: a built-in entry with different
-	// placement then blocks the profile).
+	// placement is then a sibling that does not merge, with a notice).
 	ConfiguredRuntimes func(string) bool
 }
 
@@ -78,9 +78,12 @@ type ProfileConversionInput struct {
 // and Split only; a field choice sets TargetGroup, Field and ChosenProfile
 // and leaves Split empty.
 type ConversionChoice struct {
-	// TargetGroup is the proposed instance Key of the group in
-	// ProfileConversionResult.Instances. For a Split choice it is the key
-	// of the group before the split.
+	// TargetGroup is the key of the group the choice applies to: the
+	// instance Key of an unsplit group in ProfileConversionResult.Instances,
+	// or, for a group whose profiles differ, the group key the split notice
+	// names. For a Split choice it is the key of the group before the
+	// split. A field choice consolidates the group's profiles on the chosen
+	// value instead of splitting them on it.
 	TargetGroup string
 	// Field is the conflicting field, as the settings path under a profile
 	// (for example "shared_dir_size" or "harness_overrides.claude.image");
@@ -96,7 +99,8 @@ type ConversionChoice struct {
 
 // ProfileConversionResult is the result of ConvertProfilesToInstances.
 type ProfileConversionResult struct {
-	// Instances has one proposed instance per target group, sorted by
+	// Instances has one proposed instance per target group, or per set of
+	// profiles with equal values when a group's profiles differ, sorted by
 	// Key. Key and Name are proposals the operator may edit.
 	Instances []V1RuntimeBrokerInstanceConfig
 	// ProfileMap maps each profile with no blocking finding to its
@@ -184,10 +188,14 @@ func (s *convState) add(code, severity, path, message string, profiles ...string
 // profile's value, else its runtime entry's; maps per key; for the shared
 // dir backends a profile's single value shadows the runtime entry's per-dir
 // map). Profiles are grouped by resolved target scope. When the profiles of
-// a group disagree on a field, the field is reported as a blocking
-// profile_conflict and left unset, unless an operator choice resolves it:
-// nothing is merged or chosen silently, and no template is generated.
-// Secret declarations are copied; no secret value is read or emitted.
+// a group disagree on a field, every value is preserved: the group is split
+// into one instance per set of profiles with equal values, and a notice
+// names the differing fields so the operator can consolidate. An operator
+// field choice consolidates a field on the chosen value instead, and the
+// values it drops are reported. Nothing is merged or chosen silently, and
+// no template is generated. Only a detail no flat instance can hold blocks
+// a profile. Secret declarations are copied; no secret value is read or
+// emitted.
 func ConvertProfilesToInstances(in ProfileConversionInput) ProfileConversionResult {
 	st := &convState{findings: map[string]*ConversionFinding{}}
 	vs := in.Settings
@@ -231,10 +239,19 @@ func ConvertProfilesToInstances(in ProfileConversionInput) ProfileConversionResu
 
 	result := ProfileConversionResult{ProfileMap: map[string]string{}}
 	fieldChoices := fieldChoicesByGroup(st, groups, in.Choices)
+	splits := make([]*convSplit, 0, len(groups))
+	var parts []*convGroup
 	for _, g := range groups {
-		result.Instances = append(result.Instances, buildGroupInstance(st, g, fieldChoices[g.key]))
+		sp := splitGroup(g, fieldChoices[g.key])
+		splits = append(splits, sp)
+		parts = append(parts, sp.parts...)
 	}
-	reportUnusedFieldChoices(st, groups, fieldChoices)
+	uniqueGroupKeys(parts)
+	for _, sp := range splits {
+		result.Instances = append(result.Instances, buildSplitInstances(st, sp, fieldChoices[sp.key])...)
+	}
+	sort.Slice(result.Instances, func(i, j int) bool { return result.Instances[i].Key < result.Instances[j].Key })
+	reportUnusedFieldChoices(st, splits, fieldChoices)
 
 	blocked := map[string]bool{}
 	for _, f := range st.findings {
@@ -244,7 +261,7 @@ func ConvertProfilesToInstances(in ProfileConversionInput) ProfileConversionResu
 			}
 		}
 	}
-	for _, g := range groups {
+	for _, g := range parts {
 		for _, p := range g.profiles {
 			if !blocked[p.name] {
 				result.ProfileMap[p.name] = g.key
@@ -338,19 +355,25 @@ func foldProfile(st *convState, vs *VersionedSettings, configured func(string) b
 				fmt.Sprintf("runtimes.%s.%s has no effect today and has no flat Runtime Broker instance field; it is not converted", rtKey, f.key), name)
 		}
 	}
+	// A profile pool that differs from its runtime entry's is preserved:
+	// the profile's selector keys are folded over the entry's below.
 	if typ == RuntimeTargetTypeKubernetes && ProfilePoolConflict(rt, prof) {
-		st.add(ConversionProfileConflict, ConversionSeverityBlocking, pp+"node_selector",
-			fmt.Sprintf("profiles.%s.node_selector sets %s to a different value than its runtime entry %s; a profile cannot change the runtime entry's pool, so use the same value on both (or move the profile to a runtime entry for that pool) before converting", name, PoolNodeSelectorKey, rtKey), name)
-		ok = false
+		st.add(ConversionProfileConflict, ConversionSeverityNotice, pp+"node_selector",
+			fmt.Sprintf("profiles.%s.node_selector sets %s to %s and its runtime entry %s sets %s; the instance keeps the profile's configured pool %s",
+				name, PoolNodeSelectorKey, prof.NodeSelector[PoolNodeSelectorKey], rtKey, rt.NodeSelector[PoolNodeSelectorKey], prof.NodeSelector[PoolNodeSelectorKey]), name)
 	}
+	// Runtime entries that may share a cluster and namespace merge their
+	// placement when they agree. When they disagree, each entry keeps its
+	// own placement, and profiles on them are split onto separate
+	// instances when their placement differs.
 	placementEntries := []string{rtKey}
 	if typ == RuntimeTargetTypeKubernetes {
-		var other string
-		placementEntries, other = PlacementSiblingEntries(vs.Runtimes, rtKey, configured)
-		if other != "" {
-			st.add(ConversionProfileConflict, ConversionSeverityBlocking, strings.TrimSuffix(rp, "."),
-				fmt.Sprintf("runtime entries %s, %s may target the same cluster and namespace (equal, or empty context or namespace) with different placement; a legacy start there is refused, so give them the same placement before converting", rtKey, other), name)
-			ok = false
+		entries, other := PlacementSiblingEntries(vs.Runtimes, rtKey, configured)
+		if other == "" {
+			placementEntries = entries
+		} else {
+			st.add(ConversionProfileConflict, ConversionSeverityNotice, strings.TrimSuffix(rp, "."),
+				fmt.Sprintf("runtime entries %s, %s may target the same cluster and namespace (equal, or empty context or namespace) with different placement (a legacy start is refused today when both resolve to the same cluster and namespace); profiles on runtime entry %s keep its own placement, on a separate instance when it differs", rtKey, other, rtKey), name)
 		}
 	}
 	if prof.DefaultTemplate != "" {
@@ -830,51 +853,166 @@ func fieldChoicesByGroup(st *convState, groups []*convGroup, choices []Conversio
 
 // reportUnusedFieldChoices reports each field choice that matched no
 // conflict, so a stale manifest entry is never ignored silently.
-func reportUnusedFieldChoices(st *convState, groups []*convGroup, choices map[string]map[string]*fieldChoice) {
-	for _, g := range groups {
-		for field, fc := range choices[g.key] {
+func reportUnusedFieldChoices(st *convState, splits []*convSplit, choices map[string]map[string]*fieldChoice) {
+	for _, sp := range splits {
+		for field, fc := range choices[sp.key] {
 			if !fc.used {
 				invalidChoice(st, fmt.Sprintf("choices[%d]", fc.index),
-					fmt.Sprintf("field %s of target group %s has no conflict to resolve", field, g.key), g)
+					fmt.Sprintf("field %s of target group %s has no conflict to resolve", field, sp.key), sp.parent)
 			}
 		}
 	}
 }
 
-// buildGroupInstance compares every field across the group's profiles
-// (rule 3) and builds the proposed instance from the fields they agree on
-// or an operator choice resolves.
-func buildGroupInstance(st *convState, g *convGroup, choices map[string]*fieldChoice) V1RuntimeBrokerInstanceConfig {
-	target := &V1RuntimeTargetConfig{Type: g.typ, Context: g.ctx, Namespace: g.ns}
-	defaults := &V1InstanceAgentDefaults{}
+// convSplit is one group (a scope group or an operator Split group) and
+// the instances it becomes: one when its profiles agree on every field it
+// splits on (splitsOn), else one per distinct set of those values.
+type convSplit struct {
+	parent *convGroup
+	// key is the parent's key as operator choices name it, kept even when
+	// uniqueGroupKeys later renames an unsplit parent's instance.
+	key         string
+	fields      []string // every folded field of the parent's profiles, sorted
+	conflicting map[string]bool
+	splitOn     []string // the conflicting fields the parent splits on, sorted
+	parts       []*convGroup
+}
 
-	var fields []string
+// splitsOn reports whether profiles of one group that differ in field go
+// to separate instances. It is the one place that decides which details a
+// split preserves: every field a flat instance holds, except one an
+// operator field choice consolidates, and except a harness override's
+// presence when a choice consolidates one of its conflicting sub-fields
+// (the chosen sub-field decides whether the override exists).
+func splitsOn(field string, choices map[string]*fieldChoice, conflicting map[string]bool) bool {
+	if choices[field] != nil {
+		return false
+	}
+	rest, ok := strings.CutPrefix(field, "harness_overrides.")
+	if !ok {
+		return true
+	}
+	hc, sub := splitHarnessOverrideField(rest)
+	if sub != "" {
+		return true
+	}
+	for f := range choices {
+		if r, isOverride := strings.CutPrefix(f, "harness_overrides."); isOverride {
+			if fhc, fsub := splitHarnessOverrideField(r); fhc == hc && fsub != "" && conflicting[f] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// splitGroup partitions g's profiles by the fields it splits on: each
+// profile, in name order, joins the first part whose first profile has
+// equal values (conversionValuesEqual) for all of them. With one part, g
+// is unchanged. Otherwise each part gets g's key with its profile names
+// appended, as an operator Split does.
+func splitGroup(g *convGroup, choices map[string]*fieldChoice) *convSplit {
+	sp := &convSplit{parent: g, key: g.key, conflicting: map[string]bool{}}
 	seen := map[string]bool{}
 	for _, p := range g.profiles {
 		for f := range p.fields {
 			if !seen[f] {
 				seen[f] = true
-				fields = append(fields, f)
+				sp.fields = append(sp.fields, f)
 			}
 		}
 	}
-	sort.Strings(fields)
-
-	conflicting := map[string]bool{}
-	for _, field := range fields {
+	sort.Strings(sp.fields)
+	for _, field := range sp.fields {
 		first := g.profiles[0].fields[field]
 		for _, p := range g.profiles[1:] {
 			if !conversionValuesEqual(field, first.v, p.fields[field].v) {
-				conflicting[field] = true
+				sp.conflicting[field] = true
 				break
 			}
 		}
 	}
+	for _, field := range sp.fields {
+		if sp.conflicting[field] && splitsOn(field, choices, sp.conflicting) {
+			sp.splitOn = append(sp.splitOn, field)
+		}
+	}
 
-	for _, field := range fields {
-		first := g.profiles[0].fields[field]
-		if !conflicting[field] {
-			setInstanceField(target, defaults, field, first.v)
+	var groupsOfParts [][]*convProfile
+	for _, p := range g.profiles {
+		placed := false
+		for i, part := range groupsOfParts {
+			if sameSplitValues(sp.splitOn, part[0], p) {
+				groupsOfParts[i] = append(part, p)
+				placed = true
+				break
+			}
+		}
+		if !placed {
+			groupsOfParts = append(groupsOfParts, []*convProfile{p})
+		}
+	}
+	if len(groupsOfParts) == 1 {
+		sp.parts = []*convGroup{g}
+		return sp
+	}
+	for _, members := range groupsOfParts {
+		names := make([]string, 0, len(members))
+		for _, p := range members {
+			names = append(names, p.name)
+		}
+		seed := g.seed + "\x00split\x00" + strings.Join(names, "\x00")
+		sp.parts = append(sp.parts, &convGroup{
+			key:      conversionKey(seed, g.key, strings.Join(names, "-")),
+			seed:     seed,
+			scope:    g.scope,
+			typ:      g.typ,
+			ctx:      g.ctx,
+			ns:       g.ns,
+			profiles: members,
+		})
+	}
+	return sp
+}
+
+// sameSplitValues reports whether profiles a and b agree on every field.
+func sameSplitValues(fields []string, a, b *convProfile) bool {
+	for _, f := range fields {
+		if !conversionValuesEqual(f, a.fields[f].v, b.fields[f].v) {
+			return false
+		}
+	}
+	return true
+}
+
+// buildSplitInstances builds the instances of one split group (rule 3, as
+// amended: a difference is preserved on separate instances). A field that
+// an operator choice consolidates is reported once for the whole group,
+// with every profile's value, and every part takes the chosen value.
+func buildSplitInstances(st *convState, sp *convSplit, choices map[string]*fieldChoice) []V1RuntimeBrokerInstanceConfig {
+	g := sp.parent
+	profiles := groupProfileNames(g)
+	if len(sp.parts) > 1 {
+		var parts []string
+		for _, part := range sp.parts {
+			parts = append(parts, fmt.Sprintf("%s (%s)", part.key, strings.Join(groupProfileNames(part), ", ")))
+		}
+		st.add(ConversionProfileConflict, ConversionSeverityNotice, "profiles.*",
+			fmt.Sprintf("profiles %s on target %s differ in %s; they are split into instances %s. To merge them, give the profiles the same values or add a field choice for target %s",
+				strings.Join(profiles, ", "), sp.key, strings.Join(sp.splitOn, ", "), strings.Join(parts, ", "), sp.key), profiles...)
+	}
+
+	type chosenValue struct {
+		v   interface{}
+		set bool
+	}
+	chosen := map[string]chosenValue{}
+	splitField := map[string]bool{}
+	for _, f := range sp.splitOn {
+		splitField[f] = true
+	}
+	for _, field := range sp.fields {
+		if !sp.conflicting[field] || splitField[field] {
 			continue
 		}
 		// A harness override that only some profiles have differs in its
@@ -882,37 +1020,56 @@ func buildGroupInstance(st *convState, g *convGroup, choices map[string]*fieldCh
 		// conflict already names the override, so the presence is not
 		// reported again; the entry exists once a sub-field is agreed or
 		// chosen.
-		if coveredHarnessOverrideMarker(field, conflicting) {
+		if coveredHarnessOverrideMarker(field, sp.conflicting) {
 			continue
 		}
-		profiles := groupProfileNames(g)
 		path := "profiles.*." + field
-		fc := choices[field]
-		if fc == nil {
-			st.add(ConversionProfileConflict, ConversionSeverityBlocking, path, conflictMessage(g, field), profiles...)
-			continue
-		}
+		fc := choices[field] // not nil: an unchosen difference is split on
 		fc.used = true
 		if tmpl, isTemplate := strings.CutPrefix(fc.choice.ChosenProfile, ConversionChoiceTemplatePrefix); isTemplate {
 			st.add(ConversionProfileConflictResolved, ConversionSeverityNotice, path,
 				fmt.Sprintf("operator choice: %s stays unset on instance %s and template %s sets it; no template is generated, so create or update template %s before the profiles are retired (%s)",
-					field, g.key, tmpl, tmpl, conflictValues(g, field)), profiles...)
+					field, sp.key, tmpl, tmpl, conflictValues(g, field)), profiles...)
 			continue
 		}
 		// A chosen profile that leaves the field unset leaves it unset on
 		// the instance too.
-		if chosen, set := groupProfile(g, fc.choice.ChosenProfile).fields[field]; set {
-			setInstanceField(target, defaults, field, chosen.v)
-		}
+		cv, set := groupProfile(g, fc.choice.ChosenProfile).fields[field]
+		chosen[field] = chosenValue{v: cv.v, set: set}
 		st.add(ConversionProfileConflictResolved, ConversionSeverityNotice, path,
-			fmt.Sprintf("operator choice: instance %s takes profile %s's %s (%s)", g.key, fc.choice.ChosenProfile, field, conflictValues(g, field)), profiles...)
+			fmt.Sprintf("operator choice: instance %s takes profile %s's %s (%s)", sp.key, fc.choice.ChosenProfile, field, conflictValues(g, field)), profiles...)
 	}
 
-	inst := V1RuntimeBrokerInstanceConfig{Key: g.key, Name: g.key, RuntimeTarget: target}
-	if !reflect.DeepEqual(*defaults, V1InstanceAgentDefaults{}) {
-		inst.AgentDefaults = defaults
+	var out []V1RuntimeBrokerInstanceConfig
+	for _, part := range sp.parts {
+		target := &V1RuntimeTargetConfig{Type: part.typ, Context: part.ctx, Namespace: part.ns}
+		defaults := &V1InstanceAgentDefaults{}
+		for _, field := range sp.fields {
+			switch {
+			case !sp.conflicting[field]:
+				// Agreed by the group: copied as the group's first profile
+				// writes it, so every part carries the same value.
+				if cv, set := g.profiles[0].fields[field]; set {
+					setInstanceField(target, defaults, field, cv.v)
+				}
+			case splitField[field]:
+				// Agreed by this part, which is split on the field.
+				if cv, set := part.profiles[0].fields[field]; set {
+					setInstanceField(target, defaults, field, cv.v)
+				}
+			default:
+				if c, ok := chosen[field]; ok && c.set {
+					setInstanceField(target, defaults, field, c.v)
+				}
+			}
+		}
+		inst := V1RuntimeBrokerInstanceConfig{Key: part.key, Name: part.key, RuntimeTarget: target}
+		if !reflect.DeepEqual(*defaults, V1InstanceAgentDefaults{}) {
+			inst.AgentDefaults = defaults
+		}
+		out = append(out, inst)
 	}
-	return inst
+	return out
 }
 
 // conversionValuesEqual is rule 3's deep equality. A missing value (nil)
@@ -1056,18 +1213,6 @@ var harnessOverrideSubFields = map[string]bool{
 	"env": true, "volumes": true, "resources": true,
 }
 
-// agentKubernetesEquivalents names the agent's own (inline or persisted)
-// kubernetes setting that outranks the instance value of an infrastructure
-// field. A template's kubernetes block is not applied to an agent's job
-// config (ptone/scion#4524, contract-appendix-p3.md FC5 errata), so no
-// template can set these.
-var agentKubernetesEquivalents = map[string]string{
-	"priority_class_name":      "kubernetes.priorityClassName",
-	"shared_dir_storage_class": "kubernetes.shared_dir_storage_class",
-	"shared_dir_size":          "kubernetes.shared_dir_size",
-	"safe_to_evict":            "kubernetes.safeToEvict",
-}
-
 // isWorkloadField reports whether field is an agent_defaults field (W2-W9).
 func isWorkloadField(field string) bool {
 	switch field {
@@ -1075,24 +1220,6 @@ func isWorkloadField(field string) bool {
 		return true
 	}
 	return strings.HasPrefix(field, "harness_overrides.")
-}
-
-// conflictMessage names the field, the profiles and their values, and the
-// operator dispositions (rule 3).
-func conflictMessage(g *convGroup, field string) string {
-	head := fmt.Sprintf("profiles %s use target %s with different %s (%s). ",
-		strings.Join(groupProfileNames(g), ", "), g.key, field, conflictValues(g, field))
-	switch {
-	case isWorkloadField(field):
-		return head + fmt.Sprintf("Choose one value as the instance's agent_defaults.%s, and express the others through a template "+
-			"(a template's value outranks the instance default, except a harness_overrides image, which ranks above the template image: see ptone/scion#1799), "+
-			"or keep the profiles on separate instances on the same target scope.", field)
-	case agentKubernetesEquivalents[field] != "":
-		return head + fmt.Sprintf("Choose one value as the instance's runtime_target.%s, and express the others through the agent's own %s "+
-			"(inline or persisted), which outranks the instance default, or keep the profiles on separate instances on the same target scope.", field, agentKubernetesEquivalents[field])
-	default:
-		return head + fmt.Sprintf("Choose one value for the instance's runtime_target.%s, or declare a second instance with its own key on the same target scope.", field)
-	}
 }
 
 // conflictValues lists each profile's effective value of field and where

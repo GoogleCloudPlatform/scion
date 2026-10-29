@@ -15,7 +15,9 @@
 package config
 
 import (
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -96,50 +98,88 @@ func TestProfileConversionCarriesPlacement(t *testing.T) {
 	}
 }
 
+// conversionFinding returns the finding at path with code, or nil.
+func conversionFinding(got ProfileConversionResult, path, code string) *ConversionFinding {
+	for i := range got.Findings {
+		if got.Findings[i].Path == path && got.Findings[i].Code == code {
+			return &got.Findings[i]
+		}
+	}
+	return nil
+}
+
+func assertNoBlocking(t *testing.T, got ProfileConversionResult) {
+	t.Helper()
+	for _, f := range got.Findings {
+		if f.Severity == ConversionSeverityBlocking {
+			t.Fatalf("blocking finding %+v", f)
+		}
+	}
+}
+
+// instanceByKey returns the instance with key, failing the test when
+// there is none.
+func instanceByKey(t *testing.T, got ProfileConversionResult, key string) V1RuntimeBrokerInstanceConfig {
+	t.Helper()
+	for _, inst := range got.Instances {
+		if inst.Key == key {
+			return inst
+		}
+	}
+	t.Fatalf("no instance %q in %+v", key, got.Instances)
+	return V1RuntimeBrokerInstanceConfig{}
+}
+
 // A profile that sets the pool selector to another value than its runtime
-// entry is a blocking finding: the profile is not converted.
-func TestProfileConversionPoolConflictBlocks(t *testing.T) {
+// entry converts with its own configured pool, on its own instance, and a
+// notice names both values so the operator can consolidate.
+func TestProfileConversionPoolOverrideSplits(t *testing.T) {
 	vs := convPlacementSettings()
 	p := vs.Profiles["fast"]
 	p.NodeSelector = map[string]string{PoolNodeSelectorKey: "batch"}
 	vs.Profiles["fast"] = p
 	got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs, Profiles: []string{"fast", "plain"}})
-	if _, mapped := got.ProfileMap["fast"]; mapped {
-		t.Fatalf("the conflicting profile converted: %+v", got.ProfileMap)
+	assertNoBlocking(t, got)
+	if !reflect.DeepEqual(got.ProfileMap, map[string]string{"fast": "k8s-agents-fast", "plain": "k8s-agents-plain"}) {
+		t.Fatalf("profile map %v, findings %+v", got.ProfileMap, got.Findings)
 	}
-	if got.ProfileMap["plain"] == "" {
-		t.Fatalf("the other profile did not convert: %+v", got.Findings)
+	if ns := instanceByKey(t, got, "k8s-agents-fast").RuntimeTarget.NodeSelector; ns[PoolNodeSelectorKey] != "batch" {
+		t.Fatalf("fast instance node selector %v, want the profile's pool", ns)
 	}
-	var f *ConversionFinding
-	for i := range got.Findings {
-		if got.Findings[i].Path == "profiles.fast.node_selector" {
-			f = &got.Findings[i]
-		}
+	if ns := instanceByKey(t, got, "k8s-agents-plain").RuntimeTarget.NodeSelector; ns[PoolNodeSelectorKey] != "agents" {
+		t.Fatalf("plain instance node selector %v, want the entry's pool", ns)
 	}
-	if f == nil || f.Code != ConversionProfileConflict || f.Severity != ConversionSeverityBlocking || !reflect.DeepEqual(f.Profiles, []string{"fast"}) {
-		t.Fatalf("finding = %+v", f)
+	f := conversionFinding(got, "profiles.fast.node_selector", ConversionProfileConflict)
+	if f == nil || f.Severity != ConversionSeverityNotice || !reflect.DeepEqual(f.Profiles, []string{"fast"}) ||
+		!strings.Contains(f.Message, "sets "+PoolNodeSelectorKey+" to batch and its runtime entry cluster sets agents") ||
+		!strings.Contains(f.Message, "keeps the profile's configured pool batch") {
+		t.Fatalf("pool notice = %+v", f)
 	}
 }
 
-// Profiles of one target group with different placement are a blocking
-// profile conflict per field, like any other runtime_target field; equal
-// toleration sets in another order agree.
-func TestProfileConversionGroupPlacementConflict(t *testing.T) {
+// Profiles of one target group with different placement are split into one
+// instance per distinct placement, each equal to the legacy policy of its
+// profile, and one notice names the differing fields and the new instances.
+func TestProfileConversionGroupPlacementSplits(t *testing.T) {
 	vs := convPlacementSettings()
 	got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs, Profiles: []string{"fast", "plain"}})
-	paths := map[string]bool{}
-	for _, f := range got.Findings {
-		if f.Code == ConversionProfileConflict && f.Severity == ConversionSeverityBlocking {
-			paths[f.Path] = true
+	assertNoBlocking(t, got)
+	if len(got.Instances) != 2 {
+		t.Fatalf("instances %+v", got.Instances)
+	}
+	for _, name := range []string{"fast", "plain"} {
+		target := instanceByKey(t, got, got.ProfileMap[name]).RuntimeTarget
+		legacy, ok := ResolveLegacyPolicyOffline(vs.Runtimes, vs.Profiles, nil, name)
+		if !ok || !reflect.DeepEqual(target.NodeSelector, legacy.NodeSelector) || target.RuntimeClassName != legacy.RuntimeClassName ||
+			!reflect.DeepEqual(tolerationSet(target.Tolerations), tolerationSet(legacy.Tolerations)) {
+			t.Fatalf("%s: flat target %+v, legacy %+v (ok %v)", name, target, legacy, ok)
 		}
 	}
-	for _, want := range []string{"profiles.*.node_selector", "profiles.*.tolerations", "profiles.*.runtime_class_name"} {
-		if !paths[want] {
-			t.Errorf("no blocking conflict at %s: %+v", want, got.Findings)
-		}
-	}
-	if len(got.ProfileMap) != 0 {
-		t.Fatalf("conflicting profiles converted: %v", got.ProfileMap)
+	f := conversionFinding(got, "profiles.*", ConversionProfileConflict)
+	if f == nil || f.Severity != ConversionSeverityNotice || !reflect.DeepEqual(f.Profiles, []string{"fast", "plain"}) ||
+		!strings.Contains(f.Message, "differ in node_selector, runtime_class_name, tolerations;") ||
+		!strings.Contains(f.Message, "k8s-agents-fast (fast), k8s-agents-plain (plain)") {
+		t.Fatalf("split notice = %+v", f)
 	}
 
 	a := api.K8sToleration{Key: "a", Operator: "Exists"}
@@ -152,10 +192,154 @@ func TestProfileConversionGroupPlacementConflict(t *testing.T) {
 	}
 }
 
+// Profiles with the same placement (toleration sets in another order
+// agree) merge into one instance with the group's key, with no split.
+func TestProfileConversionIdenticalPlacementMerges(t *testing.T) {
+	tolA := api.K8sToleration{Key: "a", Operator: "Exists"}
+	tolB := api.K8sToleration{Key: "b", Operator: "Equal", Value: "v"}
+	vs := &VersionedSettings{
+		Runtimes: map[string]V1RuntimeConfig{"cluster": {Type: "kubernetes", Namespace: "agents"}},
+		Profiles: map[string]V1ProfileConfig{
+			"x": {Runtime: "cluster", NodeSelector: map[string]string{"disk": "ssd"}, Tolerations: []api.K8sToleration{tolA, tolB}},
+			"y": {Runtime: "cluster", NodeSelector: map[string]string{"disk": "ssd"}, Tolerations: []api.K8sToleration{{Key: "b", Value: "v"}, tolA}},
+		},
+	}
+	got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs})
+	if len(got.Findings) != 0 || len(got.Instances) != 1 ||
+		!reflect.DeepEqual(got.ProfileMap, map[string]string{"x": "k8s-agents", "y": "k8s-agents"}) {
+		t.Fatalf("result %+v", got)
+	}
+}
+
+// Runtime entries that may share a cluster and namespace with different
+// placement each keep their own placement: their profiles go to separate
+// instances, and a notice names the entries.
+func TestProfileConversionSharedNamespaceSplits(t *testing.T) {
+	vs := &VersionedSettings{
+		Runtimes: map[string]V1RuntimeConfig{
+			"a": {Type: "kubernetes", Context: "c1", Namespace: "agents", NodeSelector: map[string]string{PoolNodeSelectorKey: "x"}},
+			"b": {Type: "kubernetes", Context: "c1", Namespace: "agents", NodeSelector: map[string]string{PoolNodeSelectorKey: "y"}},
+		},
+		Profiles: map[string]V1ProfileConfig{"pa": {Runtime: "a"}, "pb": {Runtime: "b"}},
+	}
+	got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs})
+	assertNoBlocking(t, got)
+	for name, pool := range map[string]string{"pa": "x", "pb": "y"} {
+		inst := instanceByKey(t, got, "k8s-c1-agents-"+name)
+		if got.ProfileMap[name] != inst.Key || !reflect.DeepEqual(inst.RuntimeTarget.NodeSelector, map[string]string{PoolNodeSelectorKey: pool}) {
+			t.Fatalf("%s: profile map %v, instance %+v", name, got.ProfileMap, inst.RuntimeTarget)
+		}
+	}
+	for _, path := range []string{"runtimes.a", "runtimes.b"} {
+		if f := conversionFinding(got, path, ConversionProfileConflict); f == nil || f.Severity != ConversionSeverityNotice ||
+			!strings.Contains(f.Message, "may target the same cluster and namespace") ||
+			!strings.Contains(f.Message, "(a legacy start is refused today when both resolve to the same cluster and namespace)") {
+			t.Fatalf("no shared namespace notice at %s: %+v", path, got.Findings)
+		}
+	}
+}
+
+// A differing field other than placement splits too: each instance keeps
+// its profile's value, and the notice names the field.
+func TestProfileConversionNonPlacementSplits(t *testing.T) {
+	got := ConvertProfilesToInstances(ProfileConversionInput{Settings: convSizeSettings()})
+	assertNoBlocking(t, got)
+	if !reflect.DeepEqual(got.ProfileMap, map[string]string{"a": "k8s-agents-a", "b": "k8s-agents-b"}) {
+		t.Fatalf("profile map %v", got.ProfileMap)
+	}
+	if instanceByKey(t, got, "k8s-agents-a").RuntimeTarget.SharedDirSize != "10Gi" || instanceByKey(t, got, "k8s-agents-b").RuntimeTarget.SharedDirSize != "20Gi" {
+		t.Fatalf("instances %+v", got.Instances)
+	}
+	if f := conversionFinding(got, "profiles.*", ConversionProfileConflict); f == nil || !strings.Contains(f.Message, "differ in shared_dir_size;") {
+		t.Fatalf("split notice: %+v", got.Findings)
+	}
+}
+
+// A field choice consolidates the profiles onto the chosen value: one
+// instance, and the dropped value is reported. A field choice with no
+// difference to consolidate is still reported, as blocking.
+func TestProfileConversionChoiceConsolidates(t *testing.T) {
+	vs := convSizeSettings()
+	choice := ConversionChoice{TargetGroup: "k8s-agents", Field: "shared_dir_size", ChosenProfile: "b"}
+	got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs, Choices: []ConversionChoice{choice}})
+	assertNoBlocking(t, got)
+	if len(got.Instances) != 1 || got.Instances[0].RuntimeTarget.SharedDirSize != "20Gi" ||
+		!reflect.DeepEqual(got.ProfileMap, map[string]string{"a": "k8s-agents", "b": "k8s-agents"}) {
+		t.Fatalf("result %+v", got)
+	}
+	f := conversionFinding(got, "profiles.*.shared_dir_size", ConversionProfileConflictResolved)
+	if f == nil || !strings.Contains(f.Message, "a: 10Gi from profiles.a.shared_dir_size") {
+		t.Fatalf("the dropped value is not reported: %+v", got.Findings)
+	}
+	if conversionFinding(got, "profiles.*", ConversionProfileConflict) != nil {
+		t.Fatalf("consolidated profiles reported as split: %+v", got.Findings)
+	}
+
+	unused := ConversionChoice{TargetGroup: "k8s-agents", Field: "clone_depth", ChosenProfile: "a"}
+	got = ConvertProfilesToInstances(ProfileConversionInput{Settings: vs, Choices: []ConversionChoice{choice, unused}})
+	if f := conversionFinding(got, "choices[1]", ConversionUnknownSettingsKey); f == nil || f.Severity != ConversionSeverityBlocking ||
+		!strings.Contains(f.Message, "has no conflict to resolve") {
+		t.Fatalf("unused choice not reported: %+v", got.Findings)
+	}
+}
+
+func convSizeSettings() *VersionedSettings {
+	return &VersionedSettings{
+		Runtimes: map[string]V1RuntimeConfig{"cluster": {Type: "kubernetes", Namespace: "agents"}},
+		Profiles: map[string]V1ProfileConfig{
+			"a": {Runtime: "cluster", SharedDirSize: "10Gi"},
+			"b": {Runtime: "cluster", SharedDirSize: "20Gi"},
+		},
+	}
+}
+
+// The result, including split keys and notices, does not depend on the
+// order of the profiles in scope: every permutation gives byte-identical
+// output.
+func TestProfileConversionPermutationDeterministic(t *testing.T) {
+	vs := convPlacementSettings()
+	for name, p := range map[string]V1ProfileConfig{
+		"big":   {Runtime: "cluster", SharedDirSize: "50Gi"},
+		"small": {Runtime: "cluster", SharedDirSize: "5Gi", ImageRegistry: "reg/small"},
+		"twin":  {Runtime: "cluster", SharedDirSize: "5Gi", ImageRegistry: "reg/small"},
+	} {
+		vs.Profiles[name] = p
+	}
+	names := []string{"big", "desk", "fast", "plain", "small", "twin"}
+	want, err := json.Marshal(ConvertProfilesToInstances(ProfileConversionInput{Settings: vs, Profiles: names}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var permute func(k int)
+	permute = func(k int) {
+		if k == len(names) {
+			got, err := json.Marshal(ConvertProfilesToInstances(ProfileConversionInput{Settings: vs, Profiles: append([]string(nil), names...)}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != string(want) {
+				t.Fatalf("order %v: output differs:\n%s\nwant:\n%s", names, got, want)
+			}
+			return
+		}
+		for i := k; i < len(names); i++ {
+			names[k], names[i] = names[i], names[k]
+			permute(k + 1)
+			names[k], names[i] = names[i], names[k]
+		}
+	}
+	permute(0)
+	all, _ := json.Marshal(ConvertProfilesToInstances(ProfileConversionInput{Settings: vs}))
+	if string(all) != string(want) {
+		t.Fatal("the default scope (all profiles) differs from the same profiles named")
+	}
+}
+
 // Conversion matches sibling runtime entries as a legacy start does: with
-// an agreeing sibling the converted flat target equals the legacy policy;
-// with a disagreeing sibling (a legacy start refuses) the profile is not
-// converted and the disagreement is a blocking finding.
+// an agreeing sibling the converted flat target equals the legacy policy.
+// With a disagreeing sibling (the offline legacy policy does not resolve)
+// the profile converts with its own entry's placement only, and a notice
+// names the entries.
 func TestProfileConversionSiblingPlacement(t *testing.T) {
 	pool := map[string]string{PoolNodeSelectorKey: "agents"}
 	agree := &VersionedSettings{
@@ -184,17 +368,12 @@ func TestProfileConversionSiblingPlacement(t *testing.T) {
 		Profiles: map[string]V1ProfileConfig{"p": {Runtime: "a"}},
 	}
 	got = ConvertProfilesToInstances(ProfileConversionInput{Settings: disagree, Profiles: []string{"p"}})
-	if _, mapped := got.ProfileMap["p"]; mapped {
-		t.Fatalf("a profile on disagreeing siblings converted: %+v", got.ProfileMap)
+	assertNoBlocking(t, got)
+	if got.ProfileMap["p"] == "" || !reflect.DeepEqual(got.Instances[0].RuntimeTarget.NodeSelector, pool) {
+		t.Fatalf("disagreeing siblings: %+v", got)
 	}
-	found := false
-	for _, f := range got.Findings {
-		if f.Path == "runtimes.a" && f.Code == ConversionProfileConflict && f.Severity == ConversionSeverityBlocking {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("no blocking sibling finding: %+v", got.Findings)
+	if f := conversionFinding(got, "runtimes.a", ConversionProfileConflict); f == nil || f.Severity != ConversionSeverityNotice {
+		t.Fatalf("no sibling notice: %+v", got.Findings)
 	}
 	if _, ok := ResolveLegacyPolicyOffline(disagree.Runtimes, disagree.Profiles, nil, "p"); ok {
 		t.Fatal("the legacy policy resolved for disagreeing siblings")
@@ -220,8 +399,9 @@ func TestProfileConversionSiblingPlacement(t *testing.T) {
 // Siblings are the entries that may target the same cluster and namespace,
 // as the offline policy resolution groups them: an entry with an empty
 // context and namespace may alias one with an explicit context and
-// namespace. Disagreeing such entries block the profile; identical ones
-// convert, and the flat target equals the legacy policy.
+// namespace. A profile on disagreeing such entries converts with its own
+// entry's placement and a notice; on identical ones the flat target equals
+// the legacy policy.
 func TestProfileConversionAliasSiblingPlacement(t *testing.T) {
 	x := map[string]string{PoolNodeSelectorKey: "x"}
 	y := map[string]string{PoolNodeSelectorKey: "y"}
@@ -233,17 +413,12 @@ func TestProfileConversionAliasSiblingPlacement(t *testing.T) {
 		Profiles: map[string]V1ProfileConfig{"p": {Runtime: "a"}},
 	}
 	got := ConvertProfilesToInstances(ProfileConversionInput{Settings: disagree, Profiles: []string{"p"}})
-	if _, mapped := got.ProfileMap["p"]; mapped {
-		t.Fatalf("a profile on possibly aliased disagreeing entries converted: %+v", got.ProfileMap)
+	assertNoBlocking(t, got)
+	if got.ProfileMap["p"] == "" || !reflect.DeepEqual(got.Instances[0].RuntimeTarget.NodeSelector, x) {
+		t.Fatalf("possibly aliased disagreeing entries: %+v", got)
 	}
-	blocked := false
-	for _, f := range got.Findings {
-		if f.Path == "runtimes.a" && f.Code == ConversionProfileConflict && f.Severity == ConversionSeverityBlocking {
-			blocked = true
-		}
-	}
-	if !blocked {
-		t.Fatalf("no blocking finding: %+v", got.Findings)
+	if f := conversionFinding(got, "runtimes.a", ConversionProfileConflict); f == nil || f.Severity != ConversionSeverityNotice {
+		t.Fatalf("no sibling notice: %+v", got.Findings)
 	}
 
 	// Agreeing entries may target the same namespace and are identical in
@@ -275,9 +450,9 @@ func TestProfileConversionAliasSiblingPlacement(t *testing.T) {
 // caller's configured names, like the broker: a settings file that
 // declares kubernetes: {type: kubernetes} makes that entry the operator's,
 // so it is a sibling of an entry with the same empty context and
-// namespace, and their different placement blocks the profile. Without
-// configured names every entry counts (fail closed); names that leave the
-// entry out convert the profile.
+// namespace, and their different placement gives a notice (the profile
+// keeps its own entry's placement). Without configured names every entry
+// counts (fail closed); names that leave the entry out give no notice.
 func TestProfileConversionConfiguredSiblings(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -309,21 +484,26 @@ profiles:
 			t.Errorf("profile %s: shipped default = %v", name, IsShippedDefaultProfile(name, p))
 		}
 	}
-	got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs, Profiles: []string{"p"}, ConfiguredRuntimes: configured})
-	if _, mapped := got.ProfileMap["p"]; mapped {
-		t.Fatalf("the configured kubernetes entry is not a sibling: %+v", got.Findings)
+	sibling := func(cfg func(string) bool) bool {
+		t.Helper()
+		got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs, Profiles: []string{"p"}, ConfiguredRuntimes: cfg})
+		assertNoBlocking(t, got)
+		if got.ProfileMap["p"] == "" || !reflect.DeepEqual(got.Instances[0].RuntimeTarget.NodeSelector, map[string]string{"pool": "agents"}) {
+			t.Fatalf("profile p: %+v", got)
+		}
+		return conversionFinding(got, "runtimes.pooled", ConversionProfileConflict) != nil
+	}
+	if !sibling(configured) {
+		t.Fatal("the configured kubernetes entry is not a sibling")
 	}
 	// Without configured names the conversion fails closed: every
-	// Kubernetes entry counts, so the profile is blocked too.
-	got = ConvertProfilesToInstances(ProfileConversionInput{Settings: vs, Profiles: []string{"p"}})
-	if _, mapped := got.ProfileMap["p"]; mapped {
-		t.Fatalf("without configured names the profile converted: %+v", got.Findings)
+	// Kubernetes entry counts, so it is a sibling too.
+	if !sibling(nil) {
+		t.Fatal("without configured names the kubernetes entry is not a sibling")
 	}
 	// Configured names that leave the kubernetes entry out (a settings file
-	// that does not declare it) convert the profile.
-	notDeclared := func(name string) bool { return name != "kubernetes" && names[name] }
-	got = ConvertProfilesToInstances(ProfileConversionInput{Settings: vs, Profiles: []string{"p"}, ConfiguredRuntimes: notDeclared})
-	if got.ProfileMap["p"] == "" {
-		t.Fatalf("an undeclared built-in entry blocked: %+v", got.Findings)
+	// that does not declare it) make it no sibling.
+	if sibling(func(name string) bool { return name != "kubernetes" && names[name] }) {
+		t.Fatal("an undeclared built-in entry is a sibling")
 	}
 }
