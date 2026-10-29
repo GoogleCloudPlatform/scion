@@ -85,10 +85,12 @@ func newTZWarningsServer(t *testing.T) (*Server, store.Store, *store.Agent, *moc
 		}},
 	}
 	d := NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default())
-	d.SetSecretBackend(&mockSecretBackend{secrets: []secret.SecretWithValue{{
+	// A stored owner-scope secret: start and restart select secrets by
+	// stored metadata (material_delivery.go), not through Resolve.
+	d.SetSecretBackend(launchSecretBackend(t, s, "test-hub", []secret.SecretWithValue{{
 		SecretMeta: secret.SecretMeta{Name: "tz-secret", SecretType: "environment", Target: "TZ", Scope: "user", ScopeID: agent.OwnerID, InjectionMode: "always"},
 		Value:      "America/Denver",
-	}}})
+	}}))
 	srv.SetDispatcher(d)
 	return srv, s, agent, client
 }

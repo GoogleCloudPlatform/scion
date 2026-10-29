@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -70,6 +71,58 @@ type hubDeliveryIdentity struct {
 	// source for stage-2 ancestry attestation and the progeny candidate,
 	// instead of this type's own (always non-attested) identity.
 	evidence *storedAgentIdentity
+	// admission, when set, memoizes the step-10 admission walk per
+	// permission for the life of this credential (hubDeliveryAdmission).
+	// It is hub-internal state, not request data. Only launch selection
+	// sets it (deliverySelector.mint), on a credential it mints for one
+	// start or restart and then drops; a credential without it re-runs the
+	// walk on every decision.
+	admission *hubDeliveryAdmissionMemo
+	// legacyFallback, when set, lets the admission admit a chain the walk
+	// refuses only because of legacy provenance (hubDeliveryLegacyFallback,
+	// material_delivery_legacy.go). It is hub-internal state, not request
+	// data. Only launch selection sets it (deliverySelector.mint), for the
+	// purposes legacyDeliveryFallbackPurpose names; every other credential
+	// enforces the walk strictly.
+	legacyFallback bool
+}
+
+// hubDeliveryAdmissionMemo holds the outcome of hubDeliveryAdmission's
+// chain walk and provenance-root admission, per permission, for one
+// delivery credential. The outcome depends only on the bound agent, the
+// credential's project and the permission, not on the item, so every
+// item a launch selection decides under one permission shares it. An
+// allow and a deny (including a fail-closed lookup error) are both kept,
+// so a selection judges every item against one reading of the chain.
+type hubDeliveryAdmissionMemo struct {
+	mu       sync.Mutex
+	outcomes map[string]hubDeliveryAdmissionOutcome
+}
+
+type hubDeliveryAdmissionOutcome struct {
+	ok     bool
+	reason string
+	cause  DenyCause
+	// legacyCohort is set when the outcome is an allow by the legacy
+	// fallback: the cohort (legacyDeliveryCohort*) of the first legacy hop.
+	legacyCohort string
+}
+
+func newHubDeliveryAdmissionMemo() *hubDeliveryAdmissionMemo {
+	return &hubDeliveryAdmissionMemo{outcomes: make(map[string]hubDeliveryAdmissionOutcome)}
+}
+
+func (m *hubDeliveryAdmissionMemo) load(permissionID string) (hubDeliveryAdmissionOutcome, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	o, ok := m.outcomes[permissionID]
+	return o, ok
+}
+
+func (m *hubDeliveryAdmissionMemo) save(permissionID string, o hubDeliveryAdmissionOutcome) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.outcomes[permissionID] = o
 }
 
 // Compile-time interface assertion.
@@ -271,20 +324,81 @@ func (a *AuthzService) hubDeliveryAdmission(
 		return deny("delivery resource is in a different project", DenyCauseCeilingProvenanceMissing)
 	}
 
-	if ok, reason, c := a.hubDeliveryChainWalk(ctx, agentID, h.projectID, permissionID, explain); !ok {
-		if cause != nil {
-			*cause = c
+	// The walk and the root admission do not depend on the resource, so a
+	// credential carrying a memo (launch selection) runs them once per
+	// permission. An explained decision always runs them, so its trace
+	// carries every step.
+	memo := h.admission
+	if explain != nil {
+		memo = nil
+	}
+	var o hubDeliveryAdmissionOutcome
+	cached := false
+	if memo != nil {
+		o, cached = memo.load(permissionID)
+	}
+	if !cached {
+		o = a.hubDeliveryAdmissionOutcomeFor(ctx, h, permissionID, agentID, explain)
+		if memo != nil {
+			memo.save(permissionID, o)
 		}
-		return false, reason, nil
+	}
+	if !o.ok {
+		if cause != nil {
+			*cause = o.cause
+		}
+		return false, o.reason, nil
+	}
+	return true, o.reason, nil
+}
+
+// hubDeliveryAdmissionOutcomeFor is the admission outcome for one
+// permission: hubDeliveryChainAdmission, and, when that denies and the
+// credential carries legacyFallback, the legacy fallback
+// (hubDeliveryLegacyFallback).
+func (a *AuthzService) hubDeliveryAdmissionOutcomeFor(
+	ctx context.Context,
+	h *hubDeliveryIdentity,
+	permissionID string,
+	agentID string,
+	explain *[]DecisionStep,
+) hubDeliveryAdmissionOutcome {
+	o := a.hubDeliveryChainAdmission(ctx, h, permissionID, agentID, explain)
+	if o.ok || !h.legacyFallback {
+		return o
+	}
+	return a.hubDeliveryLegacyFallback(ctx, h, permissionID, agentID, o, explain)
+}
+
+// hubDeliveryChainAdmission runs hubDeliveryChainWalk and then
+// ResolveProvenanceRoot for the target, as described on
+// hubDeliveryAdmission, and returns the outcome.
+func (a *AuthzService) hubDeliveryChainAdmission(
+	ctx context.Context,
+	h *hubDeliveryIdentity,
+	permissionID string,
+	agentID string,
+	explain *[]DecisionStep,
+) hubDeliveryAdmissionOutcome {
+	addStep := func(step, detail string) {
+		if explain != nil {
+			*explain = append(*explain, DecisionStep{Step: step, Detail: detail})
+		}
+	}
+
+	if ok, reason, c := a.hubDeliveryChainWalk(ctx, agentID, h.projectID, permissionID, explain); !ok {
+		return hubDeliveryAdmissionOutcome{reason: reason, cause: c}
 	}
 
 	root, err := a.ResolveProvenanceRoot(ctx, agentID, ResolveProvenanceOptions{PermissionID: permissionID})
 	if err != nil {
 		c := DenyCauseForProvenanceError(err)
+		reason := "delivery provenance root denied: " + err.Error()
 		if c == DenyCauseCeilingError {
-			return deny("delivery ceiling check failed (fail-closed): "+err.Error(), c)
+			reason = "delivery ceiling check failed (fail-closed): " + err.Error()
 		}
-		return deny("delivery provenance root denied: "+err.Error(), c)
+		addStep("delegation_ceiling_delivery_denied", reason)
+		return hubDeliveryAdmissionOutcome{reason: reason, cause: c}
 	}
 	// ResolveProvenanceRoot evaluates admission against the stored agent's
 	// project, the scope of the target's own edge (root.Edge.ScopeID). The
@@ -292,7 +406,7 @@ func (a *AuthzService) hubDeliveryAdmission(
 	// shows what was evaluated even if the two ever differed.
 	addStep("delegation_ceiling_delivery_root",
 		fmt.Sprintf("root user %s admitted to project %s for %s", root.RootUser.ID, root.Edge.ScopeID, permissionID))
-	return true, "delivery ceiling passed", nil
+	return hubDeliveryAdmissionOutcome{ok: true, reason: "delivery ceiling passed"}
 }
 
 // hdDelegatorLiveness is one hop's delegator state, as seen by
@@ -303,6 +417,7 @@ const (
 	hdDelegatorLive        hdDelegatorLiveness = iota
 	hdDelegatorNotFound                        // no record
 	hdDelegatorDeleted                         // agent with DeletedAt set
+	hdDelegatorHeld                            // agent with an active hold (ptone/scion#3433)
 	hdDelegatorInactive                        // user whose status is not active
 	hdDelegatorUnsupported                     // delegator type is neither user nor agent
 )
@@ -311,8 +426,10 @@ const (
 // the hub_delivery admission walk. It never consults roles or super-admin
 // status (a suspended super-admin is inactive like any other user), and it
 // never reads or writes the request-scoped delegator-authority cache. A
-// stopped agent is live. The returned string is the user's status for
-// hdDelegatorInactive. Any lookup error other than not-found is returned.
+// stopped agent is live; a held agent is not (ptone/scion#3433), as in
+// checkAgentHoldsPermission and agentStanding. The returned string is the
+// user's status for hdDelegatorInactive. Any lookup error other than
+// not-found, including a hold lookup error, is returned.
 func (a *AuthzService) hubDeliveryDelegatorLiveness(ctx context.Context, delegatorType, delegatorID string) (hdDelegatorLiveness, string, error) {
 	switch delegatorType {
 	case store.DelegationPrincipalUser:
@@ -337,6 +454,13 @@ func (a *AuthzService) hubDeliveryDelegatorLiveness(ctx context.Context, delegat
 		}
 		if !ag.DeletedAt.IsZero() {
 			return hdDelegatorDeleted, "", nil
+		}
+		held, err := a.store.HasActiveAgentHold(ctx, delegatorID)
+		if err != nil {
+			return hdDelegatorLive, "", fmt.Errorf("agent %s hold lookup: %w", delegatorID, err)
+		}
+		if held {
+			return hdDelegatorHeld, "", nil
 		}
 		return hdDelegatorLive, "", nil
 	default:
@@ -364,11 +488,35 @@ func (a *AuthzService) hubDeliveryDelegatorLiveness(ctx context.Context, delegat
 //  5. effect ceiling: principal passes, bounded must allow permissionID
 //     with no self-operation exception (ceiling_effect_exceeded), any other
 //     kind denies (ceiling_unrecorded);
-//  6. live delegator (hubDeliveryDelegatorLiveness);
+//  6. live delegator (hubDeliveryDelegatorLiveness); a held agent
+//     delegator is not live;
 //  7. a user delegator ends the chain; an agent delegator is the next hop;
 //     the depth bound and a repeated agent deny with no cause, like the
 //     ordinary walk.
+//
+// Before step 1 of every hop, the hop's delegate agent must not be held
+// (ptone/scion#3433): at depth 0 that is the target agent itself, and at
+// every later depth it is the agent delegator of the hop below, so a held
+// agent anywhere on the chain denies, matching agentStanding. A held agent
+// denies with cause ceiling_orphaned, the cause the ordinary walk records
+// for a non-live agent link (checkAgentHoldsPermission); a hold lookup
+// error denies with cause ceiling_error.
 func (a *AuthzService) hubDeliveryChainWalk(ctx context.Context, startAgentID, scopeProjectID, permissionID string, explain *[]DecisionStep) (bool, string, DenyCause) {
+	return a.hubDeliveryWalk(ctx, startAgentID, scopeProjectID, permissionID, explain, nil)
+}
+
+// hubDeliveryWalk is hubDeliveryChainWalk. With legacy nil it is exactly
+// the strict walk. With legacy set it is the legacy-tolerant walk of the
+// fallback (material_delivery_legacy.go): at the legacy points named
+// there it records the hop's cohort in legacy and goes on instead of
+// denying; every other check is unchanged.
+func (a *AuthzService) hubDeliveryWalk(ctx context.Context, startAgentID, scopeProjectID, permissionID string, explain *[]DecisionStep, legacy *hubDeliveryLegacyNote) (bool, string, DenyCause) {
+	// The tolerant walk applies only to the delivery permissions
+	// (legacyFallbackPermission); for any other permission it is the strict
+	// walk, whatever the caller passed.
+	if legacy != nil && !legacyFallbackPermission(permissionID) {
+		legacy = nil
+	}
 	addStep := func(step, detail string) {
 		if explain != nil {
 			*explain = append(*explain, DecisionStep{Step: step, Detail: detail})
@@ -394,6 +542,12 @@ func (a *AuthzService) hubDeliveryChainWalk(ctx context.Context, startAgentID, s
 
 	visited := make(map[string]bool, maxDelegationDepth+1)
 	delegateID := startAgentID
+	// pendingUAT (tolerant walk only) is set by an agent-recorded hop whose
+	// ceiling lacks the permission because an ancestor was created from a
+	// user access token (legacyInheritsUATGap). The next hops must reach
+	// that UAT-created hop through hops of the same kind, or the walk
+	// denies with pendingReason, the first such hop's own deny.
+	pendingUAT, pendingReason := false, ""
 	for depth := 0; ; depth++ {
 		if depth > maxDelegationDepth {
 			return deny("delegation chain exceeded maximum depth", "")
@@ -402,6 +556,14 @@ func (a *AuthzService) hubDeliveryChainWalk(ctx context.Context, startAgentID, s
 			return deny("delegation chain cycle", "")
 		}
 		visited[delegateID] = true
+
+		held, err := a.store.HasActiveAgentHold(ctx, delegateID)
+		if err != nil {
+			return failClosed(fmt.Errorf("agent %s hold lookup: %w", delegateID, err))
+		}
+		if held {
+			return deny(fmt.Sprintf("agent %s is held", delegateID), DenyCauseCeilingOrphaned)
+		}
 
 		allEdges, err := a.getCachedDelegationEdges(ctx, store.DelegationPrincipalAgent, delegateID)
 		if err != nil {
@@ -415,6 +577,13 @@ func (a *AuthzService) hubDeliveryChainWalk(ctx context.Context, startAgentID, s
 		}
 		if len(active) == 0 {
 			addStep("delegation_ceiling_delivery_hop", fmt.Sprintf("agent:%s has no active edge in project %s", delegateID, scopeProjectID))
+			if legacy != nil {
+				if pendingUAT {
+					return deny(pendingReason, DenyCauseCeilingEffectExceeded)
+				}
+				legacy.note(legacyDeliveryCohortNoEdge, depth)
+				return a.hubDeliveryLegacyAncestry(ctx, delegateID, deny, failClosed)
+			}
 			return deny("no active delegation edge", DenyCauseCeilingProvenanceMissing)
 		}
 		if len(active) > 1 {
@@ -427,6 +596,13 @@ func (a *AuthzService) hubDeliveryChainWalk(ctx context.Context, startAgentID, s
 				edge.ID, edge.DelegatorType, edge.DelegatorID, delegateID, edge.Kind, edge.ProvenanceVersion))
 
 		if isMigrationSentinel(edge) {
+			if legacy != nil {
+				if pendingUAT {
+					return deny(pendingReason, DenyCauseCeilingEffectExceeded)
+				}
+				legacy.note(legacyDeliveryCohortSentinelEdge, depth)
+				return a.hubDeliveryLegacyAncestry(ctx, delegateID, deny, failClosed)
+			}
 			return deny("migration-provenance delegation supplies no delivery authority", DenyCauseCeilingOrphaned)
 		}
 		if edgeHasDevLocalProvenance(edge) {
@@ -437,17 +613,47 @@ func (a *AuthzService) hubDeliveryChainWalk(ctx context.Context, startAgentID, s
 				return deny("delegation ceiling: local development provenance with another delegator", DenyCauseCeilingSourceNotAllowed)
 			}
 		}
-		if !knownProvenanceVersion(edge.ProvenanceVersion) {
-			return deny(fmt.Sprintf("delegation ceiling: %s requires recorded provenance", permissionID), DenyCauseCeilingUnrecorded)
-		}
-		switch edge.Kind {
-		case store.EffectCeilingPrincipal:
-		case store.EffectCeilingBounded:
-			if !EffectCeilingAllows(edge.EffectCeiling, permissionID, false) {
-				return deny(fmt.Sprintf("delegation ceiling: %s is outside the frozen effect ceiling", permissionID), DenyCauseCeilingEffectExceeded)
+		// hopCohort is the legacy cohort the tolerant walk lets this hop
+		// through under; inherits marks an agent-recorded hop that only
+		// inherits a UAT-created ancestor's gap. Both stay unset on the
+		// strict walk.
+		hopCohort, inherits := "", false
+		switch {
+		case !knownProvenanceVersion(edge.ProvenanceVersion) || (edge.Kind != store.EffectCeilingPrincipal && edge.Kind != store.EffectCeilingBounded):
+			if legacy == nil {
+				return deny(fmt.Sprintf("delegation ceiling: %s requires recorded provenance", permissionID), DenyCauseCeilingUnrecorded)
 			}
-		default:
-			return deny(fmt.Sprintf("delegation ceiling: %s requires recorded provenance", permissionID), DenyCauseCeilingUnrecorded)
+			// An unrecorded edge has no ceiling to apply; its delegator is
+			// still checked below and the walk goes on.
+			hopCohort = legacyDeliveryCohortUnadoptedEdge
+		case edge.Kind == store.EffectCeilingBounded && !EffectCeilingAllows(edge.EffectCeiling, permissionID, false):
+			exceeded := fmt.Sprintf("delegation ceiling: %s is outside the frozen effect ceiling", permissionID)
+			if legacy != nil {
+				hopCohort = legacyBoundedEdgeCohort(edge, permissionID)
+				inherits = hopCohort == "" && legacyInheritsUATGap(edge, permissionID)
+			}
+			if hopCohort == "" && !inherits {
+				return deny(exceeded, DenyCauseCeilingEffectExceeded)
+			}
+			if inherits && !pendingUAT {
+				pendingReason = exceeded
+			}
+		}
+		if pendingUAT {
+			switch {
+			case hopCohort == deliveryCohortUATNoDeliverMapping:
+				pendingUAT = false
+			case inherits:
+			default:
+				// The ancestor that should explain the missing permission
+				// is not a UAT-created hop: the hop below narrowed it.
+				return deny(pendingReason, DenyCauseCeilingEffectExceeded)
+			}
+		} else if inherits {
+			pendingUAT = true
+		}
+		if hopCohort != "" {
+			legacy.note(hopCohort, depth)
 		}
 
 		live, status, err := a.hubDeliveryDelegatorLiveness(ctx, edge.DelegatorType, edge.DelegatorID)
@@ -461,6 +667,8 @@ func (a *AuthzService) hubDeliveryChainWalk(ctx context.Context, startAgentID, s
 				return deny(fmt.Sprintf("delegator agent %s is not live", edge.DelegatorID), DenyCauseCeilingOrphaned)
 			}
 			return deny(fmt.Sprintf("delegator %s is not live", edge.DelegatorID), DenyCauseCeilingOrphaned)
+		case hdDelegatorHeld:
+			return deny(fmt.Sprintf("delegator agent %s is held", edge.DelegatorID), DenyCauseCeilingOrphaned)
 		case hdDelegatorInactive:
 			return deny(fmt.Sprintf("delegator %s is %s", edge.DelegatorID, status), DenyCauseCeilingDelegatorLacksPermission)
 		default:
@@ -468,6 +676,10 @@ func (a *AuthzService) hubDeliveryChainWalk(ctx context.Context, startAgentID, s
 		}
 
 		if edge.DelegatorType == store.DelegationPrincipalUser {
+			if pendingUAT {
+				// Unreachable: an inheriting hop has an agent delegator.
+				return deny(pendingReason, DenyCauseCeilingEffectExceeded)
+			}
 			return true, "delivery ceiling chain passed", ""
 		}
 		delegateID = edge.DelegatorID

@@ -2757,7 +2757,27 @@ func (s *Server) projectHasVerifiedGCPSA(ctx context.Context, projectID string) 
 // agent's env, or in the hub's env/secret stores at user, project, or hub scope.
 // For progeny agents (those with ancestry len > 1), it also checks for
 // allowProgeny secrets and env vars inherited through the ancestry chain.
+//
+// A project- or hub-scope record counts only if it would be delivered to the
+// agent at start: once the agent's own record exists, each such record is
+// authorized under the delivery credential (Decide *.deliver, no value
+// read; deliverySelector.probe). Before that (the create-time probe)
+// there is no target to authorize against and the record counts by
+// existence, as the start still authorizes every item before delivery.
 func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []string) (bool, error) {
+	var sel *deliverySelector
+	selReady := false
+	probe := func(kind MaterialKind, record materialRecordKind, id, key, scope, scopeID string) (bool, error) {
+		if !selReady {
+			var err error
+			sel, err = s.newProbeDeliverySelector(ctx, agent)
+			if err != nil {
+				return false, err
+			}
+			selReady = true
+		}
+		return sel.probe(ctx, kind, record, id, key, scope, scopeID)
+	}
 	for _, key := range keys {
 		if agent.AppliedConfig != nil && agent.AppliedConfig.Env != nil {
 			if _, ok := agent.AppliedConfig.Env[key]; ok {
@@ -2780,36 +2800,38 @@ func (s *Server) hasAnyKey(ctx context.Context, agent *store.Agent, keys []strin
 				return true, nil
 			}
 		}
-		if agent.ProjectID != "" {
-			ev, err := s.store.GetEnvVar(ctx, key, "project", agent.ProjectID)
+		for _, sc := range []struct{ scope, scopeID string }{
+			{store.ScopeProject, agent.ProjectID},
+			{store.ScopeHub, s.hubID},
+		} {
+			if sc.scopeID == "" {
+				continue
+			}
+			ev, err := s.store.GetEnvVar(ctx, key, sc.scope, sc.scopeID)
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				return false, err
 			}
 			if ev != nil {
-				return true, nil
+				ok, err := probe(envVarDeliveryKind(*ev), materialRecordEnvVar, ev.ID, ev.Key, sc.scope, sc.scopeID)
+				if err != nil {
+					return false, err
+				}
+				if ok {
+					return true, nil
+				}
 			}
-			sec, err := s.store.GetSecret(ctx, key, "project", agent.ProjectID)
+			sec, err := s.store.GetSecret(ctx, key, sc.scope, sc.scopeID)
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				return false, err
 			}
 			if sec != nil {
-				return true, nil
-			}
-		}
-		if s.hubID != "" {
-			ev, err := s.store.GetEnvVar(ctx, key, store.ScopeHub, s.hubID)
-			if err != nil && !errors.Is(err, store.ErrNotFound) {
-				return false, err
-			}
-			if ev != nil {
-				return true, nil
-			}
-			sec, err := s.store.GetSecret(ctx, key, store.ScopeHub, s.hubID)
-			if err != nil && !errors.Is(err, store.ErrNotFound) {
-				return false, err
-			}
-			if sec != nil {
-				return true, nil
+				ok, err := probe(MaterialKindSecret, materialRecordSecret, sec.ID, sec.Key, sc.scope, sc.scopeID)
+				if err != nil {
+					return false, err
+				}
+				if ok {
+					return true, nil
+				}
 			}
 		}
 	}

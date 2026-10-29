@@ -15,9 +15,11 @@
 //go:build !no_sqlite
 
 // Package hub — start-time delivery of user-scope secrets
-// (startSecretResolveOpts) against the runtime read (check 8). Both start
-// sites are driven, resolveSecrets (Dispatch, Restart and Probe) and
-// resolveAsNeededForKeys, over both user-scope paths:
+// (startSecretResolveOpts) against the runtime read (check 8). The start
+// sites are driven, resolveSecrets (the create-time dispatch paths),
+// resolveAsNeededForKeys and the start and restart launch selection
+// (selectDeliverySecrets, which must deliver exactly what resolveSecrets
+// does of the owner's user-scope rows), over both user-scope paths:
 //   - the progeny path (an agent created by an agent): start delivery
 //     equals the runtime read;
 //   - the owner path (an agent created by a user, whose OwnerID is that
@@ -32,10 +34,13 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -92,7 +97,9 @@ func sdDispatcher(srv *Server, s store.Store) *HTTPAgentDispatcher {
 // sdDelivery is what start time delivers of the owner's user-scope secrets:
 // always is sdAlwaysKey from resolveSecrets, asNeeded is sdAsNeededKey from
 // resolveAsNeededForKeys, private is sdPrivateKey from resolveSecrets. Each
-// counts only the user-scope row's value.
+// counts only the user-scope row's value. sdStartDelivery also checks that
+// the start and restart launch selection deliver always and private
+// exactly as resolveSecrets does (as-needed rows are never part of it).
 type sdDelivery struct {
 	always   bool
 	asNeeded bool
@@ -121,6 +128,27 @@ func sdStartDelivery(t *testing.T, d *HTTPAgentDispatcher, s store.Store, agentI
 	got, err := d.resolveAsNeededForKeys(ctx, agent, []string{sdAsNeededKey}, nil)
 	require.NoError(t, err)
 	out.asNeeded = got[sdAsNeededKey] == sdAsNeededValue
+
+	for _, purpose := range []MaterialPurpose{PurposeDispatch, PurposeRestart} {
+		selected, err := d.selectDeliverySecrets(ctx, newDeliverySelector(d.authzService, agent, purpose), agent)
+		require.NoError(t, err)
+		var always, private bool
+		for _, r := range selected {
+			if r.Source != store.ScopeUser {
+				continue
+			}
+			switch r.Name {
+			case sdAlwaysKey:
+				always = r.Value == sdAlwaysValue
+			case sdAsNeededKey:
+				assert.Fail(t, "an as-needed row is never part of the launch selection", "purpose %s", purpose)
+			case sdPrivateKey:
+				private = r.Value == sdPrivateValue
+			}
+		}
+		assert.Equal(t, out.always, always, "launch selection (%s) delivers %s as resolveSecrets does", purpose, sdAlwaysKey)
+		assert.Equal(t, out.private, private, "launch selection (%s) delivers %s as resolveSecrets does", purpose, sdPrivateKey)
+	}
 	return out
 }
 
@@ -309,6 +337,21 @@ func TestStartDelivery_OwnerRowDeniedFallsBackToLowerScope(t *testing.T) {
 	require.NotNil(t, got, "the project row with the same key is still delivered")
 	assert.Equal(t, store.ScopeProject, got.Source)
 	assert.Equal(t, "sd-project-value", got.Value)
+
+	// The start and restart launch selection skip the refused owner row the
+	// same way, before its value is read. The project row is still subject
+	// to its own delivery decision there, so only the owner row's absence
+	// and, when the key is delivered, its source are asserted.
+	for _, purpose := range []MaterialPurpose{PurposeDispatch, PurposeRestart} {
+		selected, err := f.disp.selectDeliverySecrets(context.Background(), newDeliverySelector(f.disp.authzService, agent, purpose), agent)
+		require.NoError(t, err)
+		for _, r := range selected {
+			if r.Name == sdAlwaysKey {
+				assert.Equal(t, store.ScopeProject, r.Source, "launch selection (%s): the refused owner row is not delivered", purpose)
+				assert.Equal(t, "sd-project-value", r.Value)
+			}
+		}
+	}
 }
 
 // TestStartDelivery_ParityWithRuntimeRead runs one chain matrix through
@@ -586,4 +629,78 @@ func TestStartDelivery_CrossUserReincarnation(t *testing.T) {
 		assert.Equal(t, sdDelivery{}, sdStartDelivery(t, r.disp, r.s, child.ID),
 			"start refuses the creator's shared secrets at both sites")
 	})
+}
+
+// TestStartDelivery_WithheldOwnerRowLoggedAtWarn: a shared owner row the
+// start-time check refuses (the terminal user's secret.use constraint, S4b) is
+// withheld from the launch selection and logged with exactly ONE Warn line, the
+// rate-limited withheld record (path owner, its cause), never its value.
+func TestStartDelivery_WithheldOwnerRowLoggedAtWarn(t *testing.T) {
+	f := newSDFixture(t, "sd-warn")
+	direct, _ := f.direct(t, "warn-direct", true)
+	constrainAllBut(t, f.Store, "user", f.UserID, secretUsePermission)
+	var buf bytes.Buffer
+	f.disp.log = slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	agent, err := f.Store.GetAgent(context.Background(), direct)
+	require.NoError(t, err)
+	selected, err := f.disp.selectDeliverySecrets(context.Background(), newDeliverySelector(f.disp.authzService, agent, PurposeRestart), agent)
+	require.NoError(t, err)
+	for _, r := range selected {
+		assert.False(t, r.Name == sdAlwaysKey && r.Source == store.ScopeUser, "the refused owner row was delivered")
+	}
+
+	recs := sdWarnRecordsFor(t, buf.String(), sdAlwaysKey)
+	require.Len(t, recs, 1, "exactly one Warn record for the withheld owner row; log: %s", buf.String())
+	assert.Equal(t, sdWithheldMsg, recs[0]["msg"])
+	assert.Equal(t, "owner", recs[0]["path"])
+	assert.Equal(t, direct, recs[0]["agent_id"])
+	assert.NotEmpty(t, recs[0]["deny_cause"])
+	assert.NotContains(t, buf.String(), sdAlwaysValue, "a withheld secret value was logged")
+}
+
+// TestStartDelivery_WithheldProgenyRowLoggedOnce: on the progeny path, a
+// user row that secret.use refuses is withheld with ONE Warn line, the
+// rate-limited withheld record, and not also the deny line.
+func TestStartDelivery_WithheldProgenyRowLoggedOnce(t *testing.T) {
+	f := newSDFixture(t, "sd-warn-progeny")
+	child, _, _ := f.progeny(t, "warn-progeny", true)
+	constrainAllBut(t, f.Store, "user", f.UserID, secretUsePermission)
+	var buf bytes.Buffer
+	f.disp.log = slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	agent, err := f.Store.GetAgent(context.Background(), child)
+	require.NoError(t, err)
+	selected, err := f.disp.selectDeliverySecrets(context.Background(), newDeliverySelector(f.disp.authzService, agent, PurposeRestart), agent)
+	require.NoError(t, err)
+	for _, r := range selected {
+		assert.False(t, r.Name == sdAlwaysKey && r.Source == store.ScopeUser, "the refused progeny row was delivered")
+	}
+
+	recs := sdWarnRecordsFor(t, buf.String(), sdAlwaysKey)
+	require.Len(t, recs, 1, "exactly one Warn record for the withheld progeny row; log: %s", buf.String())
+	assert.Equal(t, sdWithheldMsg, recs[0]["msg"])
+	assert.Equal(t, "progeny", recs[0]["path"])
+	assert.Equal(t, child, recs[0]["agent_id"])
+	assert.NotContains(t, buf.String(), sdAlwaysValue, "a withheld secret value was logged")
+}
+
+// sdWithheldMsg is the rate-limited Warn of a user row authorization keeps
+// from the agent (startSecretResolveOpts' withheld).
+const sdWithheldMsg = "start-time user secret withheld by authorization; the agent starts without it"
+
+// sdWarnRecordsFor returns the WARN records of a JSON log that name secret.
+func sdWarnRecordsFor(t *testing.T, raw, secretName string) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
+		var rec map[string]any
+		if line == "" || json.Unmarshal([]byte(line), &rec) != nil {
+			continue
+		}
+		if rec["level"] == "WARN" && rec["secret"] == secretName {
+			out = append(out, rec)
+		}
+	}
+	return out
 }
