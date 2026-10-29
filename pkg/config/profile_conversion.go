@@ -68,8 +68,9 @@ type ProfileConversionInput struct {
 	Choices []ConversionChoice
 	// ConfiguredRuntimes reports whether a runtime entry is the operator's
 	// (ConfiguredRuntimeNames), as a legacy start decides when it matches
-	// sibling entries for placement. nil leaves out only the built-in
-	// default entries kept exactly as the defaults define them.
+	// sibling entries for placement. nil counts every Kubernetes entry as
+	// the operator's (fail closed: a built-in entry with different
+	// placement then blocks the profile).
 	ConfiguredRuntimes func(string) bool
 }
 

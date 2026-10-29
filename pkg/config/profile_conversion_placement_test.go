@@ -200,14 +200,20 @@ func TestProfileConversionSiblingPlacement(t *testing.T) {
 		t.Fatal("the legacy policy resolved for disagreeing siblings")
 	}
 
-	// A built-in default entry kept as the defaults define it is not a
-	// sibling of the operator's entries.
-	entries, other := PlacementSiblingEntries(map[string]V1RuntimeConfig{
+	// Without configured names every Kubernetes entry is the operator's
+	// (fail closed): the built-in entry is a sibling and disagrees. With
+	// configured names that leave it out, it is not a sibling.
+	withBuiltin := map[string]V1RuntimeConfig{
 		"a":          {Type: "kubernetes", NodeSelector: pool},
 		"kubernetes": defaultBuiltinCatalog().Runtimes["kubernetes"],
-	}, "a", nil)
+	}
+	entries, other := PlacementSiblingEntries(withBuiltin, "a", nil)
+	if other != "kubernetes" || !reflect.DeepEqual(entries, []string{"a", "kubernetes"}) {
+		t.Fatalf("nil configured: %v %q, want the built-in entry as a disagreeing sibling", entries, other)
+	}
+	entries, other = PlacementSiblingEntries(withBuiltin, "a", func(name string) bool { return name == "a" })
 	if other != "" || !reflect.DeepEqual(entries, []string{"a"}) {
-		t.Fatalf("built-in entry counted as a sibling: %v %q", entries, other)
+		t.Fatalf("configured without the built-in entry: %v %q", entries, other)
 	}
 }
 
@@ -270,8 +276,8 @@ func TestProfileConversionAliasSiblingPlacement(t *testing.T) {
 // declares kubernetes: {type: kubernetes} makes that entry the operator's,
 // so it is a sibling of an entry with the same empty context and
 // namespace, and their different placement blocks the profile. Without
-// configured names, the entry, identical to the built-in default, is left
-// out.
+// configured names every entry counts (fail closed); names that leave the
+// entry out convert the profile.
 func TestProfileConversionConfiguredSiblings(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -307,8 +313,17 @@ profiles:
 	if _, mapped := got.ProfileMap["p"]; mapped {
 		t.Fatalf("the configured kubernetes entry is not a sibling: %+v", got.Findings)
 	}
+	// Without configured names the conversion fails closed: every
+	// Kubernetes entry counts, so the profile is blocked too.
 	got = ConvertProfilesToInstances(ProfileConversionInput{Settings: vs, Profiles: []string{"p"}})
+	if _, mapped := got.ProfileMap["p"]; mapped {
+		t.Fatalf("without configured names the profile converted: %+v", got.Findings)
+	}
+	// Configured names that leave the kubernetes entry out (a settings file
+	// that does not declare it) convert the profile.
+	notDeclared := func(name string) bool { return name != "kubernetes" && names[name] }
+	got = ConvertProfilesToInstances(ProfileConversionInput{Settings: vs, Profiles: []string{"p"}, ConfiguredRuntimes: notDeclared})
 	if got.ProfileMap["p"] == "" {
-		t.Fatalf("without configured names the built-in-identical entry blocked: %+v", got.Findings)
+		t.Fatalf("an undeclared built-in entry blocked: %+v", got.Findings)
 	}
 }

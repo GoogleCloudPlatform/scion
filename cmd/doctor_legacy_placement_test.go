@@ -202,3 +202,14 @@ func writeLegacyDoctorAgent(t *testing.T, name, info, cfg string) {
 		t.Fatal(err)
 	}
 }
+
+// A host whose only Kubernetes evidence is an operator profile on a
+// Kubernetes runtime entry (here the built-in one: no runtimes configured,
+// no agents) warns on the sources it cannot list.
+func TestCheckDoctorLegacyPlacementPreflightOperatorProfileWarns(t *testing.T) {
+	legacyDoctorHome(t, "schema_version: \"1\"\nprofiles:\n  gpu:\n    runtime: kubernetes\n")
+	res, ok := checkDoctorLegacyPlacementPreflightHere()
+	if !ok || res.Status != "warn" || !strings.Contains(res.Message, "scanned 0, incomplete 0") || !strings.Contains(res.Message, "not enumerated: linked projects") {
+		t.Fatalf("got %v %+v", ok, res)
+	}
+}

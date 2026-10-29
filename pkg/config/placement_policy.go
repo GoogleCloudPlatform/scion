@@ -17,7 +17,6 @@ package config
 import (
 	"bytes"
 	"encoding/json"
-	"reflect"
 	"sort"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -170,24 +169,18 @@ func mayTargetSameNamespace(a, b V1RuntimeConfig) bool {
 // namespace (equal context and namespace, or empty on either side),
 // sorted. configured reports whether an entry is the operator's (the
 // settings file's configured entries, as ConfiguredRuntimeNames gives
-// them); nil leaves out only the built-in default entries kept exactly as
-// the defaults define them. disagree names the first such entry whose
+// them); nil counts every Kubernetes entry as the operator's, which fails
+// closed (more siblings, so more refusals), as ResolveLegacyPolicyOffline
+// does. disagree names the first such entry whose
 // placement differs from rtKey's (SiblingPlacementAgrees), or is "" when
 // they all agree; a legacy start on that cluster and namespace may refuse
 // then.
 func PlacementSiblingEntries(runtimes map[string]V1RuntimeConfig, rtKey string, configured func(string) bool) (entries []string, disagree string) {
 	rt := runtimes[rtKey]
 	entries = []string{rtKey}
-	builtins := defaultBuiltinCatalog().Runtimes
-	isOperator := func(name string, entry V1RuntimeConfig) bool {
-		if configured != nil {
-			return configured(name)
-		}
-		b, builtin := builtins[name]
-		return !builtin || !reflect.DeepEqual(b, entry)
-	}
+	isOperator := func(name string) bool { return configured == nil || configured(name) }
 	for name, other := range runtimes {
-		if name == rtKey || !IsKubernetesRuntimeEntry(name, other) || !isOperator(name, other) {
+		if name == rtKey || !IsKubernetesRuntimeEntry(name, other) || !isOperator(name) {
 			continue
 		}
 		if mayTargetSameNamespace(rt, other) {
