@@ -44,6 +44,10 @@ const (
 	// PurposeAvailabilityProbe asks whether a key would be delivered,
 	// without ever reading a value (the hub-side auth credential probe).
 	PurposeAvailabilityProbe MaterialPurpose = "availability_probe"
+	// PurposeProvisionCredential is the project-scope secrets the broker
+	// uses as GitHub credentials to fetch the agent's gh:// skills
+	// (resolveProvisionCredentials); never placed in the container.
+	PurposeProvisionCredential MaterialPurpose = "provision_credential"
 )
 
 // MaterialKind identifies the kind of material a candidate represents.

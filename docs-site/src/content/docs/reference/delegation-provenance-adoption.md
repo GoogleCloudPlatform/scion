@@ -292,7 +292,7 @@ permissions, which unrecorded chains never held.
 
 ## Launch material for legacy agents
 
-When the Hub starts or restarts an agent, it authorizes each Project, Hub and Broker variable and secret with the delivery permissions above (`secret.deliver`, `env_var.deliver`, `skill_injection.deliver`), walking the agent's delegation chain. Agents whose chain fails that walk only because of legacy data keep receiving that material, as they did before the check existed. A hop is legacy when it is one of:
+When the Hub starts or restarts an agent, it authorizes each Project, Hub and Broker variable and secret, and each Project secret it sends for the broker to fetch a `gh://` skill, with the delivery permissions above (`secret.deliver`, `env_var.deliver`, `skill_injection.deliver`), walking the agent's delegation chain. Agents whose chain fails that walk only because of legacy data keep receiving that material, as they did before the check existed. A hop is legacy when it is one of:
 
 | Group (`cohort` in the log) | The hop's agent has |
 | :--- | :--- |
@@ -329,7 +329,7 @@ The fallback never applies when:
 
 When the walk cannot follow edges past a hop (`legacy_no_edge`, `legacy_sentinel_edge`), the agent's stored ancestry stands in for the rest of the chain: its root user must be active and every ancestor agent must exist, not be deleted and not be held. An agent with no stored ancestry is refused. The root user's project membership is not checked for these agents, which is the behaviour before the check existed.
 
-The fallback applies to start and restart selection and to the create-time check for whether a requested key exists. Other users of the delivery permissions get the strict walk. To find the affected agents before or after an upgrade, run the read-only census against a copy of the Hub database or a read replica: `go run ./hack/delivery-census -driver sqlite -db <hub.db>` (add `-dev-auth` for a workstation Hub), or `-driver postgres -db <url>`. It opens the database read-only and reports, per agent, the group it falls in and what a start delivers, with counts by group and by deny cause.
+The fallback applies to start and restart selection, to the skill-fetch credentials sent with them, and to the create-time check for whether a requested key exists. Other users of the delivery permissions get the strict walk. To find the affected agents before or after an upgrade, run the read-only census against a copy of the Hub database or a read replica: `go run ./hack/delivery-census -driver sqlite -db <hub.db>` (add `-dev-auth` for a workstation Hub), or `-driver postgres -db <url>`. It opens the database read-only and reports, per agent, the group it falls in and what a start delivers, with counts by group and by deny cause.
 
 ## Admin recovery API
 

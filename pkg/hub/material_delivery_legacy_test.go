@@ -565,6 +565,7 @@ func TestLegacyDeliveryFallback_Scope(t *testing.T) {
 	assert.True(t, legacyDeliveryFallbackPurpose(PurposeDispatch))
 	assert.True(t, legacyDeliveryFallbackPurpose(PurposeRestart))
 	assert.True(t, legacyDeliveryFallbackPurpose(PurposeAvailabilityProbe))
+	assert.True(t, legacyDeliveryFallbackPurpose(PurposeProvisionCredential))
 	assert.False(t, legacyDeliveryFallbackPurpose(PurposeRuntimeRead))
 
 	for _, c := range []DenyCause{

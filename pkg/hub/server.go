@@ -5223,6 +5223,11 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// (ptone/scion#1994).
 	dispatcher.SetCreatorSkillPreResolver(s.preResolveAgentSkillsAsCreator)
 
+	// Provision credentials are limited to the keys the agent's gh://
+	// skill references can use, so the dispatcher reads the same merged
+	// references the pre-resolvers do.
+	dispatcher.SetSkillRefLister(s.dispatchSkillRefs)
+
 	// Refuse a start or restart of an agent that is held or not in good
 	// standing before any broker call (ptone/scion#3433). SetDispatcher
 	// installs it too, for every dispatcher attached to the server.

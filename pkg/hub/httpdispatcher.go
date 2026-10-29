@@ -27,7 +27,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
@@ -43,7 +42,6 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-	"golang.org/x/sync/errgroup"
 )
 
 // permissionProjectSecretRead is the registry permission ID that governs an
@@ -214,6 +212,12 @@ type HTTPAgentDispatcher struct {
 	// principal triggers it (ptone/scion#1994). Nil = no creator-based
 	// resolution (start/restart carry no PreResolvedSkills, same as before).
 	creatorSkillPreResolver func(ctx context.Context, agent *store.Agent) *ResolveSkillsResponse
+
+	// skillRefLister returns the agent's merged skill references (inline
+	// and Hub template skills), from which the provision credential keys
+	// are derived (ghCredentialKeysForSkills). Nil = no references, so no
+	// provision credentials are sent.
+	skillRefLister func(ctx context.Context, agent *store.Agent) []api.SkillReference
 
 	// requiredStandingCheck refuses a start or restart of an agent that is
 	// not in good standing (ptone/scion#3433). It is required in
@@ -524,6 +528,13 @@ func (d *HTTPAgentDispatcher) SetCreatorSkillPreResolver(fn func(ctx context.Con
 	d.creatorSkillPreResolver = fn
 }
 
+// SetSkillRefLister registers the callback that returns an agent's merged
+// skill references. The provision credentials sent to the broker are limited
+// to the keys its gh:// references can use (resolveProvisionCredentials).
+func (d *HTTPAgentDispatcher) SetSkillRefLister(fn func(ctx context.Context, agent *store.Agent) []api.SkillReference) {
+	d.skillRefLister = fn
+}
+
 // SetRequiredStandingCheck registers the check DispatchAgentStart and
 // DispatchAgentRestart run before any broker call: a non-nil error refuses
 // the dispatch (ptone/scion#3433). Required in production; Server.SetDispatcher
@@ -687,92 +698,6 @@ func (d *HTTPAgentDispatcher) getProvisioningBrokerEndpoint(ctx context.Context,
 		}
 	}
 	return broker.Endpoint, nil
-}
-
-// resolveProvisionCredentials collects project-scope secrets for use by the
-// broker's provision-time credential resolution (skill resolution, URI
-// variable substitution, credential helpers). These are never forwarded to
-// the agent container environment. Shared by the create and start/restart
-// dispatch paths so that a required gh:// skill can resolve with the same
-// project credentials regardless of which path (re-)provisions the agent.
-// callerName prefixes every log message this function writes, at any level.
-func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, agent *store.Agent, callerName string) map[string]string {
-	if agent.ProjectID == "" || d.secretBackend == nil {
-		return nil
-	}
-	projectSecrets, listErr := d.secretBackend.List(ctx, secret.Filter{
-		Scope:   secret.ScopeProject,
-		ScopeID: agent.ProjectID,
-	})
-	if listErr != nil {
-		// Logged regardless of debug: without these credentials a private
-		// gh:// skill silently resolves with the default credential (or none).
-		d.log.Warn(callerName+": failed to list project secrets for ProvisionCredentials",
-			"agent_id", agent.ID, "project_id", agent.ProjectID, "error", listErr)
-		return nil
-	}
-	if len(projectSecrets) == 0 {
-		d.log.Info(callerName+": ProvisionCredentials resolved",
-			"agent_id", agent.ID, "project_id", agent.ProjectID, "count", 0)
-		return nil
-	}
-
-	type namedValue struct{ name, value string }
-	fetched := make([]namedValue, len(projectSecrets))
-
-	// interrupted counts secrets not fetched because ctx was cancelled or
-	// timed out. Those are reported once below rather than once per secret.
-	var interrupted atomic.Int64
-	g, gctx := errgroup.WithContext(ctx)
-	for i, sm := range projectSecrets {
-		if sm.SecretType == store.SecretTypeInternal {
-			continue
-		}
-		i, sm := i, sm // capture loop vars
-		g.Go(func() error {
-			if gctx.Err() != nil {
-				interrupted.Add(1)
-				return nil
-			}
-			sv, getErr := d.secretBackend.Get(gctx, sm.Name, secret.ScopeProject, agent.ProjectID)
-			if getErr != nil {
-				if ctx.Err() != nil || errors.Is(getErr, context.Canceled) || errors.Is(getErr, context.DeadlineExceeded) {
-					interrupted.Add(1)
-					return nil
-				}
-				// Secret name and project only; never the value.
-				d.log.Warn(callerName+": failed to get project secret for ProvisionCredentials",
-					"agent_id", agent.ID, "project_id", agent.ProjectID, "secret", sm.Name, "error", getErr)
-				return nil // don't fail the group for individual secrets
-			}
-			if sv != nil && sv.Value != "" {
-				fetched[i] = namedValue{sm.Name, sv.Value}
-			}
-			return nil
-		})
-	}
-	_ = g.Wait()
-	if n := interrupted.Load(); n > 0 {
-		cause := ctx.Err()
-		if cause == nil {
-			cause = context.Canceled
-		}
-		d.log.Warn(callerName+": ProvisionCredentials fetch stopped early; some project secrets were not fetched",
-			"agent_id", agent.ID, "project_id", agent.ProjectID, "not_fetched", n, "error", cause)
-	}
-
-	creds := make(map[string]string)
-	for _, nv := range fetched {
-		if nv.name != "" {
-			creds[nv.name] = nv.value
-		}
-	}
-	d.log.Info(callerName+": ProvisionCredentials resolved",
-		"agent_id", agent.ID, "project_id", agent.ProjectID, "count", len(creds))
-	if len(creds) == 0 {
-		return nil
-	}
-	return creds
 }
 
 // secretResolutionPolicy says what buildCreateRequest does when the secret
