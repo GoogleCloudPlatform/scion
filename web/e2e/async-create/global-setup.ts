@@ -18,7 +18,8 @@
  * Remote target (E2E_TARGET_URL): nothing to start.
  *
  * Local target: starts a throwaway member-level test hub with the
- * co-located runtime broker and server.hub.async_agent_launch on, and
+ * co-located runtime broker and the hub.async_agent_launch experiment on
+ * (set through the admin experiments API and read back), and
  * records whether agents can actually start here:
  * - E2E_LAUNCH_CAPABLE=1 or 0 decides it explicitly;
  * - otherwise a working `docker info` and E2E_IMAGE_REGISTRY (the registry
@@ -106,9 +107,11 @@ async function globalSetup(): Promise<void> {
     build: process.env.E2E_PREBUILT !== '1',
     stateFile: hubStateFile,
     env: {
-      SCION_SERVER_HUB_ASYNCAGENTLAUNCH: 'true',
       SCION_IMAGE_REGISTRY: imageRegistry,
     },
+    // Set explicitly, whatever the registry default, and read back by
+    // startHub, so the journey always runs with async create on.
+    experiments: ['hub.async_agent_launch'],
   });
 
   const suiteState: LocalSuiteState = {

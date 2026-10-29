@@ -247,22 +247,7 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 		}
 	}
 
-	rp := &api.ResolvedPlacement{Sources: map[string][]string{}}
-	for _, name := range matched {
-		rt := gvs.Runtimes[name]
-		if len(rt.NodeSelector) > 0 {
-			rp.NodeSelector = config.MergeNodeSelector(rt.NodeSelector, nil)
-			rp.Sources["node_selector"] = append(rp.Sources["node_selector"], "runtimes."+name)
-		}
-		if len(rt.Tolerations) > 0 {
-			rp.Tolerations = config.MergeTolerations(rt.Tolerations, nil)
-			rp.Sources["tolerations"] = append(rp.Sources["tolerations"], "runtimes."+name)
-		}
-		if rt.RuntimeClassName != "" {
-			rp.RuntimeClassName = rt.RuntimeClassName
-			rp.Sources["runtime_class_name"] = append(rp.Sources["runtime_class_name"], "runtimes."+name)
-		}
-	}
+	rp := config.LegacyPlacementPolicy(gvs.Runtimes, matched, "", nil)
 
 	// Step 4: the profile rung.
 	pp := profilesOn(inE)
@@ -270,7 +255,7 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 	profileGlobal = profileGlobal && res.Profile != ""
 	switch {
 	case res.How == resolutionProfile && profileGlobal && inE[profile.Runtime]:
-		applyProfilePlacement(rp, res.Profile, profile)
+		config.ApplyProfilePlacement(rp, res.Profile, profile)
 	case res.How == resolutionProfile && profileGlobal && defaultsOnlyMatched[profile.Runtime]:
 		// The selected global profile's runtime entry exists only in the
 		// built-in defaults and matches this runtime. Like the case above, it
@@ -459,22 +444,6 @@ func unionSet(a, b map[string]bool) map[string]bool {
 		out[k] = v
 	}
 	return out
-}
-
-// applyProfilePlacement applies profile p's placement over rp.
-func applyProfilePlacement(rp *api.ResolvedPlacement, name string, p config.V1ProfileConfig) {
-	if len(p.NodeSelector) > 0 {
-		rp.NodeSelector = config.MergeNodeSelector(rp.NodeSelector, p.NodeSelector)
-		rp.Sources["node_selector"] = append(rp.Sources["node_selector"], "profiles."+name)
-	}
-	if len(p.Tolerations) > 0 {
-		rp.Tolerations = config.MergeTolerations(rp.Tolerations, p.Tolerations)
-		rp.Sources["tolerations"] = append(rp.Sources["tolerations"], "profiles."+name)
-	}
-	if p.RuntimeClassName != "" {
-		rp.RuntimeClassName = p.RuntimeClassName
-		rp.Sources["runtime_class_name"] = append(rp.Sources["runtime_class_name"], "profiles."+name)
-	}
 }
 
 // kubernetesPlacementIdentity reads what the placement matcher needs from a

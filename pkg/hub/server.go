@@ -624,6 +624,14 @@ type MaintenanceConfig struct {
 	// detected once at startup (DetectMaintenanceInstaller); nil means
 	// unsupported.
 	Installer maintenance.Installer
+	// ReleaseCatalog lists and classifies the releases of GitHubRepo. nil:
+	// the hub builds one maintenance.Catalog on first use, persisted in the
+	// hub_settings row system.release_catalog (see updateReleaseCatalog).
+	ReleaseCatalog maintenance.CatalogSource
+	// ReleaseSource looks a single release up by tag (and, when it also
+	// implements maintenance.ReleaseLister, backs the default catalog).
+	// nil: GitHub's API for GitHubRepo.
+	ReleaseSource maintenance.ReleaseSource
 }
 
 // GitHubAppServerConfig holds the GitHub App configuration for the Hub server.
@@ -1560,7 +1568,7 @@ type ResolvedSecret struct {
 	Target string `json:"target"`        // Projection target
 	Value  string `json:"value"`         // Decrypted secret value
 	Source string `json:"source"`        // Scope that provided this secret
-	Ref    string `json:"ref,omitempty"` // External secret reference (e.g., "gcpsm:projects/123/secrets/name")
+	Ref    string `json:"ref,omitempty"` // External secret reference: for GCP Secret Manager the resource path "projects/123/secrets/name" (no "gcpsm:" prefix), which brokers mount as <ref>/versions/latest
 }
 
 // RemoteAgentConfig contains agent configuration for remote creation.
@@ -2542,6 +2550,14 @@ type Server struct {
 	// hubRestartReservedAt is the UnixNano time Restart Hub reserved the
 	// hub-binary exclusive group (0: none); see reserveHubRestart.
 	hubRestartReservedAt atomic.Int64
+
+	// updateCatalog is the hub's release catalog and updateDater the
+	// remembered running-release lookup, each built once on first use
+	// (updateReleaseCatalog, runningReleaseDater).
+	updateCatalogOnce sync.Once
+	updateCatalog     maintenance.CatalogSource
+	updateDaterOnce   sync.Once
+	updateDater       maintenance.ReleaseSource
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to
@@ -5210,6 +5226,11 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// (ptone/scion#1994).
 	dispatcher.SetCreatorSkillPreResolver(s.preResolveAgentSkillsAsCreator)
 
+	// Provision credentials are limited to the keys the agent's gh://
+	// skill references can use, so the dispatcher reads the same merged
+	// references the pre-resolvers do.
+	dispatcher.SetSkillRefLister(s.dispatchSkillRefs)
+
 	// Refuse a start or restart of an agent that is held or not in good
 	// standing before any broker call (ptone/scion#3433). SetDispatcher
 	// installs it too, for every dispatcher attached to the server.
@@ -5461,8 +5482,9 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 			return false
 		}
 	}
-	// The superseded start claim is released last on each path below,
-	// after the status write and the quota release (see suspendAgent).
+	// The superseded start claim is released last on each path below:
+	// after the status write and, once the suspension is recorded, after
+	// the grant revocation and the quota release (see suspendAgent).
 	releaseClaim := func() {
 		if agent.RuntimeBrokerID != "" {
 			s.releaseSupersededClaim(ctx, agent.ID, supersedes, intentAt)
@@ -5491,6 +5513,13 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 		return false
 	}
 
+	// As for suspendAgent: the agent's delegation grants end with the
+	// suspension, best effort (.design/agent-delegation.md §16.3). The
+	// revocation selects grants by agent, so it runs before the claim is
+	// released: released first, a new start could take the claim and then
+	// lose its own run's grants to it.
+	s.revokeAgentDelegationGrantsBestEffort(ctx, store.AgentDelegationGrantFilter{AgentID: agent.ID}, revokeReasonAgentSuspended)
+
 	agent.Phase = string(state.PhaseSuspended)
 	agent.ContainerStatus = "stopped"
 	agent.Activity = ""
@@ -5499,9 +5528,6 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	// suspendAgent's HTTP-path behavior.
 	s.releaseBrokerQuota(ctx, agent)
 	releaseClaim()
-	// As for suspendAgent: the agent's delegation grants end with the
-	// suspension, best effort (.design/agent-delegation.md §16.3).
-	s.revokeAgentDelegationGrantsBestEffort(ctx, store.AgentDelegationGrantFilter{AgentID: agent.ID}, revokeReasonAgentSuspended)
 	s.events.PublishAgentStatus(ctx, agent)
 	return true
 }
@@ -7471,6 +7497,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/admin/maintenance/update-available", s.guarded("/api/v1/admin/maintenance/update-available", s.handleUpdateAvailable))
 	s.mux.HandleFunc("/api/v1/admin/maintenance/restart", s.guarded("/api/v1/admin/maintenance/restart", s.handleAdminRestart))
 	s.mux.HandleFunc("/api/v1/admin/maintenance/update-status", s.guarded("/api/v1/admin/maintenance/update-status", s.handleUpdateStatus))
+	s.mux.HandleFunc("/api/v1/admin/maintenance/releases", s.guarded("/api/v1/admin/maintenance/releases", s.handleMaintenanceReleases))
 	s.mux.HandleFunc("/api/v1/admin/scheduler", s.guarded("/api/v1/admin/scheduler", s.handleAdminScheduler))
 	s.mux.HandleFunc("/api/v1/admin/allow-list", s.guarded("/api/v1/admin/allow-list", s.handleAdminAllowList))
 	s.mux.HandleFunc("/api/v1/admin/allow-list/", s.guarded("/api/v1/admin/allow-list/", s.handleAdminAllowListByEmail))
@@ -7745,6 +7772,11 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	// Apply unified auth middleware
 	// This handles all authentication types: agent tokens, user tokens, API keys, dev tokens
 	h = UnifiedAuthMiddleware(s.authConfig)(h)
+
+	// Behind an authenticating front proxy (AuthMode == "proxy"), check
+	// state-changing /api/v1 requests before authentication (see
+	// proxyModeWriteGuard). No-op in other auth modes.
+	h = s.proxyModeWriteGuard(h)
 
 	// The audit operation context (remaining-audit P4-1) sits directly
 	// inside the request logger, which mints the request ID it adopts, and

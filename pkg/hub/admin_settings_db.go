@@ -33,6 +33,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
@@ -1374,6 +1375,36 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
+	// runtimes: the body's map decides which entries exist, and each sent
+	// entry is merged key by key on the stored one, so a stored key the
+	// body leaves out, including one V1RuntimeConfig does not model, is
+	// kept (ptone/scion#6580; mergeRuntimeEntries). The row revision read
+	// is the CAS base.
+	var runtimeMergeWarnings []string
+	if _, ok := sectionDocs["runtimes"]; ok {
+		var rowValue []byte
+		rev := int64(0)
+		got, err := ops.store.GetHubSetting(r.Context(), "runtimes")
+		switch {
+		case err == nil:
+			rowValue, rev = got.Value, got.Revision
+		case errors.Is(err, store.ErrNotFound):
+		default:
+			slog.Error("PUT server-config: failed to read runtimes section", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read existing settings", nil)
+			return
+		}
+		merged, warnings, err := mergeRuntimesRow(rowValue, req.Runtimes, sentRuntimesObject(rawBody))
+		if err != nil {
+			slog.Error("PUT server-config: failed to build runtimes document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		sectionDocs["runtimes"] = merged
+		mergedBaseRevs["runtimes"] = rev
+		runtimeMergeWarnings = warnings
+	}
+
 	// The start-claim keys are checked on the merged lifecycle document,
 	// so a value carried from the row counts as well. They follow the same
 	// contract as the other lifecycle keys: omitted keeps, "" or null
@@ -1559,6 +1590,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		if doc, ok := sectionDocs["profiles"]; ok {
 			_ = json.Unmarshal(doc, &profiles)
 		}
+		sentProfiles := profiles
 		if errs := config.ValidateSharedDirSizes(runtimes, profiles); len(errs) > 0 {
 			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
 			return
@@ -1585,6 +1617,23 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			}
 			saveWarnings = safeToEvictSaveWarnings(runtimes, profiles)
 		}
+		// Resource quantities (ptone/scion#6581): the profiles the body
+		// sends, and default_resources when the body sends it.
+		var defaultResources *api.ResourceSpec
+		if doc, ok := sectionDocs["agent_defaults"]; ok {
+			adSent := applySectionPatch("agent_defaults", map[string]json.RawMessage{}, nil, agentDefaultsPresence(topFP))
+			var agentDefaults opsettings.AgentDefaultsSettings
+			if adSent["default_resources"] && json.Unmarshal(doc, &agentDefaults) == nil {
+				defaultResources = agentDefaults.DefaultResources
+			}
+		}
+		qErrs, qWarnings := config.ValidateResourceQuantities(defaultResources, sentProfiles)
+		if len(qErrs) > 0 {
+			writeResourceQuantityError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, qErrs)
+			return
+		}
+		saveWarnings = append(saveWarnings, resourceQuantityWarnings(qWarnings)...)
+		saveWarnings = append(saveWarnings, runtimeMergeWarnings...)
 	}
 	// Validate hub-level default_timezone (IANA name check; rejects "Local",
 	// same rule as the file-mode handler and as the per-user display

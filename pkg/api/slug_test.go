@@ -16,8 +16,12 @@ package api
 
 import (
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
+	"unicode"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 func TestSlugify(t *testing.T) {
@@ -57,6 +61,36 @@ func TestSlugify(t *testing.T) {
 			expected: strings.Repeat("a", MaxSlugLength),
 		},
 		{
+			name:     "consecutive dashes fast-path reject",
+			input:    "a--b",
+			expected: "a-b",
+		},
+		{
+			name:     "leading dash fast-path reject",
+			input:    "-abc",
+			expected: "abc",
+		},
+		{
+			name:     "trailing dash fast-path reject",
+			input:    "abc-",
+			expected: "abc",
+		},
+		{
+			name:     "already slug with interior dashes",
+			input:    "a-b-c",
+			expected: "a-b-c",
+		},
+		{
+			name:     "exact 63x a unchanged",
+			input:    strings.Repeat("a", MaxSlugLength),
+			expected: strings.Repeat("a", MaxSlugLength),
+		},
+		{
+			name:     "64x a truncated to 63x a",
+			input:    strings.Repeat("a", MaxSlugLength+1),
+			expected: strings.Repeat("a", MaxSlugLength),
+		},
+		{
 			name:     "numbers",
 			input:    "Agent 007",
 			expected: "agent-007",
@@ -75,6 +109,48 @@ func TestSlugify(t *testing.T) {
 			}
 		})
 	}
+}
+
+var legacyLeadingTrailingDash = regexp.MustCompile(`^-+|-+$`)
+
+func legacySlugify(s string) string {
+	s = norm.NFD.String(s)
+	var builder strings.Builder
+	for _, r := range s {
+		if !unicode.Is(unicode.Mn, r) {
+			builder.WriteRune(r)
+		}
+	}
+	s = builder.String()
+	s = strings.ToLower(s)
+	s = nonAlphanumeric.ReplaceAllString(s, "-")
+	s = legacyLeadingTrailingDash.ReplaceAllString(s, "")
+	if len(s) > MaxSlugLength {
+		s = s[:MaxSlugLength]
+		s = strings.TrimRight(s, "-")
+	}
+	return s
+}
+
+func FuzzSlugify(f *testing.F) {
+	seeds := []string{
+		"", "a", "A", "-", "--", "a-b", "a--b", "-abc", "abc-", "a-b-c",
+		"Hello World", "Héllö Wörld", "Agent 007", "!@#$%",
+		strings.Repeat("a", 63), strings.Repeat("a", 64), strings.Repeat("a-", 40),
+	}
+	for _, seed := range seeds {
+		f.Add(seed)
+	}
+	for r := rune(0); r < 256; r++ {
+		f.Add(string(r))
+	}
+	f.Fuzz(func(t *testing.T, input string) {
+		got := Slugify(input)
+		want := legacySlugify(input)
+		if got != want {
+			t.Fatalf("Slugify(%q) = %q; want %q (legacy)", input, got, want)
+		}
+	})
 }
 
 func TestValidateAgentName(t *testing.T) {
@@ -394,5 +470,45 @@ func TestIdentityKeysFor(t *testing.T) {
 				t.Errorf("IdentityKeysFor(%q, %q) = %v, want %v", tt.slug, tt.agentName, got, tt.want)
 			}
 		})
+	}
+}
+
+func BenchmarkSlugify(b *testing.B) {
+	input := "Hello World - An Agent 007!"
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = Slugify(input)
+	}
+}
+
+func BenchmarkSlugify_AlreadySlug(b *testing.B) {
+	input := "my-awesome-agent-007"
+	b.ReportAllocs()
+	for b.Loop() {
+		_ = Slugify(input)
+	}
+}
+
+func BenchmarkValidateDisplayName_ASCII(b *testing.B) {
+	name := "Builder Prime"
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _ = ValidateDisplayName(name)
+	}
+}
+
+func BenchmarkValidateDisplayName_Separators(b *testing.B) {
+	name := "under_score.dot-dash"
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _ = ValidateDisplayName(name)
+	}
+}
+
+func BenchmarkValidateDisplayName_Diacritics(b *testing.B) {
+	name := "Café Bot"
+	b.ReportAllocs()
+	for b.Loop() {
+		_, _ = ValidateDisplayName(name)
 	}
 }

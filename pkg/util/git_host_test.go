@@ -1789,7 +1789,7 @@ func TestRefuseRootCommonDirRedirect(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A normal .git directory (no root commondir/gitdir) passes.
-	if err := refuseRootCommonDirRedirect(dir); err != nil {
+	if err := refuseRootCommonDirRedirect(dir, false); err != nil {
 		t.Fatalf("a .git with no root commondir/gitdir must pass, got: %v", err)
 	}
 	// A root-level commondir or gitdir is refused.
@@ -1798,10 +1798,13 @@ func TestRefuseRootCommonDirRedirect(t *testing.T) {
 		if err := os.WriteFile(p, []byte("../elsewhere\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		err := refuseRootCommonDirRedirect(dir)
+		err := refuseRootCommonDirRedirect(dir, false)
 		var refused *RepoConfigRefusedError
 		if !errors.As(err, &refused) {
 			t.Errorf("a root .git/%s must be refused with RepoConfigRefusedError, got: %v", name, err)
+		} else if refused.Dir != dir || refused.Seeded {
+			// The host form keeps the directory and is not a seed refusal.
+			t.Errorf("host refusal = dir %q seeded %v; want %q, false", refused.Dir, refused.Seeded, dir)
 		}
 		if err := os.Remove(p); err != nil {
 			t.Fatal(err)
@@ -1815,7 +1818,7 @@ func TestRefuseRootCommonDirRedirect(t *testing.T) {
 	if err := os.WriteFile(gitDir, []byte("gitdir: /somewhere/worktrees/x\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := refuseRootCommonDirRedirect(dir); err != nil {
+	if err := refuseRootCommonDirRedirect(dir, false); err != nil {
 		t.Errorf("a .git gitfile (linked worktree) must not be refused, got: %v", err)
 	}
 }

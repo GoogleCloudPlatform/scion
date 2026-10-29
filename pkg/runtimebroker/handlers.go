@@ -40,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/brokercontrol"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -124,6 +125,16 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 			checks["nfs_mounts"] = s.nfsMountReconciler.HealthCheckString()
 		}
 		if s.nfsHealthDegradesStatus() {
+			status = degradeHealthStatus(status)
+		}
+	}
+
+	// The project storage share on a shared Layout: not visible degrades
+	// the status (readiness is unaffected; stop, delete and status keep
+	// working). The value names configuration fields, never the path.
+	if v, notVisible, ok := s.shareHealthValue(); ok {
+		checks[shareHealthCheck] = v
+		if notVisible {
 			status = degradeHealthStatus(status)
 		}
 	}
@@ -875,6 +886,22 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	if req.MoveReincarnationID != "" && !req.ProvisionOnly {
 		ValidationError(w, "moveReincarnationId is only valid on a provision-only request", nil)
 		return
+	}
+	// No volume in the request may reach a Runtime Broker control path;
+	// refused before beginCreateAttempt, so the refusal has no side effect.
+	{
+		var cfgVols, inlineVols []api.VolumeMount
+		if req.Config != nil {
+			cfgVols = req.Config.Volumes
+		}
+		if req.InlineConfig != nil {
+			inlineVols = req.InlineConfig.Volumes
+		}
+		if err := checkRequestVolumes(cfgVols, inlineVols); err != nil {
+			span.SetStatus(codes.Error, brokercontrol.ErrorCode)
+			writeControlPathRefusal(w, err)
+			return
+		}
 	}
 
 	// Flat Runtime Broker target checks (target required, mismatch,
@@ -1979,6 +2006,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			markAttemptFailed(skillResolutionHTTPStatus(skillErr.Code), "failed to create agent")
 		case config.IsAgentStateConflict(err):
 			markAttemptFailed(http.StatusConflict, "failed to create agent")
+		case errors.Is(err, agent.ErrProjectShareNotMounted):
+			markAttemptFailed(http.StatusServiceUnavailable, projectShareNotMountedText())
 		default:
 			markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
 		}
@@ -2073,6 +2102,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			SkillResolutionFailed(w, skillErr, createSkill.ref)
 		case config.IsAgentStateConflict(err):
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to create agent: "+err.Error(), nil)
+		case errors.Is(err, agent.ErrProjectShareNotMounted):
+			// The start found no project storage share on this broker
+			// (the Kubernetes workspace leaves). err names the mount
+			// point and is logged above; the body names the fields.
+			writeError(w, http.StatusServiceUnavailable, ErrCodeProjectStorageUnavailable, projectShareNotMountedText(), nil)
 		default:
 			writeCreateRuntimeError(w, err)
 		}
@@ -3856,6 +3890,16 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	}
 	opts.ResolvedPlacement, opts.PlacementResolved = rp, true
 
+	// No volume in the Hub's inline config may reach a Runtime Broker
+	// control path; refused before it is merged into scion-agent.json.
+	if startReq.InlineConfig != nil {
+		if err := checkRequestVolumes(startReq.InlineConfig.Volumes); err != nil {
+			span.SetStatus(codes.Error, brokercontrol.ErrorCode)
+			writeControlPathRefusal(w, err)
+			return
+		}
+	}
+
 	// Apply updated InlineConfig to scion-agent.json before starting.
 	if startReq.InlineConfig != nil && opts.ProjectPath != "" {
 		s.applyInlineConfigUpdate(ctx, id, opts.ProjectPath, startReq.InlineConfig, startReq.SharedWorkspace)
@@ -3956,6 +4000,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			skillResolutionFailedWithDetails(w, skillErr, startSkill.ref, details)
 		case config.IsAgentStateConflict(err):
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to start agent: "+err.Error(), details)
+		case errors.Is(err, agent.ErrProjectShareNotMounted):
+			// As on create: err names the mount point and is logged above.
+			writeError(w, http.StatusServiceUnavailable, ErrCodeProjectStorageUnavailable, projectShareNotMountedText(), details)
 		default:
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, runtimeOpError("start agent", err).Error(), details)
 		}
@@ -5149,6 +5196,11 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		}
 		if config.IsAgentStateConflict(err) {
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to restart agent: "+err.Error(), details)
+			return
+		}
+		if errors.Is(err, agent.ErrProjectShareNotMounted) {
+			// As on create: err names the mount point and is logged above.
+			writeError(w, http.StatusServiceUnavailable, ErrCodeProjectStorageUnavailable, projectShareNotMountedText(), details)
 			return
 		}
 		if errors.Is(err, agent.ErrContainerNameInUse) {
@@ -9224,16 +9276,21 @@ func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, pro
 			// (sharedHubProjectPath). A dispatch that carries a project
 			// path (not hub-managed) is admitted on directory visibility
 			// alone, with no hub-seeded identity check, as before #4219.
-			if s.config.StorageLayout.Backend.Shared() && r.VerifyOnly() &&
-				shareVisible(ctx, s.config.StorageLayout, r) == nil {
-				s.agentLifecycleLog.Warn("NFS share check is advisory on this broker; the share directory is visible, continuing dispatch",
-					"agent", name, "runtime", runtimeType, "share", shareID, "detail", detail)
-				return nil
+			var visibilityErr error
+			if s.config.StorageLayout.Backend.Shared() && r.VerifyOnly() {
+				if visibilityErr = shareVisible(ctx, s.config.StorageLayout, r); visibilityErr == nil {
+					s.agentLifecycleLog.Warn("NFS share check is advisory on this broker; the share directory is visible, continuing dispatch",
+						"agent", name, "runtime", runtimeType, "share", shareID, "detail", detail)
+					return nil
+				}
 			}
 			if s.config.StorageLayout.Backend.Shared() {
-				s.agentLifecycleLog.Error("NFS share not mounted on the broker; refusing dispatch",
-					"agent", name, "runtime", runtimeType, "share", shareID, "detail", detail)
-				return fmt.Errorf(sharedProjectUnmountedFmt, filepath.Join(nfsCfg.MountRoot, shareID))
+				// The body names the configuration fields, not the path;
+				// the path and both checks' detail go to the log only.
+				s.agentLifecycleLog.Error("NFS share not visible on the broker; refusing dispatch",
+					"agent", name, "runtime", runtimeType, "share", shareID,
+					"host_base", s.config.StorageLayout.HostBase, "detail", detail, "visibility_error", visibilityErr)
+				return errors.New(scionrt.ProjectShareUnavailableText(scionrt.ProjectShareMountPathField, true))
 			}
 			s.agentLifecycleLog.Warn("NFS share not mounted on the broker; continuing dispatch, the runtime mounts the export into the agent",
 				"agent", name, "runtime", runtimeType, "share", shareID, "detail", detail)
@@ -9241,7 +9298,16 @@ func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, pro
 		return nil
 	}
 	// ctx (the request context) bounds the wait and any mount command.
-	return r.EnsureShareMounted(ctx, shareID)
+	// The reconciler's error names the share, its server and export, and
+	// the mount point: it goes to the broker log only, and the refusal
+	// (written into the response body) names configuration fields.
+	if err := r.EnsureShareMounted(ctx, shareID); err != nil {
+		s.agentLifecycleLog.Error("NFS share not mounted on the broker; refusing dispatch",
+			"agent", name, "runtime", runtimeType, "share", shareID, "error", err)
+		// auto_mount is on here (checked above): the mount failed.
+		return errors.New(scionrt.ProjectShareMountFailedText(scionrt.ProjectShareMountPathField))
+	}
+	return nil
 }
 
 // resolveDispatchProjectDir mirrors buildStartContext's hub-managed project

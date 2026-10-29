@@ -19,7 +19,8 @@
  *    running through the shipped harnesses' no-auth fallback.
  * 2. Starts a throwaway member-level test hub (class test, --test-mode
  *    member, marked database, pinned hub id, private HOME) with the
- *    co-located runtime broker and server.hub.async_agent_launch on, as the
+ *    co-located runtime broker and the hub.async_agent_launch experiment on
+ *    (set through the admin experiments API and read back), as the
  *    async create journey does.
  * 3. With the hub's own issuer credential (the dev token, before the
  *    restart): turns hub.artifacts on through the admin experiments API,
@@ -191,9 +192,11 @@ async function setUp(suiteStateFile: string): Promise<void> {
     build: process.env.E2E_PREBUILT !== '1',
     stateFile: hubStateFile,
     env: {
-      SCION_SERVER_HUB_ASYNCAGENTLAUNCH: 'true',
       SCION_IMAGE_REGISTRY: imageRegistry,
     },
+    // Set explicitly, whatever the registry default, and read back by
+    // startHub, so the journey always runs with async create on.
+    experiments: ['hub.async_agent_launch'],
   });
   if (!hub.hubId) throw new Error('startHub returned no hub id (testIdentities is required)');
   // The only copy of the issuer credential this suite keeps; it lives in

@@ -80,11 +80,13 @@ func DeleteAgentFilesForHubProject(agentName, projectPath, hubProjectID string, 
 }
 
 // Seams for tests that force a failure of the last sharer's worktree
-// teardown (deleteAgentFiles).
+// teardown and of the directory removals in deleteAgentFiles. Every
+// removal result is handled.
 var (
 	removeWorktree      = util.RemoveWorktree
 	removeWorktreeEntry = util.RemoveWorktreeEntryIn
 	deleteBranchByName  = util.DeleteBranchIn
+	removeAllSafe       = util.RemoveAllSafe
 )
 
 // DeleteHubAgentFiles is DeleteAgentFiles for a hub agent: sharerKey is the
@@ -390,7 +392,7 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 		if _, err := os.Stat(filepath.Join(worktreeDir, ".git")); err == nil {
 			util.Debugf("delete: removing worktree-per-agent workspace at %s", worktreeDir)
 			worktreeStart := time.Now()
-			if deleted, err := util.RemoveWorktree(repoRoot, worktreeDir, repoRoot, branchToDelete(removeBranch, api.Slugify(agentName))); err == nil {
+			if deleted, err := removeWorktree(repoRoot, worktreeDir, repoRoot, branchToDelete(removeBranch, api.Slugify(agentName))); err == nil {
 				if deleted {
 					branchDeleted = true
 				}
@@ -398,11 +400,13 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 			} else {
 				util.Debugf("delete: worktree-per-agent removal failed in %v: %v", time.Since(worktreeStart), err)
 				if !errors.Is(err, util.ErrPathNotContained) {
-					_ = util.RemoveAllSafe(worktreeRemove)
+					if rmErr := removeAllSafe(worktreeRemove); rmErr != nil {
+						return branchDeleted, fmt.Errorf("delete: remove worktree %s: %w", worktreeDir, rmErr)
+					}
 				}
 			}
-		} else {
-			_ = util.RemoveAllSafe(worktreeRemove)
+		} else if err := removeAllSafe(worktreeRemove); err != nil {
+			return branchDeleted, fmt.Errorf("delete: remove worktree directory %s: %w", worktreeDir, err)
 		}
 	}
 
@@ -427,7 +431,7 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 				}
 				util.Debugf("delete: removing workspace at %s", agentWorkspace)
 				worktreeStart := time.Now()
-				if deleted, err := util.RemoveWorktree(agentDir, agentWorkspace, repoRoot, branchToDelete(removeBranch, api.Slugify(agentName))); err == nil {
+				if deleted, err := removeWorktree(agentDir, agentWorkspace, repoRoot, branchToDelete(removeBranch, api.Slugify(agentName))); err == nil {
 					if deleted {
 						branchDeleted = true
 					}
@@ -435,7 +439,9 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 				} else {
 					util.Debugf("delete: worktree removal failed in %v: %v", time.Since(worktreeStart), err)
 					if !errors.Is(err, util.ErrPathNotContained) {
-						_ = util.RemoveAllSafe(workspaceRemove)
+						if rmErr := removeAllSafe(workspaceRemove); rmErr != nil {
+							return branchDeleted, fmt.Errorf("delete: remove workspace %s: %w", agentWorkspace, rmErr)
+						}
 					}
 				}
 			}
@@ -516,7 +522,7 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 				if err != nil {
 					return branchDeleted, fmt.Errorf("delete: %w", err)
 				}
-				if err := util.RemoveAllSafe(entryRemove); err != nil {
+				if err := removeAllSafe(entryRemove); err != nil {
 					return branchDeleted, fmt.Errorf("failed to remove agent directory entry: %w", err)
 				}
 			}
@@ -525,7 +531,7 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 		}
 		util.Debugf("delete: removing directory: %s", agentDir)
 		removeStart := time.Now()
-		if err := util.RemoveAllSafe(dirRemove); err != nil {
+		if err := removeAllSafe(dirRemove); err != nil {
 			util.Debugf("delete: removal failed in %v: %v", time.Since(removeStart), err)
 			return branchDeleted, fmt.Errorf("failed to remove agent directory: %w", err)
 		}
@@ -541,8 +547,11 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 	//
 	// In podman rootless mode, files created as root inside the container are
 	// owned by a mapped subuid on the host, making them inaccessible to the
-	// normal user. If standard removal fails, try `podman unshare rm -rf`
-	// which enters the user namespace where the mapped UIDs are accessible.
+	// normal user. When the removal fails with a permission error or
+	// ENOTEMPTY, the unix build retries it with `podman unshare rm -rf`,
+	// which enters the user namespace where the mapped UIDs are accessible
+	// (retryRemovalInUserNamespace). Any other failure, and any failure the
+	// retry cannot clear, is returned.
 	//
 	// The state dir resolved from the Hub project ID (hubAgentDir) is
 	// removed the same way: it holds a shared-workspace agent's state and
@@ -558,13 +567,10 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 				return branchDeleted, fmt.Errorf("delete: %w", err)
 			}
 			util.Debugf("delete: removing external agent state dir: %s", extDir)
-			if err := util.RemoveAllSafe(extRemove); err != nil {
-				util.Debugf("delete: standard removal failed, trying podman unshare: %v", err)
-				unshareCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				if unshareErr := exec.CommandContext(unshareCtx, "podman", "unshare", "rm", "-rf", extRemove).Run(); unshareErr != nil {
-					util.Debugf("delete: podman unshare removal also failed: %v", unshareErr)
+			if err := removeAllSafe(extRemove); err != nil {
+				if err := retryRemovalInUserNamespace(extRemove, err); err != nil {
+					return branchDeleted, fmt.Errorf("delete: remove external agent state dir %s: %w", extDir, err)
 				}
-				cancel()
 			}
 		}
 	}
@@ -4587,6 +4593,13 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 					}
 				}
 				if err := util.CreateWorktreeWithOrigin(agentWorkspace, targetBranch, recordedOrigin); err != nil {
+					// A repository config refusal is a policy decision, not a failed
+					// recovery: refuse the start rather than continue without a
+					// workspace.
+					var refused *util.RepoConfigRefusedError
+					if errors.As(err, &refused) {
+						return "", "", "", nil, fmt.Errorf("recreate the missing worktree for agent %q: %w", agentName, err)
+					}
 					slog.Warn("GetAgent: could not recreate the missing worktree; continuing without a workspace",
 						"agent", agentName, "path", agentWorkspace, "branch", targetBranch, "error", err)
 					agentWorkspace = ""

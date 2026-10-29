@@ -31,6 +31,25 @@ type MaterialPurpose string
 // by-key get endpoint, and the agent secret list).
 const PurposeRuntimeRead MaterialPurpose = "runtime_read"
 
+// Launch-delivery purposes (material_delivery.go). Each is authorized under
+// the internal delivery credential (hubDeliveryIdentity), never under an
+// agent token.
+const (
+	// PurposeDispatch is the material assembled for an agent start
+	// (buildStartEnv at the start mint site).
+	PurposeDispatch MaterialPurpose = "dispatch"
+	// PurposeRestart is the material assembled for an agent restart
+	// (buildStartEnv at the restart mint site).
+	PurposeRestart MaterialPurpose = "restart"
+	// PurposeAvailabilityProbe asks whether a key would be delivered,
+	// without ever reading a value (the hub-side auth credential probe).
+	PurposeAvailabilityProbe MaterialPurpose = "availability_probe"
+	// PurposeProvisionCredential is the project-scope secrets the broker
+	// uses as GitHub credentials to fetch the agent's gh:// skills
+	// (resolveProvisionCredentials); never placed in the container.
+	PurposeProvisionCredential MaterialPurpose = "provision_credential"
+)
+
 // MaterialKind identifies the kind of material a candidate represents.
 // Declared here because later changes add further kinds; runtime material
 // selection only ever produces MaterialKindSecret.
@@ -38,6 +57,11 @@ type MaterialKind string
 
 // MaterialKindSecret is the only material kind runtime material reads select.
 const MaterialKindSecret MaterialKind = "secret"
+
+// MaterialKindEnvVar is a plain stored env var row, delivered at launch
+// under env_var.deliver. A legacy env var row flagged secret is
+// MaterialKindSecret, delivered under secret.deliver.
+const MaterialKindEnvVar MaterialKind = "env_var"
 
 // GrantKind identifies the named grant that authorized a Candidate.
 type GrantKind string
@@ -50,6 +74,14 @@ const (
 	GrantProjectSecretRead GrantKind = "project_secret_read"
 	// GrantProgeny is the runtime user read grant (check 8).
 	GrantProgeny GrantKind = "progeny"
+
+	// Delivery association grants (material_delivery.go): a project-, hub-
+	// or broker-scope item delivered at launch to an agent associated with
+	// that scope. Each names the relationship rule of the same name
+	// (authz_material_association.go). None is ever a runtime-read grant.
+	GrantProjectAssociation GrantKind = "project_association"
+	GrantHubAssociation     GrantKind = "hub_association"
+	GrantBrokerAssociation  GrantKind = "broker_association"
 )
 
 // ProvenanceRoot identifies the human ancestor a runtime read is evaluated

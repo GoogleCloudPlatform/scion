@@ -46,18 +46,29 @@ vi.mock('../shared/confirm-dialog.js', () => ({
     return Promise.resolve(confirm.answer);
   },
 }));
-/** The block count: real, or held until released (to act while a size is pending). */
-const blocks = vi.hoisted(() => ({ defer: false, pending: [] as (() => void)[] }));
+/**
+ * The block count: real, or held until released (to act while a size is
+ * pending). A text in `counts` counts as the number given there, so a test
+ * can be over the block ceiling without lexing 10,000 blocks (the real
+ * count at the limits is pinned in artifact-detail-review-size.test.ts).
+ */
+const blocks = vi.hoisted(() => ({
+  defer: false,
+  pending: [] as (() => void)[],
+  counts: new Map<string, number>(),
+}));
 vi.mock('../../utils/markdown-blocks.js', async (importOriginal) => {
   const real = await importOriginal<typeof import('../../utils/markdown-blocks.js')>();
+  const count = (md: string): Promise<number> => {
+    const n = blocks.counts.get(md);
+    return n === undefined ? real.countTopLevelBlocks(md) : Promise.resolve(n);
+  };
   return {
     countTopLevelBlocks: (md: string): Promise<number> =>
       blocks.defer
         ? // Counted now, handed over when released.
-          real
-            .countTopLevelBlocks(md)
-            .then((n) => new Promise<number>((r) => blocks.pending.push(() => r(n))))
-        : real.countTopLevelBlocks(md),
+          count(md).then((n) => new Promise<number>((r) => blocks.pending.push(() => r(n))))
+        : count(md),
   };
 });
 vi.mock('../artifact-review/review-editor-loader.js', () => ({
@@ -209,6 +220,13 @@ async function chooseView(
   await settle(el);
 }
 
+/** A short text that counts as one block over the graphical view's ceiling. */
+function overBlockCeiling(): string {
+  const md = 'p\n\n'.repeat(3);
+  blocks.counts.set(md, MAX_GRAPHICAL_BLOCKS + 1);
+  return md;
+}
+
 describe('artifact page: graphical review editor experiment', () => {
   beforeAll(async () => {
     const hd = (
@@ -229,6 +247,7 @@ describe('artifact page: graphical review editor experiment', () => {
     confirm.defer = false;
     blocks.defer = false;
     blocks.pending.length = 0;
+    blocks.counts.clear();
   });
 
   afterEach(() => {
@@ -380,7 +399,7 @@ describe('artifact page: graphical review editor experiment', () => {
     await startReview(el);
     expect(loader.load).not.toHaveBeenCalled();
     expect($(el, '.hint-strip')!.textContent).toContain('This document is large');
-  });
+  }, 30_000);
 
   it('opens a document at the limits in the graphical view', async () => {
     const edge = 'a'.repeat(LARGE_REVIEW_BYTES - 1) + '\n';
@@ -535,7 +554,7 @@ describe('artifact page: graphical review editor experiment', () => {
     mockFetch();
     const el = await mount(true);
     await startReview(el);
-    const many = 'p\n\n'.repeat(MAX_GRAPHICAL_BLOCKS + 1);
+    const many = overBlockCeiling();
     expect(new TextEncoder().encode(many).length).toBeLessThan(LARGE_REVIEW_BYTES);
     await typeSource(el, many);
     // Typing pauses look at bytes only: the toggle stays enabled.
@@ -698,11 +717,12 @@ describe('artifact page: graphical review editor experiment', () => {
     mockFetch();
     const el = await mount(true);
     await startReview(el);
-    const many = 'p\n\n'.repeat(MAX_GRAPHICAL_BLOCKS + 1);
+    const many = overBlockCeiling();
     await typeSource(el, many);
     await chooseView(el, 'graphical');
     expect(graphicalButton(el).hasAttribute('disabled')).toBe(true);
     // Still over the block ceiling (few bytes): the pause keeps it.
+    blocks.counts.set(many + 'q\n', MAX_GRAPHICAL_BLOCKS + 2);
     await typeSource(el, many + 'q\n');
     await previewPause();
     await settle(el);

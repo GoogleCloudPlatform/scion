@@ -379,6 +379,9 @@ func (s *Server) markRunRestarting(ctx context.Context, run *store.MaintenanceOp
 		Snapshot: p.Snapshot,
 		Strategy: p.Strategy,
 		At:       time.Now().UTC().Format(time.RFC3339),
+		Channel:  p.Channel,
+		Pin:      p.Pin,
+		SetBy:    run.StartedBy,
 	}
 	if err := s.writeHubSettingJSON(ctx, HubSettingSectionPendingUpdate, pending); err != nil {
 		return fmt.Errorf("record pending update: %w", err)

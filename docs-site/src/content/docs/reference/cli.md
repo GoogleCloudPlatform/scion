@@ -164,11 +164,11 @@ the initial agent create request and any env-gather submission with a 3-minute
 client timeout instead of the standard 30-second client timeout so synchronous
 creates can complete). Each dispatch attempt is bounded at
 120 seconds, so a slow cold start (for example on Kubernetes) can still fail on
-a synchronous launch; enable [asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create) for those. While waiting, each launch step is printed to stderr with a readable label, for example
+a synchronous launch; [asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create), on by default, avoids that limit. While waiting, each launch step is printed to stderr with a readable label, for example
 `my-agent: provisioning (waiting to be scheduled)` (nothing extra under `--format json`). If the
 launch fails, the error gives the failure code (with its label, unless the message already says
 it), the step and the message, for example `agent 'my-agent' create did not complete
-(image_pull_failed) while pulling the image: ...`. A create, including `scion start` of a new
+(image_pull_failed) while preparing the container (image pull, volume mounts): ...`. A create, including `scion start` of a new
 agent, reports `create did not complete`; a start or resume of an existing agent reports `did not
 start`. A launch that ended with an error ends the wait whatever phase the agent reports. If the wait times out, or you press Ctrl-C, only
 the wait stops: the launch continues on the Hub, and re-running `scion start
@@ -403,7 +403,7 @@ Sends a message to a running agent or user.
     - `--body-file <path>`: Read the message body from a file instead of passing it inline. Useful for long messages and scripted workflows. `--body-file -` reads the body from stdin, like a `-` message argument. Mutually exclusive with the inline `<message>` argument.
     - `--attach <path>`: Attach a file as part of this message (repeatable, at most 10). Use `--artifact` instead for work product to review, version or find later. The CLI first asks the Hub where uploads go (`GET /api/v1/chat/attachments`):
         - **Stored as artifacts** (the `hub.attachment_artifacts` experiment on): the files are checked before anything is uploaded. Each must be a readable regular file at any path, no two may have the same file name (compared case-insensitively), and with an agent recipient their total must fit the Hub's delivery limit (`messaging.attachment_delivery_max_bytes`). An `.html`, `.htm` or `.svg` file, or one whose first bytes contain `<html` or `<svg`, fails with exit code `2`: publish it with `scion artifact publish` and send it with `--artifact`. A Markdown file over 64 KiB prints a hint to publish it as an artifact and is still sent. The files are uploaded in one request, once per recipient for a group send, and the send names them by id. If any file is not stored, nothing is sent. An agent recipient gets the files in `~/.scion/inbox/<message-id>/` before the message text (see [Messaging](/scion/hosted/user/messaging/#attachments-for-agents)).
-        - **Otherwise** (the Hub answers `legacy`, or a Hub from before the probe refuses it): file paths must be within allowed roots (`/workspace` or `/scion-volumes`), where relative paths resolve against `/workspace`, and the files are staged in the shared directory. A path that is not a regular file (for example a directory) or is outside allowed roots fails the command.
+        - **Otherwise** (the Hub answers `legacy`, or a Hub from before the probe refuses it): file paths must be within allowed roots (`/workspace` or `/scion-volumes`), where relative paths resolve against `/workspace`, and the files are staged in the shared directory. The CLI prints `Warning: attachments are staged on the local scratchpad instead of uploaded to the hub (<reason>); they may not reach the hub or recipients on another broker` on stderr naming why the Hub upload path was not used (for example `the hub.attachment_artifacts experiment is off on the hub`). A path that is not a regular file (for example a directory) or is outside allowed roots fails the command.
         - **Constraints:** Cannot be combined with `--in` or `--at`.
         - **Undelivered attachments (staged files):** When an agent sends the message and the Hub cannot read an attached file (for example, it was staged on a different Runtime Broker's host than the Hub's), the message is still delivered without it, and the command prints `Warning: attachment <path> was not delivered: <reason>` on stderr for each such file. With `--format json`, the warnings are in the result's `attachment_warnings` field instead. Messages sent by a human from the CLI do not report undelivered attachments yet.
     - `--artifact <ref>`: Reference a published artifact, `scion://artifact/<id>` or `scion://artifact/<id>@<seq>` (repeatable, at most 10). The reference is added to the message text, and an agent recipient's message ends with one line per artifact showing how to fetch it (`Artifact: v2 - scion artifact get <ref>`, or `current` for an unpinned reference). The Hub attaches only artifacts the sender can read and prints a warning for the rest; a recipient still needs its own access to read an artifact. See [Artifacts](/scion/reference/artifacts/#artifacts-in-messages).
@@ -1663,8 +1663,10 @@ available inside agent containers.
 - **Hub Health**: Hub reachability (`/healthz`), authentication, where the Hub credential came
   from (`hub-credential`, see the credential sources below), unmapped GCP service accounts of
   the linked project, and checks of this machine's settings (NFS mounts, Kubernetes profiles,
-  the deprecated server hub endpoint source on hosts configured as a server, telemetry, container
-  images, broker credentials).
+  `flat-placement-preflight` for existing agents pinned to flat Kubernetes Runtime Brokers in
+  `server.broker.instances` whose stored pod placement disagrees with their instance's
+  `runtime_target`, the deprecated server hub endpoint source on hosts configured as a server,
+  telemetry, container images, broker credentials).
 - **Platform Health**: The Hub's health summary (`GET /api/v1/admin/health/summary`), the same
   data as the [health dashboard](/scion/workstation/dashboard/). It shows the overall status, then
   every "Needs attention" item in the Hub's order (critical items as failures, warnings as

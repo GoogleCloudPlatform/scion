@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -44,13 +45,14 @@ import (
 // mode (config.AgentsRootForProject), and the ownership store and launch
 // journal are keyed by project ID and agent, never by the project path.
 
-// Refusal texts for a shared-backend dispatch (ptone/scion#5823). They name no host path except the share's mount point, which is
-// the operator's own configuration.
+// Refusal texts for a shared-backend dispatch (ptone/scion#5823). They name
+// no host path; a share that is not visible is refused with
+// scionrt.ProjectShareUnavailableText, which names the configuration
+// fields (scionrt.ProjectShareMountPathField) instead.
 const (
-	sharedProjectNoIDText     = "a hub-managed project on shared project storage needs the project ID; upgrade the Hub"
-	sharedProjectConfigText   = "project configuration missing or does not match; run project-storage-migrate"
-	sharedProjectNoSlugText   = "project configuration has no project-slug; run project-storage-migrate"
-	sharedProjectUnmountedFmt = "project storage share is not mounted on this broker (%s; mount it or set nfs.auto_mount)"
+	sharedProjectNoIDText   = "a hub-managed project on shared project storage needs the project ID; upgrade the Hub"
+	sharedProjectConfigText = "project configuration missing or does not match; run project-storage-migrate"
+	sharedProjectNoSlugText = "project configuration has no project-slug; run project-storage-migrate"
 )
 
 // sharedHubProjectPath returns the project path of a hub-managed project
@@ -74,10 +76,10 @@ func (s *Server) sharedHubProjectPath(ctx context.Context, projectID string) (pa
 		return "", true, &startContextError{Status: http.StatusConflict, Message: sharedProjectConfigText, OriginalErr: err}
 	}
 	if err := s.ensureLayoutShareMounted(ctx, layout); err != nil {
-		s.agentLifecycleLog.Error("Project storage share is not mounted on this broker", "project_id", projectID,
+		s.agentLifecycleLog.Error("Project storage share is not visible on this broker", "project_id", projectID,
 			"host_base", layout.HostBase, "error", err)
 		return "", true, &startContextError{Status: http.StatusServiceUnavailable, Code: ErrCodeProjectStorageUnavailable,
-			Message: fmt.Sprintf(sharedProjectUnmountedFmt, layout.HostBase), OriginalErr: err}
+			Message: s.shareMountCheckText(), OriginalErr: err}
 	}
 	// What the tree shows decides the refusal. A mount point without the
 	// subpath root (<HostBase>/<subpath_root>) is not the share: 503, the
@@ -86,11 +88,12 @@ func (s *Server) sharedHubProjectPath(ctx context.Context, projectID string) (pa
 	// (checkSharedProjectConfig, unchanged). The reconciler's advisory
 	// mount-table detail goes to the log only, never into the body.
 	mountCheck := shareAdvisoryDetail(layout, s.nfsMountReconciler)
-	if subRoot := filepath.Dir(root.HostPath); projectfs.ShareDirVisible(ctx, subRoot) != nil {
+	subRoot := filepath.Dir(root.HostPath)
+	if err := projectfs.ShareDirVisible(ctx, subRoot); err != nil {
 		s.agentLifecycleLog.Error("Project storage share is not visible on this broker: its mount point has no subpath root",
-			"project_id", projectID, "host_base", layout.HostBase, "subpath_root", subRoot, "mount_check", mountCheck)
+			"project_id", projectID, "host_base", layout.HostBase, "subpath_root", subRoot, "mount_check", mountCheck, "error", err)
 		return "", true, &startContextError{Status: http.StatusServiceUnavailable, Code: ErrCodeProjectStorageUnavailable,
-			Message: shareNotVisibleText(shareMountPathField, NFSWarnOnlyRuntime(s.RuntimeName()))}
+			Message: s.shareUnavailableText(), OriginalErr: err}
 	}
 	if sce := checkSharedProjectConfig(root.HostPath, projectID); sce != nil {
 		s.agentLifecycleLog.Error("Shared project configuration refused", "project_id", projectID,
@@ -100,20 +103,30 @@ func (s *Server) sharedHubProjectPath(ctx context.Context, projectID string) (pa
 	return root.HostPath, true, nil
 }
 
-// shareMountPathField names the share's mount point in refusal bodies, in
-// place of the path (a layout value of the operator's configuration).
-const shareMountPathField = "server.project_storage.nfs.mount_root/shares[0].id"
+// shareUnavailableText is the client-safe refusal for a share this broker
+// does not see: it names the configuration fields, never the path, and
+// gives the remedy for the broker's default runtime.
+func (s *Server) shareUnavailableText() string {
+	return scionrt.ProjectShareUnavailableText(scionrt.ProjectShareMountPathField, NFSWarnOnlyRuntime(s.RuntimeName()))
+}
 
-// shareNotVisibleText is the 503 refusal for a share that is not visible at
-// mountPath (spec-v2 §2), chosen by whether the broker's default runtime
-// mounts the export into agents itself (platformMounts). Bodies pass
-// shareMountPathField, never the path: the path and the
-// mount-table detail go to the broker log.
-func shareNotVisibleText(mountPath string, platformMounts bool) string {
-	if platformMounts {
-		return fmt.Sprintf("project storage share is not visible on this broker (%s): make the share available in this broker's container at %s (the same server and export as server.project_storage.nfs.shares[0])", mountPath, mountPath)
+// shareMountCheckText is the client-safe refusal for a failed share check
+// (ensureLayoutShareMounted): on a broker that mounts its shares itself
+// (nfs.auto_mount on), the mount failed, so it is the mount-failure text,
+// not the advice to set auto_mount; otherwise shareUnavailableText.
+func (s *Server) shareMountCheckText() string {
+	if r := s.nfsMountReconciler; r != nil && r.MountsShares() {
+		return scionrt.ProjectShareMountFailedText(scionrt.ProjectShareMountPathField)
 	}
-	return fmt.Sprintf("project storage share is not mounted on this broker (%s): mount it, or set server.project_storage.nfs.auto_mount: true", mountPath)
+	return s.shareUnavailableText()
+}
+
+// projectShareNotMountedText is the client text for a start refused with
+// agent.ErrProjectShareNotMounted. That refusal comes only from the
+// Kubernetes workspace leaves, a runtime that never mounts the share on
+// the broker, so the remedy is the broker's own container.
+func projectShareNotMountedText() string {
+	return scionrt.ProjectShareUnavailableText(scionrt.ProjectShareMountPathField, true)
 }
 
 // shareAdvisoryDetail is the reconciler's last status message for the

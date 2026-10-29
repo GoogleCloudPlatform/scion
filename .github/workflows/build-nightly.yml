@@ -19,6 +19,8 @@ on:
     - cron: '0 2 * * *'   # Daily at 2:00 AM UTC
   workflow_dispatch:        # Allow manual trigger
 
+# Fork CI gate (hack/check-fork-ci-gate.sh, cr-ci/workflows/README.md): on push
+# and schedule every job runs only in GoogleCloudPlatform/scion; forks stage PRs.
 jobs:
   check-and-tag:
     name: Check for Changes and Tag
@@ -79,7 +81,7 @@ jobs:
   build:
     name: Build Nightly Release
     needs: check-and-tag
-    if: needs.check-and-tag.outputs.tagged == 'true'
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (needs.check-and-tag.outputs.tagged == 'true') }}
     permissions:
       contents: write
       pull-requests: write    # Needed by update-manifest job
@@ -90,7 +92,7 @@ jobs:
   cleanup:
     name: Cleanup Old Nightly Releases
     needs: check-and-tag
-    if: needs.check-and-tag.outputs.tagged == 'true'
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (needs.check-and-tag.outputs.tagged == 'true') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write    # Needed to delete releases via gh CLI

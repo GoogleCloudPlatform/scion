@@ -17,10 +17,13 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -33,8 +36,9 @@ import (
 //
 // The deprecated embedded-broker path (request carries a "broker" object
 // rather than a brokerId) resolves an existing broker by ID or by name and,
-// on a match, updates that record and mints a fresh secret. This requires
-// the caller to be authorized against the resolved broker (shared
+// on a match, updates that record. It returns a secret only when it mints
+// the broker's first one, never a stored secret. Updating a matched broker
+// requires the caller to be authorized against the resolved broker (shared
 // authorizedForBrokerRotate, handlers_brokers.go): a system-scoped
 // super-admin, the broker itself (HMAC identity), or the user recorded as
 // the broker's creator. Holding hub-scope project.create alone does not
@@ -157,7 +161,7 @@ func TestProjectRegisterEmbeddedBroker_OwnerAllowed(t *testing.T) {
 
 	var resp RegisterProjectResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	assert.NotEmpty(t, resp.SecretKey, "owner overwrite should mint a fresh secret")
+	assert.NotEmpty(t, resp.SecretKey, "owner overwrite of a broker with no stored secret should mint its first secret")
 
 	updated, err := s.GetRuntimeBroker(context.Background(), broker.ID)
 	require.NoError(t, err)
@@ -184,7 +188,7 @@ func TestProjectRegisterEmbeddedBroker_SuperAdminAllowed(t *testing.T) {
 
 	var resp RegisterProjectResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
-	assert.NotEmpty(t, resp.SecretKey)
+	assert.NotEmpty(t, resp.SecretKey, "a broker with no stored secret gets its first secret minted")
 
 	updated, err := s.GetRuntimeBroker(context.Background(), broker.ID)
 	require.NoError(t, err)
@@ -230,4 +234,185 @@ func TestProjectRegisterEmbeddedBroker_NewBrokerSetsOwnership(t *testing.T) {
 	created, err := s.GetRuntimeBroker(context.Background(), resp.Broker.ID)
 	require.NoError(t, err)
 	assert.Equal(t, requester.ID, created.CreatedBy, "the requester should become the new broker's owner")
+}
+
+// storeKnownBrokerSecret stores a fixed, recognisable secret for brokerID
+// and returns its base64 form, so a test can search a response body for it.
+func storeKnownBrokerSecret(t *testing.T, s store.Store, brokerID string) (string, []byte) {
+	t.Helper()
+	key := bytes.Repeat([]byte{0x5a}, 32)
+	require.NoError(t, s.CreateBrokerSecret(context.Background(), &store.BrokerSecret{
+		BrokerID:  brokerID,
+		SecretKey: key,
+		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
+		CreatedAt: time.Now(),
+		Status:    store.BrokerSecretStatusActive,
+	}))
+	return base64.StdEncoding.EncodeToString(key), key
+}
+
+// assertBodyCarriesNoStoredSecret checks that a response body carries
+// neither the stored secret (base64 or raw) nor a secretKey field.
+func assertBodyCarriesNoStoredSecret(t *testing.T, body, encoded string, raw []byte) {
+	t.Helper()
+	assert.NotContains(t, body, encoded, "the response must not carry the stored secret")
+	assert.NotContains(t, body, string(raw), "the response must not carry the raw stored secret")
+	assert.NotContains(t, body, "secretKey", "the response must not carry a secretKey field")
+}
+
+// TestProjectRegisterEmbeddedBroker_ExistingSecretNotReturned pins that the
+// deprecated embedded-broker path never returns the stored secret of a
+// broker that already has one, for every caller allowed to re-register it,
+// while the registration itself still succeeds.
+func TestProjectRegisterEmbeddedBroker_ExistingSecretNotReturned(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		admin  bool
+		byName bool
+	}{
+		{name: "owner by ID"},
+		{name: "owner by name", byName: true},
+		{name: "super-admin by ID", admin: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			owner := newHubMemberUser(t, s, "register-secret-owner")
+			caller := owner
+			if tc.admin {
+				caller = newSuperAdminUser(t, s, "register-secret-admin")
+			}
+			broker := registerBrokerTestExistingBroker(t, s, "register-secret-broker", owner.ID)
+			encoded, raw := storeKnownBrokerSecret(t, s, broker.ID)
+
+			info := &RegisterProjectBrokerInfo{ID: broker.ID, Name: broker.Name, Version: "4.0.0-reregister"}
+			if tc.byName {
+				info.ID = ""
+			}
+			rec := doRequestAsUser(t, srv, caller, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+				Name:   "register-secret-project",
+				Broker: info,
+			})
+			require.Equal(t, http.StatusOK, rec.Code, "re-registration must still succeed; got: %s", rec.Body.String())
+			body := rec.Body.String()
+			assertBodyCarriesNoStoredSecret(t, body, encoded, raw)
+
+			var resp RegisterProjectResponse
+			require.NoError(t, json.Unmarshal([]byte(body), &resp))
+			assert.Empty(t, resp.SecretKey)
+			assert.Empty(t, resp.BrokerToken, "no substitute token is issued for a broker that already has a secret")
+			require.NotNil(t, resp.Broker)
+			assert.Equal(t, broker.ID, resp.Broker.ID, "the existing broker is re-registered, not replaced")
+
+			stored, err := s.GetBrokerSecret(context.Background(), broker.ID)
+			require.NoError(t, err)
+			assert.True(t, bytes.Equal(raw, stored.SecretKey), "the stored secret must not change")
+
+			updated, err := s.GetRuntimeBroker(context.Background(), broker.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "4.0.0-reregister", updated.Version, "the re-registration still applies the requested fields")
+
+			providers, err := s.GetProjectProviders(context.Background(), resp.Project.ID)
+			require.NoError(t, err)
+			require.Len(t, providers, 1)
+			assert.Equal(t, broker.ID, providers[0].BrokerID, "the re-registered broker still becomes a provider")
+		})
+	}
+}
+
+// TestProjectRegisterEmbeddedBroker_LeftoverSecretNotReturned pins that a
+// new broker row created under an ID whose secret is still stored does not
+// receive that secret.
+func TestProjectRegisterEmbeddedBroker_LeftoverSecretNotReturned(t *testing.T) {
+	srv, s := testServer(t)
+	requester := newHubMemberUser(t, s, "register-leftover-requester")
+	brokerID := tid("register-leftover-broker")
+	encoded, raw := storeKnownBrokerSecret(t, s, brokerID)
+
+	rec := doRequestAsUser(t, srv, requester, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		Name: "register-leftover-project",
+		Broker: &RegisterProjectBrokerInfo{
+			ID:      brokerID,
+			Name:    "register leftover broker never seen before",
+			Version: "1.0.0",
+		},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assertBodyCarriesNoStoredSecret(t, rec.Body.String(), encoded, raw)
+}
+
+// TestProjectRegisterEmbeddedBroker_LostSecretInsertIsKeyless pins that a
+// first registration whose secret insert loses to a concurrent insert for
+// the same broker answers like a broker that already has a secret: no
+// secretKey and no brokerToken, and the concurrently stored secret is
+// unchanged.
+func TestProjectRegisterEmbeddedBroker_LostSecretInsertIsKeyless(t *testing.T) {
+	srv, s := testServer(t)
+	requester := newHubMemberUser(t, s, "register-lost-insert-requester")
+	winnerKey := bytes.Repeat([]byte{0x6b}, 32)
+	race := &mintRaceStore{Store: s, winnerKey: winnerKey}
+	require.NotNil(t, srv.brokerAuthService)
+	srv.brokerAuthService.store = race
+
+	rec := doRequestAsUser(t, srv, requester, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		Name: "register-lost-insert-project",
+		Broker: &RegisterProjectBrokerInfo{
+			Name:    "register lost insert broker",
+			Version: "1.0.0",
+		},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	body := rec.Body.String()
+	assertBodyCarriesNoStoredSecret(t, body, base64.StdEncoding.EncodeToString(winnerKey), winnerKey)
+	assert.NotContains(t, body, "brokerToken", "the response must not fall back to a broker token")
+	assert.Equal(t, 1, race.creates, "one insert")
+	assert.Equal(t, 1, race.gets, "only the lookup before the insert reads the secret")
+
+	var resp RegisterProjectResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Broker)
+	stored, err := s.GetBrokerSecret(context.Background(), resp.Broker.ID)
+	require.NoError(t, err)
+	assert.Equal(t, winnerKey, stored.SecretKey, "the concurrently stored secret must not change")
+}
+
+// TestProjectRegisterEmbeddedBroker_DeniedResponseIsKeyless pins that a
+// denied re-registration of a broker with a stored secret answers with a
+// fixed error that carries no key material.
+func TestProjectRegisterEmbeddedBroker_DeniedResponseIsKeyless(t *testing.T) {
+	srv, s := testServer(t)
+	owner := newHubMemberUser(t, s, "register-denied-owner")
+	nonOwner := newHubMemberUser(t, s, "register-denied-nonowner")
+	broker := registerBrokerTestExistingBroker(t, s, "register-denied-broker", owner.ID)
+	encoded, raw := storeKnownBrokerSecret(t, s, broker.ID)
+
+	rec := doRequestAsUser(t, srv, nonOwner, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		Name:   "register-denied-project",
+		Broker: &RegisterProjectBrokerInfo{ID: broker.ID, Name: broker.Name, Version: "1.0.0"},
+	})
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assertBodyCarriesNoStoredSecret(t, rec.Body.String(), encoded, raw)
+	assert.Contains(t, rec.Body.String(), "not authorized to modify this broker")
+}
+
+// TestProjectRegisterEmbeddedBroker_FirstRegistrationReturnsStoredSecret
+// pins that a first-time registration still returns the secret it minted,
+// and that it is the one stored for the new broker.
+func TestProjectRegisterEmbeddedBroker_FirstRegistrationReturnsStoredSecret(t *testing.T) {
+	srv, s := testServer(t)
+	requester := newHubMemberUser(t, s, "register-first-requester")
+
+	rec := doRequestAsUser(t, srv, requester, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		Name:   "register-first-project",
+		Broker: &RegisterProjectBrokerInfo{Name: "register first broker never seen before", Version: "1.0.0"},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp RegisterProjectResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	require.NotEmpty(t, resp.SecretKey, "first-time registration must still return the minted secret")
+	require.NotNil(t, resp.Broker)
+
+	stored, err := s.GetBrokerSecret(context.Background(), resp.Broker.ID)
+	require.NoError(t, err)
+	assert.Equal(t, resp.SecretKey, base64.StdEncoding.EncodeToString(stored.SecretKey))
 }

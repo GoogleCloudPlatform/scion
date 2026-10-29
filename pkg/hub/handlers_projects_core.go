@@ -95,7 +95,7 @@ type RegisterProjectResponse struct {
 	Created     bool                     `json:"created"`
 	Matches     []hubclient.ProjectMatch `json:"matches,omitempty"`     // Populated when multiple projects share the same git remote
 	BrokerToken string                   `json:"brokerToken,omitempty"` // DEPRECATED: use two-phase registration
-	SecretKey   string                   `json:"secretKey,omitempty"`   // DEPRECATED: secrets only from /brokers/join
+	SecretKey   string                   `json:"secretKey,omitempty"`   // DEPRECATED: secrets only from /brokers/join; set only when this request minted the broker's first secret
 }
 
 // AddProviderRequest is the request for adding a broker as a project provider.
@@ -1639,7 +1639,10 @@ func (s *Server) updateSharedProjectSlugFile(project *store.Project, newSlug str
 // On the local workspace backend it performs the host-side git clone into
 // the hub-managed workspace (~/.scion/projects/<slug>) and seeds the .scion
 // project structure on top; if the clone fails, the workspace directory is
-// cleaned up and an error is returned (unchanged).
+// cleaned up and an error is returned (unchanged). The clone URL is checked
+// first (provision.CheckHostCloneURL, refused with
+// provision.ErrHostCloneURLRefused) and cloned with the hardened transport
+// settings, as on a shared backend.
 //
 // On a shared backend the hub provisions the uuid workspace agents mount
 // (provisionSharedWorkspace: the provisioning lock, the clone and the
@@ -1662,29 +1665,43 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 		return s.seedHubProjectSettings(project, scionDir)
 	}
 
+	// The clone URL comes from the clone-url label or the project's git
+	// remote, and the clone runs on the hub host: as on a shared backend it
+	// is checked before any filesystem work, refused (never rewritten)
+	// unless it is an https, ssh or git URL, and cloned with the hardened
+	// transport settings and the token bound to the project's remote
+	// (hostGitAccess).
+	cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
+	localFixture := localCloneFixtureAllowed(cloneURL)
+	if !localFixture {
+		if err := provision.CheckHostCloneURL(cloneURL); err != nil {
+			return err
+		}
+	}
+
 	workspacePath, err := localProjectPath(project.Slug)
 	if err != nil {
 		return err
 	}
-
-	// Build clone URL from the project's git remote.
-	// The clone-url label may be an explicit override (e.g. local path for testing).
-	// Only convert to HTTPS if the URL looks like a remote git URL.
-	cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
 
 	defaultBranch := project.Labels[store.LabelDefaultBranch]
 	if defaultBranch == "" {
 		defaultBranch = "main"
 	}
 
-	// Resolve a token for authentication.
-	token := s.resolveCloneToken(ctx, project)
-
-	// Perform the clone
-	if err := util.CloneSharedWorkspace(workspacePath, cloneURL, defaultBranch, token); err != nil {
+	// Perform the clone. The project's token goes only to its own recorded
+	// remote (hostGitAccess).
+	var cloneErr error
+	if localFixture {
+		cloneErr = util.CloneSharedWorkspace(workspacePath, cloneURL, defaultBranch, "")
+	} else {
+		token, hardening := s.hostGitAccess(ctx, project, cloneURL)
+		cloneErr = util.CloneSharedWorkspaceHardened(workspacePath, cloneURL, defaultBranch, token, hardening)
+	}
+	if cloneErr != nil {
 		// Clean up the workspace directory on failure — return to pre-creation state
 		_ = util.RemoveAllSafe(workspacePath)
-		return fmt.Errorf("shared workspace clone failed: %w", err)
+		return fmt.Errorf("shared workspace clone failed: %w", cloneErr)
 	}
 
 	// Agents provision from this clone, and provisioning requires
@@ -1865,10 +1882,11 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// SECURITY-GATE: the embedded-broker form of register (req.Broker set)
-	// creates or re-registers a broker and returns its secret, so it is
-	// session-only (CREDENTIAL_MANAGEMENT): every credential other than an
-	// interactive session or a dev credential is refused before any lookup
-	// or write. A token registers brokers through POST /api/v1/brokers.
+	// creates or re-registers a broker and can return a newly minted secret
+	// (never a stored one), so it is session-only (CREDENTIAL_MANAGEMENT):
+	// every credential other than an interactive session or a dev
+	// credential is refused before any lookup or write. A token registers
+	// brokers through POST /api/v1/brokers.
 	if req.Broker != nil {
 		if _, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonCredentialManagement); !ok {
 			return
@@ -2510,10 +2528,14 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Generate HMAC credentials for the broker if broker auth service is available
-		// (deprecated flow only - new flow gets secrets from /brokers/join)
+		// (deprecated flow only - new flow gets secrets from /brokers/join).
+		// The response carries a secret only when this request minted the
+		// broker's first one. A broker that already has a secret gets none
+		// back: its stored secret is never returned here, and a new one comes
+		// only from POST /brokers/{id}/rotate-secret or /brokers/join.
 		if s.brokerAuthService != nil {
 			var err error
-			secretKey, err = s.brokerAuthService.GenerateAndStoreSecret(ctx, broker.ID)
+			secretKey, _, err = s.brokerAuthService.MintSecretIfAbsent(ctx, broker.ID)
 			if err != nil {
 				// Log but don't fail - broker is registered, can complete join later
 				util.Debugf("Warning: failed to generate broker secret: %v", err)

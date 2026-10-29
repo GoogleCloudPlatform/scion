@@ -403,12 +403,12 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 	case "update-binary":
 		installer := s.updateInstaller()
 		log.Debug("Resolved update-binary executor",
-			"installer", installer.Name(), "github_repo", mc.GitHubRepo,
-			"release_channel", mc.ReleaseChannel)
+			"installer", installer.Name(), "github_repo", mc.GitHubRepo)
 		return NewBinaryUpdateExecutor(BinaryUpdateOptions{
 			GitHubRepo: mc.GitHubRepo,
-			Channel:    mc.ReleaseChannel,
 			Installer:  installer,
+			Releases:   s.updateReleaseSource(),
+			Catalog:    s.updateReleaseCatalog(),
 		}), nil
 	default:
 		return nil, fmt.Errorf("no executor registered for operation %q", key)
@@ -752,7 +752,8 @@ func toMaintenanceRunResponse(run store.MaintenanceOperationRun) maintenanceRunR
 
 // handleCheckForUpdates handles POST /api/v1/admin/maintenance/check-updates.
 // It dispatches to the appropriate update checker based on the deployment tier:
-//   - "binary": checks the effective channel's latest release (LATEST.json)
+//   - "binary": checks the effective channel's latest release in the release
+//     catalog (refreshed, within the catalog's throttle)
 //   - "source" (default): checks for git updates via origin fetch
 //
 // Authorization: enforced by routeGuard via hub.maintenance.execute permission.
@@ -766,19 +767,30 @@ func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 
 	switch mc.DeploymentTier {
 	case "binary":
-		channel, _ := effectiveReleaseChannel(mc, version.Version)
+		sel, err := s.readReleaseSelection(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read the release selection", nil)
+			return
+		}
+		channel, _ := effectiveReleaseChannel(mc, version.Version, sel)
 		opts := maintenance.ReleaseCheckOptions{
 			CurrentVersion: version.Version,
 			Channel:        channel,
 			Repo:           mc.GitHubRepo,
+			Catalog:        s.updateReleaseCatalog(),
+			Refresh:        true,
+			Releases:       s.updateReleaseSource(),
 		}
 		if t, err := time.Parse(time.RFC3339, version.BuildTime); err == nil {
 			opts.CurrentBuildTime = t
 		}
 		result, err := maintenance.CheckForReleaseUpdates(r.Context(), opts)
 		if err != nil {
+			// The error is the catalog's fetch error; it goes to the log,
+			// and the answer says what failed, as the releases endpoint does.
+			s.maintenanceLog.Warn("Release update check failed", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-				"Failed to check for release updates: "+err.Error(), nil)
+				"Failed to check for release updates: the release list could not be fetched from GitHub; try again later", nil)
 			return
 		}
 		writeJSON(w, http.StatusOK, result)

@@ -884,8 +884,11 @@ func applyBrokerJoinRequest(broker *store.RuntimeBroker, req BrokerJoinRequest, 
 	}
 }
 
-// GenerateAndStoreSecret generates a new HMAC secret for an existing broker.
-// This is used for simplified registration flows where a join token is not required.
+// GenerateAndStoreSecret returns the broker's stored HMAC secret, or
+// generates and stores one when there is none. Its callers are in-process
+// (the co-located, flat-host and plugin brokers), which share one key
+// across restarts and instances; a response to a remote caller uses MintSecretIfAbsent
+// instead, which never returns a stored secret.
 // Returns the base64-encoded secret key.
 func (s *BrokerAuthService) GenerateAndStoreSecret(ctx context.Context, brokerID string) (string, error) {
 	if brokerID == "" {
@@ -919,6 +922,49 @@ func (s *BrokerAuthService) GenerateAndStoreSecret(ctx context.Context, brokerID
 	}
 
 	return base64.StdEncoding.EncodeToString(secretKey), nil
+}
+
+// MintSecretIfAbsent generates and stores a new HMAC secret for brokerID
+// only when the broker has no stored secret. It returns the new
+// base64-encoded secret and minted=true when it stored one, or "" and
+// minted=false when a secret already exists: unlike GenerateAndStoreSecret,
+// it never returns a stored secret. A secret created concurrently between
+// the check and the insert makes the insert fail with store.ErrAlreadyExists,
+// which is reported the same way as an existing secret ("" and
+// minted=false): the stored secret is not read and never returned.
+func (s *BrokerAuthService) MintSecretIfAbsent(ctx context.Context, brokerID string) (string, bool, error) {
+	if brokerID == "" {
+		return "", false, errors.New("brokerId is required")
+	}
+
+	existingSecret, err := s.store.GetBrokerSecret(ctx, brokerID)
+	if err == nil && existingSecret != nil {
+		return "", false, nil
+	}
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return "", false, fmt.Errorf("failed to look up broker secret: %w", err)
+	}
+
+	secretKey := make([]byte, s.config.SecretKeyLength)
+	if _, err := rand.Read(secretKey); err != nil {
+		return "", false, fmt.Errorf("failed to generate secret key: %w", err)
+	}
+
+	brokerSecret := &store.BrokerSecret{
+		BrokerID:  brokerID,
+		SecretKey: secretKey,
+		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
+		CreatedAt: time.Now(),
+		Status:    store.BrokerSecretStatusActive,
+	}
+	if err := s.store.CreateBrokerSecret(ctx, brokerSecret); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("failed to store broker secret: %w", err)
+	}
+
+	return base64.StdEncoding.EncodeToString(secretKey), true, nil
 }
 
 // =============================================================================

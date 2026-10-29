@@ -94,6 +94,14 @@ var execAuditFileAllowlist = map[string]string{
 		"HostGitCommand, i.e. the same broker-side provisioning callers above, never from runInit; " +
 		"init's pkg/util use is pinned by execAuditSymbolAllowlist below. Verify: grep cmd/sciontool " +
 		"for checkRepoConfigPolicy/crossCheckAgainstGit/SafeGitCommand finds none.",
+	"pkg/util/git_seed_layers.go": "broker-side repository config check (CheckSeedRepoConfigLayers). " +
+		"It is reached only from pkg/agent's seedCheckedPrivateGitConfig during agent start " +
+		"(pkg/agent/run.go), never from runInit. Verify: grep cmd/sciontool for " +
+		"CheckSeedRepoConfigLayers/seedCheckedPrivateGitConfig finds none.",
+	"pkg/util/git_seed_submodules.go": "broker-side submodule config check (CheckSeedSubmodules, " +
+		"seedGitlinks). It is reached only from pkg/agent's seedCheckedPrivateGitConfig during agent " +
+		"start (pkg/agent/run.go), never from runInit. Verify: grep cmd/sciontool for " +
+		"CheckSeedSubmodules/seedGitlinks/seedCheckedPrivateGitConfig finds none.",
 }
 
 // execAuditSymbolAllowlist closes a gap a per-file allowlist alone leaves
