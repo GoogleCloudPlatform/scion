@@ -413,6 +413,38 @@ set_project_binding_will_fail() {
   printf '%s' "${2:-}" > "${GCLOUD_STUB_STATE_DIR}/project-binding-fail/${1//\//_}"
 }
 
+# seed_project_iam_binding ROLE MEMBER [CONDITION_TITLE] — the project
+# IAM policy already binds MEMBER (e.g. "serviceAccount:x@p.iam.
+# gserviceaccount.com" or a "deleted:serviceAccount:...?uid=N" tombstone)
+# to ROLE, unconditionally, or under a condition titled CONDITION_TITLE.
+seed_project_iam_binding() {
+  if [[ -n "${3:-}" ]]; then
+    printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "${GCLOUD_STUB_STATE_DIR}/project-iam-policy.tsv"
+  else
+    printf '%s\t%s\n' "$1" "$2" >> "${GCLOUD_STUB_STATE_DIR}/project-iam-policy.tsv"
+  fi
+}
+
+# project_iam_bindings — the project IAM policy fixture as it stands now,
+# one "ROLE<TAB>MEMBER" line per binding member (empty if none).
+project_iam_bindings() {
+  cat "${GCLOUD_STUB_STATE_DIR}/project-iam-policy.tsv" 2>/dev/null || true
+}
+
+# set_project_get_iam_policy_will_fail — every `projects get-iam-policy`
+# call fails with a realistic PERMISSION_DENIED error.
+set_project_get_iam_policy_will_fail() {
+  touch "${GCLOUD_STUB_STATE_DIR}/project-get-iam-policy-fail"
+}
+
+# set_project_binding_remove_will_fail ROLE — every `projects
+# remove-iam-policy-binding` call for ROLE fails with a realistic
+# PERMISSION_DENIED error.
+set_project_binding_remove_will_fail() {
+  mkdir -p "${GCLOUD_STUB_STATE_DIR}/project-binding-remove-fail"
+  touch "${GCLOUD_STUB_STATE_DIR}/project-binding-remove-fail/${1//\//_}"
+}
+
 # set_service_account_describe_error EMAIL [MESSAGE] — `describe` for
 # exactly this service account fails with MESSAGE, or by default a
 # realistic PERMISSION_DENIED error that says nothing about existence.

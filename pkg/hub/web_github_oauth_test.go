@@ -260,6 +260,52 @@ func TestOAuthCallback_RedirectsToLocalReturnToOnly(t *testing.T) {
 	}
 }
 
+// A signed-out page deep link with a query lands on that path and query
+// after the OAuth callback.
+func TestOAuthCallback_PageDeepLinkReturnsWithQuery(t *testing.T) {
+	const email = "github-deeplink@example.com"
+	ws := newTestWebServer(t, WebServerConfig{
+		SessionSecret: "test-session-secret-for-github-oauth-deeplink-1234",
+		BaseURL:       "http://localhost:8080",
+	})
+	configureWebGitHubOAuth(ws)
+	ws.oauthService.httpClient = &http.Client{
+		Transport: &mockGitHubOAuthTransport{
+			tokenJSON:  `{"access_token":"mock-token","token_type":"bearer","scope":"read:user,user:email"}`,
+			userJSON:   `{"id":44,"login":"octocat3","name":"GitHub User","email":"` + email + `","avatar_url":"https://example.com/a.png"}`,
+			emailsJSON: `[{"email":"` + email + `","primary":true,"verified":true}]`,
+		},
+	}
+	ws.store = newProxyAuthStoreWithRoles()
+	handler := ws.Handler()
+
+	page := httptest.NewRequest(http.MethodGet, "/projects/p1?tab=agents", nil)
+	page.Header.Set("Accept", "text/html")
+	recPage := httptest.NewRecorder()
+	handler.ServeHTTP(recPage, page)
+	require.Equal(t, http.StatusFound, recPage.Code)
+	require.Equal(t, "/auth/login", recPage.Header().Get("Location"))
+	pageCookie := sessionCookieOf(recPage)
+	require.NotNil(t, pageCookie)
+
+	// The provider round trip sets the OAuth state in the same session.
+	reqState := withCookies(httptest.NewRequest(http.MethodGet, "/auth/login/github", nil), pageCookie)
+	recState := httptest.NewRecorder()
+	sess, err := ws.sessionStore.Get(reqState, webSessionName)
+	require.NoError(t, err)
+	require.Equal(t, "/projects/p1?tab=agents", sess.Values[sessKeyReturnTo])
+	sess.Values[sessKeyOAuthState] = "test-state-deeplink"
+	require.NoError(t, sess.Save(reqState, recState))
+	stateCookie := sessionCookieOf(recState)
+	require.NotNil(t, stateCookie)
+
+	callback := withCookies(httptest.NewRequest(http.MethodGet, "/auth/callback/github?code=test-code&state=test-state-deeplink", nil), stateCookie)
+	recCallback := httptest.NewRecorder()
+	handler.ServeHTTP(recCallback, callback)
+	require.Equal(t, http.StatusFound, recCallback.Code, recCallback.Body.String())
+	assert.Equal(t, "/projects/p1?tab=agents", recCallback.Header().Get("Location"))
+}
+
 // The error code from the provider reaches the sign-in page as one
 // query value.
 func TestOAuthCallback_ProviderErrorIsOneQueryValue(t *testing.T) {

@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -46,7 +47,24 @@ const (
 	MetricPoolConnectionsIdle     = "scion.db.pool.connections.idle"
 	MetricPoolConnectionsWaits    = "scion.db.pool.connections.wait_count"
 	MetricPoolConnectionsMax      = "scion.db.pool.connections.max"
+	MetricPoolWaitDuration        = "scion.db.pool.connections.wait_duration"
+	MetricTxHoldDuration          = "scion.db.tx.hold.duration"
+	MetricTxLockWaitDuration      = "scion.db.tx.lock_wait.duration"
+	MetricTxCommitDuration        = "scion.db.tx.commit.duration"
+	MetricDiagWarnDropped         = "scion.db.diag.warn.dropped"
 )
+
+// Attribute keys of the transaction diagnostics histograms.
+const (
+	AttrOp      = "op"
+	AttrKind    = "kind"
+	AttrOutcome = "outcome"
+)
+
+// txDurationBucketsMS are the explicit bucket boundaries, in milliseconds,
+// of the hold and lock-wait histograms. They reach 120 s because the stalls
+// they diagnose last up to about two minutes.
+var txDurationBucketsMS = []float64{1, 5, 10, 25, 50, 100, 250, 500, 1000, 2000, 5000, 10000, 30000, 60000, 120000}
 
 // AttrDropReason is the attribute key callers set on MetricNotificationsDropped
 // to say why a notification was dropped (for example "decode", "refetch" or
@@ -117,6 +135,11 @@ type PoolStats struct {
 	// the increase since the previous snapshot of the same pool as a counter.
 	WaitCount int64
 	Max       int64 // configured maximum pool size
+	// WaitDuration is the cumulative time callers spent waiting for a
+	// connection since the pool opened (database/sql DBStats.WaitDuration).
+	// The recorder exports the increase since the previous snapshot of the
+	// same pool as a counter, in milliseconds.
+	WaitDuration time.Duration
 }
 
 // recorder is the OpenTelemetry-backed implementation of Recorder.
@@ -135,11 +158,19 @@ type recorder struct {
 	poolIdle   metric.Int64Gauge
 	poolWaits  metric.Int64Counter
 	poolMax    metric.Int64Gauge
+	poolWaitMS metric.Int64Counter
 
-	// lastWaitCount holds the previous PoolStats.WaitCount per attribute set,
-	// so ObservePoolStats can add only the increase to poolWaits.
+	txHold      metric.Float64Histogram
+	txLockWait  metric.Float64Histogram
+	txCommit    metric.Float64Histogram
+	diagDropped metric.Int64Counter
+
+	// lastWaitCount and lastWaitDur hold the previous PoolStats.WaitCount
+	// and WaitDuration per attribute set, so ObservePoolStats can add only
+	// the increase to poolWaits and poolWaitMS.
 	waitMu        sync.Mutex
 	lastWaitCount map[attribute.Distinct]int64
+	lastWaitDur   map[attribute.Distinct]int64
 }
 
 // compile-time check that recorder satisfies Recorder.
@@ -161,7 +192,7 @@ func New(mp metric.MeterProvider) (Recorder, error) {
 	}
 
 	meter := mp.Meter(instrumentationName)
-	r := &recorder{enabled: enabled, lastWaitCount: map[attribute.Distinct]int64{}}
+	r := &recorder{enabled: enabled, lastWaitCount: map[attribute.Distinct]int64{}, lastWaitDur: map[attribute.Distinct]int64{}}
 
 	var err error
 
@@ -253,6 +284,49 @@ func New(mp metric.MeterProvider) (Recorder, error) {
 		return nil, fmt.Errorf("registering %s: %w", MetricPoolConnectionsMax, err)
 	}
 
+	if r.poolWaitMS, err = meter.Int64Counter(
+		MetricPoolWaitDuration,
+		metric.WithUnit("ms"),
+		metric.WithDescription("Time callers spent waiting for a database connection"),
+	); err != nil {
+		return nil, fmt.Errorf("registering %s: %w", MetricPoolWaitDuration, err)
+	}
+
+	if r.txHold, err = meter.Float64Histogram(
+		MetricTxHoldDuration,
+		metric.WithUnit("ms"),
+		metric.WithDescription("Time a database transaction or connection checkout held its connection"),
+		metric.WithExplicitBucketBoundaries(txDurationBucketsMS...),
+	); err != nil {
+		return nil, fmt.Errorf("registering %s: %w", MetricTxHoldDuration, err)
+	}
+
+	if r.txLockWait, err = meter.Float64Histogram(
+		MetricTxLockWaitDuration,
+		metric.WithUnit("ms"),
+		metric.WithDescription("Time a database request waited to get a connection"),
+		metric.WithExplicitBucketBoundaries(txDurationBucketsMS...),
+	); err != nil {
+		return nil, fmt.Errorf("registering %s: %w", MetricTxLockWaitDuration, err)
+	}
+
+	if r.txCommit, err = meter.Float64Histogram(
+		MetricTxCommitDuration,
+		metric.WithUnit("ms"),
+		metric.WithDescription("Time a database transaction's commit took (on SQLite, the WAL write and sync)"),
+		metric.WithExplicitBucketBoundaries(txDurationBucketsMS...),
+	); err != nil {
+		return nil, fmt.Errorf("registering %s: %w", MetricTxCommitDuration, err)
+	}
+
+	if r.diagDropped, err = meter.Int64Counter(
+		MetricDiagWarnDropped,
+		metric.WithUnit("{record}"),
+		metric.WithDescription("Transaction diagnostics WARN records dropped because the log queue was full"),
+	); err != nil {
+		return nil, fmt.Errorf("registering %s: %w", MetricDiagWarnDropped, err)
+	}
+
 	return r, nil
 }
 
@@ -308,6 +382,59 @@ func (r *recorder) ObservePoolStats(ctx context.Context, pool string, stats Pool
 	if delta := r.waitCountDelta(set.Equivalent(), stats.WaitCount); delta > 0 {
 		r.poolWaits.Add(ctx, delta, opt)
 	}
+	if delta := r.waitDurDelta(set.Equivalent(), stats.WaitDuration.Milliseconds()); delta > 0 {
+		r.poolWaitMS.Add(ctx, delta, opt)
+	}
+}
+
+// waitDurDelta is waitCountDelta for the cumulative wait time in ms.
+func (r *recorder) waitDurDelta(key attribute.Distinct, cur int64) int64 {
+	r.waitMu.Lock()
+	defer r.waitMu.Unlock()
+	prev, seen := r.lastWaitDur[key]
+	r.lastWaitDur[key] = cur
+	if !seen || cur < prev {
+		return cur
+	}
+	return cur - prev
+}
+
+// RecordTxHold records how long a transaction (kind "tx") or connection
+// checkout (kind "conn") held its connection, in milliseconds. It implements
+// txdiag.Recorder. op is bounded by the caller (at most 257 values).
+func (r *recorder) RecordTxHold(ctx context.Context, ms float64, op, kind, outcome string) {
+	r.txHold.Record(ctx, ms, metric.WithAttributes(
+		attribute.String(AttrOp, op),
+		attribute.String(AttrKind, kind),
+		attribute.String(AttrOutcome, outcome),
+		attribute.String(AttrPool, PoolStore),
+	))
+}
+
+// RecordTxCommit records how long a transaction's driver Commit took, in
+// milliseconds. It implements txdiag.Recorder.
+func (r *recorder) RecordTxCommit(ctx context.Context, ms float64, op, outcome string) {
+	r.txCommit.Record(ctx, ms, metric.WithAttributes(
+		attribute.String(AttrOp, op),
+		attribute.String(AttrOutcome, outcome),
+		attribute.String(AttrPool, PoolStore),
+	))
+}
+
+// RecordLockWait records how long a request waited for a connection, in
+// milliseconds. It implements txdiag.Recorder.
+func (r *recorder) RecordLockWait(ctx context.Context, ms float64, op, outcome string) {
+	r.txLockWait.Record(ctx, ms, metric.WithAttributes(
+		attribute.String(AttrOp, op),
+		attribute.String(AttrOutcome, outcome),
+		attribute.String(AttrPool, PoolStore),
+	))
+}
+
+// IncDiagDropped counts WARN records the diagnostics dropped. It implements
+// txdiag.Recorder.
+func (r *recorder) IncDiagDropped(ctx context.Context, n int64) {
+	r.diagDropped.Add(ctx, n)
 }
 
 // waitCountDelta returns how much the cumulative wait count of the pool

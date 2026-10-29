@@ -433,10 +433,14 @@ func (s *agentSet) start(opts api.StartOptions) (*api.AgentInfo, error) {
 	if hubURL == "" {
 		hubURL = env[scionhub.EnvHubURL]
 	}
-	token := env["SCION_AUTH_TOKEN"]
+	// The agent's hub credential is the token the hub issued for this
+	// start. The runtime broker passes it only in HubIssuedToken and never
+	// in the start environment (pkg/runtimebroker/start_context.go), as for
+	// a real agent in broker mode.
+	token := opts.HubIssuedToken
 	agentID := env[scionhub.EnvAgentID]
 	if hubURL == "" || token == "" || agentID == "" {
-		return nil, fmt.Errorf("fakeagent: the start environment lacks the hub URL, agent id or token")
+		return nil, fmt.Errorf("fakeagent: the start lacks the hub URL, agent id or hub-issued token")
 	}
 
 	s.mu.Lock()

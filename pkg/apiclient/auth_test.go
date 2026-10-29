@@ -50,3 +50,71 @@ func TestAgentTokenAuthApplyAuth(t *testing.T) {
 		})
 	}
 }
+
+func TestAuth_NilReceivers(t *testing.T) {
+	req, _ := http.NewRequest(http.MethodGet, "http://hub.example/api", nil)
+
+	var b *BearerAuth
+	if err := b.ApplyAuth(req); err != nil {
+		t.Errorf("BearerAuth(nil).ApplyAuth: %v", err)
+	}
+
+	var br *BrokerTokenAuth
+	if err := br.ApplyAuth(req); err != nil {
+		t.Errorf("BrokerTokenAuth(nil).ApplyAuth: %v", err)
+	}
+
+	var ag *AgentTokenAuth
+	if err := ag.ApplyAuth(req); err != nil {
+		t.Errorf("AgentTokenAuth(nil).ApplyAuth: %v", err)
+	}
+}
+
+func TestAuth_NilHeaders(t *testing.T) {
+	req1 := &http.Request{}
+	b := &BearerAuth{Token: "bearer-token"}
+	if err := b.ApplyAuth(req1); err != nil {
+		t.Fatalf("BearerAuth.ApplyAuth with nil header: %v", err)
+	}
+	if got := req1.Header.Get("Authorization"); got != "Bearer bearer-token" {
+		t.Errorf("Authorization = %q, want %q", got, "Bearer bearer-token")
+	}
+
+	req2 := &http.Request{}
+	br := &BrokerTokenAuth{Token: "broker-token"}
+	if err := br.ApplyAuth(req2); err != nil {
+		t.Fatalf("BrokerTokenAuth.ApplyAuth with nil header: %v", err)
+	}
+	if got := req2.Header.Get("X-Scion-Broker-Token"); got != "broker-token" {
+		t.Errorf("X-Scion-Broker-Token = %q, want %q", got, "broker-token")
+	}
+
+	req3 := &http.Request{}
+	ag := &AgentTokenAuth{Token: "agent-token", RunID: "run-42"}
+	if err := ag.ApplyAuth(req3); err != nil {
+		t.Fatalf("AgentTokenAuth.ApplyAuth with nil header: %v", err)
+	}
+	if got := req3.Header.Get("X-Scion-Agent-Token"); got != "agent-token" {
+		t.Errorf("X-Scion-Agent-Token = %q, want %q", got, "agent-token")
+	}
+	if got := req3.Header.Get("X-Scion-Run-Id"); got != "run-42" {
+		t.Errorf("X-Scion-Run-Id = %q, want %q", got, "run-42")
+	}
+}
+
+func TestAuth_NilRequest(t *testing.T) {
+	b := &BearerAuth{Token: "tok"}
+	if err := b.ApplyAuth(nil); err == nil {
+		t.Error("BearerAuth.ApplyAuth(nil) want error, got nil")
+	}
+
+	br := &BrokerTokenAuth{Token: "tok"}
+	if err := br.ApplyAuth(nil); err == nil {
+		t.Error("BrokerTokenAuth.ApplyAuth(nil) want error, got nil")
+	}
+
+	ag := &AgentTokenAuth{Token: "tok"}
+	if err := ag.ApplyAuth(nil); err == nil {
+		t.Error("AgentTokenAuth.ApplyAuth(nil) want error, got nil")
+	}
+}

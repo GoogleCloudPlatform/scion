@@ -354,8 +354,58 @@ The runtime target of one flat Runtime Broker instance, and the instance's own i
 | `safe_to_evict` | bool | kubernetes | `false` adds the `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` annotation to agent pods (on GKE Autopilot this requests extended run duration). `true` or unset adds nothing. An agent's own `kubernetes.safeToEvict`, `true` or `false`, wins. |
 | `priority_class_name` | string | kubernetes | Default PriorityClass of agent pods (DNS-1123 subdomain). The PriorityClass must already exist on the cluster. An agent's own `kubernetes.priorityClassName` wins. |
 | `gke` | bool | kubernetes | `true` turns on GKE mode for the instance. `false` or unset detects a GKE cluster automatically. |
+| `node_selector` | map | kubernetes | Node labels (key to value) every agent pod of the instance must match. See [Flat instance placement](#flat-instance-placement). |
+| `tolerations` | list | kubernetes | Tolerations of every agent pod of the instance, each with `key`, `operator` (`Equal` or `Exists`; empty means `Equal`), `value` and `effect` (`NoSchedule`, `PreferNoSchedule`, `NoExecute`, or empty for any). An empty key requires `Exists`, and `Exists` requires an empty value. |
+| `runtime_class_name` | string | kubernetes | RuntimeClass of every agent pod of the instance (DNS-1123 subdomain). The RuntimeClass must already exist on the cluster. |
 
 A runtime target does not choose where its agents' storage lives: [`server.project_storage`](#project-storage-serverproject_storage) does, for every instance of the process. The former `shared_dir_storage_backend`, `shared_dir_storage_backends`, `home_storage_backend` and `home_storage_leaf` fields are removed. A flat instance that sets them refuses startup with an error that names the field, `server.project_storage` and `volumes:`. On runtimes and profiles, startup reports them and agent start refuses them; see [Removed storage overrides](#removed-storage-overrides). For a node-local directory, use a `volumes:` entry.
+
+#### Flat instance placement
+
+`node_selector`, `tolerations` and `runtime_class_name` place the instance's agent pods on the nodes the operator chooses, whatever template the agent uses, including `default`. Unlike the other defaults in the table, the operator owns them, so an agent's own value does not win:
+
+- An agent's `kubernetes.nodeSelector` may add keys the runtime target does not set. It cannot change the value of a key the runtime target sets, including the pool key `scion.dev/pool`. A differing value refuses the start.
+- Each of an agent's `kubernetes.tolerations` must match one of the runtime target's tolerations exactly: the same key, operator (empty counts as `Equal`), value and effect. A broader `Exists` toleration does not cover a different entry. When the runtime target sets no tolerations, any agent toleration is refused, including one with an empty key and `Exists`. While placement is set, an agent toleration with an empty key and `Exists` is refused even when the runtime target has the same entry.
+- An agent cannot choose or change the runtime class. An agent `kubernetes.runtimeClassName` must be empty or equal to the runtime target's value.
+
+A refused start is reported as a validation error that names the field and whether it comes from the request or the agent's stored configuration. The check runs before the start creates, changes or stops anything. Node selector entries combine: an agent-added key narrows placement further, and a key with no matching nodes leaves the pod pending. An agent-added key can also steer a pod onto any pool whose nodes carry no taint, because only the runtime target's keys are fixed. Tolerations stay limited to the runtime target's. A node selector and a toleration are independent: Scion never derives one from the other, so a tainted pool needs both.
+
+The values are read from the instance's settings when it starts, so a change takes effect when the Runtime Broker restarts. Existing pods keep their placement. The Brokers page shows the instance's reported placement read-only, as defaults for new agents. In GCP identity `block` mode the Workload Identity node label is still added after this placement.
+
+```yaml
+server:
+  broker:
+    instances:
+      - key: agents
+        name: agents
+        runtime_target:
+          type: kubernetes
+          namespace: agents
+          node_selector:
+            scion.dev/pool: agents
+          tolerations:
+            - key: scion.dev/pool
+              operator: Equal
+              value: agents
+              effect: NoSchedule
+          runtime_class_name: gvisor
+```
+
+`gvisor` is an example: Scion does not create RuntimeClasses or check that one exists.
+
+This release checks and enforces these rules for flat instances only. Runtime entries and profiles of a regular Runtime Broker keep their current behaviour and follow in a later release.
+
+##### Before upgrading
+
+An agent that sets its own tolerations or runtime class while the instance's runtime target sets none is refused at its next start or restart. Running agents keep their pods until then. Before upgrading a host with flat instances:
+
+1. Run `scion doctor` with the new release. The `flat-placement-preflight` check scans the stored configuration of every agent each flat instance owns, without changing anything, and reports counts per instance: agents with tolerations while the runtime target sets none (`agent_tolerations_without_operator_policy`), agents with a runtime class while the runtime target sets none (`agent_runtime_class_without_operator_policy`), and agents it could not check (`incomplete`). It shows no agent names or configuration values. An agent can be counted in both categories.
+2. Treat `incomplete` as unfinished: fix unreadable agent records or configurations, then run the check again.
+3. For agent tolerations, decide whether each belongs to the instance. If it does, add it to the runtime target's `tolerations`; otherwise remove it from the agent's configuration. Tolerations match by key, operator (empty counts as `Equal`), value and effect; a broad `Exists` toleration on the runtime target does not cover a different agent entry. A toleration added to the runtime target applies to every agent of the instance.
+4. For an agent runtime class, either set `runtime_class_name` on the runtime target or remove the agent's class. An agent cannot choose a class on its own; repeating the runtime target's class is accepted.
+5. Restart the Runtime Broker to activate runtime target changes, then run `scion doctor` again until both counts and `incomplete` are zero.
+
+The check counts only these two cases, where the runtime target sets no tolerations or no runtime class at all. Once the runtime target sets some tolerations or a runtime class, the check no longer looks at the agents' own values, so an agent toleration that is not among the target's, or an agent class that differs from the target's, is not counted. Such remaining mismatches show up as refusals, naming the field, at the agent's next start or restart.
 
 #### Flat instance agent defaults (`server.broker.instances[].agent_defaults`)
 
@@ -411,6 +461,27 @@ Persistence settings for the Hub.
 | `conn_max_lifetime` | duration | sqlite: unlimited; postgres: `"30m"` | Maximum time a connection may be reused (Go duration, for example `"30m"`). Empty takes the default; `"0"` means unlimited. Settings file only: no environment variable sets it. |
 | `conn_max_idle_time` | duration | sqlite: no limit; postgres: `"5m"` | Maximum time a connection may sit idle in the pool before it is closed (Go duration). Set it shorter than the server-side or proxy idle timeout so idle connections are recycled first. Empty takes the default; `"0"` means no idle limit. Settings file only: no environment variable sets it. |
 | `allow_shadowed_schema` | bool | `false` | PostgreSQL only. Lets the Hub start, and the maintenance commands that migrate its database run, when the schema migration would create a new table set that hides existing Hub tables in a later schema on the `search_path`. See [PostgreSQL `search_path` check](#postgresql-search_path-check). Env: `SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA`. |
+| `tx_diagnostics` | object | see below | Transaction-hold and lock-wait diagnostics. See [Transaction diagnostics](#transaction-diagnostics). Settings file only. |
+
+#### Transaction diagnostics
+
+The Hub measures how long each database transaction and connection checkout holds its connection, and how long each request waits to get one. SQLite runs one writer at a time, and the Hub's SQLite pool has a single connection, so one slow holder makes every other database request wait behind it. These diagnostics name the holder and the waiters.
+
+| Field (`server.database.tx_diagnostics.*`) | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `enabled` | bool | `true` | Install the diagnostics. `false` opens the database exactly as without them. |
+| `hold_warn_threshold` | duration | `"2s"` | Log a transaction or connection checkout held at least this long. `"0"` turns these lines off; metrics are still recorded. |
+| `lock_wait_warn_threshold` | duration | `"1s"` | Log a request that waited at least this long for a connection. `"0"` turns these lines off. |
+| `warn_interval` | duration | `"1m"` | At most one line per call site and kind per interval. Must be positive; `"0"` or a negative value fails startup. Lines dropped by this limit are counted in the next line's `suppressed`. |
+
+The lines are WARN records from the `hub.db` subsystem:
+
+- `db_tx_long_hold`: `kind` (`tx`, or on SQLite `conn` for a held connection with no transaction line), `op` (the calling function), `site` (the first three calling frames), `hold_ms`, `begin_ms`, `stmts`, `stmt_ms` (time in SQL), `commit_ms` (time in the transaction's COMMIT; on SQLite that includes writing and syncing the WAL, so a slow disk shows up here; on a `kind=conn` line, `begin_ms` and `commit_ms` add up the transactions run during that checkout), `idle_ms` (time the connection was held outside BEGIN, SQL and COMMIT, such as Go work inside a transaction), `max_stmt_ms`, `rows_affected`, `outcome`, and on SQLite `waiters_max` (requests from the ent client that waited during the hold) and `busy`.
+- `db_lock_wait`: `op`, `site`, `wait_ms`, `req` (`tx`, `exec` or `query`) and `outcome` (`acquired`, `canceled`, `deadline` or `error`). On SQLite it also names who held the connection during the wait: `holders` (how many connection checkouts overlapped the wait; many short ones mean a queue rather than one slow holder), `top_holder_op` and `top_holder_ms` (the holder with the most time in the wait), and, when the waiter gave up, `holder_open_op` and `holder_open_ms` (the checkout still holding the connection at that moment).
+
+A write made outside an explicit transaction commits inside its own statement, so its commit time is part of that statement's `stmt_ms` and is not reported as `commit_ms`. Both carry `suppressed` and `dropped` (lines lost because the log queue was full). Per-waiter lines cover requests made through the ent client. Waits of the raw-SQL stores appear in aggregate, in the `scion.db.pool.connections.wait_duration` metric. Startup schema migrations run through the same path, so a long migration can log one or more lines at boot; they are expected and are not a stall.
+
+When metrics export is on, the Hub also records the histograms `scion.db.tx.hold.duration` (labels `op`, `kind`, `outcome`, `pool`), `scion.db.tx.lock_wait.duration` and `scion.db.tx.commit.duration` (labels `op`, `outcome`, `pool`), the counter `scion.db.pool.connections.wait_duration` (ms), and `scion.db.diag.warn.dropped`. The `op` label is capped at 256 values; further call sites are reported as `other`.
 
 #### PostgreSQL `search_path` check
 
