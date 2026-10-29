@@ -30,18 +30,33 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// listOptsRecordingStore records the options of every ListMessages call.
+// listOptsRecordingStore records the options of every ListMessages call
+// made while its switch is active (always, for a nil switch). It always
+// delegates. Install it with installStoreFault and Arm it once setup is
+// done, so only the calls under test are recorded.
 type listOptsRecordingStore struct {
 	store.Store
-	mu   sync.Mutex
-	opts []store.ListOptions
+	fault *storeFaultSwitch
+	mu    sync.Mutex
+	opts  []store.ListOptions
 }
 
 func (s *listOptsRecordingStore) ListMessages(ctx context.Context, f store.MessageFilter, o store.ListOptions) (*store.ListResult[store.Message], error) {
-	s.mu.Lock()
-	s.opts = append(s.opts, o)
-	s.mu.Unlock()
+	if s.fault.Active() {
+		s.mu.Lock()
+		s.opts = append(s.opts, o)
+		s.mu.Unlock()
+	}
 	return s.Store.ListMessages(ctx, f, o)
+}
+
+// installListOptsRecorder installs a disarmed listOptsRecordingStore as
+// srv.store.
+func installListOptsRecorder(t *testing.T, srv *Server) (*listOptsRecordingStore, *storeFaultSwitch) {
+	t.Helper()
+	return installStoreFault(t, srv, func(inner store.Store, fault *storeFaultSwitch) *listOptsRecordingStore {
+		return &listOptsRecordingStore{Store: inner, fault: fault}
+	})
 }
 
 // assertListMessagesSkippedCount fails unless at least one ListMessages
@@ -67,6 +82,7 @@ func assertListMessagesSkippedCount(t *testing.T, rs *listOptsRecordingStore, la
 // response keeps its totalCount field, at 0 (ptone/scion#6571).
 func TestChatV2_History_SkipsTotalCount(t *testing.T) {
 	srv, s, wcs, proj, db := setupSendTest(t)
+	rs, record := installListOptsRecorder(t, srv)
 	ctx := context.Background()
 
 	topicID := tid("topic-history-skip-count")
@@ -81,9 +97,7 @@ func TestChatV2_History_SkipsTotalCount(t *testing.T) {
 	}
 	setTopicConversationID(t, db, s, topicID, proj.ID)
 	seedHistoryMessages(t, s, proj.ID, topicID, 12)
-
-	rs := &listOptsRecordingStore{Store: s}
-	srv.store = rs
+	record.Arm()
 
 	fetch := func(label, query string) chatHistoryResponse {
 		t.Helper()
@@ -124,6 +138,7 @@ func TestChatV2_History_SkipsTotalCount(t *testing.T) {
 // counts.
 func TestInteragent_SkipsTotalCount(t *testing.T) {
 	srv, s := testServer(t)
+	rs, record := installListOptsRecorder(t, srv)
 	ctx := context.Background()
 
 	proj := &store.Project{ID: tid("interagent-skip-count-proj"), Slug: "skip-count", Name: "Skip Count"}
@@ -155,9 +170,7 @@ func TestInteragent_SkipsTotalCount(t *testing.T) {
 	if err := s.CreateMessage(ctx, msg); err != nil {
 		t.Fatalf("CreateMessage: %v", err)
 	}
-
-	rs := &listOptsRecordingStore{Store: s}
-	srv.store = rs
+	record.Arm()
 
 	dmKey := fmt.Sprintf("dm:agent:%s:user:%s", agent.ID, DevUserID)
 	path := fmt.Sprintf("/api/v1/chat/conversations/%s/interagent", url.PathEscape(dmKey))
