@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -84,5 +85,14 @@ func TestPlacementPreflightUnreadableAgentIsIncomplete(t *testing.T) {
 	require.Equal(t, 2, r.NotCovered, "%+v", r)
 	require.False(t, r.RecordsUnreadable)
 	require.Equal(t, 1, r.Counts[config.PreflightAgentTolerationsWithoutOperatorPolicy])
+	require.True(t, r.NeedsAttention())
+
+	// Past the report's deadline nothing is read and nothing is clean.
+	prev := placementPreflightTimeout
+	placementPreflightTimeout = time.Nanosecond
+	t.Cleanup(func() { placementPreflightTimeout = prev })
+	r = srv.scanColocatedPlacement(ctx, broker.ID, globalDir, policy)
+	require.Equal(t, 0, r.Scanned, "%+v", r)
+	require.True(t, r.RecordsUnreadable || r.Incomplete == 2, "%+v", r)
 	require.True(t, r.NeedsAttention())
 }

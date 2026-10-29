@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -95,5 +96,66 @@ func TestPlacementPreflightEchoIsDropped(t *testing.T) {
 	}
 	if got := dropTopLevelMember([]byte(`{"Placement_Preflight": {}, "a": 1}`), placementPreflightKey); string(got) != `{"a":1}` {
 		t.Fatalf("drop = %s", got)
+	}
+}
+
+// Built-in default runtime entries are not the operator's, as on the
+// co-located broker: a profiled agent on an operator entry with placement
+// is resolved (and so categorized), not made incomplete by the built-in
+// kubernetes entry that the bootstrap merge also carries. A stored
+// runtimes row decides on its own.
+func TestPlacementPreflightBuiltinEntriesAreNotOperators(t *testing.T) {
+	old := config.GetGlobalSettingsOverlay()
+	t.Cleanup(func() { config.SetGlobalSettingsOverlay(old) })
+	config.SetGlobalSettingsOverlay(nil)
+	path := tempSettingsHome(t)
+	if err := os.WriteFile(path, []byte("schema_version: \"1\"\nruntimes:\n  k8s:\n    type: kubernetes\n    node_selector:\n      pool: agents\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fileK := newFileKoanf(t, map[string]interface{}{
+		"runtimes.k8s.type":                "kubernetes",
+		"runtimes.k8s.node_selector.pool":  "agents",
+		"runtimes.kubernetes.type":         "kubernetes",
+		"profiles.gpu.runtime":             "k8s",
+		"profiles.gpu.node_selector.accel": "l4",
+	})
+	fake := newFakeHubSettingStore()
+	ops := NewOperationalSettings(fake, fileK, emptyKoanf())
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snap := ops.Snapshot()
+	if _, ok := snap.Runtimes["kubernetes"]; !ok {
+		t.Fatalf("fixture: the snapshot lacks the built-in entry: %v", snap.Runtimes)
+	}
+	configured := placementConfiguredRuntimes(ops)
+	if configured == nil || !configured("k8s") || configured("kubernetes") {
+		t.Fatal("the configured entries are not the settings file's")
+	}
+	rp, ok := config.ResolveLegacyPolicyOffline(snap.Runtimes, snap.Profiles, configured, "gpu")
+	if !ok || rp.NodeSelector["accel"] != "l4" || rp.NodeSelector["pool"] != "agents" {
+		t.Fatalf("profiled agent not resolved: %+v, %v", rp, ok)
+	}
+	if _, ok := config.ResolveLegacyPolicyOffline(snap.Runtimes, snap.Profiles, nil, "gpu"); ok {
+		t.Fatal("fixture: without the configured entries the built-in entry should make it unresolvable")
+	}
+
+	fake.seed("runtimes", json.RawMessage(`{"stored":{"type":"kubernetes"}}`))
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	configured = placementConfiguredRuntimes(ops)
+	if configured == nil || !configured("stored") || configured("k8s") {
+		t.Fatal("a stored runtimes row does not decide the configured entries")
+	}
+}
+
+// A failure anywhere in the report never fails the GET: the report then
+// says both halves are incomplete.
+func TestPlacementPreflightFailureIsIncomplete(t *testing.T) {
+	srv := &Server{}
+	view := srv.placementPreflight(context.Background(), nil)
+	if view == nil || !view.SettingsIncomplete || !view.AgentRecordsUnreadable {
+		t.Fatalf("view = %+v", view)
 	}
 }
