@@ -3667,7 +3667,9 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	issued = token != ""
 	// The broker accepts the issued credential from resolvedEnv only with
 	// its secret-bootstrap classification, so the classifications go with
-	// the start, as they do with a create.
+	// the start, as they do with a create. The reverse direction, the
+	// broker's own classifications (such as the clone URL's) reaching the
+	// hub, is still open under #1350.
 	extras.EnvClassifications = envClassifications
 
 	// send is one start send, including the hash-mismatch repair and

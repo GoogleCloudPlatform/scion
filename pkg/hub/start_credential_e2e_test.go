@@ -43,6 +43,11 @@ import (
 // (StartOptions.HubIssuedToken). The agent manager is a stand-in that
 // records its StartOptions; pkg/agent's refusal of a start without a
 // hub-issued credential is covered there (ErrNoHubToken).
+//
+// The dispatcher here uses the HTTP transport. The control-channel
+// transport tunnels the same body (applyStartExtras) to the same start and
+// restart handlers; its payload is covered by
+// TestControlChannelBrokerClient_StartAndRestartSendEnvClassifications.
 
 // credentialStartManager is runLabelManager with a Start that records its
 // options and runs the entry with the run ID it was given, as pkg/agent's
