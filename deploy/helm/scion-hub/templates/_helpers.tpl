@@ -4507,7 +4507,7 @@ restart.
 {{- end }}
 {{- end }}
 {{- end }}
-{{- $imageCheck := include "scion-hub.relayTlsImageCheck" . }}
+{{- $imageCheck := include "scion-hub.relayTlsImageCheck" (dict "root" . "via" "wiring") }}
 {{- $out := dict
     "imageCheck" $imageCheck
     "port" $port
@@ -4631,17 +4631,23 @@ older. The tag is image.tag, else .Chart.AppVersion.
   NOTES.txt and annotates the Deployment.
 */}}
 {{- define "scion-hub.relayTlsImageCheck" -}}
-{{- $min := include "scion-hub.relayTlsMinHub" . | fromYaml }}
-{{- $tag := trim (toString (.Values.image.tag | default .Chart.AppVersion)) }}
+{{- /* dict: root (the chart context), via ("wiring": conduit.internalTls is on;
+"extra": a non-loopback config.extra internal_listen with the wiring off). The
+via value picks the off-remedy the operator can act on. */}}
+{{- $root := .root }}
+{{- $off := "set conduit.internalTls.enabled: false" }}
+{{- if eq (toString .via) "extra" }}{{- $off = "remove the config.extra internal_listen (or set image.tag/image.digest as above)" }}{{- end }}
+{{- $min := include "scion-hub.relayTlsMinHub" $root | fromYaml }}
+{{- $tag := trim (toString ($root.Values.image.tag | default $root.Chart.AppVersion)) }}
 {{- /* What to do about an older tag. With image.tag unset, the tag is the
 chart's appVersion, so the operator has to set one. */}}
 {{- $minVersion := trim (toString ($min.version | default "")) }}
 {{- $orRelease := "" }}
-{{- if $minVersion }}{{- $orRelease = printf " (or a release at or after %s)" $minVersion }}{{- end }}
-{{- $defaultTag := not (trim (toString (.Values.image.tag | default ""))) }}
-{{- $remedy := printf "Use a hub image at nightly-%s or later%s, set image.digest, or set conduit.internalTls.enabled: false." $min.nightly $orRelease }}
+{{- if $minVersion }}{{- $orRelease = printf ", or a release at or after %s" $minVersion }}{{- end }}
+{{- $defaultTag := not (trim (toString ($root.Values.image.tag | default ""))) }}
+{{- $remedy := printf "Use a hub image at nightly-%s or later%s, set image.digest, or %s." $min.nightly $orRelease $off }}
 {{- if $defaultTag }}
-{{- $remedy = printf "image.tag is not set, so the tag is the chart's appVersion (%s), which is older than the floor: set image.tag to nightly-%s or later%s, or set image.digest, or set conduit.internalTls.enabled: false." .Chart.AppVersion $min.nightly $orRelease }}
+{{- $remedy = printf "image.tag is not set, so the tag is the chart's appVersion (%s), which is older than the floor: set image.tag to nightly-%s or later%s, or set image.digest, or %s." $root.Chart.AppVersion $min.nightly $orRelease $off }}
 {{- end }}
 {{- /*
 Semantic Versioning 2.0.0, with an optional leading v: numeric identifiers
@@ -4660,21 +4666,24 @@ real image tag is affected.
 {{- $num := "(0|[1-9][0-9]{0,18})" }}
 {{- $preId := "(0|[1-9][0-9]{0,18}|[0-9]*[A-Za-z-][0-9A-Za-z-]*)" }}
 {{- $semverRe := printf "^v?%s\\.%s\\.%s(-%s(\\.%s)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$" $num $num $num $preId $preId }}
-{{- if .Values.image.digest }}
+{{- if $root.Values.image.digest }}
 {{- print "unverified" }}
 {{- else if and (regexMatch $semverRe $tag) (not $minVersion) }}
 {{- /* No versioned release carries the change yet: every version tag fails, and the message names the nightly, never a version floor. */}}
 {{- if $defaultTag }}
-{{- fail (printf "image.tag is not set, so the tag is the chart's appVersion (%s), a version tag, and no versioned hub release serves the relay hop with the internal_tls_* settings yet, so a version tag cannot pass: set image.tag to nightly-%s or later, or set image.digest, or set conduit.internalTls.enabled: false." .Chart.AppVersion $min.nightly) }}
+{{- fail (printf "image.tag is not set, so the tag is the chart's appVersion (%s), a version tag, and no versioned hub release serves the relay hop with the internal_tls_* settings yet, so a version tag cannot pass: set image.tag to nightly-%s or later, or set image.digest, or %s." $root.Chart.AppVersion $min.nightly $off) }}
 {{- end }}
-{{- fail (printf "the hub image tag %s is a version tag, and no versioned hub release serves the relay hop with the internal_tls_* settings yet, so a version tag cannot pass: use nightly-%s or later, set image.digest, or set conduit.internalTls.enabled: false." (include "scion-hub.diagValue" $tag) $min.nightly) }}
+{{- fail (printf "the hub image tag %s is a version tag, and no versioned hub release serves the relay hop with the internal_tls_* settings yet, so a version tag cannot pass: use nightly-%s or later, set image.digest, or %s." (include "scion-hub.diagValue" $tag) $min.nightly $off) }}
 {{- else if regexMatch $semverRe $tag }}
 {{- if lt ((semver $tag).Compare (semver $minVersion)) 0 }}
 {{- fail (printf "the hub image tag %s is older than %s, the first hub release that serves the relay hop with the internal_tls_* settings. An older hub ignores them and would serve the hop in plaintext. %s" (include "scion-hub.diagValue" $tag) $minVersion $remedy) }}
 {{- end }}
 {{- print "ok" }}
 {{- else if regexMatch "^v?[0-9]+\\.[0-9]+\\.[0-9]+" $tag }}
-{{- fail (printf "the hub image tag %s starts like a version but is not a valid semantic version, so the chart cannot compare it with the minimum hub release that serves the relay hop with the internal_tls_* settings (nightly-%s or later%s). Use a valid version tag or an image digest, or set conduit.internalTls.enabled: false." (include "scion-hub.diagValue" $tag) $min.nightly $orRelease) }}
+{{- if $minVersion }}
+{{- fail (printf "the hub image tag %s starts like a version but is not a valid semantic version, so the chart cannot compare it with the minimum hub release that serves the relay hop with the internal_tls_* settings (nightly-%s or later%s). Use a valid version tag or an image digest, or %s." (include "scion-hub.diagValue" $tag) $min.nightly $orRelease $off) }}
+{{- end }}
+{{- fail (printf "the hub image tag %s starts like a version but is not a valid semantic version, and no versioned hub release serves the relay hop with the internal_tls_* settings yet. Use nightly-%s or later or an image digest, or %s." (include "scion-hub.diagValue" $tag) $min.nightly $off) }}
 {{- else if regexMatch "^nightly-[0-9]{8}$" $tag }}
 {{- if lt (trimPrefix "nightly-" $tag) (toString $min.nightly) }}
 {{- fail (printf "the hub image tag %s is older than nightly-%s, the first nightly that serves the relay hop with the internal_tls_* settings. An older hub ignores them and would serve the hop in plaintext. %s" (include "scion-hub.diagValue" $tag) $min.nightly $remedy) }}
@@ -4701,7 +4710,7 @@ scion-hub.relayTlsImageCheck).
 {{- else }}
 {{- $listen := toString (dig "server" "hub" "conduit" "internal_listen" "" (.Values.config.extra | default (dict))) }}
 {{- if and $listen (not (include "scion-hub.isLoopbackListen" $listen)) }}
-{{- include "scion-hub.relayTlsImageCheck" . }}
+{{- include "scion-hub.relayTlsImageCheck" (dict "root" . "via" "extra") }}
 {{- end }}
 {{- end }}
 {{- end }}
