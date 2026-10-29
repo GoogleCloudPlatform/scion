@@ -22,7 +22,8 @@ The global setup:
    drop-to-shell fallback);
 2. starts a member-level test hub (class test, `--test-mode member`,
    marked database, pinned hub id, private HOME) with the co-located
-   runtime broker and `server.hub.async_agent_launch` on;
+   runtime broker and the `hub.async_agent_launch` experiment on (set
+   through the admin experiments API and read back);
 3. with the hub's own issuer credential, turns `hub.artifacts` on and
    issues five member test identities and their single-use web-login
    codes (the recorded deviation: a local issuer, no workload delegation);

@@ -433,6 +433,12 @@ DELETE /api/v1/agents/{agentId}
 POST /api/v1/agents/{agentId}/start
 ```
 
+**Request Body (optional):**
+| Field | Type | Description |
+|-------|------|-------------|
+| `forceResume` | bool | For an agent in phase `error`: resume the interrupted harness session instead of starting a fresh one (default: false) |
+| `acceptAsyncLaunch` | bool | Opt in to an asynchronous start (default: false). Honoured only while the `hub.async_agent_start` and `hub.async_agent_launch` experiments are both on, every live hub instance advertises `async_start_v1`, and the agent and broker qualify; the hub then answers as soon as the broker accepts, with the agent in phase `starting` and an active `launch` |
+
 #### Stop Agent
 ```
 POST /api/v1/agents/{agentId}/stop
@@ -442,6 +448,9 @@ POST /api/v1/agents/{agentId}/stop
 ```
 POST /api/v1/agents/{agentId}/restart
 ```
+
+Accepts the same optional body as start, for `acceptAsyncLaunch` only: it
+applies to the restart's start leg (the stop leg stays synchronous).
 
 #### Send Message
 ```
@@ -936,11 +945,14 @@ POST /api/v1/runtime-brokers/{brokerId}/agents/{agentId}/launch
 ```
 
 Internal endpoint for a runtime broker to report progress and the terminal
-outcome of a non-blocking ("async") agent launch (design §3.2, §3.7). Only
-meaningful for an agent whose create request opted in via
-`acceptAsyncLaunch` while the `hub.async_agent_launch` experiment is on;
-with the feature off and no earlier launch left (no agent has a launch),
-every authorized, well-formed call ends in a 404 or 409 below.
+outcome of a non-blocking ("async") agent launch (design §3.2, §3.7): an
+asynchronous create, or an asynchronous start or restart of an existing
+agent. Only meaningful for an agent whose create, start or restart request
+opted in via `acceptAsyncLaunch` while the experiments allowed it
+(`hub.async_agent_launch`, on by default, and for a start
+`hub.async_agent_start`); with them off and no earlier launch left (no
+agent has a launch), every authorized, well-formed call ends in a 404 or
+409 below.
 
 Only the broker itself may call this endpoint (HMAC broker identity must
 match `{brokerId}`); a non-broker caller, or a broker identity that does not
@@ -1046,8 +1058,10 @@ POST /api/v1/agents
 The create request body accepts an optional `acceptAsyncLaunch: boolean`
 field (default `false`). It is the client's opt-in to a non-blocking launch
 and is persisted as-is regardless of whether the `hub.async_agent_launch`
-experiment is on; the experiment (checked at each create send) and the
-opt-in must both be on for a launch to actually be non-blocking.
+experiment is on; the experiment (on by default, checked at each create
+send) and the opt-in must both be on for a launch to actually be
+non-blocking. Existing agents opt in per request instead, with the same
+field in the start and restart bodies (§3.6).
 
 ---
 
