@@ -437,8 +437,10 @@ func TestConvert_DockerInstanceRefusesKubernetesFields(t *testing.T) {
 }
 
 // Secret declarations are copied as declarations; no secret value is read,
-// resolved or emitted, even when the environment holds one, and a
-// conflicting harness override env shows only its keys. The converter
+// resolved or emitted, even when the environment holds one. A harness
+// override env the profiles set differently is preserved: each split
+// instance carries its own profile's literal env, as an agreed env is
+// copied, while no finding shows an env value (only keys). The converter
 // depends on no secret, Hub or environment package (import guard).
 func TestConvert_NeverMaterializesSecretValues(t *testing.T) {
 	t.Setenv("API_TOKEN", "VALUE-FROM-ENVIRONMENT")
@@ -455,26 +457,57 @@ func TestConvert_NeverMaterializesSecretValues(t *testing.T) {
 				HarnessOverrides: map[string]V1HarnessOverride{"claude": {Env: map[string]string{"TOKEN": "INLINE-VALUE-B"}}}},
 		},
 	}
-	got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs})
-	out, err := json.Marshal(got)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, v := range []string{"VALUE-FROM-ENVIRONMENT", "INLINE-VALUE-A", "INLINE-VALUE-B"} {
-		if strings.Contains(string(out), v) {
-			t.Errorf("the conversion result contains %s: %s", v, out)
+	// A choice on the env consolidates it; its resolved notice lists the
+	// values of both profiles, which must show env keys only.
+	choice := ConversionChoice{TargetGroup: "k8s-agents", Field: "harness_overrides.claude.env", ChosenProfile: "a"}
+	for _, in := range []ProfileConversionInput{{Settings: vs}, {Settings: vs, Choices: []ConversionChoice{choice}}} {
+		got := ConvertProfilesToInstances(in)
+		out, err := json.Marshal(got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(out), "VALUE-FROM-ENVIRONMENT") {
+			t.Errorf("the conversion result contains a value from the environment: %s", out)
+		}
+		// No env value, inline or from the environment, appears in any
+		// finding's text (path, message, profiles), split notice included.
+		for _, f := range got.Findings {
+			text := strings.Join(append([]string{f.Code, f.Severity, f.Path, f.Message}, f.Profiles...), "\n")
+			for _, v := range []string{"VALUE-FROM-ENVIRONMENT", "INLINE-VALUE-A", "INLINE-VALUE-B"} {
+				if strings.Contains(text, v) {
+					t.Errorf("finding at %s shows the env value %s: %q", f.Path, v, f.Message)
+				}
+			}
+		}
+		if len(got.Findings) != 1 {
+			t.Fatalf("findings %+v", got.Findings)
+		}
+		for _, inst := range got.Instances {
+			// The two profiles declare the same set in another order: they
+			// agree, and the declarations are copied as written by the first
+			// profile.
+			if want := vs.Profiles["a"].Secrets; inst.AgentDefaults == nil || !reflect.DeepEqual(inst.AgentDefaults.Secrets, want) {
+				t.Fatalf("instance %s: agent_defaults %+v, want secrets %+v", inst.Key, inst.AgentDefaults, want)
+			}
+			if &inst.AgentDefaults.Secrets[0] == &vs.Profiles["a"].Secrets[0] {
+				t.Fatal("the declarations share memory with the settings")
+			}
 		}
 	}
-	if len(got.Instances) != 1 || got.Instances[0].AgentDefaults == nil {
+	got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs})
+	if len(got.Instances) != 2 {
 		t.Fatalf("got %+v", got.Instances)
 	}
-	// The two profiles declare the same set in another order: they agree,
-	// and the declarations are copied as written by the first profile.
-	if want := vs.Profiles["a"].Secrets; !reflect.DeepEqual(got.Instances[0].AgentDefaults.Secrets, want) {
-		t.Fatalf("secrets: got %+v, want %+v", got.Instances[0].AgentDefaults.Secrets, want)
-	}
-	if &got.Instances[0].AgentDefaults.Secrets[0] == &vs.Profiles["a"].Secrets[0] {
-		t.Fatal("the declarations share memory with the settings")
+	for i, name := range []string{"a", "b"} {
+		env := got.Instances[i].AgentDefaults.HarnessOverrides["claude"].Env
+		want := vs.Profiles[name].HarnessOverrides["claude"].Env
+		if got.ProfileMap[name] != got.Instances[i].Key || !reflect.DeepEqual(env, want) {
+			t.Fatalf("profile %s: instance %s env %v, want its own literal env %v", name, got.Instances[i].Key, env, want)
+		}
+		env["TOKEN"] = "changed"
+		if want["TOKEN"] == "changed" {
+			t.Fatal("the instance env shares memory with the settings")
+		}
 	}
 
 	fset := token.NewFileSet()
