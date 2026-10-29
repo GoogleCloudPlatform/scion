@@ -452,6 +452,9 @@ type Server struct {
 	// stateDirSetupErr refuses to start a server whose broker ID cannot
 	// name its default state directory (DefaultStateDir; startServices).
 	stateDirSetupErr error
+	// controlPathSetupErr refuses to start a server whose layout roots
+	// reach Runtime Broker control paths (checkLayoutRoots).
+	controlPathSetupErr error
 
 	// auxiliaryRuntimes holds runtime+manager pairs for non-default runtimes
 	// created via profile resolution (e.g. kubernetes when default is docker).
@@ -570,6 +573,10 @@ type Server struct {
 	// once per process (startSharedDirsMigrationHook).
 	sharedDirsMigrateOnce sync.Once
 	nfsReconcileCancel    context.CancelFunc
+	// controlPathSweepOnce and controlPathSweepCancel run and stop the
+	// running-agent control-path sweep (startControlPathSweep).
+	controlPathSweepOnce   sync.Once
+	controlPathSweepCancel context.CancelFunc
 	// shareHealth is the project storage share's visibility on a shared
 	// Layout, re-checked by startShareHealthLoop (share_health.go).
 	shareHealth shareHealthState
@@ -671,6 +678,14 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime, rec config.Run
 		} else {
 			srv.stateDir = dir
 		}
+	}
+	// The state directory, a configured credentials file and a co-located
+	// Hub's database are Runtime Broker control paths no agent may mount,
+	// wherever they are configured (brokercontrol).
+	registerControlPaths(cfg.BrokerID, srv.stateDir, cfg.BrokerCredentialsPath)
+	if err := checkLayoutRoots(cfg); err != nil {
+		srv.controlPathSetupErr = fmt.Errorf("runtime broker layout: %w", err)
+		slog.Error("Runtime Broker will not start", "error", srv.controlPathSetupErr)
 	}
 	if fi := srv.flatInstance(); fi != nil {
 		srv.flatK8sIdentity = newFlatKubernetesIdentityPolicy(fi)
@@ -1543,6 +1558,9 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 	if s.stateDirSetupErr != nil {
 		return s.stateDirSetupErr
 	}
+	if s.controlPathSetupErr != nil {
+		return s.controlPathSetupErr
+	}
 	if s.hostSetupErr != nil {
 		return s.hostSetupErr
 	}
@@ -1618,6 +1636,10 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 	// reconciled.
 	s.startNFSReconcileLoop(ctx)
 	s.startShareHealthLoop(ctx)
+
+	// Re-check the binds of agents already running, now and periodically,
+	// against the Runtime Broker control paths (controlPathSweeper).
+	s.startControlPathSweep(ctx)
 
 	// Move shared dirs this broker kept node-local onto the shared tree
 	// its Layout now places them on (background, once per process).
@@ -1741,6 +1763,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.RUnlock()
 	if nfsCancel != nil {
 		nfsCancel()
+	}
+	s.mu.RLock()
+	sweepCancel := s.controlPathSweepCancel
+	s.mu.RUnlock()
+	if sweepCancel != nil {
+		sweepCancel()
 	}
 	s.stopShareHealthLoop()
 
@@ -1868,6 +1896,12 @@ func (s *Server) sortedAuxiliaryRuntimes() []namedAuxiliaryRuntime {
 // resolve to a runtime different from the broker's default. Any discovered
 // non-default runtimes are registered as auxiliary runtimes so that agents
 // running on them (e.g. Kubernetes pods) can be found after a broker restart.
+//
+// Linked projects elsewhere on disk are not scanned here; their runtime
+// profiles are registered on first use, so the running-agent control-path
+// sweep (controlPathSweeper) reaches their agents only from then on. Scanning
+// the project dirs this broker has local agent state for is a follow-up (see
+// the Limitations in the Volume Source Restrictions reference).
 func (s *Server) discoverAuxiliaryRuntimes() {
 	// Collect project paths to scan
 	var projectPaths []string

@@ -2638,7 +2638,9 @@ func TestBuildCommonRunArgs_ProjectLabels_ExactSet(t *testing.T) {
 	var scionLabels []string
 	for i, arg := range args {
 		if arg == "--label" && i+1 < len(args) {
-			if v := args[i+1]; strings.HasPrefix(v, "scion.") {
+			// The bind-source record is not a project label
+			// (LabelBindSources); it is on every container.
+			if v := args[i+1]; strings.HasPrefix(v, "scion.") && !strings.HasPrefix(v, LabelBindSources+"=") {
 				scionLabels = append(scionLabels, v)
 			}
 		}
