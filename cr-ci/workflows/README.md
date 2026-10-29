@@ -243,6 +243,64 @@ step prints both the reported and the physical path.
   that key on ubuntu-latest and check that the entries land in
   `/home/runner/.cache/go-build`.
 
+## Fork CI gate
+
+Forks of `GoogleCloudPlatform/scion` (such as `ptone/scion`) are for staging
+pull requests, so a fork does not run CI on `push` or `schedule`. Every job in
+a workflow triggered by a branch push or a schedule starts its job-level `if:`
+with the same gate:
+
+```yaml
+if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
+```
+
+A job that already had an `if:` keeps it, ANDed after the gate:
+`${{ (<gate>) && (<old condition>) }}`. Upstream, the gate is always true, so
+push and schedule runs are unchanged. `pull_request`, `pull_request_target`
+and `workflow_dispatch` runs are unchanged everywhere, the fork included. On
+a fork push or schedule every job is skipped, including the `always()`
+summary jobs, so nothing turns red and no check is left pending. Jobs that
+already carry the stricter upstream-only guard
+(`if: github.repository == 'GoogleCloudPlatform/scion'`, in
+`build-nightly.yml` and `build-preview-weekly.yml`) keep it as it is. No
+variable or other fork-side setting is involved.
+
+As a result, the routing expression's `push` branch routes nothing for now.
+Upstream, `SCION_LARGE_RUNNER` is unset, and on a fork the push run is
+skipped. On a fork, cr-ci serves only same-repository pull requests.
+
+To run push CI on a fork anyway, start the workflow with `workflow_dispatch`
+where it has that trigger (`docs.yml`, `full-test-suite.yml`, `web-e2e.yml`,
+`build-nightly.yml`, `build-preview-weekly.yml`, `race-detection.yml`), or
+edit the gate in that fork's copy of the workflow.
+
+`hack/check-fork-ci-gate.sh` (the `fork-ci-gate-check` job in `ci.yml`, with
+fixtures in `hack/testdata/fork-ci-gate/`) fails when such a job lacks the
+gate. It also fails when the gate is weakened, for example by an `||` outside the
+job's own condition. It skips push triggers that filter only tags. It has no
+YAML parser and reads only the 2-space block style used here. In every
+workflow except `build-release.yml` (skipped by name, layout rules included),
+it reports `unrecognised layout` (exit 1) for:
+
+- an inline `on:` value that is not a bare event or a one-line list of bare
+  events (for example a flow map, a quoted event, or a list over several lines);
+- any line under a block `on:` that is not one of: a 2-space `- event` entry,
+  a 2-space `event:` key, that key's settings indented by 4 or more spaces, a
+  comment, or a blank line. This covers entries at column 0, a list or scalar
+  on the next line, and 4-space entries;
+- an `on:` with no entry (a block `on:` holding only comments or blank lines,
+  or `on: []`);
+- no top-level `on:` or `jobs:` key it recognises (for example a quoted
+  `"jobs":` or `jobs :`);
+- an inline `jobs:` value, a job key that is not an unquoted 2-space key, or a
+  `jobs:` with no job.
+
+Keep each `if:` on one line. A block-scalar `if:` is reported, and a trailing
+comment with no quotes in it is ignored.
+
+`build-release.yml` (tag pushes) is not gated yet; its jobs carry the
+upstream-only repository guard instead.
+
 ## PoC success criteria
 
 These are part of the full P6 list in
