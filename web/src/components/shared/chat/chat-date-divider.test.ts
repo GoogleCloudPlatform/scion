@@ -21,7 +21,12 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import { render } from 'lit';
-import { formatChatDate, renderDateDivider } from './chat-date-divider.js';
+import {
+  formatChatDate,
+  renderDateDivider,
+  renderRetentionDivider,
+  retentionDividerText,
+} from './chat-date-divider.js';
 import { setPreferredTimeZone } from '../../../utils/time.js';
 
 describe('formatChatDate', () => {
@@ -53,5 +58,39 @@ describe('renderDateDivider (AC4, review R2-3)', () => {
     render(renderDateDivider(''), host);
     const label = host.querySelector('.date-label');
     expect(label?.textContent?.trim()).toBe('');
+  });
+});
+
+describe('retention divider (hub.chat_retention)', () => {
+  afterEach(() => setPreferredTimeZone(''));
+
+  it('states the cutoff in the date dividers’ format', () => {
+    setPreferredTimeZone('UTC');
+    expect(retentionDividerText('2026-07-31T00:00:00Z')).toBe(
+      "Messages before Jul 31, 2026 are removed by this hub's retention policy."
+    );
+  });
+
+  it('uses the effective display zone, like the date dividers', () => {
+    setPreferredTimeZone('Asia/Tokyo');
+    expect(retentionDividerText('2026-07-30T20:00:00Z')).toContain('Jul 31, 2026');
+  });
+
+  it('renders the sentence in a date-divider row', () => {
+    setPreferredTimeZone('UTC');
+    const host = document.createElement('div');
+    render(renderRetentionDivider('2026-07-31T00:00:00Z'), host);
+    const row = host.querySelector('.date-divider.retention-divider');
+    expect(row?.getAttribute('role')).toBe('note');
+    expect(row?.querySelector('.retention-label')?.textContent?.trim()).toBe(
+      "Messages before Jul 31, 2026 are removed by this hub's retention policy."
+    );
+  });
+
+  it('renders nothing for an invalid instant', () => {
+    expect(retentionDividerText('not-a-date')).toBe('');
+    const host = document.createElement('div');
+    render(renderRetentionDivider('not-a-date'), host);
+    expect(host.querySelector('.retention-divider')).toBeNull();
   });
 });
