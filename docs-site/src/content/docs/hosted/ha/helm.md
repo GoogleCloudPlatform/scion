@@ -459,7 +459,8 @@ not a version (such as `latest`), cannot be checked: the render is allowed,
 chart's `appVersion` (the default image tag) stays below that release until a
 versioned hub release carries relay TLS, so with relay TLS on (the default above
 one replica) set `image.tag` to `nightly-20261029` or later, or set
-`image.digest`.
+`image.digest`. Until a versioned hub release carries relay TLS, every version
+tag is refused, so use a nightly tag or a digest.
 
 **Rolling back.** Hub releases before the one that adds relay TLS ignore the
 `internal_tls_*` settings and would serve this listener in plaintext. If you roll
