@@ -2920,7 +2920,8 @@ func hasAgentReplyAfter(ctx context.Context, s store.Store, threadID string, aft
 	const pageSize = 50
 	cursor := ""
 	for {
-		opts := store.ListOptions{Limit: pageSize}
+		// The scan reads only Items and NextCursor, so it skips the count.
+		opts := store.ListOptions{Limit: pageSize, SkipTotalCount: true}
 		if cursor != "" {
 			opts.Cursor = cursor
 		}
@@ -3040,8 +3041,13 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	// historyConvID is the conversation the page is listed by, when the
 	// envelope switch resolved one; reply previews are matched against it.
 	historyConvID := target.ConversationID
+	// No history caller reads totalCount, and counting costs a scan of
+	// the whole conversation on every page, so the page skips it
+	// (ptone/scion#6571). The around jump derives both of its queries from
+	// opts, so they skip it too.
 	opts := store.ListOptions{
-		Limit: limit,
+		Limit:          limit,
+		SkipTotalCount: true,
 		// Keyset pagination cursor. The client sends the opaque `nextCursor`
 		// from the previous page back as `cursor` (see chat-thread.ts
 		// fetchHistoryV2); reading any other parameter name silently drops it
@@ -3077,7 +3083,10 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		if olderLimit > 0 {
 			olderFilter := filter
 			olderFilter.Before = anchor.CreatedAt
-			older, err = s.store.ListMessages(ctx, olderFilter, store.ListOptions{Limit: olderLimit})
+			olderOpts := opts
+			olderOpts.Cursor = ""
+			olderOpts.Limit = olderLimit
+			older, err = s.store.ListMessages(ctx, olderFilter, olderOpts)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch messages", nil)
 				return
@@ -3088,10 +3097,11 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		if newerLimit > 0 {
 			newerFilter := filter
 			newerFilter.After = anchor.CreatedAt
-			newer, err = s.store.ListMessages(ctx, newerFilter, store.ListOptions{
-				Limit:   newerLimit,
-				SortDir: "asc",
-			})
+			newerOpts := opts
+			newerOpts.Cursor = ""
+			newerOpts.Limit = newerLimit
+			newerOpts.SortDir = "asc"
+			newer, err = s.store.ListMessages(ctx, newerFilter, newerOpts)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch messages", nil)
 				return
@@ -3107,7 +3117,6 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		result = &store.ListResult[store.Message]{
 			Items:      items,
 			NextCursor: older.NextCursor,
-			TotalCount: older.TotalCount + 1 + newer.TotalCount,
 		}
 	} else {
 		var err error
@@ -3364,8 +3373,10 @@ func (s *Server) handleConversationInteragent(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	// The response carries no total, so neither query counts.
 	opts := store.ListOptions{
-		Limit: limit,
+		Limit:          limit,
+		SkipTotalCount: true,
 	}
 
 	// Query 1: messages where the DM agent's UUID appears in sender_id
@@ -5835,7 +5846,9 @@ type chatMessageResponse struct {
 type chatHistoryResponse struct {
 	Messages   []store.Message `json:"messages"`
 	NextCursor string          `json:"nextCursor,omitempty"`
-	TotalCount int             `json:"totalCount"`
+	// TotalCount is 0 on an ordinary history page, which skips the count.
+	// The starred-only variant (handleStarredHistory) reports its matches.
+	TotalCount int `json:"totalCount"`
 	// CanPost reports, for a topic, whether the caller's account may post
 	// in it (project.chat_post). Omitted for a DM.
 	CanPost            *bool                      `json:"canPost,omitempty"`
