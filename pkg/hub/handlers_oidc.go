@@ -37,15 +37,15 @@ type oidcDiscoveryDocument struct {
 	ScopesSupported                  []string `json:"scopes_supported"`
 }
 
-// handleOIDCDiscovery serves the OIDC Provider Metadata at
+// HandleOIDCDiscovery serves the OIDC Provider Metadata at
 // GET /.well-known/openid-configuration.
-func (s *Server) handleOIDCDiscovery(w http.ResponseWriter, r *http.Request) {
+func (h *OIDCHandlers) HandleOIDCDiscovery(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
-	issuer := s.oidcIssuerURL
+	issuer := h.d.IssuerURL()
 
 	doc := oidcDiscoveryDocument{
 		Issuer:                           issuer,
@@ -68,14 +68,14 @@ func (s *Server) handleOIDCDiscovery(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleJWKS serves the JSON Web Key Set at GET /.well-known/jwks.json.
-func (s *Server) handleJWKS(w http.ResponseWriter, r *http.Request) {
+// HandleJWKS serves the JSON Web Key Set at GET /.well-known/jwks.json.
+func (h *OIDCHandlers) HandleJWKS(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
-	jwks := s.oidcKeyManager.JWKS()
+	jwks := h.d.KeyManager().JWKS()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=300")
@@ -99,6 +99,14 @@ type identityTokenResponse struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
+// Token kinds carried in the scion_token_kind claim of tokens signed with
+// the hub's OIDC key, so a receiving hub tells a user access credential for
+// a peer hub from an agent identity token by an explicit claim.
+const (
+	tokenKindUser  = "user"
+	tokenKindAgent = "agent"
+)
+
 // OIDCIdentityTokenClaims defines the claims in a Scion OIDC identity token.
 type OIDCIdentityTokenClaims struct {
 	jwt.Claims
@@ -113,18 +121,18 @@ type OIDCIdentityTokenClaims struct {
 	TokenKind string `json:"scion_token_kind"`
 }
 
-// handleAgentIdentityToken handles POST /api/v1/agent/identity-token.
+// HandleAgentIdentityToken handles POST /api/v1/agent/identity-token.
 // It mints an RS256-signed OIDC identity token for the calling agent.
-func (s *Server) handleAgentIdentityToken(w http.ResponseWriter, r *http.Request) {
+func (h *OIDCHandlers) HandleAgentIdentityToken(w http.ResponseWriter, r *http.Request) {
 	// 1. Extract agent identity from context.
-	agent := GetAgentFromContext(r.Context())
-	if agent == nil {
+	agent, ok := h.d.CallerAgent(r.Context())
+	if !ok {
 		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "agent authentication required", nil)
 		return
 	}
 
 	// 2. Rate limit (per-agent).
-	if s.oidcTokenRateLimiter != nil && !s.oidcTokenRateLimiter.Allow(agent.Subject) {
+	if rl := h.d.TokenRateLimiter(); rl != nil && !rl.Allow(agent.Subject) {
 		writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "rate limit exceeded for identity token requests", nil)
 		return
 	}
@@ -141,13 +149,13 @@ func (s *Server) handleAgentIdentityToken(w http.ResponseWriter, r *http.Request
 	}
 
 	// 4. Check scope: agent must have agent:identity:token scope.
-	if !agent.HasScope(ScopeIdentityToken) {
+	if !agent.CanRequestIdentityToken {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "agent not authorized to request identity tokens", nil)
 		return
 	}
 
 	// 5. Look up agent record from store.
-	agentRecord, err := s.store.GetAgent(r.Context(), agent.Subject)
+	agentRecord, err := h.d.Agents().GetAgent(r.Context(), agent.Subject)
 	if err != nil {
 		NotFound(w, "Agent")
 		return
@@ -155,7 +163,7 @@ func (s *Server) handleAgentIdentityToken(w http.ResponseWriter, r *http.Request
 
 	// 6. Build claims.
 	now := time.Now()
-	expiresAt := now.Add(s.oidcTokenLifetime)
+	expiresAt := now.Add(h.d.TokenLifetime())
 
 	jti := make([]byte, 16)
 	if _, err := rand.Read(jti); err != nil {
@@ -175,7 +183,7 @@ func (s *Server) handleAgentIdentityToken(w http.ResponseWriter, r *http.Request
 
 	claims := OIDCIdentityTokenClaims{
 		Claims: jwt.Claims{
-			Issuer:    s.oidcIssuerURL,
+			Issuer:    h.d.IssuerURL(),
 			Subject:   agent.Subject,
 			Audience:  jwt.Audience{req.Audience},
 			IssuedAt:  jwt.NewNumericDate(now),
@@ -191,7 +199,7 @@ func (s *Server) handleAgentIdentityToken(w http.ResponseWriter, r *http.Request
 	}
 
 	// 7. Sign with RS256.
-	signer := s.oidcKeyManager.Signer()
+	signer := h.d.KeyManager().Signer()
 	token, err := jwt.Signed(signer).Claims(claims).Serialize()
 	if err != nil {
 		slog.Error("Failed to sign OIDC identity token",
