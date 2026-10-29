@@ -22,6 +22,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -182,6 +183,9 @@ func (s *Server) startProjectConfigIdentityEnsure(ctx context.Context) {
 // projectConfigIdentityCounts summarizes one ensureProjectConfigIdentities pass.
 type projectConfigIdentityCounts struct {
 	ensured, mismatched, failed, notReached int
+	// workspacesProvisioned and workspacesFailed count the hub-native
+	// workspace leaves the pass provisioned (backfillHubNativeWorkspace).
+	workspacesProvisioned, workspacesFailed int
 }
 
 // ensureProjectConfigIdentities ensures the identity files of every
@@ -223,11 +227,22 @@ func (s *Server) ensureProjectConfigIdentities(ctx context.Context) projectConfi
 			case err != nil:
 				counts.failed++
 				logger.Warn("project configuration identity: could not ensure the identity files",
-					"project_id", project.ID, "error", err)
+					"project_id", project.ID, "error", sanitizedStorageError(err))
 			case outcome == identityMismatch:
 				counts.mismatched++
 			default:
 				counts.ensured++
+				// A hub-native project whose workspace leaf is absent gets it
+				// now (best-effort; ids only in the log). Never for a git
+				// project, and never next to a mismatched identity.
+				switch created, err := s.backfillHubNativeWorkspace(ctx, project); {
+				case err != nil:
+					counts.workspacesFailed++
+					logger.Warn("project workspace: could not provision the hub-native workspace leaf", "project_id", project.ID)
+				case created:
+					counts.workspacesProvisioned++
+					logger.Info("project workspace: provisioned the hub-native workspace leaf", "project_id", project.ID)
+				}
 			}
 		}
 		if result.NextCursor == "" {
@@ -236,8 +251,38 @@ func (s *Server) ensureProjectConfigIdentities(ctx context.Context) projectConfi
 		cursor = result.NextCursor
 	}
 	logger.Info("project configuration identity: pass finished",
-		"ensured", counts.ensured, "mismatched", counts.mismatched, "failed", counts.failed, "not_reached", counts.notReached)
+		"ensured", counts.ensured, "mismatched", counts.mismatched, "failed", counts.failed, "not_reached", counts.notReached,
+		"workspaces_provisioned", counts.workspacesProvisioned, "workspaces_failed", counts.workspacesFailed)
 	return counts
+}
+
+// backfillHubNativeWorkspace provisions the workspace leaf of an existing
+// hub-native project on a shared backend when the leaf is absent, with the
+// create-time provisioning (provisionHubNativeWorkspace). It reports whether
+// it provisioned one. A present leaf is left alone, whatever it holds; a git
+// project, a linked project, an empty-per-agent project and the global
+// project get nothing (hubNativeWorkspaceProject).
+func (s *Server) backfillHubNativeWorkspace(ctx context.Context, project *store.Project) (bool, error) {
+	if !s.hubNativeWorkspaceProject(ctx, project) {
+		return false, nil
+	}
+	res, err := s.projectWorkspaceResolved(project)
+	if err != nil {
+		return false, err
+	}
+	base, err := res.ResolvedHostBase()
+	if err != nil {
+		return false, err
+	}
+	if _, err := os.Lstat(filepath.Join(base, res.RelPath)); err == nil {
+		return false, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return false, err
+	}
+	if err := s.provisionSharedWorkspace(ctx, project); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // checkProjectConfigIdentityHealth reports identity mismatches as a
