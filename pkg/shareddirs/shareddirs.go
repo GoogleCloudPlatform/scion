@@ -32,6 +32,7 @@
 package shareddirs
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -47,6 +48,20 @@ import (
 // are valid in either ID scheme — those wouldn't escape the export, but
 // they would produce confusing errors or odd subPaths.
 var projectIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+// ErrUnconfinedPath marks a refusal by the O_NOFOLLOW component walk: a path
+// component is a symlink or not a directory, or the directory changed
+// between the walk and the open. The path does not name the directory the
+// layout places there, so retrying cannot help. Errors that carry it keep
+// their own message; match them with errors.Is.
+var ErrUnconfinedPath = errors.New("path is not confined to the shared tree")
+
+// confinementError is an error matching ErrUnconfinedPath with its own
+// message.
+type confinementError struct{ msg string }
+
+func (e *confinementError) Error() string        { return e.msg }
+func (e *confinementError) Is(target error) bool { return target == ErrUnconfinedPath }
 
 // Owner is the owner a directory creator running as root gives the leaf
 // directories it creates on a shared tree (shared dirs, workspace and
