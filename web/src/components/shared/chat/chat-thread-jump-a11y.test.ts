@@ -593,7 +593,7 @@ describe('scion-chat-thread message list tab stop (More actions)', () => {
     expect(arrow.defaultPrevented).toBe(false);
   });
 
-  it('a headerless starred row marks its bubble so the button sits past the gutter star', async () => {
+  it('a headerless starred row keeps its star in the gutter and the button inside the bubble', async () => {
     setFlag(true);
     const el = await mount();
     await settled(el);
@@ -601,11 +601,12 @@ describe('scion-chat-thread message list tab stop (More actions)', () => {
     row.starred = true;
     await row.updateComplete;
     const bubble = row.shadowRoot!.querySelector('.bubble')!;
-    expect(bubble.classList.contains('has-star-meta')).toBe(true);
-    expect(bubble.querySelector('.star-meta .star-indicator')).not.toBeNull();
-    expect(bubble.querySelector('.msg-actions')).not.toBeNull();
+    const star = bubble.querySelector('.star-meta .star-indicator');
+    expect(star).not.toBeNull();
+    expect(star!.closest('.bubble-content')).toBeNull();
+    expect(row.actionsButton!.parentElement!.classList.contains('bubble-content')).toBe(true);
     row.starred = false;
     await row.updateComplete;
-    expect(bubble.classList.contains('has-star-meta')).toBe(false);
+    expect(bubble.querySelector('.star-meta')).toBeNull();
   });
 });
