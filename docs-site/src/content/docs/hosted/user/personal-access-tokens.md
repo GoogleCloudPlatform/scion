@@ -466,6 +466,7 @@ privilege boundaries:
   auto-injected by the Runtime Broker, and grants only the specific permissions that agent needs
   to function (e.g., reporting status, reading its own secrets).
 - **Usage**: Automatically used by the `sciontool` binary running inside the agent.
+- **Enforcement**: In Runtime Broker mode, the Runtime Broker populates `~/.scion/scion-token`, `SCION_AUTH_TOKEN`, and `SCION_HUB_TOKEN` solely from the Hub-issued token for that run. Any `SCION_AUTH_TOKEN` configured in an agent's or harness-config's `env` is stripped and ignored with a start warning (`SCION_AUTH_TOKEN is set in the agent's environment configuration and is ignored: the agent's hub credential is only the token the hub issues for it`), and a Hub-dispatched start or restart that lacks a Hub-issued token is refused with `500 runtime_error` before a container starts.
 
 :::danger[Privilege escalation risk]
 **Never inject a `SCION_HUB_TOKEN` (or a user-level UAT) into an agent container as the

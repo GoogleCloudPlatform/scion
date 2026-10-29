@@ -240,7 +240,7 @@ git log --oneline -5 | scion message @tech-lead -
 scion message @tech-lead --body-file - < ./review-notes.md
 ```
 
-For `--body-file` and stdin, trailing CR/LF characters are trimmed; everything else is sent exactly as read.
+For `--body-file` and stdin, trailing CR/LF characters are trimmed; everything else is sent exactly as read. When `--attach` cannot upload files to the Hub as artifacts (for example while the `hub.attachment_artifacts` experiment is off) and falls back to staging them on the local `scratchpad` shared directory, `scion message` prints a `Warning: attachments are staged on the local scratchpad instead of uploaded to the hub (<reason>); they may not reach the hub or recipients on another broker` line on stderr.
 
 A successful send to an agent prints `Message accepted for agent '<name>'`. "Accepted" means the Hub handed the message to the agent's runtime, which buffered it. It does not mean the agent has read it. A send to an agent that is reincarnating prints a separate notice that the message was saved for catch-up.
 
