@@ -287,13 +287,6 @@ type stubUserStore struct {
 	getUser func(ctx context.Context, id string) (*store.User, error)
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 func canonicalConstraintAuditNotFound(t *testing.T) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
