@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 360
+**Operations:** 361
 
 ## Table of Contents
 
@@ -255,6 +255,7 @@
 - [hub.config.update](#hubconfigupdate) — Update server configuration sections. The route guard checks hub.config.read, so a token needs hub_config:read and hub_config:update, and writes configuration keys only
 - [hub.messaging.update](#hubmessagingupdate) — Read and update messaging configuration switches
 - [hub.profiling.update](#hubprofilingupdate) — Read and update the profiling switches (session only)
+- [hub.chatretention.update](#hubchatretentionupdate) — Read and update the chat message retention settings (session only)
 - [hub.experiments.update](#hubexperimentsupdate) — Read and update hub-wide experiment overrides
 - [hub.conduitgrantkeys.rotate](#hubconduitgrantkeysrotate) — Rotate the conduit grant signing key (kids and timestamps only in the response)
 - [hub.conduitgrantkeys.revoke](#hubconduitgrantkeysrevoke) — Revoke a conduit grant key at once (the kid only in the response)
@@ -9666,6 +9667,39 @@
 ### Tests
 
 - `pkg/hub:TestAdminProfiling_TokenRefused`
+
+---
+
+## hub.chatretention.update
+
+**Domain:** hub
+
+**Description:** Read and update the chat message retention settings (session only)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/chat-retention` |
+| http_route | PUT | `/api/v1/admin/chat-retention` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `IRREVERSIBLE_CASCADE`)
+
+**Base Permission:** `hub.config.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAdminChatRetention_TokenRefused`
 
 ---
 

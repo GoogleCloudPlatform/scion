@@ -213,7 +213,7 @@ var hubOperations = []OperationSpec{
 		Bearer:           SessionOnly(ReasonHostOperations),
 	},
 	{
-		ID:          "hub.chat_retention.update",
+		ID:          "hub.chatretention.update",
 		Domain:      "hub",
 		Description: "Read and update the chat message retention settings (session only)",
 		EntryPoints: []EntryPoint{
