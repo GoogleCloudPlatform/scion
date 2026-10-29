@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 )
 
 // MountChecker abstracts the syscall/exec layer for NFS mount reconciliation.
@@ -347,12 +348,59 @@ func (r *NFSMountReconciler) setStatus(shareID, target string, healthy bool, mes
 		return
 	}
 	if !healthy {
-		r.log.Error("NFS share unhealthy",
-			"shareID", shareID, "target", target, "reason", message)
+		if r.advisoryFailure(target) {
+			r.log.Warn("NFS share mount-table check failed; advisory on this broker, which does not mount the share, and the share directory is visible",
+				"shareID", shareID, "target", target, "reason", message)
+		} else {
+			r.log.Error("NFS share unhealthy",
+				"shareID", shareID, "target", target, "reason", message)
+		}
 	} else if had && !prev.Healthy {
 		r.log.Info("NFS share healthy again",
 			"shareID", shareID, "target", target, "status", message)
 	}
+}
+
+// advisoryFailure reports whether a failed check of the share mounted at
+// target is advisory only: the reconciler is verify-only (the broker never
+// mounts the share; its runtime mounts the export into each agent) and the
+// share's subpath root (<target>/<subpath_root>, projectfs.ShareSubPathRootDir,
+// the directory the start refusal and the health check test) is visible on
+// the broker (projectfs.ShareDirVisible).
+// Such a failure is usually a mount-table source that differs from the
+// configuration in form only, and it does not refuse a dispatch, so it is
+// logged as a warning. A share directory that is not visible, or any
+// failure on a broker that mounts its shares, stays an error.
+func (r *NFSMountReconciler) advisoryFailure(target string) bool {
+	if !r.VerifyOnly() || target == "" || r.cfg == nil {
+		return false
+	}
+	return projectfs.ShareDirVisible(context.Background(), projectfs.ShareSubPathRootDir(target, r.cfg.SubPathRoot)) == nil
+}
+
+// UnhealthyAdvisoryOnly reports whether at least one share is unhealthy
+// and every unhealthy share's failure is advisory (advisoryFailure).
+func (r *NFSMountReconciler) UnhealthyAdvisoryOnly() bool {
+	if !r.VerifyOnly() {
+		return false
+	}
+	r.mu.RLock()
+	var targets []string
+	for _, st := range r.statuses {
+		if !st.Healthy {
+			targets = append(targets, st.Target)
+		}
+	}
+	r.mu.RUnlock()
+	if len(targets) == 0 {
+		return false
+	}
+	for _, t := range targets {
+		if !r.advisoryFailure(t) {
+			return false
+		}
+	}
+	return true
 }
 
 // DefaultNFSReconcileInterval is how often Run re-checks the shares after

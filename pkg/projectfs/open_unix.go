@@ -115,6 +115,35 @@ func (r Resolved) VerifyNoSymlinks() (string, error) {
 	return got, nil
 }
 
+// OpenProjectTree opens the directory that holds projectID's project tree on
+// a shared backend, <HostBase>/<subpath_root>, as an *os.Root, and returns it
+// with the name of the project's entry in it (the project ID). Operations
+// through the root never leave it, so a caller acts on the project tree by
+// that name through the root (Lstat, RemoveAll), never by a path string.
+//
+// The root is reached by pkg/shareddirs' anchored, open-only walk from the
+// resolved HostBase (OpenAnchoredRoot): every component of the subpath root
+// is opened without following a symlink, and the root opened must be the
+// directory the walk saw. A component that is a symlink or not a directory,
+// or a directory that changed in between, is refused with an error that
+// matches shareddirs.ErrUnconfinedPath. A missing HostBase or subpath root
+// gives an fs.ErrNotExist-compatible error. Nothing is created.
+func (l Layout) OpenProjectTree(projectID string) (*os.Root, string, error) {
+	pr, err := l.ProjectRoot(projectID)
+	if err != nil {
+		return nil, "", err
+	}
+	base, err := pr.ResolvedHostBase()
+	if err != nil {
+		return nil, "", err
+	}
+	parent, err := shareddirs.OpenAnchoredRoot(base, filepath.Dir(pr.RelPath))
+	if err != nil {
+		return nil, "", err
+	}
+	return parent, filepath.Base(pr.RelPath), nil
+}
+
 // EnsureProjectConfigDir creates (or verifies) a project's configuration
 // directory on a shared backend, <ProjectRoot(projectID)>/.scion (beside
 // workspace/, inside no Mount), through pkg/shareddirs'

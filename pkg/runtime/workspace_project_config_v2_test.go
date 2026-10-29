@@ -1,3 +1,5 @@
+//go:build unix
+
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,32 +27,6 @@ import (
 	"testing"
 	"time"
 )
-
-// fsSnapshot records every path under roots, for the fail-closed
-// "nothing created on disk" check on a refused start.
-func fsSnapshot(t *testing.T, roots ...string) map[string]bool {
-	t.Helper()
-	m := map[string]bool{}
-	for _, r := range roots {
-		_ = filepath.Walk(r, func(p string, _ os.FileInfo, err error) error {
-			if err == nil {
-				m[p] = true
-			}
-			return nil
-		})
-	}
-	return m
-}
-
-// assertNothingCreated fails if any path under roots is new since before.
-func assertNothingCreated(t *testing.T, before map[string]bool, roots ...string) {
-	t.Helper()
-	for p := range fsSnapshot(t, roots...) {
-		if !before[p] {
-			t.Errorf("refused start created %s on disk", p)
-		}
-	}
-}
 
 // tmpfsTargets returns the destinations of every tmpfs mask in args, from both
 // the Apple --tmpfs form and the docker/podman --mount type=tmpfs form.
