@@ -362,11 +362,14 @@ func localContainerRuntime(runtimeName string) bool {
 // not fatal). An already provisioned workspace (sentinel present, as after
 // the hub's provisioning at project create) takes the reuse path; a lost
 // sentinel or a project from before that provisioning gets the clone, under
-// the provisioning lock. The clone gets the agent's git token only for the
-// clone URL's own host. It reports whether it provisioned (the caller then
-// suppresses the in-container clone); false with no error when the request
-// is not such a dispatch.
-func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startContextInputs, env map[string]string) (bool, error) {
+// the provisioning lock. The clone gets no git token: the agent's token is
+// not passed to it and no token remote is set, so a private repository is
+// not cloned here and the start fails with the provisioner's "needs
+// credentials" error. It reports whether it
+// provisioned (the caller then suppresses the in-container clone); false
+// with no error when the request is not such a dispatch. The agent's
+// resolved environment (the third argument) is deliberately not read.
+func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startContextInputs, _ map[string]string) (bool, error) {
 	layout := s.config.StorageLayout
 	if !layout.Backend.Shared() || !isSharedHubProjectRoot(in.ProjectPath) || in.Config == nil || in.Config.GitClone == nil {
 		return false, nil
@@ -406,8 +409,6 @@ func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startCont
 		AgentID:             in.AgentID,
 		Mode:                store.SharingModeSharedPlain,
 		GitClone:            &gc,
-		CloneToken:          env[provision.GitTokenEnv],
-		CloneTokenRemote:    gc.URL,
 		HostGitHardened:     true,
 		NFSUID:              uid,
 		NFSGID:              gid,
