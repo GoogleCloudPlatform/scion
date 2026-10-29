@@ -33,8 +33,10 @@ const (
 	personalTestUserToken    = "personal-user-token"
 	personalTestProjectToken = "project-scope-token"
 	personalTestCallerToken  = "caller-shell-token"
-	personalTestOwner        = "personal-token-owner"
 )
+
+// personalTestOwner is the agent owner's user ID (a UUID, as the store requires).
+var personalTestOwner = tid("personal-token-owner")
 
 // personalTokenFixture is a dispatcher with a secret backend over a real
 // store, one project with gitRemote, and one stored agent of that project
