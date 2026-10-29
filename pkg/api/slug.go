@@ -154,14 +154,15 @@ func ValidateDisplayName(name string) (key string, err error) {
 	if name == "" {
 		return "", fmt.Errorf("display name must not be empty")
 	}
-	runeCount := utf8.RuneCountInString(name)
-	if runeCount > MaxDisplayNameLength {
+	if utf8.RuneCountInString(name) > MaxDisplayNameLength {
 		return "", fmt.Errorf("display name %q is too long: must be at most %d characters", name, MaxDisplayNameLength)
 	}
 	for _, r := range name {
 		if r == ' ' || r == '-' || r == '_' || r == '.' {
 			continue
 		}
+		// Fast-path: ASCII alphanumeric characters always slugify to a single ASCII character,
+		// equivalent to the len(Slugify(string(r))) == 1 check below.
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
 			continue
 		}
