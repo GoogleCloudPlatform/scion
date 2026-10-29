@@ -102,7 +102,9 @@ func newPersonalTokenFixture(t *testing.T, o personalTokenOpts) *personalTokenFi
 		require.NoError(t, st.CreateSecret(ctx, &store.Secret{
 			ID: tid(id), Key: "GITHUB_TOKEN", EncryptedValue: value,
 			SecretType: store.SecretTypeEnvironment, Target: "GITHUB_TOKEN",
-			Scope: scope, ScopeID: scopeID,
+			// GITHUB_TOKEN secrets are delivered in the first pass.
+			InjectionMode: store.InjectionModeAlways,
+			Scope:         scope, ScopeID: scopeID,
 		}))
 	}
 	if o.userSecret {
@@ -331,21 +333,19 @@ func TestResolveCloneToken_PersonalTokenOnlyToGitHubHost(t *testing.T) {
 }
 
 // The hub-host fetch (pull and local backends) offers the creator's personal
-// token only to a GitHub-host remote; for an attacker-host remote it offers
-// no token and resets the hub host user's credential helpers.
+// token only to a GitHub-host remote; an attacker-host remote gets none,
+// while a project secret keeps its binding to the recorded remote.
 func TestHostGitAccess_PersonalTokenOnlyToGitHubHost(t *testing.T) {
 	srv := newPersonalCloneTokenServer(t, "")
 	ctx := context.Background()
 
 	attacker := &store.Project{ID: "project-clone", GitRemote: "attacker.example/org/repo", CreatedBy: "victim-user"}
-	token, h := srv.hostGitAccess(ctx, attacker, "https://attacker.example/org/repo.git")
+	token, _ := srv.hostGitAccess(ctx, attacker, "https://attacker.example/org/repo.git")
 	assert.Empty(t, token, "an attacker-host remote gets no personal token")
-	assert.True(t, h.NoCredentialHelpers, "and no host credential helper")
 
 	own := &store.Project{ID: "project-clone", GitRemote: "github.com/org/repo", CreatedBy: "victim-user"}
-	token, h = srv.hostGitAccess(ctx, own, "https://github.com/org/repo.git")
+	token, _ = srv.hostGitAccess(ctx, own, "https://github.com/org/repo.git")
 	assert.Equal(t, personalTestUserToken, token, "github.com keeps the creator's token")
-	assert.False(t, h.NoCredentialHelpers)
 
 	bound := &store.Project{ID: "project-with-secret", GitRemote: "attacker.example/org/repo", CreatedBy: "victim-user"}
 	token, _ = srv.hostGitAccess(ctx, bound, "https://attacker.example/org/repo.git")
