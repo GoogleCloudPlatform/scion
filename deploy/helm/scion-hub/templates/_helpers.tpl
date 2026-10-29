@@ -4636,16 +4636,21 @@ older. The tag is image.tag, else .Chart.AppVersion.
 via value picks the off-remedy the operator can act on. */}}
 {{- $root := .root }}
 {{- $off := "set conduit.internalTls.enabled: false" }}
-{{- if eq (toString .via) "extra" }}{{- $off = "remove the config.extra internal_listen (or set image.tag/image.digest as above)" }}{{- end }}
+{{- if eq (toString .via) "extra" }}{{- $off = "remove the config.extra internal_listen (or bind it to loopback)" }}{{- end }}
 {{- $min := include "scion-hub.relayTlsMinHub" $root | fromYaml }}
 {{- $tag := trim (toString ($root.Values.image.tag | default $root.Chart.AppVersion)) }}
 {{- /* What to do about an older tag. With image.tag unset, the tag is the
 chart's appVersion, so the operator has to set one. */}}
 {{- $minVersion := trim (toString ($min.version | default "")) }}
+{{- /* $orRelease reads inside a remedy ("nightly-X or later or a release at or
+after Y"); $orReleaseParen inside a parenthesis ("(nightly-X or later, or a
+release at or after Y)"). Both are empty while the version floor is a
+placeholder. */}}
 {{- $orRelease := "" }}
-{{- if $minVersion }}{{- $orRelease = printf ", or a release at or after %s" $minVersion }}{{- end }}
+{{- $orReleaseParen := "" }}
+{{- if $minVersion }}{{- $orRelease = printf " or a release at or after %s" $minVersion }}{{- $orReleaseParen = printf ", or a release at or after %s" $minVersion }}{{- end }}
 {{- $defaultTag := not (trim (toString ($root.Values.image.tag | default ""))) }}
-{{- $remedy := printf "Use a hub image at nightly-%s or later%s, set image.digest, or %s." $min.nightly $orRelease $off }}
+{{- $remedy := printf "Use nightly-%s or later%s, set image.digest, or %s." $min.nightly $orRelease $off }}
 {{- if $defaultTag }}
 {{- $remedy = printf "image.tag is not set, so the tag is the chart's appVersion (%s), which is older than the floor: set image.tag to nightly-%s or later%s, or set image.digest, or %s." $root.Chart.AppVersion $min.nightly $orRelease $off }}
 {{- end }}
@@ -4681,7 +4686,7 @@ real image tag is affected.
 {{- print "ok" }}
 {{- else if regexMatch "^v?[0-9]+\\.[0-9]+\\.[0-9]+" $tag }}
 {{- if $minVersion }}
-{{- fail (printf "the hub image tag %s starts like a version but is not a valid semantic version, so the chart cannot compare it with the minimum hub release that serves the relay hop with the internal_tls_* settings (nightly-%s or later%s). Use a valid version tag or an image digest, or %s." (include "scion-hub.diagValue" $tag) $min.nightly $orRelease $off) }}
+{{- fail (printf "the hub image tag %s starts like a version but is not a valid semantic version, so the chart cannot compare it with the minimum hub release that serves the relay hop with the internal_tls_* settings (nightly-%s or later%s). Use a valid version tag or an image digest, or %s." (include "scion-hub.diagValue" $tag) $min.nightly $orReleaseParen $off) }}
 {{- end }}
 {{- fail (printf "the hub image tag %s starts like a version but is not a valid semantic version, and no versioned hub release serves the relay hop with the internal_tls_* settings yet. Use nightly-%s or later or an image digest, or %s." (include "scion-hub.diagValue" $tag) $min.nightly $off) }}
 {{- else if regexMatch "^nightly-[0-9]{8}$" $tag }}
