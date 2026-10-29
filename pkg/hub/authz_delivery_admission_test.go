@@ -820,6 +820,21 @@ func TestHubDelivery_LivenessCausesMatchOrdinaryWalk(t *testing.T) {
 			},
 			want: DenyCauseCeilingOrphaned,
 		},
+		{
+			// The delegator agent is held (ptone/scion#3433): not live in
+			// either walk (checkAgentHoldsPermission, hubDeliveryDelegatorLiveness).
+			name: "agent_held",
+			setup: func(t *testing.T, f *goldenFixture) string {
+				a, c := tid("hd-live-agent-held-a"), tid("hd-live-agent-held-c")
+				hdAgent(t, f.store, a, f.projectAlpha.ID, []string{f.superAdminID})
+				hdAgent(t, f.store, c, f.projectAlpha.ID, []string{f.superAdminID, a})
+				hdEdge(t, f.store, store.DelegationPrincipalUser, f.superAdminID, a, f.projectAlpha.ID, nil)
+				hdEdge(t, f.store, store.DelegationPrincipalAgent, a, c, f.projectAlpha.ID, nil)
+				holdAgentFor(t, f.store, a, f.projectAlpha.ID, f.superAdminID)
+				return c
+			},
+			want: DenyCauseCeilingOrphaned,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

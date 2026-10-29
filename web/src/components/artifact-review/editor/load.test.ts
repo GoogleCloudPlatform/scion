@@ -20,7 +20,8 @@
  * same result as reading it on its own.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getCurrentTest } from 'vitest/suite';
 
 import {
   chooseOpeningAlphabet,
@@ -52,6 +53,26 @@ beforeAll(async () => {
   core = await makeCore();
 });
 afterAll(destroyCores);
+
+/**
+ * The work sessions leave for when the browser is idle. It runs only when a
+ * test says the browser is idle (runIdle), so the idle readings of earlier
+ * tests' documents, 200 kB ones among them, do not all run at a later
+ * test's first wait.
+ */
+const idleWork: (() => void)[] = [];
+beforeEach(() => {
+  idleWork.length = 0;
+  vi.stubGlobal('requestIdleCallback', (f: () => void): number => idleWork.push(f));
+});
+afterAll(() => {
+  vi.unstubAllGlobals();
+});
+
+/** Runs the idle work asked for so far, in order. */
+function runIdle(): void {
+  for (const f of idleWork.splice(0)) f();
+}
 
 const docs = [...corpus.map((c) => c.in), ...sweepDocs.map((d) => d.in)];
 
@@ -108,7 +129,7 @@ describe('marks of a range, from one reading of the whole text', () => {
       expect(marks.runs(core.plain), md).toEqual(fresh(md, 0, Infinity, new Set()));
     }
     expect(ranges).toBeGreaterThan(1000);
-  });
+  }, 30_000);
 });
 
 describe('code neighbours', () => {
@@ -210,6 +231,8 @@ const snapshot = <T>(x: T): T => structuredClone(x);
 describe('one reading of Markdown for every load check', () => {
   const large = [largeDoc(false), largeDoc(true)];
 
+  // Every document is read four ways: about 30 s alone, and up to 70 s on a
+  // busy machine, hence the longer timeout.
   it('gives the document, the tree and the definitions the separate parses give', () => {
     let n = 0;
     for (const md of [...docs, ...large]) {
@@ -223,7 +246,7 @@ describe('one reading of Markdown for every load check', () => {
       }
     }
     expect(n).toBeGreaterThan(200);
-  }, 120_000);
+  }, 240_000);
 
   it('building the document does not change the tree, and no check changes it', () => {
     const withDefinition = '[t][r] {++x++}\n\n> [s]: /q\n\n[r]: /p "title"\n';
@@ -332,17 +355,16 @@ describe('link reference definitions of the opening text', () => {
     return s.save();
   };
 
-  const idle = (): Promise<void> => new Promise((r) => setTimeout(r, 20));
-
-  it('are read when the browser is idle after the load', async () => {
+  it('are read when the browser is idle after the load', () => {
     const s = new ReviewSession(core);
     expect(s.load(md)).toBe(true);
     expect(defsOf(s)).toBeNull();
-    await idle();
+    expect(idleWork).toHaveLength(1);
+    runIdle();
     expect(defsOf(s)).toBe('[p]: /plan "Plan"');
   });
 
-  it('an edit before then saves what it saves after', async () => {
+  it('an edit before then saves what it saves after', () => {
     const early = new ReviewSession(core);
     expect(early.load(md)).toBe(true);
     expect(defsOf(early)).toBeNull();
@@ -351,7 +373,7 @@ describe('link reference definitions of the opening text', () => {
 
     const late = new ReviewSession(core);
     expect(late.load(md)).toBe(true);
-    await idle();
+    runIdle();
     expect(defsOf(late)).toBe('[p]: /plan "Plan"');
     const after = editAndSave(late);
 
@@ -360,12 +382,32 @@ describe('link reference definitions of the opening text', () => {
     expect(before).toContain('{++X++}');
   });
 
-  it("after a later load, they are the later text's", async () => {
+  it("after a later load, they are the later text's", () => {
     const s = new ReviewSession(core);
     expect(s.load(md)).toBe(true);
     expect(s.load('No references here {++x++}.\n')).toBe(true);
-    await idle();
+    runIdle();
     expect(defsOf(s)).toBe('');
+  });
+
+  it('are read soon after the load where the browser cannot say when it is idle', async () => {
+    vi.stubGlobal('requestIdleCallback', undefined);
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    try {
+      const s = new ReviewSession(core);
+      expect(s.load(md)).toBe(true);
+      expect(defsOf(s)).toBeNull();
+      // The reading waits for a timer instead, not for the idle queue, and
+      // not for the next microtask either.
+      expect(idleWork).toHaveLength(0);
+      expect(timers).toHaveBeenCalledWith(expect.any(Function), 0);
+      await Promise.resolve();
+      expect(defsOf(s)).toBeNull();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(defsOf(s)).toBe('[p]: /plan "Plan"');
+    } finally {
+      timers.mockRestore();
+    }
   });
 
   it('come from the source reading when the load has one', () => {
@@ -375,17 +417,61 @@ describe('link reference definitions of the opening text', () => {
   });
 });
 
+/** process.threadCpuUsage, where Node has it (23.9 and later). */
+type ThreadCpu = { threadCpuUsage?: () => NodeJS.CpuUsage };
+const threadCpuUsage = (process as NodeJS.Process & ThreadCpu).threadCpuUsage;
+
+/**
+ * The CPU time this thread has used, in ms. Load budgets are CPU time, not
+ * wall time: time spent waiting for a CPU on a busy machine does not count
+ * against them, while more work in the load still does. The thread's own
+ * time where Node can read it (23.9 and later); otherwise the process's,
+ * which is this file's own, since vitest runs each file in its own process
+ * (the forks pool, its default).
+ */
+function cpuMs(): number {
+  const u = threadCpuUsage ? threadCpuUsage.call(process) : process.cpuUsage();
+  return (u.user + u.system) / 1000;
+}
+
+/**
+ * The median CPU time of three loads of md with c; each load must open, and
+ * passes check. The times are kept in the test's report (its meta), so a
+ * run's report shows how close a load came to its budget.
+ */
+function medianLoadMs(c: Core, md: string, check: (s: ReviewSession) => void = () => {}): number {
+  const times: number[] = [];
+  for (let k = 0; k < 3; k++) {
+    const s = new ReviewSession(c);
+    const t0 = cpuMs();
+    expect(s.load(md)).toBe(true);
+    times.push(cpuMs() - t0);
+    check(s);
+  }
+  times.sort((a, b) => a - b);
+  const test = getCurrentTest();
+  if (test) {
+    const earlier = (test.meta as { loadCpuMs?: number[][] }).loadCpuMs ?? [];
+    Object.assign(test.meta, {
+      loadCpuMs: [...earlier, times.map(Math.round)],
+      cpuClock: threadCpuUsage ? 'thread' : 'process',
+    });
+  }
+  return times[1];
+}
+
 describe('opening a 200 kB document', () => {
   /**
-   * The load budget in happy-dom, well above its usual time (about 2 s
-   * where the browser takes about 1.2 s) so a slow machine does not fail
-   * it, and well below what reading the whole text again for every block,
-   * or parsing it several times, would take.
+   * The load budget, in CPU time in happy-dom: about 1.7 times its usual
+   * time (about 3.5 s), so a slower machine does not fail it, and well
+   * below what reading the whole text again for every block, or parsing
+   * it several times, would take.
    */
   const BUDGET_MS = 6000;
   /**
    * With a numeric character reference the load also parses the source
-   * and the alphabet's probe form (design E9): about 4.7 s here.
+   * and the alphabet's probe form (design E9): about 7.5 s here, so this
+   * budget too is about 1.6 times its usual time.
    */
   const BUDGET_WITH_PROBE_MS = 12000;
 
@@ -399,24 +485,45 @@ describe('opening a 200 kB document', () => {
       const md = largeDoc(hazard, refs);
       expect(md.length).toBeGreaterThan(200_000);
       expect(md.includes('&#')).toBe(refs);
-      const times: number[] = [];
-      for (let k = 0; k < 3; k++) {
-        const s = new ReviewSession(core);
-        const t0 = performance.now();
-        expect(s.load(md)).toBe(true);
-        times.push(performance.now() - t0);
+      const ms = medianLoadMs(core, md, (s) => {
         expect(s.isHazardous).toBe(hazard);
         // With a numeric reference the load reads the source itself (the
         // alphabet's probe), and takes the definitions from that reading.
         const defs = (s as unknown as { definitions: string | null }).definitions;
         expect(defs).toBe(refs ? '[guide]: https://example.com/guide "Guide"' : null);
-      }
-      times.sort((a, b) => a - b);
+      });
       expect(core.view.state.doc.childCount).toBeGreaterThan(3500);
-      expect(times[1]).toBeLessThan(refs ? BUDGET_WITH_PROBE_MS : BUDGET_MS);
+      expect(ms).toBeLessThan(refs ? BUDGET_WITH_PROBE_MS : BUDGET_MS);
     },
     180_000
   );
+
+  describe('the budget check itself', () => {
+    // A short document and a budget scaled to it, so the check is shown to
+    // fail a slow load without spending a 200 kB budget to do so.
+    const md = 'See {++this++} and [the plan][p].\n\n[p]: /plan\n';
+    const SHORT_BUDGET_MS = 200;
+
+    it('fails a load that parses its text again and again', () => {
+      expect(medianLoadMs(core, md)).toBeLessThan(SHORT_BUDGET_MS);
+      const slow: Core = {
+        ...core,
+        read: (t: string): MdRead => {
+          const r = core.read(t);
+          const until = cpuMs() + 2 * SHORT_BUDGET_MS;
+          while (cpuMs() < until) core.read(t);
+          return r;
+        },
+      };
+      expect(medianLoadMs(slow, md)).toBeGreaterThan(SHORT_BUDGET_MS);
+    }, 30_000);
+
+    it('does not count time spent waiting', async () => {
+      const t0 = cpuMs();
+      await new Promise((r) => setTimeout(r, 300));
+      expect(cpuMs() - t0).toBeLessThan(150);
+    });
+  });
 });
 
 describe('the text a save writes', () => {

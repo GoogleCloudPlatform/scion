@@ -322,7 +322,6 @@ var testAdminRoleAdminCensus = map[string]string{
 	"admin_mode.go:adminModeWebMiddleware":                                "role gate: admin only",
 	"gcp_iam_settings.go:gcpIAMHubAdmin":                                  "role gate: admin only",
 	"handlers_env_secrets.go:authorizeHubEnvVarList":                      "role gate: admin only",
-	"handlers_env_secrets.go:resolveEnvSecretAccess":                      "role gate: admin only",
 	"web.go:authorizeSSESubjects":                                         "role gate: admin only",
 	"federation_auth.go:extractUserClaims":                                "federation: a federated identity is never admin (coerced to viewer); federation is off while the tier is on",
 	"handlers_test_admin_identities.go:canIssueTestAdmin":                 "issuer check: the issuer's stored role, read from its row",

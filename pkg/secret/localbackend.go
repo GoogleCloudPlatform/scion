@@ -116,9 +116,12 @@ func (b *LocalBackend) fetchValue(ctx context.Context, meta SecretMeta) FetchRes
 	}
 	sv, err := b.decryptStoreSecret(s)
 	if err != nil {
-		return FetchResult{Err: err}
+		// The typed error Resolve returns for an undecryptable value
+		// (errors.Is ErrResolveDecrypt), naming the key and scope only.
+		return FetchResult{Err: newResolveDecryptError([]ResolveFailure{{Key: s.Key, Scope: s.Scope, Kind: DecryptFailureKind(err)}})}
 	}
-	return FetchResult{Value: sv.Value}
+	// The stored ref verbatim, as Resolve reports it.
+	return FetchResult{Value: sv.Value, Ref: s.SecretRef}
 }
 
 func (b *LocalBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *SecretMeta, error) {

@@ -200,7 +200,7 @@ func TestCreateAgent_SharedLayoutRefusals(t *testing.T) {
 			}
 		}, sharedRootProjectID, http.StatusConflict, sharedProjectConfigText},
 		{"mount point without the subpath root", func(t *testing.T, f *sharedRootFixture) {}, sharedRootProjectID, http.StatusServiceUnavailable,
-			"project storage share is not mounted on this broker (" + shareMountPathField + ")"},
+			runtime.ProjectShareUnavailableText(runtime.ProjectShareMountPathField, false)},
 		{"project-id of another project", func(t *testing.T, f *sharedRootFixture) {
 			writeSharedSeed(t, f.scionDir, "11111111-2222-3333-4444-555555555555", "web")
 		}, sharedRootProjectID, http.StatusConflict, sharedProjectConfigText},
@@ -221,7 +221,8 @@ func TestCreateAgent_SharedLayoutRefusals(t *testing.T) {
 			if err := os.RemoveAll(f.layout.HostBase); err != nil {
 				t.Fatal(err)
 			}
-		}, sharedRootProjectID, http.StatusServiceUnavailable, "project storage share is not mounted on this broker"},
+		}, sharedRootProjectID, http.StatusServiceUnavailable,
+			runtime.ProjectShareUnavailableText(runtime.ProjectShareMountPathField, false)},
 		{"no project ID", func(t *testing.T, f *sharedRootFixture) {
 			writeSharedSeed(t, f.scionDir, sharedRootProjectID, "web")
 		}, "", http.StatusConflict, sharedProjectNoIDText},
@@ -236,6 +237,11 @@ func TestCreateAgent_SharedLayoutRefusals(t *testing.T) {
 			}
 			if f.mgr.provisionCalled {
 				t.Error("Provision must not run after a refusal")
+			}
+			// A refusal body names configuration fields, never the share's
+			// mount point or the project root.
+			if body := w.Body.String(); strings.Contains(body, f.layout.HostBase) {
+				t.Errorf("refusal body names the share path %s: %s", f.layout.HostBase, body)
 			}
 			if tc.name == "no configuration" {
 				if _, err := os.Lstat(f.scionDir); !os.IsNotExist(err) {
@@ -440,8 +446,15 @@ func TestCheckNFSForDispatch_WarnOnlyRefusedOnSharedLayout(t *testing.T) {
 			projectPath := writeSettings(t, t.TempDir(), "schema_version: \"1\"\n")
 			err := srv.checkNFSForDispatch(context.Background(), "agent-1", filepath.Join(projectPath, ".scion"), "", "")
 			if shared {
-				if err == nil || !strings.Contains(err.Error(), "project storage share is not mounted on this broker (/mnt/nfs/ws1;") {
-					t.Fatalf("checkNFSForDispatch = %v, want the not-mounted refusal", err)
+				// A Kubernetes dispatch: the broker never mounts the share,
+				// so the advice is to make it available in the broker's
+				// container. The text goes into the response body: no path.
+				want := runtime.ProjectShareUnavailableText(runtime.ProjectShareMountPathField, true)
+				if err == nil || err.Error() != want {
+					t.Fatalf("checkNFSForDispatch = %v, want %q", err, want)
+				}
+				if strings.Contains(err.Error(), "/mnt/nfs") {
+					t.Fatalf("checkNFSForDispatch refusal names the share path: %v", err)
 				}
 				return
 			}

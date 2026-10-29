@@ -1051,6 +1051,10 @@ func classifyStartErrorCode(err error, templateSlug string) (code, message strin
 		return LaunchErrCodeAgentStateUnavailable, err.Error()
 	case errors.Is(err, config.ErrAgentStateConflict):
 		return LaunchErrCodeAgentStateConflict, err.Error()
+	case errors.Is(err, agent.ErrProjectShareNotMounted):
+		// The same code and text the synchronous create gives; err names
+		// the mount point and is logged by runLaunch.
+		return ErrCodeProjectStorageUnavailable, projectShareNotMountedText()
 	default:
 		return "", ""
 	}
