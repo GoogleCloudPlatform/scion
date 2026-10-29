@@ -1039,6 +1039,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 				}
 			} else if ghSecret != nil && ghSecret.Value != "" {
 				req.ResolvedEnv["GITHUB_TOKEN"] = ghSecret.Value
+				req.noAuthProjectToken = ghSecret.Value
 				// From secret store → secret-fetchable.
 				classifyEnv(&req.EnvClassifications, "GITHUB_TOKEN", api.EnvKindSecretFetchable)
 				if d.debug {
@@ -1216,7 +1217,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 	// A personal git token goes only to a recorded remote on the GitHub
 	// host (personal_git_token.go). This runs after secret resolution and
 	// the App mint, when the token git will see is known.
-	d.restrictCreateRequestTokenRemote(ctx, req)
+	d.restrictCreateRequestTokenRemote(req)
 
 	// Collect project-scope secrets for provision-time credential resolution.
 	// These are NOT merged into ResolvedEnv and will not appear in the container env.
@@ -2034,7 +2035,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 			for k, v := range asNeededEnv {
 				req.ResolvedEnv[k] = v
 			}
-			d.restrictCreateRequestTokenRemote(ctx, req)
+			d.restrictCreateRequestTokenRemote(req)
 			if tzNeeded {
 				setResolvedAgentTZ(req.ResolvedEnv, &req.EnvClassifications, d.resolveAgentTZ(ctx, agent, true))
 			}
@@ -2390,7 +2391,7 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 	classifyEnvKeys(&req.EnvClassifications, env, api.EnvKindPlain)
 	// The caller's env may carry a GITHUB_TOKEN: decide the token remote
 	// again on the merged env.
-	d.restrictCreateRequestTokenRemote(ctx, req)
+	d.restrictCreateRequestTokenRemote(req)
 	if answerTZ {
 		setResolvedAgentTZ(req.ResolvedEnv, &req.EnvClassifications, d.resolveAgentTZ(ctx, agent, true))
 	}
@@ -2436,7 +2437,7 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 			}
 			// as_needed env comes from storage — classify as secret-fetchable.
 			classifyEnvKeys(&req.EnvClassifications, asNeededEnv, api.EnvKindSecretFetchable)
-			d.restrictCreateRequestTokenRemote(ctx, req)
+			d.restrictCreateRequestTokenRemote(req)
 			if tzNeeded {
 				setResolvedAgentTZ(req.ResolvedEnv, &req.EnvClassifications, d.resolveAgentTZ(ctx, agent, true))
 			}
@@ -3440,7 +3441,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	appToken := d.injectLifecycleGitHubToken(ctx, agent, resolvedEnv, &envClassifications, caller)
 	// A personal git token goes only to a recorded remote on the GitHub
 	// host (personal_git_token.go).
-	d.restrictPersonalTokenRemote(ctx, gitTokenDispatch{
+	d.restrictPersonalTokenRemote(gitTokenDispatch{
 		projectID: agent.ProjectID,
 		gitRemote: projectInfo.gitRemote,
 		env:       resolvedEnv,

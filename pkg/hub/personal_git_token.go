@@ -15,8 +15,8 @@
 package hub
 
 import (
-	"context"
 	"crypto/subtle"
+	"slices"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
@@ -80,14 +80,16 @@ func (d *HTTPAgentDispatcher) personalTokenGitHubHost() string {
 }
 
 // gitTokenDispatch is what a dispatch knows about the GITHUB_TOKEN git will
-// see in the agent: the env and secrets it sends, and the App installation
-// token it minted for the agent's own project ("" when none).
+// see in the agent: the env and secrets it sends, the App installation token
+// it minted for the agent's own project ("" when none), and the project-scope
+// GITHUB_TOKEN it put into the env itself ("" when none; the no-auth path).
 type gitTokenDispatch struct {
-	projectID string
-	gitRemote string
-	env       map[string]string
-	secrets   []ResolvedSecret
-	appToken  string
+	projectID    string
+	gitRemote    string
+	env          map[string]string
+	secrets      []ResolvedSecret
+	appToken     string
+	projectToken string
 }
 
 // withholdTokenRemote reports whether the dispatch must send no token remote
@@ -95,49 +97,29 @@ type gitTokenDispatch struct {
 // provision and the shared-workspace helper offer git no token at all. It is
 // true when the recorded remote is not on the GitHub host and the token git
 // would see is not positively project-bound (gitTokenProjectBound).
-func (d *HTTPAgentDispatcher) withholdTokenRemote(ctx context.Context, td gitTokenDispatch) bool {
+func (d *HTTPAgentDispatcher) withholdTokenRemote(td gitTokenDispatch) bool {
 	if td.gitRemote == "" {
 		return false // no token remote is sent anyway
 	}
 	if personalTokenHostAllowed(td.gitRemote, d.personalTokenGitHubHost()) {
 		return false
 	}
-	return !d.gitTokenProjectBound(ctx, td)
+	return !gitTokenProjectBound(td)
 }
 
 // gitTokenProjectBound reports whether every GITHUB_TOKEN the agent can see
 // is project-bound. The candidates are the env value and every
-// environment-type secret projected to GITHUB_TOKEN. A candidate is
-// project-bound only when it is the App installation token minted for the
-// agent's own project in this dispatch, a secret the hub resolved from the
-// project scope, or equal to the project's project-scope GITHUB_TOKEN secret.
-// No candidate at all is not project-bound: the token then comes from
-// somewhere the hub does not see (the caller's env at gather, or the broker).
-func (d *HTTPAgentDispatcher) gitTokenProjectBound(ctx context.Context, td gitTokenDispatch) bool {
-	var projectSecret string
-	projectSecretLoaded := false
-	equalsProjectSecret := func(v string) bool {
-		if !projectSecretLoaded {
-			projectSecretLoaded = true
-			if d.secretBackend != nil && td.projectID != "" {
-				if sv, err := d.secretBackend.Get(ctx, provision.GitTokenEnv, secret.ScopeProject, td.projectID); err == nil && sv != nil {
-					projectSecret = sv.Value
-				}
-			}
-		}
-		return projectSecret != "" && subtle.ConstantTimeCompare([]byte(v), []byte(projectSecret)) == 1
-	}
-	isAppToken := func(v string) bool {
-		return td.appToken != "" && subtle.ConstantTimeCompare([]byte(v), []byte(td.appToken)) == 1
-	}
-
+// environment-type secret projected to GITHUB_TOKEN. A secret candidate is
+// project-bound only when the hub resolved it from the project scope. The env
+// value is project-bound only when it equals the App installation token
+// minted for the agent's own project in this dispatch, the project-scope
+// GITHUB_TOKEN the dispatch itself put into the env, or a project-scope
+// secret candidate. No candidate at all is not project-bound: the token then
+// comes from somewhere the hub does not see (the caller's env at gather, or
+// the broker).
+func gitTokenProjectBound(td gitTokenDispatch) bool {
+	bound := []string{td.appToken, td.projectToken}
 	candidates := 0
-	if v := td.env[provision.GitTokenEnv]; v != "" {
-		candidates++
-		if !isAppToken(v) && !equalsProjectSecret(v) {
-			return false
-		}
-	}
 	for _, s := range td.secrets {
 		if s.Type != "" && s.Type != "environment" {
 			continue
@@ -150,10 +132,16 @@ func (d *HTTPAgentDispatcher) gitTokenProjectBound(ctx context.Context, td gitTo
 			continue
 		}
 		candidates++
-		if s.Source == secret.ScopeProject {
-			continue
+		if s.Source != secret.ScopeProject {
+			return false
 		}
-		if s.Value == "" || !equalsProjectSecret(s.Value) {
+		bound = append(bound, s.Value)
+	}
+	if v := td.env[provision.GitTokenEnv]; v != "" {
+		candidates++
+		if !slices.ContainsFunc(bound, func(b string) bool {
+			return b != "" && subtle.ConstantTimeCompare([]byte(v), []byte(b)) == 1
+		}) {
 			return false
 		}
 	}
@@ -174,11 +162,11 @@ func withoutTokenRemote(gc *api.GitCloneConfig) *api.GitCloneConfig {
 // restrictPersonalTokenRemote clears the token remote of both clone settings
 // when withholdTokenRemote says so. It only ever clears, so running it again
 // after more env is merged (finalize-env) is safe.
-func (d *HTTPAgentDispatcher) restrictPersonalTokenRemote(ctx context.Context, td gitTokenDispatch, gitClone, sharedClone **api.GitCloneConfig) {
+func (d *HTTPAgentDispatcher) restrictPersonalTokenRemote(td gitTokenDispatch, gitClone, sharedClone **api.GitCloneConfig) {
 	if (*gitClone == nil || (*gitClone).TokenRemote == "") && (*sharedClone == nil || (*sharedClone).TokenRemote == "") {
 		return
 	}
-	if !d.withholdTokenRemote(ctx, td) {
+	if !d.withholdTokenRemote(td) {
 		return
 	}
 	d.log.Info("git token not offered: the project's git remote is not on the GitHub host and the token is not the project's own",
@@ -189,15 +177,16 @@ func (d *HTTPAgentDispatcher) restrictPersonalTokenRemote(ctx context.Context, t
 
 // restrictCreateRequestTokenRemote applies restrictPersonalTokenRemote to a
 // create request, from the env and secrets it carries.
-func (d *HTTPAgentDispatcher) restrictCreateRequestTokenRemote(ctx context.Context, req *RemoteCreateAgentRequest) {
+func (d *HTTPAgentDispatcher) restrictCreateRequestTokenRemote(req *RemoteCreateAgentRequest) {
 	if req == nil || req.Config == nil {
 		return
 	}
-	d.restrictPersonalTokenRemote(ctx, gitTokenDispatch{
-		projectID: req.ProjectID,
-		gitRemote: req.projectGitRemote,
-		env:       req.ResolvedEnv,
-		secrets:   req.ResolvedSecrets,
-		appToken:  req.githubAppToken,
+	d.restrictPersonalTokenRemote(gitTokenDispatch{
+		projectID:    req.ProjectID,
+		gitRemote:    req.projectGitRemote,
+		env:          req.ResolvedEnv,
+		secrets:      req.ResolvedSecrets,
+		appToken:     req.githubAppToken,
+		projectToken: req.noAuthProjectToken,
 	}, &req.Config.GitClone, &req.Config.SharedWorkspaceClone)
 }
