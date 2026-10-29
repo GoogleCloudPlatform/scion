@@ -1752,6 +1752,12 @@ export class ScionChatMessage extends LitElement {
       cursor: pointer;
     }
 
+    /* The reserved column counts toward the bubble's max-width, so an
+       attachment-only bubble is no wider than its text neighbours. */
+    .bubble.actions-corner {
+      box-sizing: border-box;
+    }
+
     .bubble.actions-corner > .msg-actions {
       top: 0;
     }

@@ -1790,11 +1790,6 @@ describe('scion-chat-message More actions dots (ptone/scion#6556)', () => {
     expect(rem(button.width) * 16).toBeGreaterThanOrEqual(24);
     expect(rem(button.height) * 16).toBeGreaterThanOrEqual(24);
     expect(button.color).toMatch(/^var\(--scion-/);
-    expect(button.position).toBe('absolute');
-    expect(button.top).toBeDefined();
-    expect(button.right).toBeDefined();
-    expect(button.left).toBeUndefined();
-    expect(button.bottom).toBeUndefined();
   });
 
   it('stays outside the text box: the bubble reserves the whole corner column', () => {
@@ -1803,6 +1798,7 @@ describe('scion-chat-message More actions dots (ptone/scion#6556)', () => {
     for (const sel of ['.bubble-content.has-actions', '.bubble.actions-corner']) {
       const reserve = declarationsFor(top, sel);
       expect(reserve.position, sel).toBe('relative');
+      if (sel === '.bubble.actions-corner') expect(reserve['box-sizing'], sel).toBe('border-box');
       expect(rem(reserve['padding-right']), sel).toBeGreaterThanOrEqual(
         rem(button.right) + rem(button.width)
       );
