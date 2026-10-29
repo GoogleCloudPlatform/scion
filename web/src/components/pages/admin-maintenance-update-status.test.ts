@@ -306,7 +306,8 @@ describe('Server Version & Updates', () => {
   it.each([
     ['verified', 'verified', 'completed'],
     ['failed', 'failed', 'failed'],
-    ['rolled_back', 'rolled back', 'pending'],
+    // A rollback means the update failed: the danger badge.
+    ['rolled_back', 'rolled back', 'failed'],
   ])('renders lastUpdate status %s', async (status, label, badgeClass) => {
     el = await mount({
       status: updateStatus({
@@ -1381,7 +1382,7 @@ describe('Reconnect after an update restart', () => {
             at: '2026-10-24T00:01:00Z',
           },
         },
-        'Update to nightly-20261023 rolled back.',
+        'Update rolled back: nightly-20261023 failed to start, so the hub restored nightly-20261022.',
       ],
     ] as Array<[string, Json, string]>)(
       'keeps the check result when the new binary answers but the run is %s',

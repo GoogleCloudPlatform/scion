@@ -2184,7 +2184,7 @@ export class ScionPageAdminMaintenance extends LitElement {
       <sl-dialog
         label="Update Hub"
         open
-        @sl-request-close=${(e: Event) => this.closeUpdateConfirm(e)}
+        @sl-request-close=${(e: Event): void => this.closeUpdateConfirm(e)}
       >
         <div class="dialog-body">
           <p>
@@ -2249,7 +2249,7 @@ export class ScionPageAdminMaintenance extends LitElement {
         class="downgrade-confirm"
         label=${label}
         open
-        @sl-request-close=${(e: Event) => this.closeUpdateConfirm(e)}
+        @sl-request-close=${(e: Event): void => this.closeUpdateConfirm(e)}
       >
         <div class="dialog-body">
           <p class="downgrade-versions">
@@ -2280,10 +2280,10 @@ export class ScionPageAdminMaintenance extends LitElement {
             autofocus
             .value=${this.downgradeTyped}
             ?disabled=${this.applyUpdateLoading}
-            @sl-input=${(e: Event) => {
+            @sl-input=${(e: Event): void => {
               this.downgradeTyped = (e.target as HTMLElement & { value: string }).value;
             }}
-            @keydown=${(e: KeyboardEvent) => {
+            @keydown=${(e: KeyboardEvent): void => {
               if (e.key === 'Enter') this.confirmDowngrade();
             }}
           ></sl-input>
@@ -2293,7 +2293,7 @@ export class ScionPageAdminMaintenance extends LitElement {
           variant="default"
           class="downgrade-cancel"
           ?disabled=${this.applyUpdateLoading}
-          @click=${() => this.closeUpdateConfirm()}
+          @click=${(): void => this.closeUpdateConfirm()}
           >Cancel</sl-button
         >
         <sl-button
@@ -2302,7 +2302,7 @@ export class ScionPageAdminMaintenance extends LitElement {
           class="confirm-downgrade"
           ?loading=${this.applyUpdateLoading}
           ?disabled=${!matches}
-          @click=${() => this.confirmDowngrade()}
+          @click=${(): void => this.confirmDowngrade()}
         >
           <sl-icon slot="prefix" name="download"></sl-icon>
           Install ${d.target} &amp; Restart
