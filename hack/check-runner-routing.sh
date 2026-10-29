@@ -12,11 +12,10 @@
 #   - a routed job cannot or must not run there: it has services:, container:,
 #     a uses: docker:// step or a docker command in a step (docker run, build,
 #     buildx, compose, pull, push, exec, login, create, start, also after global
-#     options such as -H host or --log-level debug, or docker-compose; no Docker on
-#     Cloud Run; other uses of the word, such as "Dockerfile", do not match), its
-#     permissions (its
-#     own, or the workflow's when it has none) grant write, or its workflow is
-#     triggered by pull_request_target;
+#     options such as -H host or --log-level debug, or docker-compose; no Docker
+#     on Cloud Run; other uses of the word, such as "Dockerfile", do not match),
+#     its permissions (its own, or the workflow's when it has none) grant write,
+#     or its workflow is triggered by pull_request_target;
 #   - a routed job has no timeout-minutes, or one outside 1-35 (the runner's
 #     task timeout is 45 min, minus its 10 min idle timeout). A job whose
 #     hosted runs need longer may use the guarded form
@@ -107,7 +106,9 @@ check_file() {
     # subcommand (docker -H host run, docker --log-level debug build,
     # docker --context x compose up, docker -D pull): each is a token starting with
     # "-", optionally followed by one value token that does not. A false match only
-    # keeps a job on ubuntu-latest.
+    # keeps a job on ubuntu-latest. Known gap: a quoted option value that contains
+    # whitespace (docker --config "/a b" run x) is not matched, because the value
+    # token ends at the space; such a job would fail on the runner (no Docker).
     !dcmd && /(^|[;&|(`[:space:]])docker([[:space:]]+-[^[:space:]]+([[:space:]]+[^-[:space:]][^[:space:]]*)?)*[[:space:]]+(run|build|buildx|compose|pull|push|exec|login|create|start)([[:space:]]|$)|(^|[;&|(`[:space:]])docker-compose([[:space:]]|$)/ { dcmd = NR }
     /^    runs-on:.*vars\.SCION_LARGE_RUNNER/ {
       line = $0; sub(/[[:space:]]+$/, "", line)
