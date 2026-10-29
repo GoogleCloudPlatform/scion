@@ -874,7 +874,11 @@ test_rollback_update_state_window() {
   _rb_update_state "$(_rb_happy_state)"
   touch -h -d '1700 seconds ago' "${RB_ROOT}/current"
   _rb_run
-  _rb_expect swap "valid, unverified, switched 1700 s ago" "switched 1700s ago, safe to undo"
+  _rb_expect swap "valid, unverified, switched 1700 s ago" "s ago, safe to undo"
+  # The age is measured when the guard runs, a second or more after the
+  # touch on a loaded host: accept 1700-1799 s rather than an exact value.
+  assert_true "$(printf '%s\n' "$RB_OUT" | grep -Eq 'switched 17[0-9]{2}s ago, safe to undo' && echo true || echo false)" \
+    "valid, unverified, switched 1700 s ago: the log must show the switch age (output: ${RB_OUT})"
   rm -rf "$RB_DIR"
   _rb_new_host
   _rb_update_state "$(_rb_happy_state)"
