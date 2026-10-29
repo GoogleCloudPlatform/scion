@@ -131,6 +131,10 @@ The hub-native workspace leaf:
 - `TestCreateHubNativeProject_SharedBackend_ProvisioningFailureRollsBack`
 - `TestCreateHubNativeProject_SharedBackend_ExistingRootNotProvisioned`
 - `TestCreateHubNativeProject_SharedBackend_LaterFailureRemovesCreatedRoot`
+- `TestCreateHubNativeProject_SharedBackend_LaterFailureKeepsExistingRoot`
+  (the cleanup never removes a project root this create did not make)
+- `TestHubNativeWorkspaceProject_Predicate` (the hub-native predicate case by
+  case, including a provider lookup error)
 
 Hardening:
 - `TestWriteRootFile_AtomicReplaceLeavesNoTempFile`

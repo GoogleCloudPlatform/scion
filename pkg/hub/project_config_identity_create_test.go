@@ -612,3 +612,107 @@ func TestEnsureProjectConfigIdentities_LinkedProjectsGetNoWorkspaceLeaf(t *testi
 	}
 	assertHubNativeWorkspaceProvisioned(t, f, plain.ID)
 }
+
+// TestCreateHubNativeProject_SharedBackend_LaterFailureKeepsExistingRoot: the
+// rollback cleanup removes only a project root the failed create made. A
+// pre-existing root whose identity cannot be read (here project-id is a
+// symlink leading out of the configuration directory, which os.Root refuses)
+// fails the create with 503, and the tree, its content and the link are kept.
+func TestCreateHubNativeProject_SharedBackend_LaterFailureKeepsExistingRoot(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	f.useNFSOwnedBySelf()
+	const id = "aaaaaaaa-0000-4000-8000-0000000000b0"
+	projectRoot := filepath.Join(f.shareBase, "projects", id)
+	ws := filepath.Join(projectRoot, "workspace")
+	require.NoError(t, os.MkdirAll(ws, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ws, "existing.txt"), []byte("keep\n"), 0o644))
+	cfgDir := filepath.Join(projectRoot, ".scion")
+	require.NoError(t, os.MkdirAll(cfgDir, 0o755))
+	outside := filepath.Join(t.TempDir(), "foreign-project-id")
+	require.NoError(t, os.WriteFile(outside, []byte("bbbbbbbb-0000-4000-8000-0000000000b1\n"), 0o644))
+	require.NoError(t, os.Symlink(outside, filepath.Join(cfgDir, projectkeys.ProjectIDFile)))
+
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{ID: id, Name: "Native Existing Root Fails"})
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	_, err := f.s.GetProject(context.Background(), id)
+	assert.ErrorIs(t, err, store.ErrNotFound, "the project row is rolled back")
+
+	got, err := os.ReadFile(filepath.Join(ws, "existing.txt"))
+	require.NoError(t, err, "a pre-existing tree is never removed by the rollback")
+	assert.Equal(t, "keep\n", string(got))
+	fi, err := os.Lstat(filepath.Join(cfgDir, projectkeys.ProjectIDFile))
+	require.NoError(t, err)
+	assert.NotZero(t, fi.Mode()&os.ModeSymlink, "the foreign project-id link is kept")
+	got, err = os.ReadFile(outside)
+	require.NoError(t, err)
+	assert.Equal(t, "bbbbbbbb-0000-4000-8000-0000000000b1\n", string(got), "the link target is untouched")
+	_, err = os.Stat(filepath.Join(projectRoot, provision.ProvisionStateDirName))
+	assert.True(t, os.IsNotExist(err), "nothing was provisioned into the existing tree")
+}
+
+// providersErrStore fails GetProjectProviders, for the provider-lookup error
+// case of hubNativeWorkspaceProject.
+type providersErrStore struct {
+	store.Store
+}
+
+func (providersErrStore) GetProjectProviders(context.Context, string) ([]store.ProjectProvider, error) {
+	return nil, errors.New("simulated provider lookup failure")
+}
+
+// TestHubNativeWorkspaceProject_Predicate pins the one hub-native predicate:
+// git, linked, empty-per-agent and global projects are never hub-native; the
+// hub origin label is; an unlabeled project is hub-native only without a
+// provider-registered local path; a provider lookup error means not hub-native;
+// and a non-shared backend means no.
+func TestHubNativeWorkspaceProject_Predicate(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	f.useNFS()
+	ctx := context.Background()
+	mk := func(id, slug, remote string, labels map[string]string) *store.Project {
+		p := &store.Project{ID: id, Name: slug, Slug: slug, GitRemote: remote, Labels: labels}
+		require.NoError(t, f.s.CreateProject(ctx, p))
+		return p
+	}
+	origin := func(v string) map[string]string { return map[string]string{store.LabelProjectOrigin: v} }
+	gitProject := mk("aaaaaaaa-0000-4000-8000-0000000000c1", "pred-git", "github.com/test/pred-git", origin(store.ProjectOriginHub))
+	linked := mk("aaaaaaaa-0000-4000-8000-0000000000c2", "pred-linked", "", origin(store.ProjectOriginLinked))
+	emptyPerAgent := mk("aaaaaaaa-0000-4000-8000-0000000000c3", "pred-empty", "",
+		map[string]string{store.LabelWorkspaceMode: string(store.SharingModeEmptyPerAgent), store.LabelProjectOrigin: store.ProjectOriginHub})
+	hubLabeled := mk("aaaaaaaa-0000-4000-8000-0000000000c4", "pred-hub", "", origin(store.ProjectOriginHub))
+	unlabeled := mk("aaaaaaaa-0000-4000-8000-0000000000c5", "pred-unlabeled", "", nil)
+	unlabeledPath := mk("aaaaaaaa-0000-4000-8000-0000000000c6", "pred-unlabeled-path", "", nil)
+	addProviderBroker(t, f.s, unlabeledPath.ID, "pred-path")
+	providers, err := f.s.GetProjectProviders(ctx, unlabeledPath.ID)
+	require.NoError(t, err)
+	require.Len(t, providers, 1)
+	providers[0].LocalPath = "/home/dev/checkout"
+	require.NoError(t, f.s.AddProjectProvider(ctx, &providers[0]))
+	global := &store.Project{ID: "aaaaaaaa-0000-4000-8000-0000000000c7", Name: "global", Slug: "global"}
+	require.True(t, isGlobalHubProject(global.Slug), "fixture check: the global project slug")
+
+	for name, tc := range map[string]struct {
+		p    *store.Project
+		want bool
+	}{
+		"git project":                    {gitProject, false},
+		"linked origin":                  {linked, false},
+		"empty-per-agent":                {emptyPerAgent, false},
+		"global project":                 {global, false},
+		"hub origin":                     {hubLabeled, true},
+		"unlabeled, no local path":       {unlabeled, true},
+		"unlabeled, provider local path": {unlabeledPath, false},
+		"nil project":                    {nil, false},
+	} {
+		assert.Equal(t, tc.want, f.srv.hubNativeWorkspaceProject(ctx, tc.p), name)
+	}
+
+	realStore := f.srv.store
+	f.srv.store = providersErrStore{Store: realStore}
+	assert.False(t, f.srv.hubNativeWorkspaceProject(ctx, unlabeled), "a provider lookup error means not hub-native")
+	assert.True(t, f.srv.hubNativeWorkspaceProject(ctx, hubLabeled), "the hub origin label needs no provider lookup")
+	f.srv.store = realStore
+
+	local := newWorkspaceLayoutFixture(t)
+	assert.False(t, local.srv.hubNativeWorkspaceProject(ctx, hubLabeled), "the local backend is never hub-native-provisioned")
+}
