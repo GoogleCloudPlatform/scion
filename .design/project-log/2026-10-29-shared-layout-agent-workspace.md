@@ -1,6 +1,6 @@
 # Agent-scoped workspace on a shared project Layout
 
-Base: `7fc52cc7` (scion/fsstore-share-verify-fix). Packages: `pkg/agent` only.
+Base: `7fc52cc7`. Packages: `pkg/agent` only.
 
 ## Problem
 
