@@ -4937,7 +4937,8 @@ func nfsProvisionCommand(gc *api.GitCloneConfig, uid, gid int64) []string {
 }
 
 // nfsProvisionEnv returns the environment variables for the NFS init
-// container. URL and branch are passed as env vars to prevent shell injection.
+// container. URL, branch and token remote are passed as env vars to prevent
+// shell injection.
 func nfsProvisionEnv(gc *api.GitCloneConfig) []corev1.EnvVar {
 	if gc == nil {
 		return nil
@@ -4947,6 +4948,12 @@ func nfsProvisionEnv(gc *api.GitCloneConfig) []corev1.EnvVar {
 	}
 	if gc.Branch != "" {
 		envs = append(envs, corev1.EnvVar{Name: "SCION_CLONE_BRANCH", Value: gc.Branch})
+	}
+	// The project's recorded remote, relayed unchanged: sciontool provision
+	// offers the git token to the clone only when the clone URL names it, and
+	// offers none without it.
+	if gc.TokenRemote != "" {
+		envs = append(envs, corev1.EnvVar{Name: api.EnvGitTokenRemote, Value: gc.TokenRemote})
 	}
 	return envs
 }

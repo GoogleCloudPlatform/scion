@@ -5670,6 +5670,11 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID strin
 	if writeSecretResolutionError(w, err) {
 		return
 	}
+	// The project's clone URL is one provisioning refuses: 422 with the
+	// refusal's fixed text, as at project create.
+	if writeSharedCloneSourceRefused(w, err) {
+		return
+	}
 
 	switch {
 	case relayDispatchRefusal(w, err):

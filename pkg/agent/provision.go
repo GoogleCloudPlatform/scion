@@ -924,6 +924,9 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 	}
 	if opts.SharedWorkspace {
 		ctx = api.ContextWithSharedWorkspace(ctx)
+		if gc := opts.SharedWorkspaceClone; gc != nil {
+			ctx = api.ContextWithGitTokenRemote(ctx, gc.TokenRemote)
+		}
 	}
 	ctx = api.ContextWithHubProjectID(ctx, opts.HubProjectID)
 	if opts.EmptyPerAgentWorkspace {
@@ -2908,12 +2911,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// 2f. Configure git credential helper for shared-workspace projects.
 	// The credential helper is written to $HOME/.gitconfig so it doesn't
 	// pollute the shared workspace. This pre-configures a basic credential
-	// helper using GITHUB_TOKEN env var. When GitHub App is enabled,
-	// sciontool init's configureSharedWorkspaceGit() will upgrade this to
-	// use `sciontool credential-helper` for on-demand token refresh.
-	if api.IsSharedWorkspaceFromContext(ctx) {
+	// helper using GITHUB_TOKEN env var, scoped to the host of the project's
+	// recorded git remote (the hub's token remote), so the token is offered
+	// to that host only; without a recorded remote no helper is written.
+	// When GitHub App is enabled, sciontool init's
+	// configureSharedWorkspaceGit() will upgrade this to use
+	// `sciontool credential-helper` for on-demand token refresh.
+	scope, scoped := provision.TokenRemoteCredentialScope(api.GitTokenRemoteFromContext(ctx))
+	if api.IsSharedWorkspaceFromContext(ctx) && scoped {
 		gitconfigPath := filepath.Join(agentHome, ".gitconfig")
-		credentialSection := "\n[credential]\n\thelper = !f() { echo \"username=oauth2\"; echo \"password=${GITHUB_TOKEN}\"; }; f\n"
+		credentialSection := "\n[credential \"" + scope + "\"]\n\thelper = !f() { echo \"username=oauth2\"; echo \"password=${GITHUB_TOKEN}\"; }; f\n"
 		// Append to existing .gitconfig (which may have [safe] directory config)
 		f, err := os.OpenFile(gitconfigPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {

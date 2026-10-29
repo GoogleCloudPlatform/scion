@@ -39,9 +39,12 @@ var provisionCmd = &cobra.Command{
 
 In default (clone) mode, reads SCION_CLONE_URL and SCION_CLONE_BRANCH from
 the environment and invokes the shared provisioning function. When
-GITHUB_TOKEN is set, the clone authenticates with it through a credential
-helper given to the clone command only; the token is not written to the
-clone URL, the workspace or the state directory. The sentinel
+GITHUB_TOKEN is set and SCION_GIT_TOKEN_REMOTE names the project's recorded
+git remote, the clone authenticates with it only if SCION_CLONE_URL is https
+and names that remote's host and owner/repo, through a host-scoped
+credential helper given to the clone command only; otherwise the clone gets
+no token. The token is not written to the clone URL, the workspace or the
+state directory. The sentinel
 file (.scion-provisioned) and the provisioning lock are kept in the
 project's provisioning state directory, which the Kubernetes runtime mounts
 next to the workspace and names in SCION_PROVISION_STATE_DIR, so nothing of
@@ -219,13 +222,17 @@ func runProvision(ctx context.Context) error {
 		GitClone:  gc,
 		// The Kubernetes runtime gives the cloning init container the
 		// project's git token from the agent's Secret (secretKeyRef) when
-		// one is configured. Only the clone command gets the credential
-		// helper; its value names the variable, not the token.
-		CloneWithToken: gc != nil && os.Getenv(provision.GitTokenEnv) != "",
-		NFSUID:         provisionUID,
-		NFSGID:         provisionGID,
-		SentinelDir:    sentinelDir,
-		LegacyDir:      legacyDir,
+		// one is configured, and the project's recorded remote in
+		// api.EnvGitTokenRemote. The token is offered only to a clone of
+		// that remote (provisionCloneToken); provision.ProvisionShared then
+		// gives it to the clone command alone, through a host-scoped
+		// credential helper.
+		CloneToken:       provisionCloneToken(gc, os.Getenv(provision.GitTokenEnv), os.Getenv(api.EnvGitTokenRemote)),
+		CloneTokenRemote: os.Getenv(api.EnvGitTokenRemote),
+		NFSUID:           provisionUID,
+		NFSGID:           provisionGID,
+		SentinelDir:      sentinelDir,
+		LegacyDir:        legacyDir,
 		// F-111: this command's entire purpose is the chown. A silent
 		// failure here would reproduce the "workspace stuck root:root" bug
 		// invisibly — the sentinel would still get written, and every future
@@ -260,8 +267,10 @@ func runProvision(ctx context.Context) error {
 
 	log.Info("Provisioning workspace at %s (mode=%s, project=%s, shared_dirs=%d)",
 		provisionWorkspace, mode, projectID, len(sharedDirs))
-	if in.CloneWithToken {
+	if in.CloneToken != "" {
 		log.Info("Cloning with the project's git credential (%s)", provision.GitTokenEnv)
+	} else if gc != nil && os.Getenv(provision.GitTokenEnv) != "" {
+		log.Info("The clone URL does not name the project's recorded git remote (%s); cloning without the project's git credential", api.EnvGitTokenRemote)
 	}
 	if worktree {
 		log.Info("Adding the worktree for agent %s at %s", agentSlug, provision.WorktreePath(provisionWorkspace, agentSlug))
@@ -324,6 +333,18 @@ func worktreeSafeDirectoryEnv(getenv func(string) string, workspace, agentSlug s
 		env[fmt.Sprintf("GIT_CONFIG_VALUE_%d", base+i)] = p
 	}
 	return env
+}
+
+// provisionCloneToken returns the git token to offer to the clone gc, or ""
+// for none: token only when there is a clone and gc.URL names the project's
+// recorded remote tokenRemote (provision.CloneTokenAllowed: https, same host
+// and owner/repo). An empty tokenRemote yields "" (fail closed), so a clone
+// URL taken from a label never gets the token on its own.
+func provisionCloneToken(gc *api.GitCloneConfig, token, tokenRemote string) string {
+	if gc == nil || token == "" || !provision.CloneTokenAllowed(tokenRemote, gc.URL) {
+		return ""
+	}
+	return token
 }
 
 // provisionShared is provision.ProvisionShared; a variable so tests can
