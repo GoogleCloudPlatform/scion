@@ -284,6 +284,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		// do not read Depth from the ctx copy.
 		ctx = api.ContextWithGitClone(ctx, opts.GitClone)
 	}
+	ctx = contextWithClonePerAgentWorkspace(ctx, opts)
 	if opts.RecordedOriginURL != "" {
 		// Linked-checkout route: GitClone was cleared, so the recorded origin is
 		// carried separately for the git-lfs endpoint pin.
@@ -2212,9 +2213,11 @@ authDone:
 			}
 
 			workspaceBackendName = backend.Name()
-			// Empty-per-agent keeps its private node-local path as the
-			// workspace source: mount.HostPath is the project's shared
-			// workspace, which this agent must never see.
+			// Empty-per-agent keeps its own workspace as the workspace
+			// source (on a shared Layout, its directory on the share,
+			// sharedLayoutAgentWorkspace; otherwise its private node-local
+			// path): mount.HostPath is the project's shared workspace,
+			// which this agent must never see.
 			if mount.HostPath != "" && !nfsAgentDirEmpty {
 				effectiveWorkspace = mount.HostPath
 			}

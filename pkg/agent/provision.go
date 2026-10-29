@@ -909,6 +909,7 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 	if opts.GitClone != nil {
 		ctx = api.ContextWithGitClone(ctx, opts.GitClone)
 	}
+	ctx = contextWithClonePerAgentWorkspace(ctx, opts)
 	if opts.FreshProvision {
 		ctx = api.ContextWithFreshProvision(ctx)
 	}
@@ -1142,14 +1143,17 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 	if hasGitClone {
 		agentDir = resolvedAgentDir
 		agentWorkspace := filepath.Join(agentDir, "workspace")
-		// On a shared Layout the clone is in the agent's directory on the
-		// share (sharedLayoutAgentWorkspace), as ProvisionAgent places it.
-		sharedWS, sharedErr := sharedLayoutAgentWorkspace(ctx, nil, projectDir, opts.Name, agentDir)
-		if sharedErr != nil {
-			return nil, fmt.Errorf("%w: %w", ErrReprovisionRefused, sharedErr)
-		}
-		if sharedWS != "" {
-			agentWorkspace = sharedWS
+		// On a shared Layout a clone-per-agent clone is in the agent's
+		// directory on the share (sharedLayoutAgentWorkspace), as
+		// ProvisionAgent places it. Any other mode keeps agentDir/workspace.
+		if isClonePerAgentStart(opts) {
+			sharedWS, sharedErr := sharedLayoutAgentWorkspace(ctx, nil, projectDir, opts.Name, agentDir)
+			if sharedErr != nil {
+				return nil, fmt.Errorf("%w: %w", ErrReprovisionRefused, sharedErr)
+			}
+			if sharedWS != "" {
+				agentWorkspace = sharedWS
+			}
 		}
 		if info, statErr := os.Stat(filepath.Join(agentWorkspace, ".git")); statErr != nil || !info.IsDir() {
 			return nil, fmt.Errorf("%w: agent %q has no existing git clone at %s; reincarnate does not create or recreate the workspace", ErrReprovisionRefused, opts.Name, agentWorkspace)
@@ -1867,13 +1871,15 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 
 	// An agent-scoped workspace (empty-per-agent, or clone-per-agent: a git
-	// clone) of a project on a shared Layout is the agent's directory on the
+	// clone in the clone-per-agent mode, isClonePerAgentWorkspace; never a
+	// worktree-per-agent dispatch's clone) of a project on a shared Layout
+	// is the agent's directory on the
 	// share, never below the broker-local agentDir
 	// (sharedLayoutAgentWorkspace). Start's NFS leaf helpers create that
 	// directory with the share's modes, so provisioning neither creates nor
 	// clears it.
 	var sharedAgentWorkspace string
-	if !sharedWorkspace && (emptyPerAgent || api.GitCloneFromContext(ctx) != nil) {
+	if !sharedWorkspace && (emptyPerAgent || isClonePerAgentWorkspace(ctx)) {
 		sharedAgentWorkspace, err = sharedLayoutAgentWorkspace(ctx, settings, projectDir, agentName, agentDir)
 		if err != nil {
 			return "", "", nil, err
@@ -4481,7 +4487,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 		if sharedWorkspace || agentWorkspace == "" || sharedAgentWorkspace != "" {
 			return nil
 		}
-		if !api.IsEmptyPerAgentWorkspaceFromContext(ctx) && api.GitCloneFromContext(ctx) == nil {
+		if !agentScopedWorkspace(ctx) {
 			return nil
 		}
 		ws, err := sharedLayoutAgentWorkspace(ctx, nil, projectDir, agentName, agentDir)

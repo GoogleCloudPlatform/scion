@@ -19,8 +19,47 @@ import (
 	"fmt"
 	"path/filepath"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
+
+// clonePerAgentWorkspaceKey marks a provisioning or start context whose
+// agent uses the clone-per-agent sharing mode (contextWithClonePerAgentWorkspace).
+type clonePerAgentWorkspaceKey struct{}
+
+// isClonePerAgentStart reports whether opts asks for a clone-per-agent
+// workspace: a git clone, with the clone-per-agent sharing mode in the
+// request env (SCION_WORKSPACE_MODE). A git clone in any other mode (for
+// example the worktree-per-agent dispatch on Kubernetes, which also
+// carries the clone) is not.
+func isClonePerAgentStart(opts api.StartOptions) bool {
+	return opts.GitClone != nil &&
+		store.ResolveWorkspaceSharingMode(opts.Env["SCION_WORKSPACE_MODE"]) == store.SharingModeClonePerAgent
+}
+
+// contextWithClonePerAgentWorkspace marks ctx when opts asks for a
+// clone-per-agent workspace (isClonePerAgentStart).
+func contextWithClonePerAgentWorkspace(ctx context.Context, opts api.StartOptions) context.Context {
+	if !isClonePerAgentStart(opts) {
+		return ctx
+	}
+	return context.WithValue(ctx, clonePerAgentWorkspaceKey{}, true)
+}
+
+// isClonePerAgentWorkspace reports whether ctx was marked by
+// contextWithClonePerAgentWorkspace.
+func isClonePerAgentWorkspace(ctx context.Context) bool {
+	v, _ := ctx.Value(clonePerAgentWorkspaceKey{}).(bool)
+	return v
+}
+
+// agentScopedWorkspace reports whether ctx's agent uses an agent-scoped
+// sharing mode, empty-per-agent or clone-per-agent: the modes whose
+// workspace is the agent's own directory (sharedLayoutAgentWorkspace).
+func agentScopedWorkspace(ctx context.Context) bool {
+	return api.IsEmptyPerAgentWorkspaceFromContext(ctx) || isClonePerAgentWorkspace(ctx)
+}
 
 // sharedLayoutAgentWorkspace returns the workspace directory of an
 // agent-scoped workspace (clone-per-agent or empty-per-agent) of a project

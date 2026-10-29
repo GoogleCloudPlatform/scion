@@ -82,10 +82,10 @@ func sharedLayoutStart(t *testing.T, rtName string, mutate func(*api.StartOption
 		Name:           "test-agent",
 		ProjectPath:    root,
 		NoAuth:         true,
-		RunID:          "run-dtc1",
+		RunID:          "run-shared-1",
 		FreshProvision: true,
 		Env: map[string]string{
-			"SCION_AGENT_ID":   "agent-dtc",
+			"SCION_AGENT_ID":   "agent-shared-1",
 			"SCION_PROJECT_ID": sharedRootUUID,
 		},
 	}
@@ -120,7 +120,7 @@ func TestStart_SharedLayoutClonePerAgentWorkspaceOnShare(t *testing.T) {
 	assert.FileExists(t, filepath.Join(ext, HostStateFile), "the run is recorded in the agent's state dir")
 	got, err := RecordedRunOwner(RunOwnerTargetFor(opts))
 	require.NoError(t, err)
-	assert.Equal(t, "run-dtc1", got, "delete and launch recovery find the recorded run")
+	assert.Equal(t, "run-shared-1", got, "delete and launch recovery find the recorded run")
 }
 
 // The same for an empty-per-agent agent: the workspace handed to the
@@ -144,7 +144,7 @@ func TestStart_SharedLayoutEmptyPerAgentWorkspaceOnShare(t *testing.T) {
 
 	got, err := RecordedRunOwner(RunOwnerTargetFor(opts))
 	require.NoError(t, err)
-	assert.Equal(t, "run-dtc1", got)
+	assert.Equal(t, "run-shared-1", got)
 }
 
 // A shared-plain hub-native agent on the same Layout is unaffected: its
@@ -167,7 +167,7 @@ func TestStart_SharedLayoutSharedPlainUnaffected(t *testing.T) {
 			assert.FileExists(t, filepath.Join(ext, "scion-agent.json"))
 			got, err := RecordedRunOwner(RunOwnerTargetFor(opts))
 			require.NoError(t, err)
-			assert.Equal(t, "run-dtc1", got)
+			assert.Equal(t, "run-shared-1", got)
 		})
 	}
 }
@@ -259,10 +259,10 @@ func TestHostStateRootFor_SharedProjectConfig(t *testing.T) {
 	}
 
 	target := RunOwnerTarget{ProjectPath: root, AgentName: "a1", HubProjectID: sharedCfgProjectID}
-	require.NoError(t, recordRunOwnerInAgentDir(target, ext, "run-dtc2"))
+	require.NoError(t, recordRunOwnerInAgentDir(target, ext, "run-shared-2"))
 	got, err := RecordedRunOwner(target)
 	require.NoError(t, err)
-	assert.Equal(t, "run-dtc2", got)
+	assert.Equal(t, "run-shared-2", got)
 	assert.FileExists(t, filepath.Join(ext, HostStateFile))
 	assert.NoFileExists(t, filepath.Join(root, config.DotScion, "agents", "a1", HostStateFile), "nothing is recorded on the share")
 
@@ -286,8 +286,85 @@ func TestHostStateRootFor_SharedProjectConfigLegacyAgent(t *testing.T) {
 	got, err := HostStateRootFor(target)
 	require.NoError(t, err)
 	assert.True(t, samePath(legacyRoot, got), "root %q, want the legacy project root %q", got, legacyRoot)
-	require.NoError(t, recordRunOwnerInAgentDir(target, legacy, "run-dtc3"))
+	require.NoError(t, recordRunOwnerInAgentDir(target, legacy, "run-shared-3"))
 	owner, err := RecordedRunOwner(target)
 	require.NoError(t, err)
-	assert.Equal(t, "run-dtc3", owner)
+	assert.Equal(t, "run-shared-3", owner)
+}
+
+// Only a git clone in the clone-per-agent mode is an agent-scoped clone
+// workspace; a worktree-per-agent dispatch also carries the clone (on
+// Kubernetes) and is not.
+func TestIsClonePerAgentStart(t *testing.T) {
+	gc := &api.GitCloneConfig{URL: "https://example.com/repo.git"}
+	cases := []struct {
+		name string
+		opts api.StartOptions
+		want bool
+	}{
+		{"clone-per-agent", api.StartOptions{GitClone: gc, Env: map[string]string{"SCION_WORKSPACE_MODE": "clone-per-agent"}}, true},
+		{"per-agent label", api.StartOptions{GitClone: gc, Env: map[string]string{"SCION_WORKSPACE_MODE": "per-agent"}}, true},
+		{"worktree-per-agent", api.StartOptions{GitClone: gc, Env: map[string]string{"SCION_WORKSPACE_MODE": "worktree-per-agent"}}, false},
+		{"no mode (shared-plain)", api.StartOptions{GitClone: gc}, false},
+		{"clone-per-agent without a clone", api.StartOptions{Env: map[string]string{"SCION_WORKSPACE_MODE": "clone-per-agent"}}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, isClonePerAgentStart(tc.opts))
+			ctx, _ := buildProvisionContext(context.Background(), tc.opts)
+			assert.Equal(t, tc.want, isClonePerAgentWorkspace(ctx), "provisioning context")
+			assert.Equal(t, tc.want, agentScopedWorkspace(ctx), "agent-scoped")
+		})
+	}
+}
+
+// Reprovision of a clone-per-agent agent on a shared Layout checks the clone
+// in the agent's directory on the share, where the provisioning init
+// container clones it.
+func TestReprovision_SharedLayoutClonePerAgentChecksShare(t *testing.T) {
+	_, root, _, opts, err := sharedLayoutStart(t, "kubernetes", func(o *api.StartOptions) {
+		o.GitClone = &api.GitCloneConfig{URL: "https://example.com/repo.git"}
+		o.Env["SCION_WORKSPACE_MODE"] = "clone-per-agent"
+	})
+	require.NoError(t, err)
+	shareWS := filepath.Join(root, "agents", "test-agent", "workspace")
+	m := NewManager(&runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }})
+
+	_, err = m.Reprovision(context.Background(), opts)
+	require.Error(t, err, "no clone on the share yet")
+	assert.ErrorIs(t, err, ErrReprovisionRefused)
+	assert.Contains(t, err.Error(), "has no existing git clone at "+shareWS)
+
+	mustMkdirAll(t, filepath.Join(shareWS, ".git"))
+	_, err = m.Reprovision(context.Background(), opts)
+	if err != nil {
+		assert.NotContains(t, err.Error(), "has no existing git clone", "the clone on the share must be found")
+	}
+}
+
+// A worktree-per-agent dispatch on Kubernetes also carries the git clone,
+// but it is not an agent-scoped workspace: Reprovision keeps checking the
+// broker-local agentDir/workspace, never the agent's directory on the
+// share, even when that directory holds a clone.
+func TestReprovision_SharedLayoutWorktreeKeepsOldWorkspace(t *testing.T) {
+	_, root, ext, opts, err := sharedLayoutStart(t, "kubernetes", func(o *api.StartOptions) {
+		o.GitClone = &api.GitCloneConfig{URL: "https://example.com/repo.git"}
+		o.Env["SCION_WORKSPACE_MODE"] = "clone-per-agent"
+	})
+	require.NoError(t, err)
+	shareWS := filepath.Join(root, "agents", "test-agent", "workspace")
+	mustMkdirAll(t, filepath.Join(shareWS, ".git"))
+
+	wt := opts
+	wt.Env = map[string]string{}
+	for k, v := range opts.Env {
+		wt.Env[k] = v
+	}
+	wt.Env["SCION_WORKSPACE_MODE"] = "worktree-per-agent"
+	m := NewManager(&runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }})
+	_, err = m.Reprovision(context.Background(), wt)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrReprovisionRefused)
+	assert.Contains(t, err.Error(), "has no existing git clone at "+filepath.Join(ext, "workspace"))
+	assert.NotContains(t, err.Error(), shareWS)
 }
