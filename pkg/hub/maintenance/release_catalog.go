@@ -66,8 +66,16 @@ const (
 	catalogStateVersion = 1
 )
 
-// CatalogChannels are the release channels, in display order.
-var CatalogChannels = []string{"nightly", "preview", "stable"}
+// catalogChannels are the release channels, in display order. It is an
+// array, so it cannot be appended to or resliced, and it is unexported, so
+// other packages read it only through CatalogChannels.
+var catalogChannels = [...]string{"nightly", "preview", "stable"}
+
+// CatalogChannels returns the release channels, in display order. Each call
+// returns a new slice, so a caller cannot change the set for anyone else.
+func CatalogChannels() []string {
+	return slices.Clone(catalogChannels[:])
+}
 
 // Catalog release sources. SourceLocal marks a release retained locally
 // and not in the listed window.
@@ -626,7 +634,7 @@ func (c *Catalog) fetch(ctx context.Context, prev catalogState) (catalogState, e
 
 // full reports whether every channel lists PerChannel installable releases.
 func (c *Catalog) full(channels map[string]CatalogChannel) bool {
-	for _, name := range CatalogChannels {
+	for _, name := range catalogChannels {
 		n := 0
 		for _, r := range channels[name].Releases {
 			if r.Installable {
@@ -659,8 +667,8 @@ func (c *Catalog) build(cl *classifier, releases []Release) (map[string]CatalogC
 		})
 	}
 
-	out := make(map[string]CatalogChannel, len(CatalogChannels))
-	for _, name := range CatalogChannels {
+	out := make(map[string]CatalogChannel, len(catalogChannels))
+	for _, name := range catalogChannels {
 		cands := byChannel[name]
 		slices.SortStableFunc(cands, compareNewestFirst)
 		ch := CatalogChannel{Releases: []CatalogRelease{}}
@@ -825,7 +833,7 @@ func (c *Catalog) snapshotLocked(local []InstalledRelease) Snapshot {
 		Repo:      c.opts.Repo,
 		FetchedAt: c.state.FetchedAt,
 		Stale:     c.lastErr != nil,
-		Channels:  make(map[string]CatalogChannel, len(CatalogChannels)),
+		Channels:  make(map[string]CatalogChannel, len(catalogChannels)),
 	}
 	if c.lastErr != nil {
 		snap.Error = c.lastErr.Error()
@@ -837,7 +845,7 @@ func (c *Catalog) snapshotLocked(local []InstalledRelease) Snapshot {
 		}
 	}
 	listed := map[string]bool{}
-	for _, name := range CatalogChannels {
+	for _, name := range catalogChannels {
 		src := c.state.Channels[name]
 		ch := CatalogChannel{Latest: src.Latest, Releases: make([]CatalogRelease, 0, len(src.Releases))}
 		for _, r := range src.Releases {

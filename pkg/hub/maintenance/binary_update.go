@@ -307,7 +307,7 @@ func (e *BinaryUpdateExecutor) ValidateParams(params map[string]string) error {
 	pin := params[ParamPin]
 
 	if ch, ok := strings.CutPrefix(target, LatestTargetPrefix); ok {
-		if !slices.Contains(CatalogChannels, ch) {
+		if !slices.Contains(catalogChannels[:], ch) {
 			return requestErrorf(CodeInvalidParam, "unknown channel %q in target_version %q", ch, target)
 		}
 		if channel != "" && channel != ch {

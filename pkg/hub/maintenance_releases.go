@@ -235,9 +235,9 @@ func (s *Server) buildReleasesResponse(ctx context.Context, cur runningBuild, re
 		Repo:      snap.Repo,
 		FetchedAt: snap.FetchedAt,
 		Stale:     snap.Stale,
-		Channels:  make(map[string]releasesChannel, len(maintenance.CatalogChannels)),
+		Channels:  make(map[string]releasesChannel),
 	}
-	for _, name := range maintenance.CatalogChannels {
+	for _, name := range maintenance.CatalogChannels() {
 		ch := snap.Channel(name)
 		out := releasesChannel{Releases: make([]releasesEntry, 0, len(ch.Releases))}
 		if ch.Latest != "" {

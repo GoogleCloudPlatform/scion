@@ -1337,3 +1337,25 @@ func TestExpectedChecksum_ErrorKinds(t *testing.T) {
 		}
 	}
 }
+
+// TestCatalogChannels_ReturnsCopy pins that the channel list cannot be
+// changed through the accessor: each call returns a fresh slice in display
+// order, and changing one leaves the next call (and ValidateParams) intact.
+func TestCatalogChannels_ReturnsCopy(t *testing.T) {
+	want := []string{"nightly", "preview", "stable"}
+	got := CatalogChannels()
+	if !slices.Equal(got, want) {
+		t.Fatalf("CatalogChannels() = %v, want %v", got, want)
+	}
+	got[0] = "beta"
+	if again := CatalogChannels(); !slices.Equal(again, want) {
+		t.Fatalf("CatalogChannels() after mutating a returned slice = %v, want %v", again, want)
+	}
+	e := NewBinaryUpdateExecutor(BinaryUpdateOptions{CurrentVersion: "nightly-20261022"})
+	if err := e.ValidateParams(map[string]string{ParamTargetVersion: "latest:nightly"}); err != nil {
+		t.Fatalf("latest:nightly refused after mutating a returned slice: %v", err)
+	}
+	if err := e.ValidateParams(map[string]string{ParamTargetVersion: "latest:beta"}); err == nil {
+		t.Fatal("latest:beta accepted after mutating a returned slice")
+	}
+}
