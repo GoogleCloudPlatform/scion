@@ -357,15 +357,12 @@ func isHex64(s string) bool {
 // isTemplateHashName reports whether s is a content hash rather than a
 // template name: the prefixed form cache directories use today, or any
 // other letter case or the bare 64-hex digest (templateHashPattern).
-// transfer.IsContentHash is a strict subset of templateHashPattern; it is
-// kept on purpose, only to tie this check to the cache's canonical hash
-// form, so a change to that form is reflected here too.
+// Because transfer.IsContentHash is a strict subset of templateHashPattern,
+// validating the length, case-insensitive HashPrefix, and hex digest directly
+// avoids regex evaluation for all inputs including valid content hashes.
 func isTemplateHashName(s string) bool {
 	if len(s) != 64 && len(s) != len(transfer.HashPrefix)+64 {
 		return false
-	}
-	if transfer.IsContentHash(s) {
-		return true
 	}
 	if len(s) == 64 {
 		return isHex64(s)
