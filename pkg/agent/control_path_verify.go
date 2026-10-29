@@ -55,8 +55,10 @@ func (m *AgentManager) verifyCreatedMounts(ctx context.Context, ref runtime.RunR
 	}
 	slog.Warn("Start: stopping an agent whose container mounts could not be verified clear of Runtime Broker control paths",
 		"agent", agentName, "code", brokercontrol.ErrorCode, "error", err)
-	// The stop is bounded, so a hung runtime CLI cannot hold the start.
-	stopCtx, cancel := context.WithTimeout(ctx, verifyStopTimeout)
+	// The stop is bounded, so a hung runtime CLI cannot hold the start. It
+	// does not inherit the request's cancellation: a client that goes away
+	// or times out must not cut the stop short.
+	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), verifyStopTimeout)
 	stopErr := m.Runtime.Stop(stopCtx, ref)
 	cancel()
 	if !errors.Is(err, brokercontrol.ErrControlPathMount) {

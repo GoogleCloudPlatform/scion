@@ -196,3 +196,34 @@ func TestVerifyCreatedMounts_StopFailureIsReported(t *testing.T) {
 		t.Fatalf("error does not report the failed stop truthfully: %s", msg)
 	}
 }
+
+// TestVerifyCreatedMounts_StopOutlivesCancelledRequest: a refused container
+// is stopped with a live, bounded context even when the request context is
+// already cancelled.
+func TestVerifyCreatedMounts_StopOutlivesCancelledRequest(t *testing.T) {
+	global, _ := controlPathHome(t)
+	rt := newInspectingRuntime(inspectResult{binds: []runtime.BindMount{{Source: global, Destination: "/g"}}})
+	var stopErr error
+	var hasDeadline bool
+	rt.StopFunc = func(ctx context.Context, ref runtime.RunRef) error {
+		stopErr = ctx.Err()
+		_, hasDeadline = ctx.Deadline()
+		rt.stopped = append(rt.stopped, ref)
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := (&AgentManager{Runtime: rt}).verifyCreatedMounts(ctx, runtime.RunRef{ID: "c1"}, "a")
+	if !errors.Is(err, brokercontrol.ErrControlPathMount) {
+		t.Fatalf("err = %v, want ErrControlPathMount", err)
+	}
+	if len(rt.stopped) != 1 {
+		t.Fatalf("stopped = %v, want one stop", rt.stopped)
+	}
+	if stopErr != nil {
+		t.Fatalf("Stop got a done context (%v); it must not inherit the request's cancellation", stopErr)
+	}
+	if !hasDeadline {
+		t.Fatal("Stop got a context without a deadline; the stop must stay bounded")
+	}
+}
