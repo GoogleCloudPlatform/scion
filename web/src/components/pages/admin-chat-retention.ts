@@ -79,16 +79,16 @@ const SWEEP_FIELDS: ReadonlyArray<{
   {
     key: 'pause_ms',
     label: 'Pause between chunks (ms)',
-    hint: 'Pause after each chunk (0 to 60000; default 500).',
+    hint: 'Pause after each chunk (0 to 10000; default 500).',
     min: 0,
-    max: 60000,
+    max: 10000,
   },
   {
     key: 'tick_budget_seconds',
     label: 'Tick budget (seconds)',
-    hint: 'Longest a sweep tick runs (1 to 600; default 30).',
+    hint: 'Longest a sweep tick runs (1 to 40; default 30).',
     min: 1,
-    max: 600,
+    max: 40,
   },
   {
     key: 'tick_interval_minutes',
@@ -524,7 +524,7 @@ export class ScionAdminChatRetention extends LitElement {
       </details>
       ${deleting
         ? html`<div class="status-message warning delete-warning">
-            Once saved, messages older than ${days} days are permanently deleted from this hub.
+            While enabled, messages older than ${days} days are permanently deleted from this hub.
           </div>`
         : nothing}
       ${this.saveErrors.length > 0

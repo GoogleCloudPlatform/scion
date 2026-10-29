@@ -136,7 +136,7 @@ describe('buildRetentionPutBody', () => {
     expect(r.ok).toBe(false);
     expect(!r.ok && r.errors).toEqual([
       'Chunk size must be a whole number from 25 to 1000.',
-      'Pause between chunks (ms) must be a whole number from 0 to 60000.',
+      'Pause between chunks (ms) must be a whole number from 0 to 10000.',
     ]);
   });
 });
@@ -216,7 +216,9 @@ describe('scion-admin-chat-retention', () => {
       expect(q(el, '.last-applied-cutoff')?.textContent).toContain('2026');
       expect(q<HTMLDetailsElement>(el, 'details.advanced')?.open).toBe(false);
       expect(el.shadowRoot?.querySelectorAll('.sweep-input').length).toBe(4);
-      expect(q(el, '.delete-warning')?.textContent).toContain('older than 30 days');
+      expect(q(el, '.delete-warning')?.textContent).toContain(
+        'While enabled, messages older than 30 days are permanently deleted from this hub.'
+      );
     });
 
     it('saves with expected_revision and shows the saved values', async () => {
@@ -259,13 +261,13 @@ describe('scion-admin-chat-retention', () => {
         json(
           {
             error: 'validation_failed',
-            errors: [{ Path: 'sweep/pause_ms', Message: 'must be <= 60000' }],
+            errors: [{ Path: 'sweep/pause_ms', Message: 'must be <= 10000' }],
           },
           400
         );
       await save(el);
 
-      expect(q(el, '.save-errors')?.textContent).toContain('sweep/pause_ms: must be <= 60000');
+      expect(q(el, '.save-errors')?.textContent).toContain('sweep/pause_ms: must be <= 10000');
     });
 
     it('reloads the current values on a revision conflict', async () => {

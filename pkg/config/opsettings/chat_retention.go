@@ -37,11 +37,15 @@ const (
 	ChatRetentionMinChunkSize     = 25
 	ChatRetentionMaxChunkSize     = 1000
 
+	// The pause and budget bounds keep a tick inside the hub scheduler's
+	// 55 s handler context: a 40 s budget plus one 5 s chunk timeout
+	// leaves room for the end-of-tick writes, and a pause never runs past
+	// the budget.
 	ChatRetentionDefaultPauseMS = 500
-	ChatRetentionMaxPauseMS     = 60000
+	ChatRetentionMaxPauseMS     = 10000
 
 	ChatRetentionDefaultTickBudgetSeconds = 30
-	ChatRetentionMaxTickBudgetSeconds     = 600
+	ChatRetentionMaxTickBudgetSeconds     = 40
 
 	ChatRetentionDefaultTickIntervalMinutes = 10
 	ChatRetentionMaxTickIntervalMinutes     = 1440

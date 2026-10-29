@@ -135,6 +135,8 @@ func TestAdminChatRetention_CASAndValidation(t *testing.T) {
 		{"sweep": map[string]any{"chunk_size": 1001}},
 		{"sweep": map[string]any{"pause_ms": -1}},
 		{"sweep": map[string]any{"tick_budget_seconds": 0}},
+		{"sweep": map[string]any{"tick_budget_seconds": 41}},
+		{"sweep": map[string]any{"pause_ms": 10001}},
 		{"sweep": map[string]any{"tick_interval_minutes": 0}},
 		{"deleted_conversation_grace_days": 30},
 		{"failed_message_retention_days": 7},
@@ -205,4 +207,29 @@ func TestAdminChatRetention_SaveIsAudited(t *testing.T) {
 		"enabled": true, "expected_revision": got.Revision,
 	}))
 	assert.Len(t, records(), 1, "an unchanged save writes no audit record")
+}
+
+// TestAdminChatRetention_GenericSectionResetRefused: the generic section
+// reset (DELETE /api/v1/admin/server-config/sections/chat_retention) is
+// refused, because it would skip the experiment gate, the revision check
+// and the audit record; the stored section is unchanged.
+func TestAdminChatRetention_GenericSectionResetRefused(t *testing.T) {
+	srv, s, admin, _ := chatRetentionAdminServer(t, true)
+	srv.dbDriver = "postgres" // unlock the postgres-only generic-reset route for this test
+	decodeChatRetention(t, doRequestAsUser(t, srv, admin, http.MethodPut, chatRetentionAdminPath, map[string]any{
+		"enabled": true, "messages_retention_days": 30, "expected_revision": 0,
+	}))
+	before, err := s.GetHubSetting(context.Background(), opsettings.ChatRetentionSectionName)
+	require.NoError(t, err)
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodDelete, "/api/v1/admin/server-config/sections/chat_retention", nil)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Equal(t, "validation_failed", errorCode(t, rec))
+	assert.Contains(t, rec.Body.String(), "/api/v1/admin/chat-retention")
+
+	after, err := s.GetHubSetting(context.Background(), opsettings.ChatRetentionSectionName)
+	require.NoError(t, err)
+	assert.Equal(t, string(before.Value), string(after.Value))
+	assert.Equal(t, before.Revision, after.Revision)
+	assert.True(t, srv.GetOperationalSettings().ChatRetention().Enabled)
 }

@@ -511,7 +511,9 @@ VALUES (?, ?, 'user:alice', 'agent:bot', 'retention harness', 'chat', false, fal
 	cfg.Enabled = true
 	cfg.MessagesRetentionDays = 30
 	cfg.PauseMS = 0 // the pause does not change transaction times; keep the run short
-	cfg.TickBudgetSeconds = opsettings.ChatRetentionMaxTickBudgetSeconds
+	// One tick for the whole backlog: past the settings bound, which only
+	// exists to fit the scheduler's handler context (not used here).
+	cfg.TickBudgetSeconds = 3600
 	policy := newChatRetentionPolicy(true, cfg, now)
 
 	// Record every purge transaction's duration.
@@ -564,4 +566,107 @@ func (s *timedChatRetentionStore) PurgeChatMessages(ctx context.Context, ids []s
 	s.durations = append(s.durations, time.Since(start))
 	s.mu.Unlock()
 	return res, err
+}
+
+// TestChatHistoryRetentionMarker_DMByConversation: for a DM listed by
+// conversation, the marker follows the conversation row's creation time:
+// shown when it was created before the last applied cutoff, not after.
+func TestChatHistoryRetentionMarker_DMByConversation(t *testing.T) {
+	f := newChatRetentionHubFixture(t)
+	setChatRetentionSettings(t, f.srv, true, `{"enabled":true,"messages_retention_days":30}`)
+	conv, err := f.s.UpsertConversationByExternalRef(f.ctx, &store.Conversation{
+		Kind: "direct", Surface: "native", ExternalRef: "dm:user:a:user:b", DriftState: "active",
+	})
+	require.NoError(t, err)
+	stored, err := f.s.GetConversation(f.ctx, conv.ID)
+	require.NoError(t, err)
+	created := stored.CreatedAt
+	require.False(t, created.IsZero())
+
+	marker := func(cutoff time.Time) *chatHistoryRetention {
+		f.srv.chatRetention.mu.Lock()
+		c := cutoff
+		f.srv.chatRetention.cutoff = &c
+		f.srv.chatRetention.cutoffAt = time.Now()
+		f.srv.chatRetention.mu.Unlock()
+		return f.srv.chatHistoryRetentionMarker(f.ctx, &store.ListResult[store.Message]{}, conv.ID, nil)
+	}
+
+	got := marker(created.Add(time.Hour))
+	require.NotNil(t, got, "a DM created before the cutoff shows the marker")
+	assert.True(t, got.PurgedBefore.Equal(created.Add(time.Hour)))
+	assert.Nil(t, marker(created.Add(-time.Hour)), "a DM created after the cutoff shows none")
+	assert.Nil(t, f.srv.chatHistoryRetentionMarker(f.ctx, &store.ListResult[store.Message]{}, "", nil),
+		"a legacy DM without a conversation shows none")
+}
+
+// cancellingChatRetentionStore cancels the tick's context after a given
+// number of purges, as a replica that stops (or loses the lock at the end
+// of its tick) mid-walk would.
+type cancellingChatRetentionStore struct {
+	store.ChatRetentionStore
+	cancel     context.CancelFunc
+	after      int
+	purges     int
+	firstAfter *store.ChatRetentionPosition
+}
+
+func (s *cancellingChatRetentionStore) SelectChatRetentionCandidates(ctx context.Context, cutoff time.Time, after store.ChatRetentionPosition, limit int) ([]store.ChatRetentionCandidate, error) {
+	if s.firstAfter == nil {
+		a := after
+		s.firstAfter = &a
+	}
+	return s.ChatRetentionStore.SelectChatRetentionCandidates(ctx, cutoff, after, limit)
+}
+
+func (s *cancellingChatRetentionStore) PurgeChatMessages(ctx context.Context, ids []string, projectOf map[string]string, c store.ChatRetentionCursor) (store.ChatRetentionPurgeResult, error) {
+	res, err := s.ChatRetentionStore.PurgeChatMessages(ctx, ids, projectOf, c)
+	s.purges++
+	if s.cancel != nil && s.purges == s.after {
+		s.cancel()
+	}
+	return res, err
+}
+
+// TestChatRetention_FailoverResumesFromCursorSQLite: a sweeper that stops
+// mid-tick leaves its cursor and run row in the database; a fresh sweeper
+// (another replica, at its next tick) resumes from that cursor, not from the
+// start, and the two together purge every eligible message exactly once.
+func TestChatRetention_FailoverResumesFromCursorSQLite(t *testing.T) {
+	f := newChatRetentionHubFixture(t)
+	setChatRetentionSettings(t, f.srv, true, `{"enabled":true,"messages_retention_days":30,"sweep":{"chunk_size":25,"pause_ms":0}}`)
+	old := time.Now().UTC().Add(-60 * 24 * time.Hour)
+	for i := 0; i < 120; i++ {
+		f.message(chatRetentionSeed{created: old.Add(time.Duration(i) * time.Second), channel: "web"})
+	}
+	now := time.Now()
+
+	ctxA, cancelA := context.WithCancel(f.ctx)
+	defer cancelA()
+	a := &cancellingChatRetentionStore{ChatRetentionStore: f.crs, cancel: cancelA, after: 2}
+	resA, errA := newChatRetentionSweeper(a).RunTick(ctxA, f.srv.chatRetentionPolicyAt(now))
+	require.ErrorIs(t, errA, context.Canceled)
+	assert.Equal(t, int64(50), resA.Purged.Main)
+	stored, err := f.crs.GetChatRetentionCursor(f.ctx, store.ChatRetentionPhaseMain)
+	require.NoError(t, err)
+	require.False(t, stored.Position.IsStart(), "replica A's cursor is stored")
+	runA, err := f.crs.LatestChatRetentionRun(f.ctx, store.ChatRetentionTriggerSweep, now.Add(-time.Hour))
+	require.NoError(t, err)
+	require.NotNil(t, runA)
+	assert.Equal(t, store.ChatRetentionStatusFailed, runA.Status)
+	assert.Equal(t, int64(50), runA.Counts[f.project.ID].Main)
+
+	// Replica B, at the next tick after the interval.
+	b := &cancellingChatRetentionStore{ChatRetentionStore: f.crs}
+	swB := newChatRetentionSweeper(b)
+	later := now.Add(15 * time.Minute)
+	swB.now = func() time.Time { return later }
+	resB, err := swB.RunTick(f.ctx, f.srv.chatRetentionPolicyAt(later))
+	require.NoError(t, err)
+	require.NotNil(t, b.firstAfter)
+	assert.Equal(t, stored.Position.ID, b.firstAfter.ID, "B resumes from A's cursor")
+	assert.True(t, stored.Position.Created.Equal(b.firstAfter.Created))
+	assert.Equal(t, int64(70), resB.Purged.Main)
+	assert.Equal(t, 0, f.count(`SELECT COUNT(*) FROM messages WHERE created < ?`, now.UTC().Add(-30*24*time.Hour)))
+	assert.Equal(t, chatRetentionNoOrphans(), chatRetentionOrphans(t, f.db))
 }

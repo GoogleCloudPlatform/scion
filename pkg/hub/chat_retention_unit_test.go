@@ -55,8 +55,11 @@ type fakeChatRetentionStore struct {
 	hasCursor bool
 	runs      []*store.ChatRetentionRun
 
-	purgeCost   func(call int) time.Duration
-	purgeErr    error
+	purgeCost func(call int) time.Duration
+	purgeErr  error
+	// afterPurge, when set, runs after each successful purge (a test
+	// cancels the tick's context from it).
+	afterPurge  func(call int)
 	purgeCalls  int
 	selectCalls int
 	scanned     int
@@ -125,6 +128,9 @@ func (f *fakeChatRetentionStore) PurgeChatMessages(ctx context.Context, ids []st
 	}
 	f.msgs = kept
 	f.cursor, f.hasCursor = cursor, true
+	if f.afterPurge != nil {
+		f.afterPurge(f.purgeCalls)
+	}
 	return res, nil
 }
 
@@ -136,6 +142,9 @@ func (f *fakeChatRetentionStore) GetChatRetentionCursor(ctx context.Context, pha
 }
 
 func (f *fakeChatRetentionStore) SaveChatRetentionCursor(ctx context.Context, c store.ChatRetentionCursor) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f.cursor, f.hasCursor = c, true
 	return nil
 }
@@ -159,6 +168,9 @@ func (f *fakeChatRetentionStore) LatestChatRetentionRun(ctx context.Context, tri
 }
 
 func (f *fakeChatRetentionStore) SaveChatRetentionRun(ctx context.Context, run *store.ChatRetentionRun) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	cp := *run
 	if run.ID == "" {
 		run.ID = fmt.Sprintf("run-%d", len(f.runs)+1)
@@ -176,6 +188,9 @@ func (f *fakeChatRetentionStore) SaveChatRetentionRun(ctx context.Context, run *
 }
 
 func (f *fakeChatRetentionStore) PruneChatRetentionRuns(ctx context.Context, before time.Time) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	kept := f.runs[:0]
 	n := 0
 	for _, r := range f.runs {
@@ -497,6 +512,115 @@ func TestChatRetentionSweeper_PurgeFailure(t *testing.T) {
 	assert.True(t, h.st.cursor.Position.IsStart())
 	assert.Nil(t, h.st.cursor.LastAppliedCutoff)
 	assert.Len(t, h.st.msgs, 10)
+
+	// A clean tick in the same 24 h run adds its counts, but the run stays
+	// failed with the first error until it closes.
+	h.st.purgeErr = nil
+	h.clock.t = h.clock.t.Add(10 * time.Minute)
+	res, err := h.sw.RunTick(context.Background(), h.policy(chatRetentionTestConfig(nil)))
+	require.NoError(t, err)
+	assert.True(t, res.ReachedCutoff)
+	require.Len(t, h.st.runs, 1)
+	assert.Equal(t, store.ChatRetentionStatusFailed, h.st.runs[0].Status)
+	assert.Contains(t, h.st.runs[0].Error, "disk on fire")
+	assert.Equal(t, int64(10), h.st.runs[0].Counts["p1"].Main)
+
+	// The next run row, a day later, starts clean.
+	h.clock.t = h.clock.t.Add(25 * time.Hour)
+	h.seedOld(1, "p1")
+	_, err = h.sw.RunTick(context.Background(), h.policy(chatRetentionTestConfig(nil)))
+	require.NoError(t, err)
+	require.Len(t, h.st.runs, 2)
+	assert.Equal(t, store.ChatRetentionStatusOK, h.st.runs[1].Status)
+	assert.Empty(t, h.st.runs[1].Error)
+}
+
+// TestChatRetentionSweeper_HandlerDeadline: a context deadline shorter than
+// the tick budget ends the walk early enough for a last chunk and the
+// end-of-tick writes; the run row records the committed counts, and an
+// immediate second tick is skipped by the interval gate.
+func TestChatRetentionSweeper_HandlerDeadline(t *testing.T) {
+	h := newChatRetentionUnitHarness()
+	h.seedOld(10000, "p1")
+	h.st.purgeCost = func(int) time.Duration { return 300 * time.Millisecond }
+	cfg := chatRetentionTestConfig(func(c *opsettings.ChatRetentionConfig) { c.TickBudgetSeconds = 40 })
+	// 10 s left: the walk may run until 10 - 5 (chunk timeout) - 2 (margin)
+	// = 3 s of the sweeper's clock.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	res, err := h.sw.RunTick(ctx, h.policy(cfg))
+	require.NoError(t, err)
+	assert.True(t, res.BudgetExhausted)
+	assert.Positive(t, res.Chunks)
+	assert.LessOrEqual(t, res.Chunks, 4, "300 ms tx + 500 ms pause per chunk in about 3 s")
+	require.Len(t, h.st.runs, 1)
+	run := h.st.runs[0]
+	assert.Equal(t, store.ChatRetentionStatusPartial, run.Status)
+	require.NotNil(t, run.FinishedAt)
+	assert.Equal(t, res.Purged.Main, run.Counts["p1"].Main)
+	assert.Positive(t, run.Counts["p1"].Main)
+
+	h.clock.t = h.clock.t.Add(time.Minute)
+	res, err = h.sw.RunTick(context.Background(), h.policy(cfg))
+	require.NoError(t, err)
+	assert.False(t, res.Ran, "the interval gate applies to the recorded run")
+}
+
+// TestChatRetentionSweeper_ContextDoneMidTick: when the tick's context ends
+// mid-walk (the handler deadline, or a shutdown), the end-of-tick writes
+// still run: the run row is saved failed with the error and the counts of
+// the chunks already committed, and the cursor keeps their position.
+func TestChatRetentionSweeper_ContextDoneMidTick(t *testing.T) {
+	h := newChatRetentionUnitHarness()
+	h.seedOld(1000, "p1")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h.st.afterPurge = func(call int) {
+		if call == 2 {
+			cancel()
+		}
+	}
+
+	res, err := h.sw.RunTick(ctx, h.policy(chatRetentionTestConfig(nil)))
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, 2, res.Chunks)
+	require.Len(t, h.st.runs, 1)
+	run := h.st.runs[0]
+	assert.Equal(t, store.ChatRetentionStatusFailed, run.Status)
+	assert.Contains(t, run.Error, "context canceled")
+	require.NotNil(t, run.FinishedAt)
+	assert.Equal(t, int64(400), run.Counts["p1"].Main)
+	assert.Equal(t, res.Purged.Main, run.Counts["p1"].Main)
+	assert.False(t, h.st.cursor.Position.IsStart())
+}
+
+// TestChatRetentionSweeper_LastAppliedCutoffMonotonic: lengthening the
+// window does not move the last applied cutoff back; shortening it again
+// moves it forward.
+func TestChatRetentionSweeper_LastAppliedCutoffMonotonic(t *testing.T) {
+	h := newChatRetentionUnitHarness()
+	h.seedOld(5, "p1")
+	p30 := h.policy(chatRetentionTestConfig(nil))
+	res, err := h.sw.RunTick(context.Background(), p30)
+	require.NoError(t, err)
+	require.NotNil(t, res.LastAppliedCutoff)
+	assert.True(t, res.LastAppliedCutoff.Equal(p30.MainCutoff))
+
+	h.clock.t = h.clock.t.Add(10 * time.Minute)
+	p365 := h.policy(chatRetentionTestConfig(func(c *opsettings.ChatRetentionConfig) { c.MessagesRetentionDays = 365 }))
+	res, err = h.sw.RunTick(context.Background(), p365)
+	require.NoError(t, err)
+	assert.True(t, res.ReachedCutoff)
+	require.NotNil(t, h.st.cursor.LastAppliedCutoff)
+	assert.True(t, h.st.cursor.LastAppliedCutoff.Equal(p30.MainCutoff), "a longer window keeps the newer cutoff")
+	assert.True(t, res.LastAppliedCutoff.Equal(p30.MainCutoff))
+
+	h.clock.t = h.clock.t.Add(10 * time.Minute)
+	p30later := h.policy(chatRetentionTestConfig(nil))
+	_, err = h.sw.RunTick(context.Background(), p30later)
+	require.NoError(t, err)
+	assert.True(t, h.st.cursor.LastAppliedCutoff.Equal(p30later.MainCutoff), "a newer cutoff moves it forward")
 }
 
 // TestChatHistoryRetentionMarker_Conditions covers the marker conditions

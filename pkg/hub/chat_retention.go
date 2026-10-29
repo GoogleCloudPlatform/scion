@@ -63,6 +63,12 @@ const (
 	// chatRetentionCutoffCacheTTL bounds how stale the history marker's
 	// cached last applied cutoff may be.
 	chatRetentionCutoffCacheTTL = time.Minute
+	// chatRetentionDeadlineMargin is kept free before the handler context's
+	// deadline besides one chunk timeout, for the end-of-tick writes.
+	chatRetentionDeadlineMargin = 2 * time.Second
+	// chatRetentionFinalWriteTimeout bounds the end-of-tick cursor, run and
+	// prune writes, which run even when the tick's context is done.
+	chatRetentionFinalWriteTimeout = 5 * time.Second
 	// chatRetentionTickSlack absorbs scheduler jitter when deciding whether
 	// tick_interval_minutes has passed since the last tick.
 	chatRetentionTickSlack = 5 * time.Second
@@ -197,8 +203,8 @@ func (s *Server) chatRetentionHandler() func(ctx context.Context) {
 
 		sw := newChatRetentionSweeper(st)
 		res, err := sw.RunTick(ctx, p)
-		if res.ReachedCutoff {
-			s.noteChatRetentionCutoff(p.MainCutoff, time.Now())
+		if res.LastAppliedCutoff != nil {
+			s.noteChatRetentionCutoff(*res.LastAppliedCutoff, time.Now())
 		}
 		if err != nil {
 			slog.Error("chat retention: tick failed", "error", err, "chunks", res.Chunks, "purged", res.Purged.Main)
@@ -256,6 +262,9 @@ type chatRetentionTickResult struct {
 	MaxTx time.Duration
 	// ChunkSizes are the requested chunk sizes, in order.
 	ChunkSizes []int
+	// LastAppliedCutoff is the cursor's last applied cutoff after the
+	// tick (it only moves forward); nil when none is set yet.
+	LastAppliedCutoff *time.Time
 }
 
 // nextChatRetentionChunk adapts the chunk size to the last transaction
@@ -325,24 +334,42 @@ func (sw *chatRetentionSweeper) RunTick(ctx context.Context, p chatRetentionPoli
 		cursorDirty = true
 	}
 
-	tickErr := sw.walk(ctx, p, &cursor, run, &res, start, &cursorDirty)
+	tickErr := sw.walk(ctx, p, &cursor, run, &res, sw.budgetEnd(ctx, start, cfg), &cursorDirty)
+
+	// The end-of-tick writes record what the tick committed even when ctx
+	// is done (the scheduler's handler deadline, or a shutdown): they run
+	// on a context that keeps ctx's values but not its cancellation, under
+	// their own short timeout.
+	wctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), chatRetentionFinalWriteTimeout)
+	defer cancel()
 
 	now := sw.now().UTC()
-	if res.ReachedCutoff {
+	// last_applied_cutoff only moves forward: after a longer window is set,
+	// history still starts at the newer cutoff the walk already reached.
+	if res.ReachedCutoff && (cursor.LastAppliedCutoff == nil || p.MainCutoff.After(*cursor.LastAppliedCutoff)) {
 		c := p.MainCutoff.UTC()
 		cursor.LastAppliedCutoff = &c
 		cursorDirty = true
 	}
+	res.LastAppliedCutoff = cursor.LastAppliedCutoff
 	if cursorDirty {
 		cursor.UpdatedAt = now
-		if err := sw.store.SaveChatRetentionCursor(ctx, cursor); err != nil && tickErr == nil {
+		if err := sw.store.SaveChatRetentionCursor(wctx, cursor); err != nil && tickErr == nil {
 			tickErr = err
 		}
 	}
 
 	run.Policy = store.ChatRetentionPolicy{MessagesRetentionDays: cfg.MessagesRetentionDays, MainCutoff: p.MainCutoff.UTC()}
 	run.FinishedAt = &now
+	// A sweep run that failed stays failed, with its first error, until it
+	// closes (24 h after it started); later clean ticks still add their
+	// counts to it. The next run row starts clean.
+	alreadyFailed := run.Status == store.ChatRetentionStatusFailed
 	switch {
+	case alreadyFailed:
+		if run.Error == "" && tickErr != nil {
+			run.Error = tickErr.Error()
+		}
 	case tickErr != nil:
 		run.Status = store.ChatRetentionStatusFailed
 		run.Error = tickErr.Error()
@@ -353,20 +380,36 @@ func (sw *chatRetentionSweeper) RunTick(ctx context.Context, p chatRetentionPoli
 		run.Status = store.ChatRetentionStatusPartial
 		run.Error = ""
 	}
-	if err := sw.store.SaveChatRetentionRun(ctx, run); err != nil && tickErr == nil {
+	if err := sw.store.SaveChatRetentionRun(wctx, run); err != nil && tickErr == nil {
 		tickErr = err
 	}
-	if _, err := sw.store.PruneChatRetentionRuns(ctx, now.Add(-chatRetentionRunKeep)); err != nil && tickErr == nil {
+	if _, err := sw.store.PruneChatRetentionRuns(wctx, now.Add(-chatRetentionRunKeep)); err != nil && tickErr == nil {
 		tickErr = err
 	}
 	return res, tickErr
 }
 
+// budgetEnd is when the tick's walk must stop: start + tick_budget_seconds,
+// or earlier when ctx has a deadline, so that a last chunk (at most
+// chatRetentionChunkTimeout) and the end-of-tick writes still fit before
+// it. The deadline is measured on the wall clock and applied to the
+// sweeper's clock.
+func (sw *chatRetentionSweeper) budgetEnd(ctx context.Context, start time.Time, cfg opsettings.ChatRetentionConfig) time.Time {
+	end := start.Add(cfg.TickBudget())
+	if deadline, ok := ctx.Deadline(); ok {
+		byDeadline := start.Add(time.Until(deadline) - chatRetentionChunkTimeout - chatRetentionDeadlineMargin)
+		if byDeadline.Before(end) {
+			end = byDeadline
+		}
+	}
+	return end
+}
+
 // walk runs the chunks of one tick, from cursor, until the walk reaches the
-// cutoff, the budget is spent, the context ends or a chunk fails.
-func (sw *chatRetentionSweeper) walk(ctx context.Context, p chatRetentionPolicy, cursor *store.ChatRetentionCursor, run *store.ChatRetentionRun, res *chatRetentionTickResult, start time.Time, cursorDirty *bool) error {
+// cutoff, budgetEnd passes, the context ends or a chunk fails. A pause that
+// would run past budgetEnd ends the tick instead.
+func (sw *chatRetentionSweeper) walk(ctx context.Context, p chatRetentionPolicy, cursor *store.ChatRetentionCursor, run *store.ChatRetentionRun, res *chatRetentionTickResult, budgetEnd time.Time, cursorDirty *bool) error {
 	cfg := p.Config
-	budgetEnd := start.Add(cfg.TickBudget())
 	chunk := cfg.ChunkSize
 	for {
 		if err := ctx.Err(); err != nil {
@@ -387,6 +430,10 @@ func (sw *chatRetentionSweeper) walk(ctx context.Context, p chatRetentionPolicy,
 		}
 		*cursorDirty = false // the purge transaction stored the cursor
 		chunk = nextChatRetentionChunk(chunk, cfg.ChunkSize, tx)
+		if !sw.now().Add(cfg.Pause()).Before(budgetEnd) {
+			res.BudgetExhausted = true
+			return nil
+		}
 		if err := sw.sleep(ctx, cfg.Pause()); err != nil {
 			return err
 		}
