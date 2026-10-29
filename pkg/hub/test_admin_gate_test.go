@@ -899,20 +899,15 @@ var tiaDefaultImportNames = map[string]string{
 // "exempt: <reason>" for key material that never signs a credential a test
 // identity could carry elsewhere.
 var tiaKeyMaterialSites = map[string]string{
-	"agenttoken.go:NewAgentTokenService:github.com/go-jose/go-jose/v4.NewSigner":     "agent_token",
-	"usertoken.go:NewUserTokenService:github.com/go-jose/go-jose/v4.NewSigner":       "user_jwt",
-	"agenttoken.go:newRingAgentTokenService:github.com/go-jose/go-jose/v4.NewSigner": "agent_token",
-	"usertoken.go:newRingUserTokenService:github.com/go-jose/go-jose/v4.NewSigner":   "user_jwt",
-	// pkgmove:ref-ok updated to the pkg/hub/oidckeys path in the post-move commit of this PR.
-	"oidckeys.go:NewOIDCKeyManager:github.com/go-jose/go-jose/v4.NewSigner": "oidc",
-	// pkgmove:ref-ok updated to the pkg/hub/oidckeys path in the post-move commit of this PR.
-	"oidckeys.go:RotateKey:github.com/go-jose/go-jose/v4.NewSigner": "oidc",
-	// pkgmove:ref-ok updated to the pkg/hub/oidckeys path in the post-move commit of this PR.
-	"oidckeys.go:refreshKeysFromDB:github.com/go-jose/go-jose/v4.NewSigner": "oidc",
-	// pkgmove:ref-ok updated to the pkg/hub/oidckeys path in the post-move commit of this PR.
-	"oidckeys.go:generateRSAKeyPair:crypto/rsa.GenerateKey": "oidc",
-	// pkgmove:ref-ok updated to the pkg/hub/oidckeys path in the post-move commit of this PR.
-	"oidckeys.go:decodePEMPrivateKey:crypto/x509.ParsePKCS8PrivateKey":                              "oidc",
+	"agenttoken.go:NewAgentTokenService:github.com/go-jose/go-jose/v4.NewSigner":                    "agent_token",
+	"usertoken.go:NewUserTokenService:github.com/go-jose/go-jose/v4.NewSigner":                      "user_jwt",
+	"agenttoken.go:newRingAgentTokenService:github.com/go-jose/go-jose/v4.NewSigner":                "agent_token",
+	"usertoken.go:newRingUserTokenService:github.com/go-jose/go-jose/v4.NewSigner":                  "user_jwt",
+	"oidckeys/oidckeys.go:NewOIDCKeyManager:github.com/go-jose/go-jose/v4.NewSigner":                "oidc",
+	"oidckeys/oidckeys.go:RotateKey:github.com/go-jose/go-jose/v4.NewSigner":                        "oidc",
+	"oidckeys/oidckeys.go:refreshKeysFromDB:github.com/go-jose/go-jose/v4.NewSigner":                "oidc",
+	"oidckeys/oidckeys.go:GenerateRSAKeyPair:crypto/rsa.GenerateKey":                                "oidc",
+	"oidckeys/oidckeys.go:DecodePEMPrivateKey:crypto/x509.ParsePKCS8PrivateKey":                     "oidc",
 	"download_signing.go:computeSkillFileHMAC:crypto/hmac.New":                                      "download_url",
 	"download_signing.go:computeSkillFileHMACv2:crypto/hmac.New":                                    "download_url",
 	"attachment_delivery.go:deliveryMACv2:crypto/hmac.New":                                          "attachment_delivery",
