@@ -275,10 +275,21 @@ func openExistingDirNoFollow(parentFd int, comp string) (fd int, existed bool, e
 // along the way doesn't exist (matching openExistingDirNoFollow's
 // "not existing at all is not an error" contract): there is nothing under
 // that path, existing or not, for the caller to remove.
+//
+// A "." or ".." component is refused before anything is opened, so the walk
+// stays under baseFd even when a caller passes a path that did not go
+// through config.ValidateSubPathRoot.
 func openExistingDirPathNoFollow(baseFd int, relPath string) (fd int, existed bool, err error) {
+	comps := strings.Split(filepath.ToSlash(relPath), "/")
+	for _, comp := range comps {
+		if comp == "." || comp == ".." {
+			return -1, false, &confinementError{fmt.Sprintf(
+				"path %q has a %q component; refusing", relPath, comp)}
+		}
+	}
 	currentFd := baseFd
 	opened := false
-	for _, comp := range strings.Split(filepath.ToSlash(relPath), "/") {
+	for _, comp := range comps {
 		if comp == "" {
 			continue
 		}
