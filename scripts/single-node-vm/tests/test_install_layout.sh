@@ -251,6 +251,24 @@ test_layout_install_writes_update_state() {
   rm -rf "$LH_DIR"
 }
 
+# A failed update-state write does not fail the install, and the warning
+# says what the guard will do (here a directory blocks the rename).
+test_layout_install_update_state_write_failure_warns() {
+  _layout_new_host
+  _fake_scion "${LH_DIR}/a" "nightly-20261022"
+  _fake_scion "${LH_DIR}/b" "nightly-20261023"
+  _layout install nightly-20261022 "${LH_DIR}/a"
+  mkdir "$LH_ROOT/update-state.json"
+  _layout install nightly-20261023 "${LH_DIR}/b"
+  assert_eq "0" "$LAYOUT_RC" "a failed update-state write must not fail the install (output: ${LAYOUT_OUT})"
+  assert_eq "releases/nightly-20261023" "$(readlink "$LH_ROOT/current")" "the release must still be installed"
+  assert_contains "$LAYOUT_OUT" "will not roll this release back automatically unless that file is absent and current was switched within the last 30 minutes" \
+    "the warning must describe the guard's behaviour"
+  assert_not_contains "$LAYOUT_OUT" "falls back to the switch time" "the old, misleading wording must be gone"
+  assert_eq "" "$(find "$LH_ROOT" -maxdepth 1 -name 'update-state.json.*')" "no temporary file may be left"
+  rm -rf "$LH_DIR"
+}
+
 test_layout_install_over_old_layout_writes_update_state() {
   _layout_new_host
   _fake_scion "$LH_BIN" "nightly-20261001"

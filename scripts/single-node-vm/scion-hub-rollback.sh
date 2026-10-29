@@ -248,7 +248,7 @@ out("swap", d)
 # update_state_decision CURRENT_TAG PREVIOUS_TAG -- the decision word (plus
 # from and runId); "unreadable" when python3 is missing or fails.
 update_state_decision() {
-  python3 -I -c "$UPDATE_STATE_PY" "$INSTALL_ROOT/update-state.json" "$1" "$2" "$UPDATE_STATE_MAX_BYTES" 2>/dev/null \
+  python3 -I -c "$UPDATE_STATE_PY" "$INSTALL_ROOT/update-state.json" "$1" "$2" "$UPDATE_STATE_MAX_BYTES" </dev/null 2>/dev/null \
     || echo "unreadable ? ?"
 }
 
@@ -269,7 +269,7 @@ cmd_swap() {
   cur="$(release_tag current)" || die "refusing to roll back: current is not a release inside $INSTALL_ROOT/releases/; nothing changed"
   [[ "$cur" != "$prev" ]] || die "refusing to roll back: current and previous are both $cur; nothing changed"
   if [[ "$(marker_field from)" == "$prev" && "$(marker_field to)" == "$cur" ]]; then
-    log "already rolled back from $prev to $cur (rollback.marker); not swapping back. The restored release failed too: fix it by hand (docs: Restoring after a failed update)."
+    log "rollback.marker records the rollback from $prev to $cur; not swapping back. Nothing changed; the hub stays stopped. Check journalctl -u scion-hub, fix the cause (docs: Restoring after a failed update), then run: systemctl reset-failed scion-hub && systemctl start scion-hub"
     exit "$ALREADY_ROLLED_BACK"
   fi
   local decision state_from run_id age

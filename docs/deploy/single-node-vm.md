@@ -314,7 +314,10 @@ one JSON object:
   above its downgrade floor (`pkg/version.DowngradeFloor`), that is,
   whether `from` can still run on the migrated database. It may also
   record `from_published_at`, which the guard ignores.
-- Once the update is confirmed at boot, the Hub sets `verified` to `true`.
+- The Hub sets `verified` to `true` as soon as its listener is bound,
+  independently of the boot reconciliation. A release that crash-loops
+  before it can listen (for example, because port 8080 is taken right after
+  the update) is therefore still unverified and can be rolled back.
 
 The guard compares no versions. It reads the file as the `scion` user,
 without following a symlink and up to 4 KiB, and decides:
