@@ -44,6 +44,18 @@ the external root, so the run was not recorded.
   `agents/<name>/workspace` (for example after a failed `RemoveNFSAgentFiles`)
   is reused by a new agent with the same name, which is the documented NFS
   behaviour of `RemoveNFSAgentFiles`.
+- `Start`'s workspace safety net (the "workspace directory does not exist"
+  check, now `checkStartWorkspaceExists`) is skipped when the start goes
+  through the nfs workspace backend (`startUsesNFSWorkspaceBackend`, the same
+  `runtime.SelectWorkspaceBackend` choice Start makes later; the Kubernetes
+  worktree adjustment does not change it). On nfs the workspace is created
+  later in Start: the leaf helpers create it with their atomic claim or return
+  an error, the Kubernetes init container creates it, or the start is refused
+  (`errEmptyPerAgentNFSNoClaim`). A fresh agent-scoped agent's directory on
+  the share therefore no longer fails that check before the leaf helper runs.
+  The leaf is not created earlier, so the claim (`ownDirCreated`, the move
+  rollback mark), `nfsKeepSharedCheckout` and the claim name from
+  `backend.Realize` keep their order. Every other backend keeps the check.
 - `HostStateRootFor`: a shared project configuration's root is the root of the
   agent dir that `config.AgentDirForProject` resolves (the external root for
   every sharing mode, or the legacy dir). The record is written and read in
@@ -74,6 +86,11 @@ the external root, so the run was not recorded.
   the clone in the agent's directory on the share.
 - `TestReprovision_SharedLayoutWorktreeKeepsOldWorkspace`: a worktree-per-agent
   dispatch on an nfs Layout keeps checking `<agentDir>/workspace`.
+- `TestStart_SharedLayoutFreshAgentWorkspaceCreatedByLeafHelper`
+  (clone-per-agent, empty-per-agent): with the agent's directory on the share
+  absent, Start succeeds and the leaf helper creates it.
+- `TestCheckStartWorkspaceExists`: a missing workspace is still refused off
+  nfs, and skipped on nfs.
 
 ## Notes
 

@@ -368,3 +368,64 @@ func TestReprovision_SharedLayoutWorktreeKeepsOldWorkspace(t *testing.T) {
 	assert.Contains(t, err.Error(), "has no existing git clone at "+filepath.Join(ext, "workspace"))
 	assert.NotContains(t, err.Error(), shareWS)
 }
+
+// A fresh agent-scoped agent on the nfs workspace backend: its workspace on
+// the share does not exist when Start begins (provisioning leaves it to
+// Start's NFS leaf helpers), and Start's workspace safety net must not refuse
+// it. The leaf helper then creates the directory, so the runtime is told the
+// workspace was pre-created.
+func TestStart_SharedLayoutFreshAgentWorkspaceCreatedByLeafHelper(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*api.StartOptions)
+	}{
+		{"clone-per-agent", func(o *api.StartOptions) {
+			o.GitClone = &api.GitCloneConfig{URL: "https://example.com/repo.git"}
+			o.Env["SCION_WORKSPACE_MODE"] = "clone-per-agent"
+		}},
+		{"empty-per-agent", func(o *api.StartOptions) {
+			o.EmptyPerAgentWorkspace = true
+			o.Env["SCION_WORKSPACE_MODE"] = "empty-per-agent"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, root, _, _, err := sharedLayoutStart(t, "kubernetes", func(o *api.StartOptions) {
+				tc.mutate(o)
+				shareWS := filepath.Join(o.ProjectPath, "agents", "test-agent", "workspace")
+				_, statErr := os.Stat(shareWS)
+				require.True(t, os.IsNotExist(statErr), "precondition: the agent's workspace on the share must not exist yet (stat: %v)", statErr)
+			})
+			require.NoError(t, err, "a fresh agent's workspace on the share is created by Start's leaf helper, not refused as missing")
+			assert.NotContains(t, fmt.Sprint(err), "workspace directory does not exist")
+			assert.DirExists(t, filepath.Join(root, "agents", "test-agent", "workspace"), "the leaf helper creates the workspace")
+			assert.Equal(t, "test-agent", cfg.NFSAgentDirName)
+			assert.True(t, cfg.NFSWorkspacePreCreated, "the leaf helper prepared the workspace before the pod")
+		})
+	}
+}
+
+// The safety net keeps refusing a missing workspace on every backend other
+// than nfs, and skips it for an nfs start.
+func TestCheckStartWorkspaceExists(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "gone", "workspace")
+	present := t.TempDir()
+	nfs := &config.VersionedSettings{Server: &config.V1ServerConfig{WorkspaceStorage: &config.V1WorkspaceStorageConfig{
+		Backend: "nfs",
+		NFS:     &config.V1NFSConfig{MountRoot: t.TempDir(), Shares: []config.V1NFSShare{{ID: "share-1", Server: "10.0.0.2", Export: "/x"}}},
+	}}}
+	local := &config.VersionedSettings{Server: &config.V1ServerConfig{}}
+	gitOpts := api.StartOptions{GitClone: &api.GitCloneConfig{URL: "https://example.com/repo.git"}}
+
+	err := checkStartWorkspaceExists(missing, local, gitOpts, false)
+	require.Error(t, err, "local backend, missing workspace")
+	assert.Contains(t, err.Error(), "workspace directory does not exist: "+missing)
+	err = checkStartWorkspaceExists(missing, nil, api.StartOptions{}, false)
+	require.Error(t, err, "no settings, missing workspace")
+	assert.NoError(t, checkStartWorkspaceExists(present, local, gitOpts, false), "local backend, existing workspace")
+	assert.NoError(t, checkStartWorkspaceExists("", local, gitOpts, false), "no workspace")
+
+	assert.NoError(t, checkStartWorkspaceExists(missing, nfs, gitOpts, false), "nfs backend (shared-plain clone): the leaf helpers create it")
+	assert.NoError(t, checkStartWorkspaceExists(missing, nfs, api.StartOptions{}, true), "nfs backend (empty-per-agent)")
+	assert.True(t, startUsesNFSWorkspaceBackend(nfs, api.StartOptions{}, false), "worktree-per-agent default on nfs")
+	assert.False(t, startUsesNFSWorkspaceBackend(local, gitOpts, false))
+}

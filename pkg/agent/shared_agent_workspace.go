@@ -17,10 +17,12 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -135,4 +137,61 @@ func sharedLayoutAgentWorkspace(ctx context.Context, settings *config.VersionedS
 		return "", fmt.Errorf("agent workspace on the shared project tree: %w", err)
 	}
 	return filepath.Join(agentRoot.HostPath, "workspace"), nil
+}
+
+// startWorkspaceSharingMode is the sharing mode Start selects the workspace
+// backend with, before the Kubernetes worktree adjustment: shared-plain for
+// a shared workspace or a git clone, empty-per-agent for an empty-per-agent
+// agent (it has no shared checkout: without NFS storage it is node-local, or
+// pod-local EmptyDir on Kubernetes; with NFS storage it gets its own agent
+// directory on the export, design #2703 P3, which only the Kubernetes
+// runtime can mount, see nfsEmptyAgentDirSelection), and worktree-per-agent
+// otherwise.
+func startWorkspaceSharingMode(opts api.StartOptions, emptyPerAgent bool) store.WorkspaceSharingMode {
+	switch {
+	case emptyPerAgent:
+		return store.SharingModeEmptyPerAgent
+	case opts.SharedWorkspace || opts.GitClone != nil:
+		return store.SharingModeSharedPlain
+	default:
+		return store.SharingModeWorktreePerAgent
+	}
+}
+
+// startUsesNFSWorkspaceBackend reports whether Start lays out the workspace
+// through the nfs workspace backend (runtime.SelectWorkspaceBackend). The
+// Kubernetes worktree adjustment Start applies later (shared-plain to
+// worktree-per-agent) does not change the answer: the nfs backend serves
+// both modes.
+func startUsesNFSWorkspaceBackend(settings *config.VersionedSettings, opts api.StartOptions, emptyPerAgent bool) bool {
+	if settings == nil || settings.Server == nil {
+		return false
+	}
+	ws := settings.Server.EffectiveWorkspaceStorage()
+	if ws == nil {
+		return false
+	}
+	return runtime.SelectWorkspaceBackend(ws, startWorkspaceSharingMode(opts, emptyPerAgent)).Name() == "nfs"
+}
+
+// checkStartWorkspaceExists is Start's safety net before the workspace is
+// mounted: GetAgent should have created or recreated workspace, but if it is
+// still missing the start fails with a clear error rather than a cryptic
+// mount error from the container runtime.
+//
+// A start through the nfs workspace backend (startUsesNFSWorkspaceBackend)
+// skips it. There the workspace is created later in Start, by the NFS leaf
+// helpers (which create the leaf, with its atomic claim, or return an
+// error), by the Kubernetes workspace init container, or the start is
+// refused (errEmptyPerAgentNFSNoClaim). An agent-scoped workspace on a
+// shared Layout does not exist yet on a fresh agent, because provisioning
+// leaves it to those helpers. Every other backend keeps the check.
+func checkStartWorkspaceExists(workspace string, settings *config.VersionedSettings, opts api.StartOptions, emptyPerAgent bool) error {
+	if workspace == "" || startUsesNFSWorkspaceBackend(settings, opts, emptyPerAgent) {
+		return nil
+	}
+	if _, err := os.Stat(workspace); os.IsNotExist(err) {
+		return fmt.Errorf("workspace directory does not exist: %s (try deleting and recreating the agent)", workspace)
+	}
+	return nil
 }

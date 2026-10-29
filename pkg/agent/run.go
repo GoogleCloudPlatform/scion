@@ -1901,14 +1901,10 @@ authDone:
 		repoRoot = resolvedRepoRoot
 	}
 
-	// Validate that the workspace directory exists before attempting to mount it.
-	// This is a safety net — GetAgent should have created/recreated it, but if
-	// the directory is still missing we fail early with a clear error rather than
-	// letting the container runtime produce a cryptic mount error.
-	if effectiveWorkspace != "" {
-		if _, err := os.Stat(effectiveWorkspace); os.IsNotExist(err) {
-			return nil, fmt.Errorf("workspace directory does not exist: %s (try deleting and recreating the agent)", effectiveWorkspace)
-		}
+	// Validate that the workspace directory exists before attempting to mount
+	// it (checkStartWorkspaceExists; skipped for the nfs workspace backend).
+	if err := checkStartWorkspaceExists(effectiveWorkspace, settings, opts, emptyPerAgent); err != nil {
+		return nil, err
 	}
 
 	// Telemetry defaults to enabled when not explicitly set to false.
@@ -2069,18 +2065,7 @@ authDone:
 
 	preBackendWorkspace := effectiveWorkspace
 	if settings != nil && settings.Server != nil && settings.Server.EffectiveWorkspaceStorage() != nil {
-		sharingMode := store.SharingModeWorktreePerAgent
-		if opts.SharedWorkspace || opts.GitClone != nil {
-			sharingMode = store.SharingModeSharedPlain
-		}
-		// Empty-per-agent never takes the WorktreePerAgent default above: it
-		// has no shared checkout. Without NFS storage it is node-local (or
-		// pod-local EmptyDir on Kubernetes). With NFS storage it gets its
-		// own agent directory on the export (design #2703 P3), which only
-		// the Kubernetes runtime can mount: see nfsEmptyAgentDirSelection.
-		if emptyPerAgent {
-			sharingMode = store.SharingModeEmptyPerAgent
-		}
+		sharingMode := startWorkspaceSharingMode(opts, emptyPerAgent)
 		// The agent's own directory on the export, if it gets one
 		// (nfsOwnAgentDirSelection): empty-per-agent, or a git project
 		// dispatched in clone-per-agent mode on Kubernetes, with a
