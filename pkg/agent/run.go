@@ -284,6 +284,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		// do not read Depth from the ctx copy.
 		ctx = api.ContextWithGitClone(ctx, opts.GitClone)
 	}
+	ctx = contextWithClonePerAgentWorkspace(ctx, opts)
+	ctx = contextWithAgentRuntime(ctx, m.runtimeName())
 	if opts.RecordedOriginURL != "" {
 		// Linked-checkout route: GitClone was cleared, so the recorded origin is
 		// carried separately for the git-lfs endpoint pin.
@@ -347,6 +349,14 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		delete(env, "SCION_WORKSPACE_GIT")
 		opts.Env = env
 	}
+	// SCION_WORKSPACE_GIT as the caller (the runtime broker's start context)
+	// computed it, snapshotted before any settings-driven env merging can
+	// fill the absent key: the harness-config env overlay
+	// (resolveAuthEnvOverlay), the config env layer and the hub default env
+	// (buildAgentEnv). The final env carries exactly this value
+	// (enforceWorkspaceGitEnv), because the Kubernetes runtime's
+	// shared-repository guard trusts it.
+	dispatchWorkspaceGit, dispatchWorkspaceGitSet := opts.Env["SCION_WORKSPACE_GIT"]
 	if finalScionCfg != nil {
 		util.Debugf("Start: GetAgent returned config: harness=%q harnessConfig=%q defaultHarnessConfig=%q image=%q",
 			finalScionCfg.Harness, finalScionCfg.HarnessConfig, finalScionCfg.DefaultHarnessConfig, finalScionCfg.Image)
@@ -1830,6 +1840,15 @@ authDone:
 	emptyPerAgentWorkspace := ""
 	if emptyPerAgent {
 		emptyPerAgentWorkspace = filepath.Join(agentDir, "workspace")
+		// On a shared Layout it is the agent's directory on the share
+		// (sharedLayoutAgentWorkspace), as GetAgent resolved it.
+		sharedWS, sharedErr := sharedLayoutAgentWorkspace(ctx, settings, projectDir, opts.Name, agentDir)
+		if sharedErr != nil {
+			return nil, sharedErr
+		}
+		if sharedWS != "" {
+			emptyPerAgentWorkspace = sharedWS
+		}
 		if explicitWorkspace || filepath.Clean(effectiveWorkspace) != emptyPerAgentWorkspace {
 			return nil, fmt.Errorf("empty-per-agent agent %q must use its private workspace %s, not %q", opts.Name, emptyPerAgentWorkspace, effectiveWorkspace)
 		}
@@ -1903,14 +1922,11 @@ authDone:
 		repoRoot = resolvedRepoRoot
 	}
 
-	// Validate that the workspace directory exists before attempting to mount it.
-	// This is a safety net — GetAgent should have created/recreated it, but if
-	// the directory is still missing we fail early with a clear error rather than
-	// letting the container runtime produce a cryptic mount error.
-	if effectiveWorkspace != "" {
-		if _, err := os.Stat(effectiveWorkspace); os.IsNotExist(err) {
-			return nil, fmt.Errorf("workspace directory does not exist: %s (try deleting and recreating the agent)", effectiveWorkspace)
-		}
+	// Validate that the workspace directory exists before attempting to mount
+	// it (checkStartWorkspaceExists; skipped for a Kubernetes start through
+	// the nfs workspace backend).
+	if err := checkStartWorkspaceExists(m.Runtime.Name(), effectiveWorkspace, settings, opts, emptyPerAgent); err != nil {
+		return nil, err
 	}
 
 	// Telemetry defaults to enabled when not explicitly set to false.
@@ -2071,18 +2087,7 @@ authDone:
 
 	preBackendWorkspace := effectiveWorkspace
 	if settings != nil && settings.Server != nil && settings.Server.EffectiveWorkspaceStorage() != nil {
-		sharingMode := store.SharingModeWorktreePerAgent
-		if opts.SharedWorkspace || opts.GitClone != nil {
-			sharingMode = store.SharingModeSharedPlain
-		}
-		// Empty-per-agent never takes the WorktreePerAgent default above: it
-		// has no shared checkout. Without NFS storage it is node-local (or
-		// pod-local EmptyDir on Kubernetes). With NFS storage it gets its
-		// own agent directory on the export (design #2703 P3), which only
-		// the Kubernetes runtime can mount: see nfsEmptyAgentDirSelection.
-		if emptyPerAgent {
-			sharingMode = store.SharingModeEmptyPerAgent
-		}
+		sharingMode := startWorkspaceSharingMode(opts, emptyPerAgent)
 		// The agent's own directory on the export, if it gets one
 		// (nfsOwnAgentDirSelection): empty-per-agent, or a git project
 		// dispatched in clone-per-agent mode on Kubernetes, with a
@@ -2215,9 +2220,11 @@ authDone:
 			}
 
 			workspaceBackendName = backend.Name()
-			// Empty-per-agent keeps its private node-local path as the
-			// workspace source: mount.HostPath is the project's shared
-			// workspace, which this agent must never see.
+			// Empty-per-agent keeps its own workspace as the workspace
+			// source (on a shared Layout, its directory on the share,
+			// sharedLayoutAgentWorkspace; otherwise its private node-local
+			// path): mount.HostPath is the project's shared workspace,
+			// which this agent must never see.
 			if mount.HostPath != "" && !nfsAgentDirEmpty {
 				effectiveWorkspace = mount.HostPath
 			}
@@ -2376,6 +2383,9 @@ authDone:
 	// container's env and label cannot disagree. Any value from the
 	// request or template env is replaced.
 	agentEnv = withLaunchIDEnv(agentEnv, runID)
+	// Only the caller's SCION_WORKSPACE_GIT reaches the container env; a
+	// value any merged layer added is removed (see dispatchWorkspaceGit).
+	agentEnv = enforceWorkspaceGitEnv(agentEnv, dispatchWorkspaceGit, dispatchWorkspaceGitSet)
 
 	// The template env layer is never part of agentEnv: it travels as
 	// RunConfig.FallbackEnv, which every runtime applies as the LAST step

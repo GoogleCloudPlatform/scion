@@ -4796,8 +4796,9 @@ func runConfigEnvValue(config RunConfig, key string) (string, bool) {
 
 // k8sSharedRepoShapeRefusalText is the exact neutral end-state message returned
 // when a Kubernetes start is refused for the shared-repository shape.
-const k8sSharedRepoShapeRefusalText = "Kubernetes does not support git projects that share one repository across agents " +
-	"(worktree-per-agent or shared-workspace on NFS). Re-create the agent as clone-per-agent, " +
+const k8sSharedRepoShapeRefusalText = "Kubernetes does not support agents that share one git repository on NFS: this agent is " +
+	"worktree-per-agent, or uses the project's shared workspace and the runtime broker cannot confirm " +
+	"that the shared workspace is not a git repository. Re-create the agent as clone-per-agent, " +
 	"or run it on a local or Docker broker. Work not pushed from the existing agent remains in " +
 	"the project's shared checkout on the workspace storage."
 

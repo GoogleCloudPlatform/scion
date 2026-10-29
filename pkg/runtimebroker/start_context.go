@@ -1237,14 +1237,26 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if emptyPerAgent {
 		// Never git, whatever a stale resolvedEnv claims.
 		isGitWorkspace = false
-		delete(env, "SCION_WORKSPACE_GIT")
-		delete(envCls, "SCION_WORKSPACE_GIT")
 	}
-	if isGitWorkspace {
+	// The broker owns this key: a value from the hub's resolved env (project
+	// env included), the request's env or anywhere else is replaced by the
+	// value computed here. The Kubernetes runtime's shared-repository guard
+	// trusts it, and pkg/agent keeps it as computed here (Manager.Start).
+	delete(env, "SCION_WORKSPACE_GIT")
+	delete(envCls, "SCION_WORKSPACE_GIT")
+	switch {
+	case isGitWorkspace:
 		env["SCION_WORKSPACE_GIT"] = "true"
 		classifyBrokerEnv("SCION_WORKSPACE_GIT", api.EnvKindPlain)
+	case !emptyPerAgent && s.sharedWorkspaceKnownNotGit(ctx, in, &opts, worktreeProvisioned, linkedCheckout):
+		// Explicit only when the broker positively knows the shared
+		// workspace is not a git repository (sharedWorkspaceKnownNotGit).
+		env["SCION_WORKSPACE_GIT"] = "false"
+		classifyBrokerEnv("SCION_WORKSPACE_GIT", api.EnvKindPlain)
 	}
-	// Absent when false — avoids encoding a "false" string agents must parse.
+	// Otherwise absent: git-ness is not known, and readers treat absent as
+	// "not git" except the Kubernetes guard, which then refuses (fail
+	// closed). An empty-per-agent workspace is never git and stays absent.
 
 	// --- Env + telemetry + secrets ---
 	opts.Env = env
