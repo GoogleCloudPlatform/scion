@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -140,9 +141,12 @@ func TestListMessages_InteragentFiltersReturnSameRows(t *testing.T) {
 }
 
 // TestListMessages_InteragentQueriesUseIndexes pins the SQLite plans for the
-// exact SQL the inter-agent lookups issue, on a skewed table (one busy
-// participant), both as migrated (no statistics, as on a Hub) and after
-// ANALYZE.
+// exact SQL the inter-agent lookups issue, on a table where one busy
+// participant is in a quarter of the rows. The table has no statistics, as
+// on a Hub (nothing runs ANALYZE); without statistics SQLite's plan does not
+// depend on the table's size, so these plans are the ones a large Hub gets.
+// Plans after ANALYZE depend on size and distribution, which a small fixture
+// cannot model, so they are not asserted here.
 //   - Participant COUNT: a MULTI-INDEX OR over the sender_id and
 //     recipient_id indexes, with no table scan.
 //   - Participant page: one SELECT per branch, each searching its own index
@@ -160,14 +164,18 @@ func TestListMessages_InteragentQueriesUseIndexes(t *testing.T) {
 	projectID := uuid.NewString()
 	busy := uuid.NewString()
 	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	for i := 0; i < 300; i++ {
-		recipient := uuid.NewString()
-		if i%3 != 0 {
-			recipient = busy
-		}
-		m := newTestMessage(projectID, recipient)
-		if i%3 == 1 {
-			m.Sender, m.SenderID, m.RecipientID = "agent:busy", busy, uuid.NewString()
+	// Each row's sender and recipient text names its own principal, as on a
+	// Hub. The busy participant sends every eighth message and receives the
+	// next one.
+	for i := 0; i < 400; i++ {
+		m := newTestMessage(projectID, uuid.NewString())
+		m.Sender, m.SenderID = fmt.Sprintf("user:u%d", i), uuid.NewString()
+		m.Recipient = fmt.Sprintf("agent:o%d", i)
+		switch i % 8 {
+		case 0:
+			m.Sender, m.SenderID = "agent:busy", busy
+		case 1:
+			m.Recipient, m.RecipientID = "agent:busy", busy
 		}
 		m.CreatedAt = at.Add(time.Duration(i) * time.Second)
 		require.NoError(t, s.CreateMessage(ctx, m))
@@ -208,60 +216,55 @@ func TestListMessages_InteragentQueriesUseIndexes(t *testing.T) {
 			pageWant:  [][]string{{messageProjectSenderCreatedIDIndex}},
 		},
 	}
-	check := func(t *testing.T) {
-		for _, tc := range cases {
-			first, err := s.ListMessages(ctx, tc.filter, store.ListOptions{Limit: 50})
-			require.NoError(t, err)
-			require.NotEmpty(t, first.NextCursor, "the seed must fill more than one page")
-			for _, pc := range []struct {
-				name string
-				opts store.ListOptions
-			}{
-				{"first_page", store.ListOptions{Limit: 50}},
-				{"cursor_page", store.ListOptions{Limit: 50, Cursor: first.NextCursor}},
-				{"cursor_page_asc", store.ListOptions{Limit: 50, Cursor: first.NextCursor, SortDir: "asc"}},
-			} {
-				t.Run(tc.name+"_"+pc.name, func(t *testing.T) {
-					rec.mu.Lock()
-					rec.queries = nil
-					rec.mu.Unlock()
-					_, err := s.ListMessages(ctx, tc.filter, pc.opts)
-					require.NoError(t, err)
+	for _, tc := range cases {
+		first, err := s.ListMessages(ctx, tc.filter, store.ListOptions{Limit: 20})
+		require.NoError(t, err)
+		require.NotEmpty(t, first.NextCursor, "the seed must fill more than one page")
+		for _, pc := range []struct {
+			name string
+			opts store.ListOptions
+		}{
+			{"first_page", store.ListOptions{Limit: 20}},
+			{"cursor_page", store.ListOptions{Limit: 20, Cursor: first.NextCursor}},
+			{"cursor_page_asc", store.ListOptions{Limit: 20, Cursor: first.NextCursor, SortDir: "asc"}},
+		} {
+			t.Run(tc.name+"_"+pc.name, func(t *testing.T) {
+				rec.mu.Lock()
+				rec.queries = nil
+				rec.mu.Unlock()
+				_, err := s.ListMessages(ctx, tc.filter, pc.opts)
+				require.NoError(t, err)
 
-					rec.mu.Lock()
-					queries := append([]recordedQuery(nil), rec.queries...)
-					rec.mu.Unlock()
-					var counts, pages []recordedQuery
-					for _, q := range queries {
-						switch {
-						case strings.Contains(q.sql, "COUNT("):
-							counts = append(counts, q)
-						case strings.Contains(q.sql, "ORDER BY"):
-							pages = append(pages, q)
-						}
+				rec.mu.Lock()
+				queries := append([]recordedQuery(nil), rec.queries...)
+				rec.mu.Unlock()
+				var counts, pages []recordedQuery
+				for _, q := range queries {
+					switch {
+					case strings.Contains(q.sql, "COUNT("):
+						counts = append(counts, q)
+					case strings.Contains(q.sql, "ORDER BY"):
+						pages = append(pages, q)
 					}
-					require.Len(t, counts, 1, "ListMessages must issue one COUNT")
-					require.Len(t, pages, len(tc.pageWant), "ordered SELECTs")
+				}
+				require.Len(t, counts, 1, "ListMessages must issue one COUNT")
+				require.Len(t, pages, len(tc.pageWant), "ordered SELECTs")
 
-					plan := explain(t, counts[0])
-					for _, w := range tc.countWant {
-						assert.Contains(t, plan, w, "COUNT plan for %s", counts[0].sql)
+				plan := explain(t, counts[0])
+				for _, w := range tc.countWant {
+					assert.Contains(t, plan, w, "COUNT plan for %s", counts[0].sql)
+				}
+				assert.NotContains(t, plan, "SCAN messages", "COUNT plan for %s", counts[0].sql)
+				for i, q := range pages {
+					plan := explain(t, q)
+					for _, w := range tc.pageWant[i] {
+						assert.Contains(t, plan, w, "page plan for %s", q.sql)
 					}
-					assert.NotContains(t, plan, "SCAN messages", "COUNT plan for %s", counts[0].sql)
-					for i, q := range pages {
-						plan := explain(t, q)
-						for _, w := range tc.pageWant[i] {
-							assert.Contains(t, plan, w, "page plan for %s", q.sql)
-						}
-						assert.NotContains(t, plan, "MULTI-INDEX OR", "page plan for %s", q.sql)
-						assert.NotContains(t, plan, "SCAN messages", "page plan for %s", q.sql)
-						assert.NotContains(t, plan, "TEMP B-TREE", "page plan for %s", q.sql)
-					}
-				})
-			}
+					assert.NotContains(t, plan, "MULTI-INDEX OR", "page plan for %s", q.sql)
+					assert.NotContains(t, plan, "SCAN messages", "page plan for %s", q.sql)
+					assert.NotContains(t, plan, "TEMP B-TREE", "page plan for %s", q.sql)
+				}
+			})
 		}
 	}
-	t.Run("no_stats", check)
-	require.NoError(t, base.Driver().Exec(ctx, "ANALYZE", []any{}, nil))
-	t.Run("analyzed", check)
 }
