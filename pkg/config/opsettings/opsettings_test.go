@@ -35,7 +35,7 @@ func TestRegistryHasAllSections(t *testing.T) {
 	expected := []string{"access", "lifecycle", "maintenance", "messaging",
 		"telemetry", "agent_defaults", "endpoints", "github_app", "notifications",
 		"project_defaults", "auto_expose_ports", "quotas", "agent_secrets", "federation", "experiments", "artifacts", "profiling",
-		"agent_delegation_policy"}
+		"agent_delegation_policy", "chat_retention"}
 	for _, name := range expected {
 		if SectionByName(name) == nil {
 			t.Errorf("section %q not found in registry", name)
@@ -77,6 +77,7 @@ func TestSectionHasKoanfPaths(t *testing.T) {
 		"profiling":   true,
 
 		"agent_delegation_policy": true,
+		"chat_retention":          true,
 	}
 	for _, sec := range Registry {
 		if dbOnlySections[sec.Name] {

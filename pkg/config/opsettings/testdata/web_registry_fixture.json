@@ -31,6 +31,7 @@
     "auto_expose_ports": [
       "auto_expose_ports.enabled"
     ],
+    "chat_retention": [],
     "endpoints": [
       "server.hub.public_url",
       "server.hub.hub_name",
