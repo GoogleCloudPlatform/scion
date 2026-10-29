@@ -21,7 +21,7 @@ HELM="${HELM:-helm}"
 # BASE render would return an error string instead of manifests and every check below would
 # accuse the chart of a fault it does not have. The chart will not default it - a generated
 # secret rotates on every helm upgrade, invalidating every session and the JWT signing key.
-BASE=(--set image.repository=r --set agents.imageRegistry=example.invalid/agents --set hub.hubId=h --set hub.baseUrl=https://h.example.invalid --set auth.sessionSecret=harness-not-a-real-secret --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-tests)   # hub.baseUrl became REQUIRED in Phase 1; see the arm below.
+BASE=(--set image.repository=r --set agents.imageRegistry=example.invalid/agents --set hub.hubId=h --set hub.baseUrl=https://h.example.invalid --set auth.sessionSecret=harness-not-a-real-secret --set auth.proxy.iap.audience=/projects/123456789012/locations/us-central1/services/probe-tests --set conduit.internalTls.existingSecret=us-relay-cert --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000)   # hub.baseUrl became REQUIRED in Phase 1; see the arm below. The relay Secret and the image digest are for the replicaCount=2 rows: above one replica conduit.internalTls "auto" requires a Secret, and the relay wiring refuses an image tag older than the minimum hub release.
 
 # TOOL-PRESENCE ARM. A MISSING TOOLCHAIN MUST NOT BE REPORTED AS A BROKEN CHART.
 # Without this every helm invocation fails, every assertion fails, and the output

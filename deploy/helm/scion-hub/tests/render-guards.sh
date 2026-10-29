@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=210   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 16 (workspaceStorage.nfs: thirteen refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check).
+EXPECTED_TOTAL=273   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 10 (agents.imageRegistry for the in-process broker: four refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: eight refusals, three acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check) + 16 (workspaceStorage.nfs: thirteen refusals, one acceptance, two rendered-shape checks) + 6 (runtime.gke: five refusals, one rendered-shape check) + 11 (conduit.internalTls: eight refusals, two acceptances, one rendered-shape check) + 3 (relay hop: cert-without-key refusals on non-loopback and loopback listeners, no relay-level trusted_proxies) + 3 (internal_listen loopback needs host:port and a valid 127.x: no-port IP, no-port localhost, out-of-range octet) + 5 (internal_listen: leading and trailing whitespace, port 65536, port 0, no port with TLS files) + 4 (TLS settings as written: server name with a slash, server name with trailing whitespace, blank cert path, padded key path) + 9 (minimum hub image for the relay wiring: older and minimum semver, newer semver, older and minimum nightly, no gate with the relay off, the unverified annotation, no annotation on a checked tag, the NOTES warning present and absent) + 8 (older tag with build metadata, minimum with build metadata, pre-release of the minimum, malformed version, config.extra listener on an older tag and on a digest, the digest annotation, padded CA path; the gate block now runs 16 rows) + 4 (overflowing version number, newer pre-release, newer tag with build metadata, config.extra loopback listener on an older tag; the gate block now runs 20 rows) + 1 (localhost:port without TLS is not loopback, as the hub reads it) + 1 (the default-tag refusal names image.tag and image.digest; the gate block now runs 21 rows) + 6 (the semver refusal names no placeholder floor, so the gate block now runs 22 rows; whitespace-only listen: spaces and tab, with TLS files and without; SCION_SERVER_HUB_CONDUIT_INTERNAL* refused in hub.extraEnv) + 2 (the malformed-version remedy by mode; the config.extra path names removing that listener; the gate block now runs 24 rows) + 1 (the NOTES warning on the config.extra path names removing that listener; the gate block now runs 25 rows) + 1 (the same NOTES check for an image.digest; the gate block now runs 26 rows) + 4 (conduit.internalTls auto: one refusal, three acceptances).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -957,6 +957,8 @@ echo "== SCION_SERVER_SECRETS_* through hub.extraEnv =="
 # with no project, which the hub only logs; secrets.backend refuses that shape.
 reject "SCION_SERVER_SECRETS_BACKEND" "SCION_SERVER_SECRETS_* are refused" \
   --set 'hub.extraEnv[0].name=SCION_SERVER_SECRETS_BACKEND' --set 'hub.extraEnv[0].value=gcpsm'
+reject "scion_server_hub_conduit_internal_listen, lower case" "Use conduit.internalTls" \
+  --set 'hub.extraEnv[0].name=scion_server_hub_conduit_internal_listen' --set 'hub.extraEnv[0].value=0.0.0.0:9443'
 
 echo "== hub.adminEmails =="
 # One address per entry. The hub comma-splits a one-element list only, so a
@@ -981,6 +983,304 @@ else
   failed=$((failed + 1))
 fi
 unset _ae _ad
+
+echo "== conduit.internalTls =="
+# The relay hop between hub nodes. Opt-in; when on it needs its Secret and a
+# free port, and a non-loopback relay listener without TLS is refused on every
+# path, config.extra included.
+# The hub image is set by digest here, so these rows do not depend on the
+# minimum hub release for relay TLS; the version gate has its own rows below.
+RT_ON=(--set conduit.internalTls.enabled=true --set conduit.internalTls.existingSecret=rg-relay-cert --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000)
+reject "internalTls enabled without existingSecret" "requires conduit.internalTls.existingSecret" \
+  --set conduit.internalTls.enabled=true
+reject "internalTls existingSecret while disabled" "set while the relay hop is off (conduit.internalTls.enabled is false" \
+  --set conduit.internalTls.enabled=false --set conduit.internalTls.existingSecret=rg-relay-cert
+reject "internalTls auto at two replicas without a Secret" "turns on TLS for the relay hop between hub nodes above one replica" \
+  --set replicaCount=2
+accept "internalTls auto at two replicas with a Secret" --set replicaCount=2 --set conduit.internalTls.existingSecret=rg-relay-cert --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000
+accept "internalTls disabled at two replicas" --set replicaCount=2 --set conduit.internalTls.enabled=false
+accept "internalTls existingSecret under auto at one replica (set ahead of a scale-up)" \
+  --set conduit.internalTls.existingSecret=rg-relay-cert
+reject "internalTls port on hub.webPort" "is also hub.webPort" "${RT_ON[@]}" --set conduit.internalTls.port=8080
+reject "internalTls port on the in-process broker" "is also the hub's in-process runtime broker" "${RT_ON[@]}" --set conduit.internalTls.port=9800
+reject "internalTls serverName not a DNS name" "must be a DNS name" "${RT_ON[@]}" --set conduit.internalTls.serverName=Bad_Name
+reject "plaintext non-loopback internal_listen through config.extra" "which is not a loopback address" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0:9443"}}}}'
+reject "internalTls with config.extra conduit listener" "also sets server.hub.conduit.internal_listen" "${RT_ON[@]}" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0:9555"}}}}'
+reject "internalTls with config.existingSecret" "inline settings values (conduit.internalTls.enabled" \
+  --set agents.imageRegistry= --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned "${RT_ON[@]}"
+reject "cert without key on a non-loopback listener through config.extra" "internal_tls_cert_file and internal_tls_key_file are not both set" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0:9443","internal_tls_cert_file":"/x/tls.crt"}}}}'
+reject "cert without key on a loopback listener through config.extra" "must be set together" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:9443","internal_tls_cert_file":"/x/tls.crt"}}}}'
+# Loopback means host:port with a port of 1-65535 and a valid 127.x.y.z,
+# [::1], as the hub reads it (a loopback IP literal: [::1] or a valid
+# 127.x.y.z, never a name such as localhost); anything else needs TLS.
+reject "internal_listen loopback IP without a port" "it must be host:port with a port of 1-65535" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1"}}}}'
+reject "internal_listen localhost without a port" "it must be host:port with a port of 1-65535" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"localhost"}}}}'
+reject "internal_listen localhost:port without TLS (a name is never loopback)" "which is not a loopback address" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"localhost:9443"}}}}'
+reject "internal_listen 127.x with an out-of-range octet" "which is not a loopback address" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.300.0.1:9443"}}}}'
+reject "internal_listen with leading whitespace" "with leading or trailing whitespace" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":" 127.0.0.1:9443"}}}}'
+reject "internal_listen with trailing whitespace" "with leading or trailing whitespace" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:9443 "}}}}'
+# A whitespace-only listen is refused as whitespace, with TLS files or without.
+reject "internal_listen of spaces only" "with leading or trailing whitespace" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"   "}}}}'
+reject "internal_listen of a tab only" "with leading or trailing whitespace" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"\t"}}}}'
+reject "internal_listen of spaces only, with TLS files" "with leading or trailing whitespace" --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"   ","internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":"/x/tls.key"}}}}'
+reject "internal_listen of a tab only, with TLS files" "with leading or trailing whitespace" --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"\t","internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":"/x/tls.key"}}}}'
+reject "internal_listen port 65536" "it must be host:port with a port of 1-65535" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:65536"}}}}'
+reject "internal_listen port 0" "it must be host:port with a port of 1-65535" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:0"}}}}'
+reject "internal_listen without a port, with TLS files" "it must be host:port with a port of 1-65535" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0","internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":"/x/tls.key"}}}}'
+# The TLS files and the server name are checked as the hub reads them.
+reject "internal_tls_server_name with a slash through config.extra" "it must be a host name" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_tls_server_name":"relay/internal"}}}}'
+reject "internal_tls_server_name with trailing whitespace through config.extra" "it must be a host name" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_tls_server_name":"relay.internal "}}}}'
+reject "a blank internal_tls_cert_file through config.extra" "which is blank or padded with whitespace" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:9443","internal_tls_cert_file":"  "}}}}'
+reject "a padded internal_tls_key_file through config.extra" "which is blank or padded with whitespace" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":" /x/tls.key"}}}}'
+reject "a padded internal_tls_ca_file through config.extra" "which is blank or padded with whitespace" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_tls_ca_file":"/x/ca.crt "}}}}'
+accept "loopback internal_listen through config.extra" \
+  --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:9443"}}}}'
+accept "internalTls enabled" "${RT_ON[@]}"
+executed=$((executed + 1))
+_rt_on="$(render "${RT_ON[@]}" --set conduit.internalTls.caSecret=rg-relay-ca)"
+_rt_off="$(render)"
+_rt_fail=""
+for _want in \
+  '          internal_listen: 0.0.0.0:9443' \
+  '          internal_tls_cert_file: /etc/scion/relay-tls/tls.crt' \
+  '          internal_tls_key_file: /etc/scion/relay-tls/tls.key' \
+  '          internal_tls_ca_file: /etc/scion/relay-tls-ca/ca.crt' \
+  '          internal_tls_server_name: t-scion-hub-relay.default.svc' \
+  '                  fieldPath: status.podIP' \
+  '              containerPort: 9443' \
+  '              mountPath: "/etc/scion/relay-tls"' \
+  '              mountPath: "/etc/scion/relay-tls-ca"' \
+  '            secretName: rg-relay-cert' \
+  '            secretName: rg-relay-ca'; do
+  printf '%s\n' "$_rt_on" | grep -qxF -- "$_want" || _rt_fail="${_rt_fail} [missing: ${_want# *}]"
+done
+# Whole-directory mounts (a subPath mount never sees a rotated Secret), no
+# relay port on the Service, and nothing at all when disabled.
+printf '%s\n' "$_rt_on" | grep -A2 -E 'mountPath: "/etc/scion/relay-tls' | grep -q 'subPath' && _rt_fail="${_rt_fail} [relay mount uses subPath]"
+printf '%s\n' "$_rt_on" | sed -n '/^kind: Service$/,/^---$/p' | grep -q '9443' && _rt_fail="${_rt_fail} [relay port on the Service]"
+printf '%s\n' "$_rt_off" | grep -qE 'internal_listen|relay-tls|status.podIP' && _rt_fail="${_rt_fail} [disabled render carries relay wiring]"
+if [ -z "$_rt_fail" ] && printf '%s\n' "$_rt_on" | grep -q '^kind: Deployment$'; then
+  echo "ok    conduit.internalTls renders server.hub.conduit TLS keys, whole-directory Secret mounts, POD_IP and a pod-only port; disabled renders none of it"
+else
+  echo "FAIL  conduit.internalTls shape:${_rt_fail:- no Deployment rendered}"
+  failed=$((failed + 1))
+fi
+unset _rt_on _rt_off _rt_fail _want
+# The relay wiring trusts no forwarded headers: with the relay on, the rendered
+# settings carry no server.relay block and no trusted_proxies under
+# server.hub.conduit. A relay-level trusted_proxies default stays empty.
+executed=$((executed + 1))
+_rt_settings="$(render "${RT_ON[@]}" --show-only templates/secret-settings.yaml)"
+_rt_conduit="$(printf '%s\n' "$_rt_settings" | sed -n '/^        conduit:$/,/^        [a-z_]*:/p')"
+if ! printf '%s\n' "$_rt_conduit" | grep -q 'internal_listen:'; then
+  echo "FAIL  relay trusted_proxies pin: no server.hub.conduit block rendered, so nothing was inspected"
+  failed=$((failed + 1))
+elif printf '%s\n' "$_rt_conduit" | grep -q 'trusted_proxies' || printf '%s\n' "$_rt_settings" | grep -qE '^      relay:$'; then
+  echo "FAIL  relay trusted_proxies pin: the relay wiring rendered a trusted_proxies entry or a server.relay block"
+  failed=$((failed + 1))
+else
+  echo "ok    the relay wiring renders no relay-level trusted_proxies and no server.relay block"
+fi
+unset _rt_settings _rt_conduit RT_ON
+
+echo "== conduit.internalTls minimum hub image =="
+# The relay wiring is refused for a hub image older than the first release that
+# honours the internal_tls_* settings (scion-hub.relayTlsMinHub). The floor is
+# read from the chart, so these rows follow it when it changes.
+_rt_min="$(sed -n '/define "scion-hub.relayTlsMinHub"/,/end/p' "$CHART/templates/_helpers.tpl" | sed -n 's/^version: "\(.*\)"$/\1/p')"
+_rt_min_n="$(sed -n '/define "scion-hub.relayTlsMinHub"/,/end/p' "$CHART/templates/_helpers.tpl" | sed -n 's/^nightly: "\(.*\)"$/\1/p')"
+_rt_vlines="$(sed -n '/define "scion-hub.relayTlsMinHub"/,/end/p' "$CHART/templates/_helpers.tpl" | grep -c '^version: "')"
+_rt_major="${_rt_min%%.*}"
+RT_TAG=(--set conduit.internalTls.enabled=true --set conduit.internalTls.existingSecret=rg-relay-cert)
+# Two modes, the same row count in each. Version mode: the version floor is set,
+# and semver tags are compared with it. Placeholder mode: the version floor is
+# empty (no versioned release carries the change yet), every semver tag is
+# refused with a message that names the nightly, and no refusal may print a
+# version floor. A tag that passes the check: the version floor, else the
+# nightly floor.
+if [ -n "$_rt_min" ]; then _rt_ok_tag="$_rt_min"; _rt_semver_refusal="is older than ${_rt_min}"; else _rt_ok_tag="nightly-${_rt_min_n}"; _rt_semver_refusal="no versioned hub release serves the relay hop"; fi
+if [ "$_rt_vlines" -ne 1 ] || [ -z "$_rt_min_n" ] || { [ -n "$_rt_min" ] && ! [[ "$_rt_major" =~ ^[0-9]+$ ]]; }; then
+  executed=$((executed + 26)); failed=$((failed + 26))
+  echo "FAIL  relay image gate: could not read scion-hub.relayTlsMinHub (version lines $_rt_vlines, version '$_rt_min', nightly '$_rt_min_n'); none of its 26 rows ran"
+else
+  reject "relay wiring with an older semver tag" "$_rt_semver_refusal" "${RT_TAG[@]}" --set-string image.tag=0.0.1
+  if [ -n "$_rt_min" ]; then
+    accept "relay wiring with the minimum semver tag" "${RT_TAG[@]}" --set-string "image.tag=${_rt_min}"
+    accept "relay wiring with a newer semver tag" "${RT_TAG[@]}" --set-string "image.tag=v$((_rt_major + 1)).0.0"
+  else
+    reject "placeholder: relay wiring with any semver tag (1.2.3)" "$_rt_semver_refusal" "${RT_TAG[@]}" --set-string image.tag=1.2.3
+    reject "placeholder: relay wiring with a high semver tag (v100.0.0)" "$_rt_semver_refusal" "${RT_TAG[@]}" --set-string image.tag=v100.0.0
+  fi
+  # No refusal names a version floor while it is a placeholder; with the floor
+  # set, the refusal names it.
+  executed=$((executed + 1))
+  _rt_sv="$(render "${RT_TAG[@]}" --set-string image.tag=0.0.1)"
+  if [ -z "$_rt_min" ] && printf '%s\n' "$_rt_sv" | grep -qF "$_rt_semver_refusal" && ! printf '%s\n' "$_rt_sv" | grep -qE '99\.0\.0|a release at or after|is older than'; then
+    echo "ok    placeholder: the semver refusal names the nightly and no version floor (no 99.0.0, 'a release at or after' or 'is older than')"
+  elif [ -n "$_rt_min" ] && printf '%s\n' "$_rt_sv" | grep -qF "$_rt_min"; then
+    echo "ok    the semver refusal names the version floor ${_rt_min}"
+  else
+    echo "FAIL  relay image gate: the semver refusal's wording is wrong for this mode: $(printf '%s' "$_rt_sv" | tr '\n' ' ' | cut -c1-200)"; failed=$((failed + 1))
+  fi
+  unset _rt_sv
+  # The malformed-version refusal advises a valid version tag only when a version
+  # floor exists; in placeholder mode every version tag is refused anyway.
+  executed=$((executed + 1))
+  _rt_mf="$(render "${RT_TAG[@]}" --set-string image.tag=1.2.0-01)"
+  if ! printf '%s\n' "$_rt_mf" | grep -qF 'is not a valid semantic version'; then
+    echo "FAIL  relay image gate: no malformed-version refusal for 1.2.0-01"; failed=$((failed + 1))
+  elif [ -z "$_rt_min" ] && ! printf '%s\n' "$_rt_mf" | grep -qF 'valid version tag' && printf '%s\n' "$_rt_mf" | grep -qF "nightly-${_rt_min_n} or later or an image digest"; then
+    echo "ok    placeholder: the malformed-version refusal does not advise a valid version tag"
+  elif [ -n "$_rt_min" ] && printf '%s\n' "$_rt_mf" | grep -qF 'Use a valid version tag'; then
+    echo "ok    the malformed-version refusal advises a valid version tag (a version floor exists)"
+  else
+    echo "FAIL  relay image gate: the malformed-version remedy is wrong for this mode: $(printf '%s' "$_rt_mf" | tr '\n' ' ' | cut -c1-200)"; failed=$((failed + 1))
+  fi
+  unset _rt_mf
+  # On the config.extra path (wiring off), the off-remedy is to remove that
+  # listener, not to turn off conduit.internalTls.
+  executed=$((executed + 1))
+  _rt_xr="$(render --set-string image.tag=0.1.0 --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0:9443","internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":"/x/tls.key"}}}}')"
+  if printf '%s\n' "$_rt_xr" | grep -qF 'remove the config.extra internal_listen' && ! printf '%s\n' "$_rt_xr" | grep -qF 'conduit.internalTls.enabled: false'; then
+    echo "ok    the config.extra path names removing that internal_listen as the off-remedy"
+  else
+    echo "FAIL  relay image gate: the config.extra path's remedy is wrong: $(printf '%s' "$_rt_xr" | tr '\n' ' ' | cut -c1-200)"; failed=$((failed + 1))
+  fi
+  unset _rt_xr
+  reject "relay wiring with an older nightly tag" "is older than nightly-${_rt_min_n}" "${RT_TAG[@]}" --set-string image.tag=nightly-20000101
+  accept "relay wiring with the minimum nightly tag" "${RT_TAG[@]}" --set-string "image.tag=nightly-${_rt_min_n}"
+  accept "relay off with an older tag (no gate)" --set-string image.tag=0.0.1
+  # With image.tag unset the tag is the chart's appVersion, which stays below
+  # the floor until a versioned release carries the change; the refusal must
+  # tell the operator to set image.tag or image.digest.
+  reject "relay wiring on the default tag (appVersion) names image.tag and image.digest" "image.tag is not set, so the tag is the chart's appVersion" "${RT_TAG[@]}"
+  # Build metadata does not change precedence; a pre-release sorts below its
+  # release; a tag that starts like a version but is not one gets the chart's
+  # own refusal.
+  reject "relay wiring with an older tag carrying build metadata" "$_rt_semver_refusal" "${RT_TAG[@]}" --set-string image.tag=0.0.1+build
+  if [ -n "$_rt_min" ]; then
+    accept "relay wiring with the minimum tag carrying build metadata" "${RT_TAG[@]}" --set-string "image.tag=${_rt_min}+build.1"
+    reject "relay wiring with a pre-release of the minimum" "$_rt_semver_refusal" "${RT_TAG[@]}" --set-string "image.tag=${_rt_min}-rc.1"
+  else
+    reject "placeholder: relay wiring with a tag carrying build metadata (1.0.0+build.1)" "$_rt_semver_refusal" "${RT_TAG[@]}" --set-string image.tag=1.0.0+build.1
+    reject "placeholder: relay wiring with a pre-release tag (1.0.0-rc.1)" "$_rt_semver_refusal" "${RT_TAG[@]}" --set-string image.tag=1.0.0-rc.1
+  fi
+  reject "relay wiring with a malformed version tag" "is not a valid semantic version" "${RT_TAG[@]}" --set-string image.tag=1.2.0-01
+  reject "relay wiring with an overflowing version number" "is not a valid semantic version" "${RT_TAG[@]}" --set-string image.tag=99999999999999999999.0.0
+  # Rows that do not lean on appVersion being below the floor.
+  if [ -n "$_rt_min" ]; then
+    _rt_core="${_rt_min%%[-+]*}"
+    _rt_patch="${_rt_core##*.}"
+    accept "relay wiring with a newer pre-release (patch+1, -preview.10)" "${RT_TAG[@]}" --set-string "image.tag=${_rt_core%.*}.$((_rt_patch + 1))-preview.10"
+    accept "relay wiring with a newer tag carrying build metadata" "${RT_TAG[@]}" --set-string "image.tag=v$((_rt_major + 1)).0.0+meta.1"
+  else
+    reject "placeholder: relay wiring with a pre-release tag (1.0.1-preview.10)" "$_rt_semver_refusal" "${RT_TAG[@]}" --set-string image.tag=1.0.1-preview.10
+    reject "placeholder: relay wiring with a high tag carrying build metadata (v100.0.0+meta.1)" "$_rt_semver_refusal" "${RT_TAG[@]}" --set-string image.tag=v100.0.0+meta.1
+  fi
+  accept "config.extra loopback relay listener on an older tag (loopback is not gated)" --set-string image.tag=0.0.1 \
+    --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"127.0.0.1:9443","internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":"/x/tls.key"}}}}'
+  unset _rt_core _rt_patch
+  # A non-loopback relay listener from config.extra, with the wiring off, is held
+  # to the same floor: an older hub would serve it in plaintext.
+  reject "config.extra non-loopback relay listener on an older tag" "$_rt_semver_refusal" --set-string image.tag=0.1.0 \
+    --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0:9443","internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":"/x/tls.key"}}}}'
+  executed=$((executed + 1))
+  _rt_xd="$(render --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0:9443","internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":"/x/tls.key"}}}}' --show-only templates/deployment.yaml)"
+  if printf '%s\n' "$_rt_xd" | grep -qxF '    scion.io/relay-tls-image-check: unverified'; then
+    echo "ok    a config.extra non-loopback relay listener on a digest renders with the unverified annotation"
+  else
+    echo "FAIL  relay image gate: config.extra listener on a digest did not render the unverified annotation"; failed=$((failed + 1))
+  fi
+  executed=$((executed + 1))
+  _rt_dg="$(render "${RT_TAG[@]}" --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000 --show-only templates/deployment.yaml)"
+  if printf '%s\n' "$_rt_dg" | grep -qxF '    scion.io/relay-tls-image-check: unverified'; then
+    echo "ok    the relay wiring on an image digest renders with the unverified annotation"
+  else
+    echo "FAIL  relay image gate: the relay wiring on a digest did not render the unverified annotation"; failed=$((failed + 1))
+  fi
+  unset _rt_xd _rt_dg
+  executed=$((executed + 1))
+  _rt_latest="$(render "${RT_TAG[@]}" --set-string image.tag=latest --show-only templates/deployment.yaml)"
+  if printf '%s\n' "$_rt_latest" | grep -qxF '    scion.io/relay-tls-image-check: unverified'; then
+    echo "ok    an unparseable tag (latest) is allowed and the Deployment is annotated unverified"
+  else
+    echo "FAIL  relay image gate: tag latest did not render with the unverified annotation"; failed=$((failed + 1))
+  fi
+  executed=$((executed + 1))
+  _rt_ok="$(render "${RT_TAG[@]}" --set-string "image.tag=${_rt_ok_tag}" --show-only templates/deployment.yaml)"
+  if printf '%s\n' "$_rt_ok" | grep -q '^kind: Deployment$' && ! printf '%s\n' "$_rt_ok" | grep -q 'relay-tls-image-check'; then
+    echo "ok    a checked tag renders no unverified annotation"
+  else
+    echo "FAIL  relay image gate: a checked tag rendered the unverified annotation, or no Deployment"; failed=$((failed + 1))
+  fi
+  # NOTES.txt is rendered through a copy whose NOTES is renamed to a manifest and
+  # shown with --debug, as chart-integrity.sh E11 does (helm template does not
+  # print NOTES, and exits non-zero on the prose). Both renders must carry the
+  # unconditional SCHEMA_VERSION anchor, so an empty probe cannot pass.
+  executed=$((executed + 1))
+  _rt_tmp="$(mktemp -d)"
+  _rt_warn='RELAY TLS: THE HUB IMAGE VERSION COULD NOT BE CHECKED'
+  _rt_notes() { "$HELM" template t "$_rt_tmp/c" --debug "${BASE[@]}" "${RT_TAG[@]}" "$@" --show-only templates/zz-notes-probe.txt 2>/dev/null \
+    | sed -n '/^# Source: .*zz-notes-probe\.txt$/,$p'; }
+  if cp -r "$CHART" "$_rt_tmp/c" && mv "$_rt_tmp/c/templates/NOTES.txt" "$_rt_tmp/c/templates/zz-notes-probe.txt"; then
+    _rt_n_latest="$(_rt_notes --set-string image.tag=latest)"
+    _rt_n_ok="$(_rt_notes --set-string "image.tag=${_rt_ok_tag}")"
+    # The config.extra path (wiring off), on a tag and on a digest: rendered
+    # without RT_TAG.
+    _rt_notes_extra() {
+      "$HELM" template t "$_rt_tmp/c" --debug "${BASE[@]}" "$@" \
+        --set-json 'config.extra={"server":{"hub":{"conduit":{"internal_listen":"0.0.0.0:9443","internal_tls_cert_file":"/x/tls.crt","internal_tls_key_file":"/x/tls.key"}}}}' \
+        --show-only templates/zz-notes-probe.txt 2>/dev/null | sed -n '/^# Source: .*zz-notes-probe\.txt$/,$p'
+    }
+    _rt_n_extra="$(_rt_notes_extra --set-string image.tag=latest)"
+    _rt_n_extra_digest="$(_rt_notes_extra --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000)"
+  fi
+  if printf '%s\n' "$_rt_n_latest" | grep -qF 'SCHEMA_VERSION IS LOAD-BEARING' && printf '%s\n' "$_rt_n_ok" | grep -qF 'SCHEMA_VERSION IS LOAD-BEARING' \
+    && printf '%s\n' "$_rt_n_latest" | grep -qF "$_rt_warn" && ! printf '%s\n' "$_rt_n_ok" | grep -qF "$_rt_warn"; then
+    echo "ok    NOTES.txt warns when the hub image version could not be checked, and not when it was"
+  else
+    echo "FAIL  relay image gate: the NOTES warning is missing for tag latest, present for a checked tag, or the NOTES probe rendered nothing"; failed=$((failed + 1))
+  fi
+  # On the config.extra path the NOTES warning names removing that listener (or
+  # binding it to loopback), not turning off conduit.internalTls: for tag latest
+  # and for an image.digest.
+  for _rt_case in "tag latest:$_rt_n_extra" "image.digest:$_rt_n_extra_digest"; do
+    _rt_label="${_rt_case%%:*}"; _rt_out="${_rt_case#*:}"
+    executed=$((executed + 1))
+    if printf '%s\n' "$_rt_out" | grep -qF 'SCHEMA_VERSION IS LOAD-BEARING' && printf '%s\n' "$_rt_out" | grep -qF "$_rt_warn" \
+      && printf '%s\n' "$_rt_out" | grep -qF 'remove the config.extra internal_listen (or bind it to loopback)' \
+      && ! printf '%s\n' "$_rt_out" | grep -qF 'conduit.internalTls.enabled: false'; then
+      echo "ok    NOTES.txt on the config.extra path ($_rt_label) names removing that listener, not conduit.internalTls.enabled: false"
+    else
+      echo "FAIL  relay image gate: the NOTES remedy on the config.extra path ($_rt_label) is wrong, or the probe rendered nothing"; failed=$((failed + 1))
+    fi
+  done
+  case "$_rt_tmp" in /tmp/*) rm -rf "$_rt_tmp" ;; esac
+  unset -f _rt_notes _rt_notes_extra; unset _rt_n_latest _rt_n_ok _rt_n_extra _rt_n_extra_digest _rt_warn _rt_case _rt_label _rt_out
+fi
+unset _rt_min _rt_min_n _rt_major _rt_latest _rt_ok _rt_tmp RT_TAG _rt_vlines _rt_ok_tag _rt_semver_refusal
 
 echo "== secrets.backend =="
 # local renders nothing; gcpsm renders server.secrets and needs a project. The

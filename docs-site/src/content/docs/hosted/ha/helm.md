@@ -387,6 +387,94 @@ These are the chart's selector labels, and the chart's tests pin them. Labels in
 `hub.podLabels` cannot override them.
 :::
 
+### Relay TLS between hub nodes
+
+`conduit.internalTls` wires the conduit relay's internal hop between hub nodes
+over native TLS. `enabled` is `true`, `false` or `auto` (the default). `auto`
+turns it on when `replicaCount` is above one, and the render then requires
+`existingSecret`; at one replica, or under `config.existingSecret`, the chart
+renders no relay listener. Set `enabled: false` to keep a multi-replica release
+without it. When it is on, the chart:
+
+- renders `server.hub.conduit.internal_listen` on `0.0.0.0:<port>` (default
+  `9443`) with `internal_tls_cert_file`, `internal_tls_key_file`,
+  `internal_tls_ca_file` and `internal_tls_server_name`;
+- mounts `existingSecret` (a `kubernetes.io/tls` Secret with `tls.crt` and
+  `tls.key`, for example from cert-manager) and the CA bundle (`caSecret`,
+  default `existingSecret`, key `caKey`, default `ca.crt`) as whole directories,
+  so a rotated certificate and key are picked up without a restart;
+- sets `POD_IP`, so each node advertises `https://<pod IP>:<port>`, and declares
+  the port on the pod only, never on the Service.
+
+Every node verifies its peers against the CA and `serverName`, so one
+certificate whose SAN is that name serves all replicas. The default is
+`<fullname>-relay.<namespace>.svc`, usually
+`<release>-scion-hub-relay.<namespace>.svc`: issue the certificate for that
+name, or set `conduit.internalTls.serverName` to the name your certificate
+carries. A set CA replaces the system roots, and a private CA requires it.
+cert-manager fills `ca.crt` only for some issuers; for others, point `caSecret`
+at a Secret holding the CA.
+
+The hub reads the CA bundle and `serverName` once at startup. Changing
+`serverName`, `caSecret` or `caKey` through `helm upgrade` already rolls the
+pods, because the settings checksum or the pod spec changes. A change to a
+Secret's CONTENT does not: after replacing the CA bundle inside an existing
+Secret, run `kubectl rollout restart deployment/<fullname>`. (`<fullname>` is the
+chart's full name: `<release>-scion-hub` by default, `<release>-<nameOverride>`
+when `nameOverride` is set, just `<release>` when the release name already
+contains that name, and `fullnameOverride` when that is set.)
+
+To rotate the CA without breaking the hop between nodes, keep both CAs trusted
+while the leaf certificates move:
+
+1. With the default `caSecret` (empty, so `existingSecret`): when
+   `existingSecret` is issued by cert-manager, cert-manager owns its `ca.crt`
+   and replaces it along with the leaf, so it cannot hold two CAs. For the
+   overlap window, point `caSecret` at a Secret you manage that holds both the
+   old and the new CA, and run `helm upgrade` (this rolls the pods). If you made
+   `existingSecret` by hand, its `ca.crt` can hold both CAs directly; edit it and
+   run `kubectl rollout restart deployment/<fullname>`.
+2. Issue the leaf certificates from the new CA. The hub picks up the new
+   certificate and key without a restart.
+3. Remove the old CA, either by pointing `caSecret` back or by editing your
+   Secret. A `caSecret` change through `helm upgrade` rolls the pods; an edit to
+   the Secret's content needs `kubectl rollout restart deployment/<fullname>`.
+
+```yaml
+conduit:
+  internalTls:
+    enabled: true
+    existingSecret: scion-relay-tls   # issued for <fullname>-relay.<namespace>.svc
+```
+
+**Hub image version.** The chart refuses the relay wiring when the hub image is
+older than the first release that honours the `internal_tls_*` settings, because
+an older hub would serve the relay listener in plaintext. The same check applies
+to a non-loopback relay listener set through `config.extra` with
+`conduit.internalTls` off. The image tag is `image.tag`, else the chart's
+`appVersion`. A semver tag is compared by version (build metadata is ignored,
+and a pre-release sorts below its release) and a `nightly-YYYYMMDD` tag by date;
+a tag that starts like a version but is not valid semver, or has a version
+number longer than 19 digits, is refused. An `image.digest`, or a tag that is
+not a version (such as `latest`), cannot be checked: the render is allowed,
+`NOTES.txt` prints a warning, and the Deployment is annotated
+`scion.io/relay-tls-image-check: unverified`. Check such an image yourself.
+Until a versioned hub release carries relay TLS, every version tag is refused,
+including the chart's `appVersion` (the default image tag). So with relay TLS on
+(the default above one replica), set `image.tag` to `nightly-20261029` or later,
+or set `image.digest`.
+
+**Rolling back.** Hub releases before the one that adds relay TLS ignore the
+`internal_tls_*` settings and would serve this listener in plaintext. If you roll
+the hub image back below that release, roll the chart back with it, or set
+`conduit.internalTls.enabled: false` first (for a listener set through
+`config.extra`, remove it or bind it to loopback).
+
+A relay listener that is not bound to loopback and has no TLS fails the render,
+including one set through `config.extra`. `conduit.internalTls` is refused
+together with `config.existingSecret`; put the same keys in your own settings
+file instead.
+
 The readiness and startup probes target `/readyz` on the hub's web port
 (`hub.webPort`, default 8080). The path cannot be changed. The liveness probe is
 off by default. When `probes.liveness.enabled` is `true`, it is a TCP check on

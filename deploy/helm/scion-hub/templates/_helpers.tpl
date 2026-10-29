@@ -2444,6 +2444,15 @@ environment is still the chart's.
 {{- fail "hub.extraEnv may not set SCION_ACTIVE_PROFILE: the hub loads SCION_* environment variables over settings.yaml (LoadVersionedSettings, pkg/config/settings_v1.go), so it would replace active_profile and change which profile's image_registry the hub resolves, without the chart's registry check seeing it. Set active_profile through config.extra instead; the chart renders active_profile: default, so changing it there is refused as a collision until the chart supports it." }}
 {{- end }}
 {{- /*
+SCION_SERVER_HUB_CONDUIT_INTERNAL* (internal_listen, internal_advertise and the
+internal_tls_* files and server name) binds over the rendered settings.yaml, so
+it would set the relay listener or its TLS past this chart's relay checks.
+Refused in every form, matched case-insensitively.
+*/}}
+{{- if hasPrefix "SCION_SERVER_HUB_CONDUIT_INTERNAL" (upper $name) }}
+{{- fail (printf "hub.extraEnv may not set %s: it would override the relay listener or its TLS settings (server.hub.conduit.internal_*) over the rendered settings.yaml, bypassing the chart's relay checks. Use conduit.internalTls (or config.extra, or your own settings file under config.existingSecret)." $name) }}
+{{- end }}
+{{- /*
 SCION_SERVER_HUB_CLASS binds to server.hub.class through the same env layer, over
 the rendered settings.yaml. The class is an input of the hub's --test-mode gate
 and comes from hub.hubClass only (config.extra is refused for the same reason in
@@ -2555,7 +2564,7 @@ as R4. Order is the order the guard appends them in, so the refusal message and
 this list read the same way.
 */}}
 {{- define "scion-hub.existingSecretRefusals" -}}
-config.extra, storage.bucket, agents.imageRegistry, hub.adminEmails, hub.hubClass, secrets.backend, secrets.gcpsm.projectId, secrets.gcpsm.replicationLocations, database.name, database.user, database.password, auth.oauth.web.github.clientId, auth.oauth.web.github.clientSecret, auth.oauth.web.google.clientId, auth.oauth.web.google.clientSecret, auth.proxy.iap.audience, auth.transport.mode, auth.transport.oidcAudience, auth.transport.platformAuthSa, runtime.gke, workspaceStorage.nfs.enabled, workspaceStorage.nfs.server, workspaceStorage.nfs.export, workspaceStorage.nfs.mountRoot, workspaceStorage.nfs.shareId, workspaceStorage.nfs.pvName, workspaceStorage.nfs.subpathRoot
+config.extra, storage.bucket, agents.imageRegistry, hub.adminEmails, hub.hubClass, secrets.backend, secrets.gcpsm.projectId, secrets.gcpsm.replicationLocations, database.name, database.user, database.password, auth.oauth.web.github.clientId, auth.oauth.web.github.clientSecret, auth.oauth.web.google.clientId, auth.oauth.web.google.clientSecret, auth.proxy.iap.audience, auth.transport.mode, auth.transport.oidcAudience, auth.transport.platformAuthSa, runtime.gke, workspaceStorage.nfs.enabled, workspaceStorage.nfs.server, workspaceStorage.nfs.export, workspaceStorage.nfs.mountRoot, workspaceStorage.nfs.shareId, workspaceStorage.nfs.pvName, workspaceStorage.nfs.subpathRoot, conduit.internalTls.enabled, conduit.internalTls.port, conduit.internalTls.existingSecret, conduit.internalTls.caSecret, conduit.internalTls.caKey, conduit.internalTls.serverName
 {{- end }}
 
 {{/*
@@ -2701,6 +2710,14 @@ subpathRoot; change both together.
 {{- if trim (toString (index $nfsInline $f | default "")) }}{{- $inline = append $inline (printf "workspaceStorage.nfs.%s" $f) }}{{- end }}
 {{- end }}
 {{- if ne (trim (toString ($nfsInline.subpathRoot | default "projects"))) "projects" }}{{- $inline = append $inline "workspaceStorage.nfs.subpathRoot" }}{{- end }}
+{{- $relayInline := (.Values.conduit | default (dict)).internalTls | default (dict) }}
+{{- if eq (toString $relayInline.enabled) "true" }}{{- $inline = append $inline "conduit.internalTls.enabled" }}{{- end }}
+{{- if ne (int ($relayInline.port | default 9443)) 9443 }}{{- $inline = append $inline "conduit.internalTls.port" }}{{- end }}
+{{- range $f := list "existingSecret" "caSecret" }}
+{{- if trim (toString (index $relayInline $f | default "")) }}{{- $inline = append $inline (printf "conduit.internalTls.%s" $f) }}{{- end }}
+{{- end }}
+{{- if ne (trim (toString ($relayInline.caKey | default "ca.crt"))) "ca.crt" }}{{- $inline = append $inline "conduit.internalTls.caKey" }}{{- end }}
+{{- if trim (toString ($relayInline.serverName | default "")) }}{{- $inline = append $inline "conduit.internalTls.serverName" }}{{- end }}
 {{- if $inline }}
 {{- fail (printf "config.existingSecret is set together with inline settings values (%s). With config.existingSecret the chart renders no settings.yaml, so those values would be silently discarded. Set one or the other: either supply the whole file yourself, or let the chart render it. Note that these are only the settings values the chart can PROVE you set, because their default is empty. Others - auth.mode, hub.name, the database pool sizes, the hub ID and the agent namespace - are just as inert here and cannot be refused, because a default-valued setting is indistinguishable from an unset one; they are listed with the settings keys your own file must carry in NOTES.txt and in values.yaml at config.existingSecret." (join ", " $inline)) }}
 {{- end }}
@@ -3410,6 +3427,20 @@ nothing, so it is refused rather than discarded.
 {{- if $platformAuthSa }}{{- $transportOut = set $transportOut "platform_auth_sa" $platformAuthSa }}{{- end }}
 {{- $authOut = set $authOut "transport" $transportOut }}
 {{- end }}
+{{- /*
+server.hub.conduit from conduit.internalTls: the relay listener on every
+interface, served over native TLS from the mounted Secret. Absent when
+disabled, which leaves every other render byte-identical.
+*/}}
+{{- $relayTls := include "scion-hub.relayTls" . | fromYaml }}
+{{- if $relayTls }}
+{{- $hub = set $hub "conduit" (dict
+    "internal_listen" (printf "0.0.0.0:%d" (int $relayTls.port))
+    "internal_tls_cert_file" (printf "%s/tls.crt" $relayTls.certDir)
+    "internal_tls_key_file" (printf "%s/tls.key" $relayTls.certDir)
+    "internal_tls_ca_file" (printf "%s/ca.crt" $relayTls.caDir)
+    "internal_tls_server_name" $relayTls.serverName) }}
+{{- end }}
 {{- $server := dict
     "mode" "hosted"
     "hub" $hub
@@ -3534,6 +3565,7 @@ forces a chart fork. Merged before the assertions run, not after. */}}
 {{- $rendered := toYaml $doc }}
 {{- include "scion-hub.assertSettings" (dict "root" . "rendered" $rendered "hubId" $hubId) }}
 {{- include "scion-hub.assertNoExtraCollision" (dict "preMerge" $preMerge "extra" .Values.config.extra) }}
+{{- include "scion-hub.assertRelayListenerTls" (dict "doc" $doc) }}
 {{- /* config.extra is an arbitrary subtree the operator controls, so it can put
 a credential at a path no redaction list names - a DSN at server.database.url
 was measured doing exactly that, landing in the Secret AND moving the
@@ -4395,5 +4427,338 @@ it, so the guards run even when the settings Secret is not rendered.
     "subpathRoot" $subpathRoot
     "mountPath" (printf "%s/%s" $mountRoot $shareId) }}
 {{- toYaml $out }}
+{{- end }}
+{{- end }}
+
+{{/*
+conduit.internalTls, validated, or empty when disabled: the conduit relay's
+internal hop between hub nodes over native TLS. Read by the Deployment (the
+Secret volumes, their mounts, the relay port and POD_IP) and by
+scion-hub.settings (server.hub.conduit), one define so the file paths in the
+settings and the mount paths cannot disagree. Called from the always-rendered
+Deployment so its guards also run under config.existingSecret.
+
+The hub derives the advertised endpoint as https://POD_IP:<port> when the
+listener serves TLS, and every hop client verifies the peer certificate against
+the CA file and serverName. One certificate whose SAN is serverName therefore
+serves every replica. The directories are mounted whole, not by subPath, so a
+rotated Secret (for example by cert-manager) reaches the files. The hub re-reads
+the certificate and key when they change, without a restart. It reads the CA
+bundle and serverName once at startup, so changing either needs a rolling
+restart.
+*/}}
+{{- define "scion-hub.relayTls" -}}
+{{- $c := (.Values.conduit | default (dict)).internalTls | default (dict) }}
+{{- $secret := trim (toString ($c.existingSecret | default "")) }}
+{{- $caSecret := trim (toString ($c.caSecret | default "")) }}
+{{- $caKey := trim (toString ($c.caKey | default "ca.crt")) }}
+{{- $serverName := trim (toString ($c.serverName | default "")) }}
+{{- $port := int ($c.port | default 9443) }}
+{{- /*
+enabled is true, false or "auto" (the default). "auto" turns the relay hop on
+when replicaCount is above one: those replicas reach each other's relays, and
+the hop must be TLS. It stays off under config.existingSecret, where the
+operator's own file decides.
+*/}}
+{{- $mode := toString (ternary "auto" $c.enabled (eq (toString $c.enabled) "<nil>")) }}
+{{- if not (has $mode (list "true" "false" "auto")) }}
+{{- fail (printf "conduit.internalTls.enabled is %s; it must be true, false or \"auto\"." (include "scion-hub.diagValue" $mode)) }}
+{{- end }}
+{{- $on := or (eq $mode "true") (and (eq $mode "auto") (gt (int .Values.replicaCount) 1) (not .Values.config.existingSecret)) }}
+{{- if not $on }}
+{{- $inert := list }}
+{{- if $secret }}{{- $inert = append $inert "conduit.internalTls.existingSecret" }}{{- end }}
+{{- if $caSecret }}{{- $inert = append $inert "conduit.internalTls.caSecret" }}{{- end }}
+{{- if ne $caKey "ca.crt" }}{{- $inert = append $inert "conduit.internalTls.caKey" }}{{- end }}
+{{- if $serverName }}{{- $inert = append $inert "conduit.internalTls.serverName" }}{{- end }}
+{{- if ne $port 9443 }}{{- $inert = append $inert "conduit.internalTls.port" }}{{- end }}
+{{- /* Under "auto" the values may be set ahead of a scale-up, so only an explicit false refuses them. */}}
+{{- if and $inert (eq $mode "false") }}
+{{- fail (printf "%s set while the relay hop is off (conduit.internalTls.enabled is %s, replicaCount is %d). The chart renders no relay listener in that case, so the value would reach nothing. Set conduit.internalTls.enabled: true, or remove it." (join " and " $inert) $mode (int .Values.replicaCount)) }}
+{{- end }}
+{{- else }}
+{{- if and (not $secret) (eq $mode "auto") }}
+{{- fail (printf "replicaCount is %d, and conduit.internalTls.enabled \"auto\" (the default) turns on TLS for the relay hop between hub nodes above one replica. Set conduit.internalTls.existingSecret to a kubernetes.io/tls Secret (tls.crt, tls.key) in the release namespace, for example one issued by cert-manager, or set conduit.internalTls.enabled: false." (int .Values.replicaCount)) }}
+{{- end }}
+{{- if not $secret }}
+{{- fail "conduit.internalTls.enabled is true, which requires conduit.internalTls.existingSecret: a kubernetes.io/tls Secret (tls.crt, tls.key) in the release namespace, for example one issued by cert-manager. The relay listener serves native TLS from it; the chart never creates certificates." }}
+{{- end }}
+{{- range $pair := list (list "existingSecret" $secret) (list "caSecret" $caSecret) }}
+{{- $v := index $pair 1 }}
+{{- if and $v (not (regexMatch "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" $v)) }}
+{{- fail (printf "conduit.internalTls.%s is %s; it must be a Kubernetes Secret name (lower-case letters, digits, '-' and '.')." (index $pair 0) (include "scion-hub.diagValue" $v)) }}
+{{- end }}
+{{- end }}
+{{- if not (regexMatch "^[-._a-zA-Z0-9]+$" $caKey) }}
+{{- fail (printf "conduit.internalTls.caKey is %s; it must be a Secret data key such as ca.crt." (include "scion-hub.diagValue" $caKey)) }}
+{{- end }}
+{{- if not $serverName }}
+{{- $serverName = printf "%s-relay.%s.svc" (include "scion-hub.fullname" .) .Release.Namespace }}
+{{- end }}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$" $serverName) }}
+{{- fail (printf "conduit.internalTls.serverName is %s; it must be a DNS name, the SAN every hub node's certificate carries." (include "scion-hub.diagValue" $serverName)) }}
+{{- end }}
+{{- if or (lt $port 1) (gt $port 65535) }}
+{{- fail (printf "conduit.internalTls.port is %d; it must be between 1 and 65535." $port) }}
+{{- end }}
+{{- $taken := list (dict "n" (int .Values.hub.webPort) "name" "hub.webPort") (dict "n" (int (include "scion-hub.brokerPort" .)) "name" "the hub's in-process runtime broker") }}
+{{- if .Values.cloudsql.enabled }}
+{{- $taken = append $taken (dict "n" (int .Values.cloudsql.port) "name" "cloudsql.port") }}
+{{- $taken = append $taken (dict "n" (int .Values.cloudsql.healthCheckPort) "name" "cloudsql.healthCheckPort") }}
+{{- end }}
+{{- range $t := $taken }}
+{{- if eq $port (int $t.n) }}
+{{- fail (printf "conduit.internalTls.port %d is also %s. Every container in a pod shares one network namespace, so the second listener fails at startup." $port $t.name) }}
+{{- end }}
+{{- end }}
+{{- $extraHub := dig "server" "hub" (dict) (.Values.config.extra | default (dict)) }}
+{{- if and (kindIs "map" $extraHub) (hasKey $extraHub "conduit") }}
+{{- $extraConduit := index $extraHub "conduit" }}
+{{- if kindIs "map" $extraConduit }}
+{{- range $k := list "internal_listen" "internal_advertise" "internal_tls_cert_file" "internal_tls_key_file" "internal_tls_ca_file" "internal_tls_server_name" }}
+{{- if hasKey $extraConduit $k }}
+{{- fail (printf "conduit.internalTls is enabled and config.extra also sets server.hub.conduit.%s. The chart renders the relay listener, its TLS files and the mounts they name together from conduit.internalTls; use that alone." $k) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $imageCheck := include "scion-hub.relayTlsImageCheck" (dict "root" . "via" "wiring") }}
+{{- $out := dict
+    "imageCheck" $imageCheck
+    "port" $port
+    "secret" $secret
+    "caSecret" (default $secret $caSecret)
+    "caKey" $caKey
+    "serverName" $serverName
+    "certDir" "/etc/scion/relay-tls"
+    "caDir" "/etc/scion/relay-tls-ca" }}
+{{- toYaml $out }}
+{{- end }}
+{{- end }}
+
+{{/*
+The relay hop's TLS check, on the merged settings document. A
+server.hub.conduit.internal_listen that is not a literal loopback address must
+come with BOTH server.hub.conduit.internal_tls_cert_file and
+internal_tls_key_file, whichever path wrote it (conduit.internalTls or
+config.extra). Either file alone is refused as well, as the hub refuses it.
+
+What this check can and cannot do: it guarantees the rendered settings ask for
+TLS. Serving TLS is the hub's job, and only hub releases that understand the
+internal_tls_* settings do it. An earlier hub ignores those keys and serves the
+listener in plaintext, so this chart's relay wiring is meant to ship with those
+hub releases, not before them.
+*/}}
+{{- define "scion-hub.assertRelayListenerTls" -}}
+{{- $conduit := dig "server" "hub" "conduit" (dict) .doc }}
+{{- if kindIs "map" $conduit }}
+{{- /*
+The TLS files and server name are checked as written, as the hub reads them
+(validateInternalTLS): the cert and key are set together or not at all, and a
+server name may not contain "/", ":", a space or a tab, or be padded with
+whitespace. A blank or whitespace-padded file path is refused too; the hub
+would count it as set and then fail to open it.
+*/}}
+{{- $certRaw := toString (dig "internal_tls_cert_file" "" $conduit) }}
+{{- $keyRaw := toString (dig "internal_tls_key_file" "" $conduit) }}
+{{- $caRaw := toString (dig "internal_tls_ca_file" "" $conduit) }}
+{{- range $pair := list (list "internal_tls_cert_file" $certRaw) (list "internal_tls_key_file" $keyRaw) (list "internal_tls_ca_file" $caRaw) }}
+{{- $v := index $pair 1 }}
+{{- if and $v (ne (trim $v) $v) }}
+{{- fail (printf "server.hub.conduit.%s is %s, which is blank or padded with whitespace. The hub would try to open that exact path; write the file path without surrounding whitespace." (index $pair 0) (include "scion-hub.diagValue" $v)) }}
+{{- end }}
+{{- end }}
+{{- $nameRaw := toString (dig "internal_tls_server_name" "" $conduit) }}
+{{- if and $nameRaw (or (regexMatch "[/: \t]" $nameRaw) (ne (trim $nameRaw) $nameRaw)) }}
+{{- fail (printf "server.hub.conduit.internal_tls_server_name is %s; it must be a host name with no \"/\", \":\", spaces, tabs or surrounding whitespace. The hub refuses anything else at startup." (include "scion-hub.diagValue" $nameRaw)) }}
+{{- end }}
+{{- $cert := $certRaw }}
+{{- $key := $keyRaw }}
+{{- $listenRaw := toString (dig "internal_listen" "" $conduit) }}
+{{- $listen := trim $listenRaw }}
+{{- /* Gated on the raw value, so a whitespace-only listen hits the whitespace refusal. */}}
+{{- if $listenRaw }}
+{{- /*
+The hub validates internal_listen untrimmed (SplitHostPort, then Atoi on the
+port), and a leading space would not bind, so surrounding whitespace is refused.
+The value must be host:port with a port of 1-65535 in any mode; the host is
+empty, a bracketed IPv6 literal, or a name or IPv4 address without colons.
+
+Without TLS the listener must also be loopback, as the hub's
+CheckRelayInternalListen reads it: a loopback IP literal: [::1] or a valid
+127.x.y.z (octets 0-255, no leading zeros). A name is never loopback, not even
+localhost, because the hub would resolve it when it binds.
+
+The chart is deliberately stricter than the hub in these cases:
+- other loopback IP spellings (an expanded ::1, ::ffff:127.0.0.1), which it
+  treats as not loopback;
+- port 0;
+- a port written with a sign or a leading zero (for example :+9443, :09443).
+- an empty bracketed host ([]:port).
+*/}}
+{{- if ne $listenRaw $listen }}
+{{- fail (printf "server.hub.conduit.internal_listen is %s, with leading or trailing whitespace, which the hub cannot use as written (it fails validation or the bind at startup); remove the whitespace." (include "scion-hub.diagValue" $listenRaw)) }}
+{{- end }}
+{{- $hostPort := "^(|\\[[^\\[\\]]+\\]|[^:\\[\\]]+):([1-9][0-9]{0,4})$" }}
+{{- $portStr := regexReplaceAll $hostPort $listen "${2}" }}
+{{- if or (not (regexMatch $hostPort $listen)) (gt (int $portStr) 65535) }}
+{{- fail (printf "server.hub.conduit.internal_listen is %s; it must be host:port with a port of 1-65535 (for example 0.0.0.0:9443 or [::1]:9443). The hub refuses anything else at startup." (include "scion-hub.diagValue" $listen)) }}
+{{- end }}
+{{- /* One loopback definition, shared with the image check's exemption. */}}
+{{- $loopback := eq (include "scion-hub.isLoopbackListen" $listen) "true" }}
+{{- if and (not $loopback) (not (and $cert $key)) }}
+{{- fail (printf "server.hub.conduit.internal_listen is %s, which is not a loopback address (a loopback IP literal: [::1] or a valid 127.x.y.z, never a name such as localhost; with a port of 1-65535), and internal_tls_cert_file and internal_tls_key_file are not both set. The relay hop between hub nodes must serve TLS: set conduit.internalTls (enabled, existingSecret), or bind internal_listen to loopback." (include "scion-hub.diagValue" $listen)) }}
+{{- end }}
+{{- end }}
+{{- if and (or $cert $key) (not (and $cert $key)) }}
+{{- fail "server.hub.conduit.internal_tls_cert_file and internal_tls_key_file must be set together; the hub refuses one without the other at startup." }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+The first hub release whose relay listener honours the internal_tls_*
+settings. An older hub ignores them and serves the relay hop in plaintext, so
+the chart refuses its relay wiring for an image older than this.
+
+The nightly floor is set: nightly-20261029 is the first nightly that carries
+the change. No versioned release carries it yet, so the version floor is
+empty, a placeholder: while it is empty every semver tag is refused (fails
+closed) with a message that names the nightly instead. Set it to the first
+versioned release carrying the change once that is cut and verified (a
+pre-release if that is the first). Chart.yaml appVersion, the default image
+tag, stays below the floor until that release, so with the relay wiring on an
+operator sets image.tag or image.digest.
+*/}}
+{{- define "scion-hub.relayTlsMinHub" -}}
+version: ""
+nightly: "20261029"
+{{- end }}
+
+{{/*
+The off-remedy for the relay TLS image check, by the path that triggered it.
+Takes "wiring" (conduit.internalTls is on) or "extra" (a non-loopback
+config.extra internal_listen with the wiring off). Used by the render-time
+messages and by NOTES.txt, so the two say the same thing.
+*/}}
+{{- define "scion-hub.relayOffRemedy" -}}
+{{- if eq (toString .) "extra" -}}
+remove the config.extra internal_listen (or bind it to loopback)
+{{- else if eq (toString .) "wiring" -}}
+set conduit.internalTls.enabled: false
+{{- else -}}
+{{- fail (printf "scion-hub.relayOffRemedy: unknown path %q" (toString .)) -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Checks the hub image against scion-hub.relayTlsMinHub when the relay wiring is
+on, and returns "ok" or "unverified". It fails the render for a tag that is
+older. The tag is image.tag, else .Chart.AppVersion.
+- A semver tag (v1.2.3, 1.2.3-preview.4) is compared by semver precedence.
+- A nightly tag (nightly-YYYYMMDD) is compared by date.
+- Anything else, or an image.digest (which a tag cannot describe), cannot be
+  checked: it is allowed, returns "unverified", and the chart warns in
+  NOTES.txt and annotates the Deployment.
+*/}}
+{{- define "scion-hub.relayTlsImageCheck" -}}
+{{- /* dict: root (the chart context), via ("wiring": conduit.internalTls is on;
+"extra": a non-loopback config.extra internal_listen with the wiring off). The
+via value picks the off-remedy the operator can act on. */}}
+{{- $root := .root }}
+{{- $off := include "scion-hub.relayOffRemedy" (toString .via) }}
+{{- $min := include "scion-hub.relayTlsMinHub" $root | fromYaml }}
+{{- $tag := trim (toString ($root.Values.image.tag | default $root.Chart.AppVersion)) }}
+{{- /* What to do about an older tag. With image.tag unset, the tag is the
+chart's appVersion, so the operator has to set one. */}}
+{{- $minVersion := trim (toString ($min.version | default "")) }}
+{{- /* $orRelease reads inside a remedy ("nightly-X or later or a release at or
+after Y"); $orReleaseParen inside a parenthesis ("(nightly-X or later, or a
+release at or after Y)"). Both are empty while the version floor is a
+placeholder. */}}
+{{- $orRelease := "" }}
+{{- $orReleaseParen := "" }}
+{{- if $minVersion }}{{- $orRelease = printf " or a release at or after %s" $minVersion }}{{- $orReleaseParen = printf ", or a release at or after %s" $minVersion }}{{- end }}
+{{- $defaultTag := not (trim (toString ($root.Values.image.tag | default ""))) }}
+{{- $remedy := printf "Use nightly-%s or later%s, set image.digest, or %s." $min.nightly $orRelease $off }}
+{{- if $defaultTag }}
+{{- $remedy = printf "image.tag is not set, so the tag is the chart's appVersion (%s), which is older than the floor: set image.tag to nightly-%s or later%s, or set image.digest, or %s." $root.Chart.AppVersion $min.nightly $orRelease $off }}
+{{- end }}
+{{- /*
+Semantic Versioning 2.0.0, with an optional leading v: numeric identifiers
+without leading zeros, no empty identifiers, and optional build metadata (which
+does not affect precedence). A tag that starts like a version but is not one
+is refused with the chart's own message rather than passed to semver.
+*/}}
+{{- /*
+Numbers are bounded at 19 digits, inside uint64: major, minor and patch, and
+numeric pre-release identifiers too. An overflowing number gets the
+malformed-version refusal below rather than a parse error. This is deliberately
+stricter than Semantic Versioning 2.0.0, which sets no size limit (some valid
+20-digit numbers that fit in uint64 are refused too). It fails closed, and no
+real image tag is affected.
+*/}}
+{{- $num := "(0|[1-9][0-9]{0,18})" }}
+{{- $preId := "(0|[1-9][0-9]{0,18}|[0-9]*[A-Za-z-][0-9A-Za-z-]*)" }}
+{{- $semverRe := printf "^v?%s\\.%s\\.%s(-%s(\\.%s)*)?(\\+[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$" $num $num $num $preId $preId }}
+{{- if $root.Values.image.digest }}
+{{- print "unverified" }}
+{{- else if and (regexMatch $semverRe $tag) (not $minVersion) }}
+{{- /* No versioned release carries the change yet: every version tag fails, and the message names the nightly, never a version floor. */}}
+{{- if $defaultTag }}
+{{- fail (printf "image.tag is not set, so the tag is the chart's appVersion (%s), a version tag, and no versioned hub release serves the relay hop with the internal_tls_* settings yet, so a version tag cannot pass: set image.tag to nightly-%s or later, or set image.digest, or %s." $root.Chart.AppVersion $min.nightly $off) }}
+{{- end }}
+{{- fail (printf "the hub image tag %s is a version tag, and no versioned hub release serves the relay hop with the internal_tls_* settings yet, so a version tag cannot pass: use nightly-%s or later, set image.digest, or %s." (include "scion-hub.diagValue" $tag) $min.nightly $off) }}
+{{- else if regexMatch $semverRe $tag }}
+{{- if lt ((semver $tag).Compare (semver $minVersion)) 0 }}
+{{- fail (printf "the hub image tag %s is older than %s, the first hub release that serves the relay hop with the internal_tls_* settings. An older hub ignores them and would serve the hop in plaintext. %s" (include "scion-hub.diagValue" $tag) $minVersion $remedy) }}
+{{- end }}
+{{- print "ok" }}
+{{- else if regexMatch "^v?[0-9]+\\.[0-9]+\\.[0-9]+" $tag }}
+{{- if $minVersion }}
+{{- fail (printf "the hub image tag %s starts like a version but is not a valid semantic version, so the chart cannot compare it with the minimum hub release that serves the relay hop with the internal_tls_* settings (nightly-%s or later%s). Use a valid version tag or an image digest, or %s." (include "scion-hub.diagValue" $tag) $min.nightly $orReleaseParen $off) }}
+{{- end }}
+{{- fail (printf "the hub image tag %s starts like a version but is not a valid semantic version, and no versioned hub release serves the relay hop with the internal_tls_* settings yet. Use nightly-%s or later or an image digest, or %s." (include "scion-hub.diagValue" $tag) $min.nightly $off) }}
+{{- else if regexMatch "^nightly-[0-9]{8}$" $tag }}
+{{- if lt (trimPrefix "nightly-" $tag) (toString $min.nightly) }}
+{{- fail (printf "the hub image tag %s is older than nightly-%s, the first nightly that serves the relay hop with the internal_tls_* settings. An older hub ignores them and would serve the hop in plaintext. %s" (include "scion-hub.diagValue" $tag) $min.nightly $remedy) }}
+{{- end }}
+{{- print "ok" }}
+{{- else }}
+{{- print "unverified" }}
+{{- end }}
+{{- end }}
+
+{{/*
+Whether the hub image check applies, and its result: "ok", "unverified" or ""
+(it does not apply). It applies when the chart's relay wiring is on, and also
+when config.extra sets a non-loopback server.hub.conduit.internal_listen with
+the wiring off: in both cases an older hub would ignore the internal_tls_*
+settings and serve that listener in plaintext. A loopback listener needs no
+TLS, so it needs no check. An older image fails the render (in
+scion-hub.relayTlsImageCheck).
+*/}}
+{{- define "scion-hub.relayImageCheck" -}}
+{{- $relayTls := include "scion-hub.relayTls" . | fromYaml }}
+{{- if $relayTls }}
+{{- print $relayTls.imageCheck }}
+{{- else }}
+{{- $listen := toString (dig "server" "hub" "conduit" "internal_listen" "" (.Values.config.extra | default (dict))) }}
+{{- if and $listen (not (include "scion-hub.isLoopbackListen" $listen)) }}
+{{- include "scion-hub.relayTlsImageCheck" (dict "root" . "via" "extra") }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+"true" when a listen value is a loopback host:port as the hub reads it (see
+scion-hub.assertRelayListenerTls), else empty.
+*/}}
+{{- define "scion-hub.isLoopbackListen" -}}
+{{- $hostPort := "^(|\\[[^\\[\\]]+\\]|[^:\\[\\]]+):([1-9][0-9]{0,4})$" }}
+{{- if regexMatch $hostPort . }}
+{{- $host := regexReplaceAll $hostPort . "${1}" }}
+{{- $oct := "(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])" }}
+{{- if or (eq $host "[::1]") (regexMatch (printf "^127\\.%s\\.%s\\.%s$" $oct $oct $oct) $host) }}true{{- end }}
 {{- end }}
 {{- end }}

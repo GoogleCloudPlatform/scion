@@ -2089,6 +2089,20 @@ declare -A PROBE_MUTATION=(
   [auth.oauth.web.github.clientId]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret'
   [auth.oauth.web.github.clientSecret]='--set-string|auth.oauth.web.github.clientId=probe-gh-id|--set-string|auth.oauth.web.github.clientSecret=probe-gh-secret2'
   [hub.adminEmails]='--set|hub.adminEmails={probe-admin@example.com}'
+  # Above one replica conduit.internalTls "auto" needs a relay Secret; the
+  # companion turns the relay off so this leaf moves only the Deployment.
+  [replicaCount]='--set|conduit.internalTls.enabled=false|--set|replicaCount=2'
+  # The relay leaves are inert unless the listener is on, which needs its
+  # Secret, so each one carries both and ends in the --set of its own leaf.
+  # They also set an image digest: the relay wiring refuses an image tag older
+  # than the minimum hub release for relay TLS, and the default tag is the
+  # chart's appVersion.
+  [conduit.internalTls.enabled]='--set-string|conduit.internalTls.existingSecret=probe-relay|--set|image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000|--set|conduit.internalTls.enabled=true'
+  [conduit.internalTls.existingSecret]='--set|conduit.internalTls.enabled=true|--set|image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000|--set-string|conduit.internalTls.existingSecret=probe-relay'
+  [conduit.internalTls.port]='--set|conduit.internalTls.enabled=true|--set-string|conduit.internalTls.existingSecret=probe-relay|--set|image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000|--set|conduit.internalTls.port=9555'
+  [conduit.internalTls.caSecret]='--set|conduit.internalTls.enabled=true|--set-string|conduit.internalTls.existingSecret=probe-relay|--set|image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000|--set-string|conduit.internalTls.caSecret=probe-relay-ca'
+  [conduit.internalTls.caKey]='--set|conduit.internalTls.enabled=true|--set-string|conduit.internalTls.existingSecret=probe-relay|--set|image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000|--set-string|conduit.internalTls.caKey=probe-ca.pem'
+  [conduit.internalTls.serverName]='--set|conduit.internalTls.enabled=true|--set-string|conduit.internalTls.existingSecret=probe-relay|--set|image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000|--set-string|conduit.internalTls.serverName=probe-relay.example.internal'
   # hub.hubClass is an enum ("" or test). hub.testIdentities.enabled=true needs
   # hub.hubClass: test to render at all (the render guard), so it carries it.
   [hub.hubClass]='--set-string|hub.hubClass=test'

@@ -445,8 +445,8 @@ config:
   # storage.bucket, agents.imageRegistry, hub.adminEmails, a non-local
   # secrets.backend and the secrets.gcpsm values, the database name, user and
   # password, the OAuth web client credentials, auth.proxy.iap.audience, the
-  # three auth.transport values, runtime.gke set to anything but true and the
-  # workspaceStorage.nfs values fail the render when set together with this
+  # three auth.transport values, runtime.gke set to anything but true, the
+  # workspaceStorage.nfs values and the conduit.internalTls values fail the render when set together with this
   # (NOTES.txt prints the exact list). Your file carries runtimes.kubernetes.gke
   # and any server.project_storage itself, and the chart mounts no share.
   # auth.proxy.provider is not on either list: its only legal value is its
@@ -761,6 +761,55 @@ workspaceStorage:
     # segments. This default is repeated in scion-hub.assertConfigSource
     # (templates/_helpers.tpl); change both together.
     subpathRoot: projects
+
+# The conduit relay's internal hop between hub nodes, over native TLS.
+#
+# enabled is true, false or "auto". "auto" (the default) turns it on when
+# replicaCount is above one, and then existingSecret is required; at one
+# replica, or under config.existingSecret, it renders no relay listener. When on,
+# the chart renders server.hub.conduit.internal_listen on 0.0.0.0:<port> with
+# the internal_tls_* files, mounts the certificate Secret and the CA, declares
+# the port on the pod (never on the Service), and sets POD_IP, from which the
+# hub advertises https://POD_IP:<port> to the other nodes. The relay itself runs
+# only with the hub.conduit experiment on.
+#
+# A non-loopback relay listener without TLS is refused at render, whether it
+# comes from here or from config.extra.
+#
+# The relay wiring, and a non-loopback relay listener set through config.extra,
+# are also refused for a hub image older than the first release that honours
+# the internal_tls_* settings, since an older hub would serve the hop in
+# plaintext. The image tag is image.tag, else the chart's appVersion. A
+# digest, or a tag that is not a version (for example latest), cannot be
+# checked: it is allowed, NOTES.txt warns, and the Deployment is annotated
+# scion.io/relay-tls-image-check: unverified. Refused together with
+# config.existingSecret, where your own settings file carries these keys.
+conduit:
+  internalTls:
+    enabled: auto
+
+    # Port of the relay listener inside the pod. Reachable from the other hub
+    # pods only; keep it out of any Service, Ingress or Gateway.
+    port: 9443
+
+    # REQUIRED when enabled. A kubernetes.io/tls Secret in the release
+    # namespace with tls.crt (leaf and chain) and tls.key, for example issued
+    # by cert-manager. Its certificate must carry serverName as a SAN.
+    existingSecret: ""
+
+    # The Secret holding the CA bundle every node verifies its peers against.
+    # Empty means existingSecret. A set CA replaces the system roots, and a
+    # private CA requires it. cert-manager fills ca.crt only for some issuers
+    # (CA, Vault); for others, point this at a Secret holding the CA.
+    caSecret: ""
+
+    # The key of the CA bundle in caSecret.
+    caKey: ca.crt
+
+    # The name verified in every peer certificate, instead of the pod IP
+    # dialled, so one certificate serves every replica. Empty means
+    # <fullname>-relay.<namespace>.svc.
+    serverName: ""
 
 # Where the hub keeps the secrets users and agents store through it, rendered
 # as server.secrets in settings.yaml (V1SecretsConfig,
