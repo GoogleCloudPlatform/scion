@@ -38,11 +38,29 @@ function recordFocus(e: Element): void {
   focused = e;
 }
 
+/**
+ * Like sl-input: focus() goes to an inner input, which follows the
+ * disabled attribute only in the element's own (later) update and cannot
+ * take focus while disabled.
+ */
 class StandInInput extends HTMLElement {
+  static observedAttributes = ['disabled'];
   value = '';
   updateComplete: Promise<boolean> = Promise.resolve(true);
+  private innerDisabled = false;
+
+  attributeChangedCallback(): void {
+    const disabled = this.hasAttribute('disabled');
+    this.updateComplete = new Promise((resolve) =>
+      setTimeout(() => {
+        this.innerDisabled = disabled;
+        resolve(true);
+      }, 0)
+    );
+  }
+
   override focus(): void {
-    recordFocus(this);
+    if (!this.innerDisabled) recordFocus(this);
   }
 }
 
@@ -186,7 +204,9 @@ async function mount(runs: Array<{ status: number; body: Json }>): Promise<Page>
       if ((init?.method ?? 'GET').toUpperCase() === 'POST' && path.endsWith('/run')) {
         runBodies.push(JSON.parse(init?.body as string));
         const r = runs[runBodies.length - 1] ?? runs[runs.length - 1];
-        return json(r.body, r.status);
+        // Slower than a microtask, like the network: the input is disabled
+        // while the request is in flight.
+        return new Promise((resolve) => setTimeout(resolve, 20)).then(() => json(r.body, r.status));
       }
       return json({});
     })

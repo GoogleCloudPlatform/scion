@@ -2094,6 +2094,10 @@ describe('Downgrade confirmation', () => {
         confirm_downgrade: 'nightly-20261020',
       },
     });
+    // The restart wait expects the confirmed tag, not "any version".
+    const tracked = (el as unknown as { trackedUpdate: { expectVersion: string | null } | null })
+      .trackedUpdate;
+    expect(tracked?.expectVersion).toBe('nightly-20261020');
   });
 
   it('asks again when the hub resolves the target to another tag on the re-post', async () => {

@@ -1395,11 +1395,11 @@ export class ScionPageAdminMaintenance extends LitElement {
 
   /**
    * Moves focus into the typed confirmation. An sl-dialog created already
-   * open skips Shoelace's open handling (its initial focus, [autofocus] and
-   * focus trap run only when open changes after the first update), so the
-   * dialog is rendered closed and opened here once it has updated. On a
-   * re-prompt for another tag the dialog is already open; the input is
-   * focused directly once it is enabled again.
+   * open activates its modal but never sets the initial focus: Shoelace
+   * focuses the [autofocus] element (or the panel) only when open changes
+   * after the first update. So the dialog is rendered closed and opened
+   * here once it has updated. On a re-prompt for another tag the dialog is
+   * already open; the input is focused directly once it is enabled again.
    */
   private async focusDowngradeConfirm(): Promise<void> {
     const dialog = this.renderRoot.querySelector<
@@ -1495,7 +1495,9 @@ export class ScionPageAdminMaintenance extends LitElement {
         this.trackedUpdate = {
           runId: started.runId,
           target,
-          expectVersion: target.startsWith('latest:') ? null : target,
+          // A confirmed downgrade names the tag the hub resolved, also for
+          // latest:<channel>.
+          expectVersion: confirmDowngrade ?? (target.startsWith('latest:') ? null : target),
           lastStatus: 'running',
           fromVersion,
         };
