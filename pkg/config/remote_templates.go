@@ -1015,6 +1015,7 @@ func CleanRemoteTemplateCache() error {
 // - Hub bucket/prefix configuration
 // - Fallback chain: local project -> hub project -> hub global -> error
 
+// rcloneURIPattern matches rclone remote URI syntax (e.g., :backend:path).
 var rcloneURIPattern = regexp.MustCompile(`^:\w+:.+`)
 
 // ValidateRemoteURI performs basic validation on a remote template URI.

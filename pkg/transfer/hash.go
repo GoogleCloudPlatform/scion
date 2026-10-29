@@ -28,22 +28,23 @@ import (
 // HashPrefix is the prefix for SHA-256 hashes.
 const HashPrefix = "sha256:"
 
-// IsContentHash reports whether s is a content hash in the "sha256:<hex64>"
-// form produced by HashBytes, ComputeContentHashV1 and ComputeContentHashV2.
-// Content-addressed caches (for example the broker's template cache) use this value as a
-// directory name, so callers use it to tell such a directory name apart from
-// a human-chosen name.
-func IsContentHash(s string) bool {
-	if len(s) != len(HashPrefix)+64 || !strings.HasPrefix(s, HashPrefix) {
-		return false
-	}
-	for i := len(HashPrefix); i < len(s); i++ {
+func isLowerHex(s string) bool {
+	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
 			return false
 		}
 	}
 	return true
+}
+
+// IsContentHash reports whether s is a content hash in the "sha256:<hex64>"
+// form produced by HashBytes, ComputeContentHashV1 and ComputeContentHashV2.
+// Content-addressed caches (for example the broker's template cache) use this value as a
+// directory name, so callers use it to tell such a directory name apart from
+// a human-chosen name.
+func IsContentHash(s string) bool {
+	return len(s) == len(HashPrefix)+64 && strings.HasPrefix(s, HashPrefix) && isLowerHex(s[len(HashPrefix):])
 }
 
 // IsGitBlobHash reports whether s is formatted as a git blob object ID
@@ -53,16 +54,7 @@ func IsContentHash(s string) bool {
 // resolution: "sha256:<hex64>" digests produced by this package, and bare git
 // blob object IDs supplied verbatim by GitHub's git trees API.
 func IsGitBlobHash(s string) bool {
-	if len(s) != 40 {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
-			return false
-		}
-	}
-	return true
+	return len(s) == 40 && isLowerHex(s)
 }
 
 // GitBlobHashBytes computes the git blob object ID of data, i.e.
@@ -126,6 +118,8 @@ func HashFile(path string) (string, error) {
 	return formatDigest(hasher.Sum(digest[:0])), nil
 }
 
+// formatDigest formats a 32-byte SHA-256 digest into the "sha256:<hex64>" string format.
+// Precondition: len(digest) == sha256.Size (32 bytes).
 func formatDigest(digest []byte) string {
 	var buf [len(HashPrefix) + 64]byte
 	copy(buf[:], HashPrefix)
