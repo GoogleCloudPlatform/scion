@@ -283,6 +283,17 @@ func TestProvisionCredentials_FetchFailures(t *testing.T) {
 		warn := findProvisionCredsRecord(buf.records(t), "WARN", "failed to fetch project secrets for ProvisionCredentials")
 		require.NotNil(t, warn, "log: %s", buf.String())
 	})
+	t.Run("whole_fetch_error_request_ended", func(t *testing.T) {
+		m, _, buf := newProvisionCredsFixture(t, "pc-fetch-ended", ldOptions{})
+		seed(t, m)
+		ctx := &provisionEndableCtx{Context: context.Background(), err: context.Canceled}
+		m.d.SetSecretBackend(&provisionEndThenFailBackend{SecretBackend: m.backend, end: ctx.end})
+
+		assert.Nil(t, m.d.resolveProvisionCredentials(ctx, m.agent, "DispatchAgentStart"))
+		assert.Nil(t, findProvisionCredsRecord(buf.records(t), "WARN", "failed to fetch project secrets for ProvisionCredentials"),
+			"no Warn once the request has ended; log: %s", buf.String())
+		assert.NotContains(t, buf.String(), "value-that-must-not-be-logged", "secret values must never be logged")
+	})
 	t.Run("missing_entry_live_request", func(t *testing.T) {
 		m, _, buf := newProvisionCredsFixture(t, "pc-missing", ldOptions{})
 		missing, _ := seed(t, m)
@@ -416,6 +427,18 @@ func (b *provisionEndingBackend) FetchValues(ctx context.Context, metas []secret
 		delete(out, b.dropID)
 	}
 	return out, nil
+}
+
+// provisionEndThenFailBackend ends the request (end) inside FetchValues and
+// then fails the whole call, as a backend whose request was cancelled does.
+type provisionEndThenFailBackend struct {
+	secret.SecretBackend
+	end func()
+}
+
+func (b *provisionEndThenFailBackend) FetchValues(context.Context, []secret.SecretMeta) (map[string]secret.FetchResult, error) {
+	b.end()
+	return nil, context.Canceled
 }
 
 // provisionEndableCtx is a context whose Err turns to err once end is

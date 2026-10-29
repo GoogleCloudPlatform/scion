@@ -218,6 +218,43 @@ func TestResolveProvisionCredentials_ListFailureWarns(t *testing.T) {
 	assert.Equal(t, "project-1", rec["project_id"])
 }
 
+// TestResolveProvisionCredentials_EndedRequestNoWarn: once the request has
+// ended (ctx cancelled), a List failure or an authorization failure still
+// sends nothing, but logs no Warn: the failure is the caller's cancel, not a
+// backend or authorization fault. The live-request Warns are pinned by
+// TestResolveProvisionCredentials_ListFailureWarns and
+// TestProvisionCredentials_NoAuthzServiceSendsNothing.
+func TestResolveProvisionCredentials_EndedRequestNoWarn(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	agent := &store.Agent{ID: "agent-1", ProjectID: "project-1"}
+
+	t.Run("list", func(t *testing.T) {
+		backend := &provisionCredsBackend{t: t, listErr: context.Canceled}
+		d, buf := newProvisionCredsDispatcher(backend)
+		d.skillRefLister = provisionSkillRefs("gh://acme/tools/review")
+
+		assert.Nil(t, d.resolveProvisionCredentials(ctx, agent, "buildCreateRequest"))
+		assert.Equal(t, 1, backend.lists)
+		assert.Zero(t, backend.fetches)
+		assert.Nil(t, findProvisionCredsRecord(buf.records(t), "WARN", "failed to list project secrets for ProvisionCredentials"),
+			"no Warn once the request has ended; log: %s", buf.String())
+	})
+	t.Run("authorize", func(t *testing.T) {
+		backend := &provisionCredsBackend{t: t, metas: []secret.SecretMeta{
+			{ID: "s1", Name: "GH_ACME", SecretType: store.SecretTypeEnvironment, Scope: store.ScopeProject, ScopeID: "project-1"},
+		}}
+		d, buf := newProvisionCredsDispatcher(backend)
+		d.skillRefLister = provisionSkillRefs("gh://acme/tools/review")
+
+		assert.Nil(t, d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"))
+		assert.Equal(t, 1, backend.lists)
+		assert.Zero(t, backend.fetches, "nothing is fetched without an authorization")
+		assert.Nil(t, findProvisionCredsRecord(buf.records(t), "WARN", "ProvisionCredentials not authorized; none sent"),
+			"no Warn once the request has ended; log: %s", buf.String())
+	})
+}
+
 // TestProvisionCredentials_NoAuthzServiceSendsNothing: a matching project
 // secret is not fetched or sent when the delivery credential cannot be
 // minted (no authorization service); the failure is logged at Warn.

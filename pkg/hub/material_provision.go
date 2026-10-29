@@ -132,8 +132,10 @@ func githubTokenShaped(v string) bool {
 // re-provisioned through any of them gets the same credentials. Failures
 // do not fail the dispatch: they are logged at Warn and the affected
 // credentials are left out, so the skill resolves with the default
-// credential or none. callerName prefixes every log message this function
-// writes, at any level; no value is ever logged.
+// credential or none; once ctx has ended those Warns are not written, since
+// the failure is then the caller's cancel or deadline. callerName prefixes
+// every log message this function writes, at any level; no value is ever
+// logged.
 func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, agent *store.Agent, callerName string) map[string]string {
 	if agent == nil || agent.ProjectID == "" || d.secretBackend == nil {
 		return nil
@@ -160,8 +162,12 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 	if listErr != nil {
 		// Logged regardless of debug: without these credentials a private
 		// gh:// skill silently resolves with the default credential (or none).
-		d.log.Warn(callerName+": failed to list project secrets for ProvisionCredentials",
-			"agent_id", agent.ID, "project_id", agent.ProjectID, "error", listErr)
+		// Not logged once the request has ended: that failure is the caller's
+		// cancel or deadline, not a backend fault.
+		if ctx.Err() == nil {
+			d.log.Warn(callerName+": failed to list project secrets for ProvisionCredentials",
+				"agent_id", agent.ID, "project_id", agent.ProjectID, "error", listErr)
+		}
 		return nil
 	}
 
@@ -174,8 +180,10 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 		}
 		allowed, err := sel.authorize(ctx, MaterialKindSecret, materialRecordSecret, m.ID, m.Name, store.ScopeProject, agent.ProjectID)
 		if err != nil {
-			d.log.Warn(callerName+": ProvisionCredentials not authorized; none sent",
-				"agent_id", agent.ID, "project_id", agent.ProjectID, "error", err)
+			if ctx.Err() == nil {
+				d.log.Warn(callerName+": ProvisionCredentials not authorized; none sent",
+					"agent_id", agent.ID, "project_id", agent.ProjectID, "error", err)
+			}
 			return nil
 		}
 		if allowed {
@@ -199,8 +207,10 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 
 	values, fetchErr := d.secretBackend.FetchValues(ctx, kept)
 	if fetchErr != nil {
-		d.log.Warn(callerName+": failed to fetch project secrets for ProvisionCredentials",
-			"agent_id", agent.ID, "project_id", agent.ProjectID, "error", fetchErr)
+		if ctx.Err() == nil {
+			d.log.Warn(callerName+": failed to fetch project secrets for ProvisionCredentials",
+				"agent_id", agent.ID, "project_id", agent.ProjectID, "error", fetchErr)
+		}
 		return nil
 	}
 
