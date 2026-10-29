@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,6 +68,7 @@ func TestDeleteProject_SharedStorageNotVisible_ReportsKept(t *testing.T) {
 	e := newNFSDeleteTestEnv(t, "kept-unmounted")
 	absent := filepath.Join(e.home, "absent")
 	e.srv.config.ProjectStorageConfig.NFS.MountRoot = absent
+	logs := captureProjectsLog(t, e.srv)
 
 	rec := doRequest(t, e.srv, http.MethodDelete, "/api/v1/projects/"+e.project.ID, nil)
 
@@ -78,6 +80,21 @@ func TestDeleteProject_SharedStorageNotVisible_ReportsKept(t *testing.T) {
 	e.srv.storageCleanupWG.Wait()
 	_, err := e.s.GetProject(context.Background(), e.project.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound, "the delete itself commits")
+
+	// The kept tree is one ERROR audit line on the storage-deletion channel,
+	// naming the project ID and no path.
+	var keptLines []string
+	for _, l := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(l, `msg="project storage deletion"`) && strings.Contains(l, "outcome=kept") && strings.Contains(l, "Hub cannot see") {
+			keptLines = append(keptLines, l)
+		}
+	}
+	require.Len(t, keptLines, 1, "logs:\n%s", logs.String())
+	assert.Contains(t, keptLines[0], "level=ERROR")
+	assert.Contains(t, keptLines[0], "project_id="+e.project.ID)
+	assert.Contains(t, keptLines[0], "deleter=hub")
+	assert.NotContains(t, keptLines[0], "path=")
+	assert.NotContains(t, keptLines[0], absent)
 }
 
 // With the shared project storage visible, the delete answers 204 with no

@@ -3878,7 +3878,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 	// storage: when it cannot see that storage the tree is kept, and the
 	// delete says so (200 with fixed, path-free items) instead of an
 	// unqualified 204.
-	if kept := s.projectDeleteStorageKept(); len(kept) > 0 {
+	if kept := s.projectDeleteStorageKept(ctx, id); len(kept) > 0 {
 		writeJSON(w, http.StatusOK, projectDeleteResult{StorageKept: kept})
 		return
 	}

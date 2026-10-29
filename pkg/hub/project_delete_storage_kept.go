@@ -15,7 +15,11 @@
 package hub
 
 import (
+	"context"
+	"log/slog"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 )
 
 // The Hub is the only remover of a deleted project's tree on shared project
@@ -28,6 +32,11 @@ const (
 	projectDeleteSharedStorageKeptCode    = "shared-project-storage"
 	projectDeleteSharedStorageKeptMessage = "The Hub cannot see the shared project storage, so the deleted project's shared tree was kept. Hub health reports " + projectStorageTreeCheck + " as degraded."
 )
+
+// projectDeleteSharedStorageKeptReason is the fixed reason of the ERROR audit
+// line the delete writes for a kept shared tree (no path, export or share;
+// the line names only the project ID).
+const projectDeleteSharedStorageKeptReason = "the Hub cannot see the shared project storage; the project's shared tree is kept for manual removal"
 
 // projectDeleteStorageCheckTimeout bounds the visibility check on the delete
 // request path: a stale or hung mount must not block the handler, so a
@@ -51,15 +60,22 @@ type storageKeptItem struct {
 // remove the deleted project's tree. It runs the same probe as the health
 // check (projectStorageTreeProbe), bounded by
 // projectDeleteStorageCheckTimeout; a timeout or an unusable layout counts as
-// not visible. On a backend that is not shared it reports nothing.
-func (s *Server) projectDeleteStorageKept() []storageKeptItem {
+// not visible. On a backend that is not shared it reports nothing. Each kept
+// tree is also one ERROR audit line (projectfs.AuditMessage) naming the
+// project ID.
+func (s *Server) projectDeleteStorageKept(ctx context.Context, projectID string) (kept []storageKeptItem) {
+	defer func() {
+		if len(kept) > 0 {
+			s.auditSharedStorageKept(ctx, projectID)
+		}
+	}()
 	if !s.workspaceBackendShared() {
 		return nil
 	}
-	kept := []storageKeptItem{{Code: projectDeleteSharedStorageKeptCode, Message: projectDeleteSharedStorageKeptMessage}}
+	keptItems := []storageKeptItem{{Code: projectDeleteSharedStorageKeptCode, Message: projectDeleteSharedStorageKeptMessage}}
 	layout, err := s.projectStorageLayout()
 	if err != nil {
-		return kept
+		return keptItems
 	}
 	if !layout.Backend.Shared() && !layout.SharedDirLayout().Backend.Shared() {
 		return nil
@@ -73,8 +89,21 @@ func (s *Server) projectDeleteStorageKept() []storageKeptItem {
 		if err == nil {
 			return nil
 		}
-		return kept
+		return keptItems
 	case <-timer.C:
-		return kept
+		return keptItems
 	}
+}
+
+// auditSharedStorageKept writes the ERROR audit line of a kept shared tree on
+// the storage-deletion audit channel: deleter, tree, project ID, outcome and
+// the fixed reason, no path.
+func (s *Server) auditSharedStorageKept(ctx context.Context, projectID string) {
+	s.projectsLogger().Log(ctx, slog.LevelError, projectfs.AuditMessage,
+		"audit", "storage_delete",
+		"deleter", string(projectfs.DeleterHub),
+		"tree", string(projectfs.TreeProjectRoot),
+		"project_id", projectID,
+		"outcome", string(projectfs.OutcomeKept),
+		"reason", projectDeleteSharedStorageKeptReason)
 }
