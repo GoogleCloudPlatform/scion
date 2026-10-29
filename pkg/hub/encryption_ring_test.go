@@ -26,7 +26,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -550,40 +549,6 @@ func TestServerValueCipher_SharedObject(t *testing.T) {
 	legacy, err := serverValueCipher(ServerConfig{SharedSigningSecret: "FAKE-legacy-secret-A"})
 	require.NoError(t, err)
 	assert.True(t, legacy.Enabled() && !legacy.Managed())
-}
-
-// OIDC acceptance: the RSA key and the keyset round-trip under an
-// independent v2 key across a restart, with identical KIDs and JWKS.
-func TestOIDCKeyManager_IndependentV2RestartKeepsKIDAndJWKS(t *testing.T) {
-	st := newOIDCHubTestStore(t)
-	ctx := context.Background()
-	c := v2Cipher(t, "k2", "k2")
-	newMgr := func() *OIDCKeyManager {
-		m, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{Store: st, HubID: encTestHubID,
-			IssuerURL: "https://example.com", ValueCipher: c})
-		require.NoError(t, err)
-		return m
-	}
-	m1 := newMgr()
-	require.NoError(t, m1.RotateKey(ctx))
-	kids := func(m *OIDCKeyManager) []string {
-		var out []string
-		for _, k := range m.JWKS().Keys {
-			out = append(out, k.KeyID)
-		}
-		sort.Strings(out)
-		return out
-	}
-	wantKIDs, wantActive := kids(m1), m1.activeKey.KeyID
-	require.Len(t, wantKIDs, 2)
-	for _, key := range []string{SecretKeyOIDCSigningKey, SecretKeyOIDCKeyset} {
-		v, err := st.GetSecretValue(ctx, key, store.ScopeHub, encTestHubID)
-		require.NoError(t, err)
-		assert.True(t, strings.HasPrefix(v, "enc:v2:k2:"), "%s is not enc:v2:k2", key)
-	}
-	m2 := newMgr()
-	assert.Equal(t, wantKIDs, kids(m2))
-	assert.Equal(t, wantActive, m2.activeKey.KeyID)
 }
 
 // D1: an unreadable stored keyset is not replaced at startup (it used to

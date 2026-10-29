@@ -19,6 +19,8 @@ package hub
 import (
 	"context"
 	"log/slog"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -30,7 +32,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// oidcCASTestHubID is the hub ID of the CAS tests (encTestHubID's value).
+// The key manager's tests under the shared value cipher: the CAS create and
+// the restart round-trip (moved from encryption_ring_test.go with copies of
+// their helpers, since they read the manager's unexported state).
+
+// oidcCASTestHubID is the hub ID of these tests (encTestHubID's value).
 const oidcCASTestHubID = "enc-test-hub"
 
 // oidcCASV2Cipher is a managed cipher writing enc:v2: under active, holding
@@ -90,4 +96,38 @@ func TestOIDCCASLoserUndecryptableFails(t *testing.T) {
 	after, err := st.GetSecret(ctx, SecretKeyOIDCSigningKey, store.ScopeHub, oidcCASTestHubID)
 	require.NoError(t, err)
 	assert.Equal(t, before.EncryptedValue, after.EncryptedValue)
+}
+
+// OIDC acceptance: the RSA key and the keyset round-trip under an
+// independent v2 key across a restart, with identical KIDs and JWKS.
+func TestOIDCKeyManager_IndependentV2RestartKeepsKIDAndJWKS(t *testing.T) {
+	st := createOIDCTestStore(t)
+	ctx := context.Background()
+	c := oidcCASV2Cipher(t, "k2", "k2")
+	newMgr := func() *OIDCKeyManager {
+		m, err := NewOIDCKeyManager(ctx, OIDCKeyManagerConfig{Store: st, HubID: oidcCASTestHubID,
+			IssuerURL: "https://example.com", ValueCipher: c})
+		require.NoError(t, err)
+		return m
+	}
+	m1 := newMgr()
+	require.NoError(t, m1.RotateKey(ctx))
+	kids := func(m *OIDCKeyManager) []string {
+		var out []string
+		for _, k := range m.JWKS().Keys {
+			out = append(out, k.KeyID)
+		}
+		sort.Strings(out)
+		return out
+	}
+	wantKIDs, wantActive := kids(m1), m1.activeKey.KeyID
+	require.Len(t, wantKIDs, 2)
+	for _, key := range []string{SecretKeyOIDCSigningKey, SecretKeyOIDCKeyset} {
+		v, err := st.GetSecretValue(ctx, key, store.ScopeHub, oidcCASTestHubID)
+		require.NoError(t, err)
+		assert.True(t, strings.HasPrefix(v, "enc:v2:k2:"), "%s is not enc:v2:k2", key)
+	}
+	m2 := newMgr()
+	assert.Equal(t, wantKIDs, kids(m2))
+	assert.Equal(t, wantActive, m2.activeKey.KeyID)
 }
