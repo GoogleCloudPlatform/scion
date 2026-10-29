@@ -17,6 +17,7 @@ package util
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"os"
@@ -63,11 +64,28 @@ const (
 	RepoPolicyLinked
 )
 
+// Audience is who reads the errors a host-side git command returns.
+type Audience int
+
+const (
+	// AudienceLocal is the user at the local CLI. A refusal names the
+	// repository directory.
+	AudienceLocal Audience = iota
+	// AudienceRemote is anyone else: an agent, the Hub, a Hub log. A
+	// RepoConfigRefusedError, and the errors HostGitCommand returns for
+	// repository discovery and its bound, carry no host path. Other errors,
+	// such as a failure to locate, read or parse the repository config, can
+	// still name one.
+	AudienceRemote
+)
+
 // RepoConfigRefusedError reports that a repository config key (or an
 // include directive) is not allowed for a host-side git command or an agent
 // start.
 //
-// Error never includes Value: a refused value can carry a secret.
+// Error never includes Value: a refused value can carry a secret. Every fmt
+// verb and every slog handler prints Error() (Format, LogValue), never the
+// fields.
 type RepoConfigRefusedError struct {
 	Dir    string
 	Key    string
@@ -79,14 +97,24 @@ type RepoConfigRefusedError struct {
 	// Layer names, by a fixed or relative label, the config file, submodule
 	// or combined layers the refusal concerns (never a raw path).
 	Layer string
+	// Audience selects the host-side wording. For AudienceRemote the
+	// constructor leaves Dir empty and Error() names no directory. A seeded
+	// refusal prints no Dir either way.
+	Audience Audience
 }
 
 // newRepoConfigRefusedError is the only constructor of RepoConfigRefusedError.
 // key is the raw dotted key (section.subsection.name, as git prints it); the
 // error carries refusalKeyName(key), so no refusal prints userinfo carried in
 // a subsection.
-func newRepoConfigRefusedError(dir, layer, key, value, reason string, seeded bool) *RepoConfigRefusedError {
-	return &RepoConfigRefusedError{Dir: dir, Key: refusalKeyName(key), Value: value, Reason: reason, Seeded: seeded, Layer: layer}
+//
+// For AudienceRemote it drops dir, so a remote refusal carries no host path
+// in any field.
+func newRepoConfigRefusedError(dir, layer, key, value, reason string, seeded bool, audience Audience) *RepoConfigRefusedError {
+	if audience == AudienceRemote {
+		dir = ""
+	}
+	return &RepoConfigRefusedError{Dir: dir, Key: refusalKeyName(key), Value: value, Reason: reason, Seeded: seeded, Layer: layer, Audience: audience}
 }
 
 // refusalKeyName returns the name a refusal prints for a raw dotted key. A key
@@ -128,12 +156,30 @@ func (e *RepoConfigRefusedError) Error() string {
 		}
 		msg = fmt.Sprintf("agent git config refused: repository config sets %s, which is %s; %s", e.Key, reason, remedy)
 	} else {
-		msg = fmt.Sprintf("git in %s refused: repository config sets %s, which is %s; remove it from the repository's .git/config (or config.worktree)", e.Dir, e.Key, reason)
+		where := e.Dir
+		if e.Audience == AudienceRemote {
+			where = "the project repository"
+		}
+		msg = fmt.Sprintf("git in %s refused: repository config sets %s, which is %s; remove it from the repository's .git/config (or config.worktree)", where, e.Key, reason)
 	}
 	if e.Layer != "" {
 		msg += " (in " + e.Layer + ")"
 	}
 	return msg
+}
+
+// Format prints Error() for every verb and flag (%v, %+v, %#v, %s, %q, ...),
+// so no format string can print the fields, Dir and Value among them. It has
+// a value receiver so a dereferenced copy formats the same way; fmt prints a
+// nil pointer as "<nil>".
+func (e RepoConfigRefusedError) Format(f fmt.State, _ rune) {
+	_, _ = io.WriteString(f, e.Error())
+}
+
+// LogValue makes every slog handler log Error(), never the fields. It has a
+// value receiver for the same reason as Format.
+func (e RepoConfigRefusedError) LogValue() slog.Value {
+	return slog.StringValue(e.Error())
 }
 
 // standardLFSFilter is the exact filter.lfs.* command set `git lfs install`
@@ -194,6 +240,18 @@ type repoConfigAllowOptions struct {
 	// The agent's git reads that copy without the HostGitArgs pins, so the
 	// keys in seedUnpinnedRefuse are refused too.
 	seed bool
+	// audience is the host-side refusal's audience. A seed refusal always
+	// uses AudienceRemote.
+	audience Audience
+}
+
+// refusalAudience is the audience of a refusal: AudienceRemote for a seeded
+// one (it reaches the agent), else audience.
+func refusalAudience(seeded bool, audience Audience) Audience {
+	if seeded {
+		return AudienceRemote
+	}
+	return audience
 }
 
 // allowVar reports whether v is allowed under policy, with a reason when it
@@ -556,7 +614,7 @@ func set(keys ...string) map[string]bool {
 // if git resolves any entry the parser did not, so a parser divergence fails
 // closed. It fails closed on anything it cannot locate, read or parse.
 func checkRepoConfigPolicy(ctx context.Context, dir string, env []string, policy RepoConfigPolicy, opts repoConfigAllowOptions) error {
-	if err := refuseRootCommonDirRedirect(dir, false); err != nil {
+	if err := refuseRootCommonDirRedirect(dir, false, opts.audience); err != nil {
 		return err
 	}
 	parsed, err := parseRepoConfig(dir, env)
@@ -566,7 +624,7 @@ func checkRepoConfigPolicy(ctx context.Context, dir string, env []string, policy
 	if err := checkRepoConfigVars(dir, "", parsed, policy, opts, nil); err != nil {
 		return err
 	}
-	return crossCheckAgainstGit(ctx, dir, env, parsed, "", false)
+	return crossCheckAgainstGit(ctx, dir, env, parsed, "", false, opts.audience)
 }
 
 // checkRepoConfigVars applies policy to already-parsed config variables and
@@ -587,7 +645,7 @@ func checkRepoConfigPolicy(ctx context.Context, dir string, env []string, policy
 // is not credential.<url> is named exactly as v.Key().
 func checkRepoConfigVars(dir, layer string, vars []gitConfigVar, policy RepoConfigPolicy, opts repoConfigAllowOptions, exempt func(gitConfigVar) bool) error {
 	refused := func(v gitConfigVar, reason string) error {
-		return newRepoConfigRefusedError(dir, layer, v.Key(), v.Value, reason, opts.seed)
+		return newRepoConfigRefusedError(dir, layer, v.Key(), v.Value, reason, opts.seed, refusalAudience(opts.seed, opts.audience))
 	}
 	for _, v := range vars {
 		if v.Section == "include" || v.Section == "includeif" {
@@ -723,9 +781,10 @@ func prepareSeededGitConfig(raw []byte, parse func([]byte) ([]gitConfigVar, erro
 // read-only (shared-plain and any pre-existing state). A linked worktree, whose
 // `.git` is a gitfile pointing at its admin dir, legitimately resolves a
 // commondir and is not the target here, so only a `.git` directory is checked.
-// The seeded form is an agent-start (seed) refusal and leaves Dir empty, so it
-// prints no host path; the host-side form sets Dir to dir.
-func refuseRootCommonDirRedirect(dir string, seeded bool) error {
+// The seeded form is an agent-start (seed) refusal with the remote audience,
+// so the constructor leaves Dir empty and it prints no host path; the
+// host-side form keeps dir for the local audience.
+func refuseRootCommonDirRedirect(dir string, seeded bool, audience Audience) error {
 	gitPath := filepath.Join(dir, ".git")
 	fi, err := os.Lstat(gitPath)
 	if err != nil || !fi.IsDir() {
@@ -734,10 +793,7 @@ func refuseRootCommonDirRedirect(dir string, seeded bool) error {
 	for _, name := range []string{"commondir", "gitdir"} {
 		if _, err := os.Lstat(filepath.Join(gitPath, name)); err == nil {
 			reason := "a root-level " + name + " would redirect the repository's common git directory"
-			if seeded {
-				return newRepoConfigRefusedError("", "", ".git/"+name, "", reason, true)
-			}
-			return newRepoConfigRefusedError(dir, "", ".git/"+name, "", reason, false)
+			return newRepoConfigRefusedError(dir, "", ".git/"+name, "", reason, seeded, refusalAudience(seeded, audience))
 		}
 	}
 	return nil
@@ -858,8 +914,9 @@ func verifyConfigStable(ctx context.Context, dir string, env []string, policy Re
 // (local and worktree scope) and refuses if git resolves any entry that is not
 // in the parsed set, so any divergence between the as-data parser and git
 // fails closed. git runs with the same host-side pins and scrubbed
-// environment.
-func crossCheckAgainstGit(ctx context.Context, dir string, env []string, parsed []gitConfigVar, layer string, seeded bool) error {
+// environment. dir is where git runs; a seeded refusal has the remote
+// audience, so the constructor leaves its Dir empty.
+func crossCheckAgainstGit(ctx context.Context, dir string, env []string, parsed []gitConfigVar, layer string, seeded bool, audience Audience) error {
 	args := append(HostGitArgs(), "config", "--show-scope", "-z", "--list")
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
@@ -893,7 +950,7 @@ func crossCheckAgainstGit(ctx context.Context, dir string, env []string, parsed 
 		}
 		k := e.key + "\x00" + value
 		if parsedSet[k] <= 0 {
-			return newRepoConfigRefusedError(dir, layer, e.key, "", "read differently by the config parser and by git; refusing to be safe", seeded)
+			return newRepoConfigRefusedError(dir, layer, e.key, "", "read differently by the config parser and by git; refusing to be safe", seeded, refusalAudience(seeded, audience))
 		}
 		parsedSet[k]--
 	}

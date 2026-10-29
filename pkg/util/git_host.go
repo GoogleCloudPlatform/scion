@@ -19,14 +19,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Host-side git invocations.
@@ -160,7 +163,24 @@ func HostGitEnv(env []string) []string {
 	return out
 }
 
-// HostGitOptions configures HostGitCommand.
+// HostGitCeiling selects whether git may discover a repository above the
+// command's directory. HostGitCommand refuses any value other than CeilingOn
+// and CeilingOff before running anything.
+type HostGitCeiling int
+
+const (
+	// CeilingOn, the default, stops repository discovery at the command's
+	// directory when that directory has no .git entry: git runs with
+	// GIT_CEILING_DIRECTORIES set to its parent, so it never finds, or reads
+	// the config of, a repository above it.
+	CeilingOn HostGitCeiling = iota
+	// CeilingOff lets git discover a repository above the command's
+	// directory, which the policy check does not read. Every use needs an
+	// entry, with its reason, in TestHostGitGoesThroughOneDoor's allowlist.
+	CeilingOff
+)
+
+// HostGitOptions configures HostGitCommand and RunHostGit.
 type HostGitOptions struct {
 	// Config holds extra key=value settings passed as -c after HostGitArgs,
 	// for example "safe.directory=<path>".
@@ -190,6 +210,13 @@ type HostGitOptions struct {
 	// tracked .lfsconfig), so a host-side checkout that does resolve LFS uses
 	// a trusted endpoint. Used for linked checkouts.
 	LFSURL string
+	// Audience is who reads the command's errors. AudienceRemote (broker and
+	// Hub callers) gives a refusal that names no host path.
+	Audience Audience
+	// Ceiling bounds repository discovery when dir has no .git entry and the
+	// environment pins no GIT_DIR. The zero value, CeilingOn, keeps git from
+	// discovering a repository above dir.
+	Ceiling HostGitCeiling
 }
 
 // ErrRepoConfigChanged is returned (wrapped) when the repository config a
@@ -372,9 +399,30 @@ func (c *HostGitCmd) after(runErr error) error {
 // sensitive keys; running the returned command re-checks the policy and the
 // sensitive keys afterwards (HostGitCmd, verifyConfigStable). The policy read
 // is the primary control; the pins and HostGitArgs are defence in depth.
+//
+// Discovery mode: when dir has no .git entry and env pins no GIT_DIR, there
+// is no repository at dir for the policy to read, and git would look for one
+// in dir's ancestors. This mode is for read-only subcommands (rev-parse and
+// the like). With opts.Ceiling at its default (CeilingOn) git runs with
+// GIT_CEILING_DIRECTORIES set to dir's parent (symlinks resolved), so it
+// finds no repository above dir. A parent whose resolved path contains the
+// path-list separator (':' or, on Windows, ';') cannot be expressed as a
+// ceiling, so the command is refused. With CeilingOff git may discover a
+// repository above dir, whose config is not checked here. A dir that git
+// would itself treat as a git directory (it holds a HEAD entry) is refused.
+// A .git or HEAD created in dir while the command runs is seen only after it
+// has run, and fails the command (ErrRepoConfigChanged).
+//
+// For opts.Audience AudienceRemote, the errors of discovery mode carry no
+// host path.
 func HostGitCommand(ctx context.Context, dir string, opts HostGitOptions, args ...string) (*HostGitCmd, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("HostGitCommand: dir is required")
+	}
+	switch opts.Ceiling {
+	case CeilingOn, CeilingOff:
+	default:
+		return nil, errHostGitCeilingInvalid
 	}
 	env := opts.Env
 	if env == nil {
@@ -383,15 +431,61 @@ func HostGitCommand(ctx context.Context, dir string, opts HostGitOptions, args .
 	if opts.SkipLFSSmudge {
 		env = append(env, "GIT_LFS_SKIP_SMUDGE=1")
 	}
-	allowOpts := repoConfigAllowOptions{worktreePath: opts.AllowedWorktreePath}
-	if err := checkRepoConfigPolicy(ctx, dir, env, opts.Policy, allowOpts); err != nil {
-		return nil, err
-	}
-	// Snapshot the sensitive keys before the command, to detect any change to
-	// them while it runs (verifyConfigStable).
-	before, err := repoConfigSnapshot(dir, env)
+	discover, err := hostGitDiscovers(dir, env, opts.Audience)
 	if err != nil {
 		return nil, err
+	}
+	allowOpts := repoConfigAllowOptions{worktreePath: opts.AllowedWorktreePath, audience: opts.Audience}
+	var verify func() error
+	if discover {
+		switch opts.Ceiling {
+		case CeilingOn:
+			ceiling, err := hostGitCeilingDir(dir, opts.Audience)
+			if err != nil {
+				return nil, err
+			}
+			env = setEnvValue(env, "GIT_CEILING_DIRECTORIES", ceiling)
+		case CeilingOff:
+			// No bound: git may discover a repository above dir.
+		}
+		verify = func() error {
+			// Nothing was read before the command; it must still find no
+			// repository at dir afterwards.
+			again, err := hostGitDiscovers(dir, env, opts.Audience)
+			if err != nil {
+				return fmt.Errorf("%w: %v", ErrRepoConfigChanged, err)
+			}
+			if !again {
+				return fmt.Errorf("%w: a repository appeared in the command's directory while it ran", ErrRepoConfigChanged)
+			}
+			return nil
+		}
+	} else {
+		if err := checkRepoConfigPolicy(ctx, dir, env, opts.Policy, allowOpts); err != nil {
+			return nil, err
+		}
+		// Snapshot the sensitive keys before the command, to detect any change
+		// to them while it runs (verifyConfigStable).
+		before, err := repoConfigSnapshot(dir, env)
+		if err != nil {
+			return nil, err
+		}
+		verify = func() error {
+			// After the command, re-run the deny-by-default policy (allow-list
+			// plus the git cross-check) on the current repository config, and
+			// confirm no sensitive key changed value. The command fails
+			// (ErrRepoConfigChanged) on a newly-added include or refused key, or
+			// a change to a sensitive key (remote url/fetch, branch tracking,
+			// submodule url/update, core.worktree, user.signingkey, gpg.format,
+			// filter.lfs.*). A change confined to other allowed keys is
+			// tolerated — git-lfs writes lfs.repositoryformatversion (and
+			// lfs.<url>.access after auth) during its own filter-process even
+			// with the smudge skipped. A fresh context, bounded by
+			// hostGitVerifyTimeout: the command's own may have expired.
+			vctx, cancel := context.WithTimeout(context.Background(), hostGitVerifyTimeout)
+			defer cancel()
+			return verifyConfigStable(vctx, dir, env, opts.Policy, allowOpts, before)
+		}
 	}
 	lead := HostGitArgs()
 	if opts.Network {
@@ -415,20 +509,140 @@ func HostGitCommand(ctx context.Context, dir string, opts HostGitOptions, args .
 	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.Dir = dir
 	cmd.Env = env
-	verify := func() error {
-		// After the command, re-run the deny-by-default policy (allow-list plus
-		// the git cross-check) on the current repository config, and confirm no
-		// sensitive key changed value. The command fails (ErrRepoConfigChanged)
-		// on a newly-added include or refused key, or a change to a sensitive
-		// key (remote url/fetch, branch tracking, submodule url/update,
-		// core.worktree, user.signingkey, gpg.format, filter.lfs.*). A change
-		// confined to other allowed keys is tolerated — git-lfs writes
-		// lfs.repositoryformatversion (and lfs.<url>.access after auth) during
-		// its own filter-process even with the smudge skipped. A fresh context:
-		// the command's own may have expired.
-		return verifyConfigStable(context.Background(), dir, env, opts.Policy, allowOpts, before)
-	}
 	return &HostGitCmd{Cmd: cmd, verify: verify}, nil
+}
+
+// hostGitError is a discovery-mode error: the fixed class, and for the local
+// audience the cause (which may name a path) as well. A remote error wraps
+// nothing, so no *fs.PathError reaches it.
+func hostGitError(audience Audience, class string, cause error) error {
+	if audience == AudienceRemote || cause == nil {
+		return errors.New("host-side git: " + class)
+	}
+	return fmt.Errorf("host-side git: %s: %w", class, cause)
+}
+
+// hostGitDiscovers reports whether git, run in dir with env, would look for
+// the repository in dir's ancestors: env pins no GIT_DIR and dir has no .git
+// entry. A dir holding a HEAD entry (which git may take as a git directory,
+// reading its config unchecked) and any error other than a missing .git are
+// refused.
+func hostGitDiscovers(dir string, env []string, audience Audience) (bool, error) {
+	if gitEnvValue(env, "GIT_DIR") != "" {
+		return false, nil
+	}
+	_, err := os.Lstat(filepath.Join(dir, ".git"))
+	if err == nil {
+		return false, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return false, hostGitError(audience, "cannot check the command's directory for a repository", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "HEAD")); !errors.Is(err, fs.ErrNotExist) {
+		return false, hostGitError(audience, "the command's directory has no .git entry but may itself be a git directory; refusing", nil)
+	}
+	return true, nil
+}
+
+// hostGitCeilingDir returns the parent of dir with symlinks resolved, the
+// GIT_CEILING_DIRECTORIES value that lets git check dir itself and nothing
+// above it. git compares ceilings against its resolved working directory, so
+// an unresolved parent would not stop it. git splits the value at the
+// path-list separator, so a parent containing one would become several
+// unrelated ceilings: refused, with an error that names no path for either
+// audience.
+func hostGitCeilingDir(dir string, audience Audience) (string, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", hostGitError(audience, "cannot bound repository discovery", err)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", hostGitError(audience, "cannot bound repository discovery", err)
+	}
+	ceiling := filepath.Dir(resolved)
+	if strings.ContainsRune(ceiling, filepath.ListSeparator) {
+		return "", errHostGitCeilingSeparator
+	}
+	return ceiling, nil
+}
+
+// errHostGitCeilingInvalid refuses a Ceiling value other than CeilingOn and
+// CeilingOff.
+var errHostGitCeilingInvalid = errors.New("host-side git: unknown repository discovery setting; refusing")
+
+// errHostGitCeilingSeparator refuses a discovery bound whose path contains
+// the path-list separator.
+var errHostGitCeilingSeparator = errors.New("host-side git: cannot bound repository discovery: the parent directory's path contains the path-list separator; refusing")
+
+// hostGitVerifyTimeout bounds the after-run check of the repository config,
+// which runs git with a fresh context.
+const hostGitVerifyTimeout = 30 * time.Second
+
+// hostGitWaitDelay bounds how long RunHostGit waits for git's output pipes
+// to close after git exits or is killed, so a descendant holding them open
+// cannot keep the call running.
+const hostGitWaitDelay = 5 * time.Second
+
+// setEnvValue returns env without any key= entry, with key=value appended.
+func setEnvValue(env []string, key, value string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if k, _, _ := strings.Cut(kv, "="); k == key {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, key+"="+value)
+}
+
+// HostGitResult is the outcome of RunHostGit.
+type HostGitResult struct {
+	// ExitCode is git's exit status, or -1 when git did not run or did not
+	// exit normally (refused, failed to start, killed by a signal or by ctx).
+	ExitCode int
+	// Stdout and Stderr are git's output, unmodified.
+	Stdout []byte
+	Stderr []byte
+	// Err is a refusal before the run, a start or wait failure, or a change
+	// to the repository config during the run (wrapping
+	// ErrRepoConfigChanged). A normal non-zero exit is not an error here: it is
+	// in ExitCode. When git's output pipes stay open past hostGitWaitDelay
+	// after git exits (a descendant holds them), a zero exit reports
+	// exec.ErrWaitDelay, and a non-zero exit reports its ExitCode with Err nil;
+	// either way the output may be truncated.
+	Err error
+}
+
+// RunHostGit builds the command with HostGitCommand (policy check, snapshot,
+// filter pins, HostGitArgs, HostGitEnv, the discovery ceiling), runs it once
+// under ctx and applies the after-run check. It does not retry and does not
+// interpret git's output: callers classify ExitCode, Stdout and Stderr.
+func RunHostGit(ctx context.Context, dir string, opts HostGitOptions, args ...string) HostGitResult {
+	cmd, err := HostGitCommand(ctx, dir, opts, args...)
+	if err != nil {
+		return HostGitResult{ExitCode: -1, Err: err}
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	cmd.WaitDelay = hostGitWaitDelay
+	runErr := cmd.Cmd.Run()
+	res := HostGitResult{ExitCode: -1}
+	if ps := cmd.ProcessState; ps != nil && ps.Exited() {
+		res.ExitCode = ps.ExitCode()
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			runErr = nil
+		}
+	}
+	if ctxErr := ctx.Err(); runErr != nil && ctxErr != nil && !errors.Is(runErr, ctxErr) {
+		runErr = fmt.Errorf("%w: %w", ctxErr, runErr)
+	}
+	res.Err = cmd.after(runErr)
+	res.Stdout = stdout.Bytes()
+	res.Stderr = stderr.Bytes()
+	return res
 }
 
 // hostGit returns a git command with HostGitArgs ahead of args and the
