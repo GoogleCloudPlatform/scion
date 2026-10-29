@@ -131,11 +131,15 @@ var hostGitCeilingOffAllowlist = map[string]hostGitDoorEntry{}
 // HostGitCommand. It parses (no type checking) the non-test code of
 // hostGitDoorRoots and fails on:
 //   - a function outside hostGitDoorFuncs that starts git (exec.Command or
-//     exec.CommandContext whose command is the literal "git", a path ending
-//     in /git or a base name git.exe, or a named string constant equal to
-//     one) or starts a process whose command is not a string literal or a
-//     name that resolves to a string constant (for example a variable,
-//     parameter, field or call, a step table's field among them), unless
+//     exec.CommandContext whose command is git: git, git.exe, git.cmd or
+//     git.bat, alone or as the last element of a / or \ path, in any case
+//     and ignoring trailing dots and spaces, or a named string constant
+//     equal to one) or starts a process whose command is not a string
+//     literal or a name that resolves to a string constant (for example a
+//     variable, parameter, field or call, a step table's field among them).
+//     A name is never resolved as a constant when the function binds it as
+//     a parameter, result, receiver, var, := or range variable, or when it
+//     is ambiguous (below). Such a function fails unless
 //     hostGitDoorAllowlist names it with the exact count;
 //   - os.StartProcess, syscall.Exec, syscall.ForkExec, syscall.StartProcess
 //     and an exec.Cmd composite literal, counted as non-constant starts;
@@ -147,31 +151,63 @@ var hostGitCeilingOffAllowlist = map[string]hostGitDoorEntry{}
 //   - a dot import of os/exec;
 //   - in every non-test file of the module (not only hostGitDoorRoots),
 //     outside git_host.go and hostGitCeilingOffAllowlist: CeilingOff; a
-//     conversion written HostGitCeiling(x) or <pkg>.HostGitCeiling(x) whose
-//     argument is not CeilingOn; a HostGitCeiling variable or slice element,
-//     a Ceiling element of a HostGitOptions literal (including an element
-//     literal whose type is elided in an array, slice or map of
-//     HostGitOptions), and the value of an assignment to a .Ceiling field,
-//     each when it is not CeilingOn; any unkeyed element in such a literal;
-//     and an increment of a .Ceiling field. A value that contains a
-//     HostGitCeiling conversion is judged by the conversion rule alone. A
-//     .Ceiling write or increment is not flagged when its receiver is
-//     provably of another type (below);
+//     conversion HostGitCeiling(x) or <pkg>.HostGitCeiling(x), parentheses
+//     allowed around the type, the argument or the whole, whose argument is
+//     not CeilingOn or CeilingOff; a HostGitCeiling variable or slice
+//     element, a Ceiling element of a HostGitOptions literal (including
+//     element literals whose type is elided in arrays, slices and maps of
+//     HostGitOptions, up to 16 levels below the outer literal, resolving
+//     named types declared in the same package or function, aliases and
+//     defined types of them, through up to 16 named types; deeper nesting or
+//     a longer chain is itself a finding), and the value of an assignment to
+//     a .Ceiling field, each when it is not exactly CeilingOn; any unkeyed
+//     element in such a literal; and an increment of a .Ceiling field. "Not
+//     exactly CeilingOn" ignores parentheses and excludes only CeilingOff
+//     (counted where it is named) and a conversion (counted by the
+//     conversion rule): arithmetic such as CeilingOn+1 or a conversion plus
+//     1 counts. A value that combines CeilingOff or a conversion with
+//     arithmetic is counted once by each rule at one site, so a count of 2
+//     there is expected. A .Ceiling write or increment is not flagged when
+//     its receiver is provably of another type (below);
 //   - a variable typed as RepoConfigRefusedError passed to a slog call or to
 //     a call whose format uses %+v or %#v (Format and LogValue already make
 //     both print Error(); this keeps code from relying on the fields).
 //
+// Ambiguity: a name with more than one declaration visible to this
+// analysis, whatever the kinds (const, var, type, func), is ambiguous:
+// declared in the function more than once, in the function and at package
+// level, or at package level more than once (across files or build tags).
+// An ambiguous name is never resolved: as a command it is a non-constant
+// start; as a variable's type it never makes the variable provably another
+// type; as a Ceiling value it is not CeilingOn (only the exact selector
+// forms are); and as a literal's type the literal is a finding ("ambiguous
+// type; not checked") when any declaration of the name leads to
+// HostGitOptions (through named types, element and key types, pointers and
+// embedded struct fields, failing closed past 16 levels), or the literal has
+// an elided composite element or a Ceiling key. An unkeyed literal of a type
+// none of whose declarations leads to HostGitOptions cannot set a Ceiling,
+// and its explicitly typed elements are visited on their own. Type
+// parameters count as declarations and are never resolved: a literal of a
+// type parameter type with an elided element is a finding ("type parameter
+// type; not checked"). Two over-approximations fail closed: the parameters
+// of a func literal count as bindings and declarations of the whole
+// enclosing function; and a receiver exclusion (such as the hub's
+// root.Ceiling write) holds only while the struct type stays plain and
+// declared once, with a single binding of the variable. A future failure of
+// that kind calls for an allowlist entry or a rename, not a fix here.
+//
 // It also counts, as a git start, a constant non-git launcher given git as
 // an argument (env git, timeout 5 git, sh -c "git status", xargs git), and
-// flags (module-wide) any &x.Ceiling, any declaration named CeilingOn or
-// CeilingOff outside git_host.go, and any alias or defined type over
-// HostGitOptions declared outside pkg/util (so every HostGitOptions literal
-// is spelled with that name). CeilingOn is accepted only as a selector on
-// pkg/util's import name, or inside pkg/util as the bare identifier. A
-// receiver counts as provably not a HostGitOptions only when every binding
-// of its name in the function is of a non-alias struct type of the same
-// package with no embedded field, and no package-level variable of the
-// package has that name.
+// flags (module-wide) any &x.Ceiling, any declaration named CeilingOn,
+// CeilingOff or HostGitCeiling outside git_host.go, and any alias or
+// defined type over HostGitOptions declared outside pkg/util (so every
+// HostGitOptions literal is spelled with that name). CeilingOn is accepted
+// only as a selector on pkg/util's import name, or inside pkg/util as the
+// bare identifier. A receiver counts as provably not a HostGitOptions only
+// when every binding of its name in the function is of a non-alias struct
+// type of the same package that has no embedded field and whose name is not
+// ambiguous, and no package-level variable of the package has that name.
+// The alias rule and HostGitOptions type matches ignore parentheses.
 //
 // This test is a tripwire, not a proof: it parses without type checking and
 // catches the forms above. It does not detect a wrapper that starts
@@ -185,14 +221,12 @@ var hostGitCeilingOffAllowlist = map[string]hostGitDoorEntry{}
 // constant launcher other than as a string literal; git later in a shell
 // string (sh -c "cd x && git ...", "exec git", "VAR=y git"); a conversion
 // from a same-shaped struct into HostGitOptions; decoding into one
-// (json.Unmarshal and the like); unsafe; a parenthesised conversion such as
-// (util.HostGitCeiling)(1), and arithmetic on a conversion such as
-// util.HostGitCeiling(util.CeilingOn) + 1; a parameter or local variable
-// that shadows a package or local string constant and is used as the
-// command (it is read as the constant); git command names that differ only
-// in case (Git, GIT) or are a backslash path without .exe; and nested
-// elided composite literals (for example [][]util.HostGitOptions{{{...}}}),
-// whose inner literals are not checked.
+// (json.Unmarshal and the like); unsafe; element literals of an exported
+// named slice or map type from another package, or of a generic type
+// instantiation, whose element type is not followed; git started under
+// another binary name, such as git.com or a git-<subcommand> helper
+// (git-upload-pack and the like); and a drive-relative Windows path with no
+// separator, such as "C:git.exe".
 func TestHostGitGoesThroughOneDoor(t *testing.T) {
 	scan := scanHostGitDoorTree(t)
 	// Non-vacuous: the door itself must be seen.
@@ -321,15 +355,29 @@ type hostGitDoorScan struct {
 	// function may refer to one, so its name is never provably of another
 	// type there.
 	pkgVars map[string]map[string]bool
+	// typeDefs are, per package dir, the type expression of every declared
+	// type, to resolve named array, slice and map types.
+	typeDefs map[string]map[string]ast.Expr
+	// typeDefsAll keep, per package dir, every declaration of each type name
+	// (several under build tags), for the conservative "leads to
+	// HostGitOptions" test on ambiguous names.
+	typeDefsAll map[string]map[string][]ast.Expr
+	// pkgDecls count, per package dir, the package-level declarations of
+	// each name of any kind (const, var, type, func), across files and build
+	// tags. A name declared more than once is ambiguous.
+	pkgDecls map[string]map[string]int
 }
 
 func newHostGitDoorScan() *hostGitDoorScan {
 	return &hostGitDoorScan{
-		funcs:      map[string]*hostGitDoorFunc{},
-		ceilingOff: map[string][]string{},
-		consts:     map[string]map[string]string{},
-		plain:      map[string]map[string]bool{},
-		pkgVars:    map[string]map[string]bool{},
+		funcs:       map[string]*hostGitDoorFunc{},
+		ceilingOff:  map[string][]string{},
+		consts:      map[string]map[string]string{},
+		plain:       map[string]map[string]bool{},
+		pkgVars:     map[string]map[string]bool{},
+		typeDefs:    map[string]map[string]ast.Expr{},
+		typeDefsAll: map[string]map[string][]ast.Expr{},
+		pkgDecls:    map[string]map[string]int{},
 	}
 }
 
@@ -351,7 +399,33 @@ func (s *hostGitDoorScan) addPackageDecls(dir string, f *ast.File) {
 		pv = map[string]bool{}
 		s.pkgVars[dir] = pv
 	}
+	td := s.typeDefs[dir]
+	if td == nil {
+		td = map[string]ast.Expr{}
+		s.typeDefs[dir] = td
+	}
+	tda := s.typeDefsAll[dir]
+	if tda == nil {
+		tda = map[string][]ast.Expr{}
+		s.typeDefsAll[dir] = tda
+	}
+	pd := s.pkgDecls[dir]
+	if pd == nil {
+		pd = map[string]int{}
+		s.pkgDecls[dir] = pd
+	}
+	declare := func(id *ast.Ident) {
+		if id.Name != "_" && id.Name != "init" {
+			pd[id.Name]++
+		}
+	}
 	for _, decl := range f.Decls {
+		if fd, ok := decl.(*ast.FuncDecl); ok {
+			if fd.Recv == nil {
+				declare(fd.Name)
+			}
+			continue
+		}
 		gd, ok := decl.(*ast.GenDecl)
 		if !ok {
 			continue
@@ -362,14 +436,29 @@ func (s *hostGitDoorScan) addPackageDecls(dir string, f *ast.File) {
 				if vs, ok := spec.(*ast.ValueSpec); ok {
 					for _, n := range vs.Names {
 						pv[n.Name] = true
+						declare(n)
 					}
 				}
 			}
 		case token.CONST:
 			recordStringConsts(gd, m)
+			for _, spec := range gd.Specs {
+				if vs, ok := spec.(*ast.ValueSpec); ok {
+					for _, n := range vs.Names {
+						declare(n)
+					}
+				}
+			}
 		case token.TYPE:
 			for _, spec := range gd.Specs {
-				if ts, ok := spec.(*ast.TypeSpec); ok && ts.Assign == 0 && isPlainStruct(ts.Type) {
+				ts, ok := spec.(*ast.TypeSpec)
+				if !ok {
+					continue
+				}
+				td[ts.Name.Name] = ts.Type
+				tda[ts.Name.Name] = append(tda[ts.Name.Name], ts.Type)
+				declare(ts.Name)
+				if ts.Assign == 0 && isPlainStruct(ts.Type) {
 					pt[ts.Name.Name] = true
 				}
 			}
@@ -465,8 +554,77 @@ func sortedKeys(m map[string]bool) []string {
 }
 
 // isGitLiteralValue reports whether a string names the git binary.
+// The name is compared case-insensitively, with backslashes read as
+// slashes and trailing dots and spaces dropped (as Windows does), against
+// git, git.exe, git.cmd and git.bat, alone or as the last path element.
 func isGitLiteralValue(v string) bool {
-	return v == "git" || strings.HasSuffix(v, "/git") || strings.EqualFold(path.Base(strings.ReplaceAll(v, `\`, "/")), "git.exe")
+	n := strings.TrimRight(strings.ToLower(strings.ReplaceAll(v, `\`, "/")), ". ")
+	for _, name := range []string{"git", "git.exe", "git.cmd", "git.bat"} {
+		if n == name || strings.HasSuffix(n, "/"+name) {
+			return true
+		}
+	}
+	return false
+}
+
+// hostGitDoorMaxDepth bounds element-literal nesting (levels below the
+// outer literal) and named-type chains (named types followed); anything
+// deeper is flagged.
+const hostGitDoorMaxDepth = 16
+
+// Results of resolving a literal's type.
+const (
+	resolveOK = iota
+	resolveTooDeep
+	resolveAmbiguous
+	resolveTypeParam
+)
+
+// hasElidedElement reports whether a literal has an element (or map key or
+// value) that is a composite literal with an elided type, &{...} included.
+func hasElidedElement(cl *ast.CompositeLit) bool {
+	elided := func(e ast.Expr) bool {
+		if u, ok := e.(*ast.UnaryExpr); ok && u.Op == token.AND {
+			e = u.X
+		}
+		c, ok := e.(*ast.CompositeLit)
+		return ok && c.Type == nil
+	}
+	for _, elt := range cl.Elts {
+		if kv, ok := elt.(*ast.KeyValueExpr); ok {
+			if elided(kv.Key) || elided(kv.Value) {
+				return true
+			}
+			continue
+		}
+		if elided(elt) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasCeilingKey reports whether a literal has an element keyed Ceiling.
+func hasCeilingKey(cl *ast.CompositeLit) bool {
+	for _, elt := range cl.Elts {
+		if kv, ok := elt.(*ast.KeyValueExpr); ok {
+			if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Ceiling" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// unparen strips any parentheses around e.
+func unparen(e ast.Expr) ast.Expr {
+	for {
+		p, ok := e.(*ast.ParenExpr)
+		if !ok {
+			return e
+		}
+		e = p.X
+	}
 }
 
 // file scans one parsed file; rel is its slash-separated module path.
@@ -509,38 +667,92 @@ func (s *hostGitDoorScan) file(fset *token.FileSet, rel string, f *ast.File) {
 	// isOn reports whether e is CeilingOn: outside pkg/util only a selector
 	// on pkg/util's import name, inside it only the bare identifier (any other
 	// declaration of that name is a finding below).
-	isOn := func(e ast.Expr) bool {
-		switch x := e.(type) {
+	isConst := func(e ast.Expr, name string) bool {
+		switch x := unparen(e).(type) {
 		case *ast.Ident:
-			return inUtil && x.Name == "CeilingOn"
+			return inUtil && x.Name == name
 		case *ast.SelectorExpr:
 			id, ok := x.X.(*ast.Ident)
-			return ok && utilName != "" && utilName != "." && id.Name == utilName && x.Sel.Name == "CeilingOn"
+			return ok && utilName != "" && utilName != "." && id.Name == utilName && x.Sel.Name == name
 		}
 		return false
+	}
+	isOn := func(e ast.Expr) bool { return isConst(e, "CeilingOn") }
+	// isExactOff reports whether e is exactly CeilingOff (counted where it
+	// is named).
+	isExactOff := func(e ast.Expr) bool { return isConst(e, "CeilingOff") }
+	// isConversion reports whether e is a HostGitCeiling(x) conversion,
+	// parentheses allowed around it and around the type (counted by the
+	// conversion rule).
+	isConversion := func(e ast.Expr) bool {
+		call, ok := unparen(e).(*ast.CallExpr)
+		return ok && len(call.Args) == 1 && isTypeNamed(unparen(call.Fun), "HostGitCeiling")
 	}
 	pkgConsts := s.consts[path.Dir(rel)]
 	pkgPlain := s.plain[path.Dir(rel)]
 	pkgVars := s.pkgVars[path.Dir(rel)]
-	// otherType reports whether e names (possibly through a pointer) a plain
-	// struct type of this package other than HostGitOptions: a variable of
-	// such a type cannot be, or embed, a HostGitOptions. An alias, a type with
-	// an embedded field, an unknown or another package's type is not one.
-	otherType := func(e ast.Expr) bool {
-		if st, ok := e.(*ast.StarExpr); ok {
-			e = st.X
+	pkgTypeDefs := s.typeDefs[path.Dir(rel)]
+	// resolveType follows pointers, parentheses and named types declared in
+	// this package or function (local first): aliases and defined types, in
+	// chains of up to hostGitDoorMaxDepth named types, to the type a literal
+	// really has. It reports resolveTooDeep for a longer chain, and
+	// resolveAmbiguous when a name on the way is ambiguous (the caller flags
+	// both where it matters).
+	resolveType := func(t ast.Expr, local map[string]ast.Expr, typeParams map[string]bool, ambiguous func(string) bool) (ast.Expr, int) {
+		for hops := 0; ; {
+			t = unparen(t)
+			if st, ok := t.(*ast.StarExpr); ok {
+				t = st.X
+				continue
+			}
+			id, ok := t.(*ast.Ident)
+			if !ok || id.Name == "HostGitOptions" {
+				return t, resolveOK
+			}
+			if typeParams[id.Name] {
+				return t, resolveTypeParam
+			}
+			if ambiguous(id.Name) {
+				return t, resolveAmbiguous
+			}
+			def, ok := local[id.Name]
+			if !ok {
+				def, ok = pkgTypeDefs[id.Name]
+			}
+			if !ok {
+				return t, resolveOK
+			}
+			if hops++; hops > hostGitDoorMaxDepth {
+				return t, resolveTooDeep
+			}
+			t = def
 		}
-		id, ok := e.(*ast.Ident)
-		return ok && id.Name != "HostGitOptions" && pkgPlain[id.Name]
 	}
-	// otherLiteral reports whether e is a literal (or its address) of such a
-	// type.
-	otherLiteral := func(e ast.Expr) bool {
+	// otherTypeName returns the name of the type e names (possibly through
+	// a pointer) when it is a plain struct type of this package other than
+	// HostGitOptions, else "". A variable of such a type cannot be, or embed,
+	// a HostGitOptions, provided the name is not ambiguous (checked once the
+	// function's declarations are known). An alias, a type with an embedded
+	// field, an unknown or another package's type is not one.
+	otherTypeName := func(e ast.Expr) string {
+		e = unparen(e)
+		if st, ok := e.(*ast.StarExpr); ok {
+			e = unparen(st.X)
+		}
+		if id, ok := e.(*ast.Ident); ok && id.Name != "HostGitOptions" && pkgPlain[id.Name] {
+			return id.Name
+		}
+		return ""
+	}
+	// otherLiteralName is otherTypeName for a literal (or its address).
+	otherLiteralName := func(e ast.Expr) string {
 		if u, ok := e.(*ast.UnaryExpr); ok {
 			e = u.X
 		}
-		cl, ok := e.(*ast.CompositeLit)
-		return ok && cl.Type != nil && otherType(cl.Type)
+		if cl, ok := e.(*ast.CompositeLit); ok && cl.Type != nil {
+			return otherTypeName(cl.Type)
+		}
+		return ""
 	}
 	typed := map[string]bool{}
 	for _, decl := range f.Decls {
@@ -556,11 +768,11 @@ func (s *hostGitDoorScan) file(fset *token.FileSet, rel string, f *ast.File) {
 	}
 	// Every Ceiling check skips git_host.go, which defines the type.
 	ceilingChecked := rel != "pkg/util/git_host.go"
-	// Any other declaration named CeilingOn or CeilingOff could stand in for
-	// the real constants.
+	// Any other declaration named CeilingOn, CeilingOff or HostGitCeiling
+	// could stand in for the real constants or type.
 	if ceilingChecked {
 		declared := func(id *ast.Ident) {
-			if id != nil && (id.Name == "CeilingOn" || id.Name == "CeilingOff") {
+			if id != nil && (id.Name == "CeilingOn" || id.Name == "CeilingOff" || id.Name == "HostGitCeiling") {
 				s.findings = append(s.findings, fmt.Sprintf("%s: declares %s; only pkg/util/git_host.go may", pos(fset, id), id.Name))
 			}
 		}
@@ -621,53 +833,133 @@ func (s *hostGitDoorScan) file(fset *token.FileSet, rel string, f *ast.File) {
 		// switch variables) is of, or a literal of, another plain struct type
 		// of this package. Any other binding removes the name.
 		otherBind, badBind := map[string]bool{}, map[string]bool{}
-		bind := func(name string, other bool) {
+		// bindTypes records, per bound name, the plain struct type name of each
+		// binding ("" when it is not one), resolved against ambiguity below.
+		bindTypes := map[string][]string{}
+		// varBound are the names the function binds as a parameter, result,
+		// receiver, var, := or range variable: such a name is never resolved
+		// as a string constant, even where a constant of that name exists.
+		varBound := map[string]bool{}
+		// localDeclCount counts every declaration of a name in the function:
+		// parameters, results, receivers, var, const, :=, range variables and
+		// types, func literals' included.
+		localDeclCount := map[string]int{}
+		bind := func(name, typeName string) {
 			if name == "_" {
 				return
 			}
-			if other {
-				otherBind[name] = true
-			} else {
-				badBind[name] = true
-			}
+			varBound[name] = true
+			localDeclCount[name]++
+			bindTypes[name] = append(bindTypes[name], typeName)
 		}
 		bindFields := func(fl *ast.FieldList) {
 			if fl == nil {
 				return
 			}
 			for _, field := range fl.List {
-				o := otherType(field.Type)
+				tn := otherTypeName(field.Type)
 				for _, n := range field.Names {
-					bind(n.Name, o)
+					bind(n.Name, tn)
 				}
+			}
+		}
+		// typeParams are the function's type parameters (its own, and its
+		// receiver's): declarations that are never resolved to a type.
+		typeParams := map[string]bool{}
+		typeParam := func(id *ast.Ident) {
+			if id != nil && id.Name != "_" {
+				typeParams[id.Name] = true
+				localDeclCount[id.Name]++
 			}
 		}
 		if fd, ok := node.(*ast.FuncDecl); ok {
 			bindFields(fd.Recv)
 			bindFields(fd.Type.Params)
 			bindFields(fd.Type.Results)
+			if fd.Type.TypeParams != nil {
+				for _, field := range fd.Type.TypeParams.List {
+					for _, n := range field.Names {
+						typeParam(n)
+					}
+				}
+			}
+			if fd.Recv != nil && len(fd.Recv.List) > 0 {
+				rt := fd.Recv.List[0].Type
+				if st, ok := rt.(*ast.StarExpr); ok {
+					rt = st.X
+				}
+				switch x := rt.(type) {
+				case *ast.IndexExpr:
+					if id, ok := x.Index.(*ast.Ident); ok {
+						typeParam(id)
+					}
+				case *ast.IndexListExpr:
+					for _, ix := range x.Indices {
+						if id, ok := ix.(*ast.Ident); ok {
+							typeParam(id)
+						}
+					}
+				}
+			}
 		}
+		constSpecs := map[*ast.ValueSpec]bool{}
+		// localTypes are the function's type declarations (for resolveType);
+		// localTypesAll keeps every declaration of each local type name.
+		localTypes := map[string]ast.Expr{}
+		localTypesAll := map[string][]ast.Expr{}
 		ast.Inspect(node, func(n ast.Node) bool {
 			switch x := n.(type) {
 			case *ast.FuncLit:
 				bindFields(x.Type.Params)
 				bindFields(x.Type.Results)
+			case *ast.GenDecl:
+				switch x.Tok {
+				case token.CONST:
+					for _, spec := range x.Specs {
+						if vs, ok := spec.(*ast.ValueSpec); ok {
+							constSpecs[vs] = true
+						}
+					}
+				case token.TYPE:
+					for _, spec := range x.Specs {
+						if ts, ok := spec.(*ast.TypeSpec); ok {
+							localTypes[ts.Name.Name] = ts.Type
+							localTypesAll[ts.Name.Name] = append(localTypesAll[ts.Name.Name], ts.Type)
+							if ts.Name.Name != "_" {
+								localDeclCount[ts.Name.Name]++
+							}
+						}
+					}
+				}
 			case *ast.ValueSpec:
 				for i, id := range x.Names {
-					o := false
+					tn := ""
 					switch {
 					case x.Type != nil:
-						o = otherType(x.Type)
+						tn = otherTypeName(x.Type)
 					case i < len(x.Values):
-						o = otherLiteral(x.Values[i])
+						tn = otherLiteralName(x.Values[i])
 					}
-					bind(id.Name, o)
+					if constSpecs[x] {
+						// A constant is not a variable binding: record it for the
+						// receiver rule only.
+						if id.Name != "_" {
+							badBind[id.Name] = true
+							localDeclCount[id.Name]++
+						}
+						continue
+					}
+					bind(id.Name, tn)
 				}
 			case *ast.AssignStmt:
 				if x.Tok == token.DEFINE {
 					for i, lhs := range x.Lhs {
 						if id, ok := lhs.(*ast.Ident); ok {
-							bind(id.Name, len(x.Lhs) == len(x.Rhs) && otherLiteral(x.Rhs[i]))
+							tn := ""
+							if len(x.Lhs) == len(x.Rhs) {
+								tn = otherLiteralName(x.Rhs[i])
+							}
+							bind(id.Name, tn)
 						}
 					}
 				}
@@ -675,24 +967,95 @@ func (s *hostGitDoorScan) file(fset *token.FileSet, rel string, f *ast.File) {
 				if x.Tok == token.DEFINE {
 					for _, e := range []ast.Expr{x.Key, x.Value} {
 						if id, ok := e.(*ast.Ident); ok {
-							bind(id.Name, false)
+							bind(id.Name, "")
 						}
 					}
 				}
 			}
 			return true
 		})
+		// A name is ambiguous when more than one declaration of it is visible
+		// to this analysis, whatever their kinds: declared in the function
+		// more than once, in the function and at package level, or at package
+		// level more than once (across files or build tags). Which declaration
+		// a use sees then depends on block or build, so an ambiguous name is
+		// never resolved: not as a constant command, not as a literal's type
+		// (flagged where the literal has elided elements), and never as
+		// CeilingOn (only the exact selector forms are On).
+		pkgDeclCount := s.pkgDecls[path.Dir(rel)]
+		ambiguous := func(name string) bool {
+			lc, pc := localDeclCount[name], pkgDeclCount[name]
+			return lc > 1 || (lc > 0 && pc > 0) || pc > 1
+		}
+		// A binding is provably of another type only when its plain struct
+		// type name is itself not ambiguous (a second declaration might embed
+		// HostGitOptions).
+		for name, tns := range bindTypes {
+			for _, tn := range tns {
+				if tn == "" || ambiguous(tn) {
+					badBind[name] = true
+				} else {
+					otherBind[name] = true
+				}
+			}
+		}
+		// leadsToOpts reports whether any declaration of the type e names, at
+		// any depth through named types (every local and package declaration
+		// of a name), element and key types, pointers and embedded struct
+		// fields, is HostGitOptions. Past the depth bound it reports true
+		// (fail closed).
+		pkgTypeDefsAll := s.typeDefsAll[path.Dir(rel)]
+		var leadsToOpts func(e ast.Expr, depth int) bool
+		leadsToOpts = func(e ast.Expr, depth int) bool {
+			if depth > hostGitDoorMaxDepth {
+				return true
+			}
+			switch x := unparen(e).(type) {
+			case *ast.StarExpr:
+				return leadsToOpts(x.X, depth+1)
+			case *ast.ArrayType:
+				return leadsToOpts(x.Elt, depth+1)
+			case *ast.MapType:
+				return leadsToOpts(x.Key, depth+1) || leadsToOpts(x.Value, depth+1)
+			case *ast.SelectorExpr:
+				return x.Sel.Name == "HostGitOptions"
+			case *ast.StructType:
+				if x.Fields != nil {
+					for _, field := range x.Fields.List {
+						if len(field.Names) == 0 && leadsToOpts(field.Type, depth+1) {
+							return true
+						}
+					}
+				}
+			case *ast.Ident:
+				if x.Name == "HostGitOptions" {
+					return true
+				}
+				for _, d := range localTypesAll[x.Name] {
+					if leadsToOpts(d, depth+1) {
+						return true
+					}
+				}
+				for _, d := range pkgTypeDefsAll[x.Name] {
+					if leadsToOpts(d, depth+1) {
+						return true
+					}
+				}
+			}
+			return false
+		}
 		// A package-level variable of the same name may be what the function
 		// refers to, so it counts as a binding that is not provably other.
 		nonOpts := func(name string) bool { return otherBind[name] && !badBind[name] && !pkgVars[name] }
 		ceiling := func(n ast.Node) {
 			s.ceilingOff[key] = append(s.ceilingOff[key], pos(fset, n))
 		}
-		// notOn reports whether a Ceiling value is neither CeilingOn nor counted
-		// elsewhere (where CeilingOff is named, or as a HostGitCeiling
-		// conversion).
+		// notOn reports whether a Ceiling value counts as non-On here: anything
+		// but exactly CeilingOn, exactly CeilingOff (counted where it is named)
+		// or a HostGitCeiling conversion (counted by the conversion rule).
+		// Parentheses are ignored; arithmetic and every other expression count.
 		notOn := func(e ast.Expr) bool {
-			return !isOn(e) && !mentionsIdent(e, "CeilingOff") && !mentionsIdent(e, "HostGitCeiling")
+			return !isOn(e) && !isExactOff(e) && !isConversion(e)
 		}
 		ast.Inspect(node, func(n ast.Node) bool {
 			switch x := n.(type) {
@@ -758,44 +1121,72 @@ func (s *hostGitDoorScan) file(fset *token.FileSet, rel string, f *ast.File) {
 						ceiling(cl)
 					}
 				}
-				if isTypeNamed(x.Type, "HostGitOptions") {
-					optsLiteral(x)
-				}
-				// Element literals whose type is elided ([]HostGitOptions{{...}},
-				// []*HostGitOptions{{...}}, map[K]HostGitOptions{k: {...}}) get the
-				// same checks; their own visit sees no type.
-				elided := func(e ast.Expr) {
-					if u, ok := e.(*ast.UnaryExpr); ok && u.Op == token.AND {
-						e = u.X
+				// walk checks cl, a literal of type t, and recurses into element
+				// literals whose type is elided ([]HostGitOptions{{...}},
+				// [][]HostGitOptions{{{...}}}, map[K][]*HostGitOptions{k: {{...}}},
+				// a same-package named slice type ...) at any depth, so a
+				// HostGitOptions literal is checked wherever it sits. An elided
+				// literal's own visit sees no type, so each is checked once.
+				var walk func(cl *ast.CompositeLit, t ast.Expr, depth int)
+				walk = func(cl *ast.CompositeLit, t ast.Expr, depth int) {
+					if depth > hostGitDoorMaxDepth {
+						s.findings = append(s.findings, fmt.Sprintf("%s: element literals nested deeper than %d levels; not checked", pos(fset, cl), hostGitDoorMaxDepth))
+						return
 					}
-					if cl, ok := e.(*ast.CompositeLit); ok && cl.Type == nil {
+					t, status := resolveType(t, localTypes, typeParams, ambiguous)
+					switch status {
+					case resolveTooDeep:
+						s.findings = append(s.findings, fmt.Sprintf("%s: a literal's type resolves through more than %d named types; not checked", pos(fset, cl), hostGitDoorMaxDepth))
+						return
+					case resolveAmbiguous:
+						// Flagged when any declaration of the name leads to
+						// HostGitOptions, or the literal has an elided element or a
+						// Ceiling key. An unkeyed literal of a type none of whose
+						// declarations leads to HostGitOptions cannot set a Ceiling,
+						// and its explicitly typed elements are visited on their own.
+						if leadsToOpts(t, 0) || hasElidedElement(cl) || hasCeilingKey(cl) {
+							s.findings = append(s.findings, fmt.Sprintf("%s: ambiguous type; not checked", pos(fset, cl)))
+						}
+						return
+					case resolveTypeParam:
+						if hasElidedElement(cl) {
+							s.findings = append(s.findings, fmt.Sprintf("%s: type parameter type; not checked", pos(fset, cl)))
+						}
+						return
+					}
+					if isTypeNamed(t, "HostGitOptions") {
 						optsLiteral(cl)
+						return
 					}
-				}
-				var keyOpts, valOpts bool
-				switch t := x.Type.(type) {
-				case *ast.ArrayType:
-					valOpts = isTypeNamed(t.Elt, "HostGitOptions")
-				case *ast.MapType:
-					keyOpts = isTypeNamed(t.Key, "HostGitOptions")
-					valOpts = isTypeNamed(t.Value, "HostGitOptions")
-				}
-				if keyOpts || valOpts {
-					for _, elt := range x.Elts {
+					var keyT, valT ast.Expr
+					switch tt := t.(type) {
+					case *ast.ArrayType:
+						valT = tt.Elt
+					case *ast.MapType:
+						keyT, valT = tt.Key, tt.Value
+					default:
+						return
+					}
+					sub := func(e, et ast.Expr) {
+						if u, ok := e.(*ast.UnaryExpr); ok && u.Op == token.AND {
+							e = u.X
+						}
+						if c, ok := e.(*ast.CompositeLit); ok && c.Type == nil {
+							walk(c, et, depth+1)
+						}
+					}
+					for _, elt := range cl.Elts {
 						if kv, ok := elt.(*ast.KeyValueExpr); ok {
-							if keyOpts {
-								elided(kv.Key)
+							if keyT != nil {
+								sub(kv.Key, keyT)
 							}
-							if valOpts {
-								elided(kv.Value)
-							}
+							sub(kv.Value, valT)
 							continue
 						}
-						if valOpts {
-							elided(elt)
-						}
+						sub(elt, valT)
 					}
 				}
+				walk(x, x.Type, 0)
 				// An element other than CeilingOn in a []HostGitCeiling literal.
 				if at, ok := x.Type.(*ast.ArrayType); ok && isTypeNamed(at.Elt, "HostGitCeiling") {
 					for _, elt := range x.Elts {
@@ -850,9 +1241,9 @@ func (s *hostGitDoorScan) file(fset *token.FileSet, rel string, f *ast.File) {
 				}
 			case *ast.CallExpr:
 				callFuns[x.Fun] = true
-				s.classifyStart(fset, fn, x, execName, osName, syscallName, localConsts, pkgConsts)
+				s.classifyStart(fset, fn, x, execName, osName, syscallName, localConsts, pkgConsts, func(name string) bool { return varBound[name] || ambiguous(name) })
 				// A conversion to HostGitCeiling of anything but CeilingOn.
-				if ceilingChecked && len(x.Args) == 1 && isTypeNamed(x.Fun, "HostGitCeiling") && !isOn(x.Args[0]) && !mentionsIdent(x.Args[0], "CeilingOff") {
+				if ceilingChecked && isConversion(x) && !isOn(x.Args[0]) && !isExactOff(x.Args[0]) {
 					ceiling(x)
 				}
 				if refusalSink(x, slogName, typed) {
@@ -885,7 +1276,7 @@ func (s *hostGitDoorScan) file(fset *token.FileSet, rel string, f *ast.File) {
 }
 
 // classifyStart records call in fn when it starts a process.
-func (s *hostGitDoorScan) classifyStart(fset *token.FileSet, fn *hostGitDoorFunc, call *ast.CallExpr, execName, osName, syscallName string, localConsts, pkgConsts map[string]string) {
+func (s *hostGitDoorScan) classifyStart(fset *token.FileSet, fn *hostGitDoorFunc, call *ast.CallExpr, execName, osName, syscallName string, localConsts, pkgConsts map[string]string, notConst func(string) bool) {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return
@@ -924,6 +1315,11 @@ func (s *hostGitDoorScan) classifyStart(fset *token.FileSet, fn *hostGitDoorFunc
 			return
 		}
 	case *ast.Ident:
+		if notConst(x.Name) {
+			// A parameter or variable of the function, or an ambiguous name,
+			// whatever constant it may name: a non-constant start.
+			break
+		}
 		if v, ok := localConsts[x.Name]; ok {
 			if isGitLiteralValue(v) {
 				// The literal is in the body and already counted.
@@ -1048,10 +1444,11 @@ func bindValueSpec(vs *ast.ValueSpec, typed map[string]bool) {
 }
 
 // isTypeNamed reports whether e is the type name, *name, pkg.name or
-// *pkg.name.
+// *pkg.name, parentheses allowed.
 func isTypeNamed(e ast.Expr, name string) bool {
+	e = unparen(e)
 	if st, ok := e.(*ast.StarExpr); ok {
-		e = st.X
+		e = unparen(st.X)
 	}
 	switch x := e.(type) {
 	case *ast.Ident:
@@ -1060,18 +1457,6 @@ func isTypeNamed(e ast.Expr, name string) bool {
 		return x.Sel.Name == name
 	}
 	return false
-}
-
-// mentionsIdent reports whether name appears as an identifier anywhere in e.
-func mentionsIdent(e ast.Expr, name string) bool {
-	found := false
-	ast.Inspect(e, func(n ast.Node) bool {
-		if id, ok := n.(*ast.Ident); ok && id.Name == name {
-			found = true
-		}
-		return !found
-	})
-	return found
 }
 
 func recvTypeName(d *ast.FuncDecl) string {
@@ -1164,34 +1549,60 @@ func scanHostGitDoorSource(t *testing.T, sources map[string]string) *hostGitDoor
 // added in pkg/agent fails the audit in every form; a constant non-git
 // command does not.
 func TestHostGitGoesThroughOneDoor_FlagsRawGitInAgent(t *testing.T) {
-	const head = "package agent\nimport (\"context\"; \"os\"; \"os/exec\"; \"syscall\")\nconst fixtureGit = \"git\"\nconst fixtureRuntime = \"docker\"\nfunc use(f func(context.Context, string, ...string) *exec.Cmd) {}\n"
-	for name, body := range map[string]string{
-		"literal":         `_ = exec.Command("git", "status")`,
-		"context":         `_ = exec.CommandContext(ctx, "git", "status")`,
-		"bin path":        `_ = exec.Command("/usr/bin/git", "status")`,
-		"lookpath":        `p, _ := exec.LookPath("git"); _ = exec.Command(p, "status")`,
-		"local variable":  `bin := "git"; _ = exec.CommandContext(ctx, bin, "status")`,
-		"package const":   `_ = exec.Command(fixtureGit, "status")`,
-		"local const":     `const g = "git"; _ = exec.Command(g, "status")`,
-		"variable":        `var name string; _ = exec.Command(name, "status")`,
-		"field":           `var s struct{ cmd string }; _ = exec.Command(s.cmd)`,
-		"exec.Cmd":        `_ = &exec.Cmd{Path: "/usr/bin/git"}`,
-		"os.StartProcess": `_, _ = os.StartProcess("/usr/bin/git", nil, nil)`,
-		"syscall.Exec":    `_ = syscall.Exec("/usr/bin/git", nil, nil)`,
-		"starter value":   `run := exec.Command; _ = run("git", "status")`,
-		"starter arg":     `use(exec.CommandContext)`,
-		"mutated Path":    `c := exec.Command("true"); c.Path = "/usr/bin/git"`,
-		"new Cmd Args":    `c := new(exec.Cmd); c.Args = []string{"/usr/bin/env"}`,
-		"literal Cmd":     `c := &exec.Cmd{}; c.Path = "/usr/bin/env"`,
-		"env launcher":    `_ = exec.Command("env", "git", "status")`,
-		"timeout":         `_ = exec.CommandContext(ctx, "timeout", "5", "git", "fetch")`,
-		"sh -c":           `_ = exec.Command("sh", "-c", "git status")`,
+	const head = "package agent\nimport (\"context\"; \"os\"; \"os/exec\"; \"syscall\")\nconst fixtureGit = \"git\"\nconst fixtureRuntime = \"docker\"\nvar launcherVar = \"git\"\nfunc use(f func(context.Context, string, ...string) *exec.Cmd) {}\n"
+	// Each start form, with its exact count: one more or one less fails too.
+	for name, c := range map[string]struct {
+		body string
+		n    int
+	}{
+		"literal":                           {`_ = exec.Command("git", "status")`, 1},
+		"context":                           {`_ = exec.CommandContext(ctx, "git", "status")`, 1},
+		"bin path":                          {`_ = exec.Command("/usr/bin/git", "status")`, 1},
+		"lookpath":                          {`p, _ := exec.LookPath("git"); _ = exec.Command(p, "status")`, 2},
+		"local variable":                    {`bin := "git"; _ = exec.CommandContext(ctx, bin, "status")`, 2},
+		"package const":                     {`_ = exec.Command(fixtureGit, "status")`, 1},
+		"local const":                       {`const g = "git"; _ = exec.Command(g, "status")`, 1},
+		"variable":                          {`var name string; _ = exec.Command(name, "status")`, 1},
+		"field":                             {`var s struct{ cmd string }; _ = exec.Command(s.cmd)`, 1},
+		"exec.Cmd":                          {`_ = &exec.Cmd{Path: "/usr/bin/git"}`, 2},
+		"os.StartProcess":                   {`_, _ = os.StartProcess("/usr/bin/git", nil, nil)`, 2},
+		"syscall.Exec":                      {`_ = syscall.Exec("/usr/bin/git", nil, nil)`, 2},
+		"starter value":                     {`run := exec.Command; _ = run("git", "status")`, 2},
+		"starter arg":                       {`use(exec.CommandContext)`, 1},
+		"mutated Path":                      {`c := exec.Command("true"); c.Path = "/usr/bin/git"`, 2},
+		"new Cmd Args":                      {`c := new(exec.Cmd); c.Args = []string{"/usr/bin/env"}`, 1},
+		"literal Cmd":                       {`c := &exec.Cmd{}; c.Path = "/usr/bin/env"`, 2},
+		"env launcher":                      {`_ = exec.Command("env", "git", "status")`, 1},
+		"timeout":                           {`_ = exec.CommandContext(ctx, "timeout", "5", "git", "fetch")`, 1},
+		"sh -c":                             {`_ = exec.Command("sh", "-c", "git status")`, 1},
+		"param shadows const":               {`f := func(fixtureRuntime string) { _ = exec.Command(fixtureRuntime) }; f("git")`, 2},
+		"var shadows const":                 {`fixtureRuntime := os.Getenv("X"); _ = exec.Command(fixtureRuntime)`, 1},
+		"range shadows const":               {`for _, fixtureRuntime := range []string{"git"} { _ = exec.Command(fixtureRuntime) }`, 2},
+		"upper case":                        {`_ = exec.Command("GIT", "status")`, 1},
+		"mixed case exe":                    {`_ = exec.Command("Git.exe")`, 1},
+		"backslash path":                    {`_ = exec.Command("C:\\tools\\git", "status")`, 1},
+		"upper case launcher":               {`_ = exec.Command("env", "GIT", "status")`, 1},
+		"block const shadows package const": {`{ const fixtureGit = "docker"; _ = fixtureGit }; _ = exec.Command(fixtureGit)`, 1},
+		"two local consts":                  {`const g = "git"; { const g = "docker"; _ = g }; _ = exec.Command(g)`, 2},
+		"block const shadows package var":   {`{ const launcherVar = "docker"; _ = launcherVar }; _ = exec.Command(launcherVar)`, 1},
+		"git.cmd":                           {`_ = exec.Command("git.cmd", "status")`, 1},
+		"git.bat":                           {`_ = exec.Command("C:\\tools\\git.bat", "status")`, 1},
+		"trailing dot and space":            {`_ = exec.Command("git. ", "status")`, 1},
+		"type switch shadows const":         {`var x interface{} = "git"; switch fixtureRuntime := x.(type) { case string: _ = exec.Command(fixtureRuntime) }`, 2},
+		"select shadows const":              {`ch := make(chan string, 1); ch <- "git"; select { case fixtureRuntime := <-ch: _ = exec.Command(fixtureRuntime) }`, 2},
 	} {
 		t.Run(name, func(t *testing.T) {
-			src := head + "func fixture(ctx context.Context) {\n" + body + "\n}\n"
-			v := scanHostGitDoorSource(t, map[string]string{"pkg/agent/fixture.go": src}).violations(nil, nil)
+			src := head + "func fixture(ctx context.Context) {\n" + c.body + "\n}\n"
+			scan := scanHostGitDoorSource(t, map[string]string{"pkg/agent/fixture.go": src})
+			v := scan.violations(nil, nil)
 			if len(v) != 1 || !strings.Contains(v[0], "pkg/agent/fixture.go:fixture") {
 				t.Errorf("violations = %q, want one for pkg/agent/fixture.go:fixture", v)
+			}
+			for _, n := range []int{c.n - 1, c.n, c.n + 1} {
+				v := scan.violations(map[string]hostGitDoorEntry{"pkg/agent/fixture.go:fixture": {n, "r"}}, nil)
+				if (n == c.n) != (len(v) == 0) {
+					t.Errorf("count %d (true count %d): violations %q", n, c.n, v)
+				}
 			}
 		})
 	}
@@ -1202,6 +1613,52 @@ func TestHostGitGoesThroughOneDoor_FlagsRawGitInAgent(t *testing.T) {
 	ok := head + "type urlish struct{ Path string }\nfunc fixture() { _ = exec.Command(\"podman\", \"ps\"); _ = exec.Command(\"gitk\"); _ = exec.Command(fixtureRuntime); _, _ = os.Getwd(); _ = syscall.Getpid(); c := exec.Command(\"true\"); c.Dir = \"/tmp\"; u := urlish{}; u.Path = \"x\"; _ = c; _ = exec.Command(\"env\", \"FOO=1\", \"podman\"); _ = exec.Command(\"sh\", \"-c\", \"gitk --all\") }\n"
 	if v := scanHostGitDoorSource(t, map[string]string{"pkg/agent/fixture.go": ok}).violations(nil, nil); len(v) != 0 {
 		t.Errorf("a constant non-git command was flagged: %q", v)
+	}
+	// Names that only resemble git, and an unshadowed constant, are not git
+	// starts.
+	notGit := head + `func fixture() { _ = exec.Command("C:\\tools\\gitk"); _ = exec.Command("digit"); _ = exec.Command("env", "GITHUB_TOKEN=x", "podman"); _ = exec.Command("gitk.cmd"); _ = exec.Command(fixtureRuntime) }` + "\n"
+	if v := scanHostGitDoorSource(t, map[string]string{"pkg/agent/fixture.go": notGit}).violations(nil, nil); len(v) != 0 {
+		t.Errorf("a look-alike name was flagged: %q", v)
+	}
+	// Exact counts for a shadowed name and a case variant: one more or one
+	// less than the true count fails.
+	for name, c := range map[string]struct {
+		body string
+		n    int
+	}{
+		// A non-constant start plus the "git" literal.
+		"param shadows const": {`f := func(fixtureRuntime string) { _ = exec.Command(fixtureRuntime) }; f("git")`, 2},
+		// One git literal; the start itself adds nothing.
+		"upper case": {`_ = exec.Command("GIT", "status")`, 1},
+	} {
+		src := head + "func fixture(ctx context.Context) {\n" + c.body + "\n}\n"
+		scan := scanHostGitDoorSource(t, map[string]string{"pkg/agent/fixture.go": src})
+		for _, n := range []int{c.n - 1, c.n, c.n + 1} {
+			v := scan.violations(map[string]hostGitDoorEntry{"pkg/agent/fixture.go:fixture": {n, "r"}}, nil)
+			if (n == c.n) != (len(v) == 0) {
+				t.Errorf("%s with count %d (true count %d): violations %q", name, n, c.n, v)
+			}
+		}
+	}
+	// A name declared twice at package level (build-tagged files) is
+	// ambiguous and never resolved as a constant command, whatever the kinds
+	// or values: two consts with different or identical values, or a const in
+	// one file and a var in the other.
+	for name, c := range map[string]struct {
+		other string
+		flag  bool
+	}{
+		"differing values": {"//go:build windows\n\npackage agent\nconst launcher = \"podman\"\n", true},
+		"same value":       {"//go:build windows\n\npackage agent\nconst launcher = \"docker\"\n", true},
+		"const in one tagged file, var in another": {"//go:build windows\n\npackage agent\nvar launcher = \"docker\"\n", true},
+	} {
+		v := scanHostGitDoorSource(t, map[string]string{
+			"pkg/agent/a.go": "package agent\nimport \"os/exec\"\nconst launcher = \"docker\"\nfunc fixture() { _ = exec.Command(launcher) }\n",
+			"pkg/agent/b.go": c.other,
+		}).violations(nil, nil)
+		if c.flag != (len(v) == 1) || len(v) > 1 {
+			t.Errorf("%s: violations %q, want exactly one (flagged=%v)", name, v, c.flag)
+		}
 	}
 	// A string constant in another file of the same package resolves.
 	other := map[string]string{
@@ -1267,25 +1724,37 @@ func run(ctx context.Context) {
 func TestHostGitGoesThroughOneDoor_CeilingOffNeedsEntry(t *testing.T) {
 	const head = "package runtimebroker\nimport (\"context\"; \"github.com/GoogleCloudPlatform/scion/pkg/util\")\nvar _ = context.Background\nfunc opts() *util.HostGitOptions { return nil }\ntype holder struct{ o util.HostGitOptions }\ntype wrap struct{ util.HostGitOptions }\ntype root struct{ Ceiling int }\n"
 	for name, fn := range map[string]string{
-		"literal":            `func probe(ctx context.Context, d string) { _ = util.RunHostGit(ctx, d, util.HostGitOptions{Ceiling: util.CeilingOff, Audience: util.AudienceRemote}, "rev-parse") }`,
-		"assignment":         `func probe(ctx context.Context, d string) { var o util.HostGitOptions; o.Ceiling = util.CeilingOff; _ = util.RunHostGit(ctx, d, o, "rev-parse") }`,
-		"converted":          `func probe() { _ = util.HostGitOptions{Ceiling: util.HostGitCeiling(1)} }`,
-		"parameter":          `func probe(o *util.HostGitOptions) { o.Ceiling = 1 }`,
-		"call result":        `func probe() { opts().Ceiling = util.CeilingOn + 1 }`,
-		"field":              `func probe(h *holder) { h.o.Ceiling = 1 }`,
-		"increment":          `func probe(o *util.HostGitOptions) { o.Ceiling++ }`,
-		"typed var":          `func probe() { var c util.HostGitCeiling = 1; _ = c }`,
-		"slice":              `func probe() { _ = []util.HostGitCeiling{1} }`,
-		"embedded":           `func probe(w *wrap) { w.Ceiling = 1 }`,
-		"unkeyed":            `func probe() { _ = util.HostGitOptions{nil, nil} }`,
-		"address":            `func probe(o *util.HostGitOptions) { p := &o.Ceiling; *p = 1 }`,
-		"shadowed":           `func probe(c util.HostGitCeiling) { { o := root{}; _ = o }; o := util.HostGitOptions{}; o.Ceiling = c }`,
-		"funclit param":      `func probe(c util.HostGitCeiling) { f := func(o root) { _ = o }; _ = f; o := util.HostGitOptions{}; o.Ceiling = c }`,
-		"package var shadow": "var hopts util.HostGitOptions\nfunc probe(c util.HostGitCeiling) { { hopts := root{}; _ = hopts }; hopts.Ceiling = c }",
-		"elided slice":       `func probe() { _ = []util.HostGitOptions{{Ceiling: 1}} }`,
-		"elided map":         `func probe(c util.HostGitCeiling) { _ = map[string]util.HostGitOptions{"a": {Ceiling: c}} }`,
-		"elided unkeyed":     `func probe() { _ = []util.HostGitOptions{{nil, nil}} }`,
-		"elided pointer":     `func probe() { _ = []*util.HostGitOptions{{Ceiling: 1}} }`,
+		"literal":               `func probe(ctx context.Context, d string) { _ = util.RunHostGit(ctx, d, util.HostGitOptions{Ceiling: util.CeilingOff, Audience: util.AudienceRemote}, "rev-parse") }`,
+		"assignment":            `func probe(ctx context.Context, d string) { var o util.HostGitOptions; o.Ceiling = util.CeilingOff; _ = util.RunHostGit(ctx, d, o, "rev-parse") }`,
+		"converted":             `func probe() { _ = util.HostGitOptions{Ceiling: util.HostGitCeiling(1)} }`,
+		"parameter":             `func probe(o *util.HostGitOptions) { o.Ceiling = 1 }`,
+		"call result":           `func probe() { opts().Ceiling = util.CeilingOn + 1 }`,
+		"field":                 `func probe(h *holder) { h.o.Ceiling = 1 }`,
+		"increment":             `func probe(o *util.HostGitOptions) { o.Ceiling++ }`,
+		"typed var":             `func probe() { var c util.HostGitCeiling = 1; _ = c }`,
+		"slice":                 `func probe() { _ = []util.HostGitCeiling{1} }`,
+		"embedded":              `func probe(w *wrap) { w.Ceiling = 1 }`,
+		"unkeyed":               `func probe() { _ = util.HostGitOptions{nil, nil} }`,
+		"address":               `func probe(o *util.HostGitOptions) { p := &o.Ceiling; *p = 1 }`,
+		"shadowed":              `func probe(c util.HostGitCeiling) { { o := root{}; _ = o }; o := util.HostGitOptions{}; o.Ceiling = c }`,
+		"funclit param":         `func probe(c util.HostGitCeiling) { f := func(o root) { _ = o }; _ = f; o := util.HostGitOptions{}; o.Ceiling = c }`,
+		"package var shadow":    "var hopts util.HostGitOptions\nfunc probe(c util.HostGitCeiling) { { hopts := root{}; _ = hopts }; hopts.Ceiling = c }",
+		"elided slice":          `func probe() { _ = []util.HostGitOptions{{Ceiling: 1}} }`,
+		"elided map":            `func probe(c util.HostGitCeiling) { _ = map[string]util.HostGitOptions{"a": {Ceiling: c}} }`,
+		"elided unkeyed":        `func probe() { _ = []util.HostGitOptions{{nil, nil}} }`,
+		"elided pointer":        `func probe() { _ = []*util.HostGitOptions{{Ceiling: 1}} }`,
+		"paren conversion":      `func probe() { _ = util.HostGitOptions{Ceiling: (util.HostGitCeiling)(1)} }`,
+		"paren argument":        `func probe() { var c util.HostGitCeiling = util.HostGitCeiling((1)); _ = c }`,
+		"conversion arithmetic": `func probe(o *util.HostGitOptions) { o.Ceiling = util.HostGitCeiling(util.CeilingOn) + 1 }`,
+		"on arithmetic":         `func probe(o *util.HostGitOptions) { o.Ceiling = (util.CeilingOn + 1) }`,
+		"nested slice":          `func probe() { _ = [][]util.HostGitOptions{{{Ceiling: 1}}} }`,
+		"map of slices":         `func probe() { _ = map[string][]*util.HostGitOptions{"a": {{Ceiling: 1}}} }`,
+		"named slice":           "type optsList []util.HostGitOptions\nfunc probe() { _ = optsList{{Ceiling: 1}} }",
+		"nested unkeyed":        `func probe() { _ = [][]util.HostGitOptions{{{nil, nil}}} }`,
+		"alias of named slice":  "type optsList []util.HostGitOptions\ntype more = optsList\nfunc probe() { _ = more{{Ceiling: 1}} }",
+		"defined named slice":   "type optsList []util.HostGitOptions\ntype more optsList\nfunc probe() { _ = more{{Ceiling: 1}} }",
+		"function-local type":   `func probe() { type local []util.HostGitOptions; _ = local{{Ceiling: 1}} }`,
+		"local embedding type shadows plain type": `func probe(c util.HostGitCeiling) { type root struct{ util.HostGitOptions }; var r root; r.Ceiling = c }`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			scan := scanHostGitDoorSource(t, map[string]string{"pkg/runtimebroker/probe.go": head + fn + "\n"})
@@ -1293,9 +1762,11 @@ func TestHostGitGoesThroughOneDoor_CeilingOffNeedsEntry(t *testing.T) {
 			if len(v) != 1 || !strings.Contains(v[0], "CeilingOff in pkg/runtimebroker/probe.go:probe") {
 				t.Errorf("violations = %q, want one CeilingOff finding", v)
 			}
-			allow := map[string]hostGitDoorEntry{"pkg/runtimebroker/probe.go:probe": {1, "fixture reason"}}
-			if v := scan.violations(nil, allow); len(v) != 0 {
-				t.Errorf("with an allowlist entry (count 1): violations %q", v)
+			for _, n := range []int{0, 1, 2} {
+				allow := map[string]hostGitDoorEntry{"pkg/runtimebroker/probe.go:probe": {n, "fixture reason"}}
+				if v := scan.violations(nil, allow); (n == 1) != (len(v) == 0) {
+					t.Errorf("with an allowlist entry (count %d, true count 1): violations %q", n, v)
+				}
 			}
 		})
 	}
@@ -1310,11 +1781,147 @@ func TestHostGitGoesThroughOneDoor_CeilingOffNeedsEntry(t *testing.T) {
 			t.Errorf("%s was flagged: %q", name, v)
 		}
 	}
+	// A value that is CeilingOff in arithmetic counts twice: where CeilingOff
+	// is named, and as a non-On value; the count stays exact.
+	twice := head + "func probe(o *util.HostGitOptions) { o.Ceiling = util.CeilingOff - 0 }\n"
+	tscan := scanHostGitDoorSource(t, map[string]string{"pkg/runtimebroker/probe.go": twice})
+	if v := tscan.violations(nil, map[string]hostGitDoorEntry{"pkg/runtimebroker/probe.go:probe": {1, "r"}}); len(v) != 1 {
+		t.Errorf("CeilingOff arithmetic with count 1: violations %q, want one (the count is 2)", v)
+	}
+	if v := tscan.violations(nil, map[string]hostGitDoorEntry{"pkg/runtimebroker/probe.go:probe": {2, "r"}}); len(v) != 0 {
+		t.Errorf("CeilingOff arithmetic with count 2: violations %q", v)
+	}
+	// Parenthesised CeilingOn, a conversion of it, and nested literals that
+	// set it are accepted.
+	onForms := head + "func probe(o *util.HostGitOptions) { o.Ceiling = (util.CeilingOn); _ = util.HostGitOptions{Ceiling: (util.CeilingOn)}; _ = util.HostGitCeiling((util.CeilingOn)); _ = [][]util.HostGitOptions{{{Ceiling: util.CeilingOn}}}; _ = [][]int{{1}} }\n"
+	if v := scanHostGitDoorSource(t, map[string]string{"pkg/runtimebroker/probe.go": onForms}).violations(nil, nil); len(v) != 0 {
+		t.Errorf("CeilingOn forms were flagged: %q", v)
+	}
 	// The Ceiling checks cover the whole module: a site outside the door
 	// roots fails too.
 	outside := "package main\nimport \"github.com/GoogleCloudPlatform/scion/pkg/util\"\nfunc probe() { _ = util.HostGitOptions{Ceiling: util.CeilingOff} }\n"
 	if v := scanHostGitDoorSource(t, map[string]string{"cmd/scion/probe.go": outside}).violations(nil, nil); len(v) != 1 || !strings.Contains(v[0], "CeilingOff in cmd/scion/probe.go:probe") {
 		t.Errorf("outside the door roots: violations %q, want one CeilingOff finding", v)
+	}
+	// Bounds: exactly hostGitDoorMaxDepth levels of elided nesting, and a
+	// chain of exactly hostGitDoorMaxDepth named types, are checked (their
+	// Ceiling: 1 is found); one more of either is flagged as not checked.
+	nested := func(k int) string {
+		return strings.Repeat("[]", k) + "util.HostGitOptions" + strings.Repeat("{", k) + "{Ceiling: 1}" + strings.Repeat("}", k)
+	}
+	chain := func(n int) string {
+		c := "type t1 []util.HostGitOptions\n"
+		for i := 2; i <= n; i++ {
+			c += fmt.Sprintf("type t%d = t%d\n", i, i-1)
+		}
+		return c + fmt.Sprintf("func probe() { _ = t%d{{Ceiling: 1}} }\n", n)
+	}
+	for name, c := range map[string]struct {
+		src     string
+		checked bool
+	}{
+		"16 levels":      {head + "func probe() { _ = " + nested(hostGitDoorMaxDepth) + " }\n", true},
+		"17 levels":      {head + "func probe() { _ = " + nested(hostGitDoorMaxDepth+1) + " }\n", false},
+		"16 named types": {head + chain(hostGitDoorMaxDepth), true},
+		"17 named types": {head + chain(hostGitDoorMaxDepth+1), false},
+	} {
+		v := scanHostGitDoorSource(t, map[string]string{"pkg/runtimebroker/probe.go": c.src}).violations(nil, nil)
+		var found, notChecked bool
+		for _, x := range v {
+			found = found || strings.Contains(x, "CeilingOff in pkg/runtimebroker/probe.go:probe")
+			notChecked = notChecked || strings.Contains(x, "not checked")
+		}
+		if c.checked && (!found || notChecked) || !c.checked && (found || !notChecked) {
+			t.Errorf("%s: violations %q, want checked=%v", name, v, c.checked)
+		}
+	}
+	// A literal with elided elements whose type name is ambiguous (declared
+	// more than once: locally over a package type, twice in sibling blocks,
+	// or in two build-tagged files) is flagged as not checked; without
+	// elided elements it needs no finding.
+	for name, files := range map[string]map[string]string{
+		"local type shadows package type": {"pkg/runtimebroker/probe.go": head + "type list []int\nfunc probe() { type list []util.HostGitOptions; _ = list{{Ceiling: 1}} }\n"},
+		"sibling local types":             {"pkg/runtimebroker/probe.go": head + "func probe() { { type l []int; _ = l{} }; { type l []util.HostGitOptions; _ = l{{Ceiling: 1}} } }\n"},
+		"package type in two tagged files": {
+			"pkg/runtimebroker/probe.go":   head + "type opts2 []util.HostGitOptions\nfunc probe() { _ = opts2{{Ceiling: 1}} }\n",
+			"pkg/runtimebroker/probe_w.go": "//go:build windows\n\npackage runtimebroker\ntype opts2 []int\n",
+		},
+	} {
+		v := scanHostGitDoorSource(t, files).violations(nil, nil)
+		found := false
+		for _, x := range v {
+			found = found || strings.Contains(x, "ambiguous type; not checked")
+		}
+		if !found {
+			t.Errorf("%s: violations %q, want the ambiguous type flagged", name, v)
+		}
+	}
+	plain := head + "func probe() { { type l []int; _ = l{1} }; { type l []int; _ = l{2} } }\n"
+	if v := scanHostGitDoorSource(t, map[string]string{"pkg/runtimebroker/probe.go": plain}).violations(nil, nil); len(v) != 0 {
+		t.Errorf("an ambiguous type without elided elements was flagged: %q", v)
+	}
+	// A declaration named HostGitCeiling outside git_host.go is a finding, so
+	// a stand-in cannot pass the conversion rule's name match.
+	stand := "package runtimebroker\nfunc HostGitCeiling(x int) int { return x }\n"
+	if v := scanHostGitDoorSource(t, map[string]string{"pkg/runtimebroker/probe.go": stand}).violations(nil, nil); len(v) != 1 || !strings.Contains(v[0], "declares HostGitCeiling") {
+		t.Errorf("HostGitCeiling declaration: violations %q, want one", v)
+	}
+	// A plain struct in one tagged file and an embedding one in another: the
+	// type name is ambiguous, so a variable of it is not provably another
+	// type, and its .Ceiling write counts (exactly once).
+	tagged := map[string]string{
+		"pkg/runtimebroker/probe.go":   head + "type cfg struct{ Ceiling int }\nfunc probe(c util.HostGitCeiling) { var x cfg; x.Ceiling = c }\n",
+		"pkg/runtimebroker/probe_w.go": "//go:build windows\n\npackage runtimebroker\nimport \"github.com/GoogleCloudPlatform/scion/pkg/util\"\ntype cfg struct{ util.HostGitOptions }\n",
+	}
+	cscan := scanHostGitDoorSource(t, tagged)
+	for _, n := range []int{0, 1, 2} {
+		v := cscan.violations(nil, map[string]hostGitDoorEntry{"pkg/runtimebroker/probe.go:probe": {n, "r"}})
+		if (n == 1) != (len(v) == 0) {
+			t.Errorf("plain and embedding cfg, count %d (true count 1): violations %q", n, v)
+		}
+	}
+	// A literal whose type is a type parameter and has elided elements is
+	// flagged as not checked.
+	tp := head + "func probe[S ~[]util.HostGitOptions]() { _ = S{{Ceiling: 1}} }\n"
+	if v := scanHostGitDoorSource(t, map[string]string{"pkg/runtimebroker/probe.go": tp}).violations(nil, nil); len(v) != 1 || !strings.Contains(v[0], "type parameter type; not checked") {
+		t.Errorf("type parameter literal: violations %q, want one not-checked finding", v)
+	}
+	// Ambiguous names whose declarations lead to HostGitOptions are flagged
+	// even without elided elements: an alias in two tagged files inside
+	// pkg/util, and a parenthesised alias outside it (alone, and in two
+	// tagged files).
+	for name, c := range map[string]struct {
+		files map[string]string
+		want  []string
+	}{
+		"in-util alias in two tagged files": {map[string]string{
+			"pkg/util/hopts.go":   "package util\ntype hopts = HostGitOptions\nfunc probe() { _ = hopts{Ceiling: 1} }\n",
+			"pkg/util/hopts_w.go": "//go:build windows\n\npackage util\ntype hopts = HostGitOptions\n",
+		}, []string{"ambiguous type; not checked"}},
+		"outside-util paren alias": {map[string]string{
+			"pkg/runtimebroker/probe.go": "package runtimebroker\nimport \"github.com/GoogleCloudPlatform/scion/pkg/util\"\ntype o = (util.HostGitOptions)\nfunc probe() { _ = o{Ceiling: 1} }\n",
+		}, []string{"over HostGitOptions"}},
+		"paren alias in two tagged files": {map[string]string{
+			"pkg/runtimebroker/probe.go":   "package runtimebroker\nimport \"github.com/GoogleCloudPlatform/scion/pkg/util\"\ntype o = (util.HostGitOptions)\nfunc probe() { _ = o{} }\n",
+			"pkg/runtimebroker/probe_w.go": "//go:build windows\n\npackage runtimebroker\nimport \"github.com/GoogleCloudPlatform/scion/pkg/util\"\ntype o = (util.HostGitOptions)\n",
+		}, []string{"over HostGitOptions", "ambiguous type; not checked"}},
+	} {
+		v := strings.Join(scanHostGitDoorSource(t, c.files).violations(nil, nil), "\n")
+		for _, w := range c.want {
+			if !strings.Contains(v, w) {
+				t.Errorf("%s: violations %q, want %q", name, v, w)
+			}
+		}
+	}
+	// An ambiguous type that leads nowhere near HostGitOptions (two tagged
+	// declarations, one embedding a plain struct), used in an unkeyed literal
+	// with an explicitly typed element: no finding.
+	installer := map[string]string{
+		"pkg/hub/maintenance/inst.go":   "package maintenance\ntype base struct{ status string }\ntype inst struct{ root string }\nfunc probe() *inst { return &inst{root: \"x\"} }\n",
+		"pkg/hub/maintenance/inst_w.go": "//go:build windows\n\npackage maintenance\ntype inst struct{ base }\nfunc probe2() *inst { return &inst{base{status: \"x\"}} }\n",
+	}
+	if v := scanHostGitDoorSource(t, installer).violations(nil, nil); len(v) != 0 {
+		t.Errorf("an ambiguous unrelated type was flagged: %q", v)
 	}
 	// An alias or defined type over HostGitOptions is a finding of its own, so
 	// its literals and writes cannot slip past the checks.
