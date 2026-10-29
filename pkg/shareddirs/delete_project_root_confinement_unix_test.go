@@ -24,6 +24,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 )
 
 // keepFile writes dir/keep.txt (creating dir) and returns its path.
@@ -114,4 +115,25 @@ func TestDeleteProjectRoot_InnerSymlinkUnlinkedTargetKept(t *testing.T) {
 	got, err := os.ReadFile(outsideFile)
 	require.NoError(t, err, "the file link's target survives")
 	assert.Equal(t, "file", string(got))
+}
+
+// The single-component open refuses "." and ".." itself, without relying on
+// its callers' checks: neither opens a directory.
+func TestOpenExistingDirNoFollow_RefusesDotComponents(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "base")
+	require.NoError(t, os.MkdirAll(base, 0o755))
+	baseFd, err := unix.Open(base, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = unix.Close(baseFd) })
+
+	for _, comp := range []string{".", ".."} {
+		fd, existed, err := openExistingDirNoFollow(baseFd, comp)
+		if err == nil && fd >= 0 {
+			_ = unix.Close(fd)
+		}
+		require.Error(t, err, "comp %q", comp)
+		assert.True(t, errors.Is(err, ErrUnconfinedPath), "comp %q: err = %v", comp, err)
+		assert.False(t, existed, "comp %q", comp)
+		assert.Equal(t, -1, fd, "comp %q", comp)
+	}
 }
