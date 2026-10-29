@@ -29,8 +29,9 @@ package hub
 // (hubDeliveryWalk with a hubDeliveryLegacyNote). It applies only when:
 //
 //   - the credential is a launch selection credential for a purpose
-//     legacyDeliveryFallbackPurpose names (start, restart, the availability
-//     probe of those); no other caller of Decide gets it;
+//     legacyDeliveryFallbackPurpose names (start, restart, their provision
+//     credentials, the availability probe of those); no other caller of
+//     Decide gets it;
 //   - every Decide step before step 10 allowed the item (the association,
 //     relationship and restriction stages, explicit access constraints
 //     included), and the step-10 gate conditions passed: the fallback runs
@@ -161,12 +162,13 @@ func legacyFallbackPermission(permissionID string) bool {
 }
 
 // legacyDeliveryFallbackPurpose reports whether launch selection for
-// purpose takes the legacy fallback: the start and restart selection, and
+// purpose takes the legacy fallback: the start and restart selection, the
+// provision credentials sent with them for the broker's skill fetch, and
 // the create-time availability probe, which must agree with what a start
 // delivers.
 func legacyDeliveryFallbackPurpose(p MaterialPurpose) bool {
 	switch p {
-	case PurposeDispatch, PurposeRestart, PurposeAvailabilityProbe:
+	case PurposeDispatch, PurposeRestart, PurposeProvisionCredential, PurposeAvailabilityProbe:
 		return true
 	}
 	return false

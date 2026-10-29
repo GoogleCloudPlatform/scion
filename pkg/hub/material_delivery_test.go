@@ -722,9 +722,7 @@ func TestDispatchDelivery_UnadmittedAgentGetsOnlyUserMaterial(t *testing.T) {
 		assert.NotContains(t, denied, meta.ID, "refused secret %s was fetched", meta.Name)
 	}
 	assert.Zero(t, rec.resolves, "launch selection never calls Resolve")
-	// rec.gets is not asserted: the provision-credential pass of a start
-	// still reads project secrets by name for the broker's skill fetch,
-	// outside launch selection and unchanged here.
+	assert.Zero(t, rec.gets, "no value is read by name, including for provision credentials")
 }
 
 // TestDispatchDelivery_MintBeforeFetch: during a restart, the delivery

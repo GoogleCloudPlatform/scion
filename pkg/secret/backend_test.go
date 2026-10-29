@@ -949,7 +949,7 @@ var hubInternalGetCallers = map[string]int{
 	filepath.Join("pkg", "hub", "handlers_projects_core.go"):      2, // resolveCloneToken: hub-side git clone credential, never delivered
 	filepath.Join("pkg", "hub", "resource_import.go"):             1, // resource import: hub-side git clone credential, never delivered
 	filepath.Join("pkg", "hub", "material_runtime.go"):            1, // pending FetchValues migration: agent runtime material read (fetchAuthorizedValue)
-	filepath.Join("pkg", "hub", "httpdispatcher.go"):              3, // pending FetchValues migration: provision credentials + NoAuth GITHUB_TOKEN (own and owner scope)
+	filepath.Join("pkg", "hub", "httpdispatcher.go"):              2, // pending FetchValues migration: NoAuth GITHUB_TOKEN (own and owner scope)
 	filepath.Join("pkg", "secretmigration", "secretmigration.go"): 1, // hub secret migration helper
 	filepath.Join("cmd", "server_foreground.go"):                  3, // hub startup: signing keys + telemetry credentials
 }
