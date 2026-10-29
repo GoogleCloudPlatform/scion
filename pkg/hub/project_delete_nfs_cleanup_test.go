@@ -199,11 +199,17 @@ func TestDeleteProject_NoEmbeddedBroker_NFS_HubRemovesExportTree(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "deleted project's NFS tree must be removed (err=%v)", err)
 }
 
-// A share that is not mounted on the hub is nothing to remove.
+// A share that is not mounted on the hub: the delete commits and removes
+// nothing on the share, and it answers 200 with the fixed storageKept item
+// instead of an unqualified 204.
 func TestDeleteProject_NFS_ShareNotMountedOnHubIsSuccess(t *testing.T) {
 	e := newNFSDeleteTestEnv(t, "unmounted-nfs")
 	e.srv.config.ProjectStorageConfig.NFS.MountRoot = filepath.Join(e.home, "absent")
-	e.deleteProject(t)
+	rec := doRequest(t, e.srv, http.MethodDelete, "/api/v1/projects/"+e.project.ID, nil)
+	requireSharedStorageKeptBody(t, rec)
+	e.srv.storageCleanupWG.Wait()
+	_, err := e.s.GetProject(context.Background(), e.project.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
 // The hub's workspace storage config is not validated like a broker's, so

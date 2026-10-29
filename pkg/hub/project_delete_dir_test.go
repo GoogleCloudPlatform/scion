@@ -123,7 +123,7 @@ func TestDeleteProject_StoredSlugNotDirectChild_RemovesNoDirectory(t *testing.T)
 
 			logs := captureProjectsLog(t, srv)
 			rec = doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+id, nil)
-			require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+			requireProjectDeleteResponse(t, rec)
 			srv.storageCleanupWG.Wait()
 
 			logged := logs.String()
@@ -200,7 +200,7 @@ func TestDeleteProject_RemovesExactlyOwnDirectory(t *testing.T) {
 			storeHubManagedProject(t, s, id, slug)
 
 			rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+id, nil)
-			require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+			requireProjectDeleteResponse(t, rec)
 			srv.storageCleanupWG.Wait()
 
 			_, err := os.Stat(own)

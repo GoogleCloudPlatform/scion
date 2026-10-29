@@ -101,7 +101,7 @@ func assertAbsent(t *testing.T, path, msg string) {
 func (f *embeddedCleanupFixture) deleteProject(t *testing.T) {
 	t.Helper()
 	rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/projects/"+f.project.ID, nil)
-	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+	requireProjectDeleteResponse(t, rec)
 	_, err := f.store.GetProject(context.Background(), f.project.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
@@ -314,7 +314,7 @@ func TestDeleteProject_BackendConfiguredCombinedServer_RemovesOnlyDirectChildOfP
 	writeTree(t, filepath.Dir(siblingFile), "keep.txt")
 
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/projects/"+project.ID, nil)
-	require.Equal(t, http.StatusNoContent, rec.Code, "body: %s", rec.Body.String())
+	requireProjectDeleteResponse(t, rec)
 
 	_, err := os.Stat(siblingFile)
 	assert.NoError(t, err, "sibling project directory on the embedded broker's local disk must be kept")

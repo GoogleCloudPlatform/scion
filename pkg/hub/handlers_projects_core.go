@@ -3874,6 +3874,14 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 	deletedProject := result.Project
 	s.executePostDeletionEffects(ctx, id, deletedProject, effectInputs)
 
+	// The Hub is the only remover of the project's tree on shared project
+	// storage: when it cannot see that storage the tree is kept, and the
+	// delete says so (200 with fixed, path-free items) instead of an
+	// unqualified 204.
+	if kept := s.projectDeleteStorageKept(); len(kept) > 0 {
+		writeJSON(w, http.StatusOK, projectDeleteResult{StorageKept: kept})
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
