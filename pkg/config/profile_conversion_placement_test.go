@@ -232,7 +232,8 @@ func TestProfileConversionSharedNamespaceSplits(t *testing.T) {
 	}
 	for _, path := range []string{"runtimes.a", "runtimes.b"} {
 		if f := conversionFinding(got, path, ConversionProfileConflict); f == nil || f.Severity != ConversionSeverityNotice ||
-			!strings.Contains(f.Message, "may target the same cluster and namespace") {
+			!strings.Contains(f.Message, "may target the same cluster and namespace") ||
+			!strings.Contains(f.Message, "(a legacy start is refused today when both resolve to the same cluster and namespace)") {
 			t.Fatalf("no shared namespace notice at %s: %+v", path, got.Findings)
 		}
 	}

@@ -373,7 +373,7 @@ func foldProfile(st *convState, vs *VersionedSettings, configured func(string) b
 			placementEntries = entries
 		} else {
 			st.add(ConversionProfileConflict, ConversionSeverityNotice, strings.TrimSuffix(rp, "."),
-				fmt.Sprintf("runtime entries %s, %s may target the same cluster and namespace (equal, or empty context or namespace) with different placement; profiles on runtime entry %s keep its own placement, on a separate instance when it differs", rtKey, other, rtKey), name)
+				fmt.Sprintf("runtime entries %s, %s may target the same cluster and namespace (equal, or empty context or namespace) with different placement (a legacy start is refused today when both resolve to the same cluster and namespace); profiles on runtime entry %s keep its own placement, on a separate instance when it differs", rtKey, other, rtKey), name)
 		}
 	}
 	if prof.DefaultTemplate != "" {
