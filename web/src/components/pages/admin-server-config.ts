@@ -58,6 +58,7 @@ import {
   settingsErrorStyles,
 } from '../shared/settings-error-views.js';
 import './admin-experiments.js';
+import './admin-chat-retention.js';
 import {
   type ImageRegistryProvenance,
   hasOtherProfileEnvOverrides,
@@ -5079,6 +5080,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
       ${this.renderHubObservabilitySection()} ${this.renderNativeChatSection()}
       ${this.renderMessageBrokerSection()} ${this.renderCrossProjectMessagingSection()}
+      <scion-admin-chat-retention></scion-admin-chat-retention>
     `;
   }
 
