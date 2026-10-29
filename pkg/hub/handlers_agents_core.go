@@ -5086,6 +5086,14 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 		isSystemPlane := false
 
 		targetAgent, err := s.store.GetAgent(r.Context(), id)
+		// A caller who cannot read the target agent's project gets exactly
+		// the unknown-agent answer for a soft-deleted target; a reader keeps
+		// the answer it gets today. canReadProject fails closed: a lookup
+		// fault counts as no read.
+		if err == nil && (targetAgent == nil ||
+			(!targetAgent.DeletedAt.IsZero() && !s.canReadProject(r.Context(), identity, targetAgent.ProjectID))) {
+			err = store.ErrNotFound
+		}
 		if err != nil {
 			// A visitor gets the one refusal for an unknown agent too
 			// (admitVisitorSubRoute already refused it before here).

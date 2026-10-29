@@ -2111,6 +2111,15 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	}
 	messaging.RecordStep(ctx, "agent_loaded")
 
+	// A chat reference (surface and external_ref) resolves a conversation
+	// whose default agent is set to the recipient, so the recipient must be
+	// live. A soft-deleted recipient gets exactly this handler's answer for
+	// an unknown agent, before anything is dispatched or written.
+	if req.Surface != "" && req.ExternalRef != "" && (agent == nil || !agent.DeletedAt.IsZero()) {
+		writeErrorFromErr(w, store.ErrNotFound, "")
+		return
+	}
+
 	// Ownership check: verify the DM key IDs match the actual participants.
 	// The agent in the DM key must match the target agent; the user must match
 	// the AUTHENTICATED identity (not the client-supplied SenderID, which can
