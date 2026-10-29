@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -61,6 +62,12 @@ type SettingsOverlay struct {
 	refs             ProfileReferences
 	retained         retainState
 	builtinsOverride *builtinCatalog // tests only; nil uses the embedded defaults
+
+	// placementErrors and placementWarnings are the Kubernetes placement
+	// findings of the stored runtimes and profiles
+	// (OverlaySections.PlacementErrors and Warnings), guarded by mu.
+	placementErrors   []string
+	placementWarnings []string
 }
 
 // maxFallbackLogKeys caps the set of logged single-stored-profile fallback
@@ -114,6 +121,31 @@ func (o *SettingsOverlay) Update(
 		o.harnessConfigs = nonEmptyOrNil(cloneHarnessConfigs(harnessConfigs))
 	}
 	o.active = true
+}
+
+// SetPlacementFindings records the Kubernetes placement findings of the
+// runtimes and profiles last given to Update: the settings paths whose
+// placement is malformed or invalid, and ignored unknown keys. It reports
+// whether they differ from the findings recorded before.
+func (o *SettingsOverlay) SetPlacementFindings(errs, warnings []string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	changed := !slices.Equal(o.placementErrors, errs) || !slices.Equal(o.placementWarnings, warnings)
+	o.placementErrors = slices.Clone(errs)
+	o.placementWarnings = slices.Clone(warnings)
+	return changed
+}
+
+// PlacementErrors returns a copy of the settings paths whose Kubernetes
+// placement is malformed or invalid in the runtimes and profiles the
+// overlay serves; nil for a nil overlay or when there are none.
+func (o *SettingsOverlay) PlacementErrors() []string {
+	if o == nil {
+		return nil
+	}
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return slices.Clone(o.placementErrors)
 }
 
 // UpdateImageRegistryInputs sets the hub's image_registry layers, which

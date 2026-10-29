@@ -48,6 +48,7 @@ const (
 	placementLegacyGlobalCause     = "the agent runtime's global settings use the legacy format and mention Kubernetes placement keys; set schema_version: \"1\" so Kubernetes placement can be determined"
 	placementBuiltFromCause        = "the runtime entry this agent's runtime was built from no longer matches its cluster and namespace; restart the agent runtime, fix the entry, or align the settings file's entry with the stored one"
 	placementAgentConfigCause      = "the agent's config could not be read to check it against the agent runtime's Kubernetes placement"
+	placementOverlayInvalidCause   = "the Kubernetes placement in the runtimes and profiles stored in the Hub is not valid; fix them in the Hub settings (the server config view names the paths)"
 )
 
 // placementDefaultsOnlyCause is the fixed cause for a profile with placement
@@ -93,9 +94,19 @@ func (r runtimeResolution) forExistingAgent(agentName string) runtimeResolution 
 // placementForStart is resolvePlacement with the project's settings (the
 // project-merged view, for the ignored-values warning) loaded from
 // projectPath; a load failure leaves them out.
+//
+// Every start leg resolves through here. On a legacy Runtime Broker, a
+// start on the Kubernetes runtime gets operator-owned placement
+// (api.ResolvedPlacement.OperatorOwned), even when the runtime entries and
+// profiles set none: the agent's own fields are then checked with the
+// operator rules (config.CheckAgentPlacement) before the start's side
+// effects, so tolerations or a runtime class the operator does not set
+// are refused.
 func (s *Server) placementForStart(ctx context.Context, res runtimeResolution, projectPath string) (*api.ResolvedPlacement, error) {
 	var projectVS *config.VersionedSettings
-	if res.Runtime != nil && res.Runtime.Name() == "kubernetes" && res.How != resolutionFlat && !s.isFlat() {
+	legacyKubernetes := res.Runtime != nil && res.Runtime.Name() == "kubernetes" && res.How != resolutionFlat &&
+		res.How != resolutionErrorRuntime && !s.isFlat()
+	if legacyKubernetes {
 		// Without a resolved project directory the loader would fall back to
 		// the working directory's project; skip the warning input instead.
 		if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
@@ -104,7 +115,26 @@ func (s *Server) placementForStart(ctx context.Context, res runtimeResolution, p
 			}
 		}
 	}
-	return s.resolvePlacement(ctx, res, projectVS)
+	rp, err := s.resolvePlacement(ctx, res, projectVS)
+	if err != nil || !legacyKubernetes {
+		return rp, err
+	}
+	return operatorOwnedPlacement(rp), nil
+}
+
+// operatorOwnedPlacement returns legacy placement rp (nil: none) as
+// operator-owned placement, a fresh value that leaves rp unchanged.
+func operatorOwnedPlacement(rp *api.ResolvedPlacement) *api.ResolvedPlacement {
+	out := &api.ResolvedPlacement{Sources: map[string][]string{}, OperatorOwned: true}
+	if rp != nil {
+		out.NodeSelector = config.MergeNodeSelector(rp.NodeSelector, nil)
+		out.Tolerations = config.MergeTolerations(rp.Tolerations, nil)
+		out.RuntimeClassName = rp.RuntimeClassName
+		for k, v := range rp.Sources {
+			out.Sources[k] = append([]string(nil), v...)
+		}
+	}
+	return out
 }
 
 // resolvePlacement resolves the Kubernetes placement for one start on the
@@ -143,6 +173,13 @@ func (s *Server) resolvePlacement(ctx context.Context, res runtimeResolution, pr
 	if config.GlobalSettingsIsLegacyFormat() && config.GlobalSettingsMentionPlacementKeys() {
 		s.agentLifecycleLog.Warn("Kubernetes placement: legacy-format global settings mention a placement key", "agent", res.Agent)
 		return nil, placementRefusal(placementLegacyGlobalCause)
+	}
+	// Malformed or invalid placement in the Hub's stored runtimes and
+	// profiles fails every Kubernetes start closed: it is never read as no
+	// placement.
+	if paths := config.GetGlobalSettingsOverlay().PlacementErrors(); len(paths) > 0 {
+		s.agentLifecycleLog.Warn("Kubernetes placement: the stored runtimes and profiles have invalid placement", "agent", res.Agent, "paths", paths)
+		return nil, placementRefusal(placementOverlayInvalidCause)
 	}
 	if gvs == nil {
 		gvs = &config.VersionedSettings{}

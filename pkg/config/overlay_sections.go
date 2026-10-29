@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 
 	"github.com/knadh/koanf/v2"
 )
@@ -28,6 +29,18 @@ type OverlaySections struct {
 	Runtimes       map[string]V1RuntimeConfig
 	Profiles       map[string]V1ProfileConfig
 	HarnessConfigs map[string]HarnessConfigEntry
+
+	// PlacementErrors lists, sorted, the settings paths whose Kubernetes
+	// placement is malformed or invalid in the runtimes and profiles the
+	// overlay would serve (ValidateRawPlacementEntry on a stored document,
+	// ValidatePlacementSettings on the result). The co-located Runtime
+	// Broker refuses Kubernetes starts while it is not empty; the sections
+	// themselves still load.
+	PlacementErrors []string
+	// Warnings lists, sorted, the unknown keys of stored runtime entries and
+	// profiles that are not placement keys. They are ignored, and kept in
+	// the stored document.
+	Warnings []string
 }
 
 // SectionDecodeError reports a stored section document that does not decode.
@@ -84,6 +97,8 @@ func OverlayMapSections(dbSections map[string]json.RawMessage, bootstrap *koanf.
 	} else {
 		out.Profiles = ProfilesFromBootstrapKoanf(bootstrap)
 	}
+
+	out.PlacementErrors, out.Warnings = checkOverlayPlacement(dbSections, out.Runtimes, out.Profiles)
 
 	if doc, ok := dbSections["harness_configs"]; ok {
 		var v map[string]HarnessConfigEntry
@@ -165,4 +180,57 @@ func LoadServerBootstrapKoanf(serverConfigPath string, profileTimezones []Legacy
 	k := LoadBootstrapKoanfWithConfigPath(serverConfigPath)
 	DeleteLegacyProfileTimezones(k, profileTimezones)
 	return k
+}
+
+// checkOverlayPlacement checks the Kubernetes placement of the runtimes and
+// profiles the overlay would serve: the raw keys of each stored document's
+// entries (ValidateRawPlacementEntry; a stored document that does not
+// decode as a map of entries is reported as a whole), then the typed pair
+// (ValidatePlacementSettings). Unknown keys that are not placement keys
+// are warnings. Paths only, never values.
+func checkOverlayPlacement(dbSections map[string]json.RawMessage, runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig) (errs, warnings []string) {
+	known := map[string]map[string]bool{
+		"runtimes": knownYAMLKeys(V1RuntimeConfig{}),
+		"profiles": knownYAMLKeys(V1ProfileConfig{}),
+	}
+	seen := map[string]bool{}
+	addErr := func(path string) {
+		if !seen[path] {
+			seen[path] = true
+			errs = append(errs, path)
+		}
+	}
+	for _, section := range []string{"runtimes", "profiles"} {
+		doc, ok := dbSections[section]
+		if !ok {
+			continue
+		}
+		var entries map[string]interface{}
+		if err := json.Unmarshal(doc, &entries); err != nil {
+			addErr(section)
+			continue
+		}
+		for _, name := range rawMapKeys(entries) {
+			entry, ok := entries[name].(map[string]interface{})
+			if !ok {
+				continue
+			}
+			path := section + "." + name
+			if ValidateRawPlacementEntry(path, entry) != nil {
+				addErr(path)
+				continue
+			}
+			for _, k := range rawMapKeys(entry) {
+				if !known[section][k] {
+					warnings = append(warnings, path+"."+k+": unknown setting; it is ignored and kept in the stored settings")
+				}
+			}
+		}
+	}
+	for _, e := range ValidatePlacementSettings(runtimes, profiles) {
+		addErr(e.Path)
+	}
+	sort.Strings(errs)
+	sort.Strings(warnings)
+	return errs, warnings
 }
