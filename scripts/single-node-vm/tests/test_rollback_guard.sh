@@ -9,12 +9,15 @@
 #   - its root path, with stubbed id/runuser/systemctl: root runs only
 #     systemctl and hands every read and write under the install root to
 #     the owner through runuser;
+#   - scion-hub-start-attempt.sh, the start-attempts counter (increment,
+#     reset on a switch, atomic write, no symlink following);
 #   - scion-layout.sh install-guard: the root-owned script install.
 #
 # Sourced by run.sh, never executed.
 # shellcheck shell=bash
 
 ROLLBACK_SH="${TIER_DIR}/scion-hub-rollback.sh"
+START_ATTEMPT_SH="${TIER_DIR}/scion-hub-start-attempt.sh"
 RB_LAYOUT_SH="${TIER_DIR}/scion-layout.sh"
 
 # =====================================================================
@@ -39,6 +42,9 @@ _rb_new_host() {
   chmod 0755 "${RB_ROOT}/releases/"*/scion
   ln -s releases/nightly-20261023 "${RB_ROOT}/current"
   ln -s releases/nightly-20261020 "${RB_ROOT}/previous"
+  # The crash loop's own start attempts: StartLimitBurst (5) starts of the
+  # current release since the switch.
+  _rb_attempts nightly-20261023 5
   : > "$RB_CALLS"
   # shellcheck disable=SC2086 # scenario name plus optional exit code/status
   _rb_scenario ${RB_SCENARIO:-v249-crash}
@@ -63,6 +69,21 @@ fi
 exit 0
 EOF
   chmod 0755 "${RB_SHIM}/systemctl"
+}
+
+# _rb_attempts TARGET COUNT | missing | garbled | symlink -- set
+# RB_ROOT/start-attempts (what scion-hub-start-attempt.sh maintains).
+_rb_attempts() {
+  local f="${RB_ROOT}/start-attempts"
+  rm -f "$f"
+  case "$1" in
+    missing) ;;
+    garbled) printf 'not json\n' > "$f" ;;
+    symlink)
+      printf '{"target":"nightly-20261023","count":9}\n' > "${RB_DIR}/attempts-elsewhere"
+      ln -s "${RB_DIR}/attempts-elsewhere" "$f" ;;
+    *) printf '{"target":"%s","count":%s}\n' "$1" "$2" > "$f" ;;
+  esac
 }
 
 # _rb_states LINE... -- the unit states the stub replays, one per
@@ -105,17 +126,22 @@ _rb_crash_result() {
 #                     clean exit, NRestarts=0 (manual restarts don't count);
 #   v249-stop-timeout / v255-stop-timeout
 #                     an operator `systemctl stop` that outlived
-#                     TimeoutStopSec: SIGKILL, Result=timeout (2:9),
-#                     failed/failed, NRestarts=0 (same on both versions);
+#                     TimeoutStopSec: SIGKILL, Result=timeout (2:9);
 #   v249-stop-exitcode / v255-stop-exitcode
 #                     an operator stop where the hub exited 1 on SIGTERM;
-#   crash-nrestarts-3 a crash with NRestarts one short of StartLimitBurst-1;
-#   crash-nrestarts-5 a crash with NRestarts above StartLimitBurst-1;
-#   crash-no-nrestarts a crash whose NRestarts/StartLimitBurst are empty;
+#   v249-stop-child-timeout / v255-stop-child-timeout
+#                     the main process exited 0 on SIGTERM but a child in
+#                     the cgroup outlived TimeoutStopSec: Result=timeout,
+#                     clean main exit 1:0;
+#   v249-stop-sigterm-timeout / v255-stop-sigterm-timeout
+#                     the same with the main process killed by SIGTERM (2:15);
 #   show-empty        `systemctl show` prints nothing;
 #   show-unknown      every property empty (an unknown unit).
-# Crash loops and auto-restarted clean exits have NRestarts=4 with
-# StartLimitBurst=5 (the real systemd 249 value on the VM). CODE STATUS
+# The failed stops are the same on both versions (failed/failed, no
+# restart pending) and carry NRestarts=6: a hub updated or restarted from
+# the UI several times since the last manual start, which is why the guard
+# does not use NRestarts. StartLimitBurst is 5. The guard ignores the
+# NRestarts column; it is there because systemd reports it. CODE STATUS
 # default to 1 1 (exit status 1), or 1 0 for the clean scenarios.
 _rb_scenario() {
   local name="$1" code="${2:-1}" status="${3:-}" result
@@ -134,11 +160,10 @@ _rb_scenario() {
     flip-third) _rb_states "failed failed $result $x" "failed failed $result $x" "activating auto-restart $result $x" ;;
     recovered) _rb_states "active running success 1 0 0 5" ;;
     v249-clean-manual) _rb_states "failed failed start-limit-hit $code $status 0 5" ;;
-    v249-stop-timeout|v255-stop-timeout) _rb_states "failed failed timeout 2 9 0 5" ;;
-    v249-stop-exitcode|v255-stop-exitcode) _rb_states "failed failed exit-code 1 1 0 5" ;;
-    crash-nrestarts-3) _rb_states "failed failed $result $code $status 3 5" ;;
-    crash-nrestarts-5) _rb_states "failed failed $result $code $status 5 5" ;;
-    crash-no-nrestarts) _rb_states "failed failed $result $code $status - -" ;;
+    v249-stop-timeout|v255-stop-timeout) _rb_states "failed failed timeout 2 9 6 5" ;;
+    v249-stop-exitcode|v255-stop-exitcode) _rb_states "failed failed exit-code 1 1 6 5" ;;
+    v249-stop-child-timeout|v255-stop-child-timeout) _rb_states "failed failed timeout 1 0 6 5" ;;
+    v249-stop-sigterm-timeout|v255-stop-sigterm-timeout) _rb_states "failed failed timeout 2 15 6 5" ;;
     show-empty) _rb_states "NONE" ;;
     show-unknown) _rb_states "- - - - - - -" ;;
     *) echo "unknown scenario $name" >&2; return 1 ;;
@@ -147,7 +172,7 @@ _rb_scenario() {
 
 # RB_SHOW / RB_SHOW3 -- the one systemctl call the guard reads the unit
 # with, and the three settle reads it makes before acting.
-RB_SHOW="systemctl show -p ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,NRestarts,StartLimitBurst scion-hub.service"
+RB_SHOW="systemctl show -p ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,StartLimitBurst scion-hub.service"
 RB_SHOW3="${RB_SHOW}"$'\n'"${RB_SHOW}"$'\n'"${RB_SHOW}"
 
 # _rb_run -- runs scion-hub-rollback.sh unprivileged against the fake host
@@ -242,50 +267,99 @@ test_rollback_settle_reads_three_times() {
 
 # A failed operator stop also ends failed/failed (stable, no restart
 # pending) and fires OnFailure=: a stop that outlived TimeoutStopSec
-# (SIGKILL, Result=timeout) or a hub that exited non-zero on SIGTERM. Its
-# last exit is not clean, but systemd never gave up restarting it
-# (NRestarts=0), so it must stay a no-op -- even with a fresh, unverified
-# switch that the decision table would otherwise roll back.
+# (SIGKILL, Result=timeout, with a crash or a clean main exit) or a hub
+# that exited non-zero on SIGTERM. systemd's NRestarts is high (6: earlier
+# self-exit restarts), but the release has started only once since its
+# switch (start-attempts count 1): a no-op under both versions, even with a
+# fresh, unverified update state that the decision table would roll back.
 test_rollback_failed_operator_stop_is_noop() {
   local sc
-  for sc in v249-stop-timeout v255-stop-timeout v249-stop-exitcode v255-stop-exitcode; do
+  for sc in v249-stop-timeout v255-stop-timeout v249-stop-exitcode v255-stop-exitcode \
+            v249-stop-child-timeout v255-stop-child-timeout v249-stop-sigterm-timeout v255-stop-sigterm-timeout; do
     _rb_new_host
     _rb_scenario "$sc"
+    _rb_attempts nightly-20261023 1
     _rb_update_state "$(_rb_happy_state)"
     RB_BEFORE="$(_rb_state)"
     _rb_run
     assert_eq "0" "$RB_RC" "${sc}: a failed stop is a successful no-op (output: ${RB_OUT})"
-    assert_contains "$RB_OUT" "without systemd giving up on restarts" "${sc}: the no-op must say why"
     assert_eq "$RB_BEFORE" "$(_rb_state)" "${sc}: nothing may change"
-    assert_eq "${RB_SHOW3}" "$(cat "$RB_CALLS")" "${sc}: no runuser, no reset-failed, no start"
+    assert_not_contains "$(cat "$RB_CALLS")" "reset-failed" "${sc}: no reset-failed"
+    assert_not_contains "$(cat "$RB_CALLS")" "systemctl start" "${sc}: no start"
     rm -rf "$RB_DIR"
   done
 }
 
-# The NRestarts threshold: StartLimitBurst - 1 (4 of 5) or more acts; one
-# fewer, or no numeric value at all, does not.
-test_rollback_nrestarts_threshold() {
-  _rb_new_host
-  _rb_scenario crash-nrestarts-5
-  _rb_run
-  assert_eq "releases/nightly-20261020" "$(readlink "${RB_ROOT}/current")" "NRestarts above StartLimitBurst-1 must roll back (output: ${RB_OUT})"
-  rm -rf "$RB_DIR"
+# Result=timeout is excluded on its own: even with a full count of start
+# attempts (and a crash or a clean main exit), a stop that timed out is
+# never acted on, on either path.
+test_rollback_timeout_result_is_noop_even_with_full_count() {
   local sc
-  for sc in crash-nrestarts-3 crash-no-nrestarts; do
+  for sc in v249-stop-timeout v255-stop-child-timeout v249-stop-sigterm-timeout; do
     _rb_new_host
     _rb_scenario "$sc"
+    _rb_attempts nightly-20261023 7
+    _rb_update_state "$(_rb_happy_state)"
     RB_BEFORE="$(_rb_state)"
     _rb_run
     assert_eq "0" "$RB_RC" "${sc}: must be a successful no-op (output: ${RB_OUT})"
     assert_eq "$RB_BEFORE" "$(_rb_state)" "${sc}: nothing may change"
-    assert_not_contains "$(cat "$RB_CALLS")" "systemctl start" "${sc}: the hub must not be started"
+    assert_eq "${RB_SHOW3}" "$(cat "$RB_CALLS")" "${sc}: only the three reads; no reset-failed, no start"
     rm -rf "$RB_DIR"
   done
 }
 
+# The start-attempts gate: StartLimitBurst (5) or more starts of the
+# current release act; fewer, another release, or a missing, garbled or
+# symlinked file do not -- also on the switch-time fallback (no update
+# state). Under both versions.
+test_rollback_start_attempts_gate() {
+  local sc
+  for sc in v249-crash v255-final; do
+    local count
+    for count in 5 7; do
+      _rb_new_host
+      _rb_scenario "$sc"
+      _rb_attempts nightly-20261023 "$count"
+      _rb_run
+      assert_eq "releases/nightly-20261020" "$(readlink "${RB_ROOT}/current")" "${sc}, count ${count}: must roll back (output: ${RB_OUT})"
+      rm -rf "$RB_DIR"
+    done
+    local a
+    for a in "nightly-20261023 4" "nightly-20261023 1" "nightly-20261020 9" "missing" "garbled" "symlink"; do
+      _rb_new_host
+      _rb_scenario "$sc"
+      # shellcheck disable=SC2086 # target and count
+      _rb_attempts $a
+      RB_BEFORE="$(_rb_state)"
+      _rb_run
+      assert_eq "0" "$RB_RC" "${sc}, start-attempts '${a}': must be a successful no-op (output: ${RB_OUT})"
+      assert_contains "$RB_OUT" "not a crash loop of the current release through the start limit" "${sc}, start-attempts '${a}': the no-op must say why"
+      assert_eq "$RB_BEFORE" "$(_rb_state)" "${sc}, start-attempts '${a}': nothing may change"
+      assert_not_contains "$(cat "$RB_CALLS")" "systemctl start" "${sc}, start-attempts '${a}': the hub must not be started"
+      rm -rf "$RB_DIR"
+    done
+  done
+}
+
+# A verified release with a full count (it crash-loops later, after its
+# update was confirmed) is not rolled back.
+test_rollback_verified_with_full_count_is_noop() {
+  _rb_new_host
+  _rb_attempts nightly-20261023 9
+  _rb_update_state "$(_rb_happy_state verified=true)"
+  RB_BEFORE="$(_rb_state)"
+  _rb_run
+  assert_eq "0" "$RB_RC" "verified + full count: a successful no-op (output: ${RB_OUT})"
+  assert_contains "$RB_OUT" "was verified" "verified + full count: the no-op must say why"
+  assert_eq "$RB_BEFORE" "$(_rb_state)" "verified + full count: nothing may change"
+  rm -rf "$RB_DIR"
+}
+
 # Clean manual restarts that hit the limit (NRestarts=0) still only
-# restart the hub: the clean path never swaps, and a failed stop never
-# reaches it (its last exit is not clean).
+# restart the hub: the clean path needs Result=start-limit-hit, never
+# swaps, and a failed stop with a clean main exit (Result=timeout) does not
+# take it (test_rollback_failed_operator_stop_is_noop).
 test_rollback_clean_manual_restarts_restart_without_swap() {
   _rb_new_host
   _rb_scenario v249-clean-manual
@@ -571,7 +645,7 @@ test_rollback_root_path_hands_install_root_to_owner() {
   _rb_root_shims
   _rb_run_as_root
   assert_eq "0" "$RB_RC" "the root path must succeed (output: ${RB_OUT})"
-  assert_eq "${RB_SHOW3}"$'\nrunuser -u scion -- env SCION_INSTALL_ROOT='"${RB_ROOT}"$' SCION_INSTALL_OWNER= bash -s -- __swap\nsystemctl reset-failed scion-hub.service\nsystemctl start scion-hub.service' \
+  assert_eq "${RB_SHOW3}"$'\nrunuser -u scion -- env SCION_INSTALL_ROOT='"${RB_ROOT}"$' SCION_INSTALL_OWNER= SCION_START_LIMIT_BURST=5 bash -s -- __swap\nsystemctl reset-failed scion-hub.service\nsystemctl start scion-hub.service' \
     "$(cat "$RB_CALLS")" \
     "root must only query systemctl, hand the checks, swap and marker to the owner via runuser, then reset-failed and start"
   assert_eq "releases/nightly-20261020" "$(readlink "${RB_ROOT}/current")" "the owner step must have swapped current"
@@ -637,7 +711,8 @@ test_rollback_owner_step_refuses_root_with_owner() {
 # path under RB_DIR. Sets RB_RC and RB_OUT.
 _rb_guard() {
   RB_OUT="$(SCION_INSTALL_ROOT="$RB_ROOT" SCION_BIN_LINK="${RB_DIR}/usr/local/bin/scion" SCION_INSTALL_OWNER="" \
-    SCION_ROLLBACK_PATH="${RB_GUARD}" bash "$RB_LAYOUT_SH" "$@" 2>&1)"
+    SCION_ROLLBACK_PATH="${RB_GUARD}" SCION_START_ATTEMPT_PATH="$(dirname "$RB_GUARD")/scion-hub-start-attempt.sh" \
+    bash "$RB_LAYOUT_SH" "$@" 2>&1)"
   RB_RC=$?
 }
 
@@ -645,15 +720,18 @@ test_install_guard_creates_root_owned_script() {
   _rb_new_host
   RB_GUARD="${RB_DIR}/usr/local/libexec/scion/scion-hub-rollback.sh"
   mkdir -p "${RB_DIR}/usr/local"
-  _rb_guard install-guard "$ROLLBACK_SH"
+  _rb_guard install-guard "$ROLLBACK_SH" "$START_ATTEMPT_SH"
   assert_eq "0" "$RB_RC" "install-guard must succeed (output: ${RB_OUT})"
   assert_true "$(cmp -s "$ROLLBACK_SH" "$RB_GUARD" && echo true || echo false)" "the installed script must be byte-identical"
   assert_eq "755|$(id -un)" "$(stat -c '%a|%U' "$RB_GUARD")" "the script must be 0755, owned by the installing user (root on the VM)"
+  local sa="${RB_DIR}/usr/local/libexec/scion/scion-hub-start-attempt.sh"
+  assert_true "$(cmp -s "$START_ATTEMPT_SH" "$sa" && echo true || echo false)" "the start-attempt script must be installed byte-identical next to the guard"
+  assert_eq "755|$(id -un)" "$(stat -c '%a|%U' "$sa")" "the start-attempt script must be 0755, owned by the installing user"
   assert_eq "directory|755|$(id -un)" "$(stat -c '%F|%a|%U' "${RB_DIR}/usr/local/libexec")" "missing dirs must be created 0755"
   assert_eq "directory|755|$(id -un)" "$(stat -c '%F|%a|%U' "${RB_DIR}/usr/local/libexec/scion")" "the script dir must be 0755"
   local first
   first="$(find "${RB_DIR}/usr" -printf '%p %y %m\n' | LC_ALL=C sort; sha256sum < "$RB_GUARD")"
-  _rb_guard install-guard "$ROLLBACK_SH"
+  _rb_guard install-guard "$ROLLBACK_SH" "$START_ATTEMPT_SH"
   assert_eq "0" "$RB_RC" "a second install-guard must succeed (output: ${RB_OUT})"
   assert_contains "$RB_OUT" "already installed" "a second run must be a no-op"
   assert_eq "$first" "$(find "${RB_DIR}/usr" -printf '%p %y %m\n' | LC_ALL=C sort; sha256sum < "$RB_GUARD")" \
@@ -667,7 +745,7 @@ test_install_guard_replaces_changed_script() {
   mkdir -p "${RB_DIR}/usr/local/libexec/scion"
   printf 'old\n' > "$RB_GUARD"
   chmod 0700 "$RB_GUARD"
-  _rb_guard install-guard "$ROLLBACK_SH"
+  _rb_guard install-guard "$ROLLBACK_SH" "$START_ATTEMPT_SH"
   assert_eq "0" "$RB_RC" "install-guard must succeed (output: ${RB_OUT})"
   assert_true "$(cmp -s "$ROLLBACK_SH" "$RB_GUARD" && echo true || echo false)" "a changed script must be replaced"
   assert_eq "755" "$(stat -c %a "$RB_GUARD")" "the mode must be fixed to 0755"
@@ -688,7 +766,7 @@ test_install_guard_refuses_unsafe_dirs() {
         mkdir -m 0755 "${RB_DIR}/usr/local/libexec/scion"
         ln -s "${RB_DIR}/elsewhere/target" "$RB_GUARD" ;;
     esac
-    _rb_guard install-guard "$ROLLBACK_SH"
+    _rb_guard install-guard "$ROLLBACK_SH" "$START_ATTEMPT_SH"
     assert_true "$([[ "$RB_RC" -ne 0 ]] && echo true || echo false)" "${case_name}: install-guard must refuse (output: ${RB_OUT})"
     assert_eq "" "$(ls -A "${RB_DIR}/elsewhere")" "${case_name}: nothing may be written through the link"
     rm -rf "$RB_DIR"
@@ -698,7 +776,7 @@ test_install_guard_refuses_unsafe_dirs() {
 test_install_guard_requires_script() {
   _rb_new_host
   RB_GUARD="${RB_DIR}/usr/local/libexec/scion/scion-hub-rollback.sh"
-  _rb_guard install-guard "${RB_DIR}/missing.sh"
+  _rb_guard install-guard "${RB_DIR}/missing.sh" "$START_ATTEMPT_SH"
   assert_true "$([[ "$RB_RC" -ne 0 ]] && echo true || echo false)" "a missing source must be refused"
   assert_false "$([[ -e "${RB_DIR}/usr/local/libexec" ]] && echo true)" "nothing may be created"
   rm -rf "$RB_DIR"
@@ -721,6 +799,11 @@ test_rollback_hub_unit_has_guard_in_unit_section() {
   assert_contains "$section" $'\nOnFailure=scion-hub-rollback.service' "OnFailure must name the rollback unit"
   assert_not_contains "$(_rb_unit_section "$unit" Service)" "StartLimit" "StartLimit* must not be in [Service] (the pre-230 spelling)"
   assert_contains "$(_rb_unit_section "$unit" Service)" "Restart=always" "the hub must still restart on exit"
+  assert_contains "$(_rb_unit_section "$unit" Service)" $'\nExecStartPre=-/usr/local/libexec/scion/scion-hub-start-attempt.sh\n' \
+    "every start must be counted by the root-owned start-attempt script, without blocking the start ('-')"
+  # shellcheck disable=SC2016 # a literal from the script source
+  assert_contains "$(cat "$RB_LAYOUT_SH")" 'START_ATTEMPT_PATH="${SCION_START_ATTEMPT_PATH:-/usr/local/libexec/scion/scion-hub-start-attempt.sh}"' \
+    "scion-layout.sh install-guard must install the counter at the path the unit runs"
 }
 
 test_rollback_unit_runs_root_owned_script() {
@@ -745,7 +828,7 @@ test_install_guard_unsafe_dir_message_names_guard_path() {
   RB_GUARD="${RB_DIR}/usr/local/libexec/scion/scion-hub-rollback.sh"
   mkdir -p "${RB_DIR}/usr/local"
   chmod 0775 "${RB_DIR}/usr/local"
-  _rb_guard install-guard "$ROLLBACK_SH"
+  _rb_guard install-guard "$ROLLBACK_SH" "$START_ATTEMPT_SH"
   assert_true "$([[ "$RB_RC" -ne 0 ]] && echo true || echo false)" "a group-writable parent must be refused (output: ${RB_OUT})"
   assert_contains "$RB_OUT" "${RB_GUARD}" "the refusal must name the guard path"
   assert_not_contains "$RB_OUT" "Refusing to set up ${RB_ROOT}" "the refusal must not name the install root"
@@ -928,4 +1011,103 @@ test_rollback_root_path_update_state_read_by_owner() {
   _rb_expect stay "root path, verified" "was verified"
   assert_contains "$(cat "$RB_CALLS")" "runuser -u scion" "the decision must be made in the owner step"
   rm -rf "$RB_DIR"
+}
+
+# =====================================================================
+# scion-hub-start-attempt.sh: the start-attempts counter
+# =====================================================================
+
+# _sa_run -- runs the counter against RB_ROOT as the current user. Sets
+# RB_RC and RB_OUT.
+_sa_run() {
+  RB_OUT="$(SCION_INSTALL_ROOT="$RB_ROOT" bash "$START_ATTEMPT_SH" 2>&1)"
+  RB_RC=$?
+}
+
+_sa_file() {
+  cat "${RB_ROOT}/start-attempts" 2>/dev/null
+}
+
+test_start_attempt_counts_and_resets_on_switch() {
+  _rb_new_host
+  _rb_attempts missing
+  _sa_run
+  assert_eq "0" "$RB_RC" "the first start must succeed (output: ${RB_OUT})"
+  assert_eq '{"target":"nightly-20261023","count":1}' "$(_sa_file)" "the first start of a release counts 1"
+  _sa_run
+  _sa_run
+  assert_eq '{"target":"nightly-20261023","count":3}' "$(_sa_file)" "each start of the same release adds 1"
+  rm -f "${RB_ROOT}/current"
+  ln -s releases/nightly-20261020 "${RB_ROOT}/current"
+  _sa_run
+  assert_eq '{"target":"nightly-20261020","count":1}' "$(_sa_file)" "a switch to another release restarts the count at 1"
+  assert_eq "644" "$(stat -c %a "${RB_ROOT}/start-attempts")" "start-attempts must be 0644"
+  assert_eq "" "$(find "$RB_ROOT" -maxdepth 1 -name 'start-attempts.*')" "no temporary file may be left"
+  rm -rf "$RB_DIR"
+}
+
+test_start_attempt_resets_unreadable_files() {
+  local kind
+  for kind in garbled oversized directory; do
+    _rb_new_host
+    rm -f "${RB_ROOT}/start-attempts"
+    case "$kind" in
+      garbled) printf '{"target":"nightly-20261023","count":"4"}\n' > "${RB_ROOT}/start-attempts" ;;
+      oversized) { printf '{"target":"nightly-20261023","count":4}'; head -c 5000 /dev/zero | tr '\0' ' '; } > "${RB_ROOT}/start-attempts" ;;
+      directory) mkdir "${RB_ROOT}/start-attempts" ;;
+    esac
+    _sa_run
+    assert_eq "0" "$RB_RC" "${kind}: the counter must never fail a start (output: ${RB_OUT})"
+    if [[ "$kind" == directory ]]; then
+      assert_true "$([[ -d "${RB_ROOT}/start-attempts" ]] && echo true || echo false)" "${kind}: a directory in the way is left alone (the rename fails)"
+      assert_eq "" "$(find "$RB_ROOT" -maxdepth 1 -name 'start-attempts.*')" "${kind}: no temporary file may be left"
+    else
+      assert_eq '{"target":"nightly-20261023","count":1}' "$(_sa_file)" "${kind}: an unreadable file restarts the count at 1"
+    fi
+    rm -rf "$RB_DIR"
+  done
+}
+
+# A planted symlink is never read or written through: the count restarts
+# at 1 in a regular file that replaces the link.
+test_start_attempt_does_not_follow_symlinks() {
+  _rb_new_host
+  _rb_attempts symlink
+  local before
+  before="$(cat "${RB_DIR}/attempts-elsewhere")"
+  _sa_run
+  assert_eq "0" "$RB_RC" "must succeed (output: ${RB_OUT})"
+  assert_eq "$before" "$(cat "${RB_DIR}/attempts-elsewhere")" "the symlink target must not be written"
+  assert_false "$([[ -L "${RB_ROOT}/start-attempts" ]] && echo true)" "the link must be replaced by a regular file"
+  assert_eq '{"target":"nightly-20261023","count":1}' "$(_sa_file)" "a symlinked file is not read: the count restarts at 1"
+  rm -rf "$RB_DIR"
+}
+
+# No valid current (missing, not a link, a bad name) or an unwritable root:
+# nothing is written and the start is never blocked (exit 0).
+test_start_attempt_never_blocks_a_start() {
+  local kind
+  for kind in no-current not-a-link bad-name; do
+    _rb_new_host
+    _rb_attempts missing
+    rm -f "${RB_ROOT}/current"
+    case "$kind" in
+      not-a-link) mkdir "${RB_ROOT}/current" ;;
+      bad-name) ln -s releases/nightly-20261023.partial "${RB_ROOT}/current" ;;
+    esac
+    _sa_run
+    assert_eq "0" "$RB_RC" "${kind}: must exit 0 (output: ${RB_OUT})"
+    assert_false "$([[ -e "${RB_ROOT}/start-attempts" ]] && echo true)" "${kind}: nothing may be written"
+    rm -rf "$RB_DIR"
+  done
+  if [[ "$(id -u)" != "0" ]]; then
+    _rb_new_host
+    _rb_attempts nightly-20261023 2
+    chmod 0555 "$RB_ROOT"
+    _sa_run
+    chmod 0755 "$RB_ROOT"
+    assert_eq "0" "$RB_RC" "an unwritable root must not block the start (output: ${RB_OUT})"
+    assert_eq '{"target":"nightly-20261023","count":2}' "$(_sa_file)" "an unwritable root leaves the file as it was"
+    rm -rf "$RB_DIR"
+  fi
 }

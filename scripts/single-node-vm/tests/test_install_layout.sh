@@ -663,13 +663,15 @@ _layout_assert_guard() {
   assert_contains "$cmd" "SCIONROLLBACKEOF" "${what}: the guard script must travel with the command"
   assert_contains "$cmd" "$(cat "${TIER_DIR}/scion-hub-rollback.sh")" "${what}: the guard script must be carried byte for byte"
   # shellcheck disable=SC2016 # a literal from the generated command
-  assert_contains "$cmd" 'sudo bash "$SCION_LAYOUT_SH" install-guard "$SCION_ROLLBACK_SH"' \
-    "${what}: the guard script must be installed root-owned through scion-layout.sh install-guard"
+  assert_contains "$cmd" 'sudo bash "$SCION_LAYOUT_SH" install-guard "$SCION_ROLLBACK_SH" "$SCION_START_ATTEMPT_SH"' \
+    "${what}: the guard and start-attempt scripts must be installed root-owned through scion-layout.sh install-guard"
+  assert_contains "$cmd" "SCIONSTARTATTEMPTEOF" "${what}: the start-attempt script must travel with the command"
+  assert_contains "$cmd" "$(cat "${TIER_DIR}/scion-hub-start-attempt.sh")" "${what}: the start-attempt script must be carried byte for byte"
   assert_contains "$cmd" "sudo tee /etc/systemd/system/scion-hub-rollback.service" "${what}: the rollback unit must be written"
   assert_contains "$cmd" "$(cat "${TIER_DIR}/config-templates/scion-hub-rollback.service")" "${what}: the rollback unit must match the template"
   assert_contains "$cmd" "set -euo pipefail" "${what}: a failed guard install must stop the command"
   local trap_line
-  trap_line="$(line_number "trap 'rm -f \"\$SCION_ROLLBACK_SH\" \"\${SCION_LAYOUT_SH:-}\"' EXIT" "$cmd")"
+  trap_line="$(line_number "trap 'rm -f \"\$SCION_ROLLBACK_SH\" \"\$SCION_START_ATTEMPT_SH\" \"\${SCION_LAYOUT_SH:-}\"' EXIT" "$cmd")"
   assert_true "$([[ -n "$trap_line" && -n "$(line_number 'SCION_LAYOUT_SH" install-guard' "$cmd")" && "$trap_line" -lt "$(line_number 'SCION_LAYOUT_SH" install-guard' "$cmd")" ]] && echo true || echo false)" \
     "${what}: the guard temp file must be removed on any exit, including a failed install-guard"
   guard_line="$(line_number 'SCION_LAYOUT_SH" install-guard' "$cmd")"
@@ -1013,7 +1015,8 @@ test_layout_migrate_vm_command_runs_twice_to_same_state() {
 
   local out rc first
   out="$(PATH="${LH_DIR}/work/shim:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" SCION_INSTALL_OWNER="" \
-    SCION_ROLLBACK_PATH="$guard" SCION_LAYOUT_YAML_TO_JSON="$LAYOUT_YAML_TO_JSON" bash -c "$cmd" 2>&1)"
+    SCION_ROLLBACK_PATH="$guard" SCION_START_ATTEMPT_PATH="${guard%/*}/scion-hub-start-attempt.sh" \
+    SCION_LAYOUT_YAML_TO_JSON="$LAYOUT_YAML_TO_JSON" bash -c "$cmd" 2>&1)"
   rc=$?
   assert_eq "0" "$rc" "the generated migrate command must succeed on an old-layout host (output: ${out})"
   assert_eq "releases/nightly-20261001" "$(readlink "$LH_ROOT/current")" "the installed version must be kept"
@@ -1025,6 +1028,10 @@ test_layout_migrate_vm_command_runs_twice_to_same_state() {
   assert_true "$(cmp -s "${TIER_DIR}/scion-hub-rollback.sh" "$guard" && echo true || echo false)" \
     "the boot-failure guard script must be installed (P1-migrated VMs get it too)"
   assert_eq "755" "$(stat -c %a "$guard")" "the guard script must be mode 0755"
+  assert_true "$(cmp -s "${TIER_DIR}/scion-hub-start-attempt.sh" "${guard%/*}/scion-hub-start-attempt.sh" && echo true || echo false)" \
+    "the start-attempt counter must be installed next to the guard (P1-migrated VMs get it too)"
+  assert_contains "$(cat "${LH_DIR}/work/etc/systemd/system/scion-hub.service")" \
+    "ExecStartPre=-/usr/local/libexec/scion/scion-hub-start-attempt.sh" "the re-rendered hub unit must count its starts"
   assert_eq "$(cat "${TIER_DIR}/config-templates/scion-hub-rollback.service")" \
     "$(cat "${LH_DIR}/work/etc/systemd/system/scion-hub-rollback.service")" "the rollback unit must be written"
   assert_contains "$(cat "${LH_DIR}/work/etc/systemd/system/scion-hub.service")" \
@@ -1032,7 +1039,8 @@ test_layout_migrate_vm_command_runs_twice_to_same_state() {
   first="$(_layout_state; cat "${LH_DIR}/settings.yaml")"
 
   out="$(PATH="${LH_DIR}/work/shim:${PATH}" SCION_INSTALL_ROOT="$LH_ROOT" SCION_BIN_LINK="$LH_BIN" SCION_INSTALL_OWNER="" \
-    SCION_ROLLBACK_PATH="$guard" SCION_LAYOUT_YAML_TO_JSON="$LAYOUT_YAML_TO_JSON" bash -c "$cmd" 2>&1)"
+    SCION_ROLLBACK_PATH="$guard" SCION_START_ATTEMPT_PATH="${guard%/*}/scion-hub-start-attempt.sh" \
+    SCION_LAYOUT_YAML_TO_JSON="$LAYOUT_YAML_TO_JSON" bash -c "$cmd" 2>&1)"
   rc=$?
   assert_eq "0" "$rc" "a second run must succeed (output: ${out})"
   assert_eq "$first" "$(_layout_state; cat "${LH_DIR}/settings.yaml")" \

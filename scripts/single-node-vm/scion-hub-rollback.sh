@@ -95,19 +95,33 @@
 #     core-dump, ...); Result=start-limit-hit appears only when the
 #     previous result was success, i.e. after clean restarts.
 #   - failed/failed is not specific to the start limit: a failed operator
-#     stop (systemctl stop that hits TimeoutStopSec and ends in SIGKILL,
-#     Result=timeout, or a non-zero exit on SIGTERM) ends there too, and
-#     OnFailure= fires. A crash is therefore only rolled back when systemd
-#     gave up restarting: NRestarts >= StartLimitBurst - 1, both read in the
-#     same snapshot (a crash loop stopped by StartLimitBurst=5 has made 4
-#     automatic restarts; a failed stop after a manual start has made few
-#     or none). Missing or non-numeric values count as "not given up".
-#   - The hub's last exit must be a failure. The start limit also counts
-#     clean restarts (an update or Restart Hub exits on SIGTERM and systemd
-#     starts it again; or manual restarts), so five of those within five
-#     minutes trip it too (then Result=start-limit-hit). Then the script
-#     only restarts the hub, without swapping. A failed stop never takes
-#     this path: its last exit is not clean.
+#     stop ends there too and fires OnFailure= -- `systemctl stop` that
+#     hits TimeoutStopSec (the main process, or a child left in the cgroup,
+#     is SIGKILLed: Result=timeout, with any main exit), or a main process
+#     that exits non-zero on SIGTERM (Result=exit-code). systemd's NRestarts
+#     cannot tell these apart (it counts every automatic restart since the
+#     last manual start, and every update or Restart Hub self-exit is one),
+#     so it is not used.
+#   - The discriminator is <root>/start-attempts, kept by
+#     scion-hub-start-attempt.sh (ExecStartPre=- of scion-hub.service):
+#     {"target":"<release>","count":N}, the number of starts since current
+#     was switched to that release. A crash is rolled back only if the file
+#     is readable (a regular file, not a symlink, exactly that format),
+#     target is the release current points at, and count >= StartLimitBurst
+#     (from the same systemctl snapshot): the release crash-looped through
+#     the whole start limit since its switch. A failed stop of a release
+#     that ran fine has a low count since its switch (or is verified, see
+#     "Update state"). A missing, unreadable or mismatched file means no
+#     swap. The check runs in the owner step (root never reads the install
+#     root), before the update-state decision table, so it applies to the
+#     switch-time fallback too.
+#   - Result=timeout (a stop that timed out) is never acted on.
+#   - A clean last exit (an update or Restart Hub exits on SIGTERM and
+#     systemd starts it again; or manual restarts) only restarts the hub,
+#     without swapping, and only with Result=start-limit-hit: five clean
+#     restarts within five minutes stop the unit with exactly that. A
+#     failed stop with a clean main exit (a child SIGKILLed at
+#     TimeoutStopSec) has Result=timeout and is left alone.
 #
 # Privileges: root runs only systemctl. The install root and everything
 # under it belong to the install owner (scion), who can change any entry
@@ -280,6 +294,20 @@ update_state_decision() {
     || echo "unreadable ? ?"
 }
 
+# start_attempts -- "<target> <count>" from <root>/start-attempts, or
+# "- -" when it is missing, a symlink, not a regular file, too large, or not
+# exactly the format scion-hub-start-attempt.sh writes.
+start_attempts() {
+  local f="$INSTALL_ROOT/start-attempts" line size
+  if [[ -f "$f" && ! -L "$f" ]] && size="$(stat -c %s -- "$f" 2>/dev/null)" && (( size <= UPDATE_STATE_MAX_BYTES )) \
+     && line="$(head -c "$UPDATE_STATE_MAX_BYTES" -- "$f" 2>/dev/null </dev/null)" \
+     && [[ "$line" =~ ^\{\"target\":\"([0-9A-Za-z._-]+)\",\"count\":([0-9]{1,9})\}$ ]]; then
+    echo "${BASH_REMATCH[1]} $((10#${BASH_REMATCH[2]}))"
+  else
+    echo "- -"
+  fi
+}
+
 # switched_seconds_ago -- seconds since <root>/current was last switched:
 # the mtime of the symlink itself (stat without -L), which each switch
 # sets by creating a new link.
@@ -299,6 +327,19 @@ cmd_swap() {
   if [[ "$(marker_field from)" == "$prev" && "$(marker_field to)" == "$cur" ]]; then
     log "rollback.marker records the rollback from $prev to $cur; not swapping back. Nothing changed; the hub stays stopped. Check journalctl -u scion-hub, fix the cause (docs: Restoring after a failed update), then run: systemctl reset-failed scion-hub && systemctl start scion-hub"
     exit "$ALREADY_ROLLED_BACK"
+  fi
+  # The start attempts since current was switched (scion-hub-start-attempt.sh)
+  # must cover the whole start limit: only then did this release crash-loop
+  # through StartLimitBurst starts. Applies to the switch-time fallback too.
+  local burst="${SCION_START_LIMIT_BURST:-${HUB_BURST:-}}" att_target att_count
+  if [[ ! "$burst" =~ ^[1-9][0-9]*$ ]]; then
+    log "no valid StartLimitBurst ('$burst'): not rolling back. Nothing changed; the hub stays stopped."
+    exit "$LEAVE_STOPPED"
+  fi
+  read -r att_target att_count <<< "$(start_attempts)"
+  if [[ "$att_target" != "$cur" || ! "$att_count" =~ ^[0-9]+$ ]] || (( att_count < burst )); then
+    log "start-attempts shows ${att_count:-?} start(s) of '${att_target:-?}', not >= $burst of releases/$cur: this is not a crash loop of the current release through the start limit (e.g. a failed stop): not rolling back. Nothing changed; the hub stays stopped."
+    exit "$LEAVE_STOPPED"
   fi
   local decision state_from run_id age
   local stay="Nothing changed; the hub stays stopped. Check journalctl -u scion-hub, fix the cause, then run: systemctl reset-failed scion-hub && systemctl start scion-hub"
@@ -343,6 +384,7 @@ cmd_swap() {
 run_as_owner() {
   if [[ "$(id -u)" == "0" && -n "$OWNER" ]]; then
     runuser -u "${OWNER%%:*}" -- env SCION_INSTALL_ROOT="$INSTALL_ROOT" SCION_INSTALL_OWNER="" \
+      SCION_START_LIMIT_BURST="$HUB_BURST" \
       bash -s -- __swap < "${BASH_SOURCE[0]}"
   else
     (cmd_swap)
@@ -351,10 +393,10 @@ run_as_owner() {
 
 # read_hub_state -- one `systemctl show` of scion-hub.service (a consistent
 # snapshot), into HUB_ACTIVE, HUB_SUB, HUB_RESULT, HUB_EXEC_CODE,
-# HUB_EXEC_STATUS, HUB_NRESTARTS and HUB_BURST.
+# HUB_EXEC_STATUS and HUB_BURST (StartLimitBurst).
 read_hub_state() {
   local line key value
-  HUB_ACTIVE="" HUB_SUB="" HUB_RESULT="" HUB_EXEC_CODE="" HUB_EXEC_STATUS="" HUB_NRESTARTS="" HUB_BURST=""
+  HUB_ACTIVE="" HUB_SUB="" HUB_RESULT="" HUB_EXEC_CODE="" HUB_EXEC_STATUS="" HUB_BURST=""
   while IFS= read -r line; do
     key="${line%%=*}"
     value="${line#*=}"
@@ -364,17 +406,9 @@ read_hub_state() {
       Result) HUB_RESULT="$value" ;;
       ExecMainCode) HUB_EXEC_CODE="$value" ;;
       ExecMainStatus) HUB_EXEC_STATUS="$value" ;;
-      NRestarts) HUB_NRESTARTS="$value" ;;
       StartLimitBurst) HUB_BURST="$value" ;;
     esac
-  done < <(systemctl show -p ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,NRestarts,StartLimitBurst "$HUB_UNIT")
-}
-
-# restarts_exhausted -- in the last snapshot, systemd gave up restarting:
-# NRestarts >= StartLimitBurst - 1, both numeric (fails closed otherwise).
-restarts_exhausted() {
-  [[ "$HUB_NRESTARTS" =~ ^[0-9]+$ && "$HUB_BURST" =~ ^[0-9]+$ ]] || return 1
-  (( HUB_NRESTARTS >= HUB_BURST - 1 ))
+  done < <(systemctl show -p ActiveState,SubState,Result,ExecMainCode,ExecMainStatus,StartLimitBurst "$HUB_UNIT")
 }
 
 # last_exit_was_clean -- the hub's last main process ended the way systemd
@@ -410,16 +444,21 @@ failed_for_good() {
 cmd_rollback() {
   local rc=0
   failed_for_good || return 0
+  local facts="result $HUB_RESULT, last exit $HUB_EXEC_CODE:$HUB_EXEC_STATUS, StartLimitBurst '$HUB_BURST'"
   if last_exit_was_clean; then
-    log "$HUB_UNIT failed (result $HUB_RESULT) after clean exits (repeated restarts, not a crash loop); restarting it without a rollback"
+    if [[ "$HUB_RESULT" != "start-limit-hit" ]]; then
+      log "$HUB_UNIT failed ($facts) after a clean exit but not at the start limit (e.g. a stop that timed out); nothing to do"
+      return 0
+    fi
+    log "$HUB_UNIT hit its start limit after clean exits ($facts; repeated restarts, not a crash loop); restarting it without a rollback"
     restart_hub
     return 0
   fi
-  if ! restarts_exhausted; then
-    log "$HUB_UNIT failed (result $HUB_RESULT, last exit $HUB_EXEC_CODE:$HUB_EXEC_STATUS) without systemd giving up on restarts (NRestarts '$HUB_NRESTARTS', StartLimitBurst '$HUB_BURST'): not a crash loop (e.g. a failed stop); nothing to do"
+  if [[ "$HUB_RESULT" == "timeout" ]]; then
+    log "$HUB_UNIT failed ($facts): a timeout (e.g. a stop that timed out), not a crash loop; nothing to do"
     return 0
   fi
-  log "$HUB_UNIT failed after a crash loop (result $HUB_RESULT, last exit $HUB_EXEC_CODE:$HUB_EXEC_STATUS, NRestarts $HUB_NRESTARTS of StartLimitBurst $HUB_BURST)"
+  log "$HUB_UNIT failed after a crash ($facts); checking the start attempts and update state"
   run_as_owner || rc=$?
   case "$rc" in
     0) ;;

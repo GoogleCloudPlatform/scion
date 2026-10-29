@@ -51,10 +51,12 @@
 #       keeps notify/disabled, and writes notify when the key is absent.
 #       Run as root, it re-runs itself as the settings file's owner for the
 #       edit, and verifies the result before replacing the file.
-#   scion-layout.sh install-guard ROLLBACK_SCRIPT
+#   scion-layout.sh install-guard ROLLBACK_SCRIPT START_ATTEMPT_SCRIPT
 #       Install ROLLBACK_SCRIPT (scion-hub-rollback.sh, the boot-failure
-#       guard) root-owned, mode 0755, at <rollback-path>, creating its
-#       directory root-owned 0755. Outside <root> on purpose: a root-owned
+#       guard) at <rollback-path> and START_ATTEMPT_SCRIPT
+#       (scion-hub-start-attempt.sh, the start-attempts counter run by the
+#       hub unit's ExecStartPre=-) at <start-attempt-path>, root-owned, mode
+#       0755, creating their directory root-owned 0755. Outside <root> on purpose: a root-owned
 #       file inside the owner's tree could be replaced by the owner, and
 #       root runs this one. A no-op when the installed copy is identical.
 #
@@ -65,6 +67,8 @@
 #                         empty skips chown (tests run unprivileged)
 #   SCION_ROLLBACK_PATH   boot-failure guard script path
 #                         (default /usr/local/libexec/scion/scion-hub-rollback.sh)
+#   SCION_START_ATTEMPT_PATH  start-attempts counter script path (default
+#                         /usr/local/libexec/scion/scion-hub-start-attempt.sh)
 #   SCION_LAYOUT_YAML_TO_JSON
 #                         shell command that parses YAML on stdin to JSON,
 #                         used to verify settings edits (default: python3
@@ -76,6 +80,7 @@ INSTALL_ROOT="${SCION_INSTALL_ROOT:-/opt/scion}"
 BIN_LINK="${SCION_BIN_LINK:-/usr/local/bin/scion}"
 OWNER="${SCION_INSTALL_OWNER-scion:scion}"
 ROLLBACK_PATH="${SCION_ROLLBACK_PATH:-/usr/local/libexec/scion/scion-hub-rollback.sh}"
+START_ATTEMPT_PATH="${SCION_START_ATTEMPT_PATH:-/usr/local/libexec/scion/scion-hub-start-attempt.sh}"
 
 # canonical_abs PATH -- an absolute path in plain form: starts with /, no
 # empty, "." or ".." components, no trailing /. Everything below walks
@@ -91,6 +96,7 @@ log() { echo "scion-layout: $*"; }
 die() { echo "scion-layout: ERROR: $*" >&2; exit 1; }
 
 canonical_abs "$INSTALL_ROOT" || die "SCION_INSTALL_ROOT must be an absolute path without '.', '..', '//' or a trailing '/' (got '$INSTALL_ROOT')"
+canonical_abs "$START_ATTEMPT_PATH" || die "SCION_START_ATTEMPT_PATH must be an absolute path without '.', '..', '//' or a trailing '/' (got '$START_ATTEMPT_PATH')"
 canonical_abs "$ROLLBACK_PATH" || die "SCION_ROLLBACK_PATH must be an absolute path without '.', '..', '//' or a trailing '/' (got '$ROLLBACK_PATH')"
 canonical_abs "$BIN_LINK" || die "SCION_BIN_LINK must be an absolute path without '.', '..', '//' or a trailing '/' (got '$BIN_LINK')"
 
@@ -633,28 +639,37 @@ cmd_adopt() {
 # is written next to the target under a fresh name and renamed over it, so
 # the path always holds either the old or the complete new script.
 cmd_install_guard() {
-  [[ $# -eq 1 ]] || die "usage: install-guard ROLLBACK_SCRIPT"
-  local src="$1" dir tmp
-  [[ -f "$src" ]] || die "rollback script not found: $src"
-  UNSAFE_TARGET="$ROLLBACK_PATH"
-  dir="$(dirname "$ROLLBACK_PATH")"
-  dir_chain_is_safe "$(nearest_existing "$dir")" || die "$UNSAFE_REASON; refusing to install $ROLLBACK_PATH"
+  [[ $# -eq 2 ]] || die "usage: install-guard ROLLBACK_SCRIPT START_ATTEMPT_SCRIPT"
+  [[ -f "$1" ]] || die "rollback script not found: $1"
+  [[ -f "$2" ]] || die "start-attempt script not found: $2"
+  install_root_script "$1" "$ROLLBACK_PATH"
+  install_root_script "$2" "$START_ATTEMPT_PATH"
+}
+
+# install_root_script SRC DEST -- install SRC as DEST, owned by the running
+# user (root on the VM), mode 0755, in a directory chain only root can
+# change (created 0755 if missing). A no-op when DEST is already identical.
+install_root_script() {
+  local src="$1" dest="$2" dir tmp
+  UNSAFE_TARGET="$dest"
+  dir="$(dirname "$dest")"
+  dir_chain_is_safe "$(nearest_existing "$dir")" || die "$UNSAFE_REASON; refusing to install $dest"
   make_dirs_down_to "$dir"
-  dir_chain_is_safe "$dir" || die "$UNSAFE_REASON; refusing to install $ROLLBACK_PATH"
-  refuse_symlink "$ROLLBACK_PATH"
-  if [[ -f "$ROLLBACK_PATH" ]] && cmp -s "$src" "$ROLLBACK_PATH" \
-     && [[ "$(stat -c '%a|%U' -- "$ROLLBACK_PATH")" == "755|$(id -un)" ]]; then
-    log "$ROLLBACK_PATH already installed"
+  dir_chain_is_safe "$dir" || die "$UNSAFE_REASON; refusing to install $dest"
+  refuse_symlink "$dest"
+  if [[ -f "$dest" ]] && cmp -s "$src" "$dest" \
+     && [[ "$(stat -c '%a|%U' -- "$dest")" == "755|$(id -un)" ]]; then
+    log "$dest already installed"
     return 0
   fi
-  tmp="$(mktemp "$ROLLBACK_PATH.XXXXXX")"
+  tmp="$(mktemp "$dest.XXXXXX")"
   if ! cp -- "$src" "$tmp" || ! cmp -s "$src" "$tmp"; then
     rm -f "$tmp"
     die "copy of $src to $dir is incomplete (disk full?); nothing was changed"
   fi
   chmod 0755 "$tmp"
-  mv -fT "$tmp" "$ROLLBACK_PATH"
-  log "installed $ROLLBACK_PATH"
+  mv -fT "$tmp" "$dest"
+  log "installed $dest"
 }
 
 # YAML_TO_JSON_PY -- the default settings parser for verify_settings_edit:
@@ -881,7 +896,7 @@ main() {
     adopt) cmd_adopt "$@" ;;
     set-maintenance) cmd_set_maintenance "$@" ;;
     install-guard) cmd_install_guard "$@" ;;
-    *) die "usage: scion-layout.sh {install TAG BINARY | adopt | set-maintenance SETTINGS_FILE POLICY | install-guard ROLLBACK_SCRIPT}" ;;
+    *) die "usage: scion-layout.sh {install TAG BINARY | adopt | set-maintenance SETTINGS_FILE POLICY | install-guard ROLLBACK_SCRIPT START_ATTEMPT_SCRIPT}" ;;
   esac
 }
 

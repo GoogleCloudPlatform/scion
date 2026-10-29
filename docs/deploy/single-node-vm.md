@@ -177,9 +177,11 @@ On the VM itself:
 | `/opt/scion/previous` | Symlink to the release that was active before the last switch |
 | `/opt/scion/snapshots/` | Database snapshots taken by the Hub |
 | `/opt/scion/update-state.json` | The last switch of `current` and how far the new release got; read by the [boot-failure guard](#update-state) |
+| `/opt/scion/start-attempts` | How many times the release `current` points at has started since it was switched to; read by the [boot-failure guard](#boot-failure-guard) |
 | `/opt/scion/rollback.marker` | Written by the [boot-failure guard](#boot-failure-guard) when it restores the previous release |
 | `/usr/local/bin/scion` | Root-owned symlink to `/opt/scion/current/scion`, for running `scion` on the VM |
 | `/usr/local/libexec/scion/scion-hub-rollback.sh` | Root-owned boot-failure guard script |
+| `/usr/local/libexec/scion/scion-hub-start-attempt.sh` | Root-owned start-attempts counter, run before each start of the Hub |
 | `/home/scion/.scion/settings.yaml` | Hub configuration (auth mode, storage, etc.) |
 | `/home/scion/.scion/hub.env` | Environment variables (session secret, project ID) |
 | `/home/scion/.scion/workspace-storage/` | Local workspace storage directory |
@@ -239,6 +241,15 @@ installs a guard that restores the previous release after a failed update:
   script. (The design originally placed it at `/opt/scion/rollback.sh`.)
   The unit has `TimeoutStartSec=120`, so a hung run cannot block later
   runs.
+- `scion-hub.service` also runs
+  `ExecStartPre=-/usr/local/libexec/scion/scion-hub-start-attempt.sh`
+  before every start, as the `scion` user (root-owned, mode 0755, next to
+  the guard; the `-` means it can never block a start). It keeps
+  `/opt/scion/start-attempts`, one line of JSON
+  `{"target":"<release>","count":N}`: the number of starts of the release
+  `current` points at since `current` was switched to it. A switch, or a
+  missing, unreadable or symlinked file, restarts the count at 1. It is
+  separate from `update-state.json`, which the Hub rewrites.
 
 The script runs as root but, as root, does nothing except query and
 restart the unit through `systemctl`. It never reads, follows or writes
@@ -253,49 +264,62 @@ run as the `scion` user (through `runuser`):
    (`exit-code`, `signal`, `core-dump`), not `start-limit-hit` (see
    **systemd versions** below). The failed state alone does not mean the
    start limit was hit. An operator `systemctl stop` that fails ends there
-   too: the hub outlived `TimeoutStopSec` and was killed (`Result=timeout`),
-   or exited non-zero on `SIGTERM`. So before a rollback (step 3 onwards)
-   the guard also requires that systemd gave up restarting the Hub:
-   `NRestarts` is at least `StartLimitBurst - 1` (4 of 5), read in the same
-   snapshot. A failed stop has few or no automatic restarts and is left
-   alone.
+   too: the Hub, or a process it left in its cgroup, outlived
+   `TimeoutStopSec` and was killed (`Result=timeout`), or the Hub exited
+   non-zero on `SIGTERM`. systemd's `NRestarts` cannot tell these apart,
+   because every update and **Restart Hub** is an automatic restart and the
+   count only resets on a manual start; the guard does not use it.
+   `Result=timeout` is never acted on.
 2. If the Hub's last exit was clean (exit status 0, or `SIGTERM`, `SIGINT`,
    `SIGHUP` or `SIGPIPE`), the limit was reached by restarts, not by a crash
    loop. Every update and **Restart Hub** exits cleanly and is restarted by
    systemd, and those starts count towards the limit too. In that case the
-   script restarts the Hub without changing releases. So five intentional
+   script restarts the Hub without changing releases, but only if systemd
+   recorded `Result=start-limit-hit`, which is what clean restarts that hit
+   the limit produce. So five intentional
    restarts within 300 seconds (updates, **Restart Hub**,
    `systemctl restart`) do not roll back a healthy release. A failed stop
-   never takes this path, because its last exit is not clean. A crash (a
+   with a clean main exit (a leftover child killed at `TimeoutStopSec`) has
+   `Result=timeout` and is left alone. A crash (a
    non-zero exit status, a failure to start the binary, or death by any
    other signal, such as `SIGSEGV`, `SIGABRT` or `SIGKILL`) counts as a
-   failure and leads to the rollback below.
-3. It refuses unless `/opt/scion/current` and `/opt/scion/previous` each
+   failure and goes on to the checks below.
+3. A crash is rolled back only if `/opt/scion/start-attempts` (read as the
+   `scion` user: a regular file, not a symlink, in exactly the format the
+   counter writes) names the release `current` points at with a count of at
+   least `StartLimitBurst` (5, read from the same `systemctl show`): that
+   release has crash-looped through the whole start limit since it was
+   switched to. A failed operator stop of a release that ran fine has a low
+   count since its switch, or its update is verified (step 5). A missing,
+   unreadable or mismatched file leaves the Hub stopped. This also applies
+   when `update-state.json` is missing and the guard falls back to the
+   switch time.
+4. It refuses unless `/opt/scion/current` and `/opt/scion/previous` each
    resolve to a release directory directly inside `/opt/scion/releases/`,
    and `previous` contains a `scion` binary. A link that leaves `releases/`
    (through `..`, an absolute target or a chain of symlinks) is refused, and
    so is a `previous` equal to `current`. After a refusal nothing changes
    and the Hub stays stopped.
-4. It rolls back only a **failed update that is safe to undo**, decided from
+5. It rolls back only a **failed update that is safe to undo**, decided from
    `/opt/scion/update-state.json` (see [Update state](#update-state)). A
    release that ran fine and then crash-loops for another reason (a typo in
    `settings.yaml`, a full disk, port 8080 already in use) is not rolled
    back. Neither is an update whose database migrations the previous
    release cannot run with. In both cases nothing changes, the Hub stays
    stopped, and the guard's journal says why.
-5. It writes `/opt/scion/rollback.marker` (see below), before changing any
+6. It writes `/opt/scion/rollback.marker` (see below), before changing any
    link: if the marker cannot be written (for example, the disk is full),
    nothing is swapped.
-6. It swaps `previous` and then `current`, each with an atomic symlink
+7. It swaps `previous` and then `current`, each with an atomic symlink
    rename. The pair is not atomic: if the guard dies between the two
    renames, both links point at the failed release, and the next run
    refuses ("current and previous are both ..."), leaving the Hub stopped.
-7. It runs `systemctl reset-failed scion-hub` and `systemctl start scion-hub`.
+8. It runs `systemctl reset-failed scion-hub` and `systemctl start scion-hub`.
 
 The guard swaps **binaries only**. It does not restore the database
 snapshot. Rolling back is safe without it when the failed release did not
 migrate the database, or migrated it only in ways the previous release
-can ignore; otherwise the guard refuses (step 4). To return the database
+can ignore; otherwise the guard refuses (step 5). To return the database
 to its state before the update, follow
 [Restoring after a failed update](#restoring-after-a-failed-update).
 
@@ -331,7 +355,10 @@ one JSON object:
   the update) is therefore still unverified and can be rolled back.
 
 The guard compares no versions. It reads the file as the `scion` user,
-without following a symlink and up to 4 KiB, and decides:
+without following a symlink and up to 4 KiB, and decides as below. Every
+"Rolls back" row also needs the start-attempts check of step 3 (the
+current release started at least `StartLimitBurst` times since its
+switch), including the last row:
 
 | File | Guard |
 |---|---|
@@ -477,11 +504,12 @@ command:
    edited lines) and all other keys are left as they are. The edited file is parsed (with the VM's PyYAML) and compared with the
    original before it replaces it;
 6. installs the [boot-failure guard](#boot-failure-guard)
-   (`/usr/local/libexec/scion/scion-hub-rollback.sh` and
+   (`/usr/local/libexec/scion/scion-hub-rollback.sh`, the start-attempts
+   counter `/usr/local/libexec/scion/scion-hub-start-attempt.sh` and
    `scion-hub-rollback.service`), exactly as a fresh deploy does;
 7. re-renders the systemd unit with
-   `ExecStart=/opt/scion/current/scion ...` and the guard's start limit and
-   `OnFailure=`;
+   `ExecStart=/opt/scion/current/scion ...`, the counter's `ExecStartPre=-`
+   and the guard's start limit and `OnFailure=`;
 8. runs `systemctl daemon-reload`, restarts the Hub, and waits for
    `/healthz`.
 

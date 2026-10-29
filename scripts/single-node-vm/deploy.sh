@@ -451,7 +451,9 @@ layout_script_remove() {
 }
 
 # install_guard_command -- prints remote shell text (to follow
-# layout_script_write in the same command) that installs the
+# layout_script_write in the same command) that installs the start-attempts
+# counter (scion-hub-start-attempt.sh, run by the hub unit's ExecStartPre=-,
+# next to the guard) and the
 # boot-failure guard: scion-hub-rollback.sh (this directory) root-owned
 # 0755 at /usr/local/libexec/scion/scion-hub-rollback.sh (design D1 as
 # amended: outside the hub-owned ${INSTALL_ROOT}, so the hub user can
@@ -466,14 +468,18 @@ layout_script_remove() {
 install_guard_command() {
   printf '%s\n' \
     "    SCION_ROLLBACK_SH=\"\$(mktemp)\"" \
-    "    trap 'rm -f \"\$SCION_ROLLBACK_SH\" \"\${SCION_LAYOUT_SH:-}\"' EXIT" \
+    "    SCION_START_ATTEMPT_SH=\"\$(mktemp)\"" \
+    "    trap 'rm -f \"\$SCION_ROLLBACK_SH\" \"\$SCION_START_ATTEMPT_SH\" \"\${SCION_LAYOUT_SH:-}\"' EXIT" \
     "    cat > \"\$SCION_ROLLBACK_SH\" << 'SCIONROLLBACKEOF'" \
     "$(cat "${SCRIPT_DIR}/scion-hub-rollback.sh")" \
-    "SCIONROLLBACKEOF"
+    "SCIONROLLBACKEOF" \
+    "    cat > \"\$SCION_START_ATTEMPT_SH\" << 'SCIONSTARTATTEMPTEOF'" \
+    "$(cat "${SCRIPT_DIR}/scion-hub-start-attempt.sh")" \
+    "SCIONSTARTATTEMPTEOF"
   # shellcheck disable=SC2016 # expanded on the VM, not here
-  layout_script_run install-guard '"$SCION_ROLLBACK_SH"'
+  layout_script_run install-guard '"$SCION_ROLLBACK_SH"' '"$SCION_START_ATTEMPT_SH"'
   printf '%s\n' \
-    "    rm -f \"\$SCION_ROLLBACK_SH\"" \
+    "    rm -f \"\$SCION_ROLLBACK_SH\" \"\$SCION_START_ATTEMPT_SH\"" \
     "    trap - EXIT" \
     "    sudo tee /etc/systemd/system/scion-hub-rollback.service > /dev/null << 'SERVICEEOF'" \
     "$(cat "${SCRIPT_DIR}/config-templates/scion-hub-rollback.service")" \
