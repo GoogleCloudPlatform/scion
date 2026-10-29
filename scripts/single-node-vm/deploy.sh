@@ -683,19 +683,50 @@ source "${SCRIPT_DIR}/hybrid-tier.sh"
 # shellcheck source=scripts/single-node-vm/release-order.sh
 source "${SCRIPT_DIR}/release-order.sh"
 
-# One EXIT trap, registered once, removes these three temp files on every
-# exit path, including SIGINT and SIGTERM: SSH_STDERR_FILE,
-# HYBRID_KUBECONFIG and ALLUSERS_STDERR_FILE. Other temp files are not
-# covered by this trap. The three start empty, and
-# `rm -f ""` is a harmless no-op, so setting the trap here before any
-# file exists is safe. `trap`
-# replaces rather than stacks, so a second, later `trap ... EXIT` call
-# would silently drop this one -- there must only ever be this single
-# registration.
+# Local temp files (ptone/scion#6612). Every temp file this script and
+# hybrid-tier.sh create on the operator's machine -- the 0600 hub.env copy
+# holding the session secret (HUB_ENV_TMPFILE), the per-phase *_ERR
+# files, the kubeconfig -- is a plain `mktemp`, so all of them land in
+# TMPDIR. TMPDIR is pointed at DEPLOY_TMPDIR, a private (0700) directory
+# made once here, and deploy_cleanup removes that whole directory. So
+# each file is covered from the moment it exists, with no per-file
+# registration and no window between a mktemp and its trap entry (the
+# only window left is this one mktemp -d, which can at worst leave an
+# empty directory). Child processes (gcloud, kubectl, python3) inherit
+# TMPDIR, so their temp files go the same way.
+#
+# deploy_cleanup runs on EXIT and on INT, TERM and HUP. A signal handler
+# cleans up, then re-raises the signal with the default action, so an
+# interrupted run still ends with the signal's status (130 for INT, 143
+# for TERM). `trap` replaces rather than stacks: these must stay the only
+# EXIT/INT/TERM/HUP registrations in this script. SSH_STDERR_FILE,
+# HYBRID_KUBECONFIG and ALLUSERS_STDERR_FILE are also removed by name;
+# they start empty, and `rm -f ""` is a no-op.
 SSH_STDERR_FILE=""
 HYBRID_KUBECONFIG=""
 ALLUSERS_STDERR_FILE=""
-trap 'rm -f "$SSH_STDERR_FILE" "$HYBRID_KUBECONFIG" "$ALLUSERS_STDERR_FILE"' EXIT
+DEPLOY_TMPDIR=""
+deploy_cleanup() {
+  rm -f "$SSH_STDERR_FILE" "$HYBRID_KUBECONFIG" "$ALLUSERS_STDERR_FILE"
+  case "$DEPLOY_TMPDIR" in
+    */scion-deploy.*) rm -rf "$DEPLOY_TMPDIR" ;;
+  esac
+}
+# deploy_on_signal SIGNAL STATUS -- clean up, then die of SIGNAL; should the
+# re-raised signal somehow not end the script, exit with STATUS
+# (128 + signal number) instead of carrying on.
+deploy_on_signal() {
+  deploy_cleanup
+  trap - EXIT INT TERM HUP
+  kill -s "$1" "$$"
+  exit "$2"
+}
+trap deploy_cleanup EXIT
+trap 'deploy_on_signal INT 130' INT
+trap 'deploy_on_signal TERM 143' TERM
+trap 'deploy_on_signal HUP 129' HUP
+DEPLOY_TMPDIR="$(mktemp -d "${TMPDIR:-/tmp}/scion-deploy.XXXXXX")"
+export TMPDIR="$DEPLOY_TMPDIR"
 
 # ---------------------------------------------------------------------------
 # Teardown flow (--delete)
