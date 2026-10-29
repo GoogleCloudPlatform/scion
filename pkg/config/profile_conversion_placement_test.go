@@ -205,8 +205,110 @@ func TestProfileConversionSiblingPlacement(t *testing.T) {
 	entries, other := PlacementSiblingEntries(map[string]V1RuntimeConfig{
 		"a":          {Type: "kubernetes", NodeSelector: pool},
 		"kubernetes": defaultBuiltinCatalog().Runtimes["kubernetes"],
-	}, "a")
+	}, "a", nil)
 	if other != "" || !reflect.DeepEqual(entries, []string{"a"}) {
 		t.Fatalf("built-in entry counted as a sibling: %v %q", entries, other)
+	}
+}
+
+// Siblings are the entries that may target the same cluster and namespace,
+// as the offline policy resolution groups them: an entry with an empty
+// context and namespace may alias one with an explicit context and
+// namespace. Disagreeing such entries block the profile; identical ones
+// convert, and the flat target equals the legacy policy.
+func TestProfileConversionAliasSiblingPlacement(t *testing.T) {
+	x := map[string]string{PoolNodeSelectorKey: "x"}
+	y := map[string]string{PoolNodeSelectorKey: "y"}
+	disagree := &VersionedSettings{
+		Runtimes: map[string]V1RuntimeConfig{
+			"a": {Type: "kubernetes", NodeSelector: x},
+			"b": {Type: "kubernetes", Context: "c1", Namespace: "agents", NodeSelector: y},
+		},
+		Profiles: map[string]V1ProfileConfig{"p": {Runtime: "a"}},
+	}
+	got := ConvertProfilesToInstances(ProfileConversionInput{Settings: disagree, Profiles: []string{"p"}})
+	if _, mapped := got.ProfileMap["p"]; mapped {
+		t.Fatalf("a profile on possibly aliased disagreeing entries converted: %+v", got.ProfileMap)
+	}
+	blocked := false
+	for _, f := range got.Findings {
+		if f.Path == "runtimes.a" && f.Code == ConversionProfileConflict && f.Severity == ConversionSeverityBlocking {
+			blocked = true
+		}
+	}
+	if !blocked {
+		t.Fatalf("no blocking finding: %+v", got.Findings)
+	}
+
+	// Agreeing entries may target the same namespace and are identical in
+	// placement (SiblingPlacementAgrees: equal selectors and runtime class,
+	// equal toleration sets), so the merge over them equals either entry
+	// up to toleration order; the leg checks that they are not blocked and
+	// that the converted target equals the legacy policy.
+	tolA := api.K8sToleration{Key: "a", Operator: "Exists"}
+	tolB := api.K8sToleration{Key: "b", Operator: "Exists"}
+	agree := &VersionedSettings{
+		Runtimes: map[string]V1RuntimeConfig{
+			"a": {Type: "kubernetes", NodeSelector: x, Tolerations: []api.K8sToleration{tolA, tolB}},
+			"b": {Type: "kubernetes", Context: "c1", Namespace: "agents", NodeSelector: x, Tolerations: []api.K8sToleration{tolB, tolA, tolB}},
+		},
+		Profiles: map[string]V1ProfileConfig{"p": {Runtime: "a", NodeSelector: map[string]string{"disk": "ssd"}}},
+	}
+	got = ConvertProfilesToInstances(ProfileConversionInput{Settings: agree, Profiles: []string{"p"}})
+	if got.ProfileMap["p"] == "" {
+		t.Fatalf("agreeing aliased entries blocked: %+v", got.Findings)
+	}
+	legacy, ok := ResolveLegacyPolicyOffline(agree.Runtimes, agree.Profiles, nil, "p")
+	target := got.Instances[0].RuntimeTarget
+	if !ok || !reflect.DeepEqual(target.NodeSelector, legacy.NodeSelector) || !reflect.DeepEqual(tolerationSet(target.Tolerations), tolerationSet(legacy.Tolerations)) {
+		t.Fatalf("flat target %+v, legacy %+v (ok %v)", target, legacy, ok)
+	}
+}
+
+// Conversion decides which runtime entries are the operator's with the
+// caller's configured names, like the broker: a settings file that
+// declares kubernetes: {type: kubernetes} makes that entry the operator's,
+// so it is a sibling of an entry with the same empty context and
+// namespace, and their different placement blocks the profile. Without
+// configured names, the entry, identical to the built-in default, is left
+// out.
+func TestProfileConversionConfiguredSiblings(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeFlatTestFile(t, home+"/.scion/settings.yaml", `schema_version: "1"
+runtimes:
+  kubernetes:
+    type: kubernetes
+  pooled:
+    type: kubernetes
+    node_selector:
+      pool: agents
+profiles:
+  p:
+    runtime: pooled
+`)
+	vs, _, err := LoadGlobalSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, known := ConfiguredRuntimeNames()
+	if !known || !names["kubernetes"] || !names["pooled"] {
+		t.Fatalf("configured names %v (known %v)", names, known)
+	}
+	configured := func(name string) bool { return names[name] }
+	// The loaded built-in profiles are recognized as the shipped defaults;
+	// the operator's profile is not.
+	for name, p := range vs.Profiles {
+		if IsShippedDefaultProfile(name, p) != (name != "p") {
+			t.Errorf("profile %s: shipped default = %v", name, IsShippedDefaultProfile(name, p))
+		}
+	}
+	got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs, Profiles: []string{"p"}, ConfiguredRuntimes: configured})
+	if _, mapped := got.ProfileMap["p"]; mapped {
+		t.Fatalf("the configured kubernetes entry is not a sibling: %+v", got.Findings)
+	}
+	got = ConvertProfilesToInstances(ProfileConversionInput{Settings: vs, Profiles: []string{"p"}})
+	if got.ProfileMap["p"] == "" {
+		t.Fatalf("without configured names the built-in-identical entry blocked: %+v", got.Findings)
 	}
 }

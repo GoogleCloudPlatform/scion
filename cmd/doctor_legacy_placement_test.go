@@ -33,7 +33,7 @@ func TestCheckDoctorLegacyPlacementPreflight(t *testing.T) {
 		map[string]config.V1ProfileConfig{"p": {Runtime: "k", NodeSelector: map[string]string{config.PoolNodeSelectorKey: "batch"}}})
 	agents := config.PlacementPreflightReport{Scanned: 2, Incomplete: 1,
 		Counts: map[config.PlacementPreflightCategory]int{config.PreflightAgentTolerationsWithoutOperatorPolicy: 1}}
-	res := checkDoctorLegacyPlacementPreflight(settings, agents)
+	res := checkDoctorLegacyPlacementPreflight(settings, agents, false)
 	if res.Name != "legacy-placement-preflight" || res.Status != "warn" || res.Remediation != legacyPlacementPreflightRemedy {
 		t.Fatalf("got %+v", res)
 	}
@@ -48,13 +48,13 @@ func TestCheckDoctorLegacyPlacementPreflight(t *testing.T) {
 	}
 
 	clean := config.ScanSettingsPlacement(nil, nil)
-	if res := checkDoctorLegacyPlacementPreflight(clean, config.PlacementPreflightReport{Scanned: 3}); res.Status != "pass" || res.Remediation != "" {
+	if res := checkDoctorLegacyPlacementPreflight(clean, config.PlacementPreflightReport{Scanned: 3}, false); res.Status != "pass" || res.Remediation != "" {
 		t.Fatalf("clean scan: got %+v", res)
 	}
 	// Linked projects the host cannot list are incomplete coverage, never
 	// a clean result.
 	partial := config.PlacementPreflightReport{Scanned: 3, NotEnumerated: []string{legacyPlacementNotEnumerated}}
-	res = checkDoctorLegacyPlacementPreflight(clean, partial)
+	res = checkDoctorLegacyPlacementPreflight(clean, partial, false)
 	if res.Status != "warn" || !strings.Contains(res.Message, "not enumerated: linked projects") {
 		t.Fatalf("unlisted linked projects: got %+v", res)
 	}
@@ -130,5 +130,75 @@ func TestCheckDoctorLegacyPlacementPreflightUnreadableSettings(t *testing.T) {
 	legacyDoctorHome(t, "schema_version: \"1\"\nserver:\n  broker:\n    enabled: true\n    instances:\n      - key: local-docker\n        name: example-docker\n        runtime_target:\n          type: docker\n          display_name: Local Docker\n")
 	if res, ok := checkDoctorLegacyPlacementPreflightHere(); ok {
 		t.Fatalf("a flat host got a legacy line: %+v", res)
+	}
+}
+
+// The line's status follows Kubernetes evidence; its coverage phrase is
+// always there. With no Kubernetes use, what the scan cannot list leaves
+// the line passing (naming it); with Kubernetes use (a configured entry, or
+// a Kubernetes agent found), it warns.
+func TestCheckDoctorLegacyPlacementPreflightStatusFollowsKubernetesUse(t *testing.T) {
+	clean := config.ScanSettingsPlacement(nil, nil)
+	unlisted := config.PlacementPreflightReport{NotEnumerated: []string{legacyPlacementNotEnumerated}}
+	res := checkDoctorLegacyPlacementPreflight(clean, unlisted, false)
+	if res.Status != "pass" || res.Remediation != "" || !strings.Contains(res.Message, "not enumerated: linked projects") {
+		t.Fatalf("no Kubernetes use: %+v", res)
+	}
+	if res := checkDoctorLegacyPlacementPreflight(clean, unlisted, true); res.Status != "warn" {
+		t.Fatalf("configured Kubernetes entry: %+v", res)
+	}
+	found := unlisted
+	found.Scanned = 1
+	if res := checkDoctorLegacyPlacementPreflight(clean, found, false); res.Status != "warn" {
+		t.Fatalf("Kubernetes agent found: %+v", res)
+	}
+	incomplete := unlisted
+	incomplete.Incomplete = 1
+	if res := checkDoctorLegacyPlacementPreflight(clean, incomplete, false); res.Status != "warn" {
+		t.Fatalf("incomplete records: %+v", res)
+	}
+}
+
+// A Docker-only legacy host (no Kubernetes entry configured, only a Docker
+// agent) passes, and the line still names the sources it cannot list.
+func TestCheckDoctorLegacyPlacementPreflightDockerOnlyHost(t *testing.T) {
+	legacyDoctorHome(t, "schema_version: \"1\"\n")
+	writeLegacyDoctorAgent(t, "dock", `{"runtime":"docker"}`, `{}`)
+	res, ok := checkDoctorLegacyPlacementPreflightHere()
+	if !ok || res.Status != "pass" || !strings.Contains(res.Message, "not enumerated: linked projects") {
+		t.Fatalf("got %v %+v", ok, res)
+	}
+}
+
+// A host whose only Kubernetes evidence is a configured Kubernetes runtime
+// entry warns on the sources it cannot list.
+func TestCheckDoctorLegacyPlacementPreflightConfiguredEntryWarns(t *testing.T) {
+	legacyDoctorHome(t, "schema_version: \"1\"\nruntimes:\n  gke:\n    type: kubernetes\n    namespace: agents\n")
+	res, ok := checkDoctorLegacyPlacementPreflightHere()
+	if !ok || res.Status != "warn" || !strings.Contains(res.Message, "scanned 0, incomplete 0") || !strings.Contains(res.Message, "not enumerated: linked projects") {
+		t.Fatalf("got %v %+v", ok, res)
+	}
+}
+
+// writeLegacyDoctorAgent writes agent name's agent-info.json and
+// scion-agent.json in the global project of the current HOME.
+func writeLegacyDoctorAgent(t *testing.T, name, info, cfg string) {
+	t.Helper()
+	projectDir, err := config.GetResolvedProjectDir("global")
+	if err != nil {
+		t.Fatal(err)
+	}
+	home := config.GetAgentHomePath(projectDir, name)
+	agentDir := config.GetAgentDir(projectDir, name, false)
+	for _, d := range []string{home, agentDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(home, "agent-info.json"), []byte(info), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

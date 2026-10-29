@@ -66,6 +66,11 @@ type ProfileConversionInput struct {
 	Profiles []string
 	// Choices are explicit operator choices from a reviewed manifest.
 	Choices []ConversionChoice
+	// ConfiguredRuntimes reports whether a runtime entry is the operator's
+	// (ConfiguredRuntimeNames), as a legacy start decides when it matches
+	// sibling entries for placement. nil leaves out only the built-in
+	// default entries kept exactly as the defaults define them.
+	ConfiguredRuntimes func(string) bool
 }
 
 // ConversionChoice is one operator choice. A Split choice sets TargetGroup
@@ -205,7 +210,7 @@ func ConvertProfilesToInstances(in ProfileConversionInput) ProfileConversionResu
 				fmt.Sprintf("profile %s is not defined in these settings; remove it from the profiles in scope", name), name)
 			continue
 		}
-		if cp := foldProfile(st, vs, name, prof); cp != nil {
+		if cp := foldProfile(st, vs, in.ConfiguredRuntimes, name, prof); cp != nil {
 			profiles = append(profiles, cp)
 		}
 	}
@@ -280,7 +285,7 @@ func flatTargetType(t string) string {
 // foldProfile resolves profile name's target and folds its values per
 // field. It returns nil when the profile cannot become a flat instance
 // (a blocking finding says why).
-func foldProfile(st *convState, vs *VersionedSettings, name string, prof V1ProfileConfig) *convProfile {
+func foldProfile(st *convState, vs *VersionedSettings, configured func(string) bool, name string, prof V1ProfileConfig) *convProfile {
 	pp := "profiles." + name + "."
 	if prof.Runtime == "" {
 		st.add(ConversionUnsupportedFlatTargetType, ConversionSeverityBlocking, pp+"runtime",
@@ -340,10 +345,10 @@ func foldProfile(st *convState, vs *VersionedSettings, name string, prof V1Profi
 	placementEntries := []string{rtKey}
 	if typ == RuntimeTargetTypeKubernetes {
 		var other string
-		placementEntries, other = PlacementSiblingEntries(vs.Runtimes, rtKey)
+		placementEntries, other = PlacementSiblingEntries(vs.Runtimes, rtKey, configured)
 		if other != "" {
 			st.add(ConversionProfileConflict, ConversionSeverityBlocking, strings.TrimSuffix(rp, "."),
-				SiblingDisagreementCause(rtKey, other)+"; a legacy start on that cluster and namespace is refused, so give them the same placement before converting", name)
+				fmt.Sprintf("runtime entries %s, %s may target the same cluster and namespace (equal, or empty context or namespace) with different placement; a legacy start there is refused, so give them the same placement before converting", rtKey, other), name)
 			ok = false
 		}
 	}

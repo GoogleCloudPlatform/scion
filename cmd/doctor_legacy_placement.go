@@ -64,6 +64,19 @@ func checkDoctorLegacyPlacementPreflightHere() (scionruntime.CheckResult, bool) 
 	}
 	configured, known := config.ConfiguredRuntimeNames()
 	isConfigured := func(name string) bool { return !known || configured[name] }
+	// Kubernetes use the settings show: a configured Kubernetes runtime
+	// entry, or an operator profile naming a Kubernetes runtime entry.
+	kubernetesUse := false
+	for name, rt := range vs.Runtimes {
+		if config.IsKubernetesRuntimeEntry(name, rt) && isConfigured(name) {
+			kubernetesUse = true
+		}
+	}
+	for name, p := range vs.Profiles {
+		if rt, ok := vs.Runtimes[p.Runtime]; ok && config.IsKubernetesRuntimeEntry(p.Runtime, rt) && !config.IsShippedDefaultProfile(name, p) {
+			kubernetesUse = true
+		}
+	}
 
 	settings := config.ScanSettingsPlacement(vs.Runtimes, vs.Profiles)
 	settings.AddGlobalSettingsFileRaw()
@@ -92,17 +105,30 @@ func checkDoctorLegacyPlacementPreflightHere() (scionruntime.CheckResult, bool) 
 		paths = append(paths, root)
 	}
 	agent.ScanLocalLegacyPlacement(&agents, paths, policy)
-	return checkDoctorLegacyPlacementPreflight(settings, agents), true
+	return checkDoctorLegacyPlacementPreflight(settings, agents, kubernetesUse), true
 }
 
 // checkDoctorLegacyPlacementPreflight reports the settings and agent scans
-// as one line of counts (never names or values). It warns when either
-// needs attention, including incomplete coverage, and passes otherwise.
-func checkDoctorLegacyPlacementPreflight(settings config.SettingsPlacementReport, agents config.PlacementPreflightReport) scionruntime.CheckResult {
+// as one line of counts (never names or values), always with the scan's
+// coverage limits (the sources it cannot list). It warns when the settings
+// need attention; when the agent scan has a finding, incomplete or
+// unreadable records, or agents it does not cover; or when it cannot list a
+// source and the host shows Kubernetes use (kubernetesUse from the
+// settings, or a Kubernetes agent found). A host with no Kubernetes use
+// passes, still naming what it could not list, so the line never claims
+// complete coverage.
+func checkDoctorLegacyPlacementPreflight(settings config.SettingsPlacementReport, agents config.PlacementPreflightReport, kubernetesUse bool) scionruntime.CheckResult {
 	res := scionruntime.CheckResult{Name: "legacy-placement-preflight", Status: "pass",
 		Message: "Kubernetes placement on this host (settings file; agents in the global, hub-managed and current projects): settings: " +
 			settings.Summary() + " | agents: " + agents.Summary()}
-	if settings.NeedsAttention() || agents.NeedsAttention() {
+	findings := agents.Incomplete > 0 || agents.RecordsUnreadable || agents.NotCovered > 0
+	for _, n := range agents.Counts {
+		if n > 0 {
+			findings = true
+		}
+	}
+	kubernetesUse = kubernetesUse || agents.Scanned > 0
+	if settings.NeedsAttention() || findings || (len(agents.NotEnumerated) > 0 && kubernetesUse) {
 		res.Status = "warn"
 		res.Remediation = legacyPlacementPreflightRemedy
 	}

@@ -15,6 +15,8 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"reflect"
 	"sort"
 
@@ -161,25 +163,34 @@ func mayTargetSameNamespace(a, b V1RuntimeConfig) bool {
 	return ctx && ns
 }
 
-// PlacementSiblingEntries returns the runtime entries a legacy start on
-// runtime entry rtKey merges placement from: rtKey and every other
-// Kubernetes entry with the same literal context and namespace, leaving
-// out built-in default entries kept as the defaults define them (which are
-// not the operator's), sorted. disagree names the first such entry whose
+// PlacementSiblingEntries returns the runtime entries whose placement a
+// legacy start on runtime entry rtKey may merge, as the offline policy
+// resolution groups them (ResolveLegacyPolicyOffline): rtKey and every
+// other operator Kubernetes entry that may target the same cluster and
+// namespace (equal context and namespace, or empty on either side),
+// sorted. configured reports whether an entry is the operator's (the
+// settings file's configured entries, as ConfiguredRuntimeNames gives
+// them); nil leaves out only the built-in default entries kept exactly as
+// the defaults define them. disagree names the first such entry whose
 // placement differs from rtKey's (SiblingPlacementAgrees), or is "" when
-// they all agree; a legacy start refuses then.
-func PlacementSiblingEntries(runtimes map[string]V1RuntimeConfig, rtKey string) (entries []string, disagree string) {
+// they all agree; a legacy start on that cluster and namespace may refuse
+// then.
+func PlacementSiblingEntries(runtimes map[string]V1RuntimeConfig, rtKey string, configured func(string) bool) (entries []string, disagree string) {
 	rt := runtimes[rtKey]
 	entries = []string{rtKey}
 	builtins := defaultBuiltinCatalog().Runtimes
+	isOperator := func(name string, entry V1RuntimeConfig) bool {
+		if configured != nil {
+			return configured(name)
+		}
+		b, builtin := builtins[name]
+		return !builtin || !reflect.DeepEqual(b, entry)
+	}
 	for name, other := range runtimes {
-		if name == rtKey || !IsKubernetesRuntimeEntry(name, other) {
+		if name == rtKey || !IsKubernetesRuntimeEntry(name, other) || !isOperator(name, other) {
 			continue
 		}
-		if b, ok := builtins[name]; ok && reflect.DeepEqual(b, other) {
-			continue
-		}
-		if other.Context == rt.Context && other.Namespace == rt.Namespace {
+		if mayTargetSameNamespace(rt, other) {
 			entries = append(entries, name)
 		}
 	}
@@ -190,4 +201,19 @@ func PlacementSiblingEntries(runtimes map[string]V1RuntimeConfig, rtKey string) 
 		}
 	}
 	return entries, ""
+}
+
+// IsShippedDefaultProfile reports whether profile name is one of the
+// built-in default profiles, exactly as the defaults define it (so not a
+// profile the operator configured).
+// The comparison is of the JSON forms, so empty and unset values are
+// equal.
+func IsShippedDefaultProfile(name string, p V1ProfileConfig) bool {
+	b, ok := defaultBuiltinCatalog().Profiles[name]
+	if !ok {
+		return false
+	}
+	bj, err1 := json.Marshal(b)
+	pj, err2 := json.Marshal(p)
+	return err1 == nil && err2 == nil && bytes.Equal(bj, pj)
 }
