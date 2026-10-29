@@ -471,6 +471,9 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	ctx, cancel := context.WithTimeout(legacy.context(r), portForwardTimeout)
 	defer cancel()
 	reqPath := "/" + strings.TrimPrefix(proxyPath, "/")
+	fwdHeader := cloneForwardHeaders(r.Header)
+	// The front proxy's identity headers are not passed to the agent's app.
+	s.stripFrontProxyIdentityHeaders(fwdHeader)
 	resp, err := s.portTunnels.Do(ctx, agent.ID, portforward.Request{
 		StreamID: uuid.NewString(),
 		Port:     exposed.Port,
@@ -478,7 +481,7 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 		Method:   r.Method,
 		Path:     reqPath,
 		Query:    r.URL.RawQuery,
-		Header:   cloneForwardHeaders(r.Header),
+		Header:   fwdHeader,
 		Body:     body,
 	})
 	if hook := s.legacyPortTunnelReturnedTestHook; hook != nil {

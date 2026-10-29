@@ -241,6 +241,9 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 					pr.Out.Header.Del(k)
 				}
 			}
+			// The front proxy's identity headers are not passed to the
+			// agent's app.
+			s.stripFrontProxyIdentityHeaders(pr.Out.Header)
 		},
 		Transport:     conduitProxyTransport(conn, headerTimeout),
 		FlushInterval: -1,

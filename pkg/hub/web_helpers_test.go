@@ -237,7 +237,8 @@ type mockOAuthTransport struct {
 func (m *mockProxyAuthenticator) Authenticate(_ *http.Request) (*ProxyUserInfo, error) {
 	return m.user, m.err
 }
-func (m *mockProxyAuthenticator) Name() string { return "mock" }
+func (m *mockProxyAuthenticator) Name() string               { return "mock" }
+func (m *mockProxyAuthenticator) AssertionHeaders() []string { return nil }
 
 func (s *proxyAuthStore) GetUserByEmail(_ context.Context, email string) (*store.User, error) {
 	for _, u := range s.users {
