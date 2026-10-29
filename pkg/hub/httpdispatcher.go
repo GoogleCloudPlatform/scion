@@ -3626,15 +3626,6 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	// so in the start response (ptone/scion#3982).
 	d.warnRerenderUnsupported(ctx, agent, inlineConfig)
 
-	// TODO(#1350): Thread envClassifications to broker via client.StartAgent.
-	// PRECONDITION for P3b: without this, the broker receives nil (state 3,
-	// "classification unavailable") on the start path. P3b must not land
-	// until #1350 is done — otherwise fail-closed + nil map = total outage.
-	// This includes SCION_GIT_CLONE_URL: the broker classifies it as
-	// EnvKindSecretInjected on its own side (start_context.go), but that
-	// classification does not reach the Hub until #1350 wires it back.
-	_ = envClassifications // avoid unused-variable error until #1350 wire threading
-
 	// Carry the same dispatch metadata the create path sends so that a
 	// re-provision reached via start (e.g. after the broker deletes a stale
 	// agent dir) can resolve required skills exactly as create does (#1960):
@@ -3674,6 +3665,12 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	extras.RunID = runID
 	setStartEnvToken(resolvedEnv, &envClassifications, token)
 	issued = token != ""
+	// The broker accepts the issued credential from resolvedEnv only with
+	// its secret-bootstrap classification, so the classifications go with
+	// the start, as they do with a create. The reverse direction, the
+	// broker's own classifications (such as the clone URL's) reaching the
+	// hub, is still open under #1350.
+	extras.EnvClassifications = envClassifications
 
 	// send is one start send, including the hash-mismatch repair and
 	// resend, so one asynchronous launch spans both attempts (design L7).
@@ -3892,12 +3889,6 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	resolvedEnv := startEnv.env
 	envClassifications := startEnv.classifications
 
-	// TODO(#1350): Thread envClassifications to broker via client.RestartAgent.
-	// PRECONDITION for P3b: without this, the broker receives nil (state 3,
-	// "classification unavailable") on the restart path. P3b must not land
-	// until #1350 is done — otherwise fail-closed + nil map = total outage.
-	_ = envClassifications // avoid unused-variable error until #1350 wire threading
-
 	// Carry the same dispatch metadata as DispatchAgentStart (see comment
 	// there) so a re-provision reached via restart resolves required skills
 	// exactly as create does (#1960), always as the agent's creator
@@ -3956,6 +3947,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	}
 	extras.RunID = runID
 	setStartEnvToken(resolvedEnv, &envClassifications, token)
+	// As on start: the classifications carry the issued credential's
+	// secret-bootstrap kind, without which the broker drops it.
+	extras.EnvClassifications = envClassifications
 
 	resp, err := d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv, extras)
 	if errors.Is(err, ErrLifecycleDeferred) {
