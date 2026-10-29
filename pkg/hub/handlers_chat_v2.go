@@ -3041,8 +3041,9 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 	// envelope switch resolved one; reply previews are matched against it.
 	historyConvID := target.ConversationID
 	// No history caller reads totalCount, and counting costs a scan of
-	// the whole conversation on every page, so every history query below
-	// skips it (ptone/scion#6571).
+	// the whole conversation on every page, so the page skips it
+	// (ptone/scion#6571). The around jump derives both of its queries from
+	// opts, so they skip it too.
 	opts := store.ListOptions{
 		Limit:          limit,
 		SkipTotalCount: true,
@@ -3081,7 +3082,10 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		if olderLimit > 0 {
 			olderFilter := filter
 			olderFilter.Before = anchor.CreatedAt
-			older, err = s.store.ListMessages(ctx, olderFilter, store.ListOptions{Limit: olderLimit, SkipTotalCount: true})
+			olderOpts := opts
+			olderOpts.Cursor = ""
+			olderOpts.Limit = olderLimit
+			older, err = s.store.ListMessages(ctx, olderFilter, olderOpts)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch messages", nil)
 				return
@@ -3092,11 +3096,11 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		if newerLimit > 0 {
 			newerFilter := filter
 			newerFilter.After = anchor.CreatedAt
-			newer, err = s.store.ListMessages(ctx, newerFilter, store.ListOptions{
-				Limit:          newerLimit,
-				SortDir:        "asc",
-				SkipTotalCount: true,
-			})
+			newerOpts := opts
+			newerOpts.Cursor = ""
+			newerOpts.Limit = newerLimit
+			newerOpts.SortDir = "asc"
+			newer, err = s.store.ListMessages(ctx, newerFilter, newerOpts)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to fetch messages", nil)
 				return
