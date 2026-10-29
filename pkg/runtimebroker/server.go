@@ -570,6 +570,9 @@ type Server struct {
 	// once per process (startSharedDirsMigrationHook).
 	sharedDirsMigrateOnce sync.Once
 	nfsReconcileCancel    context.CancelFunc
+	// shareHealth is the project storage share's visibility on a shared
+	// Layout, re-checked by startShareHealthLoop (share_health.go).
+	shareHealth shareHealthState
 	// nfsReconcileInterval overrides DefaultNFSReconcileInterval (tests).
 	nfsReconcileInterval time.Duration
 
@@ -1614,6 +1617,7 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 	// NFS. Until the first pass finishes, /healthz reports the shares as not
 	// reconciled.
 	s.startNFSReconcileLoop(ctx)
+	s.startShareHealthLoop(ctx)
 
 	// Move shared dirs this broker kept node-local onto the shared tree
 	// its Layout now places them on (background, once per process).
@@ -1678,6 +1682,11 @@ func (s *Server) logNFSStartupResult() {
 			"status", r.HealthCheckString(), "autoMount", r.AutoMount())
 		return
 	}
+	if r.UnhealthyAdvisoryOnly() {
+		slog.Warn("NFS mount-table check failed at startup; advisory on this broker, which does not mount the share, and the share directory is visible",
+			"detail", r.HealthCheckString(), "autoMount", r.AutoMount())
+		return
+	}
 	slog.Error("NFS mounts unhealthy at startup; the broker keeps serving",
 		"detail", r.HealthCheckString(), "autoMount", r.AutoMount())
 }
@@ -1733,6 +1742,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if nfsCancel != nil {
 		nfsCancel()
 	}
+	s.stopShareHealthLoop()
 
 	// Cancel every start still running on a start, restart or create
 	// handler and wait for Run's deferred cleanup, before the hub

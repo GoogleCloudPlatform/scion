@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -70,4 +71,16 @@ func ShareDirVisible(ctx context.Context, hostBase string) error {
 	case <-ctx.Done():
 		return fmt.Errorf("checking %s: %w", hostBase, ctx.Err())
 	}
+}
+
+// ShareSubPathRootDir is <hostBase>/<subPathRoot>, the directory every
+// project tree of a shared Layout lives in, with subPathRoot defaulting to
+// DefaultSubPathRoot as Layout does. A mount point without it is not the
+// share: the start refusal, the broker's health check and the advisory
+// mount-check log all test this one directory.
+func ShareSubPathRootDir(hostBase, subPathRoot string) string {
+	if subPathRoot == "" {
+		subPathRoot = DefaultSubPathRoot
+	}
+	return filepath.Join(hostBase, subPathRoot)
 }
