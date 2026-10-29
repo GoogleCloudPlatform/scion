@@ -88,8 +88,8 @@ func CheckGitRepoDir(dir string) (bool, error) {
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	// Force untranslated git messages so the stderr match is locale-stable.
-	cmd.Env = append(HostGitEnv(os.Environ()), "LC_ALL=C")
+	// hostGit's environment (HostGitEnv) sets LC_ALL=C, so the stderr match is
+	// locale-stable.
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err == nil {
@@ -329,10 +329,11 @@ func CreateWorktreeWithOrigin(path, branch, recordedOrigin string) error {
 
 	// git worktree add --relative-paths -b <branch> <path>
 	// We run from root to ensure --relative-paths are calculated from root.
-	// LC_ALL=C keeps git's messages in English, so the matches below hold.
-	// The checkout runs without repository hooks or repository-defined
-	// filter commands (HostGitCommand): agents can write this repository.
-	gitEnv := append(HostGitEnv(os.Environ()), "LC_ALL=C")
+	// HostGitEnv sets LC_ALL=C, which keeps git's messages in English, so the
+	// matches below hold. The checkout runs without repository hooks or
+	// repository-defined filter commands (HostGitCommand): agents can write
+	// this repository.
+	gitEnv := HostGitEnv(os.Environ())
 	ctx := context.Background()
 	// git-lfs on a host-side checkout would otherwise take its endpoint from
 	// a tracked .lfsconfig; pin the endpoint from the trusted (broker-recorded)
@@ -846,7 +847,7 @@ func baseRepoGitDir(repoRoot string) (string, error) {
 // from the process are dropped except the set HostGitEnv keeps (the host
 // user's own config and transport/auth — GIT_CONFIG_GLOBAL/SYSTEM/NOSYSTEM,
 // GIT_SSH*, GIT_ASKPASS, GIT_SSL_CA*, GIT_ALLOW_PROTOCOL,
-// GIT_CEILING_DIRECTORIES, ...) and LC_ALL=C is set; core.hooksPath points at an empty
+// GIT_CEILING_DIRECTORIES, ...) and LC_ALL=C is set (HostGitEnv); core.hooksPath points at an empty
 // location (os.DevNull), so hook files in the repository are not run; and
 // the file-system monitor is off. It returns an error, and no command, when
 // repoRoot is not a main repository (baseRepoGitDir).
@@ -866,11 +867,12 @@ func BaseRepoGitCommand(ctx context.Context, repoRoot string, args ...string) (*
 	// scrubbed environment every host git call uses (HostGitArgs/HostGitEnv): no
 	// hooks, no fsmonitor, and credential helpers supplied through the environment
 	// are dropped, with the repository pinned by GIT_DIR/GIT_COMMON_DIR rather than
-	// by anything the worktree can rewrite. LC_ALL=C keeps porcelain output parseable.
+	// by anything the worktree can rewrite. HostGitEnv's LC_ALL=C keeps porcelain
+	// output parseable.
 	full := append(append(HostGitArgs(), "-C", repoRoot), args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.WaitDelay = 5 * time.Second
-	cmd.Env = append(HostGitEnv(os.Environ()), "GIT_DIR="+gitDir, "GIT_COMMON_DIR="+gitDir, "LC_ALL=C")
+	cmd.Env = append(HostGitEnv(os.Environ()), "GIT_DIR="+gitDir, "GIT_COMMON_DIR="+gitDir)
 	return cmd, nil
 }
 
@@ -917,7 +919,8 @@ func RemoveWorktreeEntryIn(repoRoot, path string) error {
 // example with extra -c settings or environment for a shared checkout).
 // newCmd builds the git command for the given arguments, already pointed
 // at the repository; RemoveWorktreeEntry never adds -C itself. It appends
-// LC_ALL=C to the command's environment so git's messages can be matched.
+// LC_ALL=C to the command's environment so git's messages can be matched,
+// whatever environment newCmd built (one from HostGitEnv already has it).
 //
 // It acts only when path is absent (Lstat reports it does not exist), runs
 // "git worktree remove <path>" without --force, first with the cleaned path
@@ -976,6 +979,8 @@ func removeWorktreeEntryAt(ctx context.Context, newCmd func(ctx context.Context,
 	if cmd.Env == nil {
 		cmd.Env = os.Environ()
 	}
+	// newCmd may build any environment, so LC_ALL=C is appended here as well
+	// (os/exec keeps the last of duplicate entries).
 	cmd.Env = append(cmd.Env, "LC_ALL=C")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
