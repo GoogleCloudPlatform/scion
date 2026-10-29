@@ -237,7 +237,7 @@ func resolveSharedDirs(
 		}
 	} else if errors.Is(statErr, fs.ErrNotExist) {
 		if inlineSharedDirs(runtimeName, sdLayout, split) {
-			return nil, nil, fmt.Errorf("shared dir %q: %w", dirs[0].Name, nfsInlineLeafRefusal(hostBase, resolved[0].RelPath, statErr))
+			return nil, nil, fmt.Errorf("shared dir %q: %w", dirs[0].Name, inlineShareNotVisible(hostBase))
 		}
 		if !kubeletMayCreateSharedDirs(runtimeName, sdLayout, split) {
 			return nil, nil, fmt.Errorf(

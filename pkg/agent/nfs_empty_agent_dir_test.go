@@ -175,16 +175,15 @@ func TestStartNFSEmptyAgentDir_NoClaimMountsInline(t *testing.T) {
 }
 
 // Inline (no pv_name) with the export not mounted on the broker: the node
-// cannot create an inline volume's directory, so the start is refused with
-// the directory and the fix, and the pod is not created.
+// cannot create an inline volume's directory, so the start is refused as a
+// share the broker does not see (inline remedy), and the pod is not created.
 func TestStartNFSEmptyAgentDir_NoClaimExportNotMountedRefused(t *testing.T) {
 	mountRoot := filepath.Join(t.TempDir(), "nfs")
 	_, ran, err := startNFSEmptyAgentDirNoClaim(t, mountRoot)
 	require.Error(t, err)
 	assert.False(t, ran, "the pod must not be created")
-	assert.Contains(t, err.Error(), filepath.Join("projects", testNFSWorkspaceProjectID)+"/")
-	assert.Contains(t, err.Error(), "mount the share's export at")
-	assert.Contains(t, err.Error(), filepath.Join(mountRoot, "share-1"))
+	assert.True(t, errors.Is(err, ErrProjectShareNotMounted), "err = %v", err)
+	assert.Contains(t, err.Error(), runtime.ProjectShareInlineUnavailableText(filepath.Join(mountRoot, "share-1")))
 	assert.NoDirExists(t, mountRoot)
 }
 

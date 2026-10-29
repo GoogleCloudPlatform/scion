@@ -69,6 +69,13 @@ type projectShareError struct {
 func (e *projectShareError) Error() string { return e.msg }
 func (e *projectShareError) Unwrap() error { return ErrProjectShareNotMounted }
 
+// inlineShareNotVisible refuses a Kubernetes start whose NFS share has no
+// claim when the broker does not see the share at hostBase: as for a
+// claim, a projectShareError, with the inline remedy.
+func inlineShareNotVisible(hostBase string) error {
+	return &projectShareError{msg: runtime.ProjectShareInlineUnavailableText(hostBase), inline: true}
+}
+
 // ProjectShareClientText is the path-free client text for a start refused
 // with ErrProjectShareNotMounted: the refusal's remedy with the mount point
 // named as runtime.ProjectShareMountPathField. The refusal comes only from
@@ -244,7 +251,7 @@ func ensureNFSWorkspaceLeavesClaim(runtimeName, projectID string, resolved runti
 			// this error. With an inline share the text also says why the
 			// broker must create the directories itself.
 			if share.Inline() {
-				return false, false, &projectShareError{msg: runtime.ProjectShareInlineUnavailableText(resolved.HostBase), inline: true}
+				return false, false, inlineShareNotVisible(resolved.HostBase)
 			}
 			return false, false, &projectShareError{msg: runtime.ProjectShareUnavailableText(resolved.HostBase, true)}
 		}

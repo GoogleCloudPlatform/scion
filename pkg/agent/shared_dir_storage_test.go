@@ -31,6 +31,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
@@ -1416,8 +1417,9 @@ func TestResolveSharedDirs_NFS_RealizationCarriesInlineShareUnlessSplit(t *testi
 }
 
 // Inline shared dirs (no pv_name, Kubernetes): the broker must create them,
-// so a host base it has not mounted refuses the start with the directory
-// and the fix instead of leaving the directories to the node.
+// so a host base it has not mounted refuses the start as a share the broker
+// does not see (inline remedy) instead of leaving the directories to the
+// node.
 func TestResolveSharedDirs_NFS_InlineMissingHostBaseRefused(t *testing.T) {
 	tmpDir := t.TempDir()
 	missingBase := filepath.Join(tmpDir, "does-not-exist")
@@ -1428,8 +1430,8 @@ func TestResolveSharedDirs_NFS_InlineMissingHostBaseRefused(t *testing.T) {
 	dirs := []api.SharedDir{{Name: "scratchpad"}}
 	volumes, realization, err := resolveSharedDirs(sdLayoutFor(t, sdCfg), false, "/unused", "pid-1", "kubernetes", dirs, "/workspace")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "projects/pid-1/shared-dirs/scratchpad")
-	assert.Contains(t, err.Error(), "mount the share's export at \""+missingBase+"\"")
+	assert.True(t, errors.Is(err, ErrProjectShareNotMounted), "err = %v", err)
+	assert.Equal(t, `shared dir "scratchpad": `+runtime.ProjectShareInlineUnavailableText(missingBase), err.Error())
 	assert.Nil(t, volumes)
 	assert.Nil(t, realization)
 	_, statErr := os.Stat(missingBase)

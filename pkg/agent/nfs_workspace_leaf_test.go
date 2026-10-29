@@ -527,6 +527,7 @@ func TestEnsureNFSWorkspaceLeaf_ExportNotMountedRefuses(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrProjectShareNotMounted), "err = %v", err)
 	assert.Equal(t, runtime.ProjectShareUnavailableText(res.HostBase, true), err.Error())
+	assert.Equal(t, runtime.ProjectShareUnavailableText(runtime.ProjectShareMountPathField, true), ProjectShareClientText(err))
 	assert.False(t, preCreated)
 	_, err = os.Stat(mountRoot)
 	assert.True(t, os.IsNotExist(err), "the mount root must never be created")
@@ -792,9 +793,10 @@ func TestEnsureNFSWorkspaceLeaf_InlineCreatesDirectories(t *testing.T) {
 }
 
 // Inline, the start is refused when the export is not mounted on the
-// broker (as with a claim, ErrProjectShareNotMounted) and when the broker
-// may not create a directory (with a claim, that is left to the node). The
-// error names the directory and the fix.
+// broker (as with a claim, ErrProjectShareNotMounted, with the inline
+// remedy and a path-free client text) and when the broker may not create a
+// directory (with a claim, that is left to the node; the error names the
+// directory and the fix).
 func TestEnsureNFSWorkspaceLeaf_InlineRefusesNodeFallbacks(t *testing.T) {
 	t.Run("export not mounted", func(t *testing.T) {
 		mountRoot := filepath.Join(t.TempDir(), "nfs")
@@ -803,10 +805,9 @@ func TestEnsureNFSWorkspaceLeaf_InlineRefusesNodeFallbacks(t *testing.T) {
 		prepared, err := ensureNFSWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, res, inlineTestShare, nil)
 		require.Error(t, err)
 		assert.False(t, prepared)
-		assert.Contains(t, err.Error(), filepath.Join("projects", testNFSWorkspaceProjectID, "workspace"))
-		assert.Contains(t, err.Error(), "mount the share's export at \""+res.HostBase+"\"")
-		assert.Contains(t, err.Error(), "writable by the broker")
+		assert.Equal(t, runtime.ProjectShareInlineUnavailableText(res.HostBase), err.Error())
 		assert.True(t, errors.Is(err, ErrProjectShareNotMounted), "err = %v", err)
+		assert.Equal(t, runtime.ProjectShareInlineUnavailableText(runtime.ProjectShareMountPathField), ProjectShareClientText(err))
 		assert.NoDirExists(t, mountRoot)
 	})
 
@@ -838,8 +839,8 @@ func TestEnsureNFSWorktreeLeaf_InlineExportNotMountedRefused(t *testing.T) {
 	res := resolveTestNFSWorkspace(t, mountRoot)
 	_, err := ensureNFSWorktreeLeaf("kubernetes", res, inlineTestShare, "agent-1")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), filepath.Join("worktrees", "agent-1"))
-	assert.Contains(t, err.Error(), "mount the share's export at")
+	assert.True(t, errors.Is(err, ErrProjectShareNotMounted), "err = %v", err)
+	assert.Equal(t, runtime.ProjectShareInlineUnavailableText(res.HostBase), err.Error())
 	ok, err := ensureNFSWorktreeLeaf("kubernetes", res, runtime.NFSPodShare{ClaimName: "ws-pv"}, "agent-1")
 	require.NoError(t, err)
 	assert.False(t, ok)

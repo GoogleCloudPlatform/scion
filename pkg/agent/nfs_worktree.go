@@ -117,7 +117,7 @@ func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspac
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			if share.Inline() {
-				return false, nfsInlineLeafRefusal(resolved.HostBase, leaf, err)
+				return false, inlineShareNotVisible(resolved.HostBase)
 			}
 			slog.Info("workspace_storage nfs: export not mounted on this broker; the node will create the agent's worktree directory "+
 				"when the pod starts, which requires an export that allows root to create directories (no_root_squash)",
