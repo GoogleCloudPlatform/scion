@@ -1047,6 +1047,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// ignored, so the echo of a changed report is not refused
 	// (ptone/scion#3916).
 	rawBody = dropImageRegistryProvenance(rawBody)
+	// Likewise the read-only placement pre-upgrade report of a GET body.
+	rawBody = dropTopLevelMember(rawBody, placementPreflightKey)
 	if s.rejectGateProtectedSettingsKeys(w, rawBody) {
 		return
 	}

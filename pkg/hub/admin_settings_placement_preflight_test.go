@@ -80,3 +80,20 @@ func TestPlacementPreflightReportsCountsOnly(t *testing.T) {
 		}
 	}
 }
+
+// A PUT that sends the read-only report back (an echo of a GET body) has
+// it dropped: the report is never a setting and never refuses the save.
+func TestPlacementPreflightEchoIsDropped(t *testing.T) {
+	tempSettingsHome(t)
+	srv, _, ops := newTestDBServer(t)
+	rr := putServerConfigDB(t, srv, ops, `{"default_model": "m1", "placement_preflight": {"settings_counts": {"settings_malformed_placement": 3}, "agents_scanned": 9}}`)
+	if rr.Code != 200 {
+		t.Fatalf("echo with the report: %d %s", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "placement_preflight") {
+		t.Fatalf("the report is reported as a saved or rejected key: %s", rr.Body.String())
+	}
+	if got := dropTopLevelMember([]byte(`{"Placement_Preflight": {}, "a": 1}`), placementPreflightKey); string(got) != `{"a":1}` {
+		t.Fatalf("drop = %s", got)
+	}
+}

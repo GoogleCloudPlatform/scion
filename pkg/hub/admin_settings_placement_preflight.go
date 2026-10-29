@@ -24,6 +24,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
+// placementPreflightKey is the GET field of the report. A PUT body that
+// sends it back has it dropped: it is read-only, never a setting.
+const placementPreflightKey = "placement_preflight"
+
 // placementPreflightNoColocated is the fixed phrase for the agents of a Hub
 // with no co-located legacy Runtime Broker.
 const placementPreflightNoColocated = "agents of other Runtime Brokers (this Hub has no co-located legacy Runtime Broker)"
