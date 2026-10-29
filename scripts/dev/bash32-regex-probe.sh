@@ -38,11 +38,11 @@ example.com	no port	host=example.com
 [::1]:8080	port stripped	host=[::1]
 quoted RHS	no match	(literal, not regex)'
 
-# SC2317: this body is not dead. It is shipped to the interpreter under test
+# SC2317/SC2329: this body is not dead. It is shipped to the interpreter under test
 # with `declare -f` and invoked there, so shellcheck cannot see the call site.
 # Running it in THIS shell would defeat the point — the whole question is how
 # ANOTHER bash behaves.
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317,SC2329
 probe() {
   local host
   for host in 'example.com:443' 'example.com' '[::1]' '[::1]:8080'; do

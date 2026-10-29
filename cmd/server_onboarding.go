@@ -180,6 +180,10 @@ var (
 	quickstartOnboardingStatus = func(baseURL, token string) (onboardingStatusResult, error) {
 		return fetchOnboardingStatus(&http.Client{Timeout: 5 * time.Second}, baseURL, token)
 	}
-	quickstartBrowserAllowed = browserAutoOpenAllowed
-	quickstartOpenBrowser    = util.OpenBrowser
+	quickstartBrowserAllowed   = browserAutoOpenAllowed
+	quickstartOpenBrowser      = util.OpenBrowser
+	quickstartStdoutIsTerminal = stdoutIsTerminal
+	quickstartDevSignIn        = func(baseURL, token, next string) (devSignInLink, error) {
+		return requestDevSignInLink(&http.Client{Timeout: 5 * time.Second}, baseURL, token, next)
+	}
 )

@@ -5,7 +5,7 @@ ephemeral GitHub Actions JIT runner. That runner takes one job and then exits.
 
 | File | Purpose |
 | :--- | :--- |
-| [`Dockerfile`](Dockerfile) | Image: Ubuntu 24.04, GitHub Actions runner, Go, golangci-lint, git, jq, curl, zstd, ca-certificates; non-root `runner` user (uid 1001, `HOME=/home/runner`) |
+| [`Dockerfile`](Dockerfile) | Image: Ubuntu 24.04, GitHub Actions runner, Go, golangci-lint, git (built from pinned source, >= 2.48), jq, curl, zstd, ca-certificates, and the tools routed CI jobs expect preinstalled (make, procps, python3 + python3-yaml, ripgrep, tmux, shellcheck 0.9.0, openssh-client); non-root `runner` user (uid 1001, `HOME=/home/runner`) |
 | [`entrypoint.sh`](entrypoint.sh) | PID 1: checks `/scratch`, redirects caches, does the claim exchange, then runs `./run.sh --jitconfig` as a child, forwards signals and exits with the runner's real exit code |
 | [`entrypoint_test.go`](entrypoint_test.go) | Offline harness: runs `entrypoint.sh` against a fake claim server on loopback with a stub `run.sh` |
 
@@ -20,6 +20,7 @@ the values. Read them there.
 | `UBUNTU_IMAGE` | Base image, `ubuntu:24.04@sha256:<index digest>` | Docker Hub `library/ubuntu` tag `24.04`, top-level (multi-arch index) digest |
 | `ACTIONS_RUNNER_VERSION` / `ACTIONS_RUNNER_SHA256` | GitHub Actions runner, `actions-runner-linux-x64-<v>.tar.gz` | The release notes of <https://github.com/actions/runner/releases> list the SHA-256 of each tarball |
 | `GO_VERSION` / `GO_SHA256` | Go toolchain, `go<v>.linux-amd64.tar.gz` | <https://go.dev/dl/> (keep it in step with the repo's `go.mod`) |
+| `GIT_VERSION` / `GIT_SHA256` | git, `git-<v>.tar.xz`, built from source in the `git` stage (gcc only there) | `sha256sums.asc` in <https://mirrors.edge.kernel.org/pub/software/scm/git/>; also check the tarball against Junio C Hamano's `git-<v>.tar.sign` (key `96E07AF25771955980DAD10020D04E5A713660A7`). Must be 2.48 or newer: the build asserts it. git is built with `NO_RUST=YesPlease` (2.55+ builds Rust parts by default, which needs cargo); git 3.0 makes Rust mandatory, so a bump to 3.x must revisit the git stage |
 
 golangci-lint is not a download: the `golangci-lint` stage builds it with
 [`golangci-lint/build.sh`](golangci-lint/README.md), the same script, pins
@@ -32,10 +33,19 @@ needs network access to proxy.golang.org (Cloud Build has it). Bump it in
 
 Every download is checked with `sha256sum -c`, and a mismatch fails the build.
 To override a pin, pass the version **and** its checksum with `--build-arg`,
-for example `--build-arg GO_VERSION=<v> --build-arg GO_SHA256=<sha>`. git, jq,
-curl, zstd and the runner's .NET dependencies (installed by the runner's own
+for example `--build-arg GO_VERSION=<v> --build-arg GO_SHA256=<sha>`. jq, curl,
+zstd and the runner's .NET dependencies (installed by the runner's own
 `bin/installdependencies.sh`) come from the Ubuntu archive, and apt verifies
 their signatures.
+
+**git from source.** The repository's tests need git 2.48 or newer (worktree
+`--relative-paths`); Ubuntu 24.04 ships 2.43, which fails 11+ test call sites and
+silently skips 65 more. The `git` stage builds the pinned release tarball, sha256-checked
+like the other downloads, and the final stage copies the installed tree and asserts
+`git --version` >= 2.48. This pins more strongly than the git-core PPA: a PPA publishes
+only its current build, so a pinned package version disappears and rebuilds then fail or
+drift, while the tarball and its sha are permanent. gcc and the -dev libraries stay in the
+build stage; the runner image has no compiler.
 
 **Cache parity with ubuntu-latest.** The contract is
 `gs://scion-xproject-exchange/cr-ci/cache-parity.md`. `actions/cache` (and
@@ -88,12 +98,14 @@ The mediator sets these env overrides on each execution (see
 | `MEDIATOR_URL` | https origin of the mediator, no trailing slash |
 | `GH_JOB_ID` | numeric GitHub job ID (used in logs only) |
 | `RUNNER_NAME` | normally `cr-job-<GH_JOB_ID>` (used in logs only). After a runner swap or hijack recovery the mediator may reuse another job's name, so a mismatch is only a warning |
+| `GH_REPOS` | comma-separated `owner/name` list (1-100) of the repositories whose jobs the runner may be handed: its registration scope. Repo scope: the one repository; org scope: every `TARGET_REPOS` entry of the owner (an org runner may take any of their jobs). The job guard refuses a job of any other repository |
 
 The JIT config is never passed in env, args or labels. The entrypoint does
 this, in order:
 
-1. **Checks the env.** All four variables and `HOME` must be set, and `HOME`
-   must be `/home/runner`. The token must be
+1. **Checks the env and the job guard.** All five variables and `HOME` must be set, and `HOME`
+   must be `/home/runner`; `GH_REPOS` must be 1-100 comma-separated `owner/name` entries. The job-started hook must be
+   the pinned, protected file ("Job guard", below), or it exits 2 here, in warm-up too. The token must be
    exactly 32 lowercase hex chars (the mediator uses `hex.EncodeToString`;
    uppercase is rejected). `MEDIATOR_URL` must be an https origin; plain http is
    accepted only for `127.0.0.1` and `localhost`, which the test harness uses.
@@ -122,6 +134,7 @@ this, in order:
    | `~/work` | `/scratch/_work` | the runner work folder (`work_folder` = `/home/runner/work`) |
    | `~/.cache` | `/scratch/.cache` | `GOCACHE`, `GOLANGCI_LINT_CACHE`, any XDG cache |
    | `~/go` | `/scratch/go` | `GOPATH`, `GOMODCACHE` |
+   | `~/.npm` | `/scratch/.npm` | npm's cache (actions/setup-node's npm cache step also needs the directory to exist) |
 
    **RAM build cache.** With `RUNNER_BUILD_CACHE_IN_RAM=true` (set on the job by
    `deploy-job.sh` from `config.env`), `/scratch/.cache` is itself a link to a
@@ -228,8 +241,9 @@ this, in order:
    finish within 5 s of `run.sh`'s exit is abandoned, so a stray process holding
    the pipe cannot keep the execution alive.
 
-Exit codes: the runner's (above) once `run.sh` has started, 0 for an idle stop, and
-**4** when an idle stop raced a job start (above). A 4 can also be the runner's own
+Exit codes: the runner's (above) once `run.sh` has started, 0 for an idle stop,
+**4** when an idle stop raced a job start, and **5** when the job guard refused the
+assigned job (above). A 4 can also be the runner's own
 code passed through; the `ERROR idle_timeout_raced_job` log line tells them apart. Before that, **2** for a configuration error (env,
 `HOME`, `/scratch`, a HOME link, missing `run.sh`) and **3** for a failed claim. Neither path starts
 `run.sh`. If a claim is lost (for example, the mediator restarted and its
@@ -242,8 +256,108 @@ stdin, as a curl config, not in its argv. `curl -q` ignores any `~/.curlrc`,
 so no config file can turn on verbose header output. Responses stay in shell
 memory, and the ID token is cleared before `run.sh` starts. The script never
 uses `set -x`; keep it that way. The JIT config does appear in `run.sh`'s argv,
-as the runner requires. That is acceptable because it is single use and dies
-with the execution.
+as the runner requires.
+
+**Trust boundary: job code can read the runner's credentials.** The entrypoint
+(PID 1), `run.sh`, the runner listener and worker, and every job step run as the same
+uid (`runner`, 1001); there is no boundary between the runner and the job code it runs.
+So job steps can read this runner's ephemeral registration, the JIT config on
+`run.sh`'s argv (`/proc/<pid>/cmdline`), and the spent claim token in
+`/proc/1/environ`. The claim token is worthless by then: single use, already
+exchanged. The JIT config lets a job act as its own runner registration until GitHub
+removes it after the job. sec-review-3 rates this **LOW**: the window in which untrusted
+code could run on a cr-ci runner is closed by the runner-side job-started hook ("Job
+guard", below). On top of it:
+- the routing expression's fork-PR guard routes only same-repo `push` and `pull_request`
+  events and sends everything else to `ubuntu-latest` (fork PRs, `pull_request_target`,
+  `workflow_run`, `merge_group`, schedule, workflow_dispatch);
+- the mediator's fork guard (`forkReason`) is an allowlist of the same two events and
+  also refuses runs whose repository or head repository is not the target repository
+  (fork PRs);
+- one job runs per runner;
+- the hijack guard and the reaper catch a runner registration that ends up running
+  another job or is left behind.
+
+**Residual:** a compromised trusted job can still read its own runner's registration.
+The structural fix (a runner-only uid with job steps dropped to another uid, or passing
+the JIT config by file and deleting it once the listener has started) is tracked in
+ptone/scion#5978
+([architecture](../docs/architecture.md#residual-risk-job-code-can-read-the-runners-credentials)).
+
+**Job guard (`cr-ci-job-guard.sh`).** The entrypoint exports, read-only,
+`ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/bin/cr-ci-job-guard.sh`,
+`CR_JOB_GUARD_MARKER` and `CR_JOB_GUARD_REPOS` (= `GH_REPOS`, the repositories the
+runner serves). The hook allows a job only if `GITHUB_REPOSITORY` is one of
+`CR_JOB_GUARD_REPOS` (whole entries, case-insensitive) and `GITHUB_EVENT_NAME` is
+`push`, or `pull_request` with the payload's `pull_request.head.repo.full_name` equal to
+`GITHUB_REPOSITORY`. It refuses anything else, and also an empty or malformed served
+list or a missing or unparsable payload (fail closed).
+
+**No fail-open: the hook must be the pinned one.** If the worker cannot run the hook
+(missing, not executable), only its pre-job step fails and the job's `always()` steps
+still run. So before any claim (and in warm-up) the entrypoint exits **2**, without
+starting `run.sh`, unless:
+- the hook and `/etc/cr-ci/job-guard.sha256` are regular files (not symlinks), owned by
+  root, with no group or other write bit and not writable by the runner's uid, and so
+  are their directories (`/usr/local/bin`, `/etc/cr-ci`); the runner must not run as
+  root;
+- the hook is executable and its sha256 equals the one in `/etc/cr-ci/job-guard.sha256`.
+  That value is the committed `runner/cr-ci-job-guard.sh.sha256`, installed read-only by
+  the Dockerfile, which also checks it (`sha256sum -c`) and the owners and modes at build
+  time. `TestJobGuardPinnedSHA` fails when the hook changes without its pin.
+
+**The path is fixed in production.** `CR_JOB_GUARD_HOOK`, `CR_JOB_GUARD_SHA_FILE`,
+`CR_JOB_GUARD_OWNER_UID` and every other `CR_*` override take effect only in test mode:
+`CR_TEST_MODE=1` and the entrypoint not PID 1. Production runs it as PID 1 (the
+image's exec-form `ENTRYPOINT`), so it cannot enable test mode; otherwise each override
+is logged (`ignoring CR_...`) and dropped. A job cannot set any of them anyway: the
+entrypoint's environment is the Cloud Run execution's (deploy-job.sh and the
+mediator's overrides), and the entrypoint has made its checks and exported the guard's
+settings before `run.sh`, and so any job, exists. A value for one of the exported
+variables in the execution environment is replaced, not used.
+
+Checked against actions/runner v2.338.0:
+- **Before any step:** Runner.Worker adds the hook to its pre-job steps ahead of
+  container setup, every action's `pre` step and all job steps, checkout included
+  (`src/Runner.Worker/JobExtension.cs` L303-312, L315, L328, L362; steps = pre-job
+  steps then job steps, L585-586). Only action downloads (no job code) happen
+  earlier (L301).
+- **Not overridable:** the worker reads the variable from its own process environment
+  (`Environment.GetEnvironmentVariable`, L304), inherited from `run.sh`. A workflow's or
+  job's `env:` only shapes step environments, and no step has run yet.
+- **A failed hook alone does not stop the job:** later steps with `if: always()`,
+  `failure()` or `!cancelled()` would still run (`src/Runner.Worker/StepsRunner.cs`
+  L200-235). So a refusal is a **hard stop**: the hook writes the marker (the reason
+  and the job's own sanitized event, head and repository; never the served list, a
+  token or the JIT config), prints the reason code into the job's log, then SIGKILLs, in this order, its parent (the worker), the parent's process group,
+  and its own group unless that group is its alone. The runner spawns its children
+  without a new session or group (`src/Runner.Sdk/ProcessInvoker.cs` L226-298), so
+  normally both are run.sh's group (listener, worker, hook) and the hook dies last.
+  Killing the parent first means the stop does not rest on the hook sharing the
+  worker's group. The worker is still waiting for the hook to exit
+  (`JobHookProvider.RunHook` awaits it), so it cannot reach a step first.
+- **Runs under `bash -e`:** the runner starts a `.sh` hook as `bash -e <file>`
+  (`src/Runner.Worker/Handlers/ScriptHandler.cs` L213-216 with
+  `ScriptHandlerHelpers.cs` L19), so the hook turns errexit off first (`set +e`): a
+  failing `kill` cannot end it before the rest of the stop sequence.
+- **Fail closed:** if the hook is still alive after the kills (a group of its own), it
+  checks once a second that the worker and its group are gone and exits 1; if they are
+  not gone after 10 s it exits 1 with `could not stop the runner`. Independently, the
+  entrypoint's enforcer, which sees the marker, SIGKILLs run.sh's group itself.
+  (Residual, rated very unlikely by sec-review-3: if every SIGKILL and the marker write
+  all fail, the enforcer has nothing to act on.)
+
+- **What the job's log shows:** only `job refused by the cr-ci runner's job guard
+  (reason=<code>)`. The refused job's log may be public (a fork pull request), and under
+  org scope the served list can name private repositories, so the hook prints no
+  repository name. The marker sits in the entrypoint's private temp dir; the job runs as
+  the same uid but no step of it ever runs to read it.
+
+After `run.sh` has died, the entrypoint logs, to its own stderr (the container log in
+Cloud Logging, never the job's log), `ERROR job_guard_refused: ... (reason=... event=...
+head=... repository=... served=<GH_REPOS>)`, adding the served list itself, and exits
+**5**. The mediator's hijack guard deletes the registration
+when GitHub reports the job.
 
 ## Testing
 
@@ -259,7 +373,10 @@ loopback: `CR_SCRATCH_DIR`, `CR_MOUNTINFO`, `CR_RUNNER_DIR`,
 `CR_CLAIM_BACKOFF_SECONDS` and `CR_METADATA_URL`. `CR_EXPECTED_HOME` (default
 `/home/runner`) lets the harness use a temp dir as `HOME`. `CR_METADATA_URL` defaults
 to `http://metadata.google.internal` and accepts only that value or a
-loopback http origin. Production leaves them all unset.
+loopback http origin. `CR_JOB_GUARD_HOOK`, `CR_JOB_GUARD_SHA_FILE` and
+`CR_JOB_GUARD_OWNER_UID` point the job guard check at a copy of the hook and its pin
+owned by the test's uid. All of them need test mode (`CR_TEST_MODE=1`, which the
+harness sets; the entrypoint is not PID 1 there) and are ignored otherwise.
 Some tests also put stub `stat` and `sleep` commands first on `PATH`. Every
 run has a `~/.curlrc` containing `verbose`, so if `curl -q` were dropped, the
 leak assertions would catch the tokens on stderr. Like the real metadata

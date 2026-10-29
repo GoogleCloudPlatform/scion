@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// These tests exercise unix-only, Windows-gated agent storage code.
+//go:build unix
+
 package agent
 
 import (
@@ -188,10 +191,13 @@ func TestStartSharedDirLayout_LegacySplitUsesSharedDirExport(t *testing.T) {
 	assert.Empty(t, k8s.cfg.WorkspaceBackendName, "the workspace stays where it is")
 }
 
-// The removed per-profile override is ignored: with the global block on
-// the local backend, a profile's shared_dir_storage_backend nfs changes
-// nothing (validation rejects the key; the start never reads it).
-func TestStartSharedDirLayout_ProfileOverrideIgnored(t *testing.T) {
+// The removed per-profile override is refused at agent start: with the
+// global block on the local backend, a profile's shared_dir_storage_backend
+// nfs is no longer applied, so starting that profile's agent would place
+// its shared dirs on per-dir claims instead of the export. The start fails
+// before the runtime runs anything, naming the key (ptone/scion#6371; this
+// test asserted the silent ignore before).
+func TestStartSharedDirLayout_ProfileOverrideRefused(t *testing.T) {
 	f := newSharedDirStorageRunFixture(t)
 	mountRoot := filepath.Join(f.tmpDir, "nfs")
 	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, sdsProfileShareID), 0o775))
@@ -209,8 +215,10 @@ server:
 
 	var k8s sdsCapture
 	_, err := NewManager(newSDSMockRuntime("kubernetes", &k8s)).Start(context.Background(), sdsStartOpts(f, "gke-agent", "gke"))
-	require.NoError(t, err)
-	assert.Nil(t, k8s.cfg.SharedDirStorage, "the profile override must not select nfs")
+	var se *config.StorageMigrationRequiredError
+	require.ErrorAs(t, err, &se)
+	assert.Contains(t, se.Error(), "profiles.gke.shared_dir_storage_backend")
+	assert.Zero(t, k8s.ran, "the runtime must not run the agent")
 	_, statErr := os.Stat(filepath.Join(mountRoot, sdsProfileShareID, "projects"))
 	assert.True(t, os.IsNotExist(statErr), "nothing is created on the export")
 }

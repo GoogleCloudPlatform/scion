@@ -197,7 +197,7 @@ func TestCacheControl_EntryNoCache(t *testing.T) {
 				assertCacheControlEverywhere(t, ws.Handler(), target, "no-cache")
 			}
 			// Root files go through the SPA catch-all (dev auth).
-			assertCacheControlEverywhere(t, wsAuth.Handler(), "/favicon.svg", "no-cache")
+			assertCacheControlEverywhere(t, devSignedIn(t, wsAuth), "/favicon.svg", "no-cache")
 		})
 	}
 }

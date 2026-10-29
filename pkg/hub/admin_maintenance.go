@@ -30,6 +30,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -355,6 +356,8 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 		return &GroupParticipantModeCleanupExecutor{Store: s.store}, nil
 	case entadapter.ProjectStorageMigrateKey:
 		return &ProjectStorageMigrateExecutor{srv: s}, nil
+	case entadapter.ChatStarReconcileKey:
+		return &ChatStarReconcileExecutor{srv: s}, nil
 	case "pull-images":
 		log.Debug("Resolved pull-images executor",
 			"runtime_bin", mc.RuntimeBin, "registry", config.RedactImageRegistry(s.maintenanceImageRegistry()),
@@ -398,14 +401,14 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 			ObjectPath: harnessConfigFileObjectPath,
 		}), nil
 	case "update-binary":
+		installer := s.updateInstaller()
 		log.Debug("Resolved update-binary executor",
-			"service_name", mc.ServiceName, "github_repo", mc.GitHubRepo,
-			"release_channel", mc.ReleaseChannel)
+			"installer", installer.Name(), "github_repo", mc.GitHubRepo)
 		return NewBinaryUpdateExecutor(BinaryUpdateOptions{
-			ServiceName: mc.ServiceName,
-			GitHubRepo:  mc.GitHubRepo,
-			Channel:     mc.ReleaseChannel,
-			Store:       s.store,
+			GitHubRepo: mc.GitHubRepo,
+			Installer:  installer,
+			Releases:   s.updateReleaseSource(),
+			Catalog:    s.updateReleaseCatalog(),
 		}), nil
 	default:
 		return nil, fmt.Errorf("no executor registered for operation %q", key)
@@ -450,23 +453,18 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, key st
 	//   - Stale "running" runs left behind by a crash are reset to "failed" by
 	//     AbortRunningMaintenanceOps() at startup, so the guard cannot wedge an
 	//     operation permanently.
-	// There is a narrow TOCTOU window — two requests arriving at nearly the
-	// same instant could both pass this check before either writes its run
-	// record — but the goal is to stop accidental double-clicks and repeated
-	// triggers from piling up expensive builds on the hub VM, not to defend
-	// against adversarial concurrency.
-	recentRuns, err := s.store.ListMaintenanceRuns(ctx, key, 1)
-	if err != nil {
+	// Operations that install the hub binary (update-binary, rebuild-server)
+	// form one exclusive group: a run of either blocks both. This is a fast
+	// early check; createExclusiveMaintenanceRun repeats it atomically (for
+	// this process) right before creating the run.
+	if blocking, err := s.maintenanceGroupInFlight(ctx, key); err != nil {
 		log.Error("Failed to list recent runs", maintenanceLogAttrs(key, "error", err)...)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to check for running operations", nil)
 		return
-	}
-	if len(recentRuns) > 0 && recentRuns[0].Status == store.MaintenanceStatusRunning {
+	} else if blocking != nil {
 		log.Debug("Rejected: operation already running",
-			maintenanceLogAttrs(key, "run_id", recentRuns[0].ID, "user", user.Email())...)
-		writeError(w, http.StatusConflict, ErrCodeConflict, "Operation is already running", map[string]interface{}{
-			"runId": recentRuns[0].ID,
-		})
+			maintenanceLogAttrs(key, "run_id", blocking.ID, "blocking_key", blocking.OperationKey, "user", user.Email())...)
+		writeMaintenanceInFlight(w, key, blocking)
 		return
 	}
 
@@ -478,12 +476,29 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, key st
 	}
 	params := parseMigrationParams(body) // reuse same param parser
 
+	// Operations with a parameter allowlist refuse anything else, whatever
+	// its JSON type, before a run is created.
+	if allowed, ok := operationParamAllowlist[key]; ok {
+		if err := maintenance.CheckAllowedParams(rawRequestParams(body), allowed); err != nil {
+			writeMaintenanceRequestError(w, err)
+			return
+		}
+	}
+
 	// Resolve the executor.
 	executor, err := s.resolveMaintenanceExecutor(key)
 	if err != nil {
 		log.Error("Failed to resolve executor", maintenanceLogAttrs(key, "error", err)...)
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
 		return
+	}
+
+	if v, ok := executor.(maintenance.ParamValidator); ok {
+		if err := v.ValidateParams(params); err != nil {
+			log.Debug("Rejected: invalid parameters", maintenanceLogAttrs(key, "error", err)...)
+			writeMaintenanceRequestError(w, err)
+			return
+		}
 	}
 
 	// Create a run record.
@@ -496,58 +511,22 @@ func (s *Server) executeOperation(w http.ResponseWriter, r *http.Request, key st
 		StartedAt:    now,
 		StartedBy:    user.Email(),
 	}
-	if err := s.store.CreateMaintenanceRun(ctx, run); err != nil {
+	if blocking, err := s.createExclusiveMaintenanceRun(ctx, run); errors.Is(err, errHubRestartPending) {
+		log.Debug("Rejected: hub restart in progress", maintenanceLogAttrs(key, "user", user.Email())...)
+		writeHubRestartPending(w, key)
+		return
+	} else if err != nil {
 		log.Error("Failed to create run record", maintenanceLogAttrs(key, "error", err)...)
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to create run record", nil)
+		return
+	} else if blocking != nil {
+		writeMaintenanceInFlight(w, key, blocking)
 		return
 	}
 
 	log.Info("Operation started", maintenanceLogAttrs(key, "run_id", runID, "user", user.Email())...)
 
-	// Execute asynchronously.
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Error("Operation executor panicked", maintenanceLogAttrs(key, "run_id", runID, "panic", fmt.Sprint(r))...)
-				finishedAt := time.Now()
-				run.CompletedAt = &finishedAt
-				run.Status = store.MaintenanceStatusFailed
-				result := map[string]interface{}{
-					"error": fmt.Sprintf("executor panic: %v", r),
-				}
-				resultJSON, _ := json.Marshal(result)
-				run.Result = string(resultJSON)
-				if err := s.store.UpdateMaintenanceRun(context.Background(), run); err != nil {
-					log.Error("Failed to update run record after panic", maintenanceLogAttrs(key, "run_id", runID, "error", err)...)
-				}
-			}
-		}()
-
-		var buf bytes.Buffer
-		execErr := executor.Run(context.Background(), &buf, params)
-
-		finishedAt := time.Now()
-		run.CompletedAt = &finishedAt
-		run.Log = buf.String()
-
-		if execErr != nil {
-			run.Status = store.MaintenanceStatusFailed
-			result := map[string]interface{}{
-				"error": execErr.Error(),
-			}
-			resultJSON, _ := json.Marshal(result)
-			run.Result = string(resultJSON)
-			log.Error("Operation failed", maintenanceLogAttrs(key, "run_id", runID, "error", execErr, "duration", finishedAt.Sub(run.StartedAt))...)
-			log.Debug("Operation failure log output", maintenanceLogAttrs(key, "run_id", runID, "log", buf.String())...)
-		} else {
-			run.Status = store.MaintenanceStatusCompleted
-			log.Info("Operation completed successfully", maintenanceLogAttrs(key, "run_id", runID, "duration", finishedAt.Sub(run.StartedAt))...)
-		}
-
-		if err := s.store.UpdateMaintenanceRun(context.Background(), run); err != nil {
-			log.Error("Failed to update run record", maintenanceLogAttrs(key, "run_id", runID, "error", err)...)
-		}
-	}()
+	s.launchMaintenanceRun(run, executor, params)
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"runId":  runID,
@@ -773,7 +752,8 @@ func toMaintenanceRunResponse(run store.MaintenanceOperationRun) maintenanceRunR
 
 // handleCheckForUpdates handles POST /api/v1/admin/maintenance/check-updates.
 // It dispatches to the appropriate update checker based on the deployment tier:
-//   - "binary": checks for release updates via LATEST.json manifest
+//   - "binary": checks the effective channel's latest release in the release
+//     catalog (refreshed, within the catalog's throttle)
 //   - "source" (default): checks for git updates via origin fetch
 //
 // Authorization: enforced by routeGuard via hub.maintenance.execute permission.
@@ -787,10 +767,30 @@ func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 
 	switch mc.DeploymentTier {
 	case "binary":
-		result, err := CheckForReleaseUpdates(r.Context(), version.Version, mc.ReleaseChannel, mc.GitHubRepo)
+		sel, err := s.readReleaseSelection(r.Context())
 		if err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read the release selection", nil)
+			return
+		}
+		channel, _ := effectiveReleaseChannel(mc, version.Version, sel)
+		opts := maintenance.ReleaseCheckOptions{
+			CurrentVersion: version.Version,
+			Channel:        channel,
+			Repo:           mc.GitHubRepo,
+			Catalog:        s.updateReleaseCatalog(),
+			Refresh:        true,
+			Releases:       s.updateReleaseSource(),
+		}
+		if t, err := time.Parse(time.RFC3339, version.BuildTime); err == nil {
+			opts.CurrentBuildTime = t
+		}
+		result, err := maintenance.CheckForReleaseUpdates(r.Context(), opts)
+		if err != nil {
+			// The error is the catalog's fetch error; it goes to the log,
+			// and the answer says what failed, as the releases endpoint does.
+			s.maintenanceLog.Warn("Release update check failed", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-				"Failed to check for release updates: "+err.Error(), nil)
+				"Failed to check for release updates: the release list could not be fetched from GitHub; try again later", nil)
 			return
 		}
 		writeJSON(w, http.StatusOK, result)
@@ -799,7 +799,7 @@ func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 		// Source tier: existing git-based check.
 		if mc.RepoPath == "" {
 			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-				"No repository path configured; set maintenance.repo_path in settings", nil)
+				"No maintenance repository path configured; set SCION_MAINTENANCE_REPO_PATH (or workspace_path in settings)", nil)
 			return
 		}
 
@@ -900,9 +900,15 @@ func (s *Server) handleUpdateAvailable(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAdminRestart handles POST /api/v1/admin/maintenance/restart.
-// It initiates a graceful systemd restart of the hub service. The
-// --no-block flag lets systemd schedule the restart asynchronously,
-// so the response is sent before the restart takes effect.
+//
+// With a supported update installer the restart goes through it: the
+// symlink layout exits the hub (SIGTERM to itself; systemd Restart=always
+// starts it again), which is requested only after the response is written;
+// sudo-install runs its allowed `sudo -n systemctl restart` rule. Where the
+// installer is unsupported the previous behaviour is kept: `sudo systemctl
+// restart --no-block <service>`, which works only where the hub user has
+// such a sudo rule.
+//
 // Authorization: enforced by routeGuard via hub.maintenance.execute permission.
 func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -911,14 +917,84 @@ func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user := GetUserIdentityFromContext(r.Context())
+	log := s.maintenanceLog
+	installer := s.updateInstaller()
+
+	// Restart Hub is part of the hub-binary exclusive group: it is refused
+	// while an update or rebuild is running (a restart between an update's
+	// Activate and its before-restart hook would boot the new binary with
+	// no pending update), and once reserved it refuses new update and
+	// rebuild runs until this process exits. A run that is already
+	// "restarting" does not block (see reserveHubRestart).
+	blocking, stamp, err := s.reserveHubRestart(r.Context())
+	if err != nil {
+		log.Error("Failed to check for in-flight maintenance runs", "error", err)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to check for running operations", nil)
+		return
+	}
+	if blocking != nil {
+		log.Info("Hub restart refused: an update or rebuild is in flight",
+			"user", user.Email(), "run_id", blocking.ID, "operation_key", blocking.OperationKey, "status", blocking.Status)
+		writeError(w, http.StatusConflict, ErrCodeConflict,
+			fmt.Sprintf("Cannot restart the hub while %s is in progress (run %s, %s); wait for it to finish",
+				blocking.OperationKey, blocking.ID, blocking.Status),
+			map[string]interface{}{
+				"runId":        blocking.ID,
+				"operationKey": blocking.OperationKey,
+				"status":       blocking.Status,
+			})
+		return
+	}
+
+	switch installer.Name() {
+	case maintenance.StrategySymlink:
+		log.Info("Hub restart requested via admin API", "user", user.Email(), "installer", installer.Name())
+		writeRestartAccepted(w)
+		// The restart signals this process; it is sent once the response
+		// is on the wire. A graceful shutdown would let it finish anyway,
+		// but nothing depends on that.
+		// The request may be gone by then; keep its values only.
+		restartCtx := context.WithoutCancel(r.Context())
+		go func() {
+			time.Sleep(adminRestartSignalDelay)
+			ctx, cancel := context.WithTimeout(restartCtx, adminRestartTimeout)
+			defer cancel()
+			if err := installer.Restart(ctx); err != nil {
+				s.releaseHubRestart(stamp)
+				log.Error("Failed to restart the hub", "error", err, "installer", installer.Name())
+			}
+		}()
+		return
+	case maintenance.StrategySudoInstall:
+		log.Info("Hub restart requested via admin API", "user", user.Email(), "installer", installer.Name())
+		// With the --no-block rule systemd only queues the restart. With
+		// the plain rule the installer watches the systemctl child briefly:
+		// a normal non-zero exit is a failure (500), while a child killed
+		// by the unit's stop, or still running, means the restart is under
+		// way. In both cases the response is written before the hub stops,
+		// or the graceful shutdown lets it finish.
+		// A client that disconnects must not abort (or, through the
+		// watcher's ctx.Done case, misreport) the restart: detach from the
+		// request's cancellation, bounded on its own.
+		restartCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), adminRestartTimeout)
+		defer cancel()
+		if err := installer.Restart(restartCtx); err != nil {
+			s.releaseHubRestart(stamp)
+			log.Error("Failed to initiate hub restart", "error", err, "user", user.Email(), "installer", installer.Name())
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"Failed to initiate restart", nil)
+			return
+		}
+		writeRestartAccepted(w)
+		return
+	}
 
 	serviceName := s.config.MaintenanceConfig.ServiceName
 	if serviceName == "" {
 		serviceName = "scion-hub"
 	}
-
-	log := s.maintenanceLog
-	log.Info("Hub restart requested via admin API", "user", user.Email(), "service", serviceName)
+	log.Info("Hub restart requested via admin API", "user", user.Email(), "service", serviceName,
+		"installer", installer.Name())
 
 	// Use --no-block so systemd schedules the restart asynchronously.
 	// Without it, "systemctl restart" waits for the service to fully
@@ -928,14 +1004,30 @@ func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
 	// killed.
 	cmd := exec.Command("sudo", "systemctl", "restart", "--no-block", serviceName)
 	if err := cmd.Run(); err != nil {
+		s.releaseHubRestart(stamp)
 		log.Error("Failed to initiate hub restart", "error", err, "user", user.Email())
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"Failed to initiate restart", nil)
 		return
 	}
 
+	writeRestartAccepted(w)
+}
+
+// adminRestartSignalDelay is how long Restart Hub waits after writing its
+// response before the symlink installer signals the hub.
+const adminRestartSignalDelay = 250 * time.Millisecond
+
+// adminRestartTimeout bounds the installer's Restart for Restart Hub.
+const adminRestartTimeout = 30 * time.Second
+
+// writeRestartAccepted writes the Restart Hub response and flushes it.
+func writeRestartAccepted(w http.ResponseWriter) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":  "restarting",
 		"message": "Hub restart initiated",
 	})
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
 }

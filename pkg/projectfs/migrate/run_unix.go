@@ -41,6 +41,16 @@ type ProjectRef struct {
 	// project (empty-per-agent, or a linked project in a per-agent git
 	// mode). Steps 1 and 2 then leave legacy content in place, reported.
 	NoWorkspace bool
+	// Agents are the project's agents, for step 5 (Cloud Run homes).
+	Agents []AgentRef
+}
+
+// AgentRef is an agent as step 5 sees it: its hub ID, its slug, and
+// whether it is stopped (only a stopped agent's home is moved).
+type AgentRef struct {
+	ID      string
+	Slug    string
+	Stopped bool
 }
 
 // HubInput is one hub's the migration/the object-storage cleanup run.
@@ -68,6 +78,10 @@ type HubInput struct {
 	ProvisionLock func(workspace Tree, section func(lockCtx context.Context) error) error
 	// Tracked overrides GitTracked (tests).
 	Tracked func(ctx context.Context, dir, path string) (bool, error)
+	// AgentStopped, when set, re-reads whether an agent is still stopped,
+	// immediately before step 5 moves its home (the ProjectRef snapshot can
+	// be stale by then). An agent that is no longer stopped is deferred.
+	AgentStopped func(ctx context.Context, projectID, agentID string) (bool, error)
 }
 
 // HubReport is one hub's the migration/the object-storage cleanup report.
@@ -200,6 +214,40 @@ func projectInput(in HubInput, legacy Tree, ref ProjectRef) (ProjectInput, error
 			return ProjectInput{}, fmt.Errorf("resolve project root: %w", err)
 		}
 		pi.ProjectRoot = Tree{Base: root.HostBase, Rel: root.RelPath}
+		if len(ref.Agents) > 0 {
+			layout, agents, recheck, projectID := in.Workspace, ref.Agents, in.AgentStopped, ref.ID
+			step := func(opts Options) []Result { return cloudRunHomes(layout, projectID, agents, recheck, opts) }
+			pi.CloudRunHomes = step
+			if in.ProvisionLock != nil {
+				// Step 5 runs under the project's provisioning locks (the
+				// workspace's lock directories exist for every project),
+				// bounded by the locks' context.
+				ws, err := in.Workspace.Resolve(projectfs.Project{ID: ref.ID, Slug: ref.Slug}, "", projectfs.WorkspaceMount(projectfs.ModeSharedPlain, ""))
+				if err != nil {
+					return ProjectInput{}, fmt.Errorf("resolve workspace: %w", err)
+				}
+				lock, wsTree := in.ProvisionLock, Tree{Base: ws.HostBase, Rel: ws.RelPath}
+				pi.CloudRunHomes = func(opts Options) []Result {
+					// A dry run never locks or writes, and a project with no
+					// legacy Cloud Run home has nothing to move: neither takes
+					// the provisioning locks (which create the state dir).
+					if opts.DryRun || !cloudRunHomesPresent(layout, projectID, agents) {
+						return step(opts)
+					}
+					var out []Result
+					err := lock(wsTree, func(lockCtx context.Context) error {
+						o := opts
+						o.Context = lockCtx
+						out = step(o)
+						return nil
+					})
+					if err != nil {
+						out = append(out, Result{Step: StepCloudRunHomes, Source: wsTree.String(), Outcome: OutcomeFailed, Err: fmt.Errorf("provisioning lock: %w", err)})
+					}
+					return out
+				}
+			}
+		}
 		if in.ProvisionLock != nil && !ref.NoWorkspace {
 			ws, err := in.Workspace.Resolve(projectfs.Project{ID: ref.ID, Slug: ref.Slug}, "", projectfs.WorkspaceMount(projectfs.ModeSharedPlain, ""))
 			if err != nil {

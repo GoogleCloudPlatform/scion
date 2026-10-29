@@ -757,3 +757,86 @@ func TestUpdateSecretValueIfVersion_ConcurrentSameVersion(t *testing.T) {
 	assert.Equal(t, 2, got.Version)
 	assert.Equal(t, values[winner], got.EncryptedValue, "the stored value is the winner's")
 }
+
+// TestAttributeUserSecretToOwner: the repair write moves created_by to
+// scope_id on a matching user-scope row and changes nothing else; a value
+// write since the row was read does not stop it; a different created_by, a
+// non-user row or a missing row is not applied and is not an error.
+func TestAttributeUserSecretToOwner(t *testing.T) {
+	ss := newTestSecretStore(t)
+	ctx := context.Background()
+	owner := uuid.New().String()
+	legacy := "agent:" + uuid.New().String()
+
+	newRow := func(key, scope, scopeID string) *store.Secret {
+		sec := &store.Secret{
+			ID: uuid.New().String(), Key: key, EncryptedValue: "enc-" + key,
+			Scope: scope, ScopeID: scopeID, AllowProgeny: scope == store.ScopeUser, CreatedBy: legacy,
+		}
+		require.NoError(t, ss.CreateSecret(ctx, sec))
+		got, err := ss.GetSecret(ctx, key, scope, scopeID)
+		require.NoError(t, err)
+		return got
+	}
+
+	t.Run("applies and preserves every other column", func(t *testing.T) {
+		before := newRow("APPLY_KEY", store.ScopeUser, owner)
+		applied, err := ss.AttributeUserSecretToOwner(ctx, before.ID, legacy)
+		require.NoError(t, err)
+		require.True(t, applied)
+		after, err := ss.GetSecret(ctx, "APPLY_KEY", store.ScopeUser, owner)
+		require.NoError(t, err)
+		assert.Equal(t, owner, after.CreatedBy)
+		assert.Equal(t, before.Version, after.Version, "the version is not incremented")
+		assert.True(t, before.Updated.Equal(after.Updated), "the updated timestamp is preserved")
+		assert.Equal(t, before.EncryptedValue, after.EncryptedValue)
+		assert.Equal(t, before.UpdatedBy, after.UpdatedBy)
+		assert.Equal(t, before.AllowProgeny, after.AllowProgeny)
+
+		again, err := ss.AttributeUserSecretToOwner(ctx, before.ID, legacy)
+		require.NoError(t, err)
+		assert.False(t, again, "a second write finds created_by changed")
+	})
+
+	t.Run("a value write since the read does not stop it", func(t *testing.T) {
+		row := newRow("REFRESHED_KEY", store.ScopeUser, owner)
+		applied, err := ss.UpdateSecretValueIfVersion(ctx, "REFRESHED_KEY", store.ScopeUser, owner, row.Version, "enc-refreshed")
+		require.NoError(t, err)
+		require.True(t, applied)
+		applied, err = ss.AttributeUserSecretToOwner(ctx, row.ID, legacy)
+		require.NoError(t, err)
+		assert.True(t, applied)
+		got, err := ss.GetSecret(ctx, "REFRESHED_KEY", store.ScopeUser, owner)
+		require.NoError(t, err)
+		assert.Equal(t, owner, got.CreatedBy)
+		assert.Equal(t, "enc-refreshed", got.EncryptedValue)
+		assert.Equal(t, row.Version+1, got.Version)
+	})
+
+	t.Run("different created_by", func(t *testing.T) {
+		row := newRow("OTHER_KEY", store.ScopeUser, owner)
+		applied, err := ss.AttributeUserSecretToOwner(ctx, row.ID, "agent:"+uuid.New().String())
+		require.NoError(t, err)
+		assert.False(t, applied)
+		got, err := ss.GetSecret(ctx, "OTHER_KEY", store.ScopeUser, owner)
+		require.NoError(t, err)
+		assert.Equal(t, legacy, got.CreatedBy)
+	})
+
+	t.Run("project scope", func(t *testing.T) {
+		project := uuid.New().String()
+		row := newRow("PROJECT_KEY", store.ScopeProject, project)
+		applied, err := ss.AttributeUserSecretToOwner(ctx, row.ID, legacy)
+		require.NoError(t, err)
+		assert.False(t, applied)
+		got, err := ss.GetSecret(ctx, "PROJECT_KEY", store.ScopeProject, project)
+		require.NoError(t, err)
+		assert.Equal(t, legacy, got.CreatedBy)
+	})
+
+	t.Run("missing row", func(t *testing.T) {
+		applied, err := ss.AttributeUserSecretToOwner(ctx, uuid.New().String(), legacy)
+		require.NoError(t, err)
+		assert.False(t, applied)
+	})
+}

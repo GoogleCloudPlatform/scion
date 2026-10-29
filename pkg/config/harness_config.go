@@ -319,6 +319,14 @@ func FindHarnessConfigDir(name string, projectPath string, templatePaths ...stri
 	// The "generic" harness has no embedded files and therefore no on-disk
 	// directory.  Return a synthetic entry so callers (e.g. template-sync
 	// agents) can proceed without a physical harness-config dir.
+	//
+	// Its image is the shared base, scion-base:latest (moved under the
+	// configured image_registry like any short-form image), not a
+	// harness-specific image. A deployment that moves only the harness
+	// :latest tags after a rebuild leaves generic agents on the old base, so
+	// scion-base:latest must be moved together with them; image-build/README.md
+	// ("Tagging") says so. A generic harness-config dir with its own image
+	// takes precedence over this entry.
 	if name == "generic" {
 		return &HarnessConfigDir{
 			Name:   "generic",

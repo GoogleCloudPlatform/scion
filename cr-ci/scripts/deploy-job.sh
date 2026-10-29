@@ -105,4 +105,4 @@ if ((WARMUP)); then
   crci_run gcloud run jobs execute "$JOB" --region="$R" --project="$P" \
     --update-env-vars=RUNNER_WARMUP=1 --wait --format=none
 fi
-crci_note "done; next: deploy-mediator.sh"
+crci_note "done (upgrade order: deploy-mediator.sh goes before this when both changed)"

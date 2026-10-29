@@ -153,13 +153,16 @@ projects). The upgrade runs in this order:
    `mount_options`, `storage_class`, `auto_mount`) now take effect, with the
    meaning they have for workspace storage. Restart
    the hub and broker (the block is Layer-0).
-3. **Run the project-storage migration.** This maintenance operation moves
-   existing data onto the new layout. Its M2 step 2 moves hub-local
-   `~/.scion/projects/<slug>` workspaces onto the export, and step 3 moves
-   node-local shared directories onto it. The migration operation ships with
-   the storage cleanup work. Writing the block in step 2 does not move existing
-   data by itself; if the migration operation is not yet available on your
-   hub, stay on the synthesized split (step 1) until it is.
+3. **Move existing data.** Writing the block in step 2 does not move existing
+   data by itself. The hub's `project-storage-migrate` maintenance migration
+   (Admin → Maintenance, or
+   `POST /api/v1/admin/maintenance/migrations/project-storage-migrate/run`;
+   run it with `dryRun` first) moves the hub's own trees, such as hub-local
+   `~/.scion/projects/<slug>` workspaces. Each Runtime Broker moves its own
+   node-local shared dirs into `<ProjectRoot>/shared-dirs/<name>` on the
+   share on its first start after upgrade with its shared-dir layout on the
+   share (copy-only, never overwriting; the source is kept as
+   `<name>.migrated-<ts>`). No `scion` CLI command runs the hub migration.
 
 Going back after step 2 means restoring `shared_dir_storage` and moving any
 workspaces created on the export back by hand.

@@ -22,9 +22,9 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
-	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -149,27 +149,38 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sub-resource actions
-	if action == "revoke-sessions" {
+	// Sub-resource actions. Only the bare ID and the sub-routes named here
+	// are resources; any other sub-path, including a further segment below
+	// a known sub-route, answers 404 and never reaches the user handlers
+	// below.
+	switch action {
+	case "":
+		// The user itself: handled by the method switch below.
+	case "revoke-sessions":
 		if r.Method != http.MethodPost {
 			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		s.revokeUserSessions(w, r, id)
 		return
-	}
-	// delete-blockers takes no further path segment: anything below it is
-	// not a resource, and must not fall through to the user handlers below.
-	if strings.HasPrefix(action, "delete-blockers/") {
-		NotFound(w, "User resource")
-		return
-	}
-	if action == "delete-blockers" {
+	case "delete-blockers":
 		if r.Method != http.MethodGet {
 			MethodNotAllowed(w, http.MethodGet)
 			return
 		}
 		s.getUserDeleteBlockers(w, r, id)
+		return
+	case "deletion":
+		if r.Method != http.MethodGet {
+			MethodNotAllowed(w, http.MethodGet)
+			return
+		}
+		s.requireExperiment(experiments.UserDeleteForceCascade, func(w http.ResponseWriter, r *http.Request) {
+			s.getUserDeletion(w, r, id)
+		})(w, r)
+		return
+	default:
+		NotFound(w, "User resource")
 		return
 	}
 
@@ -889,6 +900,13 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		if writeConstraintAdminLockoutError(w, err) {
 			return
 		}
+		if errors.Is(err, store.ErrUserDeleting) {
+			// The user's forced deletion is in progress: its status
+			// leaves deleting only when the deletion completes
+			// (ptone/scion#2143).
+			writeUserDeletionInProgress(w, userDeletionInProgressFor(ctx, s.store, user.ID))
+			return
+		}
 		if errors.Is(err, errLastSuperAdmin) || errors.Is(err, errSelfDemotion) || errors.Is(err, errRoleOnInvitedUser) || errors.Is(err, errActivateInvitedUser) || errors.Is(err, errRoleOnTestFixture) {
 			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), nil)
 		} else if errors.Is(err, errBindingStateDrift) {
@@ -1334,6 +1352,10 @@ func (s *Server) checkLastSuperAdminTx(
 // 409 user_delete_blocked (ptone/scion#2769, ptone/scion#2143); GET
 // /api/v1/users/{id}/delete-blockers lists the same blockers. The user's
 // user-scope secrets and env vars are removed after commit, best effort.
+// With force=true and hub.user_delete_force_cascade on, a blocked user is
+// deleted through the forced cascade instead (forceDeleteUser, 202 with
+// the deletion resource); while a forced deletion is in progress a plain
+// delete answers 409 user_deletion_in_progress.
 // ---------------------------------------------------------------------------
 
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
@@ -1344,6 +1366,8 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	if !ok {
 		return
 	}
+	// force is parsed before any side effect (ptone/scion#2143).
+	force := s.forceUserDeletionEnabled(r)
 
 	// Self-deletion guard.
 	if actor.ID() == id {
@@ -1382,6 +1406,13 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	if superAdminRD == nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"super-admin role definition not found", nil)
+		return
+	}
+
+	// A forced delete of a user whom agents or delegations depend on
+	// revokes and records a tombstone instead (forceDeleteUser); with
+	// nothing blocking, it falls through to the plain delete.
+	if force && s.forceDeleteUser(w, r, actor, user, superAdminRD) {
 		return
 	}
 
@@ -1477,7 +1508,32 @@ func (s *Server) getUserDeleteBlockers(w http.ResponseWriter, r *http.Request, i
 		InternalError(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, blockers)
+	resp := userDeleteBlockersResponse{userDeleteBlockers: *blockers}
+	// A forced deletion in progress (ptone/scion#2143) is named, so a
+	// client can show it instead of offering a delete.
+	if d, err := s.store.GetUserDeletionByUser(ctx, user.ID); err == nil && d.State == store.UserDeletionStateStopping {
+		resp.InProgress = &userDeletionRef{DeletionID: d.ID, State: d.State}
+	} else if err != nil && !errors.Is(err, store.ErrNotFound) {
+		slog.ErrorContext(ctx, "read user deletion failed", "user_id", user.ID, "error", err)
+		InternalError(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// userDeletionRef names a forced deletion in progress.
+type userDeletionRef struct {
+	DeletionID string `json:"deletionId"`
+	State      string `json:"state"`
+}
+
+// userDeleteBlockersResponse is the body of GET
+// /api/v1/users/{id}/delete-blockers: the blockers, and the forced
+// deletion in progress (omitted when there is none, so the body is
+// unchanged for a user with no deletion).
+type userDeleteBlockersResponse struct {
+	userDeleteBlockers
+	InProgress *userDeletionRef `json:"inProgress,omitempty"`
 }
 
 // deleteUserRowCascadeTx deletes the user row of userID and what hangs off
@@ -1497,10 +1553,19 @@ func (s *Server) getUserDeleteBlockers(w http.ResponseWriter, r *http.Request, i
 // before it, writes its audit record after it in the same transaction, maps
 // errors with writeUserDeleteCascadeError, and calls afterUserDeleted once
 // the transaction commits.
-func deleteUserRowCascadeTx(ctx context.Context, tx store.Store, userID string, now time.Time) error {
+func deleteUserRowCascadeTx(ctx context.Context, tx store.Store, userID string, at time.Time) error {
+	return deleteUserRowCascadeModeTx(ctx, tx, userID, at, false)
+}
+
+// deleteUserRowCascadeModeTx is deleteUserRowCascadeTx. completing is set
+// only by the completion of a forced deletion (completeUserDeletion),
+// which deletes a user whose status is deleting; every other caller
+// refuses such a user with *userDeletionInProgressError.
+func deleteUserRowCascadeModeTx(ctx context.Context, tx store.Store, userID string, at time.Time, completing bool) error {
 	// Refuse while agents or active delegations depend on the user
-	// (ptone/scion#2769, ptone/scion#2143).
-	if err := checkUserDeleteBlockersTx(ctx, tx, userID); err != nil {
+	// (ptone/scion#2769, ptone/scion#2143), or while a forced deletion
+	// of the user is in progress.
+	if err := checkUserDeleteBlockersModeTx(ctx, tx, userID, completing); err != nil {
 		return err
 	}
 
@@ -1510,7 +1575,7 @@ func deleteUserRowCascadeTx(ctx context.Context, tx store.Store, userID string, 
 	// user's bindings that commits before the cascade aborts the
 	// delete with 409 conflict (a concurrent revoke does not; residual
 	// race: ptone/scion#2769).
-	if err := guardAndCascadeUserRoleBindingsTx(ctx, tx, userID, now); err != nil {
+	if err := guardAndCascadeUserRoleBindingsTx(ctx, tx, userID, at); err != nil {
 		return err
 	}
 
@@ -1555,11 +1620,14 @@ func deleteUserRowCascadeTx(ctx context.Context, tx store.Store, userID string, 
 func writeUserDeleteCascadeError(w http.ResponseWriter, err error) bool {
 	var lastOwnerErr *lastProjectOwnerDeleteError
 	var blockedErr *userDeleteBlockedError
+	var inProgressErr *userDeletionInProgressError
 	switch {
 	case errors.As(err, &lastOwnerErr):
 		writeLastProjectOwnerDeleteError(w, lastOwnerErr)
 	case errors.As(err, &blockedErr):
 		writeUserDeleteBlockedError(w, blockedErr)
+	case errors.As(err, &inProgressErr):
+		writeUserDeletionInProgress(w, inProgressErr)
 	case errors.Is(err, errUserRoleBindingsChanged):
 		writeUserRoleBindingsChangedError(w)
 	default:

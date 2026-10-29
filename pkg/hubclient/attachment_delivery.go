@@ -105,7 +105,10 @@ func (c *client) fetchAttachmentDelivery(ctx context.Context, path string) (io.R
 		if resp.StatusCode == http.StatusNotFound {
 			return nil, errDeliveryRefused
 		}
-		return nil, apiclient.CheckResponse(resp)
+		if err := apiclient.CheckResponse(resp); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w (status %d)", errDeliveryRefused, resp.StatusCode)
 	}
 }
 

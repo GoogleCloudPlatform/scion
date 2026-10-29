@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/privatefs"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/providers/env"
@@ -283,12 +284,16 @@ func PersistentHubID() string {
 	// First boot (or file missing/empty): compute, persist, and return.
 	id := DefaultHubID()
 
-	// Ensure the directory exists.
-	if err := os.MkdirAll(globalDir, 0700); err != nil {
+	// Ensure the directory exists: missing components are created private
+	// (mode 0700; on Windows an owner-only ACL). An existing directory is
+	// left as it is.
+	tree, err := privatefs.OpenTree(globalDir, privatefs.TreeOptions{CreateAnchor: true})
+	if err != nil {
 		slog.Warn("hub_id: cannot create config directory; hub_id will not be persisted",
 			"dir", globalDir, "error", err)
 		return id
 	}
+	_ = tree.Close()
 
 	if stored, err := persistHubIDOnce(filePath, id); err != nil {
 		slog.Warn("hub_id: failed to persist hub_id; future hostname changes may re-namespace secrets",
@@ -333,31 +338,33 @@ func persistHubIDOnce(path, id string) (string, error) {
 		}
 		return id, nil
 	}
-	tmp, err := createTempFile(dir, "."+filepath.Base(path)+".tmp-*")
+	// The temporary file is created private (mode 0600; on Windows an
+	// owner-only ACL set at creation) and linked into place while it is
+	// still open; the link shares its protection. The temporary name is
+	// then deleted through the handle, never by name.
+	tree, err := privatefs.OpenTree(dir, privatefs.TreeOptions{})
 	if err != nil {
 		return "", err
 	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
+	defer func() { _ = tree.Close() }()
+	tmp, _, err := tree.CreateTemp("", "."+filepath.Base(path)+".tmp-*", privatefs.Private)
+	if err != nil {
 		return "", err
 	}
-	if err := tmp.Chmod(0600); err != nil {
+	defer func() {
+		_ = tree.RemoveOpen(tmp)
 		_ = tmp.Close()
+	}()
+	if _, err := tmp.Write(data); err != nil {
 		return "", err
 	}
 	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
 		return "", err
 	}
-	if err := tmp.Close(); err != nil {
-		return "", err
-	}
-	err = linkFile(tmpName, path)
+	err = linkFile(tmp.Name(), path)
 	if err != nil && !errors.Is(err, fs.ErrExist) {
 		// No hard links here: create the file exclusively instead.
-		err = createFileExclusive(path, data, 0600)
+		err = createFileExclusive(tree, path, data, 0600)
 	}
 	if errors.Is(err, fs.ErrExist) {
 		// Written meanwhile by a writer outside the lock (a hand edit):
@@ -387,21 +394,25 @@ func readStoredHubID(path string) (string, error) {
 // system without hard links.
 var linkFile = os.Link
 
-// createFileExclusive writes data to a new file at path, failing with an
-// error wrapping fs.ErrExist if path already exists.
-func createFileExclusive(path string, data []byte, mode os.FileMode) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+// createFileExclusive writes data to a new file at path, in tree (anchored
+// at path's directory), failing with an error wrapping fs.ErrExist if path
+// already exists. The file gets the protection of mode (privatefs.ForMode):
+// for 0600, mode 0600 even under a umask stricter than 077, and on Windows
+// an owner-only ACL set at creation. A partial
+// file is deleted through its own handle.
+func createFileExclusive(tree *privatefs.Tree, path string, data []byte, mode os.FileMode) error {
+	f, err := tree.Create(filepath.Base(path), true, privatefs.ForMode(mode))
 	if err != nil {
 		return err
 	}
 	if _, err := f.Write(data); err != nil {
+		_ = tree.RemoveOpen(f)
 		_ = f.Close()
-		_ = os.Remove(path)
 		return err
 	}
 	if err := f.Sync(); err != nil {
+		_ = tree.RemoveOpen(f)
 		_ = f.Close()
-		_ = os.Remove(path)
 		return err
 	}
 	return f.Close()
@@ -731,17 +742,20 @@ type RuntimeTargetConfig struct {
 	Namespace   string `json:"namespace,omitempty" yaml:"namespace,omitempty" koanf:"namespace"`
 	Kubeconfig  string `json:"kubeconfig,omitempty" yaml:"kubeconfig,omitempty" koanf:"kubeconfig"`
 	// See V1RuntimeTargetConfig.
-	KubernetesBlockServiceAccount    string            `json:"kubernetesBlockServiceAccount,omitempty" yaml:"kubernetesBlockServiceAccount,omitempty" koanf:"kubernetesBlockServiceAccount"`
-	KubernetesServiceAccountMappings map[string]string `json:"kubernetesServiceAccountMappings,omitempty" yaml:"kubernetesServiceAccountMappings,omitempty" koanf:"kubernetesServiceAccountMappings"`
-	SharedDirStorageClass            string            `json:"sharedDirStorageClass,omitempty" yaml:"sharedDirStorageClass,omitempty" koanf:"sharedDirStorageClass"`
-	SharedDirSize                    string            `json:"sharedDirSize,omitempty" yaml:"sharedDirSize,omitempty" koanf:"sharedDirSize"`
-	GKE                              bool              `json:"gke,omitempty" yaml:"gke,omitempty" koanf:"gke"`
-	PriorityClassName                string            `json:"priorityClassName,omitempty" yaml:"priorityClassName,omitempty" koanf:"priorityClassName"`
-	SafeToEvict                      *bool             `json:"safeToEvict,omitempty" yaml:"safeToEvict,omitempty" koanf:"safeToEvict"`
-	SharedDirStorageBackend          string            `json:"sharedDirStorageBackend,omitempty" yaml:"sharedDirStorageBackend,omitempty" koanf:"sharedDirStorageBackend"`
-	SharedDirStorageBackends         map[string]string `json:"sharedDirStorageBackends,omitempty" yaml:"sharedDirStorageBackends,omitempty" koanf:"sharedDirStorageBackends"`
-	HomeStorageBackend               string            `json:"homeStorageBackend,omitempty" yaml:"homeStorageBackend,omitempty" koanf:"homeStorageBackend"`
-	HomeStorageLeaf                  string            `json:"homeStorageLeaf,omitempty" yaml:"homeStorageLeaf,omitempty" koanf:"homeStorageLeaf"`
+	KubernetesBlockServiceAccount    string              `json:"kubernetesBlockServiceAccount,omitempty" yaml:"kubernetesBlockServiceAccount,omitempty" koanf:"kubernetesBlockServiceAccount"`
+	KubernetesServiceAccountMappings map[string]string   `json:"kubernetesServiceAccountMappings,omitempty" yaml:"kubernetesServiceAccountMappings,omitempty" koanf:"kubernetesServiceAccountMappings"`
+	SharedDirStorageClass            string              `json:"sharedDirStorageClass,omitempty" yaml:"sharedDirStorageClass,omitempty" koanf:"sharedDirStorageClass"`
+	SharedDirSize                    string              `json:"sharedDirSize,omitempty" yaml:"sharedDirSize,omitempty" koanf:"sharedDirSize"`
+	GKE                              bool                `json:"gke,omitempty" yaml:"gke,omitempty" koanf:"gke"`
+	PriorityClassName                string              `json:"priorityClassName,omitempty" yaml:"priorityClassName,omitempty" koanf:"priorityClassName"`
+	SafeToEvict                      *bool               `json:"safeToEvict,omitempty" yaml:"safeToEvict,omitempty" koanf:"safeToEvict"`
+	NodeSelector                     map[string]string   `json:"nodeSelector,omitempty" yaml:"nodeSelector,omitempty" koanf:"nodeSelector"`
+	Tolerations                      []api.K8sToleration `json:"tolerations,omitempty" yaml:"tolerations,omitempty" koanf:"tolerations"`
+	RuntimeClassName                 string              `json:"runtimeClassName,omitempty" yaml:"runtimeClassName,omitempty" koanf:"runtimeClassName"`
+	SharedDirStorageBackend          string              `json:"sharedDirStorageBackend,omitempty" yaml:"sharedDirStorageBackend,omitempty" koanf:"sharedDirStorageBackend"`
+	SharedDirStorageBackends         map[string]string   `json:"sharedDirStorageBackends,omitempty" yaml:"sharedDirStorageBackends,omitempty" koanf:"sharedDirStorageBackends"`
+	HomeStorageBackend               string              `json:"homeStorageBackend,omitempty" yaml:"homeStorageBackend,omitempty" koanf:"homeStorageBackend"`
+	HomeStorageLeaf                  string              `json:"homeStorageLeaf,omitempty" yaml:"homeStorageLeaf,omitempty" koanf:"homeStorageLeaf"`
 }
 
 // DatabaseConfig holds database connection settings.
@@ -775,6 +789,77 @@ type DatabaseConfig struct {
 	// refuses to start (and those commands refuse to migrate); with this set
 	// it logs a warning and continues.
 	AllowShadowedSchema bool `json:"allowShadowedSchema" yaml:"allowShadowedSchema" koanf:"allowShadowedSchema"`
+
+	// TxDiagnostics configures the hub's transaction-hold and lock-wait
+	// diagnostics (WARN lines and metrics). See TxDiagnosticsSettings.
+	TxDiagnostics TxDiagnosticsConfig `json:"tx_diagnostics" yaml:"tx_diagnostics" koanf:"tx_diagnostics"`
+}
+
+// TxDiagnosticsConfig configures the hub database's transaction-hold and
+// lock-wait diagnostics. Durations are Go duration strings; empty takes the
+// default and "0" turns that WARN off (metrics are still recorded).
+type TxDiagnosticsConfig struct {
+	// Enabled installs the diagnostics. Nil means true. False leaves the
+	// database open path exactly as without diagnostics.
+	Enabled *bool `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
+	// HoldWarnThreshold logs a transaction or connection held this long
+	// (default "2s").
+	HoldWarnThreshold string `json:"hold_warn_threshold,omitempty" yaml:"hold_warn_threshold,omitempty" koanf:"hold_warn_threshold"`
+	// LockWaitWarnThreshold logs a request that waited this long for a
+	// connection (default "1s").
+	LockWaitWarnThreshold string `json:"lock_wait_warn_threshold,omitempty" yaml:"lock_wait_warn_threshold,omitempty" koanf:"lock_wait_warn_threshold"`
+	// WarnInterval is the rate-limit window: at most one line per call site
+	// and kind per interval (default "1m").
+	WarnInterval string `json:"warn_interval,omitempty" yaml:"warn_interval,omitempty" koanf:"warn_interval"`
+}
+
+// Defaults of TxDiagnosticsConfig.
+const (
+	DefaultTxHoldWarnThreshold     = 2 * time.Second
+	DefaultTxLockWaitWarnThreshold = time.Second
+	DefaultTxWarnInterval          = time.Minute
+)
+
+// TxDiagnosticsSettings are the parsed TxDiagnosticsConfig values.
+type TxDiagnosticsSettings struct {
+	Enabled               bool
+	HoldWarnThreshold     time.Duration
+	LockWaitWarnThreshold time.Duration
+	WarnInterval          time.Duration
+}
+
+// Settings parses c, applying the defaults. A malformed or negative
+// duration, or a zero warn_interval, returns an error.
+func (c TxDiagnosticsConfig) Settings() (TxDiagnosticsSettings, error) {
+	s := TxDiagnosticsSettings{Enabled: c.Enabled == nil || *c.Enabled}
+	var err error
+	if s.HoldWarnThreshold, err = parseTxDiagDuration("hold_warn_threshold", c.HoldWarnThreshold, DefaultTxHoldWarnThreshold); err != nil {
+		return s, err
+	}
+	if s.LockWaitWarnThreshold, err = parseTxDiagDuration("lock_wait_warn_threshold", c.LockWaitWarnThreshold, DefaultTxLockWaitWarnThreshold); err != nil {
+		return s, err
+	}
+	if s.WarnInterval, err = parseTxDiagDuration("warn_interval", c.WarnInterval, DefaultTxWarnInterval); err != nil {
+		return s, err
+	}
+	if s.WarnInterval == 0 {
+		return s, fmt.Errorf("invalid tx_diagnostics.warn_interval %q: must be positive", c.WarnInterval)
+	}
+	return s, nil
+}
+
+func parseTxDiagDuration(key, v string, def time.Duration) (time.Duration, error) {
+	if v == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("invalid tx_diagnostics.%s %q: %w", key, v, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("invalid tx_diagnostics.%s %q: must not be negative", key, v)
+	}
+	return d, nil
 }
 
 // ConnMaxLifetimeDuration parses ConnMaxLifetime into a time.Duration.
@@ -1239,6 +1324,11 @@ type GlobalConfig struct {
 	EffectiveProjectStorage *V1ProjectStorageConfig `json:"-" yaml:"-" koanf:"-"`
 	// EffectiveProjectStorageWarnings are that resolution's warnings.
 	EffectiveProjectStorageWarnings []string `json:"-" yaml:"-" koanf:"-"`
+	// RemovedStorageOverridesFileError is the public message of the removed
+	// per-runtime or per-profile storage overrides the global settings file
+	// carries, set at hub startup (config.RemovedStorageOverridesError), or
+	// "". It is reported, never a refused start (ptone/scion#6371).
+	RemovedStorageOverridesFileError string `json:"-" yaml:"-" koanf:"-"`
 
 	// NativeChat controls the built-in chat feature. Nil (absent) means
 	// enabled. Populated from server.native_chat in settings.yaml.
@@ -1319,8 +1409,8 @@ func DefaultGlobalConfig() GlobalConfig {
 			Host:                          DefaultBrokerHost,
 			ReadTimeout:                   30 * time.Second,
 			WriteTimeout:                  120 * time.Second, // Longer for agent operations
-			CORSEnabled:                   true,
-			CORSAllowedOrigins:            []string{"*"},
+			CORSEnabled:                   false,             // off by default with no origins: nothing calls the broker from a browser (opt in with server.broker.cors)
+			CORSAllowedOrigins:            []string{},
 			CORSAllowedMethods:            []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 			CORSAllowedHeaders:            []string{"Authorization", "Content-Type", "X-Scion-Broker-Token", "X-API-Key"},
 			CORSMaxAge:                    3600,

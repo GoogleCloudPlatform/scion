@@ -15,18 +15,18 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"os"
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
-	"golang.org/x/sys/unix"
 )
 
 // nfsWorkspaceExportHint is appended to every pre-create failure so the
@@ -39,7 +39,19 @@ const nfsWorkspaceExportHint = "workspace_storage nfs needs the broker to be abl
 // to reach it through its group: setgid (new entries inherit the group) and
 // group write. A directory the broker creates always has them (2775); an
 // existing one only counts as prepared when it has them too.
-const nfsLeafGroupAccessBits = unix.S_ISGID | 0o020
+const nfsLeafGroupAccessBits = 0o2000 | 0o020 // S_ISGID | group write
+
+// ErrProjectShareNotMounted refuses a start whose project storage share is
+// not mounted on this broker.
+var ErrProjectShareNotMounted = errors.New("project storage share is not mounted on this broker")
+
+// projectShareError is a refusal for a share the broker does not see: its
+// text is the operator remedy (runtime.ProjectShareUnavailableText) and it
+// matches ErrProjectShareNotMounted for errors.Is.
+type projectShareError struct{ msg string }
+
+func (e *projectShareError) Error() string { return e.msg }
+func (e *projectShareError) Unwrap() error { return ErrProjectShareNotMounted }
 
 // ensureNFSWorkspaceLeaf makes sure the project's NFS workspace directory
 // (<subpath_root>/<projectID>/workspace), its provisioning state directory
@@ -68,9 +80,9 @@ const nfsLeafGroupAccessBits = unix.S_ISGID | 0o020
 //
 // It is a no-op unless the runtime is Kubernetes and the workspace is
 // mounted from an NFS PV claim. When the broker has no local mount of the
-// export (the host base does not exist), the previous behavior is kept and
-// the kubelet creates the directories; this is logged so the export
-// requirement is visible. The same fallback applies to a directory the
+// export (the host base does not exist), the start is refused with
+// ErrProjectShareNotMounted: the broker reads and creates project storage
+// through its own mount (ptone/scion#5823). A directory the
 // broker is not allowed to create (EACCES, EPERM or EROFS): it is logged as
 // a warning and left to the node. Any other failure (a symlink, a regular
 // file in the path, an unexpected path) returns an error so the create
@@ -183,18 +195,23 @@ func ensureNFSWorkspaceLeavesClaim(runtimeName, projectID string, resolved runti
 		}
 	}
 
-	info, err := os.Stat(resolved.HostBase)
-	if err != nil {
+	// The share-visibility predicate shared with the broker's own checks
+	// (projectfs.ShareDirVisible, bounded): the share's mount point must be
+	// a directory on this broker. No mount-table source match is required
+	// here: this runtime never mounts the share on the broker.
+	if err := projectfs.ShareDirVisible(context.Background(), resolved.HostBase); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			slog.Info("workspace_storage nfs: export not mounted on this broker; the node will create the workspace directory "+
-				"when the pod starts, which requires an export that allows root to create directories (no_root_squash)",
-				"host_base", resolved.HostBase, "sub_path", workspaceLeaf)
-			return false, false, nil
+			// A broker reads and creates project storage through its own
+			// mount of the share; without it the start is refused rather
+			// than left to the node (ptone/scion#5823).
+			// This path runs only for the Kubernetes runtime, which never
+			// mounts the share on the broker: the remedy is the broker's
+			// own container, not nfs.auto_mount. The text names the path:
+			// a start failure reaches the client only as fixed text
+			// (runtimeOpError), and the broker logs this error.
+			return false, false, &projectShareError{msg: runtime.ProjectShareUnavailableText(resolved.HostBase, true)}
 		}
 		return false, false, fmt.Errorf("workspace_storage nfs: check export mount %q: %w; %s", resolved.HostBase, err, nfsWorkspaceExportHint)
-	}
-	if !info.IsDir() {
-		return false, false, fmt.Errorf("workspace_storage nfs: check export mount %q: not a directory; %s", resolved.HostBase, nfsWorkspaceExportHint)
 	}
 
 	resolvedHostBase, err := filepath.EvalSymlinks(resolved.HostBase)
@@ -233,38 +250,4 @@ func ensureNFSWorkspaceLeavesClaim(runtimeName, projectID string, resolved runti
 		}
 	}
 	return prepared, agentDirCreated, nil
-}
-
-// isNFSLeafPermissionError reports whether err means the broker was not
-// allowed to create or open a directory (as opposed to a path that is not a
-// usable directory, such as a symlink or a regular file).
-func isNFSLeafPermissionError(err error) bool {
-	return errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM) || errors.Is(err, unix.EROFS)
-}
-
-// ensureNFSLeaf creates rel under hostBase via shareddirs.EnsureLeaf and
-// reports whether the leaf was created now or already carries
-// nfsLeafGroupAccessBits.
-func ensureNFSLeaf(hostBase, rel string) (prepared bool, err error) {
-	prepared, _, err = ensureNFSLeafClaim(hostBase, rel)
-	return prepared, err
-}
-
-// ensureNFSLeafClaim is ensureNFSLeaf that also reports whether this call
-// created the leaf directory (shareddirs.EnsureLeaf's own report, not a
-// separate check).
-func ensureNFSLeafClaim(hostBase, rel string) (prepared, created bool, err error) {
-	leafFd, existed, err := shareddirs.EnsureLeaf(hostBase, rel)
-	if err != nil {
-		return false, false, err
-	}
-	defer func() { _ = shareddirs.CloseFd(leafFd) }()
-	if !existed {
-		return true, true, nil
-	}
-	var st unix.Stat_t
-	if err := unix.Fstat(leafFd, &st); err != nil {
-		return false, false, fmt.Errorf("stat existing directory: %w", err)
-	}
-	return st.Mode&nfsLeafGroupAccessBits == nfsLeafGroupAccessBits, false, nil
 }

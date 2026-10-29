@@ -37,6 +37,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -255,7 +256,7 @@ func TestSigningKeySource_SharedAndPreconfiguredLabels(t *testing.T) {
 // exists, else memory-only.
 func TestSigningKeySource_ConduitGrantRing(t *testing.T) {
 	assert.Equal(t, signingKeySourceEphemeral, conduitGrantKeySource(nil))
-	assert.Equal(t, signingKeySourceSharedScope, conduitGrantKeySource(bytes.Repeat([]byte{3}, 32)))
+	assert.Equal(t, signingKeySourceSharedScope, conduitGrantKeySource(secret.NewLegacyValueCipher("fake-test-shared-secret")))
 
 	tiaCaptureAudit(t)
 	srv, _, err := tiaNewServer(t, tiaGateServerConfig())
@@ -900,6 +901,8 @@ var tiaDefaultImportNames = map[string]string{
 var tiaKeyMaterialSites = map[string]string{
 	"agenttoken.go:NewAgentTokenService:github.com/go-jose/go-jose/v4.NewSigner":                    "agent_token",
 	"usertoken.go:NewUserTokenService:github.com/go-jose/go-jose/v4.NewSigner":                      "user_jwt",
+	"agenttoken.go:newRingAgentTokenService:github.com/go-jose/go-jose/v4.NewSigner":                "agent_token",
+	"usertoken.go:newRingUserTokenService:github.com/go-jose/go-jose/v4.NewSigner":                  "user_jwt",
 	"oidckeys.go:NewOIDCKeyManager:github.com/go-jose/go-jose/v4.NewSigner":                         "oidc",
 	"oidckeys.go:RotateKey:github.com/go-jose/go-jose/v4.NewSigner":                                 "oidc",
 	"oidckeys.go:refreshKeysFromDB:github.com/go-jose/go-jose/v4.NewSigner":                         "oidc",

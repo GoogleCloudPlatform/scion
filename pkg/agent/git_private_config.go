@@ -15,13 +15,14 @@
 package agent
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -37,13 +38,63 @@ const maxPrivateGitConfigSize = 1 << 20 // 1 MiB
 // fails closed; it is otherwise exactly (*os.File).Close.
 var tmpConfigClose = func(f *os.File) error { return f.Close() }
 
+// seedCheckedPrivateGitConfig checks every repository config layer the agent's
+// git reads raw (util.CheckSeedRepoConfigLayers: the common and the agent's own
+// config.worktree, cross-checked against git) and then seeds the private copy
+// of .git/config (seedPrivateGitConfig). The agent's own worktree admin dir is
+// resolved from broker-trusted data only (util.TrustedWorktreeAdminName, the
+// same resolution the runtime uses to bind it). When the workspace is a linked
+// worktree (its .git is not a directory) and that name does not resolve, the
+// seed refuses, as the runtime does before binding git metadata; otherwise an
+// unresolved name means there is no own worktree layer and only the common
+// layers are checked. Then every submodule admin dir and gitlink the agent's git
+// can reach is checked (util.CheckSeedSubmodules). A refusal, or anything that
+// cannot be checked, is returned before any file is written.
+func seedCheckedPrivateGitConfig(ctx context.Context, repoRoot, workspace, agentDir, branch string) (string, error) {
+	if agentDir == "" {
+		return "", fmt.Errorf("seed private git config: empty agent dir")
+	}
+	gitDir := filepath.Join(repoRoot, ".git")
+	// The repository's .git must be a real directory: every path the checks
+	// below derive from it then matches the one git walks.
+	if fi, err := os.Lstat(gitDir); err != nil || !fi.IsDir() {
+		return "", fmt.Errorf("seed private git config: the repository's .git must be a real directory, not a symlink or gitfile (%s)", gitDir)
+	}
+	adminName, ok := util.TrustedWorktreeAdminName(gitDir, workspace)
+	if !ok && workspace != "" {
+		// Without a resolved admin name, the workspace's .git may only be absent
+		// (no own worktree layer) or a real directory (the main checkout).
+		fi, err := os.Lstat(filepath.Join(workspace, ".git"))
+		if (err != nil && !errors.Is(err, fs.ErrNotExist)) || (err == nil && !fi.IsDir()) {
+			return "", fmt.Errorf("seed private git config: cannot resolve the broker-recorded worktree admin directory for workspace %q against %q; refusing to seed the repository config", workspace, gitDir)
+		}
+	}
+	if err := util.CheckSeedRepoConfigLayers(ctx, gitDir, adminName); err != nil {
+		return "", fmt.Errorf("seed private git config: %w", err)
+	}
+	// Only after the layers pass: the submodule check runs git against them.
+	wt := workspace
+	if wt == "" {
+		wt = repoRoot
+	}
+	if err := util.CheckSeedSubmodules(ctx, gitDir, wt, adminName); err != nil {
+		return "", fmt.Errorf("seed private git config: %w", err)
+	}
+	return seedPrivateGitConfig(filepath.Join(gitDir, "config"), agentDir, branch)
+}
+
 // seedPrivateGitConfig writes a per-agent private copy of the repository's
 // .git/config into the agent's (broker-owned, agent-scoped) state dir and
 // returns its path, for the runtime to bind read-only as a single file over the
 // container's .git/config.
 //
-// It reads the base config (absent → empty), strips credential-bearing keys
-// (util.RedactGitConfigSecrets), and writes the result atomically with an
+// It reads the base config (absent → empty) and prepares the copy with one
+// call to util.PrepareSeededGitConfig, which parses the base once, refuses a
+// base that sets a key the repository config policy does not allow (the error
+// names the key, never its value, and is returned as the start error), strips
+// credential-bearing keys and the stale upstream keys below, and re-serializes
+// what was checked. It appends the broker's own upstream pre-seed and writes
+// the result atomically with an
 // O_EXCL temp file + rename at <agentDir>/git/config, mode 0600, owned by
 // this broker process. The broker never reads this file back as configuration;
 // the runtime re-checks it (regular file, not a symlink, link count 1,
@@ -56,40 +107,16 @@ func seedPrivateGitConfig(baseConfigPath, agentDir, branch string) (string, erro
 	if agentDir == "" {
 		return "", fmt.Errorf("seed private git config: empty agent dir")
 	}
-	gitDir := filepath.Join(agentDir, "git")
-	if err := os.MkdirAll(gitDir, 0700); err != nil {
-		return "", fmt.Errorf("seed private git config: %w", err)
-	}
-
 	raw, err := readBaseGitConfig(baseConfigPath)
 	if err != nil {
 		return "", fmt.Errorf("seed private git config: %w", err)
 	}
-	redacted, stripped, err := util.RedactGitConfigSecrets(raw)
+	redacted, stripped, err := util.PrepareSeededGitConfig(raw, util.RepoPolicyLinked, staleUpstreamKey(branch))
 	if err != nil {
-		return "", fmt.Errorf("seed private git config: redact base config: %w", err)
+		return "", fmt.Errorf("seed private git config: %w", err)
 	}
 	if len(stripped) > 0 {
 		util.Debugf("seedPrivateGitConfig: stripped credential-bearing keys from the private copy: %v", stripped)
-	}
-
-	// Drop any pre-existing upstream for the seed branch and push.autoSetupRemote
-	// from the base before appending our own, so the copy never ends up with
-	// duplicate single-valued branch.<b>.remote/merge keys. A base that already
-	// carries them is the normal pre-upgrade state (an agent that ran `git push -u`
-	// while the config was writable, or a host user's upstream); duplicates make
-	// bare `git push` fail with "multiple upstream branches".
-	redacted, err = util.StripGitConfigKeys(redacted, func(section, subsection string, hasSubsection bool, name string) bool {
-		if section == "push" && !hasSubsection && name == "autosetupremote" {
-			return true
-		}
-		if branch != "" && section == "branch" && hasSubsection && subsection == branch {
-			return true
-		}
-		return false
-	})
-	if err != nil {
-		return "", fmt.Errorf("seed private git config: strip stale upstream: %w", err)
 	}
 
 	// The repository config is read-only to the agent (the copy is bound
@@ -103,6 +130,12 @@ func seedPrivateGitConfig(baseConfigPath, agentDir, branch string) (string, erro
 	// preferences go in the agent's writable global git config in the agent home.
 	redacted = append(redacted, privateConfigUpstreamSeed(branch)...)
 
+	// Create the git dir only once the base config has been read, so a
+	// refused read (for example ErrUnsupported off unix) creates nothing.
+	gitDir := filepath.Join(agentDir, "git")
+	if err := os.MkdirAll(gitDir, 0700); err != nil {
+		return "", fmt.Errorf("seed private git config: %w", err)
+	}
 	tmp, err := os.CreateTemp(gitDir, "config.*.tmp") // O_EXCL
 	if err != nil {
 		return "", fmt.Errorf("seed private git config: temp: %w", err)
@@ -131,6 +164,25 @@ func seedPrivateGitConfig(baseConfigPath, agentDir, branch string) (string, erro
 		return "", fmt.Errorf("seed private git config: rename: %w", err)
 	}
 	return dest, nil
+}
+
+// staleUpstreamKey returns the strip predicate for the seeded copy: it drops
+// any pre-existing upstream for the seed branch and push.autoSetupRemote from the
+// base before our own are appended, so the copy never ends up with duplicate
+// single-valued branch.<b>.remote/merge keys. A base that already carries them is
+// the normal pre-upgrade state (an agent that ran `git push -u` while the config
+// was writable, or a host user's upstream); duplicates make bare `git push` fail
+// with "multiple upstream branches".
+func staleUpstreamKey(branch string) func(section, subsection string, hasSubsection bool, name string) bool {
+	return func(section, subsection string, hasSubsection bool, name string) bool {
+		if section == "push" && !hasSubsection && name == "autosetupremote" {
+			return true
+		}
+		if branch != "" && section == "branch" && hasSubsection && subsection == branch {
+			return true
+		}
+		return false
+	}
 }
 
 // conservativeBranchName matches branch names that need no git-config escaping in
@@ -174,36 +226,4 @@ func privateConfigUpstreamSeed(branch string) []byte {
 		}
 	}
 	return []byte(b.String())
-}
-
-// readBaseGitConfig reads up to maxPrivateGitConfigSize bytes of the base
-// .git/config. A missing file is not an error (returns empty); a file larger
-// than the cap is.
-func readBaseGitConfig(path string) ([]byte, error) {
-	// Open with O_NOFOLLOW so a symlink at the base .git/config path cannot
-	// redirect the broker's read elsewhere, and confirm via fstat that the opened
-	// file is a regular file (not a FIFO/device). A missing file is not an error.
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer func() { _ = f.Close() }() // read-only; a close error cannot affect the bytes already read
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("base git config %s is not a regular file", path)
-	}
-	raw, err := io.ReadAll(io.LimitReader(f, maxPrivateGitConfigSize+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(raw) > maxPrivateGitConfigSize {
-		return nil, fmt.Errorf("base git config %s exceeds %d bytes", path, maxPrivateGitConfigSize)
-	}
-	return raw, nil
 }

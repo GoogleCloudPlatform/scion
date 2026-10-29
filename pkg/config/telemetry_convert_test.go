@@ -479,3 +479,37 @@ func TestTelemetryConfigToEnv_OmitsUnreadVars(t *testing.T) {
 		}
 	}
 }
+
+// telemetry.cloud.cloud_logging reaches the agent's telemetry config with
+// the same pointer semantics as cloud.enabled: true and false are carried,
+// unset stays nil (ptone/scion#5562).
+func TestConvertV1TelemetryToAPI_CloudLogging(t *testing.T) {
+	on, off := true, false
+	for name, in := range map[string]*bool{"true": &on, "false": &off, "unset": nil} {
+		t.Run(name, func(t *testing.T) {
+			got := ConvertV1TelemetryToAPI(&V1TelemetryConfig{Cloud: &V1TelemetryCloudConfig{CloudLogging: in}})
+			if got == nil || got.Cloud == nil {
+				t.Fatal("cloud config missing")
+			}
+			switch {
+			case in == nil && got.Cloud.CloudLogging != nil:
+				t.Errorf("CloudLogging = %v, want nil", *got.Cloud.CloudLogging)
+			case in != nil && (got.Cloud.CloudLogging == nil || *got.Cloud.CloudLogging != *in):
+				t.Errorf("CloudLogging = %v, want %v", got.Cloud.CloudLogging, *in)
+			}
+		})
+	}
+}
+
+// The carried value is not turned into an agent env variable: nothing in
+// the agent reads SCION_CLOUD_LOGGING.
+func TestTelemetryConfigToEnv_CloudLoggingNotEmitted(t *testing.T) {
+	on := true
+	env := TelemetryConfigToEnv(&api.TelemetryConfig{Cloud: &api.TelemetryCloudConfig{CloudLogging: &on}})
+	if v, ok := env["SCION_CLOUD_LOGGING"]; ok {
+		t.Errorf("SCION_CLOUD_LOGGING should not be emitted, got %q", v)
+	}
+	if len(env) != 0 {
+		t.Errorf("env = %v, want empty", env)
+	}
+}

@@ -24,15 +24,28 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import { apiFetch, extractApiError } from '../../client/api.js';
+import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
 import { loadAdminStatus } from '../../client/admin-status.js';
+import { waitForHubRestart } from '../../client/hub-restart.js';
+import { withTimeout } from '../../client/with-timeout.js';
 import { stateManager } from '../../client/state.js';
 import { canReissueAllScopes } from '../../lib/admin-permissions.js';
 import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { showToast } from '../../utils/toast.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { renderReleaseNotesLink } from '../../utils/release-notes-link.js';
+import { LAST_UPDATE_LABELS, renderInstallerUnsupported } from './admin-maintenance-update-card.js';
+import type {
+  LastUpdate,
+  PendingUpdate,
+  UpdateRequestDetail,
+  UpdateStatus,
+} from './admin-maintenance-update-card.js';
+
+export type { LastUpdate, PendingUpdate, UpdateStatus };
 
 interface MaintenanceOperation {
   id: string;
@@ -48,10 +61,23 @@ interface MaintenanceOperation {
   result?: string;
 }
 
+/**
+ * Run status of a maintenance operation or migration. `restarting` is in
+ * progress: an update-binary run whose binary is installed and whose hub is
+ * about to restart; the hub settles it on boot.
+ */
+export type MaintenanceRunStatus = 'pending' | 'running' | 'restarting' | 'completed' | 'failed';
+
+/** Whether a run status means the run has not finished yet. */
+export function isRunInProgress(status: string | undefined): boolean {
+  return status === 'running' || status === 'restarting';
+}
+
 interface MaintenanceRun {
   id: string;
   operationKey?: string;
-  status: string;
+  /** A {@link MaintenanceRunStatus}; unknown values render as-is. */
+  status: MaintenanceRunStatus | (string & {});
   startedAt: string;
   completedAt?: string;
   startedBy?: string;
@@ -106,7 +132,6 @@ interface BinaryUpdateCheckResult {
   current_version: string;
   latest_version: string;
   channel: string;
-  download_url?: string;
   release_url?: string;
 }
 
@@ -118,10 +143,96 @@ interface UpdateAvailableResponse {
   update?: {
     version: string;
     channel: string;
-    download_url?: string;
     release_url?: string;
     detected_at: string;
   };
+}
+
+/** Whether a parsed body has the parts of an update-status the page relies on. */
+function isUpdateStatus(data: unknown): data is UpdateStatus {
+  if (!data || typeof data !== 'object') return false;
+  const d = data as Partial<UpdateStatus>;
+  return (
+    !!d.current &&
+    !!d.installer &&
+    !!d.channel &&
+    (d.mode?.effective === 'git' || d.mode?.effective === 'release')
+  );
+}
+
+/**
+ * A readable message for a rejected update-binary run request, by the
+ * error code the hub sends.
+ */
+export function describeUpdateRunError(code: string, message: string, target: string): string {
+  switch (code) {
+    case 'already_running':
+      return `The hub is already running ${target}. ${message}`;
+    case 'downgrade_not_yet_supported':
+      return `${target} is older than the running version; downgrades are not supported yet. ${message}`;
+    case 'unknown_param':
+      return `The hub rejected the update request (unknown parameter): ${message}`;
+    default:
+      return `Update to ${target} could not start: ${message}`;
+  }
+}
+
+/**
+ * An update-binary run this page follows through the hub restart: one it
+ * started, or one the hub's pendingUpdate names.
+ */
+interface TrackedUpdate {
+  runId: string;
+  /** What was asked for: a tag, or latest:<channel>. */
+  target: string;
+  /** The tag the hub must come back on; null when not known. */
+  expectVersion: string | null;
+  /** Last run status seen by a successful poll. */
+  lastStatus: string;
+  /**
+   * The version the hub ran when the update started (or when this page
+   * picked the run up); undefined when not known. Recorded once, so a
+   * status reload during the restart does not change it.
+   */
+  fromVersion?: string | undefined;
+}
+
+/** Channel, pin and class of an update picked in the release picker. */
+interface UpdateConfirmOptions {
+  channel: string;
+  pin: string;
+  releaseClass: string;
+}
+
+/** How long hubErrorEnvelope waits for an error body. */
+const ERROR_BODY_TIMEOUT_MS = 5_000;
+
+/**
+ * The hub's own error envelope ({error: {code, message}}) of a failed
+ * response, or null when the body is something else, such as a reverse
+ * proxy's 502 page while the hub is down, or when it does not arrive
+ * within timeoutMs.
+ */
+export async function hubErrorEnvelope(
+  res: Response,
+  timeoutMs = ERROR_BODY_TIMEOUT_MS
+): Promise<{ code: string; message: string } | null> {
+  try {
+    // Bounded: a body that stalls after the headers counts as not the
+    // hub's envelope, so the caller does not hang on it.
+    const body = (await withTimeout(res.json() as Promise<unknown>, timeoutMs)) as
+      | { error?: { code?: unknown; message?: unknown } }
+      | null
+      | undefined;
+    const err = body?.error;
+    if (err && typeof err === 'object' && typeof err.code === 'string' && err.code) {
+      const message = typeof err.message === 'string' && err.message ? err.message : err.code;
+      return { code: err.code, message };
+    }
+  } catch {
+    // Not JSON: not the hub's envelope.
+  }
+  return null;
 }
 
 /** Maintenance mode state from GET and PUT /api/v1/admin/maintenance. */
@@ -276,6 +387,21 @@ function resetAuthFailureLine(f: ResetAuthAllFailure): string {
   return `${f.name || f.id}: ${f.error}${category}`;
 }
 
+/**
+ * How long Restart Hub waits for the hub to come back. Shorter than the
+ * update default: a plain restart does not install anything.
+ */
+const RESTART_HUB_TIMEOUT_MS = 60_000;
+
+/**
+ * Failed list polls in a row, while an update run is in progress, after
+ * which the page treats the hub as restarting and waits on /healthz.
+ */
+const FAILED_POLLS_BEFORE_RECONNECT = 2;
+
+/** Minimum gap between run status checks during a restart wait. */
+const RUN_CHECK_INTERVAL_MS = 5_000;
+
 @customElement('scion-page-admin-maintenance')
 export class ScionPageAdminMaintenance extends LitElement {
   /** Re-renders absolute times when the display timezone changes. */
@@ -382,9 +508,51 @@ export class ScionPageAdminMaintenance extends LitElement {
   @state()
   private reissueConfirmOpen = false;
 
-  /** Deployment tier: "binary" or "source" (default). */
+  /** Server version, mode and installer, from GET .../update-status. */
   @state()
-  private deploymentTier: 'binary' | 'source' = 'source';
+  private updateStatus: UpdateStatus | null = null;
+
+  /** Load error of update-status; the page does not guess the mode then. */
+  @state()
+  private updateStatusError: string | null = null;
+
+  /** Target tag of the update being confirmed in the dialog (null: closed). */
+  @state()
+  private updateConfirmTarget: string | null = null;
+
+  /**
+   * Channel, pin and class of a target picked in the release picker; null
+   * for the banner and the operation card, which post pin 'latest' only.
+   */
+  @state()
+  private updateConfirmOptions: UpdateConfirmOptions | null = null;
+
+  /** The update run followed through the restart (null: none). */
+  @state()
+  private trackedUpdate: TrackedUpdate | null = null;
+
+  /** Stops the update restart wait when the page is left. */
+  private updateWaitAbort: AbortController | null = null;
+
+  /** Stops the Restart Hub wait when the page is left. */
+  private restartWaitAbort: AbortController | null = null;
+
+  /**
+   * Id of the restarting run whose pendingUpdate was already checked, so a
+   * run that is not followed is peeked once, not on every poll.
+   */
+  private peekedRestartingRunId: string | null = null;
+
+  /** Consecutive failed list polls while the tracked update is in progress. */
+  private failedPollsWhileUpdating = 0;
+
+  /** True while waiting for the hub to come back after an update restart. */
+  @state()
+  private updateReconnecting = false;
+
+  /** Shown when the hub did not come back on the update target in time. */
+  @state()
+  private updateReconnectError: string | null = null;
 
   /** Stored update-available notification (from scheduled check). */
   @state()
@@ -674,7 +842,8 @@ export class ScionPageAdminMaintenance extends LitElement {
       color: var(--sl-color-danger-700, #b91c1c);
     }
 
-    .status-badge.running {
+    .status-badge.running,
+    .status-badge.restarting {
       background: var(--sl-color-primary-100, #dbeafe);
       color: var(--sl-color-primary-700, #1d4ed8);
     }
@@ -954,6 +1123,7 @@ export class ScionPageAdminMaintenance extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     void this.loadData();
+    void this.fetchUpdateStatus();
     void this.fetchMaintenanceState();
     void this.fetchUpdateAvailable();
     void this.loadReissueCapability();
@@ -971,6 +1141,10 @@ export class ScionPageAdminMaintenance extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopPolling();
+    this.updateWaitAbort?.abort();
+    this.updateWaitAbort = null;
+    this.restartWaitAbort?.abort();
+    this.restartWaitAbort = null;
   }
 
   private async fetchMaintenanceState(): Promise<void> {
@@ -1014,40 +1188,398 @@ export class ScionPageAdminMaintenance extends LitElement {
       if (res.ok) {
         const data = (await res.json()) as UpdateAvailableResponse;
         this.updateAvailable = data;
-        // Infer deployment tier from the presence of update notification.
-        if (data.update_available) {
-          this.deploymentTier = 'binary';
-        }
       }
     } catch {
       // Silently ignore — banner will not show.
     }
   }
 
+  /**
+   * Loads GET .../update-status. On failure the page shows an error and
+   * hides the mode-specific operations rather than guessing the mode.
+   */
+  private async fetchUpdateStatus(): Promise<void> {
+    try {
+      const res = await apiFetch('/api/v1/admin/maintenance/update-status');
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
+      }
+      const data: unknown = await res.json();
+      if (!isUpdateStatus(data)) {
+        throw new Error('Unexpected update-status response');
+      }
+      this.updateStatus = data;
+      this.updateStatusError = null;
+    } catch (err) {
+      this.updateStatus = null;
+      this.updateStatusError = err instanceof Error ? err.message : 'Failed to load update status';
+    }
+  }
+
+  /**
+   * Opens the update dialog from the update-binary operation card. The
+   * target is the notified or checked release tag when one is known;
+   * otherwise check-updates resolves the latest tag in the hub's channel,
+   * so the page knows which version the hub must come back on. Only when
+   * that fails is latest:<channel> posted, for the hub to resolve.
+   */
+  private async openUpdateFromCard(): Promise<void> {
+    const notified = this.updateAvailable?.update_available
+      ? this.updateAvailable.update?.version
+      : undefined;
+    if (notified) {
+      this.openUpdateConfirm(notified);
+      return;
+    }
+    let checked = this.updateCheckResult;
+    if (checked?.tier !== 'binary') {
+      await this.checkForUpdates();
+      checked = this.updateCheckResult;
+    }
+    if (checked?.tier === 'binary') {
+      if (!checked.update_available) {
+        showToast(`Already up to date (${checked.current_version}).`, 'success');
+        return;
+      }
+      if (checked.latest_version) {
+        this.openUpdateConfirm(checked.latest_version);
+        return;
+      }
+    }
+    const channel = this.updateStatus?.channel.effective;
+    this.openUpdateConfirm(channel ? `latest:${channel}` : null);
+  }
+
+  private openUpdateConfirm(
+    target: string | null,
+    options: UpdateConfirmOptions | null = null
+  ): void {
+    if (!target) {
+      showToast('No update target is known: update status has not loaded.');
+      return;
+    }
+    this.updateConfirmTarget = target;
+    this.updateConfirmOptions = options;
+  }
+
+  private closeUpdateConfirm(): void {
+    if (!this.applyUpdateLoading) {
+      this.updateConfirmTarget = null;
+      this.updateConfirmOptions = null;
+    }
+  }
+
+  /**
+   * Starts update-binary for the confirmed target. The request carries only
+   * target_version, pin and (from the release picker) channel; the hub
+   * resolves the release assets itself.
+   */
   private async applyUpdate(): Promise<void> {
+    const target = this.updateConfirmTarget;
+    if (!target) return;
+    const options = this.updateConfirmOptions;
+    const params: Record<string, string> = options
+      ? { target_version: target, channel: options.channel, pin: options.pin }
+      : { target_version: target, pin: 'latest' };
+    const fromVersion = this.updateStatus?.current.version;
     this.applyUpdateLoading = true;
     try {
       const response = await apiFetch('/api/v1/admin/maintenance/operations/update-binary/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ params: {} }),
+        body: JSON.stringify({ params }),
       });
 
       if (!response.ok) {
-        const errMsg = await extractApiError(response, `HTTP ${response.status}`);
-        throw new Error(errMsg);
+        const info = await parseApiError(response, `HTTP ${response.status}`);
+        throw new Error(describeUpdateRunError(info.code, info.message, target));
+      }
+      const started = (await response.json().catch(() => ({}))) as { runId?: string };
+
+      showToast(
+        `Update to ${target} started. The hub will restart when it is installed.`,
+        'success'
+      );
+      this.updateConfirmTarget = null;
+      this.updateConfirmOptions = null;
+      this.updateAvailable = null;
+      this.updateReconnectError = null;
+      if (started.runId) {
+        this.trackedUpdate = {
+          runId: started.runId,
+          target,
+          expectVersion: target.startsWith('latest:') ? null : target,
+          lastStatus: 'running',
+          fromVersion,
+        };
+      } else {
+        // Without a run id no result can be tied to this update; the run
+        // is still followed if a poll sees it running (trackUpdateRun).
+        showToast('The hub did not return a run id; follow the update in Run History.', 'warning');
       }
 
-      showToast('Binary update started. The server will restart shortly.', 'success');
-      this.updateAvailable = null;
-
-      // Reload operations and start polling for status.
-      await this.loadData();
+      // Reload operations and poll the run (see trackUpdateRun). A polling
+      // load: if the hub is already going down, the failure counts towards
+      // the restart wait instead of replacing the page with an error.
+      await this.loadData(true);
       this.startPolling();
     } catch (err) {
+      // The dialog stays open so the user can read the error and cancel.
       showToast(err instanceof Error ? err.message : 'Failed to start binary update');
     } finally {
       this.applyUpdateLoading = false;
+    }
+  }
+
+  /**
+   * Follows a run that is already restarting when the page first sees it,
+   * only when a fresh pendingUpdate names it. A restarting run without one
+   * (for example one boot reconciliation did not settle) is shown as in
+   * progress and polled, but not waited for. Checked once per run.
+   */
+  private async adoptRestartingRun(run: MaintenanceRun): Promise<void> {
+    if (this.peekedRestartingRunId === run.id) return;
+    this.peekedRestartingRunId = run.id;
+    const pending = await this.peekPendingUpdate();
+    if (!this.isConnected) return;
+    if (this.trackedUpdate || !pending?.runId || pending.runId !== run.id) return;
+    this.trackedUpdate = {
+      runId: run.id,
+      target: pending.to,
+      expectVersion: pending.to || null,
+      lastStatus: 'restarting',
+      fromVersion: pending.from || this.updateStatus?.current.version,
+    };
+    void this.reconnectAfterUpdate();
+  }
+
+  private updateBinaryRun(): MaintenanceRun | undefined {
+    return this.operations.find((op) => op.key === 'update-binary')?.lastRun;
+  }
+
+  /**
+   * Called after each successful list load: follows the update-binary run.
+   * A run seen running is followed whoever started it (another tab, a
+   * reload during the download); restarting switches to the hub restart
+   * wait; a finished run (the restart came and went between polls, or the
+   * run failed before it) reports its result.
+   */
+  private trackUpdateRun(): void {
+    if (!this.isConnected) return;
+    const run = this.updateBinaryRun();
+    if (!this.trackedUpdate && run?.status === 'running') {
+      this.trackedUpdate = {
+        runId: run.id,
+        target: '',
+        expectVersion: null,
+        lastStatus: 'running',
+        fromVersion: this.updateStatus?.current.version,
+      };
+    }
+    const tracked = this.trackedUpdate;
+    if (!tracked) {
+      if (run?.status === 'restarting') void this.adoptRestartingRun(run);
+      return;
+    }
+    if (!run || run.id !== tracked.runId) return;
+    tracked.lastStatus = run.status;
+    if (run.status === 'restarting') {
+      void this.reconnectAfterUpdate();
+    } else if (!isRunInProgress(run.status) && !this.updateReconnecting) {
+      this.trackedUpdate = null;
+      void this.fetchUpdateStatus().then(() => {
+        this.refreshUpdateNoticesAfterRun(tracked);
+        this.reportUpdateResult(tracked, run.status);
+      });
+    }
+  }
+
+  /**
+   * The version the hub ran before a tracked update: the one recorded when
+   * the run was tracked, else the hub's own record for this run
+   * (pendingUpdate.from while it restarts, lastUpdate.from once settled).
+   * A run adopted on first load may be tracked before update-status has
+   * loaded. Undefined when none is known.
+   */
+  private updateFromVersion(tracked: TrackedUpdate): string | undefined {
+    if (tracked.fromVersion) return tracked.fromVersion;
+    const pending = this.updateStatus?.pendingUpdate ?? null;
+    if (pending && pending.runId === tracked.runId && pending.from) return pending.from;
+    const last = this.updateStatus?.lastUpdate ?? null;
+    if (last && last.runId === tracked.runId && last.from) return last.from;
+    return undefined;
+  }
+
+  /**
+   * Brings the "Update available" notices up to date once an update run
+   * has ended and update-status has been reloaded (ptone/scion#6557).
+   *
+   * - The hub recorded this run as verified and runs a different version
+   *   than before it: the notices were computed against the old version.
+   *   The update check result is dropped, and the stored notification is
+   *   cleared and re-read.
+   * - Otherwise (failed, rolled back, not verified yet, or a version not
+   *   known): the check result stays, and the stored notification is only
+   *   re-read. Starting the update hid the banner, and the hub keeps the
+   *   notification for a retry, so the banner comes back.
+   *
+   * fetchUpdateAvailable handles its own errors and is not awaited.
+   */
+  private refreshUpdateNoticesAfterRun(tracked: TrackedUpdate): void {
+    const from = this.updateFromVersion(tracked);
+    const after = this.updateStatus?.current.version;
+    const last = this.updateStatus?.lastUpdate ?? null;
+    const verified = !!last && last.runId === tracked.runId && last.status === 'verified';
+    if (verified && from && after && from !== after) {
+      this.updateCheckResult = null;
+      this.updateCheckError = null;
+      // Cleared first: if the re-read fails, a notice about the old
+      // version must not stay up.
+      this.updateAvailable = null;
+    }
+    void this.fetchUpdateAvailable();
+  }
+
+  /** When the restart wait last checked the run status (epoch ms). */
+  private lastRunCheckAt = 0;
+
+  /**
+   * For the restart wait, while the hub answers but has not restarted:
+   * whether the run has already finished (for example Restart() failed
+   * and the run was marked failed), so the wait need not run out. Reads
+   * the list without touching page state, at most every few seconds.
+   */
+  private async trackedRunFinished(runId: string, signal: AbortSignal): Promise<boolean> {
+    const now = Date.now();
+    if (now - this.lastRunCheckAt < RUN_CHECK_INTERVAL_MS) return false;
+    this.lastRunCheckAt = now;
+    try {
+      const res = await apiFetch('/api/v1/admin/maintenance/operations', {
+        authErrors: 'caller',
+        signal,
+      });
+      if (!res.ok) return false;
+      const data = (await res.json()) as MaintenanceResponse;
+      const run = (data.operations ?? []).find((op) => op.key === 'update-binary')?.lastRun;
+      return !!run && run.id === runId && !isRunInProgress(run.status);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Reads pendingUpdate without touching the page state: the hub may be
+   * going down, and a failure must not replace the header with an error.
+   */
+  private async peekPendingUpdate(): Promise<PendingUpdate | null> {
+    try {
+      const res = await apiFetch('/api/v1/admin/maintenance/update-status', {
+        authErrors: 'caller',
+      });
+      if (!res.ok) return null;
+      const data: unknown = await res.json();
+      return isUpdateStatus(data) ? data.pendingUpdate : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Waits for the hub to restart after the tracked update run reached
+   * restarting (or a poll failed while it was in progress), then reloads
+   * update-status and reports this run's result.
+   */
+  private async reconnectAfterUpdate(): Promise<void> {
+    const tracked = this.trackedUpdate;
+    // A poll or peek that resolves after the page was left must not start
+    // a wait nothing would abort.
+    if (this.updateReconnecting || !tracked || !this.isConnected) return;
+    // This run is handled here: if it is still restarting after the wait,
+    // the post-wait reload must not adopt it for a second wait.
+    this.peekedRestartingRunId = tracked.runId;
+    this.updateReconnecting = true;
+    this.updateReconnectError = null;
+    this.stopPolling();
+    this.updateWaitAbort?.abort();
+    this.updateWaitAbort = new AbortController();
+    const signal = this.updateWaitAbort.signal;
+    try {
+      if (!tracked.expectVersion) {
+        // latest:<channel>: the hub writes the concrete tag to pendingUpdate
+        // just before it restarts; it may still answer.
+        const pending = await this.peekPendingUpdate();
+        if (pending && pending.runId === tracked.runId && pending.to) {
+          this.trackedUpdate = { ...tracked, expectVersion: pending.to };
+        }
+      }
+      const expectVersion = this.trackedUpdate?.expectVersion ?? undefined;
+      const result = await waitForHubRestart({
+        expectVersion,
+        signal,
+        stopWhen: () => this.trackedRunFinished(tracked.runId, signal),
+      });
+      if (!result.ok && result.aborted) return;
+      this.trackedUpdate = null;
+      if (!result.ok && !result.observed) {
+        this.updateReconnectError = this.notBackMessage(expectVersion);
+        return;
+      }
+      // The hub answers (on the target, or on another version after the
+      // wait ran out): show what it recorded.
+      await this.fetchUpdateStatus();
+      await this.loadData(true);
+      const run = this.updateBinaryRun();
+      const runIsTracked = !!run && run.id === tracked.runId;
+      if (!result.ok && runIsTracked && run.status === 'running') {
+        // A blip, not a restart: the run is still going; keep polling it.
+        this.trackedUpdate = { ...tracked, lastStatus: 'running' };
+        this.startPolling();
+        return;
+      }
+      this.refreshUpdateNoticesAfterRun(tracked);
+      if (result.ok) {
+        this.reportUpdateResult(tracked, 'restarted');
+        return;
+      }
+      const recorded = this.updateStatus?.lastUpdate?.runId === tracked.runId;
+      if (recorded || (runIsTracked && run.status === 'failed')) {
+        this.reportUpdateResult(tracked, run?.status ?? '');
+        return;
+      }
+      this.updateReconnectError = this.notBackMessage(expectVersion);
+    } finally {
+      this.updateReconnecting = false;
+    }
+  }
+
+  private notBackMessage(expectVersion: string | undefined): string {
+    return (
+      `Hub did not come back on ${expectVersion ?? 'the new version'}. ` +
+      'Check journalctl -u scion-hub'
+    );
+  }
+
+  /**
+   * Reports the outcome of a tracked run from lastUpdate, but only when
+   * lastUpdate belongs to that run; an older result is never reported as
+   * this run's.
+   */
+  private reportUpdateResult(tracked: TrackedUpdate, runStatus: string): void {
+    const last = this.updateStatus?.lastUpdate;
+    if (last && tracked.runId && last.runId === tracked.runId) {
+      if (last.status === 'verified') {
+        showToast(`Hub updated to ${last.to} (verified).`, 'success');
+      } else {
+        showToast(
+          `Update to ${last.to} ${LAST_UPDATE_LABELS[last.status] ?? last.status}.`,
+          'warning'
+        );
+      }
+    } else if (runStatus === 'failed') {
+      const target = tracked.target || 'the new version';
+      showToast(`Update to ${target} failed. See the run log.`, 'warning');
+    } else {
+      showToast('Hub restarted; the update result is not recorded yet.', 'warning');
     }
   }
 
@@ -1098,10 +1630,16 @@ export class ScionPageAdminMaintenance extends LitElement {
         this.unitStatus = newUnitStatus;
       }
 
+      this.failedPollsWhileUpdating = 0;
+      // A later successful load recovers a page left on the error view.
+      if (this.error) this.error = null;
+      this.trackUpdateRun();
+      if (this.updateReconnecting && this.trackedUpdate) return;
+
       // Start polling if any migration or operation run is active.
       const hasRunning =
         this.migrations.some((m) => m.status === 'running') ||
-        this.operations.some((op) => op.lastRun?.status === 'running');
+        this.operations.some((op) => isRunInProgress(op.lastRun?.status));
       if (hasRunning) {
         this.startPolling();
       } else {
@@ -1109,6 +1647,18 @@ export class ScionPageAdminMaintenance extends LitElement {
       }
     } catch (err) {
       console.error('Failed to load maintenance operations:', err);
+      // The hub stops answering when it restarts; usually the poll never
+      // sees the brief restarting status, only failures. One failure may be
+      // a blip during the download; a second in a row starts the wait.
+      if (isPolling && this.trackedUpdate && isRunInProgress(this.trackedUpdate.lastStatus)) {
+        this.failedPollsWhileUpdating++;
+        if (
+          this.trackedUpdate.lastStatus === 'restarting' ||
+          this.failedPollsWhileUpdating >= FAILED_POLLS_BEFORE_RECONNECT
+        ) {
+          void this.reconnectAfterUpdate();
+        }
+      }
       if (!isPolling) {
         this.error = err instanceof Error ? err.message : 'Failed to load maintenance operations';
       }
@@ -1120,7 +1670,7 @@ export class ScionPageAdminMaintenance extends LitElement {
   }
 
   private startPolling(): void {
-    if (this.pollTimer) return;
+    if (this.pollTimer || !this.isConnected) return;
     this.pollTimer = setInterval(() => void this.loadData(true), 3000);
   }
 
@@ -1172,6 +1722,8 @@ export class ScionPageAdminMaintenance extends LitElement {
         return 'exclamation-circle-fill';
       case 'running':
         return 'hourglass-split';
+      case 'restarting':
+        return 'arrow-repeat';
       default:
         return 'circle';
     }
@@ -1352,7 +1904,7 @@ export class ScionPageAdminMaintenance extends LitElement {
           ? this.renderError()
           : this.renderContent()}
       ${this.renderRunDialog()} ${this.renderRunDetailDialog()} ${this.renderRestartDialog()}
-      ${this.renderReissueConfirmDialog()}
+      ${this.renderReissueConfirmDialog()} ${this.renderUpdateConfirmDialog()}
     `;
   }
 
@@ -1382,9 +1934,9 @@ export class ScionPageAdminMaintenance extends LitElement {
 
   private renderContent() {
     return html`
-      ${this.renderUpdateAvailableBanner()} ${this.renderUnitDriftBanner()}
-      ${this.renderMaintenanceMode()} ${this.renderQuickActions()} ${this.renderMigrations()}
-      ${this.renderOperations()}
+      ${this.renderServerVersion()} ${this.renderUpdateAvailableBanner()}
+      ${this.renderUnitDriftBanner()} ${this.renderMaintenanceMode()} ${this.renderQuickActions()}
+      ${this.renderMigrations()} ${this.renderOperations()}
     `;
   }
 
@@ -1427,6 +1979,112 @@ export class ScionPageAdminMaintenance extends LitElement {
     `;
   }
 
+  /**
+   * "Server Version & Updates" card. It shows update-status and picks a
+   * release; the update itself (confirm, run, restart wait) stays here.
+   */
+  private renderServerVersion() {
+    const busy =
+      this.applyUpdateLoading ||
+      this.updateReconnecting ||
+      isRunInProgress(this.updateBinaryRun()?.status);
+    return html`
+      <scion-admin-maintenance-update-card
+        .status=${this.updateStatus}
+        .statusError=${this.updateStatusError}
+        ?reconnecting=${this.updateReconnecting}
+        .reconnectVersion=${this.trackedUpdate?.expectVersion ?? null}
+        .reconnectError=${this.updateReconnectError}
+        ?busy=${busy}
+        @reload-status=${() => this.fetchUpdateStatus()}
+        @view-run=${(e: CustomEvent<{ runId: string }>) =>
+          void this.viewRunDetail({
+            id: e.detail.runId,
+            operationKey: 'update-binary',
+            status: '',
+            startedAt: '',
+          })}
+        @update-request=${(e: CustomEvent<UpdateRequestDetail>) =>
+          this.openUpdateConfirm(e.detail.target, {
+            channel: e.detail.channel,
+            pin: e.detail.pin,
+            releaseClass: e.detail.releaseClass,
+          })}
+      ></scion-admin-maintenance-update-card>
+    `;
+  }
+
+  /** What a picker update changes besides the version: channel and pin. */
+  private renderUpdateConfirmDetails(
+    target: string,
+    options: UpdateConfirmOptions | null
+  ): TemplateResult | typeof nothing {
+    if (!options) return nothing;
+    const from = this.updateStatus?.channel.effective || this.updateStatus?.current.channel;
+    return html`
+      ${options.releaseClass === 'switch-newer' || (from && from !== options.channel)
+        ? html`<p class="confirm-channel-switch">
+            This switches the
+            hub${from ? html` from the <strong>${from}</strong> channel` : nothing} to the
+            <strong>${options.channel}</strong> channel.
+          </p>`
+        : nothing}
+      ${options.pin === 'latest'
+        ? html`<p class="confirm-pin">
+            The hub follows the latest <strong>${options.channel}</strong> release.
+          </p>`
+        : html`<p class="confirm-pin">
+            The hub stays pinned to <strong>${target}</strong>: automatic updates do not move it
+            until you pick Latest again.
+          </p>`}
+    `;
+  }
+
+  private renderUpdateConfirmDialog() {
+    const target = this.updateConfirmTarget;
+    if (!target) return nothing;
+    const latestChannel = target.startsWith('latest:') ? target.slice('latest:'.length) : null;
+    const unsupported = this.updateStatus ? !this.updateStatus.installer.supported : false;
+    return html`
+      <sl-dialog label="Update Hub" open @sl-request-close=${() => this.closeUpdateConfirm()}>
+        <div class="dialog-body">
+          <p>
+            ${latestChannel
+              ? html`Update the hub to the latest release in the
+                  <strong>${latestChannel}</strong> channel?`
+              : html`Update the hub to <strong>${target}</strong>?`}
+          </p>
+          ${this.renderUpdateConfirmDetails(target, this.updateConfirmOptions)}
+          <p style="color: var(--sl-color-warning-700, #a16207); font-weight: 500;">
+            The hub restarts once the new binary is installed. You will temporarily lose
+            connectivity; this page reconnects when the hub is back.
+          </p>
+          ${unsupported && this.updateStatus
+            ? renderInstallerUnsupported(this.updateStatus)
+            : nothing}
+        </div>
+        <sl-button
+          slot="footer"
+          variant="default"
+          @click=${() => this.closeUpdateConfirm()}
+          ?disabled=${this.applyUpdateLoading}
+          >Cancel</sl-button
+        >
+        <sl-button
+          slot="footer"
+          variant="warning"
+          class="confirm-update"
+          ?loading=${this.applyUpdateLoading}
+          ?disabled=${unsupported}
+          @click=${() => this.applyUpdate()}
+        >
+          <sl-icon slot="prefix" name="download"></sl-icon>
+          Update &amp; Restart
+        </sl-button>
+      </sl-dialog>
+    `;
+  }
+
   private renderUpdateAvailableBanner() {
     if (!this.updateAvailable?.update_available || !this.updateAvailable.update) {
       return nothing;
@@ -1446,7 +2104,7 @@ export class ScionPageAdminMaintenance extends LitElement {
             variant="primary"
             size="small"
             ?loading=${this.applyUpdateLoading}
-            @click=${() => this.applyUpdate()}
+            @click=${() => this.openUpdateConfirm(update.version)}
           >
             <sl-icon slot="prefix" name="download"></sl-icon>
             Apply Update
@@ -1762,6 +2420,13 @@ export class ScionPageAdminMaintenance extends LitElement {
     }
   }
 
+  /** A fresh signal for the Restart Hub wait, aborted on disconnect. */
+  private newRestartHubSignal(): AbortSignal {
+    this.restartWaitAbort?.abort();
+    this.restartWaitAbort = new AbortController();
+    return this.restartWaitAbort.signal;
+  }
+
   private async handleRestartHub(): Promise<void> {
     this.restartLoading = true;
     this.restartDialogOpen = false;
@@ -1769,92 +2434,48 @@ export class ScionPageAdminMaintenance extends LitElement {
     // Fire the restart request. The server will restart and likely drop the
     // connection before a response arrives, so we expect a network error or
     // 502 from the reverse proxy. Either outcome means the restart was
-    // initiated — not that it failed.
+    // initiated — not that it failed. Only the hub's own error envelope
+    // (for example 409 conflict while an update runs) means
+    // it refused, and then there is nothing to wait for.
     try {
-      await apiFetch('/api/v1/admin/maintenance/restart', { method: 'POST' });
+      const res = await apiFetch('/api/v1/admin/maintenance/restart', { method: 'POST' });
+      const refusal = res.ok ? null : await hubErrorEnvelope(res);
+      if (refusal) {
+        // apiFetch already shows the access-denied toast for a 403.
+        if (res.status !== 403) {
+          showToast(`Restart refused: ${refusal.message}`, 'warning');
+        }
+        this.restartLoading = false;
+        return;
+      }
     } catch {
       // Expected — the server went away.
     }
 
-    // Poll /healthz until the server comes back with a small uptime,
-    // confirming the process actually restarted.
-    const POLL_TIMEOUT_MS = 30_000;
-    const INITIAL_DELAY_MS = 500;
-    const MAX_INTERVAL_MS = 2000;
-    const deadline = Date.now() + POLL_TIMEOUT_MS;
-
-    await new Promise<void>((resolve) => setTimeout(resolve, INITIAL_DELAY_MS));
-
-    let interval = 1000;
-    while (Date.now() < deadline) {
-      try {
-        const res = await apiFetch('/healthz', { authErrors: 'caller' });
-        if (res.ok) {
-          const data = (await res.json()) as { uptime?: string };
-          // The uptime field is a Go duration string like "3.12s" or "1m5s".
-          // A small uptime (< 120s) confirms a fresh restart rather than
-          // a response from a server that never went down.
-          const uptimeSeconds = this.parseGoUptimeSeconds(data.uptime);
-          if (uptimeSeconds !== null) {
-            if (uptimeSeconds < 120) {
-              showToast('Server restarted successfully.', 'success');
-            } else {
-              showToast(
-                `Server responded but appears not to have restarted (uptime: ${data.uptime}).`,
-                'warning'
-              );
-            }
-            this.restartLoading = false;
-            return;
-          }
-        }
-      } catch {
-        // Server still down — keep polling.
-      }
-      await new Promise<void>((resolve) => setTimeout(resolve, interval));
-      interval = Math.min(interval * 1.5, MAX_INTERVAL_MS);
-    }
-
-    // Timed out — server did not come back within the polling window.
-    showToast('Server did not respond after restart. It may still be starting up.', 'warning', {
-      icon: 'exclamation-triangle',
-      duration: 10000,
+    // Wait for /healthz to answer with a fresh uptime, confirming the
+    // process actually restarted.
+    const result = await waitForHubRestart({
+      timeoutMs: RESTART_HUB_TIMEOUT_MS,
+      signal: this.newRestartHubSignal(),
     });
-    this.restartLoading = false;
-  }
-
-  /**
-   * Parse a Go duration string (e.g. "3s", "1m5s", "2h3m") into total seconds.
-   * Returns null if the format is unrecognized.
-   */
-  private parseGoUptimeSeconds(uptime: string | undefined): number | null {
-    if (!uptime) return null;
-    let total = 0;
-    let matched = false;
-    const re = /(\d+(?:\.\d+)?)(h|m|s|ms|µs|ns)/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(uptime)) !== null) {
-      matched = true;
-      const val = parseFloat(m[1]);
-      switch (m[2]) {
-        case 'h':
-          total += val * 3600;
-          break;
-        case 'm':
-          total += val * 60;
-          break;
-        case 's':
-          total += val;
-          break;
-        case 'ms':
-          total += val / 1000;
-          break;
-        case 'µs':
-        case 'ns':
-          break; // negligible
-      }
+    if (!result.ok && result.aborted) {
+      this.restartLoading = false;
+      return;
     }
-    return matched ? total : null;
+    if (result.ok) {
+      showToast('Server restarted successfully.', 'success');
+    } else if (result.observed) {
+      showToast(
+        `Server responded but appears not to have restarted (uptime: ${result.observed.uptime ?? 'unknown'}).`,
+        'warning'
+      );
+    } else {
+      showToast('Server did not respond after restart. It may still be starting up.', 'warning', {
+        icon: 'exclamation-triangle',
+        duration: 10000,
+      });
+    }
+    this.restartLoading = false;
   }
 
   private renderMaintenanceMode() {
@@ -1991,23 +2612,31 @@ export class ScionPageAdminMaintenance extends LitElement {
     `;
   }
 
-  /** Operations hidden when deployment tier is "binary" (require git clone). */
+  /** Operations hidden in release mode (they need the git checkout). */
   private static readonly SOURCE_ONLY_OPS = new Set([
     'rebuild-server',
     'rebuild-web',
     'rebuild-container-binaries',
   ]);
 
-  /** Operations hidden when deployment tier is "source". */
+  /** Operations hidden in git mode. */
   private static readonly BINARY_ONLY_OPS = new Set(['update-binary']);
 
-  /** Filter operations based on deployment tier. */
+  /**
+   * Operations shown for the hub's effective mode from update-status. Until
+   * it loads (or when it fails), both mode-specific sets stay hidden.
+   */
   private get visibleOperations(): MaintenanceOperationWithRun[] {
-    const hidden =
-      this.deploymentTier === 'binary'
-        ? ScionPageAdminMaintenance.SOURCE_ONLY_OPS
-        : ScionPageAdminMaintenance.BINARY_ONLY_OPS;
-    return this.operations.filter((op) => !hidden.has(op.key));
+    const mode = this.updateStatus?.mode.effective;
+    const hidden = (key: string): boolean => {
+      if (mode === 'git') return ScionPageAdminMaintenance.BINARY_ONLY_OPS.has(key);
+      if (mode === 'release') return ScionPageAdminMaintenance.SOURCE_ONLY_OPS.has(key);
+      return (
+        ScionPageAdminMaintenance.SOURCE_ONLY_OPS.has(key) ||
+        ScionPageAdminMaintenance.BINARY_ONLY_OPS.has(key)
+      );
+    };
+    return this.operations.filter((op) => !hidden(op.key));
   }
 
   private renderOperations() {
@@ -2026,7 +2655,7 @@ export class ScionPageAdminMaintenance extends LitElement {
   }
 
   private renderOperationCard(op: MaintenanceOperationWithRun) {
-    const isRunning = op.lastRun?.status === 'running';
+    const isRunning = isRunInProgress(op.lastRun?.status);
     const historyExpanded = this.expandedHistory.has(op.key);
     const runs = this.runHistory.get(op.key) ?? [];
     const showCheckButton = op.key === 'rebuild-server' || op.key === 'update-binary';
@@ -2054,12 +2683,17 @@ export class ScionPageAdminMaintenance extends LitElement {
               `
             : nothing}
           ${isRunning
-            ? html`<sl-button size="small" disabled loading>Running...</sl-button>`
+            ? html`<sl-button size="small" disabled loading
+                >${op.lastRun?.status === 'restarting' ? 'Restarting...' : 'Running...'}</sl-button
+              >`
             : html`
                 <sl-button
                   variant="${isDestructiveOp ? 'warning' : 'primary'}"
                   size="small"
-                  @click=${() => this.openRunDialog(op.key, 'operation')}
+                  @click=${() =>
+                    op.key === 'update-binary'
+                      ? void this.openUpdateFromCard()
+                      : this.openRunDialog(op.key, 'operation')}
                 >
                   <sl-icon slot="prefix" name="play-circle"></sl-icon>
                   Run
@@ -2302,13 +2936,7 @@ export class ScionPageAdminMaintenance extends LitElement {
         this.updateCheckError = await extractApiError(res, 'Failed to check for updates');
         return;
       }
-      const result = (await res.json()) as UpdateCheckResult;
-      this.updateCheckResult = result;
-
-      // Update deployment tier from the check-updates response.
-      if (result.tier === 'binary' || result.tier === 'source') {
-        this.deploymentTier = result.tier;
-      }
+      this.updateCheckResult = (await res.json()) as UpdateCheckResult;
     } catch {
       this.updateCheckError = 'Failed to connect to server';
     } finally {
@@ -2404,10 +3032,7 @@ export class ScionPageAdminMaintenance extends LitElement {
             ? html`
                 <div class="release-field">
                   <span class="release-label">Release notes:</span>
-                  <a href="${r.release_url}" target="_blank" rel="noopener noreferrer">
-                    View Release Notes
-                    <sl-icon name="box-arrow-up-right" style="font-size: 0.75rem;"></sl-icon>
-                  </a>
+                  ${renderReleaseNotesLink(r.release_url)}
                 </div>
               `
             : nothing}

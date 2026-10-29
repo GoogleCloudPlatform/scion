@@ -159,7 +159,14 @@ func CheckLegacyPlacement(block *api.KubernetesConfig, d *api.ResolvedPlacement)
 // warning, and other agent keys are kept), tolerations are merged with the
 // placement's first, and the runtime class is the agent's (equal) value or
 // else the placement's.
+//
+// Operator-owned placement (d.OperatorOwned) is applied by
+// ApplyOperatorPlacement instead, checked against the agent config.
 func ApplyPlacement(base *api.KubernetesConfig, d *api.ResolvedPlacement) (*api.KubernetesConfig, []string, error) {
+	if d != nil && d.OperatorOwned {
+		out, err := ApplyOperatorPlacement(base, d, AgentPlacementLayerConfig)
+		return out, nil, err
+	}
 	if !d.InEffect() {
 		return cloneKubernetesConfig(base), nil, nil
 	}
@@ -253,4 +260,120 @@ func ValidateRuntimeClassName(name string) error {
 		return fmt.Errorf("runtime class name %q: %s", name, strings.Join(msgs, "; "))
 	}
 	return nil
+}
+
+// PoolNodeSelectorKey is the node label key that selects a node pool for
+// agent pods. A differing agent value for it is reported as a pool
+// conflict.
+const PoolNodeSelectorKey = "scion.dev/pool"
+
+// Layers named by CheckAgentPlacement's errors: where the agent's own
+// kubernetes block comes from.
+const (
+	AgentPlacementLayerRequest = "the request"
+	AgentPlacementLayerStored  = "the agent's stored config"
+	AgentPlacementLayerConfig  = "the agent config"
+)
+
+// CheckAgentPlacement checks the agent's own kubernetes block against
+// operator-owned placement d (nil means none). layer names where the block
+// comes from (AgentPlacementLayerRequest, ...). The block's placement
+// fields are validated even when d has none. Then, an empty-key Exists
+// toleration is refused while d is in effect; a node selector key that d
+// sets must have d's value (other keys are allowed); each toleration must
+// be one of d's, compared by (key, operator with "" as Equal, value,
+// effect), so any toleration is refused when d sets none (including an
+// empty-key Exists toleration with no placement at all); and a set runtime
+// class must equal d's, which must then be set.
+// Errors name fields by key or index and never carry submitted values.
+func CheckAgentPlacement(block *api.KubernetesConfig, d *api.ResolvedPlacement, layer string) error {
+	if block == nil {
+		return nil
+	}
+	var opSelector map[string]string
+	var opTolerations []api.K8sToleration
+	var opRuntimeClass string
+	if d != nil {
+		opSelector, opTolerations, opRuntimeClass = d.NodeSelector, d.Tolerations, d.RuntimeClassName
+	}
+
+	keys := make([]string, 0, len(block.NodeSelector))
+	for k := range block.NodeSelector {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for i, k := range keys {
+		if ValidateNodeSelector(map[string]string{k: block.NodeSelector[k]}) != nil {
+			return fmt.Errorf("kubernetes.nodeSelector entry %d (in key order) in %s is not a valid Kubernetes node label", i, layer)
+		}
+	}
+	for i, t := range block.Tolerations {
+		if ValidateTolerations([]api.K8sToleration{t}) != nil {
+			return fmt.Errorf("kubernetes.tolerations[%d] in %s is not a valid toleration", i, layer)
+		}
+	}
+	if ValidateRuntimeClassName(block.RuntimeClassName) != nil {
+		return fmt.Errorf("kubernetes.runtimeClassName in %s is not a valid RuntimeClass name", layer)
+	}
+
+	if d.InEffect() {
+		for i, t := range block.Tolerations {
+			if isMatchAllToleration(t) {
+				return fmt.Errorf("kubernetes.tolerations[%d] in %s matches all taints, which is not allowed when the agent runtime configures placement; remove that entry", i, layer)
+			}
+		}
+	}
+	for _, k := range keys {
+		ov, ok := opSelector[k]
+		if !ok || ov == block.NodeSelector[k] {
+			continue
+		}
+		if k == PoolNodeSelectorKey {
+			return fmt.Errorf("pool selector conflicts with inherited placement: kubernetes.nodeSelector key %q in %s differs from the agent runtime's placement; remove it or use the same value", k, layer)
+		}
+		return fmt.Errorf("kubernetes.nodeSelector key %q in %s conflicts with the agent runtime's placement; remove it or use the same value", k, layer)
+	}
+	if len(block.Tolerations) > 0 && len(opTolerations) == 0 {
+		return fmt.Errorf("kubernetes.tolerations[0] in %s is set, but the agent runtime configures no tolerations; add the toleration to the agent runtime's placement or remove it from the agent config", layer)
+	}
+	allowed := tolerationSet(opTolerations)
+	for i, t := range block.Tolerations {
+		if _, ok := allowed[identityOfToleration(t)]; !ok {
+			return fmt.Errorf("kubernetes.tolerations[%d] in %s is not one of the agent runtime's tolerations; add it to the agent runtime's placement or remove it from the agent config", i, layer)
+		}
+	}
+	if block.RuntimeClassName != "" && block.RuntimeClassName != opRuntimeClass {
+		if opRuntimeClass == "" {
+			return fmt.Errorf("kubernetes.runtimeClassName in %s is set, but the agent runtime configures no runtime class; the runtime class comes from the agent runtime's placement, so remove it from the agent config", layer)
+		}
+		return fmt.Errorf("kubernetes.runtimeClassName in %s differs from the agent runtime's runtime_class_name; remove it from the agent config", layer)
+	}
+	return nil
+}
+
+// ApplyOperatorPlacement applies operator-owned placement d (nil means
+// none) over the agent's own kubernetes block base and returns a fresh
+// block; neither input is mutated, and the result shares no map or slice
+// with them. CheckAgentPlacement must pass first (layer names the block's
+// source). The result keeps the agent's other node selector keys and adds
+// d's; its tolerations are d's (CheckAgentPlacement has made the agent's
+// all members of them); and its runtime class is d's. Unlike ApplyPlacement, nothing is ignored with a warning.
+func ApplyOperatorPlacement(base *api.KubernetesConfig, d *api.ResolvedPlacement, layer string) (*api.KubernetesConfig, error) {
+	if err := CheckAgentPlacement(base, d, layer); err != nil {
+		return nil, err
+	}
+	out := cloneKubernetesConfig(base)
+	if d == nil {
+		return out, nil
+	}
+	if out == nil {
+		if !d.InEffect() {
+			return nil, nil
+		}
+		out = &api.KubernetesConfig{}
+	}
+	out.NodeSelector = MergeNodeSelector(out.NodeSelector, d.NodeSelector)
+	out.Tolerations = MergeTolerations(out.Tolerations, d.Tolerations)
+	out.RuntimeClassName = mergeRuntimeClassName(out.RuntimeClassName, d.RuntimeClassName)
+	return out, nil
 }

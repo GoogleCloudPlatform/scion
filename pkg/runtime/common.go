@@ -31,7 +31,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -623,7 +622,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 			// Derive the read-write own-worktree overlay target from the common
 			// dir's trusted back-links, not the agent-writable gitfile; refuse if
 			// it cannot be resolved.
-			name, ok := trustedWorktreeAdminName(gitDir, config.Workspace)
+			name, ok := util.TrustedWorktreeAdminName(gitDir, config.Workspace)
 			if !ok {
 				return nil, fmt.Errorf("agent %q: cannot resolve the broker-recorded worktree admin directory for workspace %q against %q; refusing to mount git metadata: %w", config.Name, config.Workspace, gitDir, errWorktreeAdminUnresolved)
 			}
@@ -1190,152 +1189,6 @@ func reverifyChain(gitRoot string, comps []string, leafWantDir bool) error {
 	return nil
 }
 
-// checkedBindSource is the single fail-closed inspection every git-metadata bind
-// SOURCE passes through before it is bound into an agent. Starting at the
-// broker-trusted gitRoot, it walks each component in comps with os.Lstat: a
-// component that is a symlink, or a non-directory intermediate component, refuses
-// the start — so a planted symlink, at the leaf or at any intermediate component,
-// can never redirect a bind to, or create a file or directory at, a path outside
-// the repository. A symlink is never followed and nothing is ever created through
-// one. The leaf is handled by mode:
-//   - bindDirRequire:  the leaf must be an existing real directory; a missing leaf
-//     or a missing intermediate component reports absent (present=false).
-//   - bindDirCreate:   a missing component is created one level at a time (its
-//     parent already verified a real directory); an existing non-dir/symlink refuses.
-//   - bindFileRequire: the leaf must be an existing regular file; missing reports absent.
-//   - bindFileCreate:  a missing leaf is created as a regular file with
-//     O_NOFOLLOW|O_EXCL in the verified parent (so a dangling symlink at the leaf is
-//     refused rather than created through); an existing non-regular/symlink refuses.
-//
-// For the *Create modes, after the leaf is created it re-walks the whole component
-// chain (reverifyChain): O_NOFOLLOW guards only the leaf, so a component verified as
-// a real directory and then swapped for a symlink before the create would land the
-// new entry outside the repository. The post-create re-walk fails closed on any such
-// swap, removing what was created and refusing the start.
-//
-// It returns the validated absolute source path and whether it is present to bind.
-func checkedBindSource(gitRoot string, mode bindSourceMode, comps ...string) (src string, present bool, err error) {
-	if len(comps) == 0 {
-		return "", false, fmt.Errorf("checkedBindSource: empty source under %s", gitRoot)
-	}
-	cur := gitRoot
-	last := len(comps) - 1
-	// Walk the intermediate components (all but the leaf): each must be an existing
-	// real directory. A symlink or non-directory refuses; a missing intermediate is
-	// created one level at a time for the *Create modes (its parent already verified
-	// a real directory) or reports absent for the *Require modes.
-	for i, c := range comps {
-		if c == "" || c == "." || c == ".." {
-			return "", false, fmt.Errorf("checkedBindSource: unsafe component %q under %s", c, gitRoot)
-		}
-		cur = filepath.Join(cur, c)
-		if i == last {
-			break
-		}
-		fi, statErr := os.Lstat(cur)
-		switch {
-		case statErr == nil:
-			if fi.Mode()&os.ModeSymlink != 0 {
-				return "", false, fmt.Errorf("git metadata bind source %s is a symlink", cur)
-			}
-			if !fi.IsDir() {
-				return "", false, fmt.Errorf("git metadata bind source parent %s is not a directory", cur)
-			}
-		case os.IsNotExist(statErr):
-			if mode == bindDirRequire || mode == bindFileRequire {
-				return "", false, nil
-			}
-			if mkErr := os.Mkdir(cur, 0755); mkErr != nil {
-				return "", false, fmt.Errorf("create git metadata directory %s: %w", cur, mkErr)
-			}
-		default:
-			return "", false, fmt.Errorf("stat git metadata bind source %s: %w", cur, statErr)
-		}
-	}
-
-	// The leaf. cur is now gitRoot/comps.
-	switch mode {
-	case bindDirRequire, bindDirCreate:
-		fi, statErr := os.Lstat(cur)
-		switch {
-		case statErr == nil:
-			if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
-				return "", false, fmt.Errorf("git metadata bind source %s is not a directory", cur)
-			}
-			return cur, true, nil
-		case os.IsNotExist(statErr):
-			if mode == bindDirRequire {
-				return "", false, nil
-			}
-			if bindSourceRaceHook != nil {
-				bindSourceRaceHook(cur)
-			}
-			if mkErr := os.Mkdir(cur, 0755); mkErr != nil {
-				return "", false, fmt.Errorf("create git metadata directory %s: %w", cur, mkErr)
-			}
-			// Close the create-window TOCTOU: if a verified component was swapped for
-			// a symlink before the Mkdir, the directory landed outside the repository.
-			// Re-walk and, on any swap, remove it and refuse.
-			if rErr := reverifyChain(gitRoot, comps, true); rErr != nil {
-				_ = os.Remove(cur)
-				return "", false, rErr
-			}
-			return cur, true, nil
-		default:
-			return "", false, fmt.Errorf("stat git metadata bind source %s: %w", cur, statErr)
-		}
-	case bindFileRequire:
-		fi, statErr := os.Lstat(cur)
-		switch {
-		case statErr == nil:
-			if fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
-				return "", false, fmt.Errorf("git metadata bind source %s is not a regular file", cur)
-			}
-			return cur, true, nil
-		case os.IsNotExist(statErr):
-			return "", false, nil
-		default:
-			return "", false, fmt.Errorf("stat git metadata bind source %s: %w", cur, statErr)
-		}
-	case bindFileCreate:
-		// Create the leaf as a regular file with O_EXCL|O_NOFOLLOW so that any
-		// existing path at cur — including a symlink (even a dangling one) — is
-		// refused rather than followed or created through. O_EXCL|O_NOFOLLOW is the
-		// load-bearing guard here: it is what keeps a symlinked leaf from being
-		// written through at the broker's uid.
-		if bindSourceRaceHook != nil {
-			bindSourceRaceHook(cur)
-		}
-		f, oErr := os.OpenFile(cur, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, 0644)
-		if oErr == nil {
-			_ = f.Close()
-			// Close the create-window TOCTOU: O_NOFOLLOW guards only the leaf, not an
-			// intermediate component. If a verified component was swapped for a symlink
-			// before the open, the file landed outside the repository. Re-walk and, on
-			// any swap, remove it and refuse.
-			if rErr := reverifyChain(gitRoot, comps, false); rErr != nil {
-				_ = os.Remove(cur)
-				return "", false, rErr
-			}
-			return cur, true, nil
-		}
-		if !errors.Is(oErr, os.ErrExist) {
-			return "", false, fmt.Errorf("create git metadata file %s: %w", cur, oErr)
-		}
-		// It already exists: bind only a real regular file (not a symlink/dir/other).
-		fi, lErr := os.Lstat(cur)
-		if lErr != nil {
-			return "", false, fmt.Errorf("stat git metadata bind source %s: %w", cur, lErr)
-		}
-		if fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
-			return "", false, fmt.Errorf("git metadata bind source %s is not a regular file", cur)
-		}
-		return cur, true, nil
-	default:
-		return "", false, fmt.Errorf("checkedBindSource: unknown mode %d", mode)
-	}
-}
-
 // bindChecked validates (and for the *Create modes creates) the git-metadata bind
 // source gitRoot/comps via checkedBindSource and, when present, registers it over
 // containerRoot/comps with the given read-only flag. Every git-metadata bind
@@ -1384,26 +1237,16 @@ func bindReadWriteOverlayDir(registerMount func(string, string, bool, bool), src
 // in-container git for that submodule, so they get the same treatment as the
 // top-level hooks/info/config. Submodules created in-container after start are
 // out of scope (not present at mount time).
+//
+// The admin dirs come from util.SubmoduleAdminDirs, the same discovery the seed
+// checks, so the set bound equals the set checked. Its unsafe and err results
+// are ignored here, as the walk ignored them before; the seed refuses on them.
 func narrowModuleAdminDirs(registerMount func(string, string, bool, bool), gitDir, containerGitDir string) error {
-	modulesDir := filepath.Join(gitDir, "modules")
-	return filepath.WalkDir(modulesDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if !d.IsDir() {
-			return nil
-		}
-		// A submodule admin dir is one that directly contains a HEAD file. This is a
-		// discovery predicate, not a bind source; each bound source below is
-		// resolved through checkedBindSource (component-checked, symlink refused).
-		if !fileExists(filepath.Join(path, "HEAD")) {
-			return nil
-		}
-		rel, relErr := filepath.Rel(gitDir, path)
-		if relErr != nil {
-			return nil
-		}
-		relComps := strings.Split(filepath.ToSlash(rel), "/")
+	dirs, _, _ := util.SubmoduleAdminDirs(gitDir)
+	for _, rel := range dirs {
+		// Each bound source below is resolved through checkedBindSource
+		// (component-checked, symlink refused).
+		relComps := strings.Split(rel, "/")
 		leaf := func(name string) []string {
 			c := make([]string, 0, len(relComps)+1)
 			c = append(c, relComps...)
@@ -1414,8 +1257,11 @@ func narrowModuleAdminDirs(registerMount func(string, string, bool, bool), gitDi
 				return e
 			}
 		}
-		return bindChecked(registerMount, gitDir, containerGitDir, true, bindFileRequire, leaf("config")...)
-	})
+		if e := bindChecked(registerMount, gitDir, containerGitDir, true, bindFileRequire, leaf("config")...); e != nil {
+			return e
+		}
+	}
+	return nil
 }
 
 // narrowSharerRegistryMounts layers read-only bind mounts over two further
@@ -1477,7 +1323,7 @@ func narrowObjectsInfo(registerMount func(string, string, bool, bool), gitDir, c
 // and config.worktree are pinned read-only here (file binds, below). The whole
 // worktrees/ dir is a directory bind, so the sibling protection works on every
 // runtime.
-// worktreeName must be the broker-trusted admin name (trustedWorktreeAdminName),
+// worktreeName must be the broker-trusted admin name (util.TrustedWorktreeAdminName),
 // or "" for a layout with no own per-agent worktree (shared-plain).
 func narrowWorktreesDir(registerMount func(string, string, bool, bool), gitDir, containerGitDir, worktreeName string) error {
 	// The whole worktrees/ dir is read-only so a container cannot write any
@@ -1543,34 +1389,6 @@ func registerPrivateGitConfig(registerMount func(string, string, bool, bool), co
 	return nil
 }
 
-// checkPrivateGitConfigSource verifies a seeded private-config path is safe to
-// bind: a regular file (not a symlink or special file), link count 1 (not a hard
-// link that also names another file), owned by this process. It uses Lstat so a
-// symlink is rejected rather than followed.
-func checkPrivateGitConfigSource(path string) error {
-	fi, err := os.Lstat(path)
-	if err != nil {
-		return fmt.Errorf("stat %s: %w", path, err)
-	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%s is a symlink", path)
-	}
-	if !fi.Mode().IsRegular() {
-		return fmt.Errorf("%s is not a regular file", path)
-	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return fmt.Errorf("%s: cannot read ownership/link count", path)
-	}
-	if st.Nlink != 1 {
-		return fmt.Errorf("%s has link count %d (want 1)", path, st.Nlink)
-	}
-	if int(st.Uid) != os.Getuid() {
-		return fmt.Errorf("%s is owned by uid %d, not the broker (uid %d)", path, st.Uid, os.Getuid())
-	}
-	return nil
-}
-
 // registerWorktreeGitMounts registers the .git mounts for an in-repo worktree
 // layout (workspace is a subdirectory of the repo root). On every runtime the
 // base .git is bound read-only (registerReadOnlyBaseGitMounts), with read-write
@@ -1585,7 +1403,7 @@ func registerWorktreeGitMounts(registerMount func(string, string, bool, bool), c
 	// `git worktree add` created, identified from the common dir's trusted
 	// back-links — never the agent-writable <workspace>/.git gitfile. If it
 	// cannot be resolved, refuse and mount nothing.
-	name, ok := trustedWorktreeAdminName(gitDir, config.Workspace)
+	name, ok := util.TrustedWorktreeAdminName(gitDir, config.Workspace)
 	if !ok {
 		return fmt.Errorf("agent %q: cannot resolve the broker-recorded worktree admin directory for workspace %q against %q; refusing to mount git metadata: %w", config.Name, config.Workspace, gitDir, errWorktreeAdminUnresolved)
 	}
@@ -1649,38 +1467,6 @@ func credentialSections(keys []string) []string {
 	return out
 }
 
-// readSmallConfigFile reads a .git/config, refusing a symlink or non-regular file
-// (O_NOFOLLOW) and capping the size. A missing file returns nil with no error.
-func readSmallConfigFile(path string) ([]byte, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer func() { _ = f.Close() }() // read-only; a close error cannot affect the bytes already read
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a regular file", path)
-	}
-	const maxConfig = 1 << 20
-	// Read one byte past the cap and refuse a file larger than it, so the whole
-	// config is covered by the credential check: every byte that is checked is the
-	// whole file, with no unread remainder.
-	raw, err := io.ReadAll(io.LimitReader(f, maxConfig+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(raw) > maxConfig {
-		return nil, fmt.Errorf("%s exceeds %d bytes", path, maxConfig)
-	}
-	return raw, nil
-}
-
 // registerRwBaseGitNarrowing narrows a read-write .git base
 // (docker/podman/k8s-style single-file binds supported). It layers the
 // read-only admin surface and the per-agent read-only private config over an
@@ -1726,7 +1512,7 @@ func registerRwBaseGitNarrowing(registerMount func(string, string, bool, bool), 
 // (packed-refs.lock), git gc / git pack-refs, and a shallow fetch (shallow.lock)
 // all need a writable .git root; objects under modules/<name>/ (submodules) are
 // read-only too. Commit, branch creation, fetch, pull and push work normally.
-// worktreeName must be the broker-trusted admin name (trustedWorktreeAdminName),
+// worktreeName must be the broker-trusted admin name (util.TrustedWorktreeAdminName),
 // or "" when the layout has no own per-agent worktree.
 func registerReadOnlyBaseGitMounts(registerMount func(string, string, bool, bool), gitDir, containerGitDir, worktreeName string) error {
 	registerMount(gitDir, containerGitDir, true, true) // read-only base
@@ -1817,121 +1603,6 @@ func mkdirUnderHome(home *agenthome.Home, rel string) {
 		return
 	}
 	_ = home.MkdirAll(rel, 0755)
-}
-
-// fileExists reports whether path exists (file or directory).
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
-// trustedWorktreeAdminName returns the name of the .git/worktrees/<name> admin
-// directory that belongs to the agent's workspace, derived ONLY from
-// broker-trusted data in the common git dir, never from the agent-writable
-// <workspace>/.git gitfile. It enumerates the common dir's worktrees/<name>
-// entries and returns the single one whose own gitdir back-reference resolves to
-// <workspace>/.git. A name must be a single path element (not "." or ".."). If
-// there is no unique match it returns ok=false, and the caller must refuse to
-// bind any read-write worktree overlay (fail closed).
-//
-// This is the control for the read-write own-worktree overlay: the agent must
-// not be able to choose, via its own gitfile, which admin dir it gets mounted
-// read-write (which could reach a sibling's admin dir, the whole worktrees/
-// directory, or — once cleaned — the .git root itself).
-func trustedWorktreeAdminName(gitDir, workspace string) (string, bool) {
-	wantGit := filepath.Join(workspace, ".git")
-	// The workspace .git gitfile is agent-writable. A worktree's .git is always a
-	// regular file (the gitfile); refuse if it is a symlink (or a directory, or
-	// missing), so the agent cannot repoint it at a sibling's gitfile and have the
-	// match resolve through it. Fail closed.
-	if fi, err := os.Lstat(wantGit); err != nil || !fi.Mode().IsRegular() {
-		return "", false
-	}
-	// Canonicalise by resolving the directory only and naming ".git" lexically, so
-	// a symlink the agent controls at the final component is never followed.
-	want := canonicalGitfilePath(wantGit)
-	worktreesDir := filepath.Join(gitDir, "worktrees")
-	entries, err := os.ReadDir(worktreesDir)
-	if err != nil {
-		return "", false
-	}
-	match := ""
-	for _, e := range entries {
-		name := e.Name()
-		// A single, non-traversing path element only.
-		if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\") {
-			continue
-		}
-		adminDir := filepath.Join(worktreesDir, name)
-		if !e.IsDir() {
-			continue
-		}
-		gitdirFile := filepath.Join(adminDir, "gitdir")
-		ptr, ok := readSmallRegularFile(gitdirFile)
-		if !ok {
-			continue
-		}
-		ptr = strings.TrimSpace(ptr)
-		if ptr == "" {
-			continue
-		}
-		// git worktree add --relative-paths writes a path relative to the admin
-		// dir; an absolute path is also valid. Resolve both the same way.
-		resolved := ptr
-		if !filepath.IsAbs(resolved) {
-			resolved = filepath.Join(adminDir, resolved)
-		}
-		if canonicalGitfilePath(resolved) != want {
-			continue
-		}
-		if match != "" {
-			// Two admin dirs claim this workspace — ambiguous; fail closed.
-			return "", false
-		}
-		match = name
-	}
-	if match == "" {
-		return "", false
-	}
-	return match, true
-}
-
-// canonicalGitfilePath returns a comparable absolute path for a worktree .git
-// gitfile. It resolves symlinks in the parent directory (broker-controlled path)
-// but names the final component lexically, so a symlink at the gitfile itself —
-// which the agent can write at <workspace>/.git — is never followed. If the
-// parent cannot be resolved (it may not exist yet) it falls back to the
-// absolute, cleaned form.
-func canonicalGitfilePath(path string) string {
-	abs := path
-	if a, err := filepath.Abs(path); err == nil {
-		abs = a
-	}
-	abs = filepath.Clean(abs)
-	dir, base := filepath.Split(abs)
-	if r, err := filepath.EvalSymlinks(filepath.Clean(dir)); err == nil {
-		return filepath.Join(r, base)
-	}
-	return abs
-}
-
-// readSmallRegularFile reads a small file, refusing symlinks and non-regular
-// files (a FIFO/device/symlink in a shared worktrees dir must not be
-// followed or block). It returns ok=false on any such refusal or error.
-func readSmallRegularFile(path string) (string, bool) {
-	fi, err := os.Lstat(path)
-	if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
-		return "", false
-	}
-	const max = 4096
-	if fi.Size() > max {
-		return "", false
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", false
-	}
-	return string(data), true
 }
 
 // resolveContainerID maps an agent identifier (slug, name, or partial

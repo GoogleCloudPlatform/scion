@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// These tests exercise unix-only, Windows-gated agent storage code.
+//go:build unix
+
 package agent
 
 import (
@@ -23,6 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -85,7 +89,7 @@ func TestSharedDirChainsParity(t *testing.T) {
 			f.shareID = ".."
 			orig := ensureSharedDirLeaf
 			t.Cleanup(func() { ensureSharedDirLeaf = orig })
-			ensureSharedDirLeaf = func(hostBase, rel string) (int, bool, error) {
+			ensureSharedDirLeaf = func(hostBase, rel string, owner shareddirs.Owner) (int, bool, error) {
 				t.Errorf("leaf walk ran for %q under %q", rel, hostBase)
 				return -1, false, os.ErrPermission
 			}
@@ -164,8 +168,8 @@ func TestResolveSharedDirs_NFS_BackstopRefusesSwappedLeaf(t *testing.T) {
 
 	orig := ensureSharedDirLeaf
 	t.Cleanup(func() { ensureSharedDirLeaf = orig })
-	ensureSharedDirLeaf = func(hostBase, rel string) (int, bool, error) {
-		fd, existed, err := orig(hostBase, rel)
+	ensureSharedDirLeaf = func(hostBase, rel string, owner shareddirs.Owner) (int, bool, error) {
+		fd, existed, err := orig(hostBase, rel, owner)
 		if err != nil {
 			return fd, existed, err
 		}

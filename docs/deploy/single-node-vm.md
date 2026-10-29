@@ -59,7 +59,9 @@ The script runs interactively, prompting for:
 5. **Chat plugins** — Telegram, Discord, Slack, Teams, or none
 6. **Container images** — provide a registry path or build locally on the VM
 7. **Admin email** — email address to grant super-admin access (defaults to deployer identity)
-8. **Update policy** — Auto (install updates automatically), Notify (check and notify only), or Disabled
+8. **Update policy** — Notify (check and notify only; the default), Auto
+   (install updates automatically), or Disabled. `--update-policy` (or
+   `update_policy` in the config file) skips the prompt.
 
 To install a specific release version:
 
@@ -170,7 +172,11 @@ On the VM itself:
 
 | Path | Purpose |
 |------|---------|
-| `/usr/local/bin/scion` | The Scion Hub binary |
+| `/opt/scion/releases/<tag>/scion` | Installed Scion releases, one directory per release tag (owned by `scion`) |
+| `/opt/scion/current` | Symlink to the active release (`releases/<tag>`); the unit runs `/opt/scion/current/scion` |
+| `/opt/scion/previous` | Symlink to the release that was active before the last switch |
+| `/opt/scion/snapshots/` | Database snapshots taken by the Hub |
+| `/usr/local/bin/scion` | Root-owned symlink to `/opt/scion/current/scion`, for running `scion` on the VM |
 | `/home/scion/.scion/settings.yaml` | Hub configuration (auth mode, storage, etc.) |
 | `/home/scion/.scion/hub.env` | Environment variables (session secret, project ID) |
 | `/home/scion/.scion/workspace-storage/` | Local workspace storage directory |
@@ -180,6 +186,134 @@ On the VM itself:
 The unit runs as `User=scion` with `WorkingDirectory=/home/scion`, matching
 the paths above — the Hub's daemon working directory is that user's home
 directory, not `/`.
+
+## Binary layout and updates
+
+The Hub binary lives in a versioned install root owned by the `scion` user,
+so the Hub can update itself without sudo:
+
+```
+/opt/scion/                         scion:scion 0755
+  releases/nightly-20261023/scion   one directory per installed release tag
+  releases/v0.3.0-preview.4/scion
+  current  -> releases/nightly-20261023
+  previous -> releases/v0.3.0-preview.4
+  snapshots/
+/usr/local/bin/scion -> /opt/scion/current/scion   (root-owned symlink)
+```
+
+The systemd unit runs `ExecStart=/opt/scion/current/scion server start ...`.
+To install a release, the binary is verified against the release's
+`SHA256SUMS`, placed in `releases/<tag>/`, and `current` is switched to it
+with an atomic rename. The release `current` pointed at before becomes
+`previous`. `settings.yaml` records the root as
+`server.maintenance.install_root: "/opt/scion"`.
+
+`/usr/local/bin/scion` is now a **symlink**, not a binary. Running `scion` on
+the VM always runs the active release. Do not copy a binary over
+`/usr/local/bin/scion` by hand: that replaces the symlink, and the Hub
+(which runs `/opt/scion/current/scion`) does not see the change. To install
+a different release, re-run `deploy.sh --version <tag>`, or update from the
+Maintenance page. A re-run without `--version` keeps the release `current`
+points at (see [Re-running the deploy script](#re-running-the-deploy-script)).
+
+### Converting an existing VM (`migrate-layout`)
+
+VMs deployed before this layout have a plain binary at `/usr/local/bin/scion`
+and a unit that runs it directly. Convert one with:
+
+```bash
+./scripts/single-node-vm/deploy.sh migrate-layout --config my-deploy-config.json
+```
+
+`hub_name` and `project_id` are read from the config file (without one, the
+script prompts for the hub name and uses the active gcloud project). The
+command:
+
+1. creates `/opt/scion/{releases,snapshots}`, owned by `scion`;
+2. moves the **currently installed** binary to `/opt/scion/releases/<its
+   version>/scion`, read from `scion version --format json`. A build with no
+   release version is stored as `releases/git-<sha12>`. Nothing is
+   downloaded, and the version does not change;
+3. points `/opt/scion/current` at it;
+4. replaces `/usr/local/bin/scion` with a symlink to
+   `/opt/scion/current/scion`;
+5. edits `settings.yaml` in place, as the file's owner (`scion`): adds
+   `server.maintenance.install_root: "/opt/scion"` and applies the update
+   policy rule below. Comments (including a trailing comment on the two
+   edited lines) and all other keys are left as they are. The edited file is parsed (with the VM's PyYAML) and compared with the
+   original before it replaces it;
+6. re-renders the systemd unit with
+   `ExecStart=/opt/scion/current/scion ...`;
+7. runs `systemctl daemon-reload`, restarts the Hub, and waits for
+   `/healthz`.
+
+It is safe to re-run. On a converted VM the layout step does nothing, the
+settings edit changes only what is out of date, and the unit is re-rendered
+and the Hub restarted.
+
+If something goes wrong, the command stops at that step:
+
+- **The installed binary's version cannot be read, or the binary cannot be
+  copied completely** (for example, the disk is full). The command stops
+  before `current`, `/usr/local/bin/scion` or the unit change, so nothing
+  is converted. For an unreadable version, run a full
+  `deploy.sh --version <tag>` instead. For a failed copy, free disk space
+  and re-run.
+- **`/opt/scion`, `/opt/scion/releases` or `/opt/scion/snapshots` is not a
+  directory owned by `scion` with mode 0755** (for example, it was changed
+  by hand or is a symlink). The script refuses rather than repairing it,
+  and nothing changes. Fix the ownership or mode by hand
+  (`sudo chown scion:scion …`, `sudo chmod 0755 …`; replace a symlink with
+  a real directory) and re-run. `deploy.sh --version` refuses in the same
+  way. The exception is an `/opt/scion` that is still owned by root because
+  an earlier first run stopped partway. The next run finishes setting it up
+  and hands it to `scion`. Its parent, `/opt`, must be owned by root and not
+  writable by group or others (the image default, `root 0755`). Otherwise
+  `/opt/scion` is neither created nor resumed. The same rule applies to
+  `/usr/local/bin` and every directory above it, because root writes the
+  `scion` symlink there. The script refuses before changing anything.
+- **`/usr/local/bin/scion` is a symlink to a binary only root can read**
+  (for example a hand-made `/usr/local/bin/scion -> /usr/local/lib/scion`
+  at mode 0700). A binary reached through a symlink is copied by the
+  `scion` user, not by root, so `migrate-layout` (and a `deploy.sh` re-run
+  over the old layout) stops with "input unreadable by scion". Make the
+  binary readable (`sudo chmod 0755 …`), or replace the symlink with the
+  plain binary, and re-run.
+- **The settings edit is refused.** This happens if the file has a shape the
+  script cannot edit safely (for example a flow-style `maintenance: {...}`),
+  or if PyYAML is missing (`sudo apt-get install python3-yaml`). By this
+  point steps 1-4 are done: `/opt/scion` exists and `/usr/local/bin/scion`
+  is already the symlink. `settings.yaml` is unchanged, and the unit change
+  and restart (steps 6-7) are skipped. The Hub keeps running the same
+  binary through the symlink. To finish, set
+  `install_root: "/opt/scion"` and `update_policy` by hand as block-style
+  keys under `server:` → `maintenance:` in `settings.yaml`, then re-run
+  `migrate-layout`. The re-run finds
+  the settings already up to date (no parser needed), then renders the unit
+  and restarts the Hub.
+
+A normal re-run of `deploy.sh` also
+converts the VM: it keeps the old binary as the `previous` release and
+installs the requested version as `current`.
+
+**Update policy on conversion.** `migrate-layout` rewrites an existing
+`update_policy: "auto"` to `"notify"`, unless you ask for auto explicitly
+with `--update-policy auto` (or `update_policy: "auto"` in the config file).
+`notify` and `disabled` are kept. Before this change, `auto` was selected
+for you by default, and it did nothing on most VMs because the Hub could
+not replace its own binary. After conversion it works, so it should be a
+choice you make, not a default.
+
+**Behaviour change for unconverted VMs.** Some VMs updated themselves
+before this layout only because the `scion` user happened to have full
+passwordless sudo, for example through the GCE `google-sudoers` group, and
+had no maintenance repository configured. Those Hubs now report the
+installer as `unsupported` on the Maintenance page and do not download or
+install updates until you run `deploy.sh migrate-layout`. Hubs set up with
+the starter-hub sudoers rules (`/etc/sudoers.d/scion-rebuild-server`) and a
+maintenance repository path keep updating through the `sudo-install`
+strategy, with no change on the host.
 
 ## Configuration
 
@@ -224,8 +358,9 @@ server:
       - "you@example.com"
   maintenance:
     deployment_tier: "binary"
-    release_channel: "stable"
-    update_policy: "auto"
+    release_channel: "nightly"
+    update_policy: "notify"
+    install_root: "/opt/scion"
   storage:
     local_path: /home/scion/.scion/workspace-storage
   secrets:
@@ -259,12 +394,17 @@ Key settings:
 - `maintenance.deployment_tier` — `"binary"` for release-based deployments
   (set automatically by the deploy script). Source deployments use `"source"`.
 - `maintenance.release_channel` — which release channel to track for updates:
-  `"stable"` or `"preview"`. Default: `"stable"`.
+  `"stable"`, `"preview"` or `"nightly"`. The deploy script's default is
+  `"nightly"`.
+- `maintenance.install_root` — the versioned install root (see
+  [Binary layout and updates](#binary-layout-and-updates)). The deploy
+  script sets it to `"/opt/scion"`.
 - `maintenance.update_policy` — controls automatic update behavior:
-  - `"auto"` — check for updates on a schedule and install automatically
-    (recommended for binary deployments).
   - `"notify"` — check for updates and show a banner in the admin UI; admin
-    must manually trigger the update.
+    must manually trigger the update. This is the deploy script's default.
+  - `"auto"` — check for updates on a schedule and install automatically.
+    Only used when you choose it (`--update-policy auto` or
+    `update_policy: "auto"` in the config file).
   - `"disabled"` — no automatic update checking (manual checks via the admin
     UI still work).
 
@@ -462,10 +602,11 @@ The teardown flow prompts for the hub name and region, then deletes:
 1. The Cloud Run IAP proxy service
 2. The GCE VM instance
 3. The Cloud NAT and Cloud Router (unless they were reused from a pre-existing gateway on the network/region)
-4. The hub VM's service account
-5. The Cloud Run proxy's service account
-6. The IAP SSH firewall rule
-7. The proxy-to-VM firewall rule (tcp:8080)
+4. The hub VM's service account's project role bindings (also any `deleted:serviceAccount:` tombstones of it on those roles)
+5. The hub VM's service account
+6. The Cloud Run proxy's service account
+7. The IAP SSH firewall rule
+8. The proxy-to-VM firewall rule (tcp:8080)
 
 **Note:** IAP access bindings are scoped to the region, not to the service.
 Teardown does not remove them. To clean up IAP bindings manually:
@@ -626,5 +767,24 @@ The script is idempotent. Re-running it will:
 - Skip creating the VM and service account if they already exist
 - Preserve the existing `hub.env` (and its `SCION_SERVER_SESSION_SECRET`)
 - Seed the hub-scoped `GOOGLE_CLOUD_*` env vars only if they are absent (admin edits are preserved)
-- Overwrite `settings.yaml` with the current configuration
+- Overwrite `settings.yaml` with the current configuration. The update
+  policy comes from `--update-policy`, then the config file's
+  `update_policy`, and otherwise the prompt, which defaults to `notify`. An
+  earlier `auto` is not carried over unless you ask for it again.
+- Install the requested release into `/opt/scion/releases/<tag>/` and switch
+  `/opt/scion/current` to it. On a VM with the old layout, the old binary is
+  kept as the `previous` release (see
+  [Binary layout and updates](#binary-layout-and-updates)).
+- **Without `--version`, keep the release the VM already runs** when
+  `/opt/scion/current` exists. The Hub may have updated itself past the
+  release that auto-detect would pick (auto-detect reads GitHub's latest
+  release, not the Hub's channel), so the script neither downloads nor
+  switches the binary, and says so. Chat plugins are still installed from
+  that release. Pass `--version <tag>` to change releases. If the VM runs a
+  git build (`releases/git-<sha>`), the script stops and asks for
+  `--version`.
+- **With `--version` older than the running release**, print a `DOWNGRADE`
+  warning and proceed, because the version was chosen explicitly. A
+  downgrade can fail to start if the newer release already migrated the Hub
+  database. The newer release stays installed as `/opt/scion/previous`.
 - Re-deploy the Cloud Run proxy (converges to the same state)

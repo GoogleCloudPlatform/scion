@@ -16,38 +16,48 @@ package secret
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // LocalBackend implements SecretBackend using the local store.SecretStore.
-// Values are encrypted at rest using AES-256-GCM before being written to
-// the Hub database. The encryption key is derived from the deployment-wide
-// shared signing secret via DeriveLocalEncryptionKey.
+// Values are encrypted at rest by the shared ValueCipher (ptone/scion#1530
+// §5) before they are written to the Hub database: AES-256-GCM in the
+// enc:v1: or enc:v2:<kid>: envelope the cipher's ring selects.
 type LocalBackend struct {
-	store         store.SecretStore
-	hubID         string
-	encryptionKey []byte // 32-byte AES-256 key; nil disables encryption (legacy/dev)
+	store  store.SecretStore
+	hubID  string
+	cipher *ValueCipher // the shared cipher; nil fails closed
 }
 
-// NewLocalBackend creates a LocalBackend wrapping the given SecretStore.
-// The sharedSecret parameter is the deployment-wide signing secret used to
-// derive the AES-256 encryption key for at-rest encryption. When empty,
-// encryption is disabled and values are stored as plaintext (with a warning).
+// NewLocalBackend creates a LocalBackend wrapping the given SecretStore,
+// with the legacy-mode cipher over sharedSecret (NewLegacyValueCipher).
+// When sharedSecret is empty, encryption is disabled and values are stored
+// as plaintext (with a warning). Production wiring shares one cipher with
+// the Hub through NewLocalBackendWithCipher.
 func NewLocalBackend(s store.SecretStore, hubID, sharedSecret string) *LocalBackend {
-	var key []byte
-	if sharedSecret != "" {
-		key = DeriveLocalEncryptionKey(sharedSecret)
-	} else {
+	return NewLocalBackendWithCipher(s, hubID, NewLegacyValueCipher(sharedSecret))
+}
+
+// NewLocalBackendWithCipher creates a LocalBackend that encrypts with c,
+// the server's one shared ValueCipher. A nil c fails closed: every value
+// operation returns ErrCipherNotConfigured (the disabled plaintext mode is
+// only NewLegacyValueCipher("")).
+func NewLocalBackendWithCipher(s store.SecretStore, hubID string, c *ValueCipher) *LocalBackend {
+	if c != nil && !c.Enabled() {
 		slog.Warn("local secret backend: no shared signing secret configured; " +
 			"secret values will be stored WITHOUT encryption")
 	}
-	return &LocalBackend{store: s, hubID: hubID, encryptionKey: key}
+	return &LocalBackend{store: s, hubID: hubID, cipher: c}
 }
+
+// Cipher returns the backend's ValueCipher (for identity checks: the Hub
+// and the backend must share one object).
+func (b *LocalBackend) Cipher() *ValueCipher { return b.cipher }
 
 // HubID returns the hub instance ID used for hub-scoped secret namespacing.
 func (b *LocalBackend) HubID() string {
@@ -106,23 +116,26 @@ func (b *LocalBackend) fetchValue(ctx context.Context, meta SecretMeta) FetchRes
 	}
 	sv, err := b.decryptStoreSecret(s)
 	if err != nil {
-		return FetchResult{Err: err}
+		// The typed error Resolve returns for an undecryptable value
+		// (errors.Is ErrResolveDecrypt), naming the key and scope only.
+		return FetchResult{Err: newResolveDecryptError([]ResolveFailure{{Key: s.Key, Scope: s.Scope, Kind: DecryptFailureKind(err)}})}
 	}
-	return FetchResult{Value: sv.Value}
+	// The stored ref verbatim, as Resolve reports it.
+	return FetchResult{Value: sv.Value, Ref: s.SecretRef}
 }
 
 func (b *LocalBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *SecretMeta, error) {
 	s := toStoreSecret(input)
 
-	// Encrypt the value before persisting. When no encryption key is
-	// configured the plaintext is stored as-is (legacy/dev mode).
-	if b.encryptionKey != nil {
-		encrypted, err := EncryptValue(s.EncryptedValue, b.encryptionKey)
-		if err != nil {
-			return false, nil, fmt.Errorf("encrypting secret value: %w", err)
-		}
-		s.EncryptedValue = encrypted
+	// Encrypt the value before persisting. The disabled cipher (legacy dev
+	// mode, no server secret) stores the plaintext as-is. A write the
+	// database encryption policy refuses returns
+	// store.ErrEncryptionPolicyMismatch, never an unencrypted fallback.
+	encrypted, err := b.cipher.Encrypt(s.EncryptedValue)
+	if err != nil {
+		return false, nil, fmt.Errorf("encrypting secret value: %w", err)
 	}
+	s.EncryptedValue = encrypted
 
 	created, err := b.store.UpsertSecret(ctx, s)
 	if err != nil {
@@ -195,6 +208,12 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 	// in this codebase, and the reason a stale broker-scoped secret could
 	// silently shadow a project-scoped one regardless of which was meant
 	// to win.)
+	// Decrypt failures are collected and fail the whole resolution
+	// (ptone/scion#1530 §5): a value that cannot be read is never treated
+	// as a missing secret, so no agent starts with an apparently complete
+	// but partial set.
+	var failures []ResolveFailure
+
 	scopes := make([]scopeEntry, 0, 4)
 	if brokerID != "" {
 		scopes = append(scopes, scopeEntry{scope: store.ScopeRuntimeBroker, scopeID: brokerID})
@@ -222,15 +241,24 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 			if s.SecretType == store.SecretTypeInternal {
 				continue
 			}
-
-			rawValue, err := b.store.GetSecretValue(ctx, s.Key, sc.scope, sc.scopeID)
-			if err != nil {
+			// The owner path: a user-scope row of userID is held to the
+			// caller's UserScopeCheck before its value is read. A rejected
+			// row is skipped, so a lower-scope row with the same key stays
+			// in effect.
+			if sc.scope == store.ScopeUser && opts != nil && opts.UserScopeCheck != nil && !opts.UserScopeCheck(*fromStoreSecretMeta(&s)) {
 				continue
 			}
-			value, err := b.decryptRawValue(rawValue)
+
+			rawValue, err := b.store.GetSecretValue(ctx, s.Key, sc.scope, sc.scopeID)
+			if errors.Is(err, store.ErrNotFound) {
+				continue // deleted since it was listed
+			}
 			if err != nil {
-				slog.Warn("skipping secret: decryption not possible",
-					"key", s.Key, "error", err)
+				return nil, err
+			}
+			value, err := b.decryptPayload(rawValue, s.SecretRef)
+			if err != nil {
+				failures = append(failures, ResolveFailure{Key: s.Key, Scope: sc.scope, Kind: DecryptFailureKind(err)})
 				continue
 			}
 
@@ -296,13 +324,15 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 			}
 
 			rawValue, err := b.store.GetSecretValue(ctx, s.Key, s.Scope, s.ScopeID)
-			if err != nil {
-				continue
+			if errors.Is(err, store.ErrNotFound) {
+				continue // deleted since it was listed
 			}
-			value, err := b.decryptRawValue(rawValue)
 			if err != nil {
-				slog.Warn("skipping progeny secret: decryption not possible",
-					"key", s.Key, "error", err)
+				return nil, err
+			}
+			value, err := b.decryptPayload(rawValue, s.SecretRef)
+			if err != nil {
+				failures = append(failures, ResolveFailure{Key: s.Key, Scope: s.Scope, Kind: DecryptFailureKind(err)})
 				continue
 			}
 
@@ -336,6 +366,10 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 				Value: value,
 			}
 		}
+	}
+
+	if len(failures) > 0 {
+		return nil, newResolveDecryptError(failures)
 	}
 
 	result := make([]SecretWithValue, 0, len(merged))
@@ -409,21 +443,12 @@ func fromStoreSecretMeta(s *store.Secret) *SecretMeta {
 }
 
 // decryptStoreSecret converts a store.Secret to SecretWithValue, decrypting
-// the EncryptedValue if an encryption key is configured. Legacy plaintext
-// values (those without the enc:v1: prefix) are returned as-is.
+// its EncryptedValue with the shared cipher. Every failure is a typed
+// ValueCipher or envelope error naming the secret key, never a value.
 func (b *LocalBackend) decryptStoreSecret(s *store.Secret) (*SecretWithValue, error) {
-	value := s.EncryptedValue
-	if b.encryptionKey != nil {
-		plaintext, _, err := DecryptValue(s.EncryptedValue, b.encryptionKey)
-		if err != nil {
-			return nil, fmt.Errorf("decrypting secret %q: %w", s.Key, err)
-		}
-		value = plaintext
-	} else if strings.HasPrefix(s.EncryptedValue, EncryptedPrefix) {
-		// The stored value is encrypted but no encryption key is configured.
-		// Returning the raw ciphertext would leak an indistinguishable blob
-		// that the caller would treat as a real secret value.
-		return nil, fmt.Errorf("secret %q is encrypted but no encryption key is configured", s.Key)
+	value, err := b.decryptPayload(s.EncryptedValue, s.SecretRef)
+	if err != nil {
+		return nil, fmt.Errorf("decrypting secret %q: %w", s.Key, err)
 	}
 	return &SecretWithValue{
 		SecretMeta: *fromStoreSecretMeta(s),
@@ -431,22 +456,24 @@ func (b *LocalBackend) decryptStoreSecret(s *store.Secret) (*SecretWithValue, er
 	}, nil
 }
 
-// decryptRawValue decrypts a raw encrypted value string. If decryption fails
-// (e.g. corrupted ciphertext or key mismatch after rotation), an error is
-// returned and the value is always empty: a failure is reported to the
-// caller instead of being delivered as an indistinguishable empty value.
-// This is used in Resolve, where the caller skips the affected secret on a
-// non-nil error rather than aborting the entire resolution.
-func (b *LocalBackend) decryptRawValue(raw string) (string, error) {
-	if b.encryptionKey == nil {
-		if strings.HasPrefix(raw, EncryptedPrefix) {
-			// The stored value is encrypted but no encryption key is
-			// configured. Return an error instead of leaking ciphertext.
-			return "", fmt.Errorf("value is encrypted but no encryption key is configured")
-		}
-		return raw, nil // legacy plaintext
+// decryptPayload is decryptRawValue for a row with backend reference ref.
+// A reference-only row (an empty value with a non-empty SecretRef, as the
+// GCP backend writes) holds no local payload: it is not decrypted and
+// reads as the empty value, exactly as before, so a managed cipher does
+// not misreport it as unadmitted plaintext (ptone/scion#1530 §7).
+func (b *LocalBackend) decryptPayload(raw, ref string) (string, error) {
+	if raw == "" && ref != "" {
+		return "", nil
 	}
-	plaintext, _, err := DecryptValue(raw, b.encryptionKey)
+	return b.decryptRawValue(raw)
+}
+
+// decryptRawValue decrypts a raw stored value with the shared cipher. On
+// failure the value is always empty and the error is typed: a failure is
+// reported to the caller, never delivered as an indistinguishable empty
+// value.
+func (b *LocalBackend) decryptRawValue(raw string) (string, error) {
+	plaintext, err := b.cipher.Decrypt(raw)
 	if err != nil {
 		return "", fmt.Errorf("decrypting secret value: %w", err)
 	}

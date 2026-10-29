@@ -14,13 +14,18 @@
  * limitations under the License.
  */
 
+import { existsSync, realpathSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { characterEntities } from 'character-entities';
+import { decodeNamedCharacterReference } from 'decode-named-character-reference';
 
 import {
   SENTINEL_CANDIDATES,
   chooseAlphabet,
   chooseOpeningAlphabet,
   criticToSentinelText,
+  probeOpeningAlphabet,
   readTag,
   sentinelSet,
   sentinelTextToCritic,
@@ -84,6 +89,96 @@ describe('opening alphabet (probe)', () => {
   it('needs twenty-four free candidates', () => {
     expect(chooseOpeningAlphabet(C.slice(0, C.length - 24).join(''), (t) => t)).not.toBeNull();
     expect(chooseOpeningAlphabet(C.slice(0, C.length - 23).join(''), (t) => t)).toBeNull();
+    // With a numeric character reference too.
+    const ref = '&#x41;';
+    expect(
+      chooseOpeningAlphabet(ref + C.slice(0, C.length - 24).join(''), (t) => t)
+    ).not.toBeNull();
+    expect(chooseOpeningAlphabet(ref + C.slice(0, C.length - 23).join(''), (t) => t)).toBeNull();
+  });
+});
+
+describe('opening alphabet without a numeric character reference', () => {
+  const C = SENTINEL_CANDIDATES;
+  const never = (): string => {
+    throw new Error('the probe ran');
+  };
+
+  it('checks the decoder and entity table the Markdown parser itself loads', () => {
+    // Where Node finds package name for code in from: the first
+    // node_modules/name above it (package locations do not depend on a
+    // package's exports).
+    const pkgDir = (from: string, name: string): string => {
+      for (let d = from; ; d = dirname(d)) {
+        const p = join(d, 'node_modules', name);
+        if (existsSync(join(p, 'package.json'))) return realpathSync(p);
+        if (dirname(d) === d) throw new Error(`no ${name} above ${from}`);
+      }
+    };
+    // The copies this test imports.
+    const decoder = pkgDir(__dirname, 'decode-named-character-reference');
+    const table = pkgDir(__dirname, 'character-entities');
+    // The parser's own chain, from the editor's Milkdown parser down: every
+    // package of it that decodes character references finds the same copy.
+    const web = join(__dirname, '../..');
+    // A package location, not an import: listed in dependencies.test.ts's
+    // NOT_IMPORTS.
+    const transformer = pkgDir(web, '@milkdown/transformer');
+    const remark = pkgDir(transformer, 'remark');
+    const fromMarkdown = pkgDir(pkgDir(remark, 'remark-parse'), 'mdast-util-from-markdown');
+    const micromark = pkgDir(fromMarkdown, 'micromark');
+    const users = {
+      'mdast-util-from-markdown': fromMarkdown,
+      micromark,
+      'micromark-core-commonmark': pkgDir(micromark, 'micromark-core-commonmark'),
+      'micromark-util-decode-string': pkgDir(fromMarkdown, 'micromark-util-decode-string'),
+    };
+    for (const [name, dir] of Object.entries(users)) {
+      expect(pkgDir(dir, 'decode-named-character-reference'), name).toBe(decoder);
+    }
+    expect(pkgDir(decoder, 'character-entities')).toBe(table);
+  });
+
+  it('no named character reference decodes to a candidate', () => {
+    const names = Object.keys(characterEntities);
+    expect(names.length).toBeGreaterThan(2000);
+    for (const name of names) {
+      const decoded = decodeNamedCharacterReference(name);
+      expect(decoded, name).not.toBe(false);
+      for (const c of decoded as string) expect(C.includes(c), name).toBe(false);
+    }
+  });
+
+  it('chooses without the probe, as the probe would with nothing to exclude', () => {
+    const docs = [
+      'plain text',
+      'R&amp;D {++and++} &copy; &nbsp; & # done',
+      `${C[0]}${C[5]} {>>note<<} {~~a~>b~~}`,
+      C.slice(0, C.length - 24).join(''),
+      '& #x2E00; &x2E00; #&',
+    ];
+    for (const md of docs) {
+      expect(chooseOpeningAlphabet(md, never), md).toEqual(probeOpeningAlphabet(md, (t) => t));
+    }
+  });
+
+  it('runs the probe when the source holds one, in any form', () => {
+    for (const md of ['&#x2E00;', 'a &#42; b', '&#65;', '{>>&#<<}', '&#']) {
+      let ran = false;
+      chooseOpeningAlphabet(md, (t) => {
+        ran = true;
+        return t;
+      });
+      expect(ran, md).toBe(true);
+    }
+  });
+
+  it('the sentinel form has a numeric character reference only where the source has one', () => {
+    for (const md of ['&{>>n<<}#x2E00;', '&{++x++}#65;', '&{~~a~>b~~}#1;', '{==&==}#x41;']) {
+      expect(md.includes('&#'), md).toBe(false);
+      const a = chooseAlphabet(md)!;
+      expect(criticToSentinelText(md, a, true).text.includes('&#'), md).toBe(false);
+    }
   });
 });
 

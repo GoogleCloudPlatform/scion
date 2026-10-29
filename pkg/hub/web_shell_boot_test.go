@@ -128,7 +128,7 @@ func TestSPAShell_HeadFlushedBeforePrefetch(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"id": agentID, "name": "flush-agent"})
 	}), func(ctx context.Context) error { return nil })
 
-	srv := httptest.NewServer(ws.Handler())
+	srv := httptest.NewServer(devSignedIn(t, ws))
 	defer srv.Close()
 	// Runs before srv.Close (defers run last-in first-out), so a failing
 	// test never leaves the handler blocked and Close waiting on it.

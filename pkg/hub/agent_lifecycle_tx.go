@@ -157,11 +157,17 @@ func (s *Server) agentFinalizeHook(ctx context.Context, tx store.Store, a *store
 	actor := auditActorFromContext(ctx)
 	switch mode {
 	case store.DeletionFinalizeSoft:
-		return s.softDeleteAgentTx(ctx, tx, a, actor)
+		if err := s.softDeleteAgentTx(ctx, tx, a, actor); err != nil {
+			return err
+		}
 	case store.DeletionFinalizeHard:
-		return s.hardDeleteAgentTx(ctx, tx, a, actor)
+		if err := s.hardDeleteAgentTx(ctx, tx, a, actor); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("agent finalize: %w: mode %q", store.ErrInvalidInput, mode)
 	}
-	return fmt.Errorf("agent finalize: %w: mode %q", store.ErrInvalidInput, mode)
+	return recordUserDeletionAgentStoppedTx(ctx, tx, a)
 }
 
 // lifecycleAudit builds a lifecycle mutation audit record for agentID with

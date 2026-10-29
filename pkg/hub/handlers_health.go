@@ -191,6 +191,9 @@ func (s *Server) healthChecks(ctx context.Context) map[string]string {
 	// Legacy storage blocks still in use (non-critical).
 	s.checkProjectStorageConfig(checks)
 
+	// Removed per-runtime/per-profile storage overrides (non-critical).
+	s.checkRemovedStorageOverrides(checks)
+
 	return checks
 }
 
@@ -480,6 +483,18 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	// (ptone/scion#1530 §2); verification of eligible generations continues
 	// until verify_until.
 	if reason := s.signingNotReadyReason(); reason != "" {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"status": "not_ready",
+			"reason": reason,
+		})
+		return
+	}
+
+	// A keyring-file instance whose startup encryption audit found an
+	// unreadable infrastructure backup is not ready (ptone/scion#1530 §5);
+	// the record is preserved, never replaced. Legacy mode reports it as an
+	// unhealthy diagnostic instead.
+	if reason := s.backupNotReadyReason(); reason != "" {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"status": "not_ready",
 			"reason": reason,

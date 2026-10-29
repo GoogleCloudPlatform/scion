@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -461,7 +462,7 @@ func newGateServer(t *testing.T, nfs *config.V1NFSConfig, brokerRuntime, dispatc
 
 	mc := newSyncMountChecker()
 	mc.mountErr = errors.New("mount failed")
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.NFSConfig = nfs
 	cfg.NFSMountChecker = mc
 	cfg.ForceRuntime = dispatchRuntime
@@ -602,19 +603,39 @@ func TestCheckNFSForDispatch_NoNFSConfig(t *testing.T) {
 
 // TestCreateAgent_NFSGate_Returns503 drives the create handler: with
 // auto_mount on and a failing mount, an NFS-backed create on a
-// local-container runtime gets 503 nfs_unavailable.
+// local-container runtime gets 503 nfs_unavailable. On and off a shared
+// project-storage Layout, the body names configuration fields only: no
+// share ID, mount point or server:export (the reconciler's detail is
+// logged).
 func TestCreateAgent_NFSGate_Returns503(t *testing.T) {
-	srv, _ := gateTestServer(t, true, "mock")
-	projectPath := writeSettings(t, t.TempDir(), "schema_version: \"1\"\n")
+	for _, shared := range []bool{false, true} {
+		t.Run(fmt.Sprintf("shared=%v", shared), func(t *testing.T) {
+			srv, _ := gateTestServer(t, true, "mock")
+			if shared {
+				srv.config.StorageLayout = projectfs.Layout{Backend: projectfs.BackendNFS, HostBase: "/mnt/nfs/ws1", SubPathRoot: "projects", Share: projectfs.Share{ID: "ws1"}}
+			}
+			projectPath := writeSettings(t, t.TempDir(), "schema_version: \"1\"\n")
 
-	body := fmt.Sprintf(`{"name":"nfs-agent","id":"agent-nfs-1","projectPath":%q}`, filepath.Join(projectPath, ".scion"))
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
+			body := fmt.Sprintf(`{"name":"nfs-agent","id":"agent-nfs-1","projectPath":%q}`, filepath.Join(projectPath, ".scion"))
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "nfs_unavailable") {
-		t.Fatalf("create = %d %s, want 503 nfs_unavailable", rec.Code, rec.Body.String())
+			if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "nfs_unavailable") {
+				t.Fatalf("create = %d %s, want 503 nfs_unavailable", rec.Code, rec.Body.String())
+			}
+			// auto_mount is on and the mount failed: the mount-failure text,
+			// not the advice to set auto_mount.
+			if want := runtime.ProjectShareMountFailedText(runtime.ProjectShareMountPathField); !strings.Contains(rec.Body.String(), want) {
+				t.Errorf("body = %s, want it to contain %q", rec.Body.String(), want)
+			}
+			for _, v := range []string{"ws1", "/mnt/nfs", "10.0.0.2", "/scion-workspaces"} {
+				if strings.Contains(rec.Body.String(), v) {
+					t.Errorf("body carries %q: %s", v, rec.Body.String())
+				}
+			}
+		})
 	}
 }
 

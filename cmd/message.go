@@ -374,18 +374,20 @@ Examples:
 		// recipient send, which names them by id; otherwise today's path
 		// validation and staging run unchanged.
 		msgAttachUpload = nil
+		var attachFallback string
 		if len(msgAttach) > 0 {
 			toAgent := agentName != "" || (convRef != nil && convRef.Kind == messaging.RefAgent) || groupHasAgent(groupRecipients)
-			upload, staged, err := resolveAttachMode(hubCtx.Client, msgAttach, toAgent)
+			upload, staged, fallback, err := resolveAttachMode(hubCtx.Client, msgAttach, toAgent)
 			if err != nil {
 				return err
 			}
-			msgAttachUpload, msgAttach = upload, staged
+			msgAttachUpload, msgAttach, attachFallback = upload, staged, fallback
 		}
 
-		// Stage attachments to shared volume
+		// Stage attachments to shared volume; once staged, say why they were
+		// not uploaded.
 		if len(msgAttach) > 0 {
-			staged, err := stageAttachments(msgAttach)
+			staged, err := stageAttachmentsWithWarning(msgAttach, attachFallback)
 			if err != nil {
 				return fmt.Errorf("attachment staging failed: %w", err)
 			}

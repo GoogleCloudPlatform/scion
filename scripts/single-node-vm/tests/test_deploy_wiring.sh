@@ -993,9 +993,21 @@ test_deploy_create_tier_off_full_run_removes_temp_files() {
 # deploy.sh registers exactly one EXIT trap: a second registration would
 # replace, not extend, the first.
 test_deploy_sh_registers_a_single_exit_trap() {
-  local count
-  count="$(grep -cE '^[[:space:]]*trap .* EXIT[[:space:]]*$' "$DEPLOY_SH" || true)"
+  local count remote
+  # The binary and plugin install commands each set an EXIT trap inside
+  # their remote --command string (it runs in the VM's shell, not in
+  # deploy.sh) to remove their private download dir; those are written
+  # with escaped quotes (\"\$SCION_EXTRACT_DIR\"), which only appear
+  # inside such double-quoted strings. The hub.env install does the same
+  # for its private staging dir (${HUB_ENV_REMOTE_DIR}, expanded locally
+  # into the remote command). Every other trap line is deploy.sh's own,
+  # and there must be exactly one.
+  # shellcheck disable=SC2016 # a regex for literal text in deploy.sh
+  remote='trap .rm -rf (\\"\\\$(SCION|PLUGIN)_EXTRACT_DIR\\"|\$\{HUB_ENV_REMOTE_DIR\}). EXIT'
+  count="$(grep -E '^[[:space:]]*trap .* EXIT[[:space:]]*$' "$DEPLOY_SH" | grep -cvE "$remote" || true)"
   assert_eq "1" "$count" "deploy.sh must register exactly one EXIT trap"
+  assert_eq "3" "$(grep -cE "$remote" "$DEPLOY_SH" || true)" \
+    "the remote install commands (binary, plugin, hub.env) must each clean up their private dir with an EXIT trap"
 }
 
 # =====================================================================
@@ -1856,7 +1868,7 @@ test_deploy_create_tier_off_settings_yaml_byte_identical() {
   assert_not_contains "$template" "HYBRID_" \
     "the dev-mode heredoc template must carry no hybrid-tier reference outside the splices"
   expected="$(IMAGE_REGISTRY="localhost/scion" HUB_NAME="demohub" ADMIN_EMAIL="admin@example.com" \
-    RELEASE_CHANNEL="nightly" UPDATE_POLICY="auto" render_settings_yaml_template "$template"; echo x)"
+    RELEASE_CHANNEL="nightly" UPDATE_POLICY="auto" INSTALL_ROOT="/opt/scion" render_settings_yaml_template "$template"; echo x)"
   expected="${expected%x}"
   assert_contains "$expected" "  # Listen port: set by --web-port in scion-hub.service, not here." "the rendered template must reach the listen-port comment line"
   assert_eq "$expected" "$actual" \
@@ -1890,7 +1902,7 @@ test_deploy_create_tier_off_proxy_settings_yaml_byte_identical() {
   assert_not_contains "$template" "HYBRID_" \
     "the proxy-mode heredoc template must carry no hybrid-tier reference outside the splices"
   expected="$(IMAGE_REGISTRY="us-docker.pkg.dev/demo-project/scion" HUB_NAME="demohub" ADMIN_EMAIL="admin@example.com" \
-    RELEASE_CHANNEL="nightly" UPDATE_POLICY="auto" \
+    RELEASE_CHANNEL="nightly" UPDATE_POLICY="auto" INSTALL_ROOT="/opt/scion" \
     IAP_AUDIENCE="/projects/123456789012/locations/us-central1/services/scion-hub-demohub-iap-proxy" \
     render_settings_yaml_template "$template"; echo x)"
   expected="${expected%x}"
@@ -2190,6 +2202,7 @@ server.auth.mode
 server.hub.admin_emails[0]
 server.hub.hub_name
 server.maintenance.deployment_tier
+server.maintenance.install_root
 server.maintenance.release_channel
 server.maintenance.update_policy
 server.secrets.backend
@@ -2235,6 +2248,8 @@ server.storage.local_path"
       "tier-off ${mode}-mode write: server.maintenance.release_channel"
     assert_eq "auto" "$(_json_get "$json" server.maintenance.update_policy)" \
       "tier-off ${mode}-mode write: server.maintenance.update_policy"
+    assert_eq "/opt/scion" "$(_json_get "$json" server.maintenance.install_root)" \
+      "tier-off ${mode}-mode write: server.maintenance.install_root"
     assert_eq "/home/scion/.scion/workspace-storage" "$(_json_get "$json" server.storage.local_path)" \
       "tier-off ${mode}-mode write: server.storage.local_path"
     assert_eq "local" "$(_json_get "$json" server.secrets.backend)" \
@@ -2624,10 +2639,10 @@ test_deploy_create_api_check_enables_iamcredentials_when_missing() {
   assert_not_contains "$enable_line" "compute.googleapis.com" "an already-enabled API must not be re-enabled"
 }
 
-# deploy.sh never removes the hub SA's project role bindings one by one:
-# --delete deletes the hub SA itself, so every binding it holds
-# (serviceAccountAdmin included) no longer applies. Asserts that path, against the
-# exact state a default create left behind.
+# --delete removes the hub SA's project role bindings (serviceAccountAdmin
+# included; see test_delete_sa_bindings.sh) and then deletes the SA.
+# Asserts the SA delete, against the exact state a default create left
+# behind.
 test_deploy_delete_after_create_deletes_hub_sa_holding_service_account_admin() {
   fresh_gcloud_state
   run_deploy_create "$(base_config_json "$HUB")"

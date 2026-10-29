@@ -717,13 +717,19 @@ func TestCapabilityKeyring_ArtifactViewIssuanceClosed(t *testing.T) {
 
 	const warning = "view capability not issued"
 	require.NotContains(t, logs.String(), warning)
+	// An existing session, with capability issuance closed: the user JWT is
+	// signed by the same ring, so it is minted just before sign_until (T0+1h)
+	// on the ring clock and stays valid at T0+1h (15 min on the same clock).
+	clk.t = krT0.Add(59 * time.Minute)
+	session := keyringSessionToken(t, f.a, f.owner)
 	clk.t = krT0.Add(time.Hour)
-	_, code = f.mintView(t, f.a)
+	viewPath := "/api/v1/artifacts/" + f.id + "/versions/1/view"
+	code = requestWithToken(t, f.a, session, http.MethodPost, viewPath, nil).Code
 	assert.Equal(t, http.StatusServiceUnavailable, code)
 	shared := anonymous(f.a, http.MethodGet, created.URL)
 	assert.Equal(t, http.StatusServiceUnavailable, shared.Code)
 	assert.Empty(t, shared.Header().Get("Location"))
-	_, code = f.mintView(t, f.a)
+	code = requestWithToken(t, f.a, session, http.MethodPost, viewPath, nil).Code
 	assert.Equal(t, http.StatusServiceUnavailable, code)
 	assert.Equal(t, http.StatusOK, anonymous(f.b, http.MethodGet, view).Code)
 	assert.Equal(t, 1, strings.Count(logs.String(), warning), "one warning for three refusals")
@@ -836,13 +842,20 @@ func TestCapabilityKeyring_ListCursorIssuanceClosed(t *testing.T) {
 	_, s, _, carol, _ := setupTemplateScopeTest(t)
 	setupCursorOpacityTemplates(t, s, carol.ID)
 	logs := captureLogs(t) // before the replica: its loggers bind the default at New
-	clk := &krClock{t: krT0.Add(time.Hour)}
+	// An existing session, with capability issuance closed: the user JWT is
+	// signed by the same ring, so it is minted just before sign_until (T0+1h)
+	// on the ring clock and stays valid at T0+1h (15 min on the same clock).
+	clk := &krClock{t: krT0.Add(59 * time.Minute)}
 	c := newCapReplica(t, s, capClosing(t), clk)
-	rec, _ := getTemplatesPage(t, c, carol, "scope=user&limit=1")
+	session := keyringSessionToken(t, c, carol)
+	clk.t = krT0.Add(time.Hour)
+	rec := requestWithToken(t, c, session, http.MethodGet, "/api/v1/templates?scope=user&limit=1", nil)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), "c2.")
-	rec, all := getTemplatesPage(t, c, carol, "scope=user&limit=10")
+	rec = requestWithToken(t, c, session, http.MethodGet, "/api/v1/templates?scope=user&limit=10", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var all ListTemplatesResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &all))
 	assert.Len(t, all.Templates, 2)
 	assert.Empty(t, all.NextCursor)
 	assertNoCapabilityKeyMaterial(t, logs.String()+rec.Body.String())

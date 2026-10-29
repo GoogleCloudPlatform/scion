@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// These tests exercise the unix git-metadata mounts and private config checks
+// (symlinks, link counts, ownership); on other platforms they are
+// ErrUnsupported stubs.
+//go:build unix
+
 package runtime
 
 import (
@@ -23,6 +28,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
 // A private-config source that is a symlink, a non-regular file, or missing
@@ -254,7 +260,7 @@ func TestCheckPrivateGitConfigSource_RefusesHardLink(t *testing.T) {
 	}
 }
 
-// Pins the os.Lstat regular-file guard in trustedWorktreeAdminName. The workspace
+// Pins the os.Lstat regular-file guard in util.TrustedWorktreeAdminName. The workspace
 // .git gitfile is agent-writable, so an agent could replace it with a symlink. The
 // resolver's lexical canonicalisation (canonicalGitfilePath names the final ".git"
 // component without following it) already stops a symlink from *redirecting* the
@@ -292,7 +298,7 @@ func TestTrustedWorktreeAdminName_RefusesSymlinkedGitfile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	name, ok := trustedWorktreeAdminName(gitDir, ws)
+	name, ok := util.TrustedWorktreeAdminName(gitDir, ws)
 	if ok || name != "" {
 		t.Errorf("a symlinked <workspace>/.git must be refused (fail closed), got name=%q ok=%v", name, ok)
 	}
@@ -778,7 +784,7 @@ func TestAppleRepoConfigWithSecrets_OverCapRefused(t *testing.T) {
 
 // Structural: every read-write overlay source in the read-only-root layout is
 // reached through the single ensureOverlayDir refusal — EXCEPT the agent's own
-// worktree admin overlay, whose source is the broker-trusted trustedWorktreeAdminName,
+// worktree admin overlay, whose source is the broker-trusted util.TrustedWorktreeAdminName,
 // not ensureOverlayDir — so a symlink planted at an ensureOverlayDir source is refused
 // (fail closed) rather than followed. A future overlay bound without going through
 // ensureOverlayDir would be caught by adding its name here.
@@ -864,7 +870,7 @@ func TestReadOnlyGitRoot_OutsideRootLayout(t *testing.T) {
 			if out, err := exec.Command("git", "-C", repoRoot, "worktree", "add", "-q", "-b", "sibling", sibling).CombinedOutput(); err != nil {
 				t.Fatalf("git worktree add sibling: %v\n%s", err, out)
 			}
-			ownName, ok := trustedWorktreeAdminName(gitDir, workspace)
+			ownName, ok := util.TrustedWorktreeAdminName(gitDir, workspace)
 			if !ok {
 				t.Fatal("fixture: cannot resolve the own worktree admin name")
 			}

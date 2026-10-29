@@ -161,6 +161,8 @@ func TestCloneSharedWorkspaceProject_HubProjectIDIsWorkspaceIdentity(t *testing.
 			require.NoError(t, cmd.Run(), "git %v", args)
 		}
 
+		allowLocalCloneFixture(t, sourceDir)
+
 		project := sharedWorkspaceProject("clone-identity")
 		project.Labels[store.LabelCloneURL] = sourceDir
 		project.Labels[store.LabelDefaultBranch] = "master"
@@ -207,6 +209,8 @@ func TestCloneSharedWorkspaceProject_RepositoryIdentityReplacedByHubProjectID(t 
 		cmd.Dir = sourceDir
 		require.NoError(t, cmd.Run(), "git %v", args)
 	}
+
+	allowLocalCloneFixture(t, sourceDir)
 
 	project := sharedWorkspaceProject("clone-repo-identity")
 	project.Labels[store.LabelCloneURL] = sourceDir
@@ -597,6 +601,7 @@ func TestHubWorkspaceOnSameHome_BrokerKeepsHubIdentity(t *testing.T) {
 			before := identitySnapshot(t, workspacePath)
 
 			cfg := runtimebroker.DefaultServerConfig()
+			cfg.BrokerAuthEnabled = false // no hub keys here: serve the broker API without auth
 			cfg.BrokerID = "same-home-broker"
 			cfg.BrokerName = "same-home-broker"
 			cfg.StorageBucket = "bucket"

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -149,6 +150,14 @@ type Resource struct {
 	// launcher status-read rule (authz_launcher_read.go) decides from it
 	// alone. It is unexported so no decoded request can carry it.
 	launchedTarget *store.Agent
+
+	// deliveryItem names the stored material record a deliver request is
+	// for, set only by materialDeliveryResource (material_resources.go).
+	// The association rules (authz_material_association.go) re-read the
+	// record it names from the store and decide from that record and the
+	// delivery credential's stored agent. It is unexported so no decoded
+	// request can carry it.
+	deliveryItem *materialDeliveryItem
 }
 
 // PrincipalKind describes the authenticated actor evaluated by an authorization request.
@@ -348,6 +357,14 @@ type Decision struct {
 	// flag. Authorization-neutral: it never changes Allowed or Reason.
 	AlwaysAudit bool `json:"-"`
 
+	// parentProof is the parent authority a resource parent ceiling
+	// checked at step 10 (authz_resource_parent_ceiling.go), set on allow
+	// and on deny as far as known, and nil when the permission has no
+	// parent ceiling. Unexported and untagged: a caller in this package
+	// reads it to compose a check that depends on the recorded source (the
+	// GCP token mint's actAs check). It never changes Allowed.
+	parentProof *ParentProof
+
 	// DenyCause classifies certain deny decisions structurally, so callers
 	// can react to *why* access was denied without parsing or matching
 	// substrings of Reason (which is prose, for logs and explain, and is
@@ -530,6 +547,19 @@ type AuthzService struct {
 	// latch catches up as soon as the backfill completes.
 	backfillDone atomic.Bool
 
+	// legacyDeliveryLog rate-limits the launch legacy fallback Warn
+	// (deliverySelector.warnLegacyFallback). Nil logs every line.
+	legacyDeliveryLog *deliveryLogDedup
+
+	// legacyFallbackUses counts uses of the legacy adopted-agent fallback
+	// for owner user secrets (user_secret_legacy_adopted_fallback.go);
+	// legacyFallbackMetrics, when set, exports them; legacyFallbackWarn
+	// rate limits their Warn line, created on first use.
+	legacyFallbackUses     atomic.Int64
+	legacyFallbackMetrics  legacyAdoptedFallbackMetrics
+	legacyFallbackWarn     *hookRefusalLimiter
+	legacyFallbackWarnOnce sync.Once
+
 	// relationshipResolver handles progeny relationship grants. Lazily
 	// initialized on first use.
 	relationshipResolver *RelationshipGrantResolver
@@ -582,6 +612,7 @@ func NewAuthzService(s store.Store, logger *slog.Logger) *AuthzService {
 		logger:                  logger,
 		DecisionAuditSampleRate: 1.0,
 		relationshipResolver:    NewRelationshipGrantResolver(s),
+		legacyDeliveryLog:       newDeliveryLogDedup(legacyDeliveryLogDedupSize, legacyDeliveryLogDedupWindow),
 	}
 	// ptone/scion#2128: personal (user-scoped) skills are a progeny sharing
 	// source keyed on the owning user's bucket (see authz_skill_progeny.go).
@@ -1267,7 +1298,24 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// the grant source (kernel or relationship grant). The ceiling
 	// evaluates the exact permission resolved above. A failed lookup
 	// denies.
-	if decision.Allowed && isAgentPrincipal(principal.Kind) {
+	//
+	// A permission with a reviewed resource parent ceiling
+	// (ResourceParentCeilingFor) takes that ceiling in place of the chain
+	// check: the recorded source must live-hold the parent permission on
+	// the exact resource, within the recorded effect ceiling. The chain
+	// check would ask whether each delegator holds the decision permission
+	// itself, which no delegator does by design. The chain states the chain
+	// check denies from what was recorded (an unrecorded or sentinel hop,
+	// local development provenance this server does not admit, a missing
+	// edge after the backfill or above the agent) still deny such a
+	// permission first (parentCeilingChainDeny). The parent ceiling is the
+	// only proof for such a permission, so an agent-kind principal whose
+	// identity is not an AgentIdentity denies here instead of passing
+	// unchecked.
+	if m, ok := ResourceParentCeilingFor(permissionID); ok && decision.Allowed && isAgentPrincipal(principal.Kind) {
+		agent, _ := principal.Identity.(AgentIdentity)
+		decision = a.applyResourceParentCeiling(maskAuthzInputs(ctx), m, agent, request.Resource, decision)
+	} else if decision.Allowed && isAgentPrincipal(principal.Kind) {
 		if agent, ok := principal.Identity.(AgentIdentity); ok {
 			if getDelegationCeilingCache(ctx) == nil {
 				ctx = contextWithDelegationCeilingCache(ctx)
@@ -2036,8 +2084,22 @@ func (a *AuthzService) accessConstraintRestrictions(
 	if err != nil {
 		return nil, err
 	}
+	return restrictionsFromConstraints(constraints, closure, resource), nil
+}
+
+// restrictionsFromConstraints is accessConstraintRestrictions after its load:
+// it converts the loaded constraints, keeps those that apply to closure in
+// the scope resource.ProjectID selects (the system scope when it is empty),
+// and returns them as kernel restrictions. It does no I/O, so a caller that
+// evaluates many resources in one request can load the table once and call
+// this per resource.
+func restrictionsFromConstraints(
+	constraints []*store.AccessConstraint,
+	closure map[string]struct{},
+	resource ResourceContext,
+) []Restriction {
 	if len(constraints) == 0 {
-		return nil, nil
+		return nil
 	}
 
 	// Convert store constraints to hub AccessConstraint and filter.
@@ -2096,7 +2158,7 @@ func (a *AuthzService) accessConstraintRestrictions(
 		ri++
 	}
 
-	return restrictions, nil
+	return restrictions
 }
 
 // loadAllAccessConstraints loads all access constraints by paging through

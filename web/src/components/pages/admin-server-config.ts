@@ -33,6 +33,7 @@ import { normalizeModelAlias } from '../../shared/model-utils.js';
 import type { RuntimeBroker, GCPServiceAccount } from '../../shared/types.js';
 import { formatInstantWithZone, isValidTimeZone } from '../../utils/time.js';
 import { isHttpUrl } from '../../utils/http-url.js';
+import { renderReleaseNotesLink } from '../../utils/release-notes-link.js';
 import '../shared/timezone-picker.js';
 import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
@@ -575,7 +576,6 @@ interface UpdateCheckResult {
   current_version?: string;
   latest_version?: string;
   channel?: string;
-  download_url?: string;
   release_url?: string;
 }
 
@@ -690,8 +690,16 @@ const KEYS_REJECTED_CODES = new Set([
   'unsaved_keys_rejected',
 ]);
 
-/** Why a field is read-only: hosted Layer-0, env-pinned, or workstation flag-managed. */
-type ReadOnlyReason = 'bootstrap' | 'env' | 'flag' | 'pinned';
+/** Why a field is read-only: hosted Layer-0, env-pinned, workstation flag-managed, pinned, or read only at startup (DB-backed hubs). */
+type ReadOnlyReason = 'bootstrap' | 'env' | 'flag' | 'pinned' | 'startup';
+
+/**
+ * The hub's direct Cloud Logging switch. The hub reads it only at startup,
+ * from SCION_CLOUD_LOGGING or settings.yaml, before the settings database is
+ * opened; a database-backed hub refuses a changed value (ptone/scion#5664),
+ * so the page shows it read-only there and never sends it.
+ */
+const CLOUD_LOGGING_KEY = 'telemetry.cloud.cloud_logging';
 
 /** The koanf key of the hub's public URL. */
 const PUBLIC_URL_KEY = 'server.hub.public_url';
@@ -2272,6 +2280,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     // The public URL is pinned by an operator setting on this node: the hub
     // uses that value and ignores a saved one (ptone/scion#3905).
     if (koanfKey === PUBLIC_URL_KEY && this.publicUrlStatus?.pinned_by) return 'pinned';
+    if (koanfKey === CLOUD_LOGGING_KEY && this.settingsTier === 'db') return 'startup';
     if (this.layer1Only) {
       return this.layer1Keys.has(koanfKey) ? null : 'bootstrap';
     }
@@ -2298,11 +2307,13 @@ export class ScionPageAdminServerConfig extends LitElement {
     const text =
       reason === 'pinned'
         ? `🔒 Set by ${this.publicUrlStatus?.pinned_by ?? 'an operator setting'}`
-        : reason === 'bootstrap'
-          ? '🔒 Managed via deployment configuration'
-          : reason === 'flag'
-            ? '🔒 Set by workstation startup defaults / server flags'
-            : '🔒 Set via environment variable';
+        : reason === 'startup'
+          ? '🔒 Read at startup from settings.yaml or SCION_CLOUD_LOGGING'
+          : reason === 'bootstrap'
+            ? '🔒 Managed via deployment configuration'
+            : reason === 'flag'
+              ? '🔒 Set by workstation startup defaults / server flags'
+              : '🔒 Set via environment variable';
     return html`<span class="read-only-badge">${text}</span>`;
   }
 
@@ -2628,12 +2639,9 @@ export class ScionPageAdminServerConfig extends LitElement {
           gcp_project_id: this.telemetryCloudGcpProjectId || null,
         };
         putTriState(cloud, 'enabled', this.telemetryCloudEnabled, this.loadedTelemetryCloudEnabled);
-        putTriState(
-          cloud,
-          'cloud_logging',
-          this.telemetryCloudCloudLogging,
-          this.loadedTelemetryCloudCloudLogging
-        );
+        // cloud_logging is never sent here: the hub reads it only at
+        // startup, and a database-backed hub refuses a changed value
+        // (ptone/scion#5664).
         telemetry.cloud = cloud;
       }
       if (ok('telemetry.hub.enabled')) {
@@ -4089,13 +4097,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                         ${r.release_url
                           ? html`<div class="release-field">
                               <span class="release-label">Release notes:</span>
-                              <a href="${r.release_url}" target="_blank" rel="noopener noreferrer">
-                                View Release Notes
-                                <sl-icon
-                                  name="box-arrow-up-right"
-                                  style="font-size: 0.75rem;"
-                                ></sl-icon>
-                              </a>
+                              ${renderReleaseNotesLink(r.release_url)}
                             </div>`
                           : nothing}
                       </div>
@@ -7352,14 +7354,31 @@ export class ScionPageAdminServerConfig extends LitElement {
     `;
   }
 
+  /**
+   * update-binary params: the checked release tag when the check returned
+   * one, otherwise the latest release in the checked channel, which the hub
+   * resolves. The hub rejects any other param. Null when neither is known.
+   */
+  private updateBinaryParams(): Record<string, string> | null {
+    const r = this.updateCheckResult;
+    const target = r?.latest_version || (r?.channel ? `latest:${r.channel}` : '');
+    return target ? { target_version: target, pin: 'latest' } : null;
+  }
+
   private async triggerUpdate(): Promise<void> {
+    const opKey = this.deploymentTier === 'binary' ? 'update-binary' : 'rebuild-server';
+    const params = opKey === 'update-binary' ? this.updateBinaryParams() : {};
+    if (!params) {
+      this.updateCheckError =
+        'No update target is known. Run Check for Updates first, then update.';
+      return;
+    }
     this.updateRunning = true;
     try {
-      const opKey = this.deploymentTier === 'binary' ? 'update-binary' : 'rebuild-server';
       const res = await apiFetch(`/api/v1/admin/maintenance/operations/${opKey}/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ params: {} }),
+        body: JSON.stringify({ params }),
       });
       if (!res.ok) {
         const errMsg = await extractApiError(res, `HTTP ${res.status}`);

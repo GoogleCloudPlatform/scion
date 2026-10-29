@@ -144,6 +144,10 @@ type Client interface {
 	// operations interface.
 	TestIdentityDelegations() TestIdentityDelegationService
 
+	// AgentDelegations returns the agent delegation grant operations
+	// interface (.design/agent-delegation.md §18.6).
+	AgentDelegations() AgentDelegationService
+
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
 
@@ -183,6 +187,7 @@ type client struct {
 	artifacts             *artifactService
 	testIdentities        *testIdentityService
 	testIdentityDelegs    *testIdentityDelegationService
+	agentDelegations      *agentDelegationService
 }
 
 // New creates a new Hub API client.
@@ -241,6 +246,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.artifacts = &artifactService{c: c}
 	c.testIdentities = &testIdentityService{c: c}
 	c.testIdentityDelegs = &testIdentityDelegationService{c: c}
+	c.agentDelegations = &agentDelegationService{c: c}
 
 	return c, nil
 }
@@ -394,6 +400,11 @@ func (c *client) TestIdentityDelegations() TestIdentityDelegationService {
 	return c.testIdentityDelegs
 }
 
+// AgentDelegations returns the agent delegation grant operations interface.
+func (c *client) AgentDelegations() AgentDelegationService {
+	return c.agentDelegations
+}
+
 // get performs an HTTP GET request.
 func (c *client) get(ctx context.Context, path string, headers http.Header) (*http.Response, error) {
 	return c.getWithQuery(ctx, path, nil, headers)
@@ -531,6 +542,9 @@ func WithHTTPClient(hc *http.Client) Option {
 // WithTimeout sets the request timeout.
 func WithTimeout(d time.Duration) Option {
 	return func(c *client) {
+		if c.transport.HTTPClient == nil {
+			c.transport.HTTPClient = &http.Client{}
+		}
 		c.transport.HTTPClient.Timeout = d
 	}
 }

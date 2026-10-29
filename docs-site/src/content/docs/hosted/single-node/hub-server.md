@@ -68,7 +68,7 @@ server:
   log_level: info
   hub:
     port: 9810       # Used in standalone mode only
-    host: 0.0.0.0
+    host: 127.0.0.1  # Loopback required when auth.dev_mode is true
   database:
     driver: sqlite
     url: hub.db
@@ -101,10 +101,12 @@ See the [Authentication Guide](/scion/hosted/single-node/auth/) for detailed set
 For local testing, the Hub can auto-generate a development token:
 ```yaml
 server:
+  hub:
+    host: 127.0.0.1
   auth:
     dev_mode: true
 ```
-The token is written to `~/.scion/dev-token` on startup. The CLI and Web Dashboard automatically detect this token when running on the same machine.
+Dev auth requires a loopback listen host (`127.0.0.1`, `::1`, or `localhost`), both when the web server is enabled and when the Hub API runs standalone without `--enable-web`. The token is written to `~/.scion/dev-token` on startup. The CLI automatically uses this token for a loopback Hub, and browser sign-in uses a single-use launch link opened or printed by `scion server start` or `scion server open` (`POST /auth/dev-launch` and `GET /auth/dev-signin`).
 
 ### User Access Tokens (Programmatic)
 
@@ -163,13 +165,24 @@ calls, and never a token the browser can see or reuse directly.
   time — not a snapshot from when the message was originally posted. If the
   agent's identity was later reassigned or removed, the fetch uses the new
   identity (or fails, if none is assigned).
+- **Whose authority is checked**: the same rule as an agent's own token
+  request (see [Token-Request Authority](/scion/hosted/ha/permissions/#token-request-authority)).
+  The principal recorded as the source of the agent's assignment must still
+  hold `gcp_service_account.assign` on the account and, in
+  `gcp_iam_check_mode: enforce`, still pass the `actAs` check, and an
+  access constraint on the sending agent applies as it does to the agent's
+  token request. The sending agent must also be in good standing, as for its
+  own token request: a suspended (held) agent, an agent below a suspended or
+  deleted parent, or an agent whose root user is inactive or no longer in the
+  project cannot open links. If any of these fails, the link fails like any
+  other unavailable object.
 - **Size limits and previews**: objects up to 10 MiB can be opened. PNG,
   JPEG, GIF and WebP objects preview as images; other text — including SVG,
   which is always shown as source rather than rendered — previews inline up
   to 512 KB (larger text offers Download only); binary objects show "This
   file can't be previewed." with Download.
 - **Errors and the Cloud Console fallback**: an object that can't be opened
-  (not found, access denied, or no Service Account currently assigned) shows
+  (not found, access denied, or no Service Account currently usable) shows
   a single generic message rather than revealing which case applied; an
   object over 10 MiB shows a size-limit message instead. Every such case also
   offers an **Open in Cloud Console** link, so you can still inspect the
@@ -204,11 +217,12 @@ The Scion Hub provides a built-in maintenance administration panel in the Web Da
 
 Administrators can trigger critical infrastructure operations directly from the dashboard:
 
-- **Check for Updates**: Checks for available updates and allows administrators to execute an "Update Now" action. The update banner on the maintenance and server configuration pages runs the operation that matches the deployment tier: **Update Binary (`update-binary`)** on binary-tier deployments (single-node VMs installed from releases), which downloads and verifies the release binary, swaps it in, and restarts the Hub; and `rebuild-server` on source-tier deployments. See [Maintenance (`server.maintenance`)](/scion/reference/server-config/#maintenance-servermaintenance).
+- **Check for Updates**: Checks for available updates and allows administrators to execute an "Update Now" action. The update banner on the maintenance and server configuration pages runs the operation that matches the deployment tier: **Update Binary (`update-binary`)** on binary-tier deployments (single-node VMs installed from releases), which takes a `target_version`, runs an installer preflight, downloads the release from pinned GitHub release asset URLs, verifies per-asset SHA256 checksums against `SHA256SUMS` and the binary's `version` output, swaps it in, and restarts the Hub (reconciling pending updates at boot and reporting status at `GET /api/v1/admin/maintenance/update-status`); and `rebuild-server` on source-tier deployments. See [Maintenance (`server.maintenance`)](/scion/reference/server-config/#maintenance-servermaintenance).
 - **Rebuild Server (`rebuild-server`)**: Initiates a fire-and-forget server rebuild and restart sequence. It uses staging paths and sudoers implementation to ensure reliable updates even while the server is running. It replaces the binary only, never the systemd unit. On a starter hub it compares the installed unit with `scripts/starter-hub/scion-hub.service.tmpl` in the checked-out tree. If they differ, the run log and a banner on this page say "re-provision needed", with the steps: re-run `scripts/starter-hub/gce-start-hub.sh --full` from the provisioning workstation with the original flags. The banner clears after a rebuild reports a match.
 - **Rebuild Web (`rebuild-web`)**: Recompiles the web frontend assets.
 - **Pull Images (`pull-images`)**: Triggers the Docker/Podman executor to pull the latest agent container images.
-- **Restart Hub**: Initiates a fire-and-forget server restart (`POST /api/v1/admin/maintenance/restart`) via systemd, restricted to administrators. A modal confirmation dialog prevents accidental triggers of restarts.
+- **Starred Messages Reconciliation (`chat-star-reconcile`)**: Checks every stored star until nothing is left to update or remove. Run it before enabling starred messages again after a downgrade; see [Starred messages rollout](#starred-messages-rollout).
+- **Restart Hub**: Initiates a fire-and-forget server restart (`POST /api/v1/admin/maintenance/restart`) via systemd, restricted to administrators. A modal confirmation dialog prevents accidental triggers of restarts. It is refused with `409 Conflict` while an **Update Binary** or **Rebuild Server** run is running, and once accepted it holds back new update and rebuild runs (also `409 Conflict`) until the Hub is back, for at most 2 minutes. An update that is already waiting for its own restart does not block it.
 
 ### Migrations
 
@@ -216,15 +230,26 @@ The panel also lists one-time data migrations, with **Run** for a pending migrat
 
 `group-participant-mode-cleanup` removes legacy agent participant rows from group conversations; see [Agents in Group Conversations](/scion/reference/messaging-authorization/#agents-in-group-conversations). It only reports unless run through the API with `{"params":{"apply":"true"}}` (the string `"true"`), which the panel's **Run** does not send; a panel run without dry run reports what it would remove and is still marked completed; the migration can still be run with apply through the API.
 
-`project-storage-migrate` moves project files from the hub's older storage locations into the project storage layout that agents mount. Run it once on a hub whose workspace storage is shared (`nfs`, `cloudrun-volume` or `gke-shared-volume`). On local storage it does nothing. On Kubernetes, agent pods do not mount `gke-shared-volume` yet, so agents there work in an `emptyDir` workspace rather than in this layout; see [Stopping, Starting and Restarting Agents](/scion/hosted/ha/kubernetes/#stopping-starting-and-restarting-agents) and [ptone/scion#1075](https://github.com/ptone/scion/issues/1075). Until the migration has run, the project **Files** tab shows a notice for each project that still has files in an old location. The migration moves three things for each project:
+`project-storage-migrate` moves project files from the hub's older storage locations into the project storage layout that agents mount. Run it once on a hub whose workspace storage is shared (`nfs`, `cloudrun-volume` or `gke-shared-volume`). On local storage it does nothing. On Kubernetes, agent pods do not mount `gke-shared-volume` yet, so agents there work in an `emptyDir` workspace rather than in this layout; see [Stopping, Starting and Restarting Agents](/scion/hosted/ha/kubernetes/#stopping-starting-and-restarting-agents). Until the migration has run, the project **Files** tab shows a notice for each project that still has files in an old location. The migration moves four things for each project:
 
 - the hub-managed project tree on the share and the hub's own `~/.scion/projects/<slug>`, into `projects/<project id>/workspace`;
 - the project configuration in the old `.scion` (`settings.yaml`, `project-id`, `project-slug`, `templates/`, `harness-configs/`; never broker records such as `agents/`), copied into `projects/<project id>/.scion`;
-- the hub's local shared-dir content, into `projects/<project id>/shared-dirs/<name>`.
+- the hub's local shared-dir content, into `projects/<project id>/shared-dirs/<name>` (each Runtime Broker also moves its own node-local shared directories from `~/.scion/project-configs/<slug>__<id8>/shared-dirs/<name>` into `<ProjectRoot>/shared-dirs/<name>` on its first start after upgrade);
+- stopped (`stopped` or `halted`, not running or `error`) Cloud Run agents' legacy `agents/<agent id>/{home,secrets}` directories on the workspace share, into the unified `<subpath_root>/<project id>/agents/<slug>/{home-,secrets-}<agent id>` layout under the project's provisioning locks (running agents are deferred; starting a Cloud Run agent whose legacy home has not yet been moved is refused).
 
 A tree is renamed only when its target does not exist yet and the filesystem supports an atomic no-replace rename. NFS does not, so on NFS the tree is copied and its source kept, which needs room for a second copy until you delete the `.migrated-<time>` directory. Otherwise only the files missing from the target are copied, and no file in the target is ever overwritten. Each conflict is listed, and the source is kept beside itself as `<name>.migrated-<time>`.
 
 Old trees are found by project slug. A tree can therefore belong to a deleted project whose slug a new project reuses, so the migration first checks the project ID recorded in the tree. It looks in `.scion/project-id`, in the project ID keys of `.scion/settings.yaml` (current and pre-rename keys), and in the hub's workspace record. A tree whose recorded ID names another project is never migrated. A tree that records no ID is left in place and listed in the log with what was checked. To migrate it, run the migration with `{"params":{"adoptUnverified":"<slug>[,<slug>...]"}}`, or `"true"` for all projects. Symlinks and special files are never followed or copied; they are listed instead. If a broker in the hub process still uses `~/.scion/projects/<slug>`, that tree is only copied from and is left in place. Migrated files are given the agents' uid and gid from the storage configuration. If the export refuses that (root squash), the log says so; fix ownership as described in the [hybrid tier guide](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/hybrid-tier.md). Once every step for a project has succeeded and its workspace on the shared storage holds content, the project's old workspace copy in object storage is deleted; otherwise it is kept, because it may be the only copy. Per-agent sync objects are kept. Run it before starting agents in the affected projects. While it moves a project's files it holds that project's provisioning locks, so an agent start for the project waits for it and may fail cleanly if the wait is too long; start the agent again afterwards. Every file is copied under a temporary name (`.scion-migrate-tmp-*`) and gets its final name only once it is complete, so an interrupted run never leaves a partial file under a real name; the next run removes such leftovers. A git checkout's `.git` is copied last, under a temporary name (`.git.scion-migrating`), and renamed into place only once every copyable entry is present with identical content (symlinks and special files are never copied; they are listed); if an entry differs (for example after a crash), it is left under the temporary name and the project is reported as still pending. Run the migration again to resume it. A git project whose old tree has no `.git` is reported as migrated with a warning: its first agent start refuses the workspace (not empty, no provisioning marker, no `.git`) until you move the non-git entries out or re-clone. Run it with `{"params":{"dryRun":true}}` first to see the plan. It is safe to run again: a second run reports `moves=0`.
+
+### Starred messages rollout
+
+Starred messages in native chat are gated by the `web.chat_starred_messages` [experiment](/scion/reference/experiments/), on by default. For what users see, see [Starred messages](/scion/hosted/user/messaging/#starred-messages).
+
+- **Before upgrading a multi-instance Hub**: The experiment is on by default, so new instances serve stars as soon as they start, while older instances do not update stars when a direct message becomes a thread. If you upgrade from the 2026-10-19 release, set the experiment OFF in **Admin → Server Config → Experiments** first. If you upgrade from an earlier release, which does not know the experiment and refuses to store a setting for it, set it OFF from the first upgraded instance. Then upgrade every instance, run **Starred Messages Reconciliation** until the run is **completed** (as in **Re-enabling after a downgrade** below), and only then turn it on or reset it to the default. The star table is created at Hub start whether or not the experiment is on. A single-instance Hub needs none of this.
+- **Enabling and disabling**: Toggle the experiment in **Admin → Server Config → Experiments**. Users see the change on their next page load. While it is off, the star controls and the **Starred** filter are hidden, the starred-message API routes answer `404`, and no star updates are sent to browsers. Stored stars are kept, so users find them again when it is turned back on. Chat history, read state and the other rail filters work the same either way.
+- **Cleanup while off**: Each Hub instance checks a batch of up to 500 stars every 10 minutes, whether the experiment is on or off. It removes stars whose message, conversation, project or owner was deleted, and updates a star whose message moved to another conversation. It never removes a star because of a permission or an account status: a star the owner can no longer read stays hidden and comes back if access is restored.
+- **Downgrading**: Disable the experiment before you downgrade any instance to a release without starred messages. When a direct message becomes a thread, older releases do not update the stars of its messages, so those stars point at the old conversation until they are reconciled.
+- **Re-enabling after a downgrade**: Upgrade every instance, then run **Starred Messages Reconciliation** (`chat-star-reconcile`) from the maintenance panel, or with `POST /api/v1/admin/maintenance/operations/chat-star-reconcile/run`, and wait for the run to finish (`GET /api/v1/admin/maintenance/operations/chat-star-reconcile/runs/<runId>`). Enable the experiment only after the run is **completed**. It checks every star in batches, repeating full passes until a pass updates and removes nothing, and its log lists each pass and the totals checked, updated and removed. If stars were still changing after 3 passes, the run fails and asks to be run again; run it again until it completes. If the run fails for another reason, such as a database error or its 30-minute time limit, run it again too: each run starts from the beginning and nothing is lost. It takes no parameters, is safe to run again, and can run while users are active, with the experiment on or off. It uses the same permission as the other maintenance operations (`hub.maintenance.execute`).
 
 ### Operation Execution & History
 
@@ -237,7 +262,7 @@ All maintenance tasks executed through the panel are tracked. The maintenance in
 
 To guarantee server stability, the Hub enforces a strict **concurrency guard** on all maintenance operations:
 - **Mutual Exclusion:** Running multiple operations (such as parallel `go build` compilations) simultaneously is rejected.
-- **Conflict Rejection:** Any new maintenance request initiated while another is active returns a `409 Conflict` HTTP status code. This prevents resource exhaustion or server outages from concurrent builds.
+- **Conflict Rejection:** Any new maintenance request initiated while another is active returns a `409 Conflict` HTTP status code. This prevents resource exhaustion or server outages from concurrent builds. **Update Binary**, **Rebuild Server** and **Restart Hub** form one group: none of them starts while another is in progress (Restart Hub only waits for a running update or rebuild), and the `409` error names the blocking operation (and its run, when the blocker is an update or rebuild run; a pending Hub restart has no run).
 - **Status Monitoring:** Operators can trace progress and view active logs on the dashboard's maintenance interface.
 
 ## Persistence
@@ -285,9 +310,9 @@ Template and harness-config files are stored by content: each file is stored onc
 
 Templates and harness-configs stored before this layout keep their old layout (one object per file path) until their next commit (a push, a file edit, or a re-import), which moves them to the new layout. That commit then removes the old copy, unless another template or harness-config of the same kind still uses the same path or a path inside it. If a file in the old copy no longer matches its recorded hash (for example, two rows once shared the path), the commit keeps the content that is actually stored and records its real hash. A Runtime Broker that is downloading the old copy at that moment can fail once; it retries and gets the new version.
 
-The Hub no longer copies Hub-managed workspaces to Runtime Brokers through its storage bucket. A Runtime Broker reaches a Hub-managed workspace through the Hub's shared workspace storage (nfs), or runs on the Hub's host. A create sent to a remote Runtime Broker that can do neither fails up front with `409`. The only exception is a linked project with no git remote (registered from an existing checkout) on a Hub with local workspace storage. It keeps its workspace on that Runtime Broker (filled by the CLI workspace upload and `scion sync to`), and the Hub's Files tab answers `409` for it.
+The Hub no longer copies Hub-managed workspaces to Runtime Brokers through its storage bucket. A Runtime Broker reaches a Hub-managed workspace through the Hub's shared project storage (`server.project_storage` with `nfs`), or runs on the Hub's host. A create sent to a remote Runtime Broker that can do neither fails up front with `409`. The only exception is a linked project with no git remote (registered from an existing checkout) on a Hub with local project storage. It keeps its workspace on that Runtime Broker (filled by the CLI workspace upload and `scion sync to`), and the Hub's Files tab answers `409` for it.
 
-- For Hub-managed projects and shared-workspace git projects, the Hub's project **Files** tab, workspace archive download and resource import resolve `projects/<uuid>/workspace` on a shared workspace storage backend (`nfs`, `cloudrun-volume`, `gke-shared-volume`) or `~/.scion/projects/<slug>` on the `local` backend. They answer `409` for `empty-per-agent` projects, and the Files tab and archive answer `503` if a shared backend's mount point is missing.
+- For Hub-managed projects and shared-workspace git projects, the Hub's project **Files** tab, workspace archive download and resource import resolve `projects/<uuid>/workspace` on a shared project storage backend (`nfs`, `cloudrun-volume`, `gke-shared-volume`) or `~/.scion/projects/<slug>` on the `local` backend. They answer `409` for `empty-per-agent` projects, and the Files tab and archive answer `503` if a shared backend's mount point is missing.
 - `POST /api/v1/projects/{id}/workspace/pull` works only for shared-workspace git projects. It answers `409` otherwise, or when the workspace is not provisioned.
 - On a shared backend, project create seeds `projects/<uuid>/.scion`. On the `nfs` backend, project delete also removes `projects/<uuid>`.
 - For a linked project in a per-agent git mode, the **Files** tab resolves only a co-located Runtime Broker's local path. It answers `409` when the project is served only by remote Runtime Brokers. The linked-project workspace cache and `POST /api/v1/projects/{id}/workspace/sync` have been removed and answer `404`.

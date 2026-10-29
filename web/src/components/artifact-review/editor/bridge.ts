@@ -196,11 +196,18 @@ export function applySentinels(
     return ok;
   };
   const doc0 = tr.doc;
-  doc0.descendants((node, pos, parent, index) => {
+  // Every node in document order (as doc0.descendants), with the index of
+  // the top-level block it is in.
+  const visit = (
+    node: Node,
+    pos: number,
+    parent: Node | null,
+    index: number,
+    block: number
+  ): boolean => {
     if (!node.isText) {
       // Atoms (images, raw HTML) and a code block's language come before
       // their text in the source.
-      const block = doc0.resolve(pos).index(0);
       const attrs = restoreAttrs(node.type.name, node.attrs, block);
       if (attrs) {
         attributeBlocks.add(block);
@@ -212,7 +219,6 @@ export function applySentinels(
     }
     const t = node.text ?? '';
     const code = !parent?.type.allowsMarkType(insType);
-    const block = doc0.resolve(pos).index(0);
     for (let i = 0; i < t.length; i++) {
       const c = t[i];
       if (!sentinels.has(c)) continue;
@@ -284,6 +290,13 @@ export function applySentinels(
       });
     }
     return false;
+  };
+  doc0.forEach((top, offset, block) => {
+    if (visit(top, offset, doc0, block, block)) {
+      top.descendants((node, pos, parent, index) =>
+        visit(node, offset + 1 + pos, parent, index, block)
+      );
+    }
   });
   // Attribute changes keep every position, so they go first.
   for (const f of attrEdits) f();

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 )
 
 // MountChecker abstracts the syscall/exec layer for NFS mount reconciliation.
@@ -107,6 +108,18 @@ func (r *NFSMountReconciler) AutoMount() bool {
 // share status messages. Call it before Run or any other method.
 func (r *NFSMountReconciler) SetVerifyOnly(reason string) {
 	r.verifyOnlyReason = reason
+}
+
+// VerifyOnly reports whether SetVerifyOnly was called: the broker's default
+// runtime mounts the export into each agent itself, so this reconciler only
+// checks shares and never mounts them.
+func (r *NFSMountReconciler) VerifyOnly() bool {
+	return r.verifyOnlyReason != ""
+}
+
+// VerifyOnlyReason is the reason given to SetVerifyOnly, or "".
+func (r *NFSMountReconciler) VerifyOnlyReason() string {
+	return r.verifyOnlyReason
 }
 
 // MountsShares reports whether the reconciler mounts shares itself:
@@ -335,12 +348,59 @@ func (r *NFSMountReconciler) setStatus(shareID, target string, healthy bool, mes
 		return
 	}
 	if !healthy {
-		r.log.Error("NFS share unhealthy",
-			"shareID", shareID, "target", target, "reason", message)
+		if r.advisoryFailure(target) {
+			r.log.Warn("NFS share mount-table check failed; advisory on this broker, which does not mount the share, and the share directory is visible",
+				"shareID", shareID, "target", target, "reason", message)
+		} else {
+			r.log.Error("NFS share unhealthy",
+				"shareID", shareID, "target", target, "reason", message)
+		}
 	} else if had && !prev.Healthy {
 		r.log.Info("NFS share healthy again",
 			"shareID", shareID, "target", target, "status", message)
 	}
+}
+
+// advisoryFailure reports whether a failed check of the share mounted at
+// target is advisory only: the reconciler is verify-only (the broker never
+// mounts the share; its runtime mounts the export into each agent) and the
+// share's subpath root (<target>/<subpath_root>, projectfs.ShareSubPathRootDir,
+// the directory the start refusal and the health check test) is visible on
+// the broker (projectfs.ShareDirVisible).
+// Such a failure is usually a mount-table source that differs from the
+// configuration in form only, and it does not refuse a dispatch, so it is
+// logged as a warning. A share directory that is not visible, or any
+// failure on a broker that mounts its shares, stays an error.
+func (r *NFSMountReconciler) advisoryFailure(target string) bool {
+	if !r.VerifyOnly() || target == "" || r.cfg == nil {
+		return false
+	}
+	return projectfs.ShareDirVisible(context.Background(), projectfs.ShareSubPathRootDir(target, r.cfg.SubPathRoot)) == nil
+}
+
+// UnhealthyAdvisoryOnly reports whether at least one share is unhealthy
+// and every unhealthy share's failure is advisory (advisoryFailure).
+func (r *NFSMountReconciler) UnhealthyAdvisoryOnly() bool {
+	if !r.VerifyOnly() {
+		return false
+	}
+	r.mu.RLock()
+	var targets []string
+	for _, st := range r.statuses {
+		if !st.Healthy {
+			targets = append(targets, st.Target)
+		}
+	}
+	r.mu.RUnlock()
+	if len(targets) == 0 {
+		return false
+	}
+	for _, t := range targets {
+		if !r.advisoryFailure(t) {
+			return false
+		}
+	}
+	return true
 }
 
 // DefaultNFSReconcileInterval is how often Run re-checks the shares after
@@ -466,12 +526,19 @@ func (r *NFSMountReconciler) HealthCheckCodes() string {
 	return "unhealthy: " + strings.Join(unhealthy, "; ")
 }
 
-// EnsureShareMounted is called before each NFS-backed dispatch to a
-// local-container runtime to verify the share for a given share ID is still
-// mounted. It re-reconciles the share, mounting it when MountsShares is true.
-// Returns an error if the share cannot be verified or mounted, or if ctx
-// (the dispatch request's context) is done first; ctx also bounds any mount
-// command it runs.
+// EnsureShareMounted re-reconciles the share with the given ID before a
+// dispatch and reports whether it is healthy: mounted at its target from
+// exactly the configured server:export, mounting it when MountsShares is
+// true. It returns an error if the share cannot be verified or mounted, or
+// if ctx (the dispatch request's context) is done first; ctx also bounds any
+// mount command it runs.
+//
+// Callers decide what an unhealthy share means. A broker that mounts its
+// shares refuses the dispatch. A verify-only reconciler (the broker's
+// default runtime is Kubernetes or Cloud Run, so it never mounts) treats
+// the result as advisory (shareVisible): it refuses only when the share's
+// directory is not visible or the project configuration there does not
+// identify the project, not over an exact mount-table source match.
 func (r *NFSMountReconciler) EnsureShareMounted(ctx context.Context, shareID string) error {
 	if r.cfg == nil {
 		return fmt.Errorf("NFS config is nil")

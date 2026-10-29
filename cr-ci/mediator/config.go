@@ -51,6 +51,7 @@ const (
 // Cloud Run limits and contract defaults.
 const (
 	maxOwnerLen            = 39
+	maxTargetRepos         = 100 // the runner entrypoint's GH_REPOS cap
 	maxCloudRunTaskTimeout = 168 * time.Hour
 	// maxEphemeralDiskGi: the per-volume maximum Cloud Run documents. Above
 	// 10 GiB per instance needs the per-instance quota
@@ -194,7 +195,10 @@ func Keys() []string {
 
 var (
 	// GitHub user/org names: alphanumerics and single hyphens, no leading or
-	// trailing hyphen. The 39-character limit is checked separately.
+	// trailing hyphen. The 39-character limit is checked separately. The runner's
+	// shell checks (entrypoint.sh GH_REPOS, cr-ci-job-guard.sh) use the looser owner
+	// part [A-Za-z0-9-]+: config is the strict side, so every owner it accepts passes
+	// them (TestOwnerRuleWithinRunnerPattern pins this).
 	ownerRE = regexp.MustCompile(`^[A-Za-z0-9](?:-?[A-Za-z0-9])*$`)
 	repoRE  = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
 	// GCP project IDs: 6-30 chars, lowercase letter first, no trailing hyphen.
@@ -473,6 +477,9 @@ func parseRepos(raw string, fail func(string, ...any)) []Repo {
 		}
 		seen[key] = true
 		repos = append(repos, Repo{Owner: owner, Name: name})
+	}
+	if len(repos) > maxTargetRepos {
+		fail("%d repositories listed, at most %d (each runner's GH_REPOS allowlist carries them all in org scope)", len(repos), maxTargetRepos)
 	}
 	return repos
 }
