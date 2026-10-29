@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -115,6 +116,12 @@ type KubernetesRuntime struct {
 	// it as terminal is still reported with that reason (see
 	// k8s_pod_tombstones.go).
 	podTrack podTracker
+
+	// claimReadFallbackLogged and claimEventsFallbackLogged make the claim
+	// check before the pod (verifyPodClaims) log only once per runtime
+	// that it cannot read claims, or events, and so checks less.
+	claimReadFallbackLogged   atomic.Bool
+	claimEventsFallbackLogged atomic.Bool
 }
 
 // agentContainerName is the name of the primary scion agent container in
@@ -170,6 +177,14 @@ func (r *KubernetesRuntime) isGKEScheduling() bool {
 
 func (r *KubernetesRuntime) Name() string {
 	return "kubernetes"
+}
+
+// CopiesAgentHome implements CopiedAgentHomeRuntime. The pod never mounts the
+// host's agent home: Run fills the pod home (local or on the NFS export) by
+// exec-based sync from RunConfig.HomeDir, and the harness starts only after
+// the startup-gate touch, the last step of Run.
+func (r *KubernetesRuntime) CopiesAgentHome() bool {
+	return true
 }
 
 func (r *KubernetesRuntime) ExecUser() string {
@@ -814,23 +829,35 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		}
 	}
 
+	// NFS workspace provisioning is serialized by the file lock that
+	// sciontool provision takes on the export, inside the init container.
+	// buildPod only constructs the spec (no API calls, no files written),
+	// so it runs before the checkpoint below, letting the claim check see
+	// every claim the pod mounts.
+	pod, err := r.buildPod(namespace, config)
+	if err != nil {
+		return "", fmt.Errorf("failed to build pod spec: %w", err)
+	}
+
+	// Check every claim the pod mounts before the pod exists, so a start
+	// whose pod could never be scheduled fails with a reason. It only
+	// reads, and runs before the checkpoint because it can wait for a
+	// Pending claim: the checkpoint stays immediately before the create.
+	if err := r.verifyPodClaims(ctx, namespace, pod, podClaimSources(config)); err != nil {
+		return "", err
+	}
+
 	runtimeLog().Info("Pre-create setup complete", "agent", config.Name, "namespace", namespace,
 		"phase", "pre-create", "elapsed_ms", time.Since(preCreateStart).Milliseconds())
 
 	// The pod create's checkpoint can block for as long as the launch
 	// deadline while the Hub is unreachable. Between here and the pod create
-	// there is only local work (the pod spec), no API object creates.
+	// there is only local work (the debug file), no API object creates
+	// (verifyStartObjects only reads).
 	if err := hooks.checkpoint(ctx, CheckpointStepPodCreate); err != nil {
 		// The launch is over: create nothing further. The secrets this
 		// launch created are removed by its cleanup, by UID.
 		return "", err
-	}
-
-	// NFS workspace provisioning is serialized by the file lock that
-	// sciontool provision takes on the export, inside the init container.
-	pod, err := r.buildPod(namespace, config)
-	if err != nil {
-		return "", fmt.Errorf("failed to build pod spec: %w", err)
 	}
 
 	writeK8sRuntimeDebugFile(config, namespace, pod)
@@ -1929,15 +1956,10 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 		return fmt.Errorf("cannot create shared dir PVCs: missing scion.project label")
 	}
 
-	storageClass := ""
+	policy := sharedDirClaimPolicyFor(config.Kubernetes)
 	size := defaultSharedDirSize
-	if config.Kubernetes != nil {
-		if config.Kubernetes.SharedDirStorageClass != "" {
-			storageClass = config.Kubernetes.SharedDirStorageClass
-		}
-		if config.Kubernetes.SharedDirSize != "" {
-			size = config.Kubernetes.SharedDirSize
-		}
+	if config.Kubernetes != nil && config.Kubernetes.SharedDirSize != "" {
+		size = config.Kubernetes.SharedDirSize
 	}
 
 	storageQuantity, err := parseResourceSafe(size, "shared_dir_size")
@@ -1946,7 +1968,7 @@ func (r *KubernetesRuntime) createSharedDirPVCs(ctx context.Context, namespace s
 	}
 
 	for _, sd := range sharedDirs {
-		if err := r.ensureProjectRWXClaim(ctx, namespace, projectName, projectID, sd.Name, storageClass, storageQuantity); err != nil {
+		if err := r.ensureProjectRWXClaim(ctx, namespace, projectName, projectID, sd.Name, policy, storageQuantity); err != nil {
 			return err
 		}
 	}
@@ -1980,9 +2002,17 @@ func warnOnStorageClassMismatch(pvc *corev1.PersistentVolumeClaim, requested str
 // ensureProjectRWXClaim is the idempotent get-or-create core for project-scoped
 // RWX PVCs. It creates a PVC with a deterministic name if one does not already
 // exist. Used by both shared-dir and (future) workspace claim paths.
+//
+// An existing claim is reused as it is, with no policy needed, unless it is
+// labelled for a different project, which refuses the start. An existing
+// claim without a project ID label (one made by hand) is reused with a
+// warning. A claim that does not exist is created only when policy allows
+// it (sharedDirClaimPolicy.createSpec); otherwise the start is refused with
+// an error naming the settings that fix it, and nothing is created.
 func (r *KubernetesRuntime) ensureProjectRWXClaim(
 	ctx context.Context,
-	namespace, projectName, projectID, dirName, storageClass string,
+	namespace, projectName, projectID, dirName string,
+	policy sharedDirClaimPolicy,
 	storageQuantity resource.Quantity,
 ) error {
 	pvcName := sharedDirPVCName(projectName, dirName)
@@ -1990,9 +2020,26 @@ func (r *KubernetesRuntime) ensureProjectRWXClaim(
 	// Check if PVC already exists (project-scoped, may have been created by another agent)
 	existing, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
 	if err == nil {
-		runtimeLog().Info("Project RWX PVC already exists, reusing", "pvc", pvcName, "dir", dirName)
-		warnOnStorageClassMismatch(existing, storageClass)
+		claimProjectID := projectkeys.ProjectIDFromLabels(existing.Labels)
+		switch {
+		case claimProjectID == "":
+			runtimeLog().Warn("Reusing shared-dir claim without a project ID label; it is used as is",
+				"pvc", pvcName, "namespace", namespace, "dir", dirName, "project_id", projectID)
+		case projectID != "" && claimProjectID != projectID:
+			return sharedDirClaimOtherProjectError(dirName, namespace, pvcName, claimProjectID, projectID)
+		default:
+			runtimeLog().Info("Project RWX PVC already exists, reusing", "pvc", pvcName, "dir", dirName)
+		}
+		warnOnStorageClassMismatch(existing, policy.Class)
 		return nil
+	}
+	if !k8serrors.IsNotFound(err) {
+		return fmt.Errorf("checking shared-dir claim %s/%s: %w", namespace, pvcName, err)
+	}
+
+	storageClass, err := policy.createSpec()
+	if err != nil {
+		return sharedDirClaimUnresolvedError(dirName, namespace, pvcName)
 	}
 
 	pvc := &corev1.PersistentVolumeClaim{
@@ -2022,9 +2069,7 @@ func (r *KubernetesRuntime) ensureProjectRWXClaim(
 		}
 	}
 
-	if storageClass != "" {
-		pvc.Spec.StorageClassName = &storageClass
-	}
+	pvc.Spec.StorageClassName = storageClass
 
 	runtimeLog().Info("Creating project RWX PVC", "pvc", pvcName, "dir", dirName, "storage", storageQuantity.String())
 	if _, err := r.Client.Clientset.CoreV1().PersistentVolumeClaims(namespace).Create(ctx, pvc, metav1.CreateOptions{}); err != nil {
@@ -3184,6 +3229,21 @@ func podDisruptionReason(pod *corev1.Pod) string {
 	return ""
 }
 
+// podDisruptionStartError returns the pod_disrupted *LaunchFailure in step
+// for a pod the cluster preempted or evicted (reason, from
+// podDisruptionReason) while the start waited for it to become ready. The
+// text says which of the two happened and gives the Kubernetes reason, never
+// the pod's or the condition's message. A non-nil cause (the Kubernetes
+// NotFound error, or the terminal-phase error) is wrapped after the text, so
+// its text and its error chain are kept for callers that match on them.
+func podDisruptionStartError(podName, step, reason string, cause error) error {
+	text := fmt.Sprintf("pod %q was %s while starting (%s) — start the agent again", podName, PodDisruptionKind(reason), reason)
+	if cause == nil {
+		return newLaunchFailure(api.LaunchCodePodDisrupted, step, reason, errors.New(text))
+	}
+	return newLaunchFailure(api.LaunchCodePodDisrupted, step, reason, fmt.Errorf("%s: %w", text, cause))
+}
+
 // podDisruptedError returns a pod_disrupted *LaunchFailure in step when the
 // pod is being deleted, or nil. Only the deletion timestamp makes it
 // terminal: Kubernetes can clear a DisruptionTarget condition whose
@@ -3194,8 +3254,7 @@ func podDisruptedError(pod *corev1.Pod, podName, step string) error {
 		return nil
 	}
 	if reason := podDisruptionReason(pod); reason != "" {
-		return newLaunchFailure(api.LaunchCodePodDisrupted, step, reason,
-			fmt.Errorf("pod %q was disrupted while starting (%s) — the cluster preempted or evicted it; start the agent again", podName, reason))
+		return podDisruptionStartError(podName, step, reason, nil)
 	}
 	return newLaunchFailure(api.LaunchCodePodDisrupted, step, "",
 		fmt.Errorf("pod %q was deleted while starting — if you did not stop it, start the agent again", podName))
@@ -3338,6 +3397,10 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 	lastStatus := ""
 	lastStep := ""
 	autopilotWaitLogged := false
+	// lastDisruption is the disruption reason (podDisruptionReason) of the
+	// last pod read, so a pod that is gone by the next poll is still
+	// reported as preempted or evicted.
+	lastDisruption := ""
 
 	fmt.Printf("Waiting for pod '%s' to be ready...\n", podName)
 	for {
@@ -3361,10 +3424,14 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 				if k8serrors.IsNotFound(err) && parentCtx.Err() == nil {
 					// The pod was removed (preempted, evicted or deleted)
 					// before it became ready.
+					if lastDisruption != "" {
+						return podDisruptionStartError(podName, failStep(lastStep), lastDisruption, err)
+					}
 					return newLaunchFailure(api.LaunchCodePodDisrupted, failStep(lastStep), "", err)
 				}
 				return err
 			}
+			lastDisruption = podDisruptionReason(pod)
 
 			if step := podLaunchStep(pod, r.isGKEScheduling()); step != lastStep {
 				lastStep = step
@@ -3373,7 +3440,7 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 
 			// A pod being deleted never becomes usable: fail now rather than
 			// wait for it to disappear. A pod already in a terminal phase
-			// keeps its error text below.
+			// is reported below.
 			if pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed {
 				if err := podDisruptedError(pod, podName, failStep(lastStep)); err != nil {
 					runtimeLog().Error("Pod disrupted while starting", "pod", podName, "reason", podDisruptionReason(pod), "phase", "wait-schedule")
@@ -3487,8 +3554,8 @@ func (r *KubernetesRuntime) waitForPodReady(ctx context.Context, namespace, podN
 				if containerStatus != nil && containerStatus.State.Terminated != nil {
 					err = fmt.Errorf("pod failed to start: %s - %s", containerStatus.State.Terminated.Reason, containerStatus.State.Terminated.Message)
 				}
-				if reason := podDisruptionReason(pod); reason != "" {
-					return newLaunchFailure(api.LaunchCodePodDisrupted, failStep(lastStep), reason, err)
+				if lastDisruption != "" {
+					return podDisruptionStartError(podName, failStep(lastStep), lastDisruption, err)
 				}
 				return err
 			}
@@ -3811,15 +3878,31 @@ func k8sDisruptionExitReason(pod *corev1.Pod) string {
 		if cond.Type != corev1.DisruptionTarget || cond.Status != corev1.ConditionTrue {
 			continue
 		}
-		if cond.Reason == corev1.PodReasonPreemptionByScheduler {
-			return string(state.ExitReasonPreempted)
-		}
-		// TerminationByKubelet, EvictionByEvictionAPI, or any other
-		// DisruptionTarget reason (for example a taint-manager or pod-GC
-		// removal) is reported as evicted.
-		return string(state.ExitReasonEvicted)
+		return string(disruptionExitReason(cond.Reason))
 	}
 	return ""
+}
+
+// disruptionExitReason maps a Kubernetes disruption reason to preempted or
+// evicted: PreemptionByScheduler is a preemption; TerminationByKubelet,
+// EvictionByEvictionAPI, the pod status reason Evicted, or any other
+// DisruptionTarget reason (for example a taint-manager or pod-GC removal)
+// is reported as evicted.
+func disruptionExitReason(reason string) state.ExitReason {
+	if reason == corev1.PodReasonPreemptionByScheduler {
+		return state.ExitReasonPreempted
+	}
+	return state.ExitReasonEvicted
+}
+
+// PodDisruptionKind returns "preempted" or "evicted" for the Kubernetes
+// disruption reason a pod_disrupted LaunchFailure carries in Reason, or ""
+// when reason is empty (the pod was deleted without a disruption signal).
+func PodDisruptionKind(reason string) string {
+	if reason == "" {
+		return ""
+	}
+	return string(disruptionExitReason(reason))
 }
 
 // k8sPodWorkspaceRecoverable reports whether a later start of the agent can
@@ -4713,8 +4796,9 @@ func runConfigEnvValue(config RunConfig, key string) (string, bool) {
 
 // k8sSharedRepoShapeRefusalText is the exact neutral end-state message returned
 // when a Kubernetes start is refused for the shared-repository shape.
-const k8sSharedRepoShapeRefusalText = "Kubernetes does not support git projects that share one repository across agents " +
-	"(worktree-per-agent or shared-workspace on NFS). Re-create the agent as clone-per-agent, " +
+const k8sSharedRepoShapeRefusalText = "Kubernetes does not support agents that share one git repository on NFS: this agent is " +
+	"worktree-per-agent, or uses the project's shared workspace and the runtime broker cannot confirm " +
+	"that the shared workspace is not a git repository. Re-create the agent as clone-per-agent, " +
 	"or run it on a local or Docker broker. Work not pushed from the existing agent remains in " +
 	"the project's shared checkout on the workspace storage."
 

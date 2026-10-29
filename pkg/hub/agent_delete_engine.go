@@ -400,6 +400,9 @@ func (s *Server) runAgentDeletion(reqCtx context.Context, plan *agentDeletionPla
 			}
 			e.stopRenewal()
 			cancel(nil)
+			// A forced user deletion that lists this agent records the
+			// outcome and moves on (ptone/scion#2143). Non-blocking.
+			s.noteUserDeletionAgentFinished(plan, out)
 			done <- out
 		}()
 		out = e.run()

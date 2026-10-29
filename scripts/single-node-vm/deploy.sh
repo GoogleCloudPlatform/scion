@@ -28,11 +28,39 @@
 #
 # Usage:
 #   ./deploy.sh [--version VERSION] [--config CONFIG_FILE] [--rebuild-images]
+#               [--update-policy POLICY]
+#   ./deploy.sh migrate-layout [--config CONFIG_FILE] [--update-policy POLICY]
 #   ./deploy.sh --delete
+#
+# Binary layout on the VM: each release is installed to
+# /opt/scion/releases/<tag>/scion (owned by the scion user), /opt/scion/current
+# is a symlink to the active release, /opt/scion/previous to the one before,
+# and /usr/local/bin/scion is a symlink to /opt/scion/current/scion. The
+# systemd unit runs /opt/scion/current/scion, so the hub can update itself
+# without sudo.
+#
+# Subcommands:
+#   migrate-layout      Convert an existing VM that still has a plain
+#                       /usr/local/bin/scion binary to the layout above,
+#                       keeping the installed version (nothing is
+#                       downloaded). It also re-renders the systemd unit,
+#                       sets server.maintenance.install_root, rewrites
+#                       update_policy "auto" to "notify" unless auto is
+#                       requested explicitly, and restarts the hub. Safe to
+#                       re-run: on a converted VM only the unit and settings
+#                       are re-applied. Uses hub_name/project_id/region from
+#                       --config, or prompts for them.
 #
 # Options:
 #   --version VERSION   Scion release version to install (e.g. v0.5.0).
-#                       If omitted, the latest release is fetched from GitHub.
+#                       If omitted on a VM that already has /opt/scion, the
+#                       release it runs is kept (nothing is downloaded);
+#                       otherwise the latest release is fetched from GitHub.
+#                       A VERSION older than the running release is
+#                       installed with a DOWNGRADE warning.
+#   --update-policy POLICY
+#                       auto, notify, or disabled. Overrides update_policy in
+#                       the config file. The default is notify.
 #   --config FILE       Path to a JSON config file that pre-answers interactive
 #                       prompts. When provided with all required fields, the
 #                       script runs headlessly (no interactive input needed).
@@ -73,8 +101,8 @@
 #                                 accounts for agents. false skips the
 #                                 grant (and does not revoke an earlier
 #                                 one).
-#   update_policy                auto, notify, or disabled. Requires the
-#                                 binary auto-update feature.
+#   update_policy                auto, notify, or disabled. Defaults to
+#                                 notify. --update-policy overrides it.
 #   release_channel              stable, preview, or nightly. Defaults to
 #                                 nightly if not specified.
 #   gke_target.name              Name of an existing GKE cluster to attach
@@ -220,7 +248,20 @@ readonly CLOUD_INIT_RETRY_SECS=15
 readonly HEALTH_CHECK_MAX_ATTEMPTS=12
 readonly HEALTH_CHECK_RETRY_SECS=5
 readonly BUILD_POLL_MAX_ATTEMPTS=180
-readonly BUILD_POLL_INTERVAL_SECS=15
+# Overridable (0-60, whole seconds) so a test can drive the poll loop
+# without waiting 15 s per poll; anything else falls back to 15.
+if [[ "${SCION_TEST_BUILD_POLL_SECS:-}" =~ ^[0-9]{1,2}$ ]] && (( 10#$SCION_TEST_BUILD_POLL_SECS <= 60 )); then
+  readonly BUILD_POLL_INTERVAL_SECS="$((10#$SCION_TEST_BUILD_POLL_SECS))"
+else
+  readonly BUILD_POLL_INTERVAL_SECS=15
+fi
+# The background image build's status files (log, exit, pid) live in a
+# fixed 0700 directory in the SSH user's home on the VM, not under fixed
+# /tmp names another local user could pre-create to abort the deploy,
+# forge the exit status or inject log output. Sent verbatim to the remote
+# shell, which expands $HOME.
+# shellcheck disable=SC2016 # expanded by the remote shell, not here
+readonly IMAGE_BUILD_STATUS_DIR='$HOME/.scion-image-build'
 # Overridable via env so a test can drive this deploy without waiting
 # out the real wait for real IAP enforcement to activate.
 readonly IAP_ENFORCEMENT_WAIT_SECS="${IAP_ENFORCEMENT_WAIT_SECS:-60}"
@@ -268,10 +309,16 @@ readonly NETWORK_CHECK_RETRY_SECS="${SCION_TEST_NETWORK_RETRY_SECS:-$NETWORK_CHE
 # ---------------------------------------------------------------------------
 VERSION=""
 DELETE_MODE=false
+MIGRATE_LAYOUT_MODE=false
 CONFIG_FILE=""
 CLI_REBUILD_IMAGES=false
+CLI_UPDATE_POLICY=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    migrate-layout) MIGRATE_LAYOUT_MODE=true; shift ;;
+    --update-policy)
+      [[ $# -ge 2 ]] || { err "--update-policy requires a value (auto, notify, disabled)"; exit 1; }
+      CLI_UPDATE_POLICY="$2"; shift 2 ;;
     --version) VERSION="$2"; shift 2 ;;
     --config) CONFIG_FILE="$2"; shift 2 ;;
     --delete) DELETE_MODE=true; shift ;;
@@ -283,6 +330,23 @@ while [[ $# -gt 0 ]]; do
     *) err "Unknown flag: $1"; exit 1 ;;
   esac
 done
+
+if [[ -n "$CLI_UPDATE_POLICY" ]]; then
+  case "$CLI_UPDATE_POLICY" in
+    auto|notify|disabled) ;;
+    *) err "Invalid --update-policy: '${CLI_UPDATE_POLICY}' (expected: auto, notify, disabled)"; exit 1 ;;
+  esac
+fi
+if [[ "$MIGRATE_LAYOUT_MODE" == "true" ]]; then
+  if [[ "$DELETE_MODE" == "true" ]]; then
+    err "migrate-layout and --delete cannot be combined."
+    exit 1
+  fi
+  if [[ -n "$VERSION" || "$CLI_REBUILD_IMAGES" == "true" ]]; then
+    err "migrate-layout keeps the installed version; --version and --rebuild-images do not apply. Re-run deploy.sh without migrate-layout to change versions."
+    exit 1
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # Config file helper
@@ -342,6 +406,65 @@ config_prompt() {
   fi
 }
 
+# The versioned install root on the VM (design D1). Fixed: the systemd unit
+# template hard-codes ExecStart=/opt/scion/current/scion, and the hub reads
+# the same path from server.maintenance.install_root.
+readonly INSTALL_ROOT="/opt/scion"
+
+# SHA-256 of empty input. A SHA256SUMS entry with this hash describes an
+# empty upload, so the install commands refuse it even though the (empty)
+# download would "verify".
+readonly EMPTY_SHA256="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+# install_layout_command ARGS... -- prints remote shell text that writes
+# scion-layout.sh (this directory) to a temp file on the VM and runs it as
+# root with ARGS (install TAG BINARY | adopt | set-maintenance FILE POLICY).
+# The script travels inside the --command string as a quoted heredoc, so
+# nothing in it is expanded either locally or on the VM. ARGS must be
+# shell-safe words (deploy.sh only passes validated values).
+install_layout_command() {
+  printf '%s\n' \
+    "    SCION_LAYOUT_SH=\"\$(mktemp)\"" \
+    "    cat > \"\$SCION_LAYOUT_SH\" << 'SCIONLAYOUTEOF'" \
+    "$(cat "${SCRIPT_DIR}/scion-layout.sh")" \
+    "SCIONLAYOUTEOF" \
+    "    sudo bash \"\$SCION_LAYOUT_SH\" $* || { rm -f \"\$SCION_LAYOUT_SH\"; exit 1; }" \
+    "    rm -f \"\$SCION_LAYOUT_SH\""
+}
+
+# read_current_release ZONE -- prints the release tag ${INSTALL_ROOT}/current
+# points at on the hub VM (e.g. nightly-20261023, or git-<sha12> for an
+# adopted git build). Prints nothing when the VM has no layout yet, is
+# unreachable, or the link has an unexpected target. Never fails.
+read_current_release() {
+  local zone="$1" target
+  target="$(gcloud compute ssh "${INSTANCE_NAME}" \
+    --zone="${zone}" --project="${PROJECT_ID}" \
+    --command="readlink ${INSTALL_ROOT}/current 2>/dev/null || true" 2>/dev/null)" || true
+  target="${target%%$'\n'*}"
+  target="${target//$'\r'/}"
+  if [[ "$target" == releases/* ]]; then
+    target="${target#releases/}"
+    if [[ "$target" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]]; then
+      printf '%s' "$target"
+    fi
+  fi
+}
+
+
+# read_update_policy_config -- prints the config file's update_policy
+# (empty when unset), or fails with an error for a value other than auto,
+# notify or disabled. Shared by the deploy and migrate-layout paths so both
+# read the key the same way.
+read_update_policy_config() {
+  local v
+  v="$(config_get 'update_policy' '')"
+  case "$v" in
+    ""|auto|notify|disabled) printf '%s' "$v" ;;
+    *) err "Invalid update_policy in config: '${v}' (expected: auto, notify, disabled)"; return 1 ;;
+  esac
+}
+
 # proxy_sa_name HUB_NAME — derives the Cloud Run proxy's service-account
 # ID from the hub name. A single helper shared by both the create path
 # (Phase 2) and teardown, so they can never compute two different names
@@ -372,6 +495,116 @@ proxy_sa_name() {
   printf '%s' "$name"
 }
 
+# Project roles granted to the hub VM's service account (Phase 2). The
+# create path grants HUB_SA_BASE_ROLES, plus HUB_SA_MINTING_ROLE when
+# hub_sa_minting is true. Teardown removes all of them, whatever
+# hub_sa_minting says now, since an earlier deploy may have granted the
+# minting role. Both paths read these lists, so they cannot drift apart.
+# The proxy SA and the deployer get no project roles here that teardown
+# owns (see Phase 2 and the IAP tunnel note in the teardown flow).
+HUB_SA_BASE_ROLES=(roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent roles/artifactregistry.writer roles/aiplatform.user)
+HUB_SA_MINTING_ROLE="roles/iam.serviceAccountAdmin"
+
+# _project_binding_absent TEXT -- true when TEXT (gcloud's stderr from
+# projects remove-iam-policy-binding) says the member/role binding is not
+# in the policy. Real gcloud exits 1 in that case rather than no-op, with
+# one of the IamPolicyBindingNotFound messages: "Policy binding with the
+# specified principal, role, and condition not found!" (what
+# --condition=None gets), "... principal and role not found!", or the
+# plural "Policy bindings with the specified principal and role not
+# found!". Older SDKs say "member" where newer ones say "principal".
+_project_binding_absent() {
+  if printf '%s\n' "$1" | grep -qiE 'permission|forbidden'; then
+    return 1
+  fi
+  printf '%s\n' "$1" | grep -qiE 'Policy bindings? with the specified (principal|member).* not found'
+}
+
+# remove_hub_sa_project_bindings PROJECT_ID SA_EMAIL ROLE...
+#
+# Removes the project IAM bindings of SA_EMAIL for exactly the given
+# roles, one remove-iam-policy-binding call per role and member, always
+# with --condition=None, never set-iam-policy. Members removed are the
+# live "serviceAccount:SA_EMAIL" and any "deleted:serviceAccount:SA_EMAIL
+# ?uid=..." tombstones GCP left from an earlier SA delete. No other
+# member and no other role is touched. Conditional bindings are skipped:
+# deploy.sh never creates one, and --condition=None cannot remove one.
+# Each role and member gets at most one call.
+#
+# The policy is read once to find what is bound. If that read fails, it
+# falls back to one blind removal of the live member per role, where an
+# absent binding is not an error; tombstones then stay and are reported.
+#
+# Sets HUB_SA_BINDINGS_REMOVED (count) and HUB_SA_BINDINGS_FAILED (count).
+# Never exits: a binding that could not be removed is warned about, and
+# a later --delete removes its tombstone.
+remove_hub_sa_project_bindings() {
+  local project="$1" sa_email="$2"
+  shift 2
+  local live_member="serviceAccount:${sa_email}"
+  local tombstone_prefix="deleted:serviceAccount:${sa_email}?uid="
+  local -a targets=()
+  local role member cond_title cond_expr policy_rows policy_err_file err_text wanted r t
+  HUB_SA_BINDINGS_REMOVED=0
+  HUB_SA_BINDINGS_FAILED=0
+
+  policy_err_file="$(mktemp)"
+  if policy_rows="$(gcloud projects get-iam-policy "${project}" \
+      --flatten="bindings[].members" \
+      --format="value(bindings.role,bindings.members,bindings.condition.title,bindings.condition.expression)" 2>"${policy_err_file}")"; then
+    # Tab is IFS whitespace, so empty condition fields collapse: an
+    # unconditional row leaves cond_title and cond_expr both empty, and any
+    # condition at all leaves at least one of them set. --flatten makes
+    # each row a single member, so member is compared whole.
+    while IFS=$'\t' read -r role member cond_title cond_expr; do
+      [[ -z "$role" || -z "$member" ]] && continue
+      [[ -n "$cond_title" || -n "$cond_expr" ]] && continue
+      wanted=false
+      for r in "$@"; do
+        [[ "$r" == "$role" ]] && wanted=true
+      done
+      [[ "$wanted" == "true" ]] || continue
+      if [[ "$member" == "$live_member" || "$member" == "$tombstone_prefix"* ]]; then
+        wanted=true
+        for t in ${targets[@]+"${targets[@]}"}; do
+          [[ "$t" == "${role}"$'\t'"${member}" ]] && wanted=false
+        done
+        [[ "$wanted" == "true" ]] && targets+=("${role}"$'\t'"${member}")
+      fi
+    done <<< "$policy_rows"
+    if [[ ${#targets[@]} -eq 0 ]]; then
+      echo "  No project role bindings left for ${sa_email}."
+    fi
+  else
+    warn "Could not read the IAM policy of project ${project}; removing ${sa_email}'s role bindings without it. Tombstones (deleted:serviceAccount:...) of an earlier SA delete are not checked:"
+    print_gcloud_error "$(cat "${policy_err_file}")"
+    for role in "$@"; do
+      targets+=("${role}"$'\t'"${live_member}")
+    done
+  fi
+  rm -f "${policy_err_file}"
+
+  local target
+  for target in ${targets[@]+"${targets[@]}"}; do
+    role="${target%%$'\t'*}"
+    member="${target#*$'\t'}"
+    if err_text="$(gcloud projects remove-iam-policy-binding "${project}" \
+        --member="${member}" \
+        --role="${role}" \
+        --condition=None \
+        --quiet 2>&1 >/dev/null)"; then
+      echo "  Removed: ${role} from ${member}"
+      HUB_SA_BINDINGS_REMOVED=$((HUB_SA_BINDINGS_REMOVED + 1))
+    elif _project_binding_absent "$err_text"; then
+      echo "  Not bound: ${role} for ${member}"
+    else
+      warn "Could not remove ${role} from ${member}:"
+      print_gcloud_error "$err_text"
+      HUB_SA_BINDINGS_FAILED=$((HUB_SA_BINDINGS_FAILED + 1))
+    fi
+  done
+}
+
 # Validate config file exists if specified
 if [[ -n "$CONFIG_FILE" ]]; then
   if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -397,6 +630,10 @@ fi
 HYBRID_ENABLED=false
 # shellcheck source=scripts/single-node-vm/hybrid-tier.sh
 source "${SCRIPT_DIR}/hybrid-tier.sh"
+# release_order (the downgrade guard's tag ordering): pure bash, so it
+# works on a macOS operator machine too (BSD sort has no -V).
+# shellcheck source=scripts/single-node-vm/release-order.sh
+source "${SCRIPT_DIR}/release-order.sh"
 
 # One EXIT trap, registered once, removes these three temp files on every
 # exit path, including SIGINT and SIGTERM: SSH_STDERR_FILE,
@@ -478,6 +715,9 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   # this can never drift from what create actually named the SA.
   PROXY_SA_NAME="$(proxy_sa_name "$HUB_NAME")"
   PROXY_SA_EMAIL="${PROXY_SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+  # Every role the create path may have granted SA_EMAIL, minting role
+  # included whatever hub_sa_minting says now.
+  HUB_SA_TEARDOWN_ROLES=("${HUB_SA_BASE_ROLES[@]}" "${HUB_SA_MINTING_ROLE}")
 
   echo ""
   echo "Checking hybrid-tier firewall rule ownership:"
@@ -573,6 +813,7 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   echo "  Cloud NAT:         ${NAT_NAME} (router: ${ROUTER_NAME})"
   echo "  Cloud Router:      ${ROUTER_NAME} (region: ${REGION})"
   echo "  Service account:   ${SA_EMAIL}"
+  echo "  Project roles:     ${HUB_SA_TEARDOWN_ROLES[*]} (bindings for ${SA_EMAIL}, and its deleted:serviceAccount tombstones, only)"
   echo "  Proxy SA:          ${PROXY_SA_EMAIL}"
   echo "  Service account:   $(hybrid_transport_sa_name "${HUB_NAME}")@${PROJECT_ID}.iam.gserviceaccount.com (hybrid tier agent transport; if present and marked)"
   echo "  Firewall rule:     ${FW_RULE_NAME}"
@@ -606,6 +847,9 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   ROUTER_NOT_FOUND=false
   SA_DELETED=false
   SA_NOT_FOUND=false
+  HUB_SA_BINDINGS_ATTEMPTED=false
+  HUB_SA_BINDINGS_REMOVED=0
+  HUB_SA_BINDINGS_FAILED=0
   PROXY_SA_DELETED=false
   PROXY_SA_NOT_FOUND=false
   FW_RULE_DELETED=false
@@ -741,6 +985,13 @@ if [[ "$DELETE_MODE" == "true" ]]; then
       warn "Cloud Router ${ROUTER_NAME} could not be deleted: $(cat "${ROUTER_DELETE_ERR}")"
     fi
     rm -f "${ROUTER_DELETE_ERR}"
+
+    # Before the SA delete: once the SA is gone, GCP keeps its bindings as
+    # deleted:serviceAccount:...?uid= tombstones. Those of an earlier
+    # delete are removed here too.
+    info "Removing the service account's project role bindings..."
+    HUB_SA_BINDINGS_ATTEMPTED=true
+    remove_hub_sa_project_bindings "${PROJECT_ID}" "${SA_EMAIL}" "${HUB_SA_TEARDOWN_ROLES[@]}"
 
     info "Deleting service account..."
     SA_DELETE_ERR="$(mktemp)"
@@ -902,6 +1153,12 @@ if [[ "$DELETE_MODE" == "true" ]]; then
   else
     echo "  Kept service account:       ${SA_EMAIL}"
   fi
+  if [[ "$HUB_SA_BINDINGS_ATTEMPTED" == "true" ]]; then
+    echo "  Removed project bindings:   ${HUB_SA_BINDINGS_REMOVED} for ${SA_EMAIL}"
+    if [[ "$HUB_SA_BINDINGS_FAILED" -gt 0 ]]; then
+      echo "  Kept project bindings:      ${HUB_SA_BINDINGS_FAILED} for ${SA_EMAIL} (removal failed; re-run teardown)"
+    fi
+  fi
   if [[ "$PROXY_SA_DELETED" == "true" ]]; then
     echo "  Deleted proxy SA:           ${PROXY_SA_EMAIL}"
   elif [[ "${PROXY_SA_NOT_FOUND:-false}" == "true" ]]; then
@@ -971,6 +1228,98 @@ if [[ "$DELETE_MODE" == "true" ]]; then
     err "Teardown completed with at least one failure reported above."
     exit 1
   fi
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Layout migration (migrate-layout)
+# ---------------------------------------------------------------------------
+# Converts an existing VM to the versioned install root (design D9, steps
+# 1-6, ptone/scion#6009) using the binary that is already installed: no
+# version change and no download. On the VM, scion-layout.sh `adopt`
+# copies the binary /usr/local/bin/scion resolves to into
+# /opt/scion/releases/<its version>/, points /opt/scion/current at it and
+# replaces /usr/local/bin/scion with a symlink to /opt/scion/current/scion.
+# Then the unit is re-rendered (ExecStart=/opt/scion/current/scion),
+# settings.yaml gets server.maintenance.install_root and the D7
+# update_policy rule, and the hub restarts. Everything runs in one SSH
+# command under `set -e`, so if the adopt step fails the unit is never
+# pointed at a path that does not exist.
+#
+# Idempotent: on a converted VM `adopt` is a no-op, the settings edit only
+# changes what is out of date, and the unit is re-rendered.
+if [[ "$MIGRATE_LAYOUT_MODE" == "true" ]]; then
+  section "Migrate layout: versioned install root (${INSTALL_ROOT})"
+
+  PROJECT_ID="$(config_get 'project_id' '')"
+  if [[ -z "$PROJECT_ID" ]]; then
+    info "Detecting GCP project..."
+    PROJECT_ID="$(gcloud config get-value project 2>/dev/null)" || true
+  fi
+  if [[ -z "$PROJECT_ID" ]]; then
+    err "No GCP project configured. Set project_id in config or run: gcloud config set project PROJECT_ID"
+    exit 1
+  fi
+  echo "  Project: ${PROJECT_ID}"
+
+  HUB_NAME="$(config_get 'hub_name' '')"
+  if [[ -z "$HUB_NAME" ]]; then
+    config_prompt HUB_NAME "Hub name [my-hub]: " "my-hub"
+  fi
+  if [[ ! "$HUB_NAME" =~ ^[a-z][a-z0-9-]*$ ]]; then
+    err "Hub name '${HUB_NAME}' is invalid. It must start with a lowercase letter and contain only lowercase letters, numbers, and hyphens."
+    exit 1
+  fi
+  INSTANCE_NAME="scion-hub-${HUB_NAME}"
+
+  ZONE="$(gcloud compute instances list \
+    --filter="name=${INSTANCE_NAME}" \
+    --format="value(zone)" \
+    --project="${PROJECT_ID}" 2>/dev/null | head -1)" || true
+  if [[ -z "$ZONE" ]]; then
+    err "VM ${INSTANCE_NAME} not found in project ${PROJECT_ID}; migrate-layout only converts an existing hub VM."
+    exit 1
+  fi
+  ZONE="${ZONE##*/}"
+  echo "  Instance: ${INSTANCE_NAME} (zone ${ZONE})"
+
+  # D7: an explicit auto (flag or config) is kept; otherwise "default" makes
+  # scion-layout.sh rewrite a rendered auto to notify and keep notify or
+  # disabled.
+  MIGRATE_CFG_UPDATE_POLICY="$(read_update_policy_config)" || exit 1
+  MIGRATE_UPDATE_POLICY="${CLI_UPDATE_POLICY:-${MIGRATE_CFG_UPDATE_POLICY:-default}}"
+  if [[ "$MIGRATE_UPDATE_POLICY" == "default" ]]; then
+    echo "  Update policy: auto -> notify unless already notify/disabled (pass --update-policy auto to keep auto)"
+  else
+    echo "  Update policy: ${MIGRATE_UPDATE_POLICY}"
+  fi
+
+  info "Converting ${INSTANCE_NAME} to the ${INSTALL_ROOT} layout (installed version kept)..."
+  gcloud compute ssh "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --command="
+    set -euo pipefail
+$(install_layout_command adopt)
+$(install_layout_command set-maintenance /home/scion/.scion/settings.yaml "${MIGRATE_UPDATE_POLICY}")
+    sudo tee /etc/systemd/system/scion-hub.service > /dev/null << 'SERVICEEOF'
+$(cat "${SCRIPT_DIR}/config-templates/scion-hub.service")
+SERVICEEOF
+    sudo systemctl daemon-reload
+    sudo systemctl enable scion-hub.service
+    sudo systemctl restart scion-hub.service
+    echo 'scion-hub.service restarted from ${INSTALL_ROOT}/current/scion.'
+  "
+
+  info "Running post-migration health check..."
+  wait_for_hub_health "Post-migration health check" || exit 1
+
+  echo ""
+  echo -e "${BOLD}=== Layout migration complete ===${RESET}"
+  echo ""
+  echo "  Instance:     ${INSTANCE_NAME}"
+  echo "  Binary:       ${INSTALL_ROOT}/current/scion (/usr/local/bin/scion is a symlink to it)"
+  echo ""
+  echo "The hub can now update itself from the Maintenance page."
   exit 0
 fi
 
@@ -1207,24 +1556,28 @@ if [[ -z "$ADMIN_EMAIL" ]]; then
 fi
 
 # --- Update policy ---
-CFG_UPDATE_POLICY="$(config_get 'update_policy' '')"
-if [[ -n "$CFG_UPDATE_POLICY" ]]; then
-  case "$CFG_UPDATE_POLICY" in
-    auto|notify|disabled) UPDATE_POLICY="$CFG_UPDATE_POLICY" ;;
-    *) err "Invalid update_policy in config: '$CFG_UPDATE_POLICY' (expected: auto, notify, disabled)"; exit 1 ;;
-  esac
+# --update-policy wins over the config file's update_policy; with neither,
+# the interactive default (and the headless default) is notify, not auto
+# (design D7, ptone/scion#6009): once the hub can replace its own binary,
+# auto would start self-updating every hub that never chose it. An explicit
+# auto is still honoured.
+CFG_UPDATE_POLICY="$(read_update_policy_config)" || exit 1
+if [[ -n "$CLI_UPDATE_POLICY" ]]; then
+  UPDATE_POLICY="$CLI_UPDATE_POLICY"
+elif [[ -n "$CFG_UPDATE_POLICY" ]]; then
+  UPDATE_POLICY="$CFG_UPDATE_POLICY"
 else
   echo ""
   echo "Automatic update policy:"
-  echo "  1) Auto - automatically install new releases (recommended)"
-  echo "  2) Notify - check for updates, notify admin only"
+  echo "  1) Auto - automatically install new releases"
+  echo "  2) Notify - check for updates, notify admin only (recommended)"
   echo "  3) Disabled - no automatic update checking"
-  config_prompt UPDATE_CHOICE "Select [1]: " "1"
-  case "${UPDATE_CHOICE:-1}" in
+  config_prompt UPDATE_CHOICE "Select [2]: " "2"
+  case "${UPDATE_CHOICE:-2}" in
     1) UPDATE_POLICY="auto" ;;
     2) UPDATE_POLICY="notify" ;;
     3) UPDATE_POLICY="disabled" ;;
-    *) UPDATE_POLICY="auto" ;;
+    *) UPDATE_POLICY="notify" ;;
   esac
 fi
 
@@ -1309,6 +1662,36 @@ fi
 echo "  Update policy: ${UPDATE_POLICY}"
 
 # --- Release version ---
+# Without --version, a hub VM that already has the ${INSTALL_ROOT} layout
+# keeps the release it currently runs: the hub may have updated itself past
+# what the GitHub auto-detect below would pick (it reads /releases/latest,
+# not the hub's channel), and silently swapping current back would be a
+# downgrade nobody asked for. The binary is then neither downloaded nor
+# switched. An explicit --version is always honoured (see the downgrade
+# warning in Phase 3).
+VERSION_FROM_CLI=false
+[[ -n "$VERSION" ]] && VERSION_FROM_CLI=true
+KEEP_CURRENT_RELEASE=false
+if [[ -z "$VERSION" ]]; then
+  EXISTING_VM_ZONE="$(gcloud compute instances list \
+    --filter="name=${INSTANCE_NAME}" \
+    --format="value(zone)" \
+    --project="${PROJECT_ID}" 2>/dev/null | head -1)" || true
+  EXISTING_VM_ZONE="${EXISTING_VM_ZONE##*/}"
+  if [[ -n "$EXISTING_VM_ZONE" ]]; then
+    info "Checking the release installed on ${INSTANCE_NAME}..."
+    CURRENT_RELEASE="$(read_current_release "$EXISTING_VM_ZONE")"
+    if [[ "$CURRENT_RELEASE" == git-* ]]; then
+      err "${INSTANCE_NAME} runs a git build (${INSTALL_ROOT}/current -> releases/${CURRENT_RELEASE}), not a release."
+      echo "  Pass --version <release tag> to choose the release to install." >&2
+      exit 1
+    elif [[ -n "$CURRENT_RELEASE" ]]; then
+      VERSION="$CURRENT_RELEASE"
+      KEEP_CURRENT_RELEASE=true
+      info "Keeping the installed release ${VERSION} (${INSTALL_ROOT}/current): the scion binary is not downloaded or switched. Pass --version to install a different release."
+    fi
+  fi
+fi
 if [[ -z "$VERSION" ]]; then
   info "Detecting latest Scion release..."
   # Try /releases/latest first (excludes pre-releases), fall back to
@@ -1396,11 +1779,27 @@ if [[ "${ALLOW_UNVERIFIED_RELEASE:-false}" == "true" ]]; then
 else
   ALLOW_UNVERIFIED_RELEASE=false
 fi
-info "Checking that release ${VERSION} publishes checksums..."
 SHA256SUMS_PREFLIGHT_RC=0
-curl -fsSLI -o /dev/null "${RELEASE_URL}/SHA256SUMS" || SHA256SUMS_PREFLIGHT_RC=$?
-if [[ "$SHA256SUMS_PREFLIGHT_RC" -eq 0 ]]; then
+if [[ "$KEEP_CURRENT_RELEASE" == "true" && ${#CHAT_PLUGINS[@]} -eq 0 ]]; then
+  # Nothing is downloaded from the release (the binary is kept and there
+  # are no chat plugins), so there is nothing to verify; the release may
+  # even have aged out of GitHub (nightlies are kept for 14 days).
+  echo "  Keeping the installed binary and no chat plugins selected: no release download, checksum preflight skipped."
+else
+  info "Checking that release ${VERSION} publishes checksums..."
+  curl -fsSLI -o /dev/null "${RELEASE_URL}/SHA256SUMS" || SHA256SUMS_PREFLIGHT_RC=$?
+fi
+if [[ "$KEEP_CURRENT_RELEASE" == "true" && ${#CHAT_PLUGINS[@]} -eq 0 ]]; then
+  :
+elif [[ "$SHA256SUMS_PREFLIGHT_RC" -eq 0 ]]; then
   echo "  SHA256SUMS found for ${VERSION}; downloads will be verified."
+elif [[ "$KEEP_CURRENT_RELEASE" == "true" && "$SHA256SUMS_PREFLIGHT_RC" -eq 22 ]]; then
+  # The operator did not pick this release: it is the one the VM runs, kept
+  # because --version was not given. Its chat plugins come from the same
+  # release, which may no longer be published.
+  err "The installed release ${VERSION} is no longer published on GitHub (nightlies are kept for 14 days), so its chat plugins cannot be downloaded."
+  echo "  Pass --version <tag> to install a current release; the scion binary and the chat plugins then both come from that release." >&2
+  exit 1
 elif [[ "$SHA256SUMS_PREFLIGHT_RC" -ne 22 ]]; then
   # curl -f maps any HTTP error response to exit 22; anything else (DNS
   # failure, TLS error, connection refused/timed out, ...) is a
@@ -1818,9 +2217,9 @@ fi
 # read and set IAM policy on it, and delete it if a follow-up grant fails.
 # serviceAccountCreator alone is not enough for that flow. Skipped when
 # hub_sa_minting is false.
-HUB_SA_ROLES=(roles/logging.logWriter roles/monitoring.metricWriter roles/cloudtrace.agent roles/artifactregistry.writer roles/aiplatform.user)
+HUB_SA_ROLES=("${HUB_SA_BASE_ROLES[@]}")
 if [[ "$HUB_SA_MINTING" == "true" ]]; then
-  HUB_SA_ROLES+=(roles/iam.serviceAccountAdmin)
+  HUB_SA_ROLES+=("${HUB_SA_MINTING_ROLE}")
 fi
 info "Binding IAM roles..."
 for ROLE in "${HUB_SA_ROLES[@]}"; do
@@ -2381,20 +2780,77 @@ gcloud compute ssh "${INSTANCE_NAME}" \
 # the "[ *]" class accepts either sha256sum output mode: two spaces in text
 # mode (what build-release.yml's `sha256sum --` produces), or a space and an
 # asterisk in binary mode.
+#
+# Only the asset's own line is checked (never `sha256sum -c` over the whole
+# file, which would also act on unrelated or bogus entries such as one for
+# SHA256SUMS itself). An entry whose hash is the SHA-256 of empty input is
+# refused outright: it can only describe an empty or truncated upload, never
+# a real archive.
+#
+# The verified binary is then installed into the versioned layout by
+# scion-layout.sh (see install_layout_command below): releases/${VERSION}/scion,
+# with /opt/scion/current switched to it and /usr/local/bin/scion a symlink
+# to /opt/scion/current/scion.
 SCION_ARCHIVE="scion-linux-${ARCH_SUFFIX}.tar.gz"
 SCION_ARCHIVE_RE="${SCION_ARCHIVE//./\\.}"
-info "Installing scion binary (${VERSION})..."
-gcloud compute ssh "${INSTANCE_NAME}" \
-  --zone="${ZONE}" --project="${PROJECT_ID}" \
-  --command="
+# Downgrade guard: compare with what the VM currently runs. Without
+# --version, a VM whose layout the Phase 1 probe missed (e.g. SSH was not
+# ready yet) keeps its current release here instead of being switched to
+# the auto-detected one. With --version, the operator's choice is honoured,
+# with a clear warning when it is older than the current release.
+if [[ "$KEEP_CURRENT_RELEASE" != "true" ]]; then
+  CURRENT_RELEASE="$(read_current_release "$ZONE")"
+  if [[ -n "$CURRENT_RELEASE" && "$VERSION_FROM_CLI" != "true" ]]; then
+    if [[ "$CURRENT_RELEASE" == git-* ]]; then
+      err "${INSTANCE_NAME} runs a git build (${INSTALL_ROOT}/current -> releases/${CURRENT_RELEASE}), not a release."
+      echo "  Pass --version <release tag> to choose the release to install." >&2
+      exit 1
+    fi
+    warn "${INSTANCE_NAME} already runs ${CURRENT_RELEASE} (${INSTALL_ROOT}/current); keeping it instead of switching to the auto-detected ${VERSION}. Pass --version to install a different release."
+    # Everything after this point (chat plugins, the image build and its
+    # marker, the summary) must use the kept release, not the auto-detected
+    # one, or the hub would run release A with plugins and images from B.
+    # The plugin install commands verify against the kept release's own
+    # SHA256SUMS, and fail closed if it is no longer published.
+    VERSION="$CURRENT_RELEASE"
+    RELEASE_URL="https://github.com/GoogleCloudPlatform/scion/releases/download/${VERSION}"
+    KEEP_CURRENT_RELEASE=true
+  elif [[ -n "$CURRENT_RELEASE" ]]; then
+    case "$(release_order "$VERSION" "$CURRENT_RELEASE")" in
+      older)
+        warn "DOWNGRADE: --version ${VERSION} is OLDER than the release ${INSTANCE_NAME} runs now (${CURRENT_RELEASE})."
+        warn "Proceeding because --version was given explicitly. If ${CURRENT_RELEASE} already migrated the hub database, ${VERSION} may not start; ${CURRENT_RELEASE} stays installed as ${INSTALL_ROOT}/previous."
+        ;;
+      unknown)
+        warn "--version ${VERSION} and the current release ${CURRENT_RELEASE} cannot be ordered (different channels); this may be a downgrade. Proceeding because --version was given explicitly."
+        ;;
+    esac
+  fi
+fi
+
+if [[ "$KEEP_CURRENT_RELEASE" == "true" ]]; then
+  info "Keeping the installed scion binary (${INSTALL_ROOT}/current -> releases/${CURRENT_RELEASE:-$VERSION}); not downloading or switching releases."
+else
+  info "Installing scion binary (${VERSION})..."
+  gcloud compute ssh "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --command="
     set -euo pipefail
     echo 'Downloading scion binary...'
-    curl -fsSL '${RELEASE_URL}/${SCION_ARCHIVE}' -o /tmp/${SCION_ARCHIVE}
+    # Download, verify and extract inside a fresh private directory (never
+    # a fixed /tmp name another local user could pre-create); root
+    # (scion-layout.sh) reads the binary from it. Removed on any exit.
+    SCION_EXTRACT_DIR=\"\$(mktemp -d /tmp/scion-extract.XXXXXX)\"
+    trap 'rm -rf \"\$SCION_EXTRACT_DIR\"' EXIT
+    curl -fsSL '${RELEASE_URL}/${SCION_ARCHIVE}' -o \"\$SCION_EXTRACT_DIR/${SCION_ARCHIVE}\"
     echo 'Downloading release checksums...'
-    if curl -fsSL '${RELEASE_URL}/SHA256SUMS' -o /tmp/SHA256SUMS; then
-      if grep -qE '^[0-9a-f]{64} [ *]${SCION_ARCHIVE_RE}\$' /tmp/SHA256SUMS; then
+    if curl -fsSL '${RELEASE_URL}/SHA256SUMS' -o \"\$SCION_EXTRACT_DIR/SHA256SUMS\"; then
+      if grep -qE '^${EMPTY_SHA256} [ *]${SCION_ARCHIVE_RE}\$' \"\$SCION_EXTRACT_DIR/SHA256SUMS\"; then
+        echo 'ERROR: the SHA256SUMS entry for ${SCION_ARCHIVE} is the empty-file hash -- refusing to install.' >&2
+        exit 1
+      elif grep -qE '^[0-9a-f]{64} [ *]${SCION_ARCHIVE_RE}\$' \"\$SCION_EXTRACT_DIR/SHA256SUMS\"; then
         echo 'Verifying checksum...'
-        (cd /tmp && grep -E '^[0-9a-f]{64} [ *]${SCION_ARCHIVE_RE}\$' SHA256SUMS | sha256sum -c -)
+        (cd \"\$SCION_EXTRACT_DIR\" && grep -E '^[0-9a-f]{64} [ *]${SCION_ARCHIVE_RE}\$' SHA256SUMS | sha256sum -c -)
       elif [ '${ALLOW_UNVERIFIED_RELEASE}' = 'true' ]; then
         echo 'WARNING: no checksum entry for ${SCION_ARCHIVE} in SHA256SUMS; installing UNVERIFIED (ALLOW_UNVERIFIED_RELEASE=true).' >&2
       else
@@ -2407,12 +2863,12 @@ gcloud compute ssh "${INSTANCE_NAME}" \
       echo 'ERROR: could not download SHA256SUMS for ${VERSION} -- refusing to install.' >&2
       exit 1
     fi
-    tar -xzf /tmp/${SCION_ARCHIVE} -C /tmp
-    sudo mv /tmp/scion /usr/local/bin/scion
-    sudo chmod +x /usr/local/bin/scion
-    rm -f /tmp/${SCION_ARCHIVE} /tmp/SHA256SUMS
+    tar -xzf \"\$SCION_EXTRACT_DIR/${SCION_ARCHIVE}\" -C \"\$SCION_EXTRACT_DIR\"
+$(install_layout_command install "${VERSION}" "\"\$SCION_EXTRACT_DIR/scion\"")
+    rm -rf \"\$SCION_EXTRACT_DIR\"
     echo \"Installed scion binary (${VERSION})\"
-  "
+    "
+fi
 
 # --- Download and install chat plugins ---
 if [[ ${#CHAT_PLUGINS[@]} -gt 0 ]]; then
@@ -2427,10 +2883,17 @@ if [[ ${#CHAT_PLUGINS[@]} -gt 0 ]]; then
       --command="
         set -euo pipefail
         sudo -u scion mkdir -p /home/scion/.scion/plugins/broker
-        curl -fsSL '${RELEASE_URL}/${PLUGIN_ARCHIVE}' -o /tmp/${PLUGIN_ARCHIVE}
-        if curl -fsSL '${RELEASE_URL}/SHA256SUMS' -o /tmp/SHA256SUMS; then
-          if grep -qE '^[0-9a-f]{64} [ *]${PLUGIN_ARCHIVE_RE}\$' /tmp/SHA256SUMS; then
-            (cd /tmp && grep -E '^[0-9a-f]{64} [ *]${PLUGIN_ARCHIVE_RE}\$' SHA256SUMS | sha256sum -c -)
+        # Download, verify and extract inside a fresh private directory
+        # (never a fixed /tmp name), removed on any exit.
+        PLUGIN_EXTRACT_DIR=\"\$(mktemp -d /tmp/scion-extract.XXXXXX)\"
+        trap 'rm -rf \"\$PLUGIN_EXTRACT_DIR\"' EXIT
+        curl -fsSL '${RELEASE_URL}/${PLUGIN_ARCHIVE}' -o \"\$PLUGIN_EXTRACT_DIR/${PLUGIN_ARCHIVE}\"
+        if curl -fsSL '${RELEASE_URL}/SHA256SUMS' -o \"\$PLUGIN_EXTRACT_DIR/SHA256SUMS\"; then
+          if grep -qE '^${EMPTY_SHA256} [ *]${PLUGIN_ARCHIVE_RE}\$' \"\$PLUGIN_EXTRACT_DIR/SHA256SUMS\"; then
+            echo 'ERROR: the SHA256SUMS entry for ${PLUGIN_ARCHIVE} is the empty-file hash -- refusing to install.' >&2
+            exit 1
+          elif grep -qE '^[0-9a-f]{64} [ *]${PLUGIN_ARCHIVE_RE}\$' \"\$PLUGIN_EXTRACT_DIR/SHA256SUMS\"; then
+            (cd \"\$PLUGIN_EXTRACT_DIR\" && grep -E '^[0-9a-f]{64} [ *]${PLUGIN_ARCHIVE_RE}\$' SHA256SUMS | sha256sum -c -)
           elif [ '${ALLOW_UNVERIFIED_RELEASE}' = 'true' ]; then
             echo 'WARNING: no checksum entry for ${PLUGIN_ARCHIVE} in SHA256SUMS; installing UNVERIFIED (ALLOW_UNVERIFIED_RELEASE=true).' >&2
           else
@@ -2443,11 +2906,12 @@ if [[ ${#CHAT_PLUGINS[@]} -gt 0 ]]; then
           echo 'ERROR: could not download SHA256SUMS for ${VERSION} -- refusing to install.' >&2
           exit 1
         fi
-        tar -xzf /tmp/${PLUGIN_ARCHIVE} -C /tmp
-        sudo mv /tmp/${PLUGIN_BINARY} /home/scion/.scion/plugins/broker/${PLUGIN_BINARY}
-        sudo chown scion:scion /home/scion/.scion/plugins/broker/${PLUGIN_BINARY}
-        sudo chmod +x /home/scion/.scion/plugins/broker/${PLUGIN_BINARY}
-        rm -f /tmp/${PLUGIN_ARCHIVE} /tmp/SHA256SUMS
+        tar -xzf \"\$PLUGIN_EXTRACT_DIR/${PLUGIN_ARCHIVE}\" -C \"\$PLUGIN_EXTRACT_DIR\"
+        # The scion user copies the plugin into its own plugins directory:
+        # root never writes or chowns inside a scion-owned tree.
+        chmod 0755 \"\$PLUGIN_EXTRACT_DIR\" \"\$PLUGIN_EXTRACT_DIR/${PLUGIN_BINARY}\"
+        sudo -u scion install -m 0755 \"\$PLUGIN_EXTRACT_DIR/${PLUGIN_BINARY}\" /home/scion/.scion/plugins/broker/${PLUGIN_BINARY}
+        rm -rf \"\$PLUGIN_EXTRACT_DIR\"
         echo 'Installed ${PLUGIN_BINARY}'
       "
   done
@@ -2478,17 +2942,33 @@ else
     "${SCRIPT_DIR}/config-templates/hub.env.template" > "${HUB_ENV_TMPFILE}"
   unset session_secret
 
+  # On the VM, the file is staged in a fresh private directory made by the
+  # SSH user (mktemp -d, 0700) -- never a fixed /tmp name, which any local
+  # user could pre-create -- and written into ~scion/.scion by the scion
+  # user itself (umask 077, from the SSH user's stdin), so root never
+  # writes, moves or chowns anything there.
+  HUB_ENV_REMOTE_DIR="$(gcloud compute ssh "${INSTANCE_NAME}" \
+    --zone="${ZONE}" --project="${PROJECT_ID}" \
+    --command="mktemp -d /tmp/scion-hubenv.XXXXXX" 2>/dev/null)" || true
+  HUB_ENV_REMOTE_DIR="${HUB_ENV_REMOTE_DIR%%$'\n'*}"
+  HUB_ENV_REMOTE_DIR="${HUB_ENV_REMOTE_DIR//$'\r'/}"
+  if [[ ! "$HUB_ENV_REMOTE_DIR" =~ ^/tmp/scion-hubenv\.[A-Za-z0-9]+$ ]]; then
+    rm -f "${HUB_ENV_TMPFILE}"
+    err "Could not create a private staging directory on ${INSTANCE_NAME} for hub.env (got '${HUB_ENV_REMOTE_DIR}')."
+    exit 1
+  fi
+
   gcloud compute scp "${HUB_ENV_TMPFILE}" \
-    "${INSTANCE_NAME}:/tmp/hub.env" \
+    "${INSTANCE_NAME}:${HUB_ENV_REMOTE_DIR}/hub.env" \
     --zone="${ZONE}" --project="${PROJECT_ID}" --quiet
   rm -f "${HUB_ENV_TMPFILE}"
 
   gcloud compute ssh "${INSTANCE_NAME}" \
     --zone="${ZONE}" --project="${PROJECT_ID}" \
     --command="
-      sudo mv /tmp/hub.env /home/scion/.scion/hub.env
-      sudo chown scion:scion /home/scion/.scion/hub.env
-      sudo chmod 600 /home/scion/.scion/hub.env
+      set -euo pipefail
+      trap 'rm -rf ${HUB_ENV_REMOTE_DIR}' EXIT
+      sudo -u scion sh -c 'umask 077 && cat > /home/scion/.scion/hub.env.new && chmod 600 /home/scion/.scion/hub.env.new && mv -f /home/scion/.scion/hub.env.new /home/scion/.scion/hub.env' < ${HUB_ENV_REMOTE_DIR}/hub.env
     "
 fi
 
@@ -2540,6 +3020,7 @@ ${ADMIN_EMAIL:+    admin_emails:
     deployment_tier: \"binary\"
     release_channel: \"${RELEASE_CHANNEL}\"
     update_policy: \"${UPDATE_POLICY}\"
+    install_root: \"${INSTALL_ROOT}\"
   storage:
     local_path: /home/scion/.scion/workspace-storage
   secrets:
@@ -2675,8 +3156,9 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
   # not /home/scion — the deployer identity running this over `gcloud
   # compute ssh` is never a member of the `scion` group, and /home/scion
   # is mode 0750 once cloud-init's `useradd -m` runs. Every privileged
-  # step uses `sudo`; the deployer only needs to traverse /opt and
-  # write /tmp.
+  # step uses `sudo`; the deployer only needs to traverse /opt and write
+  # its own ~/.scion-image-build status directory (see
+  # IMAGE_BUILD_STATUS_DIR), not anything under /tmp.
   #
   # Idempotency: a successful build writes a version marker
   # (/opt/scion-source/.images-built.version) containing $VERSION. A re-run
@@ -2739,7 +3221,22 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
       --command="
         set -euo pipefail
         cd /opt/scion-source
-        rm -f /tmp/scion-image-build.exit
+        # Status dir: a real directory owned by this user (checked without
+        # following a symlink), created 0700 if missing; anything else is
+        # refused.
+        B=\"${IMAGE_BUILD_STATUS_DIR}\"
+        if [ -e \"\$B\" ] || [ -L \"\$B\" ]; then
+          if [ -L \"\$B\" ] || [ ! -d \"\$B\" ] || [ \"\$(stat -c %u \"\$B\")\" != \"\$(id -u)\" ]; then
+            echo \"ERROR: \$B is not a directory owned by \$(id -un); refusing to use it for the image build status.\" >&2
+            exit 1
+          fi
+        else
+          mkdir -m 0700 \"\$B\"
+        fi
+        chmod 0700 \"\$B\"
+        # Exported: the background build below runs in a child bash.
+        export B
+        rm -f \"\$B/exit\"
         # Clear the marker before starting: if this build is interrupted or
         # fails partway, no marker should be left claiming a stale version
         # is built (Step 5 below only writes it back on full success).
@@ -2782,11 +3279,11 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
             echo '${VERSION}' | sudo tee '${IMAGES_BUILT_MARKER}' > /dev/null
 
             echo \"=== All images built and tagged successfully ===\"
-          } > /tmp/scion-image-build.log 2>&1
-          echo \$? > /tmp/scion-image-build.exit
+          } > \"\$B/log\" 2>&1
+          echo \$? > \"\$B/exit\"
         ' >/dev/null 2>&1 </dev/null &
-        echo \$! > /tmp/scion-image-build.pid
-        echo \"Image build started in background (PID \$(cat /tmp/scion-image-build.pid))\"
+        echo \$! > \"\$B/pid\"
+        echo \"Image build started in background (PID \$(cat \"\$B/pid\"))\"
       "
 
     # Poll for build completion
@@ -2799,29 +3296,33 @@ if [[ "$IMAGE_SOURCE" == "build" ]]; then
       # Check if the exit code file exists (build finished)
       BUILD_EXIT=$(gcloud compute ssh "${INSTANCE_NAME}" \
         --zone="${ZONE}" --project="${PROJECT_ID}" \
-        --command="cat /tmp/scion-image-build.exit 2>/dev/null || echo running" \
+        --command="cat \"${IMAGE_BUILD_STATUS_DIR}/exit\" 2>/dev/null || echo running" \
         2>/dev/null) || true
+      BUILD_EXIT="$(printf '%s' "$BUILD_EXIT" | LC_ALL=C tr -d '\000-\037\177')"
       if [[ "$BUILD_EXIT" != "running" ]]; then
         BUILD_DONE=true
       else
         # Show progress (last line of build log)
         LAST_LINE=$(gcloud compute ssh "${INSTANCE_NAME}" \
           --zone="${ZONE}" --project="${PROJECT_ID}" \
-          --command="tail -1 /tmp/scion-image-build.log 2>/dev/null || echo '(waiting...)'" \
+          --command="tail -1 \"${IMAGE_BUILD_STATUS_DIR}/log\" 2>/dev/null || echo '(waiting...)'" \
           2>/dev/null) || true
+        # The log is build output: strip control characters (terminal
+        # escape sequences included) before echoing it.
+        LAST_LINE="$(printf '%s' "$LAST_LINE" | LC_ALL=C tr -d '\000-\037\177')"
         echo "  [${POLL_COUNT}] ${LAST_LINE}"
       fi
     done
 
     if [[ "$BUILD_DONE" != "true" ]]; then
       err "Image build timed out after $((BUILD_POLL_MAX_ATTEMPTS * BUILD_POLL_INTERVAL_SECS / 60)) minutes."
-      echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='cat /tmp/scion-image-build.log'"
+      echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='cat ~/.scion-image-build/log'"
       exit 1
     fi
 
     if [[ "$BUILD_EXIT" != "0" ]]; then
       err "Image build failed (exit code: ${BUILD_EXIT})."
-      echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='tail -50 /tmp/scion-image-build.log'"
+      echo "  Check build log: gcloud compute ssh ${INSTANCE_NAME} --zone=${ZONE} --project=${PROJECT_ID} --command='tail -50 ~/.scion-image-build/log'"
       exit 1
     fi
     echo "  Image build completed successfully."
@@ -3137,6 +3638,7 @@ ${ADMIN_EMAIL:+    admin_emails:
     deployment_tier: \"binary\"
     release_channel: \"${RELEASE_CHANNEL}\"
     update_policy: \"${UPDATE_POLICY}\"
+    install_root: \"${INSTALL_ROOT}\"
   storage:
     local_path: /home/scion/.scion/workspace-storage
   secrets:

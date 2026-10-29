@@ -1317,6 +1317,41 @@ type V1MaintenanceConfig struct {
 	UpdatePolicy       string `json:"update_policy,omitempty" yaml:"update_policy,omitempty" koanf:"update_policy"`
 	CheckIntervalHours int    `json:"check_interval_hours,omitempty" yaml:"check_interval_hours,omitempty" koanf:"check_interval_hours"`
 	GitHubRepo         string `json:"github_repo,omitempty" yaml:"github_repo,omitempty" koanf:"github_repo"`
+	// InstallRoot is the hub's versioned install root (releases/, current,
+	// previous) used by release self-update; see MaintenanceInstallRoot.
+	InstallRoot string `json:"install_root,omitempty" yaml:"install_root,omitempty" koanf:"install_root"`
+}
+
+// EnvMaintenanceInstallRoot overrides server.maintenance.install_root.
+const EnvMaintenanceInstallRoot = "SCION_MAINTENANCE_INSTALL_ROOT"
+
+// DefaultMaintenanceInstallRoot is the install root when neither the env
+// override nor server.maintenance.install_root is set.
+const DefaultMaintenanceInstallRoot = "/opt/scion"
+
+// MaintenanceInstallRoot resolves the install root: $SCION_MAINTENANCE_INSTALL_ROOT,
+// else m.InstallRoot, else DefaultMaintenanceInstallRoot. m may be nil. A
+// relative value is ignored with a warning (it would resolve against the
+// hub's working directory) and the next source is used.
+func MaintenanceInstallRoot(m *V1MaintenanceConfig) string {
+	candidates := []struct{ source, value string }{
+		{EnvMaintenanceInstallRoot, os.Getenv(EnvMaintenanceInstallRoot)},
+	}
+	if m != nil {
+		candidates = append(candidates, struct{ source, value string }{"server.maintenance.install_root", m.InstallRoot})
+	}
+	for _, c := range candidates {
+		v := strings.TrimSpace(c.value)
+		if v == "" {
+			continue
+		}
+		if !filepath.IsAbs(v) {
+			slog.Warn("Ignoring relative maintenance install root; it must be an absolute path", "source", c.source, "value", v)
+			continue
+		}
+		return filepath.Clean(v)
+	}
+	return DefaultMaintenanceInstallRoot
 }
 
 // V1ServerConfig holds server-side configuration in the versioned settings format.
@@ -1705,14 +1740,25 @@ type V1ServerHubConduitConfig struct {
 	// ports (9810, 18380) are always refused. Empty: exposed ports only.
 	TCPAllowedPorts []int `json:"tcp_allowed_ports,omitempty" yaml:"tcp_allowed_ports,omitempty" koanf:"tcp_allowed_ports"`
 	// InternalListen is the host:port of the internal relay API listener.
-	// It must be reachable only inside the cluster/VPC. TLS on the
-	// internal hop is recommended (a service mesh or TLS-terminating proxy,
-	// advertised as https://); plain http:// is accepted.
+	// It must be reachable only inside the cluster/VPC. Without
+	// InternalTLSCertFile it must be a loopback address.
 	InternalListen string `json:"internal_listen,omitempty" yaml:"internal_listen,omitempty" koanf:"internal_listen"`
 	// InternalAdvertise is the base URL other hub nodes use to reach this
 	// node's internal listener (default: derived from POD_IP or the listen
 	// host).
 	InternalAdvertise string `json:"internal_advertise,omitempty" yaml:"internal_advertise,omitempty" koanf:"internal_advertise"`
+	// InternalTLSCertFile and InternalTLSKeyFile are the PEM certificate
+	// chain and private key the internal listener serves TLS with (both
+	// or neither). Without them internal_listen must be loopback.
+	InternalTLSCertFile string `json:"internal_tls_cert_file,omitempty" yaml:"internal_tls_cert_file,omitempty" koanf:"internal_tls_cert_file"`
+	InternalTLSKeyFile  string `json:"internal_tls_key_file,omitempty" yaml:"internal_tls_key_file,omitempty" koanf:"internal_tls_key_file"`
+	// InternalTLSCAFile is the PEM CA bundle internal hop clients verify
+	// peers with; it replaces the system roots. A private or internal CA
+	// requires it.
+	InternalTLSCAFile string `json:"internal_tls_ca_file,omitempty" yaml:"internal_tls_ca_file,omitempty" koanf:"internal_tls_ca_file"`
+	// InternalTLSServerName is the name internal hop clients verify in
+	// the peer certificate instead of the dialed host.
+	InternalTLSServerName string `json:"internal_tls_server_name,omitempty" yaml:"internal_tls_server_name,omitempty" koanf:"internal_tls_server_name"`
 	// PeerAuth selects relay-peer authentication. Requests are always
 	// HMAC-signed with a key derived from the hub signing secret; "oidc"
 	// also requires an OIDC ID token, "auto" (default) adds it on GCP, and
@@ -1907,6 +1953,19 @@ type V1RuntimeTargetConfig struct {
 	// and an explicit false or true is kept as written. The agent's own
 	// kubernetes.safeToEvict wins over it. Kubernetes only.
 	SafeToEvict *bool `json:"safe_to_evict,omitempty" yaml:"safe_to_evict,omitempty" koanf:"safe_to_evict"`
+	// NodeSelector, Tolerations and RuntimeClassName are this Kubernetes
+	// instance's pod placement: the flat counterpart of the runtime entry
+	// fields of the same names. Unlike the defaults above, the operator owns
+	// them: an agent may add node selector keys, but it cannot change a key
+	// set here or the runtime class, and its tolerations must be among
+	// these, so none are allowed when none are set here
+	// (config.ApplyOperatorPlacement).
+	// Read from the activated
+	// instance policy on every start; a change takes effect on restart.
+	// Kubernetes only.
+	NodeSelector     map[string]string   `json:"node_selector,omitempty" yaml:"node_selector,omitempty" koanf:"node_selector"`
+	Tolerations      []api.K8sToleration `json:"tolerations,omitempty" yaml:"tolerations,omitempty" koanf:"tolerations"`
+	RuntimeClassName string              `json:"runtime_class_name,omitempty" yaml:"runtime_class_name,omitempty" koanf:"runtime_class_name"`
 	// SharedDirStorageBackend, SharedDirStorageBackends, HomeStorageBackend
 	// and HomeStorageLeaf are removed per-instance storage overrides
 	// (design: no per-runtime storage overrides): server.project_storage places every agent's storage.
@@ -1940,6 +1999,9 @@ type V1DatabaseConfig struct {
 	// create a new table set that hides existing hub tables
 	// later on the search_path. See DatabaseConfig.AllowShadowedSchema.
 	AllowShadowedSchema bool `json:"allow_shadowed_schema,omitempty" yaml:"allow_shadowed_schema,omitempty" koanf:"allow_shadowed_schema"`
+	// TxDiagnostics configures transaction-hold and lock-wait diagnostics.
+	// See TxDiagnosticsConfig.
+	TxDiagnostics *TxDiagnosticsConfig `json:"tx_diagnostics,omitempty" yaml:"tx_diagnostics,omitempty" koanf:"tx_diagnostics"`
 }
 
 // V1AuthConfig holds authentication settings.
@@ -4245,6 +4307,10 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				Ingress:               c.Ingress,
 				TargetStreamDeadlines: c.TargetStreamDeadlines,
 				PeerSecret:            c.PeerSecret,
+				InternalTLSCertFile:   c.InternalTLSCertFile,
+				InternalTLSKeyFile:    c.InternalTLSKeyFile,
+				InternalTLSCAFile:     c.InternalTLSCAFile,
+				InternalTLSServerName: c.InternalTLSServerName,
 			}
 			if m := c.StreamAuthzMax; m != nil {
 				gc.Hub.Conduit.StreamAuthzMax = HubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
@@ -4346,6 +4412,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			gc.Database.ConnMaxIdleTime = v1.Database.ConnMaxIdleTime
 		}
 		gc.Database.AllowShadowedSchema = v1.Database.AllowShadowedSchema
+		if v1.Database.TxDiagnostics != nil {
+			gc.Database.TxDiagnostics = *v1.Database.TxDiagnostics
+		}
 	}
 
 	// Auth config
@@ -4637,6 +4706,10 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 			Ingress:               c.Ingress,
 			TargetStreamDeadlines: c.TargetStreamDeadlines,
 			PeerSecret:            c.PeerSecret,
+			InternalTLSCertFile:   c.InternalTLSCertFile,
+			InternalTLSKeyFile:    c.InternalTLSKeyFile,
+			InternalTLSCAFile:     c.InternalTLSCAFile,
+			InternalTLSServerName: c.InternalTLSServerName,
 		}
 		if m := c.StreamAuthzMax; !m.IsZero() {
 			v1Hub.Conduit.StreamAuthzMax = &V1ServerHubConduitStreamAuthzMax{User: m.User, Broker: m.Broker, Agent: m.Agent}
@@ -4728,6 +4801,9 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		ConnMaxIdleTime: gc.Database.ConnMaxIdleTime,
 
 		AllowShadowedSchema: gc.Database.AllowShadowedSchema,
+	}
+	if td := gc.Database.TxDiagnostics; td != (TxDiagnosticsConfig{}) {
+		v1.Database.TxDiagnostics = &td
 	}
 
 	// Auth config

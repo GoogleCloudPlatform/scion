@@ -172,6 +172,10 @@ func relayServerConfig(ctx context.Context, cfg *config.GlobalConfig, db *relayd
 	}
 	slog.Info("Conduit relay-peer authentication", "mode", mode)
 	podIP := os.Getenv("POD_IP")
+	hopServerTLS, hopClientTLS, err := conduitHopTLS(cfg.Hub.Conduit)
+	if err != nil {
+		return relayserver.Config{}, err
+	}
 	return relayserver.Config{
 		InstanceID:     id,
 		PublicURL:      cfg.Relay.PublicURL,
@@ -179,8 +183,10 @@ func relayServerConfig(ctx context.Context, cfg *config.GlobalConfig, db *relayd
 		PublicListen:   net.JoinHostPort(cfg.Hub.Host, strconv.Itoa(cfg.Hub.Port)),
 		InternalListen: cfg.Hub.Conduit.InternalListen,
 		Advertise: func(bound net.Addr) string {
-			return conduitAdvertiseEndpoint(cfg.Hub.Conduit.InternalAdvertise, bound, podIP)
+			return conduitAdvertiseEndpoint(cfg.Hub.Conduit.InternalAdvertise, bound, podIP, hopServerTLS != nil)
 		},
+		InternalTLS:      hopServerTLS,
+		HopTLS:           hopClientTLS,
 		PeerAuth:         auth,
 		Registry:         db.Registry,
 		Experiment:       db.Settings,

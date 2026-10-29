@@ -129,9 +129,10 @@ func newKRReplica(t *testing.T, st store.Store, k *keyring.Keyring, clk *krClock
 		tokenJSON:    `{"access_token":"mock-google-access-token","token_type":"Bearer","expires_in":3600}`,
 		userinfoJSON: `{"id":"1082345","email":"` + krUserEmail + `","verified_email":true,"name":"Keyring User"}`,
 	}}
-	// Every purpose but the session cookies keeps the legacy material: both
-	// replicas derive the user signing key from the keyring's legacy entry,
-	// exactly as hub.New does from SharedSigningSecret.
+	// The user token service is fixed to the keyring's legacy entry here
+	// (the derivation a legacy-mode hub uses), so these cookie tests do not
+	// depend on which generation is active; hub.New builds it from the
+	// signing ring (see server_jwt_keyring_test.go).
 	legacy, ok := k.Signing().LegacySecret()
 	require.True(t, ok)
 	svc, err := NewUserTokenService(UserTokenConfig{SigningKey: deriveSharedSigningKey(legacy, SecretKeyUserSigningKey)})

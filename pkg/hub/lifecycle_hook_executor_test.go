@@ -867,7 +867,7 @@ func TestLifecycleHookExecutor_SSRFBlocksLoopback(t *testing.T) {
 	tokenGen := &mockTokenGenerator{accessToken: "tok", email: "hub@sa.com"}
 	auditLog := newCapturingAuditLogger()
 	// Use the REAL SSRF-safe client (NOT newTestExecutor) to verify blocking.
-	executor := NewHTTPExecutor(s, tokenGen, auditLog, slog.Default())
+	executor := NewHTTPExecutor(s, tokenGen, auditLog, slog.Default(), allowAllHookFireAuthorizer{})
 
 	hook := makeTestHook(saID, &store.LifecycleHookAction{
 		Type:           store.LifecycleHookActionHTTP,

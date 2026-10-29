@@ -1161,6 +1161,7 @@ func TestRun_NFSHomeSecretDeleteBetweenConfirmAndCreate(t *testing.T) {
 	cs.PrependReactor("create", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
 		return true, nil, errors.New("stop here")
 	})
+	seedConfigClaims(t, cs, "default", cfg)
 	if _, err := rt.Run(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "stop here") {
 		t.Fatalf("Run: %v", err)
 	}

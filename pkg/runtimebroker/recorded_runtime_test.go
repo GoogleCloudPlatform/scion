@@ -140,7 +140,7 @@ func newRecordedRuntimeServer(t *testing.T, withK8s bool) (*Server, *rrManager, 
 	defaultMgr := &rrManager{}
 	defaultMgr.agents = []api.AgentInfo{rrAgentInfo("docker-container")}
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	srv := New(cfg, defaultMgr, newRRRuntime("docker", defaultMgr), config.RuntimeBuildRecord{})

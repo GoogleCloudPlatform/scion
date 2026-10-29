@@ -213,12 +213,11 @@ func SanitizeFilename(name string) (string, error) {
 	// Check for refused extensions. This is the one gate both entry points
 	// share — the browser upload handler and the agent --attach path — so both
 	// classes of refusal are judged here, off the same canonical extension.
-	// Markup is refused because it would be served back as its own document
-	// type; #1098 tracks re-admitting it safely.
+	// Both lists share one refusal message. Markup is refused because it
+	// would be served back as its own document type; #1098 tracks
+	// re-admitting it safely.
 	switch ext := attachmentExt(name); {
-	case DangerousExtensions[ext]:
-		return "", fmt.Errorf("files with a %s extension are not accepted", ext)
-	case refusedMarkupExtensions[ext]:
+	case DangerousExtensions[ext], refusedMarkupExtensions[ext]:
 		return "", fmt.Errorf("files with a %s extension are not accepted", ext)
 	}
 	// Truncate if too long (preserve extension). This parse is about keeping a

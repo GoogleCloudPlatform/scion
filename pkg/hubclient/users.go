@@ -53,6 +53,22 @@ type UserService interface {
 	// is refused with 409 user_delete_blocked while either list is not
 	// empty.
 	DeleteBlockers(ctx context.Context, userID string) (*UserDeleteBlockers, error)
+
+	// ForceDelete deletes a user whom agents or active delegations depend
+	// on, through DELETE /api/v1/users/{id}?force=true (behind the
+	// hub.user_delete_force_cascade experiment; while it is off the hub
+	// ignores force and the request is a plain delete). It returns the deletion in progress
+	// (202), or nil when nothing blocked and the user was deleted at once
+	// (204). A repeated call while the deletion is in progress returns the
+	// same deletion. A 403 user_delete_force_forbidden (agents the caller
+	// may not delete) and a 409 user_delete_blockers_changed are returned
+	// as API errors.
+	ForceDelete(ctx context.Context, userID string) (*UserDeletion, error)
+
+	// GetDeletion returns the forced deletion of a user through
+	// GET /api/v1/users/{id}/deletion. It answers after the user is
+	// deleted; a user with no deletion is a 404 API error.
+	GetDeletion(ctx context.Context, userID string) (*UserDeletion, error)
 }
 
 // userService is the implementation of UserService.
@@ -141,6 +157,84 @@ type UserDeleteBlockers struct {
 	Agents    []UserDeleteBlockingAgent `json:"agents"`
 	Edges     []UserDeleteBlockingEdge  `json:"edges"`
 	Truncated bool                      `json:"truncated"`
+	// InProgress names a forced deletion of the user in progress, or is
+	// nil (DeleteBlockers only).
+	InProgress *UserDeletionRef `json:"inProgress,omitempty"`
+}
+
+// UserDeletionRef names a forced user deletion.
+type UserDeletionRef struct {
+	DeletionID string `json:"deletionId"`
+	State      string `json:"state"`
+}
+
+// UserDeletion is a forced user deletion. State is stopping until every
+// agent is stopped or removed, then completed (the user is deleted).
+type UserDeletion struct {
+	DeletionID       string                    `json:"deletionId"`
+	UserID           string                    `json:"userId"`
+	State            string                    `json:"state"`
+	RequestedAt      time.Time                 `json:"requestedAt"`
+	RequestedBy      UserDeletionPrincipal     `json:"requestedBy"`
+	CompletedAt      *time.Time                `json:"completedAt"`
+	LastReconciledAt *time.Time                `json:"lastReconciledAt"`
+	LastError        string                    `json:"lastError"`
+	Agents           []UserDeletionAgent       `json:"agents"`
+	Counts           UserDeletionCounts        `json:"counts"`
+	OrphanedByRevoke []UserDeletionRevokedEdge `json:"orphanedByRevoke"`
+}
+
+// UserDeletionPrincipal names who requested a deletion.
+type UserDeletionPrincipal struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+}
+
+// UserDeletionAgent is one agent of a forced user deletion. Outcome is
+// pending, stopping, failed, stopped (the delete engine confirmed the
+// runtime teardown) or removed (the agent's record is gone without that
+// confirmation).
+type UserDeletionAgent struct {
+	ID        string `json:"id"`
+	Slug      string `json:"slug"`
+	ProjectID string `json:"projectId"`
+	Outcome   string `json:"outcome"`
+	Attempts  int    `json:"attempts"`
+	LastError string `json:"lastError"`
+}
+
+// UserDeletionCounts counts a deletion's agents by outcome.
+type UserDeletionCounts struct {
+	Pending  int `json:"pending"`
+	Stopping int `json:"stopping"`
+	Failed   int `json:"failed"`
+	Stopped  int `json:"stopped"`
+	Removed  int `json:"removed"`
+}
+
+// UserDeletionRevokedEdge is a delegation the deletion revoked whose
+// delegate agent it does not stop (another user's agent).
+type UserDeletionRevokedEdge struct {
+	AgentID string `json:"agentId"`
+	EdgeID  string `json:"edgeId"`
+}
+
+// ForceDelete force-deletes a user.
+func (s *userService) ForceDelete(ctx context.Context, userID string) (*UserDeletion, error) {
+	resp, err := s.c.delete(ctx, "/api/v1/users/"+url.PathEscape(userID)+"?force=true", nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeResponse[UserDeletion](resp)
+}
+
+// GetDeletion returns the forced deletion of a user.
+func (s *userService) GetDeletion(ctx context.Context, userID string) (*UserDeletion, error) {
+	resp, err := s.c.get(ctx, "/api/v1/users/"+url.PathEscape(userID)+"/deletion", nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[UserDeletion](resp)
 }
 
 // UserDeleteBlockingAgent is an agent of the user that blocks the delete.

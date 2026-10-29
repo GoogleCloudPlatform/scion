@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"log/slog"
 	"net"
@@ -52,9 +53,9 @@ func countInternalListeners(t *testing.T) *int {
 	t.Helper()
 	n := new(int)
 	prev := serveConduitInternalListenerFn
-	serveConduitInternalListenerFn = func(ctx context.Context, listen string, h http.Handler, wg *sync.WaitGroup, errCh chan<- error) (net.Addr, func(), error) {
+	serveConduitInternalListenerFn = func(ctx context.Context, listen string, tlsConfig *tls.Config, h http.Handler, wg *sync.WaitGroup, errCh chan<- error) (net.Addr, func(), error) {
 		*n++
-		return prev(ctx, listen, h, wg, errCh)
+		return prev(ctx, listen, tlsConfig, h, wg, errCh)
 	}
 	t.Cleanup(func() { serveConduitInternalListenerFn = prev })
 	return n

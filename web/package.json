@@ -56,6 +56,7 @@
     "@milkdown/preset-commonmark": "7.22.3",
     "@milkdown/preset-gfm": "7.22.3",
     "@milkdown/prose": "7.22.3",
+    "@milkdown/transformer": "7.22.3",
     "@milkdown/utils": "7.22.3",
     "@shoelace-style/shoelace": "^2.19.0",
     "@xterm/addon-clipboard": "^0.1.0",

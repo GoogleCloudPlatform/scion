@@ -209,6 +209,11 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 	var repoRoot string
 	var externalAgentDir string
 	var hubAgentDir string // state dir resolved from hubProjectID, when distinct
+	// legacyAgentDir is the in-project state dir an agent of a shared
+	// project configuration had before the configuration moved to the
+	// project root (config.LegacySharedProjectAgentDir); removed with the
+	// agent so a later agent of the same name never resolves to it.
+	var legacyAgentDir string
 	var worktreeDir string // worktree-per-agent: agent's worktree path
 	// ownWorktreePaths lists the paths where this agent's own worktree may
 	// be registered. Only these entries are removed from git's worktree
@@ -231,7 +236,15 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 	var layout agentProjectLayout
 	if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
 		resolvedProjectDir = projectDir
-		agentsDirs = append(agentsDirs, filepath.Join(projectDir, "agents"))
+		// A shared project configuration's in-project agents root is on
+		// the share, in the hub-owned configuration: never a delete target.
+		if !config.IsSharedProjectConfigDir(projectDir) {
+			agentsDirs = append(agentsDirs, filepath.Join(projectDir, "agents"))
+		}
+		if legacy := config.LegacySharedProjectAgentDir(projectDir, agentName); legacy != "" {
+			legacyAgentDir = legacy
+			agentsDirs = append(agentsDirs, filepath.Dir(legacy))
+		}
 
 		// The global project's own per-agent workspace
 		// (~/.scion/workspace/<agentName>, see ProvisionAgent's Case 3) is
@@ -280,10 +293,10 @@ func deleteAgentFiles(agentName, sharerKey, projectPath, hubProjectID string, re
 	// A sharer key other than the name owns its worktree under the shared
 	// base too, so that path is one of the agent's own. hubAgentDir (when
 	// set) is one of the agent's own directories, the state dir
-	// ProvisionAgent's guard also trusts; it is verified like an extra root
-	// (anchored at its parent, not trusted when it resolves elsewhere). An
-	// empty extra root is ignored.
-	keyRoots := []string{hubAgentDir}
+	// ProvisionAgent's guard also trusts, and so is legacyAgentDir (when
+	// set); each is verified like an extra root (anchored at its parent, not
+	// trusted when it resolves elsewhere). An empty extra root is ignored.
+	keyRoots := []string{hubAgentDir, legacyAgentDir}
 	if sharerKey != agentName && layout.sharedBaseIsRepo {
 		keyRoots = append(keyRoots, filepath.Join(layout.sharedBase, "worktrees", sharerKey))
 	}
@@ -896,6 +909,7 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 	if opts.GitClone != nil {
 		ctx = api.ContextWithGitClone(ctx, opts.GitClone)
 	}
+	ctx = contextWithClonePerAgentWorkspace(ctx, opts)
 	if opts.FreshProvision {
 		ctx = api.ContextWithFreshProvision(ctx)
 	}
@@ -1095,6 +1109,7 @@ var ErrReprovisionRefused = errors.New("reprovision refused")
 //     agent's own agentDir via checkAgentDirContained/CheckAgentDirContained).
 func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
 	ctx = m.withWorkspaceLock(ctx)
+	ctx = contextWithAgentRuntime(ctx, m.runtimeName())
 	hasGitClone := opts.GitClone != nil
 	if !api.ReincarnateEligible(hasGitClone, opts.Workspace, opts.EmptyPerAgentWorkspace) {
 		return nil, fmt.Errorf("%w: agent %q is neither clone-per-agent, empty-per-agent, nor has an explicit workspace; reincarnate currently supports those workspace modes only", ErrReprovisionRefused, opts.Name)
@@ -1129,6 +1144,18 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 	if hasGitClone {
 		agentDir = resolvedAgentDir
 		agentWorkspace := filepath.Join(agentDir, "workspace")
+		// On a shared Layout a clone-per-agent clone is in the agent's
+		// directory on the share (sharedLayoutAgentWorkspace), as
+		// ProvisionAgent places it. Any other mode keeps agentDir/workspace.
+		if isClonePerAgentStart(opts) {
+			sharedWS, sharedErr := sharedLayoutAgentWorkspace(ctx, nil, projectDir, opts.Name, agentDir)
+			if sharedErr != nil {
+				return nil, fmt.Errorf("%w: %w", ErrReprovisionRefused, sharedErr)
+			}
+			if sharedWS != "" {
+				agentWorkspace = sharedWS
+			}
+		}
 		if info, statErr := os.Stat(filepath.Join(agentWorkspace, ".git")); statErr != nil || !info.IsDir() {
 			return nil, fmt.Errorf("%w: agent %q has no existing git clone at %s; reincarnate does not create or recreate the workspace", ErrReprovisionRefused, opts.Name, agentWorkspace)
 		}
@@ -1311,6 +1338,7 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 		}
 	}
 	ctx = m.withWorkspaceLock(ctx)
+	ctx = contextWithAgentRuntime(ctx, m.runtimeName())
 	ctx, inlineCfg := buildProvisionContext(ctx, opts)
 	agentDir, agentHome, _, cfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "created", opts.Branch, opts.Workspace, inlineCfg)
 	if err != nil {
@@ -1688,6 +1716,12 @@ func effectiveSharedWorkspace(projectDir, agentName string, sharedWorkspace bool
 	if sharedWorkspace {
 		return true
 	}
+	// A shared project configuration keeps every agent's state in the
+	// external root (config.AgentsRootForProject), so its presence there
+	// says nothing about the workspace mode.
+	if config.IsSharedProjectConfigDir(projectDir) {
+		return false
+	}
 	ext, err := config.AgentDirForProject(projectDir, agentName, true, hubProjectID)
 	if err != nil {
 		return false
@@ -1838,6 +1872,22 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
+	// An agent-scoped workspace (empty-per-agent, or clone-per-agent: a git
+	// clone in the clone-per-agent mode, isClonePerAgentWorkspace; never a
+	// worktree-per-agent dispatch's clone) of a project on a shared Layout
+	// is the agent's directory on the
+	// share, never below the broker-local agentDir
+	// (sharedLayoutAgentWorkspace). Start's NFS leaf helpers create that
+	// directory with the share's modes, so provisioning neither creates nor
+	// clears it.
+	var sharedAgentWorkspace string
+	if !sharedWorkspace && (emptyPerAgent || isClonePerAgentWorkspace(ctx)) {
+		sharedAgentWorkspace, err = sharedLayoutAgentWorkspace(ctx, settings, projectDir, agentName, agentDir)
+		if err != nil {
+			return "", "", nil, err
+		}
+	}
+
 	agentHome := config.GetAgentHomePath(projectDir, agentName)
 	// filesGuard is the agent files guard for every removal below, built on
 	// first use (projectAgentFilesGuard).
@@ -1854,6 +1904,9 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	var agentWorkspace string
 	if !sharedWorkspace {
 		agentWorkspace = filepath.Join(agentDir, "workspace")
+		if sharedAgentWorkspace != "" {
+			agentWorkspace = sharedAgentWorkspace
+		}
 	}
 
 	// Migrate any pre-existing in-project state for shared-workspace agents to
@@ -1945,7 +1998,13 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			slog.Warn("provision: failed before completing; removing the agent directory it created",
 				"agent", agentName, "agent_dir", agentDir, "error", retErr)
 			// A refusal is logged by the guard; nothing is removed then.
-			_ = removeAgentDirGuarded(filesGuard(), agentDir, agentWorkspace)
+			// An agent-scoped workspace on a shared Layout is outside
+			// agentDir and no worktree, so it names no worktree entry.
+			worktreeEntry := agentWorkspace
+			if sharedAgentWorkspace != "" {
+				worktreeEntry = ""
+			}
+			_ = removeAgentDirGuarded(filesGuard(), agentDir, worktreeEntry)
 			if newAgentHome && !pathWithin(agentHome, agentDir) {
 				_ = removeAgentDirGuarded(filesGuard(), agentHome, "")
 			}
@@ -2039,40 +2098,45 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		// fallback of Case 3 can hand the agent a shared directory. Existing
 		// content is kept: a restart must not wipe the agent's work. A
 		// reprovision never creates it; its existence was checked above.
-		if !reprovision {
+		if !reprovision && sharedAgentWorkspace == "" {
 			if err := os.MkdirAll(agentWorkspace, 0755); err != nil {
 				return "", "", nil, fmt.Errorf("failed to create workspace directory: %w", err)
 			}
 		}
 	} else if gitClone != nil {
-		// Git clone mode: ensure the workspace directory exists and is ready
-		// for sciontool to clone into at container startup.
-		//
-		// If the directory already exists with a real git clone (.git as a
-		// directory), preserve it — this is a stopped agent being restarted
-		// and sciontool will skip the clone correctly.
-		//
-		// If the directory has a .git FILE (worktree pointer from a previous
-		// local-mode run) or other non-clone content, clear it so sciontool
-		// sees an empty workspace and performs a fresh clone.
-		if info, err := os.Stat(agentWorkspace); err == nil && info.IsDir() {
-			gitDir := filepath.Join(agentWorkspace, ".git")
-			gitDirInfo, gitErr := os.Stat(gitDir)
-			isRealClone := gitErr == nil && gitDirInfo.IsDir()
-			if !isRealClone {
-				util.Debugf("provision: clearing stale workspace before git clone: %s", agentWorkspace)
-				target, err := filesGuard().check(agentWorkspace)
-				if err != nil {
-					return "", "", nil, fmt.Errorf("failed to clear stale workspace dir: %w", err)
-				}
-				_ = util.MakeWritableRecursive(target)
-				if err := os.RemoveAll(target); err != nil {
-					return "", "", nil, fmt.Errorf("failed to clear stale workspace dir: %w", err)
+		// On a shared Layout the workspace is the agent's directory on the
+		// share, which Start's NFS leaf helpers create and the provisioning
+		// init container clones into: nothing is created or cleared here.
+		if sharedAgentWorkspace == "" {
+			// Git clone mode: ensure the workspace directory exists and is ready
+			// for sciontool to clone into at container startup.
+			//
+			// If the directory already exists with a real git clone (.git as a
+			// directory), preserve it — this is a stopped agent being restarted
+			// and sciontool will skip the clone correctly.
+			//
+			// If the directory has a .git FILE (worktree pointer from a previous
+			// local-mode run) or other non-clone content, clear it so sciontool
+			// sees an empty workspace and performs a fresh clone.
+			if info, err := os.Stat(agentWorkspace); err == nil && info.IsDir() {
+				gitDir := filepath.Join(agentWorkspace, ".git")
+				gitDirInfo, gitErr := os.Stat(gitDir)
+				isRealClone := gitErr == nil && gitDirInfo.IsDir()
+				if !isRealClone {
+					util.Debugf("provision: clearing stale workspace before git clone: %s", agentWorkspace)
+					target, err := filesGuard().check(agentWorkspace)
+					if err != nil {
+						return "", "", nil, fmt.Errorf("failed to clear stale workspace dir: %w", err)
+					}
+					_ = util.MakeWritableRecursive(target)
+					if err := os.RemoveAll(target); err != nil {
+						return "", "", nil, fmt.Errorf("failed to clear stale workspace dir: %w", err)
+					}
 				}
 			}
-		}
-		if err := os.MkdirAll(agentWorkspace, 0755); err != nil {
-			return "", "", nil, fmt.Errorf("failed to create workspace dir: %w", err)
+			if err := os.MkdirAll(agentWorkspace, 0755); err != nil {
+				return "", "", nil, fmt.Errorf("failed to create workspace dir: %w", err)
+			}
 		}
 	} else if workspace != "" {
 		// Case 1: Explicit Workspace provided
@@ -3528,6 +3592,43 @@ func UpdateAgentConfig(agentName string, projectPath string, status string, runt
 	})
 }
 
+// afterAdvanceRead, when set (tests only), runs in advanceAgentPhase between
+// its first read of agent-info.json and the locked update, so a test can
+// change the phase in that gap.
+var afterAdvanceRead func()
+
+// advanceAgentPhase sets the agent-info.json phase to "to" only while it is
+// still "from" (compare-and-set), so a phase another writer recorded in the
+// meantime, such as a stop or soft-delete mark, is kept. It reads the file
+// first and writes nothing unless the phase matches, because an update
+// through updateSavedAgentInfo always rewrites the file; the update then
+// checks "from" again under the agent-info lock. A missing file is left
+// missing. Best effort: a failure is logged, not returned.
+func advanceAgentPhase(agentName, projectPath, from, to string) {
+	info := getSavedAgentInfo(agentName, projectPath)
+	if info == nil {
+		slog.Debug("Start: agent-info.json is missing or unreadable after the runtime launch; not advancing the phase",
+			"agent", agentName, "from", from, "to", to)
+		return
+	}
+	if info.Phase != from {
+		slog.Debug("Start: agent phase changed during the runtime launch; not advancing it",
+			"agent", agentName, "want", from, "phase", info.Phase, "to", to)
+		return
+	}
+	if afterAdvanceRead != nil {
+		afterAdvanceRead()
+	}
+	if err := updateSavedAgentInfo(agentName, projectPath, func(cur *api.AgentInfo) {
+		if cur.Phase == from {
+			cur.Phase = to
+		}
+	}); err != nil {
+		slog.Warn("Start: failed to record the agent phase after the runtime launch; list may show a stale phase",
+			"agent", agentName, "phase", to, "error", err)
+	}
+}
+
 // MarkAgentSoftDeleted sets Phase "deleted" and, when deletedAt is not
 // zero, DeletedAt in one locked update of agent-info.json, so a concurrent
 // writer never sees or keeps only half of the soft-delete mark.
@@ -4380,6 +4481,27 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	if !sharedWorkspace {
 		agentWorkspace = filepath.Join(agentDir, "workspace")
 	}
+	// sharedAgentWorkspace is the agent-scoped workspace on a shared Layout
+	// (sharedLayoutAgentWorkspace), set below once the agent's persisted
+	// workspace mode is known; "" otherwise.
+	var sharedAgentWorkspace string
+	resolveSharedAgentWorkspace := func() error {
+		if sharedWorkspace || agentWorkspace == "" || sharedAgentWorkspace != "" {
+			return nil
+		}
+		if !agentScopedWorkspace(ctx) {
+			return nil
+		}
+		ws, err := sharedLayoutAgentWorkspace(ctx, nil, projectDir, agentName, agentDir)
+		if err != nil {
+			return err
+		}
+		if ws != "" {
+			sharedAgentWorkspace = ws
+			agentWorkspace = ws
+		}
+		return nil
+	}
 
 	// Remove other agents' kept directories in the same agents root whose
 	// soft-delete retention window has passed (ptone/scion#4742).
@@ -4394,6 +4516,11 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	// agent-info.json, or refused), and only a dir with no home state is
 	// removed so it can be re-provisioned.
 	if err := handleAgentDirWithoutConfigGuarded(projectAgentFilesGuard(ctx, projectDir, agentName, agentDir), agentName, agentDir, agentHome, agentWorkspace); err != nil {
+		return "", "", "", nil, err
+	}
+	// The stale-directory handling above acts on the broker-local agent
+	// directory only; the workspace is resolved after it.
+	if err := resolveSharedAgentWorkspace(); err != nil {
 		return "", "", "", nil, err
 	}
 
@@ -4422,13 +4549,19 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 			}
 		}
 	}
+	// A persisted empty-per-agent mode applies to the workspace too.
+	if err := resolveSharedAgentWorkspace(); err != nil {
+		return "", "", "", nil, err
+	}
 
 	// If the managed workspace directory doesn't exist, try to recreate it.
 	// Only do this for existing, fully-provisioned agents (config file present).
 	// For new agents or stale directories, ProvisionAgent handles worktree creation.
 	// Skipped for shared-workspace agents (agentWorkspace == "") because they
 	// share the project-wide checkout and have no per-agent worktree.
-	if agentWorkspace != "" && config.GetScionAgentConfigPath(agentDir) != "" {
+	// An agent-scoped workspace on a shared Layout is created by Start's NFS
+	// leaf helpers, with the share's modes, never here.
+	if agentWorkspace != "" && sharedAgentWorkspace == "" && config.GetScionAgentConfigPath(agentDir) != "" {
 		if _, err := os.Stat(agentWorkspace); os.IsNotExist(err) {
 			if api.IsEmptyPerAgentWorkspaceFromContext(ctx) {
 				// Empty-per-agent (design #2703): recreate the private
@@ -4509,7 +4642,11 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	// carries GitClone, so a workspace that didn't survive a stop can be
 	// recreated, but it must never clear a workspace that did survive —
 	// that would discard un-pushed work.
-	if gitClone := api.GitCloneFromContext(ctx); gitClone != nil && api.IsFreshProvisionFromContext(ctx) {
+	//
+	// Not for an agent-scoped workspace on a shared Layout: the agent's
+	// directory on the share is managed by the NFS workspace code (the leaf
+	// helpers and RemoveNFSAgentFiles), never cleared from here.
+	if gitClone := api.GitCloneFromContext(ctx); gitClone != nil && api.IsFreshProvisionFromContext(ctx) && sharedAgentWorkspace == "" {
 		if info, err := os.Stat(agentWorkspace); err == nil && info.IsDir() {
 			if !isWorkspaceEmptyDir(agentWorkspace) {
 				util.Debugf("GetAgent: clearing existing workspace for git-clone re-provision: %s", agentWorkspace)

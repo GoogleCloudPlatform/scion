@@ -179,6 +179,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/admin/maintenance/check-updates":    "admin", // Check for updates
 	"/api/v1/admin/maintenance/update-available": "admin", // Update availability status
 	"/api/v1/admin/maintenance/restart":          "admin", // Restart hub
+	"/api/v1/admin/maintenance/update-status":    "admin", // Update status (version, installer, last update)
 	"/api/v1/admin/scheduler":                    "admin", // Scheduler status
 	"/api/v1/admin/allow-list":                   "admin", // Allow list management
 	"/api/v1/admin/allow-list/":                  "admin", // Allow list by email
@@ -254,20 +255,21 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/messaging/targets/resolve": "authenticated", // Resolve a message target
 
 	// ── Native chat (conditionally registered) ─────────────────────────
-	"/api/v1/chat/prefs":          "authenticated", // Chat preferences
-	"/api/v1/chat/spaces":         "authenticated", // Chat spaces
-	"/api/v1/chat/spaces/":        "authenticated", // Chat space routes
-	"/api/v1/chat/conversations/": "authenticated", // Chat conversation routes
-	"/api/v1/chat/topics/":        "authenticated", // Chat topic routes
-	"/api/v1/chat/dms":            "authenticated", // Chat direct messages
-	"/api/v1/chat/unread-count":   "authenticated", // Chat unread conversation count
-	"/api/v1/chat/user-prefs":     "authenticated", // Chat user preferences
-	"/api/v1/chat/presence":       "authenticated", // Chat presence
-	"/api/v1/chat/search":         "authenticated", // Chat search
-	"/api/v1/chat/stars":          "authenticated", // Caller's starred messages in one conversation; 404 when the experiment is off
-	"/api/v1/chat/stars/":         "authenticated", // Star state, star detail, star add/remove (caller's own); 404 when the experiment is off
-	"/api/v1/chat/attachments":    "authenticated", // Chat attachments (agents: POST upload and GET probe only, chatAttachmentRoute)
-	"/api/v1/chat/attachments/":   "authenticated", // Chat attachment by ID (never agents)
+	"/api/v1/chat/prefs":                 "authenticated", // Chat preferences
+	"/api/v1/chat/spaces":                "authenticated", // Chat spaces
+	"/api/v1/chat/spaces/":               "authenticated", // Chat space routes
+	"/api/v1/chat/conversations/":        "authenticated", // Chat conversation routes
+	"/api/v1/chat/topics/":               "authenticated", // Chat topic routes
+	"/api/v1/chat/dms":                   "authenticated", // Chat direct messages
+	"/api/v1/chat/unread-count":          "authenticated", // Chat unread conversation count
+	"/api/v1/chat/user-prefs":            "authenticated", // Chat user preferences
+	"/api/v1/chat/presence":              "authenticated", // Chat presence
+	"/api/v1/chat/search":                "authenticated", // Chat search
+	"/api/v1/chat/stars":                 "authenticated", // Caller's starred messages in one conversation; 404 when the experiment is off
+	"/api/v1/chat/stars/":                "authenticated", // Star state, star detail, star add/remove (caller's own); 404 when the experiment is off
+	"/api/v1/chat/starred-conversations": "authenticated", // Caller's conversations with starred messages (the Starred rail); 404 when the experiment is off
+	"/api/v1/chat/attachments":           "authenticated", // Chat attachments (agents: POST upload and GET probe only, chatAttachmentRoute)
+	"/api/v1/chat/attachments/":          "authenticated", // Chat attachment by ID (never agents)
 
 	// ── gs:// link fetch (native chat) ─────────────────────────────────
 	"/api/v1/gcs/object": "authenticated", // GET: user identity only (handler); access derived from message readability, never client-supplied SA

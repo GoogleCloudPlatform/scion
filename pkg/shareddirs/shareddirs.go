@@ -48,6 +48,20 @@ import (
 // they would produce confusing errors or odd subPaths.
 var projectIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
+// Owner is the owner a directory creator running as root gives the leaf
+// directories it creates on a shared tree (shared dirs, workspace and
+// provisioning-state leaves): the Layout's nfs uid and gid (projectfs.Layout
+// UID and GID). Without it, a root creator leaves new leaves root-owned
+// with group 0 unless their parent is setgid with the nfs gid, and agents
+// (which run as the nfs uid and get only the nfs gid as a leaf group)
+// cannot write them. Intermediates are never given it, nor is a directory
+// only Scion components write (a project's configuration directory). The
+// zero Owner, or a creator that is not root, changes nothing. Directories
+// that already existed are never changed.
+type Owner struct {
+	UID, GID int
+}
+
 // ValidProjectID reports whether projectID is safe to use as a path segment
 // when resolving shared_dir_storage=nfs paths.
 func ValidProjectID(projectID string) bool {

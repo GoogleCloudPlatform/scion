@@ -1166,7 +1166,7 @@ func TestTestAdminPolicy_DispatchSecretsClamp(t *testing.T) {
 		return got
 	}
 	second := func(a *store.Agent) map[string]string {
-		return d.resolveAsNeededForKeys(ctx, a, []string{"B_AN", "H_AN", "P_AN", "U_AN"}, nil)
+		return mustResolveAsNeeded(t, d, ctx, a, []string{"B_AN", "H_AN", "P_AN", "U_AN"}, nil)
 	}
 
 	// Not a member: user scope only.

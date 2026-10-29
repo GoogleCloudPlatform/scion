@@ -79,6 +79,32 @@ func HasPerProfileInstances(rt Runtime) bool {
 	return ok && pp.PerProfileInstances()
 }
 
+// CopiedAgentHomeRuntime is an optional capability a Runtime may implement
+// when the container's agent home is a one-way copy the runtime makes during
+// Run (never a mount of the host's agent home), and the harness cannot start
+// until Run has returned successfully. For such a runtime the host's
+// agent-info.json is not shared with the container while it runs (only an
+// explicit user `scion sync from` copies the container home back), so the
+// host may write it after Run returns and still keep the ptone/scion#4766
+// invariant (no host write while the container may read the file).
+// Start then records "starting" before Run and "running" once Run returns,
+// so no reader sees "running" while the runtime is still preparing the
+// container.
+//
+// A runtime that does not implement this interface, or reports false, keeps
+// the default behavior: "running" is recorded before Run and the host does
+// not write agent-info.json after it.
+type CopiedAgentHomeRuntime interface {
+	CopiesAgentHome() bool
+}
+
+// CopiesAgentHome reports whether rt implements CopiedAgentHomeRuntime and
+// reports true.
+func CopiesAgentHome(rt Runtime) bool {
+	c, ok := rt.(CopiedAgentHomeRuntime)
+	return ok && c.CopiesAgentHome()
+}
+
 // AttachCapableRuntime is an optional capability a Runtime may implement to
 // report whether it supports interactive attach — a PTY or exec primitive a
 // caller can dial to reach an actor's running session. Attach has always

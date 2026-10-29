@@ -34,6 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // Conduit ingress in external relay mode (design §3.9 "Ingress" and "Relay
@@ -295,6 +296,15 @@ func (s *Server) proxyConduitDial(w http.ResponseWriter, r *http.Request, rt *co
 	endpoint, err := url.Parse(target.InternalEndpoint)
 	if err != nil || endpoint.Host == "" {
 		slog.Warn("Conduit ingress: the relay's internal endpoint is unusable", "relay_instance_id", target.InstanceID, "error", err)
+		return true
+	}
+	// The relay internal hop rule, before anything is signed, sent or
+	// written to the client: the proxied leg carries the client's
+	// credentials and its whole session. A plaintext endpoint on a
+	// non-loopback host (a misconfigured relay or a stale or forged
+	// registry row) is never dialed; another relay may be picked.
+	if err := config.CheckRelayTransport(target.InternalEndpoint); err != nil {
+		slog.Warn("Conduit ingress: refusing the relay's internal endpoint", "relay_instance_id", target.InstanceID, "error", err)
 		return true
 	}
 	// The proxied session outlives the request: lift the server's read and

@@ -1507,16 +1507,13 @@ type StartOptions struct {
 	// persisted, so it is recomputed on every dispatch.
 	HostCredentialFiles bool
 
-	// ColocatedHubDevToken is the workstation server's dev token, offered by
-	// the runtime broker for an agent that has no hub-issued token. The
-	// broker sets it only when the dispatch is bound to the hub co-located
-	// in its own process (the binding HostCredentialFiles also requires) and
-	// TrustedHubEndpoint is set. The agent manager uses it as the agent's
-	// hub token only in BrokerMode, and only when the agent's final hub
-	// endpoint, after the agent config and config env overrides, still
-	// equals TrustedHubEndpoint; otherwise it is dropped. Like
-	// HostCredentialFiles it is never persisted.
-	ColocatedHubDevToken string `json:"-"`
+	// HubIssuedToken is the agent token the hub issued for this start, set
+	// only by the runtime broker: the create request's dedicated agent token,
+	// or on start and restart the resolved env SCION_AUTH_TOKEN that the hub
+	// classified as secret-bootstrap. In BrokerMode it is the agent's only
+	// hub credential; a SCION_AUTH_TOKEN from any other source is dropped.
+	// Like HostCredentialFiles it is never persisted.
+	HubIssuedToken string `json:"-"`
 
 	// RerenderKeys are the provision-rendered config keys
 	// (RerenderableConfigKeys) whose files this start renders again before

@@ -20,13 +20,12 @@ import (
 	"context"
 	"testing"
 
-	entsql "entgo.io/ent/dialect/sql"
 	"github.com/stretchr/testify/require"
 )
 
 func TestNativeChatTailIndexes(t *testing.T) {
 	client := newTestClient(t)
-	driver, ok := client.Driver().(*entsql.Driver)
+	driver, ok := SQLDriver(client.Driver())
 	require.True(t, ok)
 	db := driver.DB()
 	ctx := context.Background()

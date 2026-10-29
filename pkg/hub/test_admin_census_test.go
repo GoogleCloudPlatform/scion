@@ -253,6 +253,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"handlers_users_core.go:deleteSuperAdminBindingTx:ListRoleBindingsForPrincipal":                  "mutation: bindings being deleted",
 	"handlers_users_core.go:guardAndCascadeUserRoleBindingsTx:GetRoleBinding":                        "mutation: user-delete binding cascade",
 	"handlers_users_core.go:guardAndCascadeUserRoleBindingsTx:ListRoleBindingsForPrincipal":          "mutation: user-delete binding cascade",
+	"user_delete_data.go:cleanupOrphanedProvisionedUser:ListRoleBindingsForPrincipal":                "guard: keeps a provisioned user row that gained any binding (any binding only keeps the row; never admits)",
 	"handlers_users_core.go:superAdminBindingStateForUser:ListRoleBindingsForPrincipal":              "mutation: role-change target's own binding state; test identity targets are refused first",
 	"project_membership_service.go:RemoveMember:GetRoleBinding":                                      "mutation: the binding being removed",
 	"project_membership_service.go:UpdateMemberRole:GetRoleBinding":                                  "mutation: the binding being changed",
