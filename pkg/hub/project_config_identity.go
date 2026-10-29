@@ -227,7 +227,7 @@ func (s *Server) ensureProjectConfigIdentities(ctx context.Context) projectConfi
 			case err != nil:
 				counts.failed++
 				logger.Warn("project configuration identity: could not ensure the identity files",
-					"project_id", project.ID, "error", err)
+					"project_id", project.ID, "error", sanitizedStorageError(err))
 			case outcome == identityMismatch:
 				counts.mismatched++
 			default:

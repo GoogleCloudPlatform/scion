@@ -42,6 +42,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/google/uuid"
 )
 
 type ListProjectsResponse struct {
@@ -347,6 +348,13 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Labels = labels
+
+	// A client-supplied project ID is a canonical UUID: it keys the store row
+	// and, on a shared backend, the project's directory tree.
+	if !validClientProjectID(req.ID) {
+		ValidationError(w, invalidClientProjectIDMessage, map[string]interface{}{"field": "id"})
+		return
+	}
 
 	// Idempotency: if we have a client-provided ID, check for existing project
 	if req.ID != "" {
@@ -1146,7 +1154,7 @@ func (s *Server) seedSharedProjectIdentity(project *store.Project, scionDir stri
 	}
 	if _, err := s.ensureProjectConfigIdentity(project); err != nil {
 		s.projectsLogger().Warn("failed to write the project identity files on shared workspace storage",
-			"project_id", project.ID, "error", err)
+			"project_id", project.ID, "error", sanitizedStorageError(err))
 		return fmt.Errorf("project configuration: %w", errWorkspaceStorageUnavailable)
 	}
 	return nil
@@ -1170,8 +1178,55 @@ func (s *Server) ensureSharedProjectIdentityBestEffort(project *store.Project) {
 	}
 	if _, err := s.ensureProjectConfigIdentity(project); err != nil {
 		s.projectsLogger().Warn("failed to write the project identity files on shared workspace storage",
-			"project_id", project.ID, "error", err)
+			"project_id", project.ID, "error", sanitizedStorageError(err))
 	}
+}
+
+// invalidClientProjectIDMessage is the 400 text for a client-supplied
+// project ID that is not a canonical UUID.
+const invalidClientProjectIDMessage = "id must be a canonical lowercase UUID (for example 0b6f3e1a-2c4d-4e5f-8a9b-0c1d2e3f4a5b)"
+
+// validClientProjectID reports whether id, a client-supplied project ID, is
+// empty (the hub then generates one) or a canonical lowercase UUID, the form
+// the hub and the CLI generate. Other forms uuid.Parse accepts (braces, urn:,
+// upper case) are refused: the ID keys a directory tree on shared storage.
+func validClientProjectID(id string) bool {
+	if id == "" {
+		return true
+	}
+	u, err := uuid.Parse(id)
+	return err == nil && u.String() == id
+}
+
+// sanitizedStorageError renders err for an operator log line without any
+// path: the operation and the errno of the innermost path, link or syscall
+// error, behind the outermost code-authored prefix when that holds no path
+// separator. A deep OS error never carries a host path into the log.
+func sanitizedStorageError(err error) string {
+	if err == nil {
+		return ""
+	}
+	prefix := ""
+	if head, _, ok := strings.Cut(err.Error(), ":"); ok && !strings.ContainsAny(head, `/\`) {
+		prefix = head + ": "
+	}
+	var pe *fs.PathError
+	var le *os.LinkError
+	var se *os.SyscallError
+	switch {
+	case errors.As(err, &pe):
+		return prefix + pe.Op + ": " + pe.Err.Error()
+	case errors.As(err, &le):
+		return prefix + le.Op + ": " + le.Err.Error()
+	case errors.As(err, &se):
+		return prefix + se.Syscall + ": " + se.Err.Error()
+	case errors.Is(err, errWorkspaceStorageUnavailable):
+		return prefix + errWorkspaceStorageUnavailable.Error()
+	}
+	if prefix != "" {
+		return strings.TrimSuffix(prefix, ": ")
+	}
+	return "storage error (details withheld: may name a path)"
 }
 
 // ensureProjectConfigDir creates the hub-managed project's configuration
@@ -1717,6 +1772,10 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 
 	if req.Name == "" {
 		ValidationError(w, "name is required", nil)
+		return
+	}
+	if !validClientProjectID(req.ID) {
+		ValidationError(w, invalidClientProjectIDMessage, map[string]interface{}{"field": "id"})
 		return
 	}
 

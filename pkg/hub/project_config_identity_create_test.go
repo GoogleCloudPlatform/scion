@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -429,4 +430,88 @@ func TestCreateHubNativeProject_SharedBackend_ProvisioningFailureRollsBack(t *te
 	} else {
 		assert.True(t, os.IsNotExist(err))
 	}
+}
+
+// TestWriteRootFile_AtomicReplaceLeavesNoTempFile (sec L2): an identity
+// file is replaced by a temp file plus rename (a new inode, so a concurrent
+// reader never sees a truncated file), a new file is published whole, and
+// neither a rewrite, a create nor a refused write leaves a temporary file.
+func TestWriteRootFile_AtomicReplaceLeavesNoTempFile(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	require.NoError(t, err)
+	defer func() { _ = root.Close() }()
+
+	require.NoError(t, writeRootFile(root, projectkeys.ProjectSlugFile, "first-slug-that-is-long\n"))
+	before, err := os.Lstat(filepath.Join(dir, projectkeys.ProjectSlugFile))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o644), before.Mode().Perm())
+
+	require.NoError(t, writeRootFile(root, projectkeys.ProjectSlugFile, "second\n"))
+	after, err := os.Lstat(filepath.Join(dir, projectkeys.ProjectSlugFile))
+	require.NoError(t, err)
+	assert.False(t, os.SameFile(before, after), "the rewrite replaces the file (rename), it does not truncate in place")
+	assert.Equal(t, os.FileMode(0o644), after.Mode().Perm())
+	got, err := os.ReadFile(filepath.Join(dir, projectkeys.ProjectSlugFile))
+	require.NoError(t, err)
+	assert.Equal(t, "second\n", string(got))
+
+	require.NoError(t, os.Symlink(projectkeys.ProjectSlugFile, filepath.Join(dir, "linked")))
+	require.Error(t, writeRootFile(root, "linked", "x\n"), "a symlink is still refused")
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	assert.ElementsMatch(t, []string{projectkeys.ProjectSlugFile, "linked"}, names, "no temporary file is left behind")
+}
+
+// TestCreateAndRegisterProject_RejectNonCanonicalClientID (sec INFO): a
+// client-supplied project ID must be a canonical lowercase UUID on create and
+// on register; anything else is a 400 before any lookup or write.
+func TestCreateAndRegisterProject_RejectNonCanonicalClientID(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	f.useNFS()
+	const valid = "aaaaaaaa-0000-4000-8000-0000000000c9"
+	for _, bad := range []string{
+		"not-a-uuid",
+		"../escape",
+		"AAAAAAAA-0000-4000-8000-0000000000C9",
+		"{aaaaaaaa-0000-4000-8000-0000000000c9}",
+		"urn:uuid:aaaaaaaa-0000-4000-8000-0000000000c9",
+		"aaaaaaaa00004000800000000000000c9",
+	} {
+		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{ID: bad, Name: "Bad ID create"})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "create with id %q: %s", bad, rec.Body.String())
+		rec = doRequest(t, f.srv, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{ID: bad, Name: "Bad ID register"})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "register with id %q: %s", bad, rec.Body.String())
+	}
+	entries, err := os.ReadDir(filepath.Join(f.shareBase, "projects"))
+	if err == nil {
+		assert.Empty(t, entries, "nothing is written for a refused ID")
+	}
+	project := createProjectOverHTTP(t, f.srv, CreateProjectRequest{ID: valid, Name: "Good ID"})
+	assert.Equal(t, valid, project.ID, "a canonical UUID is accepted")
+}
+
+// TestSanitizedStorageError_NoPath (sec L1): the operator-log rendering of a
+// storage error keeps the operation and errno and never a path.
+func TestSanitizedStorageError_NoPath(t *testing.T) {
+	hostPath := "/mnt/nfs/share1/projects/aaaaaaaa-0000-4000-8000-0000000000d9/.scion/project-id"
+	pe := &os.PathError{Op: "open", Path: hostPath, Err: syscall.EACCES}
+	got := sanitizedStorageError(fmt.Errorf("write project-id: %w", pe))
+	assert.Equal(t, "write project-id: open: permission denied", got)
+	assert.NotContains(t, got, "/mnt")
+
+	got = sanitizedStorageError(fmt.Errorf("create project configuration directory %q: %w", hostPath, syscall.EIO))
+	assert.NotContains(t, got, "/mnt", "a path formatted into the message is withheld")
+	assert.NotContains(t, got, "projects/")
+
+	le := &os.LinkError{Op: "rename", Old: hostPath + ".tmp", New: hostPath, Err: syscall.EXDEV}
+	got = sanitizedStorageError(le)
+	assert.NotContains(t, got, "/mnt")
+	assert.Contains(t, got, "rename")
+	assert.Empty(t, sanitizedStorageError(nil))
 }

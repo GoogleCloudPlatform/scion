@@ -123,6 +123,37 @@ until an agent or a Files-tab write did. Now:
   - `TestCreateHubNativeProject_LocalBackend_NoShareWrites`;
   - `TestCreateHubNativeProject_SharedBackend_ProvisioningFailureRollsBack`.
 
+## Security read residuals, folded in (sec-review-3, report 10d0154e)
+
+- **L1, no host path in the operator log:** the identity-seed warnings (both
+  create helpers and the startup pass) log `sanitizedStorageError(err)`. That
+  is the operation and the errno of the innermost path, link or syscall
+  error, behind the outermost code-authored prefix only when it holds no path
+  separator; otherwise the text is withheld. The mismatch line already logged
+  ids only. Test: `TestSanitizedStorageError_NoPath`.
+- **L2, atomic identity-file writes:** `writeRootFile` (root_file_unix.go)
+  writes a temporary file beside the target under the same `os.Root`
+  (O_CREATE|O_EXCL|O_NOFOLLOW, 0644) and fsyncs it.
+  - An absent name is published with `Root.Link`, so anything that appears
+    meanwhile is never replaced or followed.
+  - An existing name keeps the old checks (Lstat, the opened file is the same
+    regular file), is checked once more right before the replace, and is then
+    replaced with `Root.Rename`.
+  - A broker reading project-id or project-slug over NFS sees the old content
+    or the new, never a truncated file.
+  - Symlinks, FIFOs and special files are still refused, and the temporary
+    file is removed on every error path.
+  - Test: `TestWriteRootFile_AtomicReplaceLeavesNoTempFile`; the existing
+    `TestWriteRootFile_RefusesSymlinkAndSpecialFiles` is unchanged.
+- **INFO, client project ID at intake:** `createProject` and
+  `handleProjectRegister` refuse a client-supplied `id` that is not a
+  canonical lowercase UUID (400, field `id`), before any lookup or write.
+  - Braces, `urn:`, upper case and non-UUIDs are refused; an empty `id` still
+    means the hub generates one.
+  - The hub and the CLI generate canonical UUIDs (`uuid.New().String()`), and
+    the existing tests send `tid()` UUIDs, so no known client breaks.
+  - Test: `TestCreateAndRegisterProject_RejectNonCanonicalClientID`.
+
 ## Follow-ups (not in this change)
 
 - **N-3:** request-path NFS I/O at create (the identity write through the
