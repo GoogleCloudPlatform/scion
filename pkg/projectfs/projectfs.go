@@ -303,6 +303,15 @@ type Resolved struct {
 	// ClaimName is the PersistentVolumeClaim of the share this directory
 	// is on (the Layout's Share.PVName), for pod mounts; empty on local.
 	ClaimName string
+	// OwnerUID and OwnerGID are the Layout's UID and GID: a root creator
+	// gives the directories Open(true) creates that owner (Owner).
+	OwnerUID, OwnerGID int
+}
+
+// Owner is the shareddirs.Owner a root creator gives the directories it
+// creates for r: the Layout's UID and GID.
+func (r Resolved) Owner() shareddirs.Owner {
+	return shareddirs.Owner{UID: r.OwnerUID, GID: r.OwnerGID}
 }
 
 const (
@@ -420,6 +429,8 @@ func (l Layout) shared(rel string, m Mount) Resolved {
 		ClaimName:   l.Share.PVName,
 		Kind:        m.Kind,
 		Name:        m.Name,
+		OwnerUID:    l.UID,
+		OwnerGID:    l.GID,
 	}
 	if l.Share.Export != "" {
 		r.ServerPath = path.Join(l.Share.Export, filepath.ToSlash(rel))

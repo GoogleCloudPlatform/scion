@@ -376,8 +376,9 @@ func (s *Server) applySharedBootstrap(ctx context.Context, ws, rel string, apply
 		return false, fmt.Errorf("resolve host base: %w", err)
 	}
 	stateRel := filepath.Join(filepath.Dir(rel), provision.ProvisionStateDirName)
+	owner := shareddirs.Owner{UID: s.config.StorageLayout.UID, GID: s.config.StorageLayout.GID}
 	for _, leaf := range []string{rel, stateRel} {
-		fd, _, err := shareddirs.EnsureLeaf(base, leaf)
+		fd, _, err := shareddirs.EnsureLeafOwned(base, leaf, owner)
 		if err != nil {
 			return false, fmt.Errorf("create %s: %w", filepath.Base(leaf), err)
 		}
@@ -446,8 +447,10 @@ func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startCont
 		return false, fmt.Errorf("resolve host base: %w", err)
 	}
 	stateRel := filepath.Join(filepath.Dir(r.RelPath), provision.ProvisionStateDirName)
+	// A root broker gives the directories it creates the Layout's owner;
+	// ProvisionShared below sets the workspace content's ownership as before.
 	for _, leaf := range []string{r.RelPath, stateRel} {
-		fd, _, err := shareddirs.EnsureLeaf(base, leaf)
+		fd, _, err := shareddirs.EnsureLeafOwned(base, leaf, r.Owner())
 		if err != nil {
 			return false, fmt.Errorf("create %s: %w", filepath.Base(leaf), err)
 		}

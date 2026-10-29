@@ -57,7 +57,18 @@ import (
 // Returns the leaf's open fd (caller must close via CloseFd) and whether it
 // already existed before this call.
 func EnsureLeaf(hostBase, rel string) (leafFd int, alreadyExisted bool, err error) {
-	parentFd, leafName, fd, existed, walkErr := createViaComponentWalk(hostBase, rel, 0o2755, 0o775)
+	return EnsureLeafOwned(hostBase, rel, Owner{})
+}
+
+// EnsureLeafOwned is EnsureLeaf that, when the caller runs as root and
+// owner names a non-root uid and gid (Owner), gives every directory this
+// call creates -- each intermediate and the leaf -- that owner with fchown
+// on the descriptor the walk opened (never a path chown, never through a
+// symlink), before the modes and the default ACL are applied. A directory
+// that already existed is never changed. A failed chown of a leaf this call
+// created removes the leaf, as a failed chmod does.
+func EnsureLeafOwned(hostBase, rel string, owner Owner) (leafFd int, alreadyExisted bool, err error) {
+	parentFd, leafName, fd, existed, created, walkErr := createViaComponentWalk(hostBase, rel, 0o2755, 0o775, owner)
 	if walkErr != nil {
 		return -1, false, walkErr
 	}
@@ -66,6 +77,14 @@ func EnsureLeaf(hostBase, rel string) (leafFd int, alreadyExisted bool, err erro
 		return fd, true, nil
 	}
 
+	if created && owner.chownsCreated() {
+		if chownErr := fchownDir(fd, owner.UID, owner.GID); chownErr != nil {
+			_ = CloseFd(fd)
+			_ = unix.Unlinkat(parentFd, leafName, unix.AT_REMOVEDIR)
+			_ = unix.Close(parentFd)
+			return -1, false, fmt.Errorf("chown shared dir: %w", chownErr)
+		}
+	}
 	if chmodErr := chmodLeaf(fd, 0o2775); chmodErr != nil {
 		_ = CloseFd(fd)
 		_ = unix.Unlinkat(parentFd, leafName, unix.AT_REMOVEDIR)
@@ -95,10 +114,25 @@ func EnsureLeaf(hostBase, rel string) (leafFd int, alreadyExisted bool, err erro
 // before returning the error, as EnsureLeaf does. Returns the leaf's open
 // fd (caller must close via CloseFd) and whether it already existed.
 func EnsurePrivateDir(hostBase, rel string) (leafFd int, alreadyExisted bool, err error) {
+	return EnsurePrivateDirOwned(hostBase, rel, Owner{})
+}
+
+// EnsurePrivateDirOwned is EnsurePrivateDir with EnsureLeafOwned's owner
+// rule: a root caller gives every directory this call creates owner's uid
+// and gid (fchown on the walk's descriptor) before its mode is applied.
+func EnsurePrivateDirOwned(hostBase, rel string, owner Owner) (leafFd int, alreadyExisted bool, err error) {
 	// The leaf is created at 0755, so it never has a group-write window.
-	parentFd, leafName, fd, existed, walkErr := createViaComponentWalk(hostBase, rel, 0o2755, 0o755)
+	parentFd, leafName, fd, existed, created, walkErr := createViaComponentWalk(hostBase, rel, 0o2755, 0o755, owner)
 	if walkErr != nil {
 		return -1, false, walkErr
+	}
+	if created && owner.chownsCreated() {
+		if chownErr := fchownDir(fd, owner.UID, owner.GID); chownErr != nil {
+			_ = CloseFd(fd)
+			_ = unix.Unlinkat(parentFd, leafName, unix.AT_REMOVEDIR)
+			_ = unix.Close(parentFd)
+			return -1, false, fmt.Errorf("chown directory: %w", chownErr)
+		}
 	}
 	if !existed {
 		if chmodErr := chmodLeaf(fd, 0o2755); chmodErr != nil {
@@ -123,6 +157,19 @@ var (
 	chmodLeaf         = ChmodFd
 	setLeafDefaultACL = SetLeafDefaultACL
 )
+
+// fchownDir is unix.Fchown on a directory descriptor the walk opened,
+// indirected through a package var so a test running without root can
+// record the calls a root creator makes. Production never overrides it
+// outside tests.
+var fchownDir = unix.Fchown
+
+// chownsCreated reports whether o is applied to the directories a walk
+// creates: the process runs as root (geteuid) and o names a non-root uid
+// and gid.
+func (o Owner) chownsCreated() bool {
+	return o.UID > 0 && o.GID > 0 && geteuid() == 0
+}
 
 // SetLeafFinalizationHooksForTest overrides EnsureLeaf's two finalization
 // steps (chmod and default-ACL) for the duration of a test, returning a
@@ -152,10 +199,16 @@ func SetLeafFinalizationHooksForTest(chmod func(fd int, mode uint32) error, acl 
 // fd (still open — the caller owns closing it) alongside the leaf's own fd
 // and name, so a caller (EnsureLeaf) can roll back a partially-finalized
 // leaf via Unlinkat(parentFd, leafName, ...) without re-walking.
-func createViaComponentWalk(hostBase, rel string, intermediateMode, leafCreateMode uint32) (parentFd int, leafName string, leafFd int, alreadyExisted bool, err error) {
+//
+// An intermediate this walk created itself (its mkdirat succeeded) gets
+// owner (Owner.chownsCreated) with fchown on its descriptor before its
+// mode; leafCreated reports whether the walk created the leaf, which the
+// caller then gives owner the same way. A component that already existed,
+// or that a concurrent creator made first, is never chowned.
+func createViaComponentWalk(hostBase, rel string, intermediateMode, leafCreateMode uint32, owner Owner) (parentFd int, leafName string, leafFd int, alreadyExisted, leafCreated bool, err error) {
 	baseFd, err := unix.Open(hostBase, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return -1, "", -1, false, fmt.Errorf("open host base %q: %w", hostBase, err)
+		return -1, "", -1, false, false, fmt.Errorf("open host base %q: %w", hostBase, err)
 	}
 
 	parts := strings.Split(filepath.ToSlash(rel), "/")
@@ -166,16 +219,23 @@ func createViaComponentWalk(hostBase, rel string, intermediateMode, leafCreateMo
 		// mkdirat and the explicit fchmod below during
 		// which a concurrent, differently-permissioned creator could
 		// otherwise plant a real (group-writable) directory here.
-		nextFd, existed, walkErr := openOrCreateDirNoFollow(currentFd, comp, 0o755)
+		nextFd, existed, created, walkErr := openOrCreateDirNoFollow(currentFd, comp, 0o755)
 		if walkErr != nil {
 			_ = unix.Close(currentFd)
-			return -1, "", -1, false, walkErr
+			return -1, "", -1, false, false, walkErr
 		}
 		if !existed {
+			if created && owner.chownsCreated() {
+				if chownErr := fchownDir(nextFd, owner.UID, owner.GID); chownErr != nil {
+					_ = unix.Close(nextFd)
+					_ = unix.Close(currentFd)
+					return -1, "", -1, false, false, fmt.Errorf("chown path component %q: %w", comp, chownErr)
+				}
+			}
 			if chmodErr := unix.Fchmod(nextFd, intermediateMode); chmodErr != nil {
 				_ = unix.Close(nextFd)
 				_ = unix.Close(currentFd)
-				return -1, "", -1, false, fmt.Errorf("chmod path component %q: %w", comp, chmodErr)
+				return -1, "", -1, false, false, fmt.Errorf("chmod path component %q: %w", comp, chmodErr)
 			}
 		} else {
 			warnIfIntermediateUnsafe(nextFd, comp)
@@ -185,12 +245,12 @@ func createViaComponentWalk(hostBase, rel string, intermediateMode, leafCreateMo
 	}
 
 	leafComp := parts[len(parts)-1]
-	fd, existed, walkErr := openOrCreateDirNoFollow(currentFd, leafComp, leafCreateMode)
+	fd, existed, created, walkErr := openOrCreateDirNoFollow(currentFd, leafComp, leafCreateMode)
 	if walkErr != nil {
 		_ = unix.Close(currentFd)
-		return -1, "", -1, false, walkErr
+		return -1, "", -1, false, false, walkErr
 	}
-	return currentFd, leafComp, fd, existed, nil
+	return currentFd, leafComp, fd, existed, created, nil
 }
 
 var intermediateUnsafeWarnOnce sync.Once
@@ -233,25 +293,29 @@ func warnIfIntermediateUnsafe(fd int, comp string) {
 // reopens it the same way. A concurrent creator winning the mkdirat race
 // (EEXIST) is not an error — the reopen with O_NOFOLLOW still refuses a
 // symlink even if the entry a racing process left behind is one.
-func openOrCreateDirNoFollow(parentFd int, comp string, mode uint32) (fd int, existed bool, err error) {
+//
+// created reports whether this call's own mkdirat created the component
+// (false when it existed, or when a concurrent creator won the race).
+func openOrCreateDirNoFollow(parentFd int, comp string, mode uint32) (fd int, existed, created bool, err error) {
 	const openFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
 
 	fd, err = unix.Openat(parentFd, comp, openFlags, 0)
 	if err == nil {
-		return fd, true, nil
+		return fd, true, false, nil
 	}
 	if !errors.Is(err, unix.ENOENT) {
-		return -1, false, classifyComponentOpenError(parentFd, comp, err)
+		return -1, false, false, classifyComponentOpenError(parentFd, comp, err)
 	}
 
-	if mkErr := unix.Mkdirat(parentFd, comp, mode); mkErr != nil && !errors.Is(mkErr, unix.EEXIST) {
-		return -1, false, fmt.Errorf("mkdir path component %q: %w", comp, mkErr)
+	mkErr := unix.Mkdirat(parentFd, comp, mode)
+	if mkErr != nil && !errors.Is(mkErr, unix.EEXIST) {
+		return -1, false, false, fmt.Errorf("mkdir path component %q: %w", comp, mkErr)
 	}
 	fd, err = unix.Openat(parentFd, comp, openFlags, 0)
 	if err != nil {
-		return -1, false, classifyComponentOpenError(parentFd, comp, err)
+		return -1, false, false, classifyComponentOpenError(parentFd, comp, err)
 	}
-	return fd, false, nil
+	return fd, false, mkErr == nil, nil
 }
 
 // classifyComponentOpenError turns the errno openat(O_NOFOLLOW|O_DIRECTORY)

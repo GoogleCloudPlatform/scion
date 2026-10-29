@@ -163,7 +163,7 @@ func (s *Server) moveProjectSharedDirs(ctx context.Context, layout projectfs.Lay
 		return nil, fmt.Errorf("resolve host base: %w", err)
 	}
 	stateRel := filepath.Join(filepath.Dir(ws.RelPath), provision.ProvisionStateDirName)
-	fd, _, err := shareddirs.EnsureLeaf(base, stateRel)
+	fd, _, err := shareddirs.EnsureLeafOwned(base, stateRel, ws.Owner())
 	if err != nil {
 		return nil, fmt.Errorf("create provisioning state dir: %w", err)
 	}
