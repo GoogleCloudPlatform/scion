@@ -114,10 +114,27 @@ describe('placementRows', () => {
     ]);
   });
 
-  it('is empty for docker, for an unknown type, and when nothing is reported', () => {
+  it('is empty for docker, for an unknown type, and without a presentation', () => {
     expect(placementRows(docker, withPlacement())).toEqual([]);
     expect(placementRows({ id: 'x', type: 'cloudrun' }, withPlacement())).toEqual([]);
-    expect(placementRows(k8s, fullPresentation())).toEqual([]);
     expect(placementRows(k8s, undefined)).toEqual([]);
+  });
+
+  it('tells placement not reported from reported empty placement', () => {
+    expect(placementRows(k8s, fullPresentation())).toEqual([
+      { label: 'Placement', value: 'Not reported' },
+    ]);
+    const reportedEmpty = fullPresentation();
+    reportedEmpty.target = { ...reportedEmpty.target!, placementReported: true };
+    expect(placementRows(k8s, reportedEmpty)).toEqual([
+      { label: 'Placement', value: 'None configured on the broker' },
+    ]);
+    const reported = withPlacement();
+    reported.target = { ...reported.target!, placementReported: true };
+    expect(placementRows(k8s, reported).map((r) => r.label)).toEqual([
+      'Node selector',
+      'Tolerations',
+      'Runtime class',
+    ]);
   });
 });

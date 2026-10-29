@@ -294,6 +294,8 @@ The Hub monitors broker health via a recurring heartbeat timeout scheduler. If a
 
 On a co-located server, the broker detail shows the host identity state: whether the configured GCP host service account matches the identity the host reports. `mismatch` and `pinned_absent` (configured, but the host reports no account) mark the broker as needing attention in the health summary. The configured value is used either way.
 
+Each Runtime Broker also reports its binary `version` on registration, join, and heartbeat (`POST /api/v1/runtime-brokers/:id/heartbeat`), and the Hub returns `versionStatus` (`match`, `mismatch`, or `unknown`) and `hubVersion` on Runtime Broker list and detail endpoints. When a Runtime Broker's version differs from the Hub's, the Web Dashboard shows a warning badge on the Runtime Broker list and detail pages and in the admin health summary (see [Version mismatch](/scion/workstation/dashboard/#version-mismatch)).
+
 ## Unregistering a Broker
 
 To permanently remove a broker from the Hub, use the **Unregister** button on the broker detail page in the Web Dashboard. Unregistering a broker:

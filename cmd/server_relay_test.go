@@ -47,8 +47,8 @@ func relayRoleTestConfig() *config.GlobalConfig {
 	cfg.Hub.Conduit.PeerAuth = config.ConduitPeerAuthHMAC
 	cfg.Hub.Conduit.InstanceID = "relay-7"
 	cfg.Hub.Conduit.InternalListen = "127.0.0.1:0"
-	cfg.Hub.Conduit.InternalAdvertise = "http://relay-7.internal:9811"
-	cfg.Relay.HubInternalURL = "http://hub-internal.example:9811"
+	cfg.Hub.Conduit.InternalAdvertise = "https://relay-7.internal:9811"
+	cfg.Relay.HubInternalURL = "https://hub-internal.example:9811"
 	cfg.Relay.PublicURL = "https://relay-7.example.com"
 	cfg.Database.Driver, cfg.Database.URL = "sqlite", "relay.db"
 	return cfg
@@ -220,12 +220,12 @@ func TestRelayServerConfigReadsRelaySettings(t *testing.T) {
 	rcfg, err := relayServerConfig(context.Background(), cfg, db)
 	require.NoError(t, err)
 	assert.Equal(t, "relay-7", rcfg.InstanceID)
-	assert.Equal(t, "http://hub-internal.example:9811", rcfg.HubInternalURL)
+	assert.Equal(t, "https://hub-internal.example:9811", rcfg.HubInternalURL)
 	assert.Equal(t, "https://relay-7.example.com", rcfg.PublicURL)
 	assert.False(t, rcfg.Singleton)
 	assert.Equal(t, "127.0.0.1:18443", rcfg.PublicListen)
 	assert.Equal(t, "127.0.0.1:0", rcfg.InternalListen)
-	assert.Equal(t, "http://relay-7.internal:9811", rcfg.Advertise(nil), "server.hub.conduit.internal_advertise")
+	assert.Equal(t, "https://relay-7.internal:9811", rcfg.Advertise(nil), "server.hub.conduit.internal_advertise")
 	assert.NotNil(t, rcfg.PeerAuth)
 	assert.Same(t, db.Settings, rcfg.Experiment)
 	assert.Nil(t, rcfg.Events, "no LISTEN source on SQLite")

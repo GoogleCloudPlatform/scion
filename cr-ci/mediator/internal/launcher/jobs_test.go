@@ -2,6 +2,8 @@ package launcher
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -61,8 +63,14 @@ func TestLaunchRejectsIncompleteSpec(t *testing.T) {
 	if _, err := l.Launch(context.Background(), LaunchSpec{JobID: 1, RunnerName: "cr-job-1"}); err == nil {
 		t.Error("launch without a claim token succeeded")
 	}
-	// The runner's job guard binds to GH_REPOS, so a launch must carry a well-formed list.
-	for _, served := range [][]string{nil, {""}, {"o"}, {"o/"}, {"/r"}, {"o/r,x/y"}, {"o/r", "o/ s"}} {
+	// The runner's job guard binds to GH_REPOS, so a launch must carry a well-formed list:
+	// each entry as entrypoint.sh accepts it, at most maxServedRepos of them.
+	tooMany := make([]string, maxServedRepos+1)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("o/r%d", i)
+	}
+	for _, served := range [][]string{nil, {""}, {"o"}, {"o/"}, {"/r"}, {"o/r,x/y"}, {"o/r", "o/ s"},
+		{"o/r/x"}, {"o!/r"}, {"o/r$"}, {"\u00f6/r"}, {"o_x/r"}, {"o/r\n"}, tooMany} {
 		if _, err := l.Launch(context.Background(), LaunchSpec{JobID: 1, RunnerName: "cr-job-1", ClaimToken: "0123456789abcdef0123456789abcdef", ServedRepos: served}); err == nil {
 			t.Errorf("launch with served repositories %q succeeded", served)
 		}
@@ -117,5 +125,47 @@ func TestActiveTerminateReap(t *testing.T) {
 	}
 	if active, _ := l.Active(ctx); len(active) != 0 {
 		t.Errorf("active after reap = %v", active)
+	}
+}
+
+// TestLaunchAcceptsServedRepos: names with . _ - and a list at the cap launch.
+func TestLaunchAcceptsServedRepos(t *testing.T) {
+	l, cr := newLauncher(t)
+	full := make([]string, maxServedRepos)
+	for i := range full {
+		full[i] = fmt.Sprintf("example-owner/repo.%d_x-y", i)
+	}
+	for _, served := range [][]string{{"o/r"}, {"Example-Owner/a.b_c-d"}, full} {
+		if _, err := l.Launch(context.Background(), LaunchSpec{JobID: 1, RunnerName: "cr-job-1", ClaimToken: "0123456789abcdef0123456789abcdef", ServedRepos: served}); err != nil {
+			t.Errorf("launch with %d served repositories (%q...): %v", len(served), served[0], err)
+		}
+	}
+	if got := len(cr.RunBodies); got != 3 {
+		t.Errorf("run requests = %d, want 3", got)
+	}
+}
+
+// TestServedReposMatchEntrypoint: the launcher's GH_REPOS entry pattern and cap are
+// the ones cr-ci/runner/entrypoint.sh enforces, so a list the launcher accepts never
+// makes the runner exit 2 at startup.
+func TestServedReposMatchEntrypoint(t *testing.T) {
+	b, err := os.ReadFile("../../../runner/entrypoint.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const prefix = "[[ $GH_REPOS =~ "
+	var got string
+	for _, line := range strings.Split(string(b), "\n") {
+		if i := strings.Index(line, prefix); i >= 0 {
+			if got != "" {
+				t.Fatalf("entrypoint.sh checks GH_REPOS more than once")
+			}
+			got = strings.TrimSuffix(strings.TrimSpace(line[i+len(prefix):]), " ]] ||")
+		}
+	}
+	entry := strings.TrimSuffix(strings.TrimPrefix(servedRepoRE.String(), "^"), "$")
+	want := fmt.Sprintf("^%s(,%s){0,%d}$", entry, entry, maxServedRepos-1)
+	if got != want {
+		t.Errorf("entrypoint.sh GH_REPOS pattern = %q, want %q (servedRepoRE and maxServedRepos)", got, want)
 	}
 }

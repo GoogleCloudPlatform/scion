@@ -533,6 +533,7 @@ func TestSyncArchiveCreateArgs_ExcludesLinkTargets(t *testing.T) {
 // returns Run's error.
 func startFakeK8sPod(t *testing.T, rt *KubernetesRuntime, clientset *fake.Clientset, config RunConfig) error {
 	t.Helper()
+	seedConfigClaims(t, clientset, "default", config)
 	errChan := make(chan error, 1)
 	go func() {
 		_, err := rt.Run(context.Background(), config)

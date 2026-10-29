@@ -63,6 +63,7 @@ type idFixtures struct {
 	groupDel                string
 	user                    string
 	userDel                 string
+	userDeletion            string
 	member                  string
 	skill                   string
 	skillDel                string
@@ -329,6 +330,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		groupDel:             tid("li-group-del"),
 		user:                 tid("li-user"),
 		userDel:              tid("li-user-del"),
+		userDeletion:         tid("li-user-deletion"),
 		member:               tid("li-member"),
 		skill:                tid("li-skill"),
 		skillDel:             tid("li-skill-del"),
@@ -424,6 +426,10 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 
 	require.NoError(t, s.CreateUser(ctx, &store.User{ID: f.user, Email: "li-user@test.com", DisplayName: "LI User", Role: "member", Status: "active"}))
 	require.NoError(t, s.CreateUser(ctx, &store.User{ID: f.userDel, Email: "li-user-del@test.com", DisplayName: "LI User Del", Role: "member", Status: "active"}))
+	// A user with a recorded forced deletion, for GET
+	// /api/v1/users/{id}/deletion (ptone/scion#2143).
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: f.userDeletion, Email: "li-user-deletion@test.com", DisplayName: "LI User Deletion", Role: "member", Status: "active"}))
+	require.NoError(t, s.CreateUserDeletion(ctx, &store.UserDeletion{UserID: f.userDeletion, RequestedByKind: "user", RequestedByID: DevUserID, CredentialKind: "session", RequestedAt: time.Now()}))
 	require.NoError(t, s.CreateUser(ctx, &store.User{ID: f.member, Email: "li-member@test.com", DisplayName: "LI Member", Role: "member", Status: "active"}))
 	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{GroupID: f.group, MemberID: f.member, MemberType: store.GroupMemberTypeUser, Role: store.GroupMemberRoleMember}))
 
@@ -693,7 +699,8 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	var active []experiments.Experiment
 	for _, e := range srv.experimentRegistry().All() {
 		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.FederationProjectVisitors ||
-			e.Name == experiments.ChatStarredMessages || e.Name == experiments.AgentEditHeld {
+			e.Name == experiments.ChatStarredMessages || e.Name == experiments.AgentEditHeld ||
+			e.Name == experiments.UserDeleteForceCascade {
 			e.Default = true
 		}
 		active = append(active, e)
@@ -707,6 +714,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(experiments.FederationProjectVisitors))
 	require.True(t, srv.experimentEnabled(experiments.ChatStarredMessages))
 	require.True(t, srv.experimentEnabled(experiments.AgentEditHeld))
+	require.True(t, srv.experimentEnabled(experiments.UserDeleteForceCascade))
 	// POST /api/v1/auth/federation-token also answers 404 while the OIDC
 	// provider is off: install a test key manager and allow the audience
 	// that bodyOverrides sends, so the route reaches its caller checks.
@@ -1062,6 +1070,7 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/users/{id}":                 {"id": f.user},
 		"/api/v1/users/{id}/revoke-sessions": {"id": f.user},
 		"/api/v1/users/{id}/delete-blockers": {"id": f.user},
+		"/api/v1/users/{id}/deletion":        {"id": f.userDeletion},
 
 		// --- skill family ---
 		"/api/v1/skills/{id}":                          {"id": f.skill},

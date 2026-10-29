@@ -235,13 +235,14 @@ func TestBuildStartContext_DebugNotPropagatedExplicitLogLevelKept(t *testing.T) 
 	}
 }
 
-// TestBuildStartContext_AuthTokenPrecedence verifies the SCION_AUTH_TOKEN
-// resolution precedence in buildStartContext step 3:
+// TestBuildStartContext_AuthTokenPrecedence verifies the hub-issued token
+// resolution in buildStartContext step 3 (StartOptions.HubIssuedToken; the
+// env never carries SCION_AUTH_TOKEN):
 //  1. in.AgentToken (explicit hub-provided field) wins.
-//  2. an existing token from ResolvedEnv (start/resume path) is kept and must
-//     NOT be clobbered by the broker's own dev SCION_AUTH_TOKEN. This is the
-//     regression case for the resume 401 ("compact JWS format must have three
-//     parts").
+//  2. a ResolvedEnv token the hub classified secret-bootstrap (start/resume
+//     path) is kept and must NOT be clobbered by the broker's own dev
+//     SCION_AUTH_TOKEN. This is the regression case for the resume 401
+//     ("compact JWS format must have three parts").
 //  3. with neither of the above the agent gets no token: the broker's own
 //     SCION_AUTH_TOKEN is never used (TestBuildStartContext_AgentTokenIsHubIssuedOnly).
 func TestBuildStartContext_AuthTokenPrecedence(t *testing.T) {
@@ -265,6 +266,7 @@ func TestBuildStartContext_AuthTokenPrecedence(t *testing.T) {
 			ResolvedEnv: map[string]string{
 				"SCION_AUTH_TOKEN": hubToken,
 			},
+			EnvClassifications: map[string]api.EnvKind{"SCION_AUTH_TOKEN": api.EnvKindSecretBootstrap},
 			// AgentToken intentionally empty (start/resume path).
 			HTTPRequest: r,
 			Operation:   opCreate,
@@ -272,8 +274,11 @@ func TestBuildStartContext_AuthTokenPrecedence(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := sc.Opts.Env["SCION_AUTH_TOKEN"]; got != hubToken {
-			t.Errorf("expected SCION_AUTH_TOKEN to keep hub-minted token %q, got %q (broker dev token must not clobber)", hubToken, got)
+		if got := sc.Opts.HubIssuedToken; got != hubToken {
+			t.Errorf("expected HubIssuedToken to be the hub-minted token %q, got %q (broker dev token must not clobber)", hubToken, got)
+		}
+		if _, ok := sc.Opts.Env["SCION_AUTH_TOKEN"]; ok {
+			t.Error("SCION_AUTH_TOKEN left in env")
 		}
 	})
 
@@ -297,8 +302,11 @@ func TestBuildStartContext_AuthTokenPrecedence(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := sc.Opts.Env["SCION_AUTH_TOKEN"]; got != explicitToken {
-			t.Errorf("expected SCION_AUTH_TOKEN=%q (explicit AgentToken wins), got %q", explicitToken, got)
+		if got := sc.Opts.HubIssuedToken; got != explicitToken {
+			t.Errorf("expected HubIssuedToken=%q (explicit AgentToken wins), got %q", explicitToken, got)
+		}
+		if _, ok := sc.Opts.Env["SCION_AUTH_TOKEN"]; ok {
+			t.Error("SCION_AUTH_TOKEN left in env")
 		}
 	})
 
@@ -321,6 +329,9 @@ func TestBuildStartContext_AuthTokenPrecedence(t *testing.T) {
 		}
 		if got, ok := sc.Opts.Env["SCION_AUTH_TOKEN"]; ok {
 			t.Errorf("SCION_AUTH_TOKEN in env (len %d), want unset (no hub connection)", len(got))
+		}
+		if sc.Opts.HubIssuedToken != "" {
+			t.Errorf("HubIssuedToken set (len %d), want empty", len(sc.Opts.HubIssuedToken))
 		}
 	})
 }

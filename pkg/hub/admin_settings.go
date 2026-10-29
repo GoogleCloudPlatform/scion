@@ -119,6 +119,13 @@ type ServerConfigResponse struct {
 	// it cannot be shown safely) and whether the hub runs with that value.
 	// Additive: EnvOverrides is unchanged.
 	EnvValues map[string]EnvKeyValue `json:"env_values,omitempty"`
+
+	// StorageOverrideErrors lists, read-only, the removed per-runtime or
+	// per-profile storage overrides the settings file (as read at startup)
+	// or the stored settings still carry, one message per source with the
+	// keys and the migration (ptone/scion#6371). Agents of those profiles
+	// are refused at start. There is no request field for it.
+	StorageOverrideErrors []string `json:"storage_override_errors,omitempty"`
 }
 
 // ServerConfigUpdateRequest is the payload for updating settings.
@@ -393,6 +400,7 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read settings", nil)
 		return
 	}
+	resp.StorageOverrideErrors = s.removedStorageOverrideErrors()
 	writeJSON(w, http.StatusOK, resp)
 }
 

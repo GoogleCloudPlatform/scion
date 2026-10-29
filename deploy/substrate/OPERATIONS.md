@@ -480,9 +480,9 @@ this broker are:
 - **The broker's own CA/trust-bundle is read once, at dial time.** Rotating
   the CA or trust bundle a broker uses to reach ateapi/the router requires
   restarting the broker process — there is no live-reload path.
-- **The broker container runs as root.** `Dockerfile.hub` has no `USER`
-  directive, so `broker.yaml`'s pod spec deliberately does not set
-  `runAsNonRoot`/`runAsUser` (setting them against a root-only image would
+- **The broker container runs as root.** The default target of the repo-root
+  `Dockerfile` has no `USER` directive, so `broker.yaml`'s pod spec
+  deliberately does not set `runAsNonRoot`/`runAsUser` (setting them against a root-only image would
   just `CrashLoopBackOff` the container). It does set
   `allowPrivilegeEscalation: false`, drops all Linux capabilities, and sets
   `seccompProfile: RuntimeDefault` — the hardening that doesn't depend on

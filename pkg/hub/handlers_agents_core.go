@@ -2389,6 +2389,16 @@ func (s *Server) createAgentInProject(
 				"cannot create the agent: the user or agent it belongs to no longer exists", nil)
 			return
 		}
+		if errors.Is(err, errAgentOwnerUserDeleting) {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"cannot create the agent: the user it belongs to is being deleted", nil)
+			return
+		}
+		if errors.Is(err, errAgentGuardUserLookup) {
+			slog.ErrorContext(ctx, "agent create: guard user lookup failed", "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Could not verify the agent's owner; retry", nil)
+			return
+		}
 		if errors.Is(err, errAgentCreateWriteInvalid) {
 			slog.ErrorContext(ctx, "agent create: incomplete create write", "error", err)
 			InternalError(w)
@@ -5611,6 +5621,11 @@ const workspaceStorageUnconfiguredErrorCode = api.BrokerErrCodeWorkspaceStorageU
 // harness-config whose provisioner cannot run (ptone/scion#3132).
 const harnessConfigUnusableErrorCode = api.BrokerErrCodeHarnessConfigUnusable
 
+// storageMigrationRequiredErrorCode is the runtime broker's error code for
+// an agent start refused because its storage would be placed differently
+// than configured before server.project_storage (ptone/scion#6371).
+const storageMigrationRequiredErrorCode = api.BrokerErrCodeStorageMigrationRequired
+
 // dispatchCreateErrorResponse classifies a failed create/provision dispatch to
 // the runtime broker and writes the matching HTTP response.
 //
@@ -5729,8 +5744,8 @@ func relayWorkspaceStorageUnconfigured(w http.ResponseWriter, err error) bool {
 }
 
 // relayBrokerRefusal writes a broker 4xx refusal of a dispatch -- 422
-// harness_config_unusable, 403 forbidden, 400 validation_error or 409
-// conflict -- with the broker's status, code and message instead of the
+// harness_config_unusable, 422 storage_migration_required, 403 forbidden,
+// 400 validation_error or 409 conflict -- with the broker's status, code and message instead of the
 // generic 502, and reports whether it did. For any other error it writes
 // nothing and returns false.
 //
@@ -5761,6 +5776,7 @@ func relayBrokerRefusal(w http.ResponseWriter, err error) bool {
 	switch {
 	case se.StatusCode == http.StatusBadRequest && code == ErrCodeValidationError:
 	case se.StatusCode == http.StatusUnprocessableEntity && code == harnessConfigUnusableErrorCode:
+	case se.StatusCode == http.StatusUnprocessableEntity && code == storageMigrationRequiredErrorCode:
 	case se.StatusCode == http.StatusConflict && code == ErrCodeConflict:
 	case se.StatusCode == http.StatusForbidden && code == ErrCodeForbidden:
 		// Harness-config policy is today the broker's only producer of a

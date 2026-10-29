@@ -62,5 +62,12 @@ func (c RelayServerConfig) Validate() error {
 			errs = append(errs, fmt.Errorf("invalid %s: want an http(s) URL without query, fragment or credentials", f.key))
 		}
 	}
+	// The relay internal hop rule (CheckRelayTransport) for the hub
+	// internal API, named by key only. The public URL is client-facing,
+	// not the internal hop.
+	if c.HubInternalURL != "" && CheckRelayTransport(c.HubInternalURL) != nil {
+		errs = append(errs, fmt.Errorf("invalid server.relay.hub_internal_url: %w: it is neither https:// nor loopback; "+
+			"use the hub's TLS internal listener at an https:// URL (%s)", ErrPlaintextNonLoopback, relayTransportFix))
+	}
 	return errors.Join(errs...)
 }

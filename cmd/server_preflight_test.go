@@ -37,7 +37,6 @@ import (
 	"time"
 
 	"entgo.io/ent/dialect"
-	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
@@ -219,7 +218,7 @@ func openPreflightSnapshot(t *testing.T, brokerID, path string) *preflightReader
 // rawDB returns the read-write fixture's *sql.DB.
 func (h *preflightHub) rawDB(t *testing.T) *sql.DB {
 	t.Helper()
-	drv, ok := h.client.Driver().(*entsql.Driver)
+	drv, ok := entc.SQLDriver(h.client.Driver())
 	require.True(t, ok)
 	return drv.DB()
 }
@@ -593,7 +592,7 @@ func TestServerPreflight_DBIsReadOnly(t *testing.T) {
 	client, err := openPreflightClient("sqlite", path)
 	require.NoError(t, err)
 	defer func() { _ = client.Close() }()
-	db := client.Driver().(*entsql.Driver).DB()
+	db := entc.SQLDB(client.Driver())
 	var busy, queryOnly int
 	require.NoError(t, db.QueryRow("PRAGMA busy_timeout").Scan(&busy))
 	require.NoError(t, db.QueryRow("PRAGMA query_only").Scan(&queryOnly))

@@ -33,7 +33,7 @@ import (
 // config or dispatch endpoint is available.
 func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 	t.Run("linked project with settings at projectPath", func(t *testing.T) {
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
 		cfg.HubEndpoint = "http://localhost:9810"
@@ -79,7 +79,7 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 	})
 
 	t.Run("hub-managed project with settings in .scion subdirectory", func(t *testing.T) {
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
 		cfg.HubEndpoint = "http://localhost:9810"
@@ -130,7 +130,7 @@ func TestStartAgentProjectSettingsFallbackHubEndpoint(t *testing.T) {
 // TestStartAgentBrokerConfigUsedWhenNoProjectSettings verifies that the broker's
 // config HubEndpoint is used as fallback when project settings don't specify one.
 func TestStartAgentBrokerConfigUsedWhenNoProjectSettings(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.HubEndpoint = "http://localhost:9810"
@@ -173,7 +173,7 @@ func TestStartAgentBrokerConfigUsedWhenNoProjectSettings(t *testing.T) {
 // has no HubEndpoint configured, the hub endpoint from resolvedEnv (sent by
 // the hub dispatcher) is used as a fallback.
 func TestStartAgentResolvedEnvHubEndpointFallback(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.HubEndpoint = "" // Standalone broker without hub endpoint config
@@ -209,7 +209,7 @@ func TestStartAgentResolvedEnvHubEndpointFallback(t *testing.T) {
 // has no HubEndpoint configured, SCION_HUB_URL from resolvedEnv is accepted as
 // the fallback endpoint in the start path.
 func TestStartAgentResolvedEnvHubURLFallback(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.HubEndpoint = ""
@@ -247,7 +247,7 @@ func TestStartAgentResolvedEnvHubURLFallback(t *testing.T) {
 // the hub endpoint from resolvedEnv is localhost, the ContainerHubEndpoint
 // override is applied.
 func TestStartAgentResolvedEnvHubEndpointWithContainerOverride(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.HubEndpoint = ""                                              // No broker-level hub endpoint
@@ -337,7 +337,7 @@ runtimes:
 			t.Fatal(err)
 		}
 
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
 		cfg.HubEndpoint = "http://localhost:8080" // combo broker's own (loopback) view
@@ -431,7 +431,7 @@ runtimes:
 // SCION_HUB_ENDPOINT for the broker's ContainerHubEndpoint configuration.
 func TestHTTPStartAndRestart_DockerComboBridgeOverrideMatchesCreate(t *testing.T) {
 	newSrv := func() (*Server, *envCapturingManager) {
-		cfg := DefaultServerConfig()
+		cfg := testServerConfig()
 		cfg.BrokerID = "test-broker-id"
 		cfg.BrokerName = "test-host"
 		cfg.HubEndpoint = "http://localhost:8080" // combo broker's own (loopback) view
@@ -644,7 +644,7 @@ func TestRestartAgent_ContainerScanSuppliesSettingsFallback(t *testing.T) {
 		t.Fatalf("failed to write settings: %v", err)
 	}
 
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.ForceRuntime = "mock"
@@ -674,7 +674,7 @@ func TestRestartAgent_ContainerScanSuppliesSettingsFallback(t *testing.T) {
 // sends a localhost endpoint on port 8080 but the broker's ContainerHubEndpoint
 // was pre-computed with port 9810, the actual endpoint port (8080) is preserved.
 func TestCreateAgentPortPreservedAcrossBridge(t *testing.T) {
-	cfg := DefaultServerConfig()
+	cfg := testServerConfig()
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	cfg.Debug = true

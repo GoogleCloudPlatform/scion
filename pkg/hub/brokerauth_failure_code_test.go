@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -126,6 +127,14 @@ func TestBrokerAuthFailure_Q3_ResponseBodiesUnchangedAndClassified(t *testing.T)
 			wantMessage: "missing X-Scion-Nonce header", wantCode: auditevent.BrokerFailureMissingCredentials},
 		{name: "malformed timestamp", req: unsignedBrokerRequest(brokerID, "abc", "n3"),
 			wantMessage: `invalid timestamp format: strconv.ParseInt: parsing "abc": invalid syntax`, wantCode: auditevent.BrokerFailureMalformed},
+		{name: "unsized signed body", req: func() *http.Request {
+			r := unsignedBrokerRequest(brokerID, now, "n11")
+			r.Method = http.MethodPost
+			r.Body = io.NopCloser(strings.NewReader("{}"))
+			r.ContentLength = -1
+			r.TransferEncoding = []string{"chunked"}
+			return r
+		}(), wantMessage: "signed request body must declare its length", wantCode: auditevent.BrokerFailureMalformed},
 		{name: "clock skew", req: unsignedBrokerRequest(brokerID, strconv.FormatInt(time.Now().Add(-2*time.Hour).Unix(), 10), "n4"),
 			wantPrefix: "timestamp outside acceptable range (skew: ", wantCode: auditevent.BrokerFailureClockSkew},
 		{name: "replay", before: func(t *testing.T) {

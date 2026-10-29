@@ -328,7 +328,12 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"env_var.deliver":         "Material delivery grant evaluation, NonRouteUse only (ptone/scion#2129)",
 		"skill_injection.deliver": "Material delivery grant evaluation, NonRouteUse only (ptone/scion#2129)",
 		"secret.use":              "Agent runtime secret retrieval, enforced in material_runtime.go, not route-enforced",
-		"gcp_service_account.use": "Agent GCP token-mint request, NonRouteUse only (ptone/scion#2129)",
+		// Hub-minted service account creation (mintGCPServiceAccount; the
+		// hub-scope route is an authentication-only exemption with an inline
+		// policy check) and the mint capability it reports; not a cataloged
+		// base permission. The agent GCP token
+		// mint (gcp.identity.mint) decides gcp_service_account.use instead.
+		"gcp_service_account.mint": "Creation of Hub-minted service accounts: inline policy check in the mint handler, not a catalog base permission",
 	}
 
 	var unconsumed []string

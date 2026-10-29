@@ -83,7 +83,8 @@ export interface AdminUser {
   displayName: string;
   avatarUrl?: string;
   role: UserRole;
-  status: 'active' | 'suspended' | 'invited';
+  /** deleting: a forced deletion of the user is in progress. */
+  status: 'active' | 'suspended' | 'invited' | 'deleting';
   created: string;
   lastLogin?: string;
   lastSeen?: string;
@@ -1309,6 +1310,11 @@ export interface PresentedTarget {
   nodeSelector?: Record<string, string>;
   tolerations?: PresentedToleration[];
   runtimeClassName?: string;
+  /**
+   * True only when the instance reports placement. Absent or false means
+   * "not reported" (an older instance), not "no placement".
+   */
+  placementReported?: boolean;
 }
 
 /**
@@ -1464,6 +1470,41 @@ export interface RuntimeBroker {
    * for callers allowed to update the broker.
    */
   hostIdentity?: BrokerHostIdentity;
+  /**
+   * Where the broker places project storage, as it last reported it.
+   * Mirrors Go api.BrokerWorkspaceStorage (pkg/api/workspace_storage.go).
+   * Absent when the broker never reported it (an older broker).
+   */
+  workspaceStorage?: BrokerWorkspaceStorage;
+}
+
+/** Mirrors Go api.BrokerWorkspaceStorage (pkg/api/workspace_storage.go). */
+export interface BrokerWorkspaceStorage {
+  /** local, nfs, cloudrun-volume or gke-shared-volume. */
+  backend: string;
+  /** Set only for the nfs backend with a valid share. */
+  nfs?: BrokerNFSWorkspaceStorage;
+  /** Set only for the volume backends. */
+  volume?: BrokerVolumeWorkspaceStorage;
+  /** Where shared dirs are placed when that differs from backend; empty means with the workspace. */
+  sharedDirs?: string;
+  /** Where agent homes are placed: local or nfs; empty when the broker predates the field. */
+  homes?: string;
+}
+
+/** Mirrors Go api.BrokerNFSWorkspaceStorage. */
+export interface BrokerNFSWorkspaceStorage {
+  server: string;
+  export: string;
+  subPathRoot: string;
+  healthy: boolean;
+  exportId?: string;
+}
+
+/** Mirrors Go api.BrokerVolumeWorkspaceStorage. */
+export interface BrokerVolumeWorkspaceStorage {
+  claimName?: string;
+  subPathRoot: string;
 }
 
 /** Mirrors Go store.HostIdentityStatus (pkg/store/models.go). */

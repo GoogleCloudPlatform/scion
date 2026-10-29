@@ -356,6 +356,8 @@ func bearerMatrixQueryOverrides(f idFixtures) map[overrideKey]string {
 		{"chat.search.topic", "/api/v1/chat/search"}:   "q=chat&key=" + f.chatTopic,
 		{"chat.search.project", "/api/v1/chat/search"}: "q=chat&projectId=" + f.project,
 		{"chat.search.dm", "/api/v1/chat/search"}:      "q=chat&key=" + f.chat.dmAgent,
+		// The starred-only history variant.
+		{"chat.conversation.history.starred", "/api/v1/chat/conversations/{id}/messages"}: "starred=true",
 	}
 }
 
