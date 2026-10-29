@@ -83,7 +83,7 @@ func TestSharedWorkspaceKnownNotGit(t *testing.T) {
 	shared := &api.GitCloneConfig{URL: "https://example.com/org/repo.git", Branch: "main"}
 	cases := []struct {
 		name    string
-		prepare func(t *testing.T, f *workspaceGitFixture)
+		prepare func(f *workspaceGitFixture, t *testing.T)
 		in      startContextInputs
 		want    bool
 	}{
@@ -91,17 +91,17 @@ func TestSharedWorkspaceKnownNotGit(t *testing.T) {
 		{name: "hub-native project, explicit shared-plain mode", prepare: (*workspaceGitFixture).mkLeaf,
 			in: startContextInputs{WorkspaceMode: "shared-plain"}, want: true},
 		{name: "workspace directory does not exist yet (undeterminable)"},
-		{name: "workspace directory is a git repository", prepare: func(t *testing.T, f *workspaceGitFixture) {
+		{name: "workspace directory is a git repository", prepare: func(f *workspaceGitFixture, t *testing.T) {
 			f.mkLeaf(t)
 			gitInitDir(t, f.leaf)
 		}},
-		{name: "workspace directory has a .git file", prepare: func(t *testing.T, f *workspaceGitFixture) {
+		{name: "workspace directory has a .git file", prepare: func(f *workspaceGitFixture, t *testing.T) {
 			f.mkLeaf(t)
 			if err := os.WriteFile(filepath.Join(f.leaf, ".git"), []byte("gitdir: /elsewhere\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
 		}},
-		{name: "workspace directory is a symlink", prepare: func(t *testing.T, f *workspaceGitFixture) {
+		{name: "workspace directory is a symlink", prepare: func(f *workspaceGitFixture, t *testing.T) {
 			target := t.TempDir()
 			if err := os.MkdirAll(filepath.Dir(f.leaf), 0o755); err != nil {
 				t.Fatal(err)
@@ -130,7 +130,7 @@ func TestSharedWorkspaceKnownNotGit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newWorkspaceGitFixture(t)
 			if tc.prepare != nil {
-				tc.prepare(t, f)
+				tc.prepare(f, t)
 			}
 			in := tc.in
 			switch in.ProjectID {
