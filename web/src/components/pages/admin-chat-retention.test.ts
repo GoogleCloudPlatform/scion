@@ -81,7 +81,7 @@ function q<T extends Element = HTMLElement>(el: Panel, sel: string): T | null {
 function puts(): Array<Record<string, unknown>> {
   return apiFetch.mock.calls
     .filter(([, init]) => init?.method === 'PUT')
-    .map(([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>);
+    .map(([, init]) => JSON.parse(init?.body as string) as Record<string, unknown>);
 }
 
 /** Type into an sl-input and let the panel re-render. */
@@ -106,7 +106,12 @@ describe('buildRetentionPutBody', () => {
       body: {
         enabled: true,
         messages_retention_days: null,
-        sweep: { chunk_size: 200, pause_ms: 500, tick_budget_seconds: 30, tick_interval_minutes: 10 },
+        sweep: {
+          chunk_size: 200,
+          pause_ms: 500,
+          tick_budget_seconds: 30,
+          tick_interval_minutes: 10,
+        },
         expected_revision: 4,
       },
     });

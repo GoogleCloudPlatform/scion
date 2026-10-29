@@ -4939,9 +4939,7 @@ export class ScionChatThread extends LitElement {
 
       this.nextCursor = data.nextCursor || null;
       this.hasOlderMessages = this.nextCursor !== null;
-      this.retentionPurgedBefore = this.nextCursor
-        ? null
-        : data.retention?.purgedBefore || null;
+      this.retentionPurgedBefore = this.nextCursor ? null : data.retention?.purgedBefore || null;
       this.mergeMessages(items);
       this.afterHistoryPage(items);
       this.recordRecentFilesForHistory(items, recentFilesGeneration);

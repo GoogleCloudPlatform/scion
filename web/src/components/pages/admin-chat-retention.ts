@@ -177,7 +177,8 @@ export function retentionSaveErrors(body: unknown, fallback: string): string[] {
         .map((e) => {
           if (!e || typeof e !== 'object') return '';
           const { Path, Message, path, message } = e as Record<string, unknown>;
-          const msg = typeof Message === 'string' ? Message : typeof message === 'string' ? message : '';
+          const msg =
+            typeof Message === 'string' ? Message : typeof message === 'string' ? message : '';
           const at = typeof Path === 'string' ? Path : typeof path === 'string' ? path : '';
           return msg ? (at ? `${at}: ${msg}` : msg) : '';
         })
@@ -426,8 +427,8 @@ export class ScionAdminChatRetention extends LitElement {
         <h3 class="section-title">Chat retention</h3>
         <ul class="intro">
           <li>
-            Nothing is deleted until the sweep is enabled <strong>and</strong> a retention window
-            is set.
+            Nothing is deleted until the sweep is enabled <strong>and</strong> a retention window is
+            set.
           </li>
           <li>Deletes are permanent: removed messages cannot be restored.</li>
           <li>Take a database backup before enabling.</li>
@@ -480,7 +481,8 @@ export class ScionAdminChatRetention extends LitElement {
             placeholder="Keep forever"
             .value=${form.days}
             ?disabled=${this.saving}
-            @sl-input=${(e: Event) => this.updateForm({ days: (e.target as HTMLInputElement).value })}
+            @sl-input=${(e: Event) =>
+              this.updateForm({ days: (e.target as HTMLInputElement).value })}
           ></sl-input>
           <span class="hint"
             >Messages older than this are deleted. Empty keeps messages forever; at least
