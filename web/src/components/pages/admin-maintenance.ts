@@ -2181,7 +2181,11 @@ export class ScionPageAdminMaintenance extends LitElement {
     const latestChannel = target.startsWith('latest:') ? target.slice('latest:'.length) : null;
     const unsupported = this.updateStatus ? !this.updateStatus.installer.supported : false;
     return html`
-      <sl-dialog label="Update Hub" open @sl-request-close=${(e: Event) => this.closeUpdateConfirm(e)}>
+      <sl-dialog
+        label="Update Hub"
+        open
+        @sl-request-close=${(e: Event) => this.closeUpdateConfirm(e)}
+      >
         <div class="dialog-body">
           <p>
             ${latestChannel
@@ -2260,8 +2264,7 @@ export class ScionPageAdminMaintenance extends LitElement {
             : nothing}
           ${d.snapshotPath
             ? html`<p class="downgrade-snapshot">
-                A database snapshot is written to <code>${d.snapshotPath}</code> before the
-                install.
+                A database snapshot is written to <code>${d.snapshotPath}</code> before the install.
               </p>`
             : nothing}
           ${d.floor

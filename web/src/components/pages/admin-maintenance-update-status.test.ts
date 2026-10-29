@@ -1271,7 +1271,9 @@ describe('Reconnect after an update restart', () => {
         'warning'
       );
       expect(
-        versionSection(el!).querySelector('.last-update-rollback')?.textContent?.replace(/\s+/g, ' ')
+        versionSection(el!)
+          .querySelector('.last-update-rollback')
+          ?.textContent?.replace(/\s+/g, ' ')
       ).toBe('Rolled back to nightly-20261022 after nightly-20261023 failed to start');
       expect(versionSection(el!).querySelector('sl-alert.update-reconnect-error')).toBeNull();
     });
@@ -1858,10 +1860,12 @@ describe('Downgrade confirmation', () => {
     const d = dialog(el)!;
     expect(d.getAttribute('label')).toBe('Confirm Downgrade');
     const text = d.textContent!.replace(/\s+/g, ' ');
-    expect(text).toContain('Install nightly-20261020, which is older than the running version nightly-20261022');
-    expect(Array.from(d.querySelectorAll('.downgrade-risks li')).map((li) => li.textContent)).toEqual(
-      RISKS
+    expect(text).toContain(
+      'Install nightly-20261020, which is older than the running version nightly-20261022'
     );
+    expect(
+      Array.from(d.querySelectorAll('.downgrade-risks li')).map((li) => li.textContent)
+    ).toEqual(RISKS);
     expect(d.querySelector('.downgrade-snapshot code')?.textContent).toBe('/opt/scion/snapshots');
     expect(d.querySelector('.downgrade-floor')?.textContent).toContain('nightly-20261009');
 
@@ -2006,7 +2010,11 @@ describe('Downgrade confirmation', () => {
     confirmButton(el).click();
     await settle(el);
     expect(runBodies[1]).toEqual({
-      params: { target_version: 'latest:nightly', pin: 'latest', confirm_downgrade: 'nightly-20261020' },
+      params: {
+        target_version: 'latest:nightly',
+        pin: 'latest',
+        confirm_downgrade: 'nightly-20261020',
+      },
     });
   });
 
@@ -2071,9 +2079,7 @@ describe('Downgrade confirmation', () => {
         },
       ],
     });
-    expect(vi.mocked(showToast).mock.calls[0][0]).toContain(
-      "downgrade floor (nightly-20261021)"
-    );
+    expect(vi.mocked(showToast).mock.calls[0][0]).toContain('downgrade floor (nightly-20261021)');
     expect(dialog(el)).toBeNull();
     expect(root(el).querySelector('sl-dialog[label="Update Hub"]')).not.toBeNull();
   });
@@ -2086,6 +2092,8 @@ describe('Downgrade confirmation', () => {
     await pick(el, 'release-select', 'nightly-20261020');
     cardRoot(el).querySelector<HTMLElement>('sl-button.update-release')!.click();
     await settle(el);
-    expect(root(el).querySelector('sl-dialog[label="Update Hub"] .confirm-snapshot')).not.toBeNull();
+    expect(
+      root(el).querySelector('sl-dialog[label="Update Hub"] .confirm-snapshot')
+    ).not.toBeNull();
   });
 });
