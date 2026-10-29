@@ -69,7 +69,7 @@ const OPS = [
 
 interface Options {
   /** Body of GET update-status, or an HTTP status to fail with. */
-  status?: Json | number | (() => Json | number);
+  status?: Json | number | (() => Json | number | Promise<Json>);
   /**
    * Body of GET update-available; a function may answer differently per
    * call, with an HTTP status to fail with, or 'down' to reject.
@@ -121,6 +121,7 @@ function handler(opts: Options) {
     if (path === '/api/v1/admin/maintenance/update-status') {
       const raw = opts.status ?? updateStatus();
       const s = typeof raw === 'function' ? raw() : raw;
+      if (s instanceof Promise) return s.then((b) => json(b));
       if (typeof s === 'number') {
         return json({ error: { code: 'internal_error', message: 'status unavailable' } }, s);
       }
@@ -1110,9 +1111,7 @@ describe('Reconnect after an update restart', () => {
       expect(root(el!).querySelector('.update-check-banner')).toBeNull();
       expect(availableFetchCount()).toBe(2);
       expect(notices(el!).updateAvailable).toEqual({ update_available: false });
-      expect(
-        root(el!).querySelector('.update-available-banner:not(.unit-drift-banner)')
-      ).toBeNull();
+      expect(banner(el!)).toBeNull();
       expect(showToast).toHaveBeenCalledWith(
         'Hub updated to nightly-20261023 (verified).',
         'success'
@@ -1235,6 +1234,147 @@ describe('Reconnect after an update restart', () => {
       expect(showToast).toHaveBeenCalledWith('Update to nightly-20261023 failed.', 'warning');
     });
 
+    it('resolves an unknown before-version from lastUpdate for a run adopted on first load', async () => {
+      // The operations list answers before update-status, so the running
+      // run is adopted with no version known.
+      let releaseStatus: (b: Json) => void = () => {};
+      const firstStatus = new Promise<Json>((resolve) => {
+        releaseStatus = resolve;
+      });
+      let ops: Json[] = withRun('running');
+      let status: Json | Promise<Json> = firstStatus;
+      let calls = 0;
+      el = await mount({
+        operations: () => ops,
+        status: () => status,
+        checkUpdates: CHECK_AVAILABLE,
+        updateAvailable: () => (calls++ === 0 ? NOTIFIED : { update_available: false }),
+      });
+      const tracked = (el as unknown as { trackedUpdate: { fromVersion?: string } | null })
+        .trackedUpdate;
+      expect(tracked).not.toBeNull();
+      expect(tracked!.fromVersion).toBeUndefined();
+      releaseStatus(updateStatus());
+      await settle(el);
+      await (el as unknown as { checkForUpdates(): Promise<void> }).checkForUpdates();
+      await settle(el);
+
+      // The poll sees the run finish; the hub verified nightly-20261023.
+      ops = withRun('completed');
+      status = verified('run-1');
+      await el.loadData(true);
+      await settle(el);
+
+      expect(versionSection(el).querySelector('.current-version')?.textContent).toBe(
+        'nightly-20261023'
+      );
+      expect(notices(el).updateCheckResult).toBeNull();
+      expect(availableFetchCount()).toBe(2);
+      expect(notices(el).updateAvailable).toEqual({ update_available: false });
+    });
+
+    it('takes the before-version of an adopted restarting run from pendingUpdate.from', async () => {
+      // The status read during the restart already shows the new binary;
+      // only pendingUpdate.from says what ran before.
+      let finishWait: () => void = () => {};
+      let ops: Json[] = withRun('restarting');
+      let status: Json = updateStatus({
+        current: {
+          version: 'nightly-20261023',
+          channel: 'nightly',
+          commit: 'f00',
+          isGitBuild: false,
+        },
+        pendingUpdate: PENDING,
+      });
+      let calls = 0;
+      vi.mocked(waitForHubRestart).mockImplementation(
+        () =>
+          new Promise<Awaited<ReturnType<typeof waitForHubRestart>>>((resolve) => {
+            finishWait = () =>
+              resolve({
+                ok: true,
+                observed: { version: 'nightly-20261023', uptime: '3s', uptimeSeconds: 3 },
+              });
+          })
+      );
+      el = await mount({
+        operations: () => ops,
+        status: () => status,
+        checkUpdates: CHECK_AVAILABLE,
+        updateAvailable: () => (calls++ === 0 ? NOTIFIED : { update_available: false }),
+      });
+      expect(waitForHubRestart).toHaveBeenCalledTimes(1);
+      const tracked = (el as unknown as { trackedUpdate: { fromVersion?: string } | null })
+        .trackedUpdate;
+      expect(tracked?.fromVersion).toBe('nightly-20261022');
+      await (el as unknown as { checkForUpdates(): Promise<void> }).checkForUpdates();
+      await settle(el);
+
+      ops = withRun('completed');
+      status = verified('run-1');
+      finishWait();
+      await settle(el);
+
+      expect(notices(el).updateCheckResult).toBeNull();
+      expect(availableFetchCount()).toBe(2);
+    });
+
+    it.each([
+      [
+        'not verified yet',
+        { lastUpdate: null, pendingUpdate: PENDING },
+        'Hub restarted; the update result is not recorded yet.',
+      ],
+      [
+        'rolled back',
+        {
+          lastUpdate: {
+            runId: 'run-1',
+            from: 'nightly-20261022',
+            to: 'nightly-20261023',
+            status: 'rolled_back',
+            at: '2026-10-24T00:01:00Z',
+          },
+        },
+        'Update to nightly-20261023 rolled back.',
+      ],
+    ] as Array<[string, Json, string]>)(
+      'keeps the check result when the new binary answers but the run is %s',
+      async (_name, record, toast) => {
+        await updateAndComeBack(
+          () => NOTIFIED,
+          (hub) => {
+            hub.setOps(withRun('completed'));
+            hub.setStatus(
+              updateStatus({
+                current: {
+                  version: 'nightly-20261023',
+                  channel: 'nightly',
+                  commit: 'f00',
+                  isGitBuild: false,
+                },
+                ...record,
+              })
+            );
+            return {
+              ok: true,
+              observed: { version: 'nightly-20261023', uptime: '3s', uptimeSeconds: 3 },
+            };
+          }
+        );
+
+        expect(notices(el!).updateCheckResult).toEqual(CHECK_AVAILABLE);
+        expect(root(el!).querySelector('.update-check-banner')?.textContent).toContain(
+          'nightly-20261023'
+        );
+        // Safe branch: the stored notification is re-read, not cleared.
+        expect(availableFetchCount()).toBe(2);
+        expect(notices(el!).updateAvailable).toEqual(NOTIFIED);
+        expect(showToast).toHaveBeenCalledWith(toast, 'warning');
+      }
+    );
+
     it.each([
       ['an HTTP error', 500],
       ['a network error', 'down'],
@@ -1257,9 +1397,7 @@ describe('Reconnect after an update restart', () => {
         expect(availableFetchCount()).toBe(2);
         // The old notice does not stay up when the re-read fails.
         expect(notices(el!).updateAvailable).toBeNull();
-        expect(
-          root(el!).querySelector('.update-available-banner:not(.unit-drift-banner)')
-        ).toBeNull();
+        expect(banner(el!)).toBeNull();
         expect(notices(el!).updateCheckResult).toBeNull();
         expect(root(el!).querySelector('.error-state')).toBeNull();
         expect(versionSection(el!).querySelector('sl-alert.update-reconnect-error')).toBeNull();

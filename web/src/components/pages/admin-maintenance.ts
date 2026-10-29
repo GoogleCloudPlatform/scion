@@ -1388,30 +1388,49 @@ export class ScionPageAdminMaintenance extends LitElement {
     } else if (!isRunInProgress(run.status) && !this.updateReconnecting) {
       this.trackedUpdate = null;
       void this.fetchUpdateStatus().then(() => {
-        this.refreshUpdateNoticesAfterRun(tracked.fromVersion);
+        this.refreshUpdateNoticesAfterRun(tracked);
         this.reportUpdateResult(tracked, run.status);
       });
     }
   }
 
   /**
+   * The version the hub ran before a tracked update: the one recorded when
+   * the run was tracked, else the hub's own record for this run
+   * (pendingUpdate.from while it restarts, lastUpdate.from once settled).
+   * A run adopted on first load may be tracked before update-status has
+   * loaded. Undefined when none is known.
+   */
+  private updateFromVersion(tracked: TrackedUpdate): string | undefined {
+    if (tracked.fromVersion) return tracked.fromVersion;
+    const pending = this.updateStatus?.pendingUpdate ?? null;
+    if (pending && pending.runId === tracked.runId && pending.from) return pending.from;
+    const last = this.updateStatus?.lastUpdate ?? null;
+    if (last && last.runId === tracked.runId && last.from) return last.from;
+    return undefined;
+  }
+
+  /**
    * Brings the "Update available" notices up to date once an update run
    * has ended and update-status has been reloaded (ptone/scion#6557).
    *
-   * - The hub is on a different version than when the update started: the
-   *   notices were computed against the old version. The update check
-   *   result is dropped, and the stored notification is cleared and
-   *   re-read.
-   * - Same version (the update failed or was rolled back) or a version not
-   *   known: the check result stays, and the stored notification is only
+   * - The hub recorded this run as verified and runs a different version
+   *   than before it: the notices were computed against the old version.
+   *   The update check result is dropped, and the stored notification is
+   *   cleared and re-read.
+   * - Otherwise (failed, rolled back, not verified yet, or a version not
+   *   known): the check result stays, and the stored notification is only
    *   re-read. Starting the update hid the banner, and the hub keeps the
    *   notification for a retry, so the banner comes back.
    *
    * fetchUpdateAvailable handles its own errors and is not awaited.
    */
-  private refreshUpdateNoticesAfterRun(fromVersion: string | undefined): void {
+  private refreshUpdateNoticesAfterRun(tracked: TrackedUpdate): void {
+    const from = this.updateFromVersion(tracked);
     const after = this.updateStatus?.current.version;
-    if (fromVersion && after && fromVersion !== after) {
+    const last = this.updateStatus?.lastUpdate ?? null;
+    const verified = !!last && last.runId === tracked.runId && last.status === 'verified';
+    if (verified && from && after && from !== after) {
       this.updateCheckResult = null;
       this.updateCheckError = null;
       // Cleared first: if the re-read fails, a notice about the old
@@ -1517,7 +1536,7 @@ export class ScionPageAdminMaintenance extends LitElement {
         this.startPolling();
         return;
       }
-      this.refreshUpdateNoticesAfterRun(tracked.fromVersion);
+      this.refreshUpdateNoticesAfterRun(tracked);
       if (result.ok) {
         this.reportUpdateResult(tracked, 'restarted');
         return;
