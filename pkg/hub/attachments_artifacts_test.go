@@ -532,17 +532,15 @@ func TestStageChatAttachments_ArtifactProjectionOnRef(t *testing.T) {
 
 	// Direct conversation key: inbox only.
 	refs := []AttachmentRef{newArtifactAttachmentRef(info[resp.ID][0])}
-	paths, mounts, notDelivered := f.srv.stageChatAttachments(context.Background(), dm, f.projA.ID, resp.ID, refs)
+	paths, mounts := f.srv.stageChatAttachments(context.Background(), dm, f.projA.ID, resp.ID, refs)
 	assert.Empty(t, paths)
 	assert.Empty(t, mounts)
-	assert.Empty(t, notDelivered, "a delivered artifact attachment is not reported as not delivered")
 	assert.Empty(t, refs[0].projectedPath, "a DM attachment is never projected")
 	assert.NoDirExists(t, filepath.Join(stagingDir, id))
 
 	// Project topic thread key: projected.
 	refs = []AttachmentRef{newArtifactAttachmentRef(info[resp.ID][0])}
-	paths, mounts, notDelivered = f.srv.stageChatAttachments(context.Background(), f.topicA, f.projA.ID, resp.ID, refs)
-	assert.Empty(t, notDelivered)
+	paths, mounts = f.srv.stageChatAttachments(context.Background(), f.topicA, f.projA.ID, resp.ID, refs)
 	assert.Empty(t, paths, "a delivered artifact attachment adds no legacy entry")
 	assert.Empty(t, mounts)
 	assert.Equal(t, "/scion-volumes/scratchpad/.attachments/_webchat/"+id+"/p.txt", refs[0].projectedPath)
@@ -558,8 +556,9 @@ func TestStageChatAttachments_ArtifactProjectionOnRef(t *testing.T) {
 // TestAttachmentArtifacts_DMToAgentNotProjected: with artifacts on, an
 // attachment sent to an agent in a direct conversation is delivered to the
 // inbox only and never projected into the scratchpad.
-// The experiment is read at send time: once it is explicitly off, the same
-// kind of send of a legacy attachment makes no scratchpad copy either.
+// The experiment is read at send time: once it is off, the same kind of
+// send stages the legacy attachment for the agent (T1 behaviour, the
+// documented T1-only Low).
 func TestAttachmentArtifacts_DMToAgentNotProjected(t *testing.T) {
 	f := newRefFixture(t)
 	enableAttachmentArtifacts(t, f)
@@ -573,7 +572,9 @@ func TestAttachmentArtifacts_DMToAgentNotProjected(t *testing.T) {
 	setAttachmentExperiments(t, f.srv, false, false)
 	legacy := f.uploadAs(t, f.ua, "", "legacy.txt", "legacy bytes")
 	f.sendWith(t, f.ua, dm, legacy)
-	assert.NoDirExists(t, filepath.Join(stagingDir, legacy), "with artifacts off a DM attachment is not staged")
+	got, err := os.ReadFile(filepath.Join(stagingDir, legacy, "legacy.txt"))
+	require.NoError(t, err, "with artifacts off a DM attachment is staged (no inbox delivery exists)")
+	assert.Equal(t, "legacy bytes", string(got))
 }
 
 // TestAttachmentArtifacts_UploadedOnSentOffNotProjectedInDM: an attachment

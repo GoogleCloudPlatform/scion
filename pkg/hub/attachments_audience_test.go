@@ -31,16 +31,15 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Attachments reach agents by delivery into their home; a copy in the
-// project's scratchpad is made only for a whole-project audience, on every
-// backend, with attachment artifacts on (the default wherever the artifact
-// service is ready, local blob storage included) or off.
+// With attachment artifacts on (the default wherever the artifact service
+// is ready, local blob storage included), attachments reach agents by
+// delivery into their home; a copy in the project's scratchpad is made only
+// for a whole-project audience.
 
 // localStorageHub prepares f as a hub with local blob storage and no
 // object storage (a workstation or single-node hub): an artifact store, a
@@ -115,66 +114,11 @@ func TestAttachmentAudience_LocalDefaults_DMAndTopic(t *testing.T) {
 	assert.Equal(t, "topic bytes", got.body)
 }
 
-// TestAttachmentAudience_ArtifactsExplicitlyOff_DMNotDelivered: with
-// attachment artifacts explicitly off, a direct-conversation attachment is
-// not copied into the scratchpad and no path is sent; the agent reads a
-// not-delivered line, which the stored message does not carry. The file
-// still downloads from history. A project topic thread is staged as
-// before.
-func TestAttachmentAudience_ArtifactsExplicitlyOff_DMNotDelivered(t *testing.T) {
-	f := newRefFixture(t)
-	stagingDir, disp := localStorageHub(t, f)
-	storeAttachmentArtifactsOverride(t, f.srv, false)
-	require.False(t, f.srv.experimentEnabled(experiments.AttachmentArtifacts))
-	require.NoError(t, f.wcs.UpdateTopic(context.Background(), f.topicA, TopicUpdate{DefaultAgent: &f.aa.Slug}))
-
-	dm := dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID)
-	legacy := f.uploadAs(t, f.ua, "", "legacy.txt", "legacy bytes")
-	resp := f.sendWith(t, f.ua, dm, legacy)
-	assert.NoDirExists(t, filepath.Join(stagingDir, legacy), "no scratchpad copy with artifacts off")
-	call := callTo(t, disp, f.aa)
-	assert.Empty(t, call.StructuredMessage.Attachments, "no path is listed")
-	assert.Empty(t, call.StructuredMessage.AttachmentMounts)
-	assert.Empty(t, call.StructuredMessage.AttachmentDeliveries)
-	assert.Contains(t, call.StructuredMessage.Msg, "Attachment not delivered: legacy.txt")
-	assert.Contains(t, call.Message, "Attachment not delivered: legacy.txt")
-	stored, err := f.st.GetMessagesByIDs(context.Background(), []string{resp.ID})
-	require.NoError(t, err)
-	require.NotNil(t, stored[resp.ID])
-	assert.NotContains(t, stored[resp.ID].Msg, "Attachment not delivered", "history keeps the sender's text")
-	got := f.download(t, f.ua, legacy)
-	require.Equal(t, http.StatusOK, got.status, got.body)
-	assert.Equal(t, "legacy bytes", got.body)
-
-	inTopic := f.uploadAs(t, f.ua, f.projA.ID, "topic.txt", "topic bytes")
-	f.sendWith(t, f.ua, f.topicA, inTopic)
-	assert.FileExists(t, filepath.Join(stagingDir, inTopic, "topic.txt"), "a project topic thread is still staged")
-	call = callTo(t, disp, f.aa)
-	assert.NotContains(t, call.StructuredMessage.Msg, "Attachment not delivered")
-}
-
-// TestAttachmentAudience_ParticipantGroupKeyNotStaged: a legacy attachment
-// on a participant-list group conversation's key is not copied into a
-// local scratchpad and is reported as not delivered.
-func TestAttachmentAudience_ParticipantGroupKeyNotStaged(t *testing.T) {
-	srv, s, project, sharedDir := agentAttachmentServer(t)
-	group := seedGroupConversation(t, s, project.ID, "crew")
-	ref := saveLegacyAttachment(t, srv, project.ID, "group.txt", "group bytes")
-	for _, key := range []string{group, "group:" + project.ID + ":crew"} {
-		paths, mounts, notDelivered := srv.stageChatAttachments(context.Background(), key, project.ID, api.NewUUID(), []AttachmentRef{ref})
-		assert.Empty(t, paths, key)
-		assert.Empty(t, mounts, key)
-		assert.Len(t, notDelivered, 1, key)
-	}
-	assert.NoDirExists(t, filepath.Join(sharedDir, ".attachments", "_webchat", ref.ID))
-}
-
 // TestAttachmentAudience_TwoUsers: two users each have an agent in the same
 // project on a local-storage hub. A direct-conversation attachment from
-// user A to A's agent is not readable through user B's agent, with the
-// defaults or with attachment artifacts explicitly off: no copy reaches the
-// scratchpad both agents mount, the artifact service refuses B's agent, and
-// B cannot download it.
+// user A to A's agent is not readable through user B's agent with the
+// defaults: no copy reaches the scratchpad both agents mount, the artifact
+// service refuses B's agent, and B cannot download it.
 func TestAttachmentAudience_TwoUsers(t *testing.T) {
 	f := newRefFixture(t)
 	ctx := context.Background()
@@ -196,13 +140,6 @@ func TestAttachmentAudience_TwoUsers(t *testing.T) {
 	assert.False(t, svc.MayReadAttachments(withStandingMemo(storedAgentContext(ab)), resp.ID, found[resp.ID][0].MessageProjectID),
 		"user B's agent does not read the attachment")
 	requireSameAnswer(t, missing, f.download(t, f.ub, id))
-
-	// Explicitly off: a legacy upload, never copied where B's agent reads.
-	storeAttachmentArtifactsOverride(t, f.srv, false)
-	legacy := f.uploadAs(t, f.ua, "", "private-legacy.txt", "for aa too")
-	f.sendWith(t, f.ua, dm, legacy)
-	assert.NoDirExists(t, filepath.Join(stagingDir, legacy))
-	requireSameAnswer(t, missing, f.download(t, f.ub, legacy))
 }
 
 // TestAttachmentAudience_LocalDefaults_ParticipantGroupSend: end to end on
