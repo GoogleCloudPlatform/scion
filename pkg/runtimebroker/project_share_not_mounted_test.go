@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // A start refused because the project storage share is not mounted on the
@@ -79,7 +80,7 @@ func TestProjectShareNotMounted_SyncPaths(t *testing.T) {
 }
 
 func TestClassifyStartError_ProjectShareNotMounted(t *testing.T) {
-	code, _, message := classifyStartError(context.Background(), projectShareNotMountedErr(), "", "")
+	code, _, message := classifyStartError(context.Background(), projectShareNotMountedErr(), "", "", store.LaunchKindCreate)
 	if code != ErrCodeProjectStorageUnavailable {
 		t.Errorf("code = %q, want %q", code, ErrCodeProjectStorageUnavailable)
 	}

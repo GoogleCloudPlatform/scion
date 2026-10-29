@@ -153,9 +153,11 @@ func (rec *launchRecord) CancelLocal() {
 }
 
 // launchRegistry tracks local launch bookkeeping keyed by (projectID, slug)
-// (design §3.8.1). It is a pure optimisation: a replica restart loses it
-// with no correctness impact, because the Hub always resolves the launch's
-// fate independently (the reaper, or the next report's answer).
+// (design §3.8.1). It is in memory only and a replica restart loses it.
+// That has no correctness impact: the launch journal (launch_journal.go, under
+// the broker's state directory) is what a restarted broker recovers
+// in-flight launches from, and the Hub resolves each launch's fate
+// independently (the reaper, or the next report's answer).
 type launchRegistry struct {
 	mu      sync.Mutex
 	records map[launchKey]*launchRecord

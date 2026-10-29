@@ -25,6 +25,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // TestStartWithoutHubTokenReportsCause pins that a Manager.Start failure
@@ -105,7 +106,7 @@ func TestStartWithoutHubTokenReportsCause(t *testing.T) {
 	}
 
 	t.Run("async launch report", func(t *testing.T) {
-		code, _, msg := classifyStartError(context.Background(), wrapped, "", "")
+		code, _, msg := classifyStartError(context.Background(), wrapped, "", "", store.LaunchKindCreate)
 		if code != api.LaunchCodeRuntimeError {
 			t.Errorf("code %q, want %q", code, api.LaunchCodeRuntimeError)
 		}

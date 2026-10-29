@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // storageRefusalErr is the agent manager's refusal of a start whose
@@ -94,7 +95,7 @@ func TestStorageMigrationRequired_DispatchPathsAnswer422(t *testing.T) {
 // An async launch reports the storage_migration_required code with the
 // public message.
 func TestClassifyStartError_StorageMigrationRequired(t *testing.T) {
-	code, _, msg := classifyStartError(context.Background(), storageRefusalErr(t), "", "")
+	code, _, msg := classifyStartError(context.Background(), storageRefusalErr(t), "", "", store.LaunchKindCreate)
 	if code != ErrCodeStorageMigrationRequired {
 		t.Errorf("code = %q, want %q", code, ErrCodeStorageMigrationRequired)
 	}
