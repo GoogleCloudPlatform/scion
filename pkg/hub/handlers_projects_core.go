@@ -1309,7 +1309,7 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 		return storageErr("workspace leaf", err)
 	}
 	_ = root.Close()
-	fd, _, err := shareddirs.EnsureLeafOwned(base, filepath.Join(pr.RelPath, provision.ProvisionStateDirName), res.Owner())
+	fd, _, err := shareddirs.EnsureLeaf(base, filepath.Join(pr.RelPath, provision.ProvisionStateDirName))
 	if err != nil {
 		cleanup()
 		return storageErr("provisioning state directory", err)

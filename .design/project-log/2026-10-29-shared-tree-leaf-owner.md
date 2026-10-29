@@ -37,21 +37,28 @@ agents running as the nfs uid could not write shared dirs.
   before.
 - `EnsureLeaf` and `EnsurePrivateDir` are the zero-owner forms and are
   unchanged.
-- **The project configuration directory** `<ProjectRoot>/.scion` keeps the
-  zero owner (`EnsurePrivateDir`). It holds the project's identity
-  (project-id, project-slug), only Scion components write it, and it must
-  never be agent-writable.
+- **The project-root trust directories keep the zero owner:**
+  - the project configuration directory `<ProjectRoot>/.scion`
+    (`EnsurePrivateDir`), which holds the project's identity (project-id,
+    project-slug);
+  - the provisioning state directory `<ProjectRoot>/provision`, which holds
+    the provisioning locks and sentinel.
+
+  Only Scion components write them, and they must never be agent-writable.
+  Only the leaves agents use are given the owner.
 - **`pkg/projectfs`:** `Resolved` carries the Layout's `UID` and `GID`
   (`OwnerUID`, `OwnerGID`, `Owner()`). `Resolved.Open(create)` uses the owned
   walk, so shared-dir, workspace and migration leaves created through it get
   the owner.
-- **Call sites passing the Layout's owner:**
+- **Call sites passing the Layout's owner (agent-used leaves only):**
   - shared-dir leaves: `pkg/agent` `resolveSharedDirs` and `pkg/runtime`
     `ResolveSharedDirHostPath`;
-  - the broker's shared bootstrap and shared-plain workspace leaves, and their
-    provisioning state directories (`pkg/runtimebroker`);
-  - the shared-dir migration state directory;
-  - the hub's provisioning state directory at shared-workspace provisioning.
+  - the broker's shared bootstrap and shared-plain workspace leaves, through
+    `ensureWorkspaceAndStateLeaves` in `pkg/runtimebroker`, which keeps their
+    provisioning state directory at the zero owner.
+
+  The hub's and the shared-dir migration's provisioning state directories keep
+  `EnsureLeaf`, unchanged.
 
   `ProvisionShared` keeps setting the workspace content's ownership as
   before. It does not chown the leaf a second time.
@@ -95,4 +102,7 @@ agents running as the nfs uid could not write shared dirs.
     nfs-owned;
   - `TestOpenCreate_RootCreatorOwnsSharedDirLeaf`.
 - `pkg/agent` `TestResolveSharedDirs_NFS_LeafOwnerAndAgentGroup`.
+- `pkg/runtimebroker`
+  `TestEnsureWorkspaceAndStateLeaves_StateDirKeepsZeroOwner`: the workspace
+  leaf is owned and the provisioning state directory is not.
 - `pkg/config` `TestSynthesizeProjectStorage_LegacySharedDirsOwnerDefaults`.
