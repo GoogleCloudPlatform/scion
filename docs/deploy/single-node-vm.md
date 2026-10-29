@@ -250,7 +250,12 @@ run as the `scion` user (through `runuser`):
    `SIGHUP` or `SIGPIPE`), the limit was reached by restarts, not by a crash
    loop. Every update and **Restart Hub** exits cleanly and is restarted by
    systemd, and those starts count towards the limit too. In that case the
-   script restarts the Hub without changing releases.
+   script restarts the Hub without changing releases. So five intentional
+   restarts within 300 seconds (updates, **Restart Hub**,
+   `systemctl restart`) do not roll back a healthy release. A crash (a
+   non-zero exit status, a failure to start the binary, or death by any
+   other signal, such as `SIGSEGV`, `SIGABRT` or `SIGKILL`) counts as a
+   failure and leads to the rollback below.
 3. It refuses unless `/opt/scion/previous` resolves to a release directory
    directly inside `/opt/scion/releases/` that contains a `scion` binary. A
    `previous` that leaves `releases/` (through `..`, an absolute target or a

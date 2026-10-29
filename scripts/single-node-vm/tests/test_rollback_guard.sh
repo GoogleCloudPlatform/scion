@@ -112,7 +112,8 @@ test_rollback_noop_unless_start_limit_hit() {
 }
 
 # The start limit also counts clean restarts (self-SIGTERM on update or
-# Restart Hub): the hub is restarted, not rolled back.
+# Restart Hub): five intentional restarts within 300 s hit it with a clean
+# last exit, and the hub is restarted, not rolled back.
 test_rollback_clean_exits_restart_without_swap() {
   local exit_spec
   for exit_spec in "1 0" "2 15" "2 2" "2 1" "2 13"; do
@@ -136,7 +137,8 @@ test_rollback_clean_exits_restart_without_swap() {
 
 test_rollback_swaps_current_and_previous() {
   local exit_spec
-  for exit_spec in "1 1" "1 203" "2 9" "2 11" "3 6"; do
+  # exit 1, exec failure (203), killed by KILL/SEGV/ABRT, ABRT with core.
+  for exit_spec in "1 1" "1 203" "2 9" "2 11" "2 6" "3 6"; do
     _rb_new_host
     # shellcheck disable=SC2086 # two words: code and status
     _rb_props start-limit-hit $exit_spec
