@@ -970,6 +970,81 @@ func TestCreateSharedWorkspaceProject_SharedBackend_TokenBoundToRecordedRemote(t
 	assert.Equal(t, "https://mirror.example.invalid/team/mirror.git", in.GitClone.URL)
 }
 
+// TestCreateSharedWorkspaceProject_SharedBackend_NoCredentialRunsUnbound: the
+// hub's shared-workspace clone with no project credential runs anonymously
+// on ANY host, the GitHub host included: unbound (no token, no token remote),
+// so the hardened clone resets the hub host's own git authentication for it.
+// With a resolved credential (here the creator's token on the GitHub host)
+// the binding is kept.
+func TestCreateSharedWorkspaceProject_SharedBackend_NoCredentialRunsUnbound(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	f.useNFS()
+	seen := cloneLocalFixture(t, newSourceRepo(t))
+	create := func(name, remote string) provision.ProvisionInput {
+		t.Helper()
+		before := len(*seen)
+		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
+			Name: name, GitRemote: remote, WorkspaceMode: store.WorkspaceModeShared,
+		})
+		require.Equal(t, http.StatusCreated, rec.Code, "%s: body: %s", name, rec.Body.String())
+		require.Len(t, *seen, before+1, "%s: one provisioning call", name)
+		return (*seen)[before]
+	}
+
+	for _, tc := range []struct{ name, remote string }{
+		{"Off Host No Token", "ghe.example.invalid/team/off"},
+		{"GitHub Host No Token", "github.com/team/on"},
+	} {
+		in := create(tc.name, tc.remote)
+		assert.Empty(t, in.CloneToken, tc.name)
+		assert.Empty(t, in.CloneTokenRemote, "%s: with no project credential the clone runs unbound", tc.name)
+		assert.True(t, in.HostGitHardened, tc.name)
+	}
+
+	const token = "test-creator-token"
+	f.srv.SetSecretBackend(&userTokenSecretBackend{value: token})
+	in := create("GitHub Host With Token", "github.com/team/tok")
+	assert.Equal(t, token, in.CloneToken)
+	assert.Equal(t, "github.com/team/tok", in.CloneTokenRemote, "with a project credential the binding is kept")
+}
+
+// TestCreateSharedWorkspaceProject_SharedBackend_SSHWithoutProjectSecretRefused:
+// the hub's shared-workspace clone of an ssh or scp repository URL with no
+// project git credential is refused (422, fixed text) before provisioning;
+// with a credential it goes ahead.
+func TestCreateSharedWorkspaceProject_SharedBackend_SSHWithoutProjectSecretRefused(t *testing.T) {
+	f := newWorkspaceLayoutFixture(t)
+	f.useNFS()
+	seen := cloneLocalFixture(t, newSourceRepo(t))
+	create := func(name, remote, label string) (int, string) {
+		t.Helper()
+		labels := map[string]string{}
+		if label != "" {
+			labels[store.LabelCloneURL] = label
+		}
+		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
+			Name: name, GitRemote: remote, WorkspaceMode: store.WorkspaceModeShared, Labels: labels,
+		})
+		return rec.Code, rec.Body.String()
+	}
+	for _, tc := range []struct{ name, label string }{
+		{"SSH Label No Secret", "ssh://git@git.example.invalid/team/s.git"},
+		{"SCP Label No Secret", "git@git.example.invalid:team/s.git"},
+	} {
+		before := len(*seen)
+		code, body := create(tc.name, "git.example.invalid/team/s", tc.label)
+		assert.Equal(t, http.StatusUnprocessableEntity, code, "%s: %s", tc.name, body)
+		assert.Contains(t, body, errSSHCloneURLNeedsProjectSecret.Error(), tc.name)
+		assert.Len(t, *seen, before, "%s: nothing is provisioned", tc.name)
+	}
+
+	f.srv.SetSecretBackend(&userTokenSecretBackend{value: "test-creator-token"})
+	before := len(*seen)
+	code, body := create("SCP Label With Credential", "github.com/team/s", "git@github.com:team/s.git")
+	require.Equal(t, http.StatusCreated, code, body)
+	require.Len(t, *seen, before+1, "with a credential the clone goes ahead")
+}
+
 // TestCreateSharedWorkspaceProject_SharedBackend_CloneFailureKeepsExistingRoot:
 // the rollback of a failed provisioning removes only a project root that
 // this create made; a root that already existed (content another writer

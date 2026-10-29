@@ -1350,10 +1350,14 @@ var provisionSharedClone = provision.ProvisionShared
 // refusal of a project's clone URL for a hub-side clone, and reports whether
 // it wrote the response.
 func writeSharedCloneSourceRefused(w http.ResponseWriter, err error) bool {
-	if !errors.Is(err, provision.ErrHostCloneURLRefused) {
+	switch {
+	case errors.Is(err, provision.ErrHostCloneURLRefused):
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeInvalidRequest, provision.ErrHostCloneURLRefused.Error(), nil)
+	case errors.Is(err, errSSHCloneURLNeedsProjectSecret):
+		writeError(w, http.StatusUnprocessableEntity, ErrCodeInvalidRequest, errSSHCloneURLNeedsProjectSecret.Error(), nil)
+	default:
 		return false
 	}
-	writeError(w, http.StatusUnprocessableEntity, ErrCodeInvalidRequest, provision.ErrHostCloneURLRefused.Error(), nil)
 	return true
 }
 
@@ -1439,6 +1443,19 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 	if project.GitRemote == "" {
 		legacyLockDir = ""
 	}
+	// With no project credential the clone runs anonymously: it is run
+	// unbound, so the hardened clone resets the hub host's own git
+	// authentication for it, on any host.
+	tokenRemote := project.GitRemote
+	if cloneToken == "" {
+		tokenRemote = ""
+	}
+	if cloneCfg != nil {
+		if err := sshCloneURLRefused(cloneCfg.URL, cloneToken != ""); err != nil {
+			cleanup()
+			return err
+		}
+	}
 	err = provisionSharedClone(provision.ProvisionInput{
 		Ctx:              ctx,
 		Resolved:         provision.ResolvedWorkspace{HostPath: res.HostPath},
@@ -1446,7 +1463,7 @@ func (s *Server) provisionSharedWorkspace(ctx context.Context, project *store.Pr
 		Mode:             store.SharingModeSharedPlain,
 		GitClone:         cloneCfg,
 		CloneToken:       cloneToken,
-		CloneTokenRemote: project.GitRemote,
+		CloneTokenRemote: tokenRemote,
 		HostGitHardened:  true,
 		NFSUID:           layout.UID,
 		NFSGID:           layout.GID,
@@ -1695,6 +1712,9 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 	if localFixture {
 		cloneErr = util.CloneSharedWorkspace(workspacePath, cloneURL, defaultBranch, "")
 	} else {
+		if err := s.refuseSSHWithoutProjectSecret(ctx, project, cloneURL); err != nil {
+			return err
+		}
 		token, hardening := s.hostGitAccess(ctx, project, cloneURL)
 		cloneErr = util.CloneSharedWorkspaceHardened(workspacePath, cloneURL, defaultBranch, token, hardening)
 	}

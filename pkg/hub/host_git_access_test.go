@@ -497,22 +497,56 @@ func TestHostGitAccess_BoundPullAuthenticates(t *testing.T) {
 	assert.Contains(t, body, `"updated":true`)
 }
 
-// The trace endpoint's ambient credential store and extra headers answer a
-// pull of the project's recorded remote when the project has no token
-// (bound URLs keep the host's own git authentication), so the pull's
-// no-credential assertions above are not vacuous.
-func TestHostGitAccess_PullTraceIsLive(t *testing.T) {
-	tr := newHostGitTrace(t)
-	srv, st, _ := hostGitTokenServer(t)
-	p := hostGitProvisionedProject(t, srv, st, "host-git-pull-live", tr.url("org/repo"), "")
-	m := tr.mark()
+// configureTraceAsGitHubHost makes the trace endpoint's host the configured
+// GitHub host.
+func configureTraceAsGitHubHost(srv *Server, tr *hostGitTrace) {
+	srv.mu.Lock()
+	srv.config.GitHubAppConfig.APIBaseURL = tr.srv.URL + "/api/v3"
+	srv.mu.Unlock()
+}
 
-	code, body := hostGitPull(t, srv, p.ID)
-	require.NotEqual(t, http.StatusOK, code, body)
+// assertTraceAmbientIsLive runs git directly (not through the hub) against the
+// trace endpoint and asserts that the host's own credential store and extra
+// headers answer it, so a later "no host credential" assertion is not vacuous.
+func assertTraceAmbientIsLive(t *testing.T, tr *hostGitTrace) {
+	t.Helper()
+	m := tr.mark()
+	cmd := exec.Command("git", "ls-remote", tr.url("org/repo"))
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	_ = cmd.Run() // the endpoint answers 401; only what git sent matters
 	got := tr.seen()[m.auth:]
-	require.NotEmpty(t, got, "the host's credential store must answer a bound pull with no project token")
+	require.NotEmpty(t, got, "fixture check: the host's credential store must answer a direct git call")
 	assert.Equal(t, "ambient:ambient-secret", got[0])
 	assert.Subset(t, tr.seenHeaders()[m.headers:], []string{"generic", "host", "full"})
+}
+
+// With no project credential the pull runs anonymously on ANY host, the
+// GitHub host included: git gets none of the hub host's own git
+// authentication (no credential from its helpers, no askpass, none of its
+// extra headers), although that authentication answers a direct git call.
+func TestHostGitAccess_PullTraceIsLive(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		gitHubHost bool
+	}{
+		{"recorded remote off the GitHub host", false},
+		{"recorded remote on the GitHub host", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := newHostGitTrace(t)
+			assertTraceAmbientIsLive(t, tr)
+			srv, st, _ := hostGitTokenServer(t)
+			if tc.gitHubHost {
+				configureTraceAsGitHubHost(srv, tr)
+			}
+			p := hostGitProvisionedProject(t, srv, st, "host-git-pull-anon", tr.url("org/repo"), "")
+			m := tr.mark()
+
+			code, body := hostGitPull(t, srv, p.ID)
+			require.NotEqual(t, http.StatusOK, code, body)
+			tr.assertNoCredential(t, m)
+		})
+	}
 }
 
 // An unbound https clone and pull of a repository that needs no credential
