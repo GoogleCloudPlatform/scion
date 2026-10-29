@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 )
 
 const testSharedDirProjectID = "0123abcd-0000-4000-8000-000000000001"
@@ -282,8 +283,8 @@ func TestResolveSharedDirHostPath_NFSBackstopRefusesSwappedLeaf(t *testing.T) {
 
 	orig := ensureSharedDirLeaf
 	t.Cleanup(func() { ensureSharedDirLeaf = orig })
-	ensureSharedDirLeaf = func(hostBase, rel string) (int, bool, error) {
-		fd, existed, err := orig(hostBase, rel)
+	ensureSharedDirLeaf = func(hostBase, rel string, owner shareddirs.Owner) (int, bool, error) {
+		fd, existed, err := orig(hostBase, rel, owner)
 		if err != nil {
 			return fd, existed, err
 		}
@@ -318,7 +319,7 @@ func TestResolveSharedDirHostPath_NFSRefusesRootHostBase(t *testing.T) {
 	orig := ensureSharedDirLeaf
 	t.Cleanup(func() { ensureSharedDirLeaf = orig })
 	walked := false
-	ensureSharedDirLeaf = func(hostBase, rel string) (int, bool, error) {
+	ensureSharedDirLeaf = func(hostBase, rel string, owner shareddirs.Owner) (int, bool, error) {
 		walked = true
 		return -1, false, errors.New("leaf walk must not run")
 	}
