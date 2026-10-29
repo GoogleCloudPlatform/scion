@@ -375,11 +375,9 @@ async function expectAsyncSubmit(tracked: TrackedPage, submit: SubmitResult): Pr
   const syncAnswer =
     'the create was answered synchronously: the target hub has the hub.async_agent_launch ' +
     'experiment off, or its runtime broker does not support async launch';
-  expect(submit.launch, `agent.launch in the create response (${syncAnswer})`).toBeDefined();
-  expect(
-    submit.launch?.active,
-    `agent.launch.active in the create response (${syncAnswer})`
-  ).toBe(true);
+  const inResponse = (field: string): string => `${field} in the create response (${syncAnswer})`;
+  expect(submit.launch, inResponse('agent.launch')).toBeDefined();
+  expect(submit.launch?.active, inResponse('agent.launch.active')).toBe(true);
   expect(submit.launch?.kind).toBe('create');
   await expect(tracked.page).toHaveURL(new RegExp(`/agents/${submit.agentId}$`));
   submit.landedAt = Date.now();

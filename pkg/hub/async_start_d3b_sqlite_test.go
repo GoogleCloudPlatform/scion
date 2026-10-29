@@ -1678,7 +1678,11 @@ func TestAsyncStartD2Contract(t *testing.T) {
 func TestAsyncStartHeartbeatGuard_OldContainerIgnored(t *testing.T) {
 	f, d := newAsyncStartFixture(t)
 	const oldRun, newRun = "run-old-container", "run-new-container"
-	a := f.addAgent("as-hb-old", string(state.PhaseStopped), "", func(a *store.Agent) { a.RunID = oldRun })
+	a := f.addAgent("as-hb-old", string(state.PhaseStopped), "")
+	// The previous run, as its own start recorded it (CreateAgent does not
+	// store a run ID).
+	_, err := f.s.SetAgentRunID(context.Background(), a.ID, oldRun, nil)
+	require.NoError(t, err)
 	require.Equal(t, oldRun, getAgent(t, f.s, a.ID).RunID)
 	// The start's run, as the real dispatcher's beginRun records it before
 	// the send.
