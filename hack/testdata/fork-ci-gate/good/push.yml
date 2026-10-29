@@ -38,3 +38,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: echo ok
+
+  doubled-quote:
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (github.head_ref != 'it''s ) || (x') }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok

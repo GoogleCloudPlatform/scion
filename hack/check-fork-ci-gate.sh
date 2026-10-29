@@ -17,9 +17,14 @@
 # must be one balanced operand, so the closing ") }}" closes the "(" after
 # "&&": "(<GATE>) && (a) || (b)" is rejected (it runs whenever b holds). The
 # if: must be on one line (a block scalar is rejected); a trailing comment is
-# ignored. It fails closed on layouts it does not parse, in any workflow: a
-# flow-map on:, on: entries or job keys not indented by 2 spaces, quoted job
-# keys, an inline jobs: value, or a jobs: with no job read. Push triggers that only
+# ignored. It fails closed ("unrecognised layout", exit 1) in any workflow
+# on what it does not parse: an on: value that is not a bare event or a
+# one-line list of bare events (a flow map, a list over several lines), any
+# line under a block on: that is not a 2-space "- event" entry, a 2-space
+# "event:" key or 4+-space settings of such a key (so column-0 entries, a list
+# or scalar on the next line, and 4-space entries fail), an on: with no entry,
+# no top-level on: or jobs: key (e.g. quoted "jobs":), an inline jobs: value,
+# a job key that is not an unquoted 2-space key, and a jobs: with no job. Push triggers that only
 # filter tags (tags/tags-ignore without branches/branches-ignore) are skipped,
 # and build-release.yml is skipped by name: its tag pushes are not gated yet
 # (its jobs carry the upstream-only guard instead).
@@ -46,7 +51,7 @@ check_file() {
     # wrapped MID: 1 if MID, the text between "${{ (<gate>) && (" and ") }}",
     # is one balanced operand, so the closing ")" of the suffix is the one the
     # prefix opened (rejects "(<gate>) && (a) || (b)"). Parens inside
-    # single-quoted string literals do not count; a doubled quote ('') inside
+    # single-quoted string literals do not count; a doubled quote inside
     # a literal toggles twice, so it needs no special case.
     function wrapped(m,   i, c, d, q) {
       d = 1; q = 0
@@ -81,40 +86,50 @@ check_file() {
       }
       job = ""
     }
-    # Top-level on: (also "on" quoted). Inline value: a bare event or a flow
-    # list; a flow map is not parsed, so it fails closed.
+    # Top-level on: (also "on" quoted). Every line of it must be consumed by
+    # a rule below; anything else is an unrecognised layout (fails closed).
+    # Inline value: a bare event or a one-line flow list of bare events.
     /^["\047]?on["\047]?:/ {
+      onseen = 1
       v = $0; sub(/^["\047]?on["\047]?:[[:space:]]*/, "", v); sub(/[[:space:]]*#.*$/, "", v)
-      if (v == "") { inon = 1; onfirst = 1; next }
+      if (v == "") { inon = 1; onentries = 0; trig = ""; next }
       if (v ~ /^\{/) { layout(NR, "flow-map on:"); next }
+      if (v ~ /^\[/ && v !~ /\]$/) { layout(NR, "on: flow list not closed on its line"); next }
       gsub(/[][ ]/, "", v); n = split(v, ev, ",")
       for (i = 1; i <= n; i++) {
+        if (ev[i] !~ /^[a-z_]+$/) { layout(NR, "on: value not a bare event or a list of bare events"); next }
         if (ev[i] == "push") { push = 1; pbranch = 1 }
         if (ev[i] == "schedule") sched = 1
       }
       next
     }
-    inon && /^[^ #]/ { inon = 0; trig = "" }
-    # The first entry under on: must be at 2 spaces.
-    inon && onfirst && /^[[:space:]]+[^[:space:]#]/ {
-      onfirst = 0
-      if ($0 !~ /^  [^ ]/) { layout(NR, "on: entries not indented by 2 spaces"); inon = 0; next }
+    inon && /^[[:space:]]*(#.*)?$/ { next }
+    inon && /^-/ { layout(NR, "on: entries at column 0"); inon = 0; next }
+    inon && /^[^ ]/ {
+      if (!onentries) layout(NR - 1, "on: with no entry read")
+      inon = 0; trig = ""
     }
-    inon && /^  - *[a-z_]+/ {
+    inon && /^  - *[a-z_]+[[:space:]]*(#.*)?$/ {
       v = $0; sub(/^  - */, "", v); sub(/[[:space:]#].*$/, "", v)
       if (v == "push") { push = 1; pbranch = 1 }
       if (v == "schedule") sched = 1
+      onentries++; trig = ""
       next
     }
     inon && /^  [a-z_]+:/ {
       trig = $0; sub(/^  /, "", trig); sub(/:.*/, "", trig)
       if (trig == "push") push = 1
       if (trig == "schedule") sched = 1
+      onentries++
       next
     }
-    inon && /^  ["\047]/ { layout(NR, "quoted key under on:"); next }
+    # The settings of a trigger (4+ spaces) are consumed; for push, the branch
+    # and tag filters are read at 4 spaces. A filter at another depth counts as
+    # a branch push (a false positive at worst, never a missed gate).
     inon && trig == "push" && /^    (branches|branches-ignore):/ { pbranch = 1 }
     inon && trig == "push" && /^    (tags|tags-ignore):/ { ptags = 1 }
+    inon && trig != "" && /^    / { next }
+    inon { layout(NR, "unparsed line under on:"); inon = 0; next }
 
     /^jobs:/ {
       v = $0; sub(/^jobs:[[:space:]]*/, "", v); sub(/[[:space:]]*#.*$/, "", v)
@@ -142,6 +157,11 @@ check_file() {
     }
     END {
       flush()
+      if (inon && !onentries) layout(NR, "on: with no entry read")
+      # Every workflow has both keys; a missing one means it was not recognised
+      # (e.g. "jobs": quoted, or jobs : with a space).
+      if (!onseen) layout(1, "no top-level on: key recognised")
+      if (!jobsline) layout(1, "no top-level jobs: key recognised")
       if (jobsline && !njobs && !nlerr) layout(jobsline, "jobs: with no job parsed")
       # Layout errors fail closed whatever the triggers are: the triggers may
       # be what could not be read.
@@ -159,7 +179,8 @@ gated() {
   local f=$1
   case " $SKIP_FILES " in *" ${f##*/} "*) return 1 ;; esac
   # Reuse check_file on a copy with every job removed: in scope iff an
-  # injected job without an if: is reported.
+  # injected job without an if: is reported. Grep for that one error, as
+  # layout errors are printed whatever the triggers are.
   local tmp
   tmp=$(mktemp)
   awk '/^jobs:/ { exit } { print }' "$f" >"$tmp"

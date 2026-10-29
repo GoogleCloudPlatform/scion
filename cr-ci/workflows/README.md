@@ -277,9 +277,24 @@ edit the gate in that fork's copy of the workflow.
 `hack/check-fork-ci-gate.sh` (the `fork-ci-gate-check` job in `ci.yml`, with
 fixtures in `hack/testdata/fork-ci-gate/`) fails when such a job lacks the
 gate. It also fails when the gate is weakened, for example by an `||` outside the
-job's own condition. It skips push triggers that filter only tags. It reads
-only the 2-space block YAML used here, and fails closed on other layouts.
-Keep each `if:` on one line.
+job's own condition. It skips push triggers that filter only tags. It has no
+YAML parser and reads only the 2-space block style used here. In any workflow,
+it reports `unrecognised layout` (exit 1) for:
+
+- an inline `on:` value that is not a bare event or a one-line list of bare
+  events (for example a flow map, a quoted event, or a list over several lines);
+- any line under a block `on:` that is not one of: a 2-space `- event` entry,
+  a 2-space `event:` key, that key's settings indented by 4 or more spaces, a
+  comment, or a blank line. This covers entries at column 0, a list or scalar
+  on the next line, and 4-space entries;
+- a block `on:` with no entry;
+- no top-level `on:` or `jobs:` key it recognises (for example a quoted
+  `"jobs":` or `jobs :`);
+- an inline `jobs:` value, a job key that is not an unquoted 2-space key, or a
+  `jobs:` with no job.
+
+Keep each `if:` on one line. A block-scalar `if:` is reported, and a trailing
+comment with no quotes in it is ignored.
 
 `build-release.yml` (tag pushes) is not gated yet; its jobs carry the
 upstream-only repository guard instead.

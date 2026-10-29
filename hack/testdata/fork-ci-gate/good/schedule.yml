@@ -20,3 +20,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: echo ok
+# Trailing comment and blank lines after the last job are fine.
+

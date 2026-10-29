@@ -1,5 +1,8 @@
 on:
+  # A comment, a blank line and nested settings are consumed.
+
   pull_request:
+    types: [opened]
     paths:
       - 'extras/**'
   workflow_dispatch:
