@@ -17,17 +17,19 @@
 # must be one balanced operand, so the closing ") }}" closes the "(" after
 # "&&": "(<GATE>) && (a) || (b)" is rejected (it runs whenever b holds). The
 # if: must be on one line (a block scalar is rejected); a trailing comment is
-# ignored. It fails closed ("unrecognised layout", exit 1) in any workflow
-# on what it does not parse: an on: value that is not a bare event or a
-# one-line list of bare events (a flow map, a list over several lines), any
-# line under a block on: that is not a 2-space "- event" entry, a 2-space
-# "event:" key or 4+-space settings of such a key (so column-0 entries, a list
-# or scalar on the next line, and 4-space entries fail), an on: with no entry,
-# no top-level on: or jobs: key (e.g. quoted "jobs":), an inline jobs: value,
-# a job key that is not an unquoted 2-space key, and a jobs: with no job. Push triggers that only
-# filter tags (tags/tags-ignore without branches/branches-ignore) are skipped,
-# and build-release.yml is skipped by name: its tag pushes are not gated yet
-# (its jobs carry the upstream-only guard instead).
+# ignored. It fails closed ("unrecognised layout", exit 1) in every workflow
+# except build-release.yml on what it does not parse: an on: value that is
+# not a bare event or a one-line list of bare events (a flow map, a list over
+# several lines), any line under a block on: that is not a 2-space "- event"
+# entry, a 2-space "event:" key or 4+-space settings of such a key (so
+# column-0 entries, a list or scalar on the next line, and 4-space entries
+# fail), an on: with no entry (block or "[]"), no top-level on: or jobs: key
+# (e.g. quoted "jobs":), an inline jobs: value, a job key that is not an
+# unquoted 2-space key, and a jobs: with no job.
+# Push triggers that only filter tags (tags/tags-ignore without
+# branches/branches-ignore) are skipped. build-release.yml is skipped by name,
+# layout rules included: its tag pushes are not gated yet (its jobs carry the
+# upstream-only guard instead).
 #
 # Usage: hack/check-fork-ci-gate.sh [WORKFLOW_DIR]   (default .github/workflows)
 #        hack/check-fork-ci-gate.sh --selftest       (runs the fixtures in
@@ -96,6 +98,7 @@ check_file() {
       if (v ~ /^\{/) { layout(NR, "flow-map on:"); next }
       if (v ~ /^\[/ && v !~ /\]$/) { layout(NR, "on: flow list not closed on its line"); next }
       gsub(/[][ ]/, "", v); n = split(v, ev, ",")
+      if (n == 0) { layout(NR, "on: with no entry read"); next }
       for (i = 1; i <= n; i++) {
         if (ev[i] !~ /^[a-z_]+$/) { layout(NR, "on: value not a bare event or a list of bare events"); next }
         if (ev[i] == "push") { push = 1; pbranch = 1 }

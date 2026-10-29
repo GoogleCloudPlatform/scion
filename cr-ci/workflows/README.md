@@ -278,7 +278,8 @@ edit the gate in that fork's copy of the workflow.
 fixtures in `hack/testdata/fork-ci-gate/`) fails when such a job lacks the
 gate. It also fails when the gate is weakened, for example by an `||` outside the
 job's own condition. It skips push triggers that filter only tags. It has no
-YAML parser and reads only the 2-space block style used here. In any workflow,
+YAML parser and reads only the 2-space block style used here. In every
+workflow except `build-release.yml` (skipped by name, layout rules included),
 it reports `unrecognised layout` (exit 1) for:
 
 - an inline `on:` value that is not a bare event or a one-line list of bare
@@ -287,7 +288,8 @@ it reports `unrecognised layout` (exit 1) for:
   a 2-space `event:` key, that key's settings indented by 4 or more spaces, a
   comment, or a blank line. This covers entries at column 0, a list or scalar
   on the next line, and 4-space entries;
-- a block `on:` with no entry;
+- an `on:` with no entry (a block `on:` holding only comments or blank lines,
+  or `on: []`);
 - no top-level `on:` or `jobs:` key it recognises (for example a quoted
   `"jobs":` or `jobs :`);
 - an inline `jobs:` value, a job key that is not an unquoted 2-space key, or a
