@@ -282,8 +282,10 @@ make_dirs_down_to() {
 }
 
 # unsafe_parent_die -- refuse with the reason the parent chain is unsafe.
+# UNSAFE_TARGET names what was being set up (default <root>).
 unsafe_parent_die() {
-  die "$UNSAFE_REASON; the directories above $INSTALL_ROOT must be real directories owned by root and not writable by group or others. Refusing to set up $INSTALL_ROOT there."
+  local target="${UNSAFE_TARGET:-$INSTALL_ROOT}"
+  die "$UNSAFE_REASON; the directories above $target must be real directories owned by root and not writable by group or others. Refusing to set up $target there."
 }
 
 # build_and_hand_over VERB -- with <root> a real directory only root can
@@ -427,9 +429,12 @@ stage_release() {
 }
 
 # activate TAG -- make releases/TAG current; the release current pointed at
-# before (if any, and if different) becomes previous.
+# before (if any, and if different) becomes previous. Sets ACTIVATED_FROM
+# to that previous tag when current was switched with a previous release,
+# empty otherwise.
 activate() {
   local tag="$1" target="releases/$1" old=""
+  ACTIVATED_FROM=""
   if [[ -L "$INSTALL_ROOT/current" ]]; then
     old="$(readlink "$INSTALL_ROOT/current")"
   elif [[ -e "$INSTALL_ROOT/current" ]]; then
@@ -441,9 +446,30 @@ activate() {
   fi
   if [[ -n "$old" && -d "$INSTALL_ROOT/$old" ]]; then
     swap_link previous "$old"
+    ACTIVATED_FROM="${old##*/}"
   fi
   swap_link current "$target"
   log "current -> $target${old:+ (previous -> $old)}"
+}
+
+# write_update_state TARGET FROM -- record the switch to TARGET from FROM
+# in <root>/update-state.json for the boot-failure guard
+# (scion-hub-rollback.sh, "Update state"), the same object the hub writes
+# before its own update restart, with runId "deploy.sh". The new binary
+# fills in migrated/previous_safe/verified as it boots. Atomic (a fresh
+# temp file renamed over it, so a planted symlink is replaced, not
+# followed), 0644. Best effort: without the file the guard falls back to
+# how recently current was switched.
+write_update_state() {
+  local tmp
+  if tmp="$(mktemp "$INSTALL_ROOT/update-state.json.XXXXXX")" \
+     && printf '{"target":"%s","from":"%s","runId":"deploy.sh","verified":false,"migrated":false,"previous_safe":true}\n' "$1" "$2" > "$tmp" \
+     && chmod 0644 "$tmp" && mv -fT "$tmp" "$INSTALL_ROOT/update-state.json"; then
+    log "update-state.json: $2 -> $1"
+    return 0
+  fi
+  [[ -n "${tmp:-}" ]] && rm -f "$tmp"
+  echo "scion-layout: WARNING: could not write $INSTALL_ROOT/update-state.json; the boot-failure guard falls back to the switch time" >&2
 }
 
 # cmd_as_owner TAG BINARY [TAG BINARY...] -- runs as the owner: create any
@@ -459,12 +485,19 @@ cmd_as_owner() {
       chmod 0755 "$INSTALL_ROOT/$d"
     fi
   done
+  local last=""
   while [[ $# -gt 0 ]]; do
     valid_tag "$1" || die "invalid release tag: '$1'"
     stage_release "$1" "$2"
     activate "$1"
+    last="$1"
     shift 2
   done
+  # Only a real switch with a previous release is a state the guard can
+  # undo; a re-run on the same release keeps the hub's own record.
+  if [[ -n "$ACTIVATED_FROM" ]]; then
+    write_update_state "$last" "$ACTIVATED_FROM"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -599,6 +632,7 @@ cmd_install_guard() {
   [[ $# -eq 1 ]] || die "usage: install-guard ROLLBACK_SCRIPT"
   local src="$1" dir tmp
   [[ -f "$src" ]] || die "rollback script not found: $src"
+  UNSAFE_TARGET="$ROLLBACK_PATH"
   dir="$(dirname "$ROLLBACK_PATH")"
   dir_chain_is_safe "$(nearest_existing "$dir")" || die "$UNSAFE_REASON; refusing to install $ROLLBACK_PATH"
   make_dirs_down_to "$dir"

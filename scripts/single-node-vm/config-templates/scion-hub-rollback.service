@@ -5,4 +5,7 @@ Description=Scion Hub boot-failure guard (restores the previous release)
 
 [Service]
 Type=oneshot
+# A oneshot has no start timeout by default; a hung run would block later
+# OnFailure= starts, which merge into it.
+TimeoutStartSec=120
 ExecStart=/usr/local/libexec/scion/scion-hub-rollback.sh

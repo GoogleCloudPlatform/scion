@@ -24,15 +24,57 @@
 # StartLimitIntervalSec=300) after crashing, the script:
 #   1. refuses unless <root>/previous resolves (realpath) to a release
 #      directly inside <root>/releases/ that holds a scion binary;
-#   2. swaps current <-> previous, each with an atomic symlink rename;
+#   2. acts only on a failed update that is safe to undo, decided from
+#      <root>/update-state.json (see "Update state" below) or, when that
+#      file is missing or unreadable, from how recently <root>/current was
+#      switched. A release that ran fine and then crash-loops (a settings
+#      typo, a full disk, a port clash) is not rolled back, and neither is
+#      one whose database migrations the previous release cannot run
+#      with: the hub stays stopped for an operator;
 #   3. writes <root>/rollback.marker, one line of JSON:
 #        {"at":"<RFC3339 UTC>","from":"<failed tag>","to":"<restored tag>"}
-#   4. runs `systemctl reset-failed scion-hub && systemctl start scion-hub`.
+#      before changing any link, so a marker that cannot be written means
+#      no swap;
+#   4. swaps current <-> previous: previous first, then current, each with
+#      an atomic symlink rename. The pair is not atomic. Dying between the
+#      two leaves both pointing at the failed release, which a later run
+#      refuses ("current and previous are both ..."): it fails closed;
+#   5. runs `systemctl reset-failed scion-hub && systemctl start scion-hub`.
+#
+# It swaps binaries only. The database is not restored: after a rollback
+# across a schema migration, follow "Restoring after a failed update" in
+# docs/deploy/single-node-vm.md.
 #
 # It never swaps back. If the restored release crash-loops too, the start
 # limit stops the hub again and this script runs again: it finds the
 # marker already records exactly this rollback (from = previous,
 # to = current) and does nothing, leaving the hub stopped for an operator.
+#
+# Update state. The hub writes <root>/update-state.json (owner-written,
+# atomic, 0644), one JSON object:
+#   {"target":"<tag>","from":"<tag>","runId":"...","verified":false,
+#    "migrated":false,"previous_safe":true}
+# The hub being replaced writes it before its update restart, and
+# scion-layout.sh install (deploy.sh) writes it with runId "deploy.sh"
+# when it switches current; the new binary sets migrated=true before its first migration statement and
+# previous_safe (whether `from` is at or above its DowngradeFloor,
+# computed in Go), and verified=true once the update is confirmed. This
+# script compares no versions; it decides on the booleans only:
+#   - target is the release current points at and from the one previous
+#     points at:
+#       - verified is true: no swap (the update succeeded; this crash
+#         loop has another cause);
+#       - migrated is true and previous_safe is not true (false, missing
+#         or not a boolean): no swap (the previous release may not run on
+#         the migrated database; restore the snapshot);
+#       - otherwise: swap;
+#   - target or from does not match: no swap. The links were changed by
+#     something other than the update the file describes;
+#   - file missing or unreadable (not a regular file, a symlink, over
+#     4 KiB, not a JSON object with string target and from and boolean
+#     verified and migrated, or no python3): fall back to the mtime gate --
+#     swap only if current was switched within RECENT_SWITCH_WINDOW_SEC
+#     (the symlink's own mtime; every switch creates a new link).
 #
 # It acts only when the hub crash-looped:
 #   - scion-hub's Result must be start-limit-hit. systemd >= 254 also
@@ -68,6 +110,20 @@ readonly HUB_UNIT="scion-hub.service"
 # Exit status of the owner step when the marker already records this
 # rollback: nothing changed and the hub must not be started.
 readonly ALREADY_ROLLED_BACK=3
+# Exit status of the owner step when the crash loop is not a failed
+# update that is safe to undo: nothing changed and the hub must stay
+# stopped.
+readonly LEAVE_STOPPED=4
+
+# The largest update-state.json the owner step reads (bytes).
+readonly UPDATE_STATE_MAX_BYTES=4096
+
+# How recently current must have been switched for a crash loop to count
+# as a failed update (seconds). Covers the update itself, the restart and
+# the five failed starts (about 30 s with RestartSec=5) with a wide margin
+# for a release that fails a little later, without reaching back to a
+# release that has been running normally.
+readonly RECENT_SWITCH_WINDOW_SEC=1800
 
 log() { echo "scion-hub-rollback: $*"; }
 die() { echo "scion-hub-rollback: ERROR: $*" >&2; exit 1; }
@@ -128,13 +184,76 @@ swap_link() {
 
 # write_marker FROM TO -- write <root>/rollback.marker atomically: a fresh,
 # randomly named file (never an existing name that could be a symlink),
-# renamed over the marker.
+# renamed over the marker. Fails (removing its temp file) without changing
+# the marker if any step fails.
 write_marker() {
   local tmp
-  tmp="$(mktemp "$INSTALL_ROOT/rollback.marker.XXXXXX")"
-  printf '{"at":"%s","from":"%s","to":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" > "$tmp"
-  chmod 0644 "$tmp"
-  mv -fT "$tmp" "$INSTALL_ROOT/rollback.marker"
+  tmp="$(mktemp "$INSTALL_ROOT/rollback.marker.XXXXXX")" || return 1
+  if printf '{"at":"%s","from":"%s","to":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" > "$tmp" \
+     && chmod 0644 "$tmp" && mv -fT "$tmp" "$INSTALL_ROOT/rollback.marker"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# UPDATE_STATE_PY -- reads update-state.json without following a symlink,
+# at most UPDATE_STATE_MAX_BYTES, and prints one word: missing,
+# unreadable, mismatch, verified, unsafe or swap (see "Update state"),
+# then, for a readable file, its from and runId for the log.
+# shellcheck disable=SC2016 # Python source, not shell
+UPDATE_STATE_PY='
+import json, os, stat, sys
+path, current, previous, cap = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+def clean(v):
+    # One printable word for the log line.
+    return "".join(c if c.isprintable() and not c.isspace() else "_" for c in str(v))[:80] or "?"
+def out(word, d=None):
+    d = d if isinstance(d, dict) else {}
+    print(word, clean(d.get("from", "?")), clean(d.get("runId", "?")))
+    sys.exit(0)
+try:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except FileNotFoundError:
+    out("missing")
+except OSError:
+    out("unreadable")
+st = os.fstat(fd)
+if not stat.S_ISREG(st.st_mode) or st.st_size > cap:
+    out("unreadable")
+data = os.read(fd, cap + 1)
+if len(data) > cap:
+    out("unreadable")
+try:
+    d = json.loads(data.decode("utf-8"))
+except ValueError:
+    out("unreadable")
+if not isinstance(d, dict) or not all(isinstance(d.get(k), str) for k in ("target", "from")) \
+        or not all(isinstance(d.get(k), bool) for k in ("verified", "migrated")):
+    out("unreadable")
+if d["target"] != current or d["from"] != previous:
+    out("mismatch", d)
+if d["verified"]:
+    out("verified", d)
+if d["migrated"] and d.get("previous_safe") is not True:
+    out("unsafe", d)
+out("swap", d)
+'
+
+# update_state_decision CURRENT_TAG PREVIOUS_TAG -- the decision word (plus
+# from and runId); "unreadable" when python3 is missing or fails.
+update_state_decision() {
+  python3 -I -c "$UPDATE_STATE_PY" "$INSTALL_ROOT/update-state.json" "$1" "$2" "$UPDATE_STATE_MAX_BYTES" 2>/dev/null \
+    || echo "unreadable ? ?"
+}
+
+# switched_seconds_ago -- seconds since <root>/current was last switched:
+# the mtime of the symlink itself (stat without -L), which each switch
+# sets by creating a new link.
+switched_seconds_ago() {
+  local mtime
+  mtime="$(stat -c %Y -- "$INSTALL_ROOT/current")" || return 1
+  echo $(( $(date +%s) - mtime ))
 }
 
 cmd_swap() {
@@ -145,12 +264,35 @@ cmd_swap() {
   cur="$(release_tag current)" || die "refusing to roll back: current is not a release inside $INSTALL_ROOT/releases/; nothing changed"
   [[ "$cur" != "$prev" ]] || die "refusing to roll back: current and previous are both $cur; nothing changed"
   if [[ "$(marker_field from)" == "$prev" && "$(marker_field to)" == "$cur" ]]; then
-    log "already rolled back from $prev to $cur (rollback.marker); not swapping back. The restored release failed too: fix it by hand (docs: Restore after a failed update)."
+    log "already rolled back from $prev to $cur (rollback.marker); not swapping back. The restored release failed too: fix it by hand (docs: Restoring after a failed update)."
     exit "$ALREADY_ROLLED_BACK"
   fi
-  swap_link current "releases/$prev"
+  local decision state_from run_id age
+  local stay="Nothing changed; the hub stays stopped. Check journalctl -u scion-hub, fix the cause, then run: systemctl reset-failed scion-hub && systemctl start scion-hub"
+  read -r decision state_from run_id <<< "$(update_state_decision "$cur" "$prev")"
+  case "$decision" in
+    swap)
+      log "update-state.json: failed update $state_from -> $cur (run $run_id), safe to undo" ;;
+    mismatch)
+      log "update-state.json describes another update (run $run_id, from $state_from) than current releases/$cur with previous releases/$prev; the links were changed by hand or by another tool: not rolling back. Nothing changed; the hub stays stopped. See docs/deploy/single-node-vm.md, Restoring after a failed update."
+      exit "$LEAVE_STOPPED" ;;
+    verified)
+      log "update-state.json: the update to $cur (run $run_id) was verified, so this crash loop is not a failed update: not rolling back. $stay"
+      exit "$LEAVE_STOPPED" ;;
+    unsafe)
+      log "update-state.json: $cur (run $run_id) migrated the database, and $prev is below its downgrade floor: not rolling back. Nothing changed; the hub stays stopped. Restore the database snapshot with the release it was taken from (docs/deploy/single-node-vm.md, Restoring after a failed update)."
+      exit "$LEAVE_STOPPED" ;;
+    *)
+      age="$(switched_seconds_ago)" || die "cannot read when $INSTALL_ROOT/current was switched; nothing changed"
+      if (( age > RECENT_SWITCH_WINDOW_SEC )); then
+        log "update-state.json is $decision, and current (releases/$cur) was switched ${age}s ago, more than ${RECENT_SWITCH_WINDOW_SEC}s: this crash loop is not a failed update, so it is not rolled back. $stay"
+        exit "$LEAVE_STOPPED"
+      fi
+      log "update-state.json is $decision; current was switched ${age}s ago (within ${RECENT_SWITCH_WINDOW_SEC}s): treating this as a failed update" ;;
+  esac
+  write_marker "$cur" "$prev" || die "could not write $INSTALL_ROOT/rollback.marker (disk full?); refusing to roll back without it. Nothing changed"
   swap_link previous "releases/$cur"
-  write_marker "$cur" "$prev"
+  swap_link current "releases/$prev"
   log "current -> releases/$prev (previous -> releases/$cur); wrote rollback.marker"
 }
 
@@ -207,7 +349,7 @@ cmd_rollback() {
   run_as_owner || rc=$?
   case "$rc" in
     0) ;;
-    "$ALREADY_ROLLED_BACK") return 0 ;;
+    "$ALREADY_ROLLED_BACK"|"$LEAVE_STOPPED") return 0 ;;
     *) exit "$rc" ;;
   esac
   restart_hub

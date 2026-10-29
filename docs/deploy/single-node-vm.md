@@ -176,6 +176,7 @@ On the VM itself:
 | `/opt/scion/current` | Symlink to the active release (`releases/<tag>`); the unit runs `/opt/scion/current/scion` |
 | `/opt/scion/previous` | Symlink to the release that was active before the last switch |
 | `/opt/scion/snapshots/` | Database snapshots taken by the Hub |
+| `/opt/scion/update-state.json` | The last switch of `current` and how far the new release got; read by the [boot-failure guard](#update-state) |
 | `/opt/scion/rollback.marker` | Written by the [boot-failure guard](#boot-failure-guard) when it restores the previous release |
 | `/usr/local/bin/scion` | Root-owned symlink to `/opt/scion/current/scion`, for running `scion` on the VM |
 | `/usr/local/libexec/scion/scion-hub-rollback.sh` | Root-owned boot-failure guard script |
@@ -223,7 +224,7 @@ points at (see [Re-running the deploy script](#re-running-the-deploy-script)).
 ### Boot-failure guard
 
 A release that crashes on startup cannot roll itself back, so `deploy.sh`
-installs a guard that restores the previous release:
+installs a guard that restores the previous release after a failed update:
 
 - `scion-hub.service` sets `StartLimitIntervalSec=300`, `StartLimitBurst=5`
   and `OnFailure=scion-hub-rollback.service` in its `[Unit]` section. With
@@ -237,6 +238,8 @@ installs a guard that restores the previous release:
   `/opt/scion` on purpose: the `scion` user owns `/opt/scion` and could
   replace any file in it, including a root-owned one, and root runs this
   script. (The design originally placed it at `/opt/scion/rollback.sh`.)
+  The unit has `TimeoutStartSec=120`, so a hung run cannot block later
+  runs.
 
 The script runs as root but, as root, does nothing except query and
 restart the unit through `systemctl`. It never reads, follows or writes
@@ -256,14 +259,34 @@ run as the `scion` user (through `runuser`):
    non-zero exit status, a failure to start the binary, or death by any
    other signal, such as `SIGSEGV`, `SIGABRT` or `SIGKILL`) counts as a
    failure and leads to the rollback below.
-3. It refuses unless `/opt/scion/previous` resolves to a release directory
-   directly inside `/opt/scion/releases/` that contains a `scion` binary. A
-   `previous` that leaves `releases/` (through `..`, an absolute target or a
-   chain of symlinks) is refused, and so is a `previous` equal to
-   `current`. After a refusal nothing changes and the Hub stays stopped.
-4. It swaps `current` and `previous`, each with an atomic symlink rename.
-5. It writes `/opt/scion/rollback.marker` (see below).
-6. It runs `systemctl reset-failed scion-hub` and `systemctl start scion-hub`.
+3. It refuses unless `/opt/scion/current` and `/opt/scion/previous` each
+   resolve to a release directory directly inside `/opt/scion/releases/`,
+   and `previous` contains a `scion` binary. A link that leaves `releases/`
+   (through `..`, an absolute target or a chain of symlinks) is refused, and
+   so is a `previous` equal to `current`. After a refusal nothing changes
+   and the Hub stays stopped.
+4. It rolls back only a **failed update that is safe to undo**, decided from
+   `/opt/scion/update-state.json` (see [Update state](#update-state)). A
+   release that ran fine and then crash-loops for another reason (a typo in
+   `settings.yaml`, a full disk, port 8080 already in use) is not rolled
+   back. Neither is an update whose database migrations the previous
+   release cannot run with. In both cases nothing changes, the Hub stays
+   stopped, and the guard's journal says why.
+5. It writes `/opt/scion/rollback.marker` (see below), before changing any
+   link: if the marker cannot be written (for example, the disk is full),
+   nothing is swapped.
+6. It swaps `previous` and then `current`, each with an atomic symlink
+   rename. The pair is not atomic: if the guard dies between the two
+   renames, both links point at the failed release, and the next run
+   refuses ("current and previous are both ..."), leaving the Hub stopped.
+7. It runs `systemctl reset-failed scion-hub` and `systemctl start scion-hub`.
+
+The guard swaps **binaries only**. It does not restore the database
+snapshot. Rolling back is safe without it when the failed release did not
+migrate the database, or migrated it only in ways the previous release
+can ignore; otherwise the guard refuses (step 4). To return the database
+to its state before the update, follow
+[Restoring after a failed update](#restoring-after-a-failed-update).
 
 It never swaps back. If the restored release crash-loops too, the start
 limit stops the Hub again and the guard runs again. It then finds that the
@@ -272,6 +295,41 @@ marker already records this exact rollback (`from` is the current
 the Hub stopped for you to fix (see
 [Restoring after a failed update](#restoring-after-a-failed-update)).
 Running the script twice is therefore safe.
+
+#### Update state
+
+`/opt/scion/update-state.json` describes the last switch of `current`, as
+one JSON object:
+
+```json
+{"target":"nightly-20261023","from":"nightly-20261020","runId":"...","verified":false,"migrated":false,"previous_safe":true}
+```
+
+- The Hub writes it before it restarts into an update (`target` is the new
+  release, `from` the one it replaces). `deploy.sh` writes it when it
+  switches `current` (`runId` is `deploy.sh`), so a release installed by
+  `deploy.sh` is protected the same way.
+- The new release sets `migrated` to `true` before its first database
+  migration statement, and sets `previous_safe`: whether `from` is at or
+  above its downgrade floor (`pkg/version.DowngradeFloor`), that is,
+  whether `from` can still run on the migrated database. It may also
+  record `from_published_at`, which the guard ignores.
+- Once the update is confirmed at boot, the Hub sets `verified` to `true`.
+
+The guard compares no versions. It reads the file as the `scion` user,
+without following a symlink and up to 4 KiB, and decides:
+
+| File | Guard |
+|---|---|
+| `target` is the release `current` points at and `from` the one `previous` points at, `verified` is `false`, and not (`migrated` is `true` and `previous_safe` is not `true`) | Rolls back |
+| As above, but `verified` is `true` | Leaves the Hub stopped: the update succeeded, so the crash loop has another cause |
+| As above, but `migrated` is `true` and `previous_safe` is `false`, missing or not a boolean | Leaves the Hub stopped: restore the snapshot |
+| `target` or `from` does not match the links | Leaves the Hub stopped: the links were changed by something other than that update |
+| Missing or unreadable (not a regular file, a symlink, over 4 KiB, not a JSON object with string `target` and `from` and boolean `verified` and `migrated`) | Rolls back only if `current` was switched within the last 1800 seconds (the age of the symlink itself; every switch creates a new link), otherwise leaves the Hub stopped |
+
+To start a Hub that the guard left stopped, fix the cause shown in
+`journalctl -u scion-hub`, then run
+`sudo systemctl reset-failed scion-hub && sudo systemctl start scion-hub`.
 
 **systemd versions.** The VM image is Ubuntu 22.04 LTS, which ships systemd
 249. There, `OnFailure=` fires only when the unit finally fails, that is
@@ -322,14 +380,15 @@ together with the release:
    sudo systemctl stop scion-hub
    ```
 
-2. Keep the current database, then copy the snapshot over it. Remove the
-   SQLite `-wal` and `-shm` files: they belong to the newer database and
-   must not be applied to the snapshot.
+2. Keep a copy of the current database, then restore the snapshot into
+   it. Use `sqlite3` for both, not `cp`: the database runs in WAL mode, and
+   after a crash recent changes can still be in `hub.db-wal`. `.backup`
+   includes them, and `.restore` replaces the whole database, WAL included.
+   Never delete `hub.db-wal` or `hub.db-shm` by hand.
 
    ```bash
-   sudo -u scion cp -p /home/scion/.scion/hub.db /home/scion/.scion/hub.db.before-restore
-   sudo -u scion cp /opt/scion/snapshots/hub-<from-version>-<timestamp>.db /home/scion/.scion/hub.db
-   sudo -u scion rm -f /home/scion/.scion/hub.db-wal /home/scion/.scion/hub.db-shm
+   sudo -u scion sqlite3 /home/scion/.scion/hub.db ".backup '/home/scion/.scion/hub.db.before-restore'"
+   sudo -u scion sqlite3 /home/scion/.scion/hub.db ".restore '/opt/scion/snapshots/hub-<from-version>-<timestamp>.db'"
    ```
 
 3. If needed, copy the settings back. An older release can drop settings
@@ -350,7 +409,9 @@ together with the release:
    ```
 
    If the boot-failure guard already restored the release, `current` points
-   at it already. Skip this step.
+   at it already. Skip this step. Changing the links by hand makes
+   `update-state.json` no longer match them, so the guard will not roll
+   this state back on its own; that is intended.
 
 5. Start the Hub and check it:
 

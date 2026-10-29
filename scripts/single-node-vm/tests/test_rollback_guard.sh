@@ -209,12 +209,17 @@ test_rollback_refuses_previous_outside_releases() {
 
 test_rollback_refuses_current_outside_releases_or_equal() {
   local case_name
-  for case_name in absolute same; do
+  for case_name in absolute dotdot-relative dotdot-through-releases chained same; do
     _rb_new_host
     mkdir -p "${RB_DIR}/evil"
     rm -f "${RB_ROOT}/current"
     case "$case_name" in
       absolute) ln -s "${RB_DIR}/evil" "${RB_ROOT}/current" ;;
+      dotdot-relative) ln -s ../../evil "${RB_ROOT}/current" ;;
+      dotdot-through-releases) ln -s releases/../../../evil "${RB_ROOT}/current" ;;
+      chained)
+        ln -s "${RB_DIR}/evil" "${RB_ROOT}/releases/nightly-20261030"
+        ln -s releases/nightly-20261030 "${RB_ROOT}/current" ;;
       same) ln -s releases/nightly-20261020 "${RB_ROOT}/current" ;;
     esac
     RB_BEFORE="$(_rb_state)"
@@ -286,6 +291,21 @@ test_rollback_old_marker_for_other_pair_does_not_block() {
   assert_eq "0" "$RB_RC" "a marker for another pair must not block the rollback (output: ${RB_OUT})"
   assert_eq "releases/nightly-20261020" "$(readlink "${RB_ROOT}/current")" "the rollback must happen"
   assert_contains "$(cat "${RB_ROOT}/rollback.marker")" '"from":"nightly-20261023","to":"nightly-20261020"' "the marker must be rewritten for this rollback"
+  rm -rf "$RB_DIR"
+}
+
+# The marker is written before any link changes: if it cannot be written
+# (here a directory is in its place; on a VM, a full disk), nothing is
+# swapped and the hub is not started.
+test_rollback_marker_write_failure_means_no_swap() {
+  _rb_new_host
+  mkdir "${RB_ROOT}/rollback.marker"
+  RB_BEFORE="$(_rb_state)"
+  _rb_run
+  assert_true "$([[ "$RB_RC" -ne 0 ]] && echo true || echo false)" "a failed marker write must fail the run (output: ${RB_OUT})"
+  assert_contains "$RB_OUT" "could not write" "the failure must say the marker could not be written"
+  assert_eq "$RB_BEFORE" "$(_rb_state)" "no link may change and no temporary marker may be left"
+  assert_not_contains "$(cat "$RB_CALLS")" "systemctl start" "the hub must not be started"
   rm -rf "$RB_DIR"
 }
 
@@ -505,4 +525,164 @@ test_rollback_unit_runs_root_owned_script() {
   # shellcheck disable=SC2016 # a literal from the script source
   assert_contains "$(cat "$RB_LAYOUT_SH")" 'ROLLBACK_PATH="${SCION_ROLLBACK_PATH:-/usr/local/libexec/scion/scion-hub-rollback.sh}"' \
     "scion-layout.sh install-guard must install it at the path the unit runs"
+}
+
+test_rollback_unit_has_start_timeout() {
+  assert_contains "$(_rb_unit_section "${TIER_DIR}/config-templates/scion-hub-rollback.service" Service)" "TimeoutStartSec=120" \
+    "a hung guard run must time out instead of blocking later OnFailure= starts"
+}
+
+test_install_guard_unsafe_dir_message_names_guard_path() {
+  _rb_new_host
+  RB_GUARD="${RB_DIR}/usr/local/libexec/scion/scion-hub-rollback.sh"
+  mkdir -p "${RB_DIR}/usr/local"
+  chmod 0775 "${RB_DIR}/usr/local"
+  _rb_guard install-guard "$ROLLBACK_SH"
+  assert_true "$([[ "$RB_RC" -ne 0 ]] && echo true || echo false)" "a group-writable parent must be refused (output: ${RB_OUT})"
+  assert_contains "$RB_OUT" "${RB_GUARD}" "the refusal must name the guard path"
+  assert_not_contains "$RB_OUT" "Refusing to set up ${RB_ROOT}" "the refusal must not name the install root"
+  chmod 0755 "${RB_DIR}/usr/local"
+  rm -rf "$RB_DIR"
+}
+
+# =====================================================================
+# Update state: the decision table
+# =====================================================================
+
+# _rb_update_state JSON -- writes RB_ROOT/update-state.json.
+_rb_update_state() {
+  printf '%s\n' "$1" > "${RB_ROOT}/update-state.json"
+}
+
+# _rb_happy_state [OVERRIDES...] -- the matching state for the default host
+# (current nightly-20261023, previous nightly-20261020), with key=JSON
+# overrides, e.g. verified=true or previous_safe=  (empty drops the key).
+_rb_happy_state() {
+  "$PYTHON" -c '
+import json, sys
+d = {"target": "nightly-20261023", "from": "nightly-20261020", "runId": "run-1",
+     "verified": False, "migrated": False, "previous_safe": True}
+for kv in sys.argv[1:]:
+    k, v = kv.split("=", 1)
+    if v == "":
+        d.pop(k, None)
+    else:
+        d[k] = json.loads(v)
+print(json.dumps(d, separators=(",", ":")))
+' "$@"
+}
+
+# _rb_stale -- current was switched two hours ago.
+_rb_stale() {
+  touch -h -d '2 hours ago' "${RB_ROOT}/current"
+}
+
+# _rb_expect OUTCOME WHAT [LOG_SNIPPET] -- after _rb_run: OUTCOME swap (the
+# rollback happened, the hub started) or stay (exit 0, nothing changed, no
+# marker, hub not started).
+_rb_expect() {
+  local outcome="$1" what="$2" snippet="${3:-}"
+  if [[ "$outcome" == swap ]]; then
+    assert_eq "0" "$RB_RC" "${what}: must roll back (output: ${RB_OUT})"
+    assert_eq "releases/nightly-20261020" "$(readlink "${RB_ROOT}/current")" "${what}: current must be the restored release"
+    assert_true "$([[ -f "${RB_ROOT}/rollback.marker" ]] && echo true || echo false)" "${what}: the marker must be written"
+    assert_contains "$(cat "$RB_CALLS")" "systemctl start scion-hub.service" "${what}: the hub must be started"
+  else
+    assert_eq "0" "$RB_RC" "${what}: leaving the hub stopped is not an error (output: ${RB_OUT})"
+    assert_eq "$RB_BEFORE" "$(_rb_state)" "${what}: nothing may change, no marker"
+    assert_not_contains "$(cat "$RB_CALLS")" "systemctl start" "${what}: the hub must stay stopped"
+    assert_not_contains "$(cat "$RB_CALLS")" "systemctl reset-failed" "${what}: the failed state must stay visible"
+  fi
+  if [[ -n "$snippet" ]]; then
+    assert_contains "$RB_OUT" "$snippet" "${what}: the log must say why"
+  fi
+}
+
+# _rb_case OUTCOME WHAT STALE SNIPPET SETUP... -- one row: a fresh host,
+# SETUP evaluated (writes the state file), current made stale if STALE is
+# "stale", then the guard run and checked.
+_rb_case() {
+  local outcome="$1" what="$2" stale="$3" snippet="$4"
+  shift 4
+  _rb_new_host
+  eval "$*"
+  [[ "$stale" == stale ]] && _rb_stale
+  RB_BEFORE="$(_rb_state)"
+  _rb_run
+  _rb_expect "$outcome" "$what" "$snippet"
+  rm -rf "$RB_DIR"
+}
+
+# shellcheck disable=SC2016 # SETUP snippets are evaluated by _rb_case
+test_rollback_update_state_decision_table() {
+  # Readable and matching: the booleans decide, whatever the switch time.
+  _rb_case swap "happy path (fresh)" fresh "safe to undo" '_rb_update_state "$(_rb_happy_state)"'
+  _rb_case swap "happy path (stale current: the file overrides the timer)" stale "safe to undo" '_rb_update_state "$(_rb_happy_state)"'
+  _rb_case stay "verified" fresh "was verified" '_rb_update_state "$(_rb_happy_state verified=true)"'
+  _rb_case stay "migrated, previous not safe" fresh "below its downgrade floor" '_rb_update_state "$(_rb_happy_state migrated=true previous_safe=false)"'
+  _rb_case stay "migrated, previous_safe missing" fresh "Restoring after a failed update" '_rb_update_state "$(_rb_happy_state migrated=true previous_safe=)"'
+  _rb_case stay "migrated, previous_safe not a boolean" fresh "below its downgrade floor" '_rb_update_state "$(_rb_happy_state migrated=true previous_safe="\"true\"")"'
+  _rb_case swap "migrated, previous safe" fresh "safe to undo" '_rb_update_state "$(_rb_happy_state migrated=true)"'
+  _rb_case swap "not migrated, previous not safe" fresh "safe to undo" '_rb_update_state "$(_rb_happy_state previous_safe=false)"'
+  # Readable but about other links: fail closed, never the timer.
+  _rb_case stay "mismatched target" fresh "describes another update" '_rb_update_state "$(_rb_happy_state target="\"nightly-20261025\"")"'
+  _rb_case stay "mismatched from" fresh "describes another update" '_rb_update_state "$(_rb_happy_state from="\"nightly-20261001\"")"'
+  # Missing or unreadable: the switch-time fallback.
+  _rb_case swap "missing, fresh current" fresh "is missing; current was switched" ':'
+  _rb_case stay "missing, stale current" stale "is missing, and current" ':'
+  _rb_case swap "invalid JSON, fresh" fresh "is unreadable; current was switched" '_rb_update_state "{not json"'
+  _rb_case stay "invalid JSON, stale" stale "is unreadable, and current" '_rb_update_state "{not json"'
+  _rb_case stay "wrong types (verified a string), stale" stale "is unreadable" '_rb_update_state "$(_rb_happy_state verified="\"false\"")"'
+  _rb_case stay "from missing, stale" stale "is unreadable" '_rb_update_state "$(_rb_happy_state from=)"'
+  _rb_case stay "JSON array, stale" stale "is unreadable" '_rb_update_state "[]"'
+  _rb_case stay "a directory, stale" stale "is unreadable" 'mkdir "${RB_ROOT}/update-state.json"'
+  _rb_case swap "oversized, fresh" fresh "is unreadable; current was switched" '_rb_update_state "$(_rb_happy_state runId="\"$(printf "x%.0s" {1..5000})\"")"'
+  _rb_case stay "oversized happy state, stale (cap enforced, not parsed)" stale "is unreadable" '_rb_update_state "$(_rb_happy_state runId="\"$(printf "x%.0s" {1..5000})\"")"'
+  # A symlinked file is unreadable (O_NOFOLLOW): a happy target behind it,
+  # with a stale current, must not swap.
+  _rb_case stay "symlink to a happy state, stale (not followed)" stale "is unreadable" \
+    '_rb_happy_state > "${RB_DIR}/happy.json"; ln -s "${RB_DIR}/happy.json" "${RB_ROOT}/update-state.json"'
+  _rb_case swap "symlink, fresh (fallback)" fresh "is unreadable; current was switched" \
+    '_rb_happy_state > "${RB_DIR}/happy.json"; ln -s "${RB_DIR}/happy.json" "${RB_ROOT}/update-state.json"'
+}
+
+# The window edge of the fallback: 1700 s ago swaps, 1900 s ago does not.
+test_rollback_mtime_fallback_window() {
+  _rb_new_host
+  touch -h -d '1700 seconds ago' "${RB_ROOT}/current"
+  _rb_run
+  _rb_expect swap "switched 1700 s ago"
+  rm -rf "$RB_DIR"
+  _rb_new_host
+  touch -h -d '1900 seconds ago' "${RB_ROOT}/current"
+  RB_BEFORE="$(_rb_state)"
+  _rb_run
+  _rb_expect stay "switched 1900 s ago" "more than 1800s"
+  rm -rf "$RB_DIR"
+}
+
+# Without python3 the file counts as unreadable: the fallback applies.
+test_rollback_update_state_without_python_falls_back() {
+  _rb_new_host
+  _rb_update_state "$(_rb_happy_state)"
+  _rb_stale
+  printf '#!/bin/sh\nexit 127\n' > "${RB_SHIM}/python3"
+  chmod 0755 "${RB_SHIM}/python3"
+  RB_BEFORE="$(_rb_state)"
+  _rb_run
+  _rb_expect stay "no python3, stale current" "is unreadable, and current"
+  rm -rf "$RB_DIR"
+}
+
+# The root path still never opens update-state.json: the decision runs in
+# the owner step (the install root is mode 000 until runuser).
+test_rollback_root_path_update_state_read_by_owner() {
+  _rb_new_host
+  _rb_root_shims
+  _rb_update_state "$(_rb_happy_state verified=true)"
+  RB_BEFORE="$(_rb_state)"
+  _rb_run_as_root
+  _rb_expect stay "root path, verified" "was verified"
+  assert_contains "$(cat "$RB_CALLS")" "runuser -u scion" "the decision must be made in the owner step"
+  rm -rf "$RB_DIR"
 }

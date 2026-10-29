@@ -423,16 +423,35 @@ readonly EMPTY_SHA256="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7
 # nothing in it is expanded either locally or on the VM. ARGS must be
 # shell-safe words (deploy.sh only passes validated values).
 install_layout_command() {
+  layout_script_write
+  layout_script_run "$@"
+  layout_script_remove
+}
+
+# layout_script_write / layout_script_run ARGS... / layout_script_remove --
+# the three parts of install_layout_command, for a VM command that runs
+# scion-layout.sh more than once: write it once, run it as often as needed,
+# remove it. A command must carry the script only once: an ssh --command
+# is a single argv word, which Linux caps at 128 KiB (MAX_ARG_STRLEN), and
+# scion-layout.sh alone is over a quarter of that.
+layout_script_write() {
   printf '%s\n' \
     "    SCION_LAYOUT_SH=\"\$(mktemp)\"" \
     "    cat > \"\$SCION_LAYOUT_SH\" << 'SCIONLAYOUTEOF'" \
     "$(cat "${SCRIPT_DIR}/scion-layout.sh")" \
-    "SCIONLAYOUTEOF" \
-    "    sudo bash \"\$SCION_LAYOUT_SH\" $* || { rm -f \"\$SCION_LAYOUT_SH\"; exit 1; }" \
+    "SCIONLAYOUTEOF"
+}
+layout_script_run() {
+  printf '%s\n' \
+    "    sudo bash \"\$SCION_LAYOUT_SH\" $* || { rm -f \"\$SCION_LAYOUT_SH\"; exit 1; }"
+}
+layout_script_remove() {
+  printf '%s\n' \
     "    rm -f \"\$SCION_LAYOUT_SH\""
 }
 
-# install_guard_command -- prints remote shell text that installs the
+# install_guard_command -- prints remote shell text (to follow
+# layout_script_write in the same command) that installs the
 # boot-failure guard: scion-hub-rollback.sh (this directory) root-owned
 # 0755 at /usr/local/libexec/scion/scion-hub-rollback.sh (design D1 as
 # amended: outside the hub-owned ${INSTALL_ROOT}, so the hub user can
@@ -441,17 +460,21 @@ install_layout_command() {
 # checks its directory chain; and the root oneshot scion-hub-rollback.service that
 # scion-hub.service's OnFailure= starts. Idempotent. Shared by the deploy
 # and migrate-layout paths so both install the same guard; the caller
-# writes scion-hub.service afterwards and runs daemon-reload.
+# writes scion-hub.service afterwards and runs daemon-reload. The guard
+# and layout temp files are removed on any exit (an EXIT trap, cleared
+# once the guard file is gone), including when install-guard fails.
 install_guard_command() {
   printf '%s\n' \
     "    SCION_ROLLBACK_SH=\"\$(mktemp)\"" \
+    "    trap 'rm -f \"\$SCION_ROLLBACK_SH\" \"\${SCION_LAYOUT_SH:-}\"' EXIT" \
     "    cat > \"\$SCION_ROLLBACK_SH\" << 'SCIONROLLBACKEOF'" \
     "$(cat "${SCRIPT_DIR}/scion-hub-rollback.sh")" \
     "SCIONROLLBACKEOF"
   # shellcheck disable=SC2016 # expanded on the VM, not here
-  install_layout_command install-guard '"$SCION_ROLLBACK_SH"'
+  layout_script_run install-guard '"$SCION_ROLLBACK_SH"'
   printf '%s\n' \
     "    rm -f \"\$SCION_ROLLBACK_SH\"" \
+    "    trap - EXIT" \
     "    sudo tee /etc/systemd/system/scion-hub-rollback.service > /dev/null << 'SERVICEEOF'" \
     "$(cat "${SCRIPT_DIR}/config-templates/scion-hub-rollback.service")" \
     "SERVICEEOF"
@@ -1324,9 +1347,11 @@ if [[ "$MIGRATE_LAYOUT_MODE" == "true" ]]; then
     --zone="${ZONE}" --project="${PROJECT_ID}" \
     --command="
     set -euo pipefail
-$(install_layout_command adopt)
-$(install_layout_command set-maintenance /home/scion/.scion/settings.yaml "${MIGRATE_UPDATE_POLICY}")
+$(layout_script_write)
+$(layout_script_run adopt)
+$(layout_script_run set-maintenance /home/scion/.scion/settings.yaml "${MIGRATE_UPDATE_POLICY}")
 $(install_guard_command)
+$(layout_script_remove)
     sudo tee /etc/systemd/system/scion-hub.service > /dev/null << 'SERVICEEOF'
 $(cat "${SCRIPT_DIR}/config-templates/scion-hub.service")
 SERVICEEOF
@@ -3066,7 +3091,9 @@ gcloud compute ssh "${INSTANCE_NAME}" \
   --zone="${ZONE}" --project="${PROJECT_ID}" \
   --command="
     set -euo pipefail
+$(layout_script_write)
 $(install_guard_command)
+$(layout_script_remove)
     sudo tee /etc/systemd/system/scion-hub.service > /dev/null << 'SERVICEEOF'
 $(cat "${SCRIPT_DIR}/config-templates/scion-hub.service")
 SERVICEEOF
