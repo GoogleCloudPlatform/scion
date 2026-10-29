@@ -53,7 +53,9 @@ func writePlacementPreflightAgent(t *testing.T, projectPath, slug, info, cfg str
 // placed are not covered. None of them is reported as clean.
 func TestPlacementPreflightUnreadableAgentIsIncomplete(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	srv, s := testServer(t)
+	srv, s, _, expire := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *listThenExpireStore {
+		return &listThenExpireStore{Store: inner, fault: f}
+	})
 	ctx := context.Background()
 	globalDir := t.TempDir()
 	broker := newLocalPathTestBroker(t, s, "pp-broker")
@@ -87,12 +89,75 @@ func TestPlacementPreflightUnreadableAgentIsIncomplete(t *testing.T) {
 	require.Equal(t, 1, r.Counts[config.PreflightAgentTolerationsWithoutOperatorPolicy])
 	require.True(t, r.NeedsAttention())
 
-	// Past the report's deadline nothing is read and nothing is clean.
+	// The deadline passes after the listing and before any agent is read:
+	// both co-located agents are incomplete, never clean.
 	prev := placementPreflightTimeout
-	placementPreflightTimeout = time.Nanosecond
+	placementPreflightTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { placementPreflightTimeout = prev })
+	expire.Arm()
 	r = srv.scanColocatedPlacement(ctx, broker.ID, globalDir, policy)
 	require.Equal(t, 0, r.Scanned, "%+v", r)
-	require.True(t, r.RecordsUnreadable || r.Incomplete == 2, "%+v", r)
+	require.False(t, r.RecordsUnreadable, "%+v", r)
+	require.Equal(t, 2, r.Incomplete, "%+v", r)
+	require.Equal(t, 2, r.NotCovered, "%+v", r)
 	require.True(t, r.NeedsAttention())
+}
+
+// listThenExpireStore, once armed, lists agents normally, then waits for
+// the caller's deadline before returning them, so the scan's deadline
+// falls between the listing and the agents' reads.
+type listThenExpireStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
+
+func (s *listThenExpireStore) ListAgents(ctx context.Context, f store.AgentFilter, o store.ListOptions) (*store.ListResult[store.Agent], error) {
+	res, err := s.Store.ListAgents(ctx, f, o)
+	if s.fault.Active() {
+		<-ctx.Done()
+	}
+	return res, err
+}
+
+// The report's policy uses the runtime entries the co-located broker
+// treats as the operator's: a profiled Kubernetes agent of the co-located
+// broker, on an operator entry with placement, is categorized through the
+// GET's report even though the bootstrap merge also carries the built-in
+// kubernetes entry (which, counted as the operator's, would make it
+// unresolvable).
+func TestPlacementPreflightReportUsesConfiguredEntries(t *testing.T) {
+	old := config.GetGlobalSettingsOverlay()
+	t.Cleanup(func() { config.SetGlobalSettingsOverlay(old) })
+	config.SetGlobalSettingsOverlay(nil)
+	path := tempSettingsHome(t)
+	require.NoError(t, os.WriteFile(path, []byte("schema_version: \"1\"\nruntimes:\n  k8s:\n    type: kubernetes\n    node_selector:\n      pool: agents\n"), 0o644))
+	srv, s := testServer(t)
+	ctx := context.Background()
+	broker := newLocalPathTestBroker(t, s, "pp-cfg-broker")
+	linked := filepath.Join(t.TempDir(), "linked", config.DotScion)
+	require.NoError(t, os.MkdirAll(linked, 0o755))
+	project := &store.Project{ID: tid("pp-cfg-project"), Name: "pp-cfg", Slug: "pp-cfg"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: project.ID, BrokerID: broker.ID, BrokerName: broker.Name, LocalPath: linked, Status: store.BrokerStatusOnline,
+	}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: tid("pp-cfg-agent"), Slug: "gpu-agent", Name: "gpu-agent", ProjectID: project.ID, RuntimeBrokerID: broker.ID}))
+	writePlacementPreflightAgent(t, linked, "gpu-agent", `{"runtime":"kubernetes","profile":"gpu"}`, `{"kubernetes":{"nodeSelector":{"pool":"other"}}}`)
+
+	fileK := newFileKoanf(t, map[string]interface{}{
+		"runtimes.k8s.type":                "kubernetes",
+		"runtimes.k8s.node_selector.pool":  "agents",
+		"runtimes.kubernetes.type":         "kubernetes",
+		"profiles.gpu.runtime":             "k8s",
+		"profiles.gpu.node_selector.accel": "l4",
+	})
+	ops := NewOperationalSettings(newFakeHubSettingStore(), fileK, emptyKoanf())
+	_, err := ops.Refresh(ctx)
+	require.NoError(t, err)
+	publishTarget(srv, nil, broker.ID, t.TempDir())
+
+	view := srv.placementPreflight(ctx, ops)
+	require.Equal(t, 1, view.AgentsScanned, "%+v", view)
+	require.Equal(t, 0, view.AgentsIncomplete, "%+v", view)
+	require.Equal(t, 1, view.AgentCounts[string(config.PreflightAgentSelectorConflictsOperator)], "%+v", view)
 }

@@ -137,7 +137,8 @@ func agentDirNames(root string) ([]string, error) {
 // Broker, or not placed on one yet, is counted as not covered: its pod
 // takes the placement of whichever Runtime Broker starts it. An agent of
 // the co-located broker whose project row is missing or resolves to no
-// path is incomplete. ctx bounds the scan: once it is done, the co-located
+// path is incomplete. ctx is checked before each agent's reads (a read
+// already started is not interrupted): once it is done, the co-located
 // agents not yet read are counted as incomplete.
 func ScanColocatedLegacyPlacement(ctx context.Context, globalDir, colocatedBrokerID string, in ProfileRefInputs, policy PlacementPolicyFunc) config.PlacementPreflightReport {
 	var r config.PlacementPreflightReport

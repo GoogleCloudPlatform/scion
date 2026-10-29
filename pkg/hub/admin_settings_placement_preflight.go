@@ -67,10 +67,11 @@ type PlacementPreflightView struct {
 	AgentCounts map[string]int `json:"agent_counts"`
 }
 
-// placementPreflightTimeout bounds the whole agent half of one report:
-// the store listing and every agent's file reads. The report runs inside
-// the server-config GET, so it is shorter than the background reference
-// count's bound. A variable so tests can shorten it.
+// placementPreflightTimeout is the deadline of the agent half of one
+// report: the store listing runs under it, and it is checked before each
+// agent's file reads (a read already started is not interrupted). The
+// report runs inside the server-config GET, so it is shorter than the
+// background reference count's bound. A variable so tests can shorten it.
 var placementPreflightTimeout = 10 * time.Second
 
 // placementPreflight builds the placement pre-upgrade report from the
@@ -153,9 +154,10 @@ func placementConfiguredRuntimes(ops *OperationalSettings) func(string) bool {
 	return func(name string) bool { return names[name] }
 }
 
-// scanColocatedPlacement runs the co-located broker's agent scan within
-// placementPreflightTimeout: the store listing and the per-agent reads
-// (agents not read by the deadline are incomplete). The report is advisory
+// scanColocatedPlacement runs the co-located broker's agent scan under
+// placementPreflightTimeout: the store listing runs under it, and it is
+// checked before each agent's reads (agents not yet read at the deadline
+// are incomplete). The report is advisory
 // and never fails the settings GET: a listing error, or a failure inside
 // the scan, marks the agent records unreadable (coverage incomplete) and
 // is logged.
