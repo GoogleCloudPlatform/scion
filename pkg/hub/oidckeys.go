@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/keymaterial"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4"
@@ -464,7 +465,7 @@ func (m *OIDCKeyManager) loadOrCreateKey(ctx context.Context, cfg OIDCKeyManager
 				m.log.Warn("Failed to persist OIDC key backup to store after loading from backend",
 					"key", keyName, "error", persistErr)
 			}
-			m.source = signingKeySourceSecretBackend
+			m.source = keymaterial.SourceSecretBackend
 			return privKey, nil
 		}
 		if err != store.ErrNotFound {
@@ -495,7 +496,7 @@ func (m *OIDCKeyManager) loadOrCreateKey(ctx context.Context, cfg OIDCKeyManager
 						"key", keyName, "error", syncErr)
 				}
 			}
-			m.source = signingKeySourceStore
+			m.source = keymaterial.SourceStore
 			return privKey, nil
 		}
 		if err != nil && err != store.ErrNotFound {
@@ -532,7 +533,7 @@ func (m *OIDCKeyManager) loadOrCreateKey(ctx context.Context, cfg OIDCKeyManager
 		if casKey != nil {
 			// Another instance created a key first — use theirs.
 			m.log.Info("Another instance already created OIDC signing key, using theirs", "key", keyName)
-			m.source = signingKeySourceStore
+			m.source = keymaterial.SourceStore
 			return casKey, nil
 		}
 	}
@@ -559,18 +560,19 @@ func (m *OIDCKeyManager) loadOrCreateKey(ctx context.Context, cfg OIDCKeyManager
 		}
 	}
 
-	m.source = signingKeySourceGenerated
+	m.source = keymaterial.SourceGenerated
 	return privKey, nil
 }
 
 // backupKeyToStore saves the PEM-encoded key to SQLite as a local backup.
-// It refuses (errExistingRecordUnreadable) to overwrite an existing record
-// that is unreadable with the configured keys (ptone/scion#1530 §5).
+// It refuses (keymaterial.ErrExistingRecordUnreadable) to overwrite an
+// existing record that is unreadable with the configured keys
+// (ptone/scion#1530 §5).
 func (m *OIDCKeyManager) backupKeyToStore(ctx context.Context, keyName, pemValue, hubID string) error {
 	if m.store == nil {
 		return nil
 	}
-	if err := guardOverwrite(ctx, m.store, m.cipher, m.flagged, keyName, store.ScopeHub, hubID); err != nil {
+	if err := keymaterial.GuardOverwrite(ctx, m.store, m.cipher, m.flagged, keyName, store.ScopeHub, hubID); err != nil {
 		return err
 	}
 	// Encrypt with the shared cipher, consistent with LocalBackend.Set().
@@ -608,7 +610,7 @@ func (m *OIDCKeyManager) syncKeyToBackend(ctx context.Context, keyName, pemValue
 		return nil
 	}
 	if _, isGCP := m.backend.(*secret.GCPBackend); !isGCP {
-		if err := guardOverwrite(ctx, m.store, m.cipher, m.flagged, keyName, store.ScopeHub, hubID); err != nil {
+		if err := keymaterial.GuardOverwrite(ctx, m.store, m.cipher, m.flagged, keyName, store.ScopeHub, hubID); err != nil {
 			return err
 		}
 	}
@@ -729,7 +731,7 @@ func (m *OIDCKeyManager) saveKeysetToDB(ctx context.Context) error {
 		return fmt.Errorf("marshaling OIDC keyset: %w", err)
 	}
 
-	if err := guardOverwrite(ctx, m.store, m.cipher, m.flagged, SecretKeyOIDCKeyset, store.ScopeHub, m.hubID); err != nil {
+	if err := keymaterial.GuardOverwrite(ctx, m.store, m.cipher, m.flagged, SecretKeyOIDCKeyset, store.ScopeHub, m.hubID); err != nil {
 		return err
 	}
 	valueToStore, encErr := m.cipher.Encrypt(string(data))
