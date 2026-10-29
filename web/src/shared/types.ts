@@ -1310,6 +1310,11 @@ export interface PresentedTarget {
   nodeSelector?: Record<string, string>;
   tolerations?: PresentedToleration[];
   runtimeClassName?: string;
+  /**
+   * True only when the instance reports placement. Absent or false means
+   * "not reported" (an older instance), not "no placement".
+   */
+  placementReported?: boolean;
 }
 
 /**

@@ -14,7 +14,10 @@
 
 package config
 
-import "context"
+import (
+	"context"
+	"slices"
+)
 
 // FlatInstancePolicy is the local policy of one flat Runtime Broker instance
 // (.design/flat-runtime-brokers/contract-appendix-p3.md FC5): the typed
@@ -45,6 +48,8 @@ func NewFlatInstancePolicy(inst V1RuntimeBrokerInstanceConfig) *FlatInstancePoli
 		p.Target.KubernetesServiceAccountMappings = copyStringMap(inst.RuntimeTarget.KubernetesServiceAccountMappings)
 		p.Target.SharedDirStorageBackends = copyStringMap(inst.RuntimeTarget.SharedDirStorageBackends)
 		p.Target.SafeToEvict = copyBoolPtr(inst.RuntimeTarget.SafeToEvict)
+		p.Target.NodeSelector = copyStringMap(inst.RuntimeTarget.NodeSelector)
+		p.Target.Tolerations = slices.Clone(inst.RuntimeTarget.Tolerations)
 	}
 	if d := copyInstanceAgentDefaults(inst.AgentDefaults); d != nil {
 		p.Defaults = *d

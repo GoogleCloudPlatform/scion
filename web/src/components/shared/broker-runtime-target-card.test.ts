@@ -46,10 +46,14 @@ function flatBroker(type: string, presentation?: RuntimeTargetPresentation): Run
   } as RuntimeBroker;
 }
 
-function withPlacement(extra: Record<string, unknown> = {}): RuntimeTargetPresentation {
+function withPlacement(
+  extra: Record<string, unknown> = {},
+  placementReported?: boolean
+): RuntimeTargetPresentation {
   const p = fullPresentation();
   p.target = {
     ...p.target!,
+    placementReported,
     nodeSelector: { 'cloud.google.com/gke-nodepool': 'agents' },
     tolerations: [
       { key: 'dedicated', operator: 'Equal', value: 'agents', effect: 'NoSchedule', ...extra },
@@ -136,11 +140,23 @@ describe('scion-broker-runtime-target-card', () => {
     expect(root.innerHTML).not.toContain('tolerationSeconds');
   });
 
-  it('has no Placement group for docker, an unknown type, or missing fields', async () => {
+  it('has no Placement group for docker or an unknown type', async () => {
     expect(rows(await mount(flatBroker('docker', withPlacement())), 'placement-rows')).toBeNull();
     expect(rows(await mount(flatBroker('cloudrun', withPlacement())), 'placement-rows')).toBeNull();
-    const none = await mount(flatBroker('kubernetes', fullPresentation()));
-    expect(rows(none, 'placement-rows')).toBeNull();
+  });
+
+  it('flat placement is read-only and tells not reported from none configured', async () => {
+    const old = await mount(flatBroker('kubernetes', fullPresentation()));
+    expect(rows(old, 'placement-rows')).toEqual({ Placement: 'Not reported' });
+    const empty = fullPresentation();
+    empty.target = { ...empty.target!, placementReported: true };
+    const reported = await mount(flatBroker('kubernetes', empty));
+    expect(rows(reported, 'placement-rows')).toEqual({
+      Placement: 'None configured on the broker',
+    });
+    const placed = await mount(flatBroker('kubernetes', withPlacement({}, true)));
+    expect(rows(placed, 'placement-rows')!['Runtime class']).toBe('gvisor');
+    expect(placed.querySelector('sl-input, sl-button, input, button, form')).toBeNull();
   });
 
   it('renders nothing for a legacy broker', async () => {

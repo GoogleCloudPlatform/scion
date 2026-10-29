@@ -354,8 +354,58 @@ The runtime target of one flat Runtime Broker instance, and the instance's own i
 | `safe_to_evict` | bool | kubernetes | `false` adds the `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` annotation to agent pods (on GKE Autopilot this requests extended run duration). `true` or unset adds nothing. An agent's own `kubernetes.safeToEvict`, `true` or `false`, wins. |
 | `priority_class_name` | string | kubernetes | Default PriorityClass of agent pods (DNS-1123 subdomain). The PriorityClass must already exist on the cluster. An agent's own `kubernetes.priorityClassName` wins. |
 | `gke` | bool | kubernetes | `true` turns on GKE mode for the instance. `false` or unset detects a GKE cluster automatically. |
+| `node_selector` | map | kubernetes | Node labels (key to value) every agent pod of the instance must match. See [Flat instance placement](#flat-instance-placement). |
+| `tolerations` | list | kubernetes | Tolerations of every agent pod of the instance, each with `key`, `operator` (`Equal` or `Exists`; empty means `Equal`), `value` and `effect` (`NoSchedule`, `PreferNoSchedule`, `NoExecute`, or empty for any). An empty key requires `Exists`, and `Exists` requires an empty value. |
+| `runtime_class_name` | string | kubernetes | RuntimeClass of every agent pod of the instance (DNS-1123 subdomain). The RuntimeClass must already exist on the cluster. |
 
 A runtime target does not choose where its agents' storage lives: [`server.project_storage`](#project-storage-serverproject_storage) does, for every instance of the process. The former `shared_dir_storage_backend`, `shared_dir_storage_backends`, `home_storage_backend` and `home_storage_leaf` fields are removed. A flat instance that sets them refuses startup with an error that names the field, `server.project_storage` and `volumes:`. On runtimes and profiles, startup reports them and agent start refuses them; see [Removed storage overrides](#removed-storage-overrides). For a node-local directory, use a `volumes:` entry.
+
+#### Flat instance placement
+
+`node_selector`, `tolerations` and `runtime_class_name` place the instance's agent pods on the nodes the operator chooses, whatever template the agent uses, including `default`. Unlike the other defaults in the table, the operator owns them, so an agent's own value does not win:
+
+- An agent's `kubernetes.nodeSelector` may add keys the runtime target does not set. It cannot change the value of a key the runtime target sets, including the pool key `scion.dev/pool`. A differing value refuses the start.
+- Each of an agent's `kubernetes.tolerations` must match one of the runtime target's tolerations exactly: the same key, operator (empty counts as `Equal`), value and effect. A broader `Exists` toleration does not cover a different entry. When the runtime target sets no tolerations, any agent toleration is refused, including one with an empty key and `Exists`. While placement is set, an agent toleration with an empty key and `Exists` is refused even when the runtime target has the same entry.
+- An agent cannot choose or change the runtime class. An agent `kubernetes.runtimeClassName` must be empty or equal to the runtime target's value.
+
+A refused start is reported as a validation error that names the field and whether it comes from the request or the agent's stored configuration. The check runs before the start creates, changes or stops anything. Node selector entries combine: an agent-added key narrows placement further, and a key with no matching nodes leaves the pod pending. An agent-added key can also steer a pod onto any pool whose nodes carry no taint, because only the runtime target's keys are fixed. Tolerations stay limited to the runtime target's. A node selector and a toleration are independent: Scion never derives one from the other, so a tainted pool needs both.
+
+The values are read from the instance's settings when it starts, so a change takes effect when the Runtime Broker restarts. Existing pods keep their placement. The Brokers page shows the instance's reported placement read-only, as defaults for new agents. In GCP identity `block` mode the Workload Identity node label is still added after this placement.
+
+```yaml
+server:
+  broker:
+    instances:
+      - key: agents
+        name: agents
+        runtime_target:
+          type: kubernetes
+          namespace: agents
+          node_selector:
+            scion.dev/pool: agents
+          tolerations:
+            - key: scion.dev/pool
+              operator: Equal
+              value: agents
+              effect: NoSchedule
+          runtime_class_name: gvisor
+```
+
+`gvisor` is an example: Scion does not create RuntimeClasses or check that one exists.
+
+This release checks and enforces these rules for flat instances only. Runtime entries and profiles of a regular Runtime Broker keep their current behaviour and follow in a later release.
+
+##### Before upgrading
+
+An agent that sets its own tolerations or runtime class while the instance's runtime target sets none is refused at its next start or restart. Running agents keep their pods until then. Before upgrading a host with flat instances:
+
+1. Run `scion doctor` with the new release. The `flat-placement-preflight` check scans the stored configuration of every agent each flat instance owns, without changing anything, and reports counts per instance: agents with tolerations while the runtime target sets none (`agent_tolerations_without_operator_policy`), agents with a runtime class while the runtime target sets none (`agent_runtime_class_without_operator_policy`), and agents it could not check (`incomplete`). It shows no agent names or configuration values. An agent can be counted in both categories.
+2. Treat `incomplete` as unfinished: fix unreadable agent records or configurations, then run the check again.
+3. For agent tolerations, decide whether each belongs to the instance. If it does, add it to the runtime target's `tolerations`; otherwise remove it from the agent's configuration. Tolerations match by key, operator (empty counts as `Equal`), value and effect; a broad `Exists` toleration on the runtime target does not cover a different agent entry. A toleration added to the runtime target applies to every agent of the instance.
+4. For an agent runtime class, either set `runtime_class_name` on the runtime target or remove the agent's class. An agent cannot choose a class on its own; repeating the runtime target's class is accepted.
+5. Restart the Runtime Broker to activate runtime target changes, then run `scion doctor` again until both counts and `incomplete` are zero.
+
+The check counts only these two cases, where the runtime target sets no tolerations or no runtime class at all. Once the runtime target sets some tolerations or a runtime class, the check no longer looks at the agents' own values, so an agent toleration that is not among the target's, or an agent class that differs from the target's, is not counted. Such remaining mismatches show up as refusals, naming the field, at the agent's next start or restart.
 
 #### Flat instance agent defaults (`server.broker.instances[].agent_defaults`)
 

@@ -900,6 +900,18 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A flat instance's placement is its operator's: the request's own
+	// kubernetes block is checked against it here, before the dispatch
+	// attempt and any preparation of the start. Provision-only creates
+	// start no pod.
+	if !req.ProvisionOnly {
+		if perr := s.checkFlatCreatePlacement(req); perr != nil {
+			span.SetStatus(codes.Error, perr.Error())
+			s.writeStartContextError(w, perr, "create agent", "agent_id", req.ID, "profile", createRequestProfile(req))
+			return
+		}
+	}
+
 	attemptKey := req.ID
 	if attemptKey == "" {
 		attemptKey = req.Name
@@ -1593,6 +1605,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// creates start no pod and skip it; a reprovision is always
 	// provision-only.
 	if !req.ProvisionOnly {
+		// On a flat instance this cannot refuse for a foreign runtime: a
+		// profile was refused (422) before the attempt, buildStartContext
+		// resolves only the instance's runtime, and checkFlatCreatePlacement
+		// already checked the policy and its target before the attempt.
 		rp, perr := s.placementForStart(ctx, sc.Resolution, opts.ProjectPath)
 		if perr != nil {
 			span.SetStatus(codes.Error, perr.Error())
