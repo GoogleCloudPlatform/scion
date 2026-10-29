@@ -26,3 +26,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: echo ok
+
+  commented:
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }} # a trailing comment is not part of the expression
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+
+  literal-parens:
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (startsWith(github.head_ref, 'a) || (b')) }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok

@@ -13,7 +13,13 @@
 # also passes. pull_request, pull_request_target and workflow_dispatch runs are
 # untouched by the gate, on the fork too.
 # This check fails when a job in such a workflow has no if:, or an if: that
-# does not start with the gate in one of those forms. Push triggers that only
+# is not exactly one of those forms. In the ANDed form the job's own condition
+# must be one balanced operand, so the closing ") }}" closes the "(" after
+# "&&": "(<GATE>) && (a) || (b)" is rejected (it runs whenever b holds). The
+# if: must be on one line (a block scalar is rejected); a trailing comment is
+# ignored. It fails closed on layouts it does not parse, in any workflow: a
+# flow-map on:, on: entries or job keys not indented by 2 spaces, quoted job
+# keys, an inline jobs: value, or a jobs: with no job read. Push triggers that only
 # filter tags (tags/tags-ignore without branches/branches-ignore) are skipped,
 # and build-release.yml is skipped by name: its tag pushes are not gated yet
 # (its jobs carry the upstream-only guard instead).
@@ -37,24 +43,50 @@ check_file() {
   base=${f##*/}
   case " $SKIP_FILES " in *" $base "*) return 0 ;; esac
   awk -v file="$f" -v gate="$GATE" -v repo="$REPO_GUARD" '
-    function flush(   v, ok, pre, suf) {
+    # wrapped MID: 1 if MID, the text between "${{ (<gate>) && (" and ") }}",
+    # is one balanced operand, so the closing ")" of the suffix is the one the
+    # prefix opened (rejects "(<gate>) && (a) || (b)"). Parens inside
+    # single-quoted string literals do not count; a doubled quote ('') inside
+    # a literal toggles twice, so it needs no special case.
+    function wrapped(m,   i, c, d, q) {
+      d = 1; q = 0
+      for (i = 1; i <= length(m); i++) {
+        c = substr(m, i, 1)
+        if (c == "\047") { q = !q; continue }
+        if (q) continue
+        if (c == "(") d++
+        else if (c == ")") { d--; if (d < 1) return 0 }
+      }
+      return d == 1 && !q
+    }
+    function layout(n, what) {
+      lerrs[++nlerr] = sprintf("%s:%d: unrecognised layout: %s; this check reads only 2-space block YAML (unquoted keys), so it cannot verify the fork CI gate here", file, n, what)
+    }
+    function flush(   v, ok, pre, suf, m) {
       if (job == "") return
       if (!hasif) {
         errs[++nerr] = sprintf("%s:%d: job %s has no if:; on push and schedule it must carry the fork CI gate", file, jobline, job)
+      } else if (ifval ~ /^[>|]/) {
+        errs[++nerr] = sprintf("%s:%d: job %s: if: is a block scalar; write the fork CI gate on the if: line itself", file, ifline, job)
       } else {
         v = ifval
         pre = "${{ (" gate ") && ("
         suf = ") }}"
         ok = (v == "${{ " gate " }}") || (v == repo) || (v == "${{ " repo " }}")
-        if (!ok && index(v, pre) == 1 && length(v) > length(pre) + length(suf) && substr(v, length(v) - length(suf) + 1) == suf) ok = 1
+        if (!ok && index(v, pre) == 1 && length(v) > length(pre) + length(suf) && substr(v, length(v) - length(suf) + 1) == suf) {
+          m = substr(v, length(pre) + 1, length(v) - length(pre) - length(suf))
+          ok = wrapped(m)
+        }
         if (!ok) errs[++nerr] = sprintf("%s:%d: job %s: if: does not apply the fork CI gate:\n  got:\n    if: %s", file, ifline, job, v)
       }
       job = ""
     }
-    # Top-level on: (also "on" quoted). Inline value: a bare event or a flow list.
+    # Top-level on: (also "on" quoted). Inline value: a bare event or a flow
+    # list; a flow map is not parsed, so it fails closed.
     /^["\047]?on["\047]?:/ {
       v = $0; sub(/^["\047]?on["\047]?:[[:space:]]*/, "", v); sub(/[[:space:]]*#.*$/, "", v)
-      if (v == "") { inon = 1; next }
+      if (v == "") { inon = 1; onfirst = 1; next }
+      if (v ~ /^\{/) { layout(NR, "flow-map on:"); next }
       gsub(/[][ ]/, "", v); n = split(v, ev, ",")
       for (i = 1; i <= n; i++) {
         if (ev[i] == "push") { push = 1; pbranch = 1 }
@@ -63,6 +95,11 @@ check_file() {
       next
     }
     inon && /^[^ #]/ { inon = 0; trig = "" }
+    # The first entry under on: must be at 2 spaces.
+    inon && onfirst && /^[[:space:]]+[^[:space:]#]/ {
+      onfirst = 0
+      if ($0 !~ /^  [^ ]/) { layout(NR, "on: entries not indented by 2 spaces"); inon = 0; next }
+    }
     inon && /^  - *[a-z_]+/ {
       v = $0; sub(/^  - */, "", v); sub(/[[:space:]#].*$/, "", v)
       if (v == "push") { push = 1; pbranch = 1 }
@@ -75,23 +112,40 @@ check_file() {
       if (trig == "schedule") sched = 1
       next
     }
+    inon && /^  ["\047]/ { layout(NR, "quoted key under on:"); next }
     inon && trig == "push" && /^    (branches|branches-ignore):/ { pbranch = 1 }
     inon && trig == "push" && /^    (tags|tags-ignore):/ { ptags = 1 }
 
-    /^jobs:/ { injobs = 1; next }
+    /^jobs:/ {
+      v = $0; sub(/^jobs:[[:space:]]*/, "", v); sub(/[[:space:]]*#.*$/, "", v)
+      if (v != "") { layout(NR, "inline jobs: value"); next }
+      injobs = 1; jobsline = NR; next
+    }
     injobs && /^[^ #]/ { flush(); injobs = 0 }
     injobs && /^  [A-Za-z0-9_-]+:[[:space:]]*(#.*)?$/ {
       flush()
       job = $0; sub(/^  /, "", job); sub(/:.*/, "", job)
-      jobline = NR; hasif = 0; ifval = ""
+      jobline = NR; hasif = 0; ifval = ""; njobs++
       next
+    }
+    # Anything else that is not deeper job content: a quoted, 4-space or
+    # otherwise unparsed job key. Job content (4+ spaces) is only valid once a
+    # job key has been read.
+    injobs && /^[[:space:]]+[^[:space:]#]/ && ($0 !~ /^    / || job == "") {
+      layout(NR, "job key not an unquoted 2-space key"); injobs = 0; job = ""; next
     }
     injobs && job != "" && !hasif && /^    if:/ {
       hasif = 1; ifline = NR
       ifval = $0; sub(/^    if:[[:space:]]*/, "", ifval); sub(/[[:space:]]+$/, "", ifval)
+      # A trailing comment (no quotes in it) is not part of the expression.
+      sub(/[[:space:]]+#[^\047"]*$/, "", ifval)
     }
     END {
       flush()
+      if (jobsline && !njobs && !nlerr) layout(jobsline, "jobs: with no job parsed")
+      # Layout errors fail closed whatever the triggers are: the triggers may
+      # be what could not be read.
+      for (i = 1; i <= nlerr; i++) print lerrs[i]
       # A push that filters only tags never runs for a branch push.
       if (push && ptags && !pbranch) push = 0
       if (!push && !sched) exit
@@ -113,7 +167,7 @@ gated() {
   local o
   o=$(check_file "$tmp")
   rm -f "$tmp"
-  [ -n "$o" ]
+  grep -qF 'job probe has no if:' <<<"$o"
 }
 
 # check_dir DIR: prints every error for DIR's workflows; exit 1 if any.
@@ -209,5 +263,6 @@ else
   echo "    if: \${{ $GATE }}" >&2
   echo "  or, with the job's own condition:" >&2
   echo "    if: \${{ ($GATE) && (<condition>) }}" >&2
+  echo "  on the if: line itself, with <condition> one balanced operand (no || outside it)." >&2
   exit "$rc"
 fi
