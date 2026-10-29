@@ -124,6 +124,9 @@ func TestCheckSeedRepoConfigLayers_LayerKeysRefuse(t *testing.T) {
 			if strings.Contains(msg, "layermarker-q1") || !strings.Contains(msg, "(in "+layer+")") {
 				t.Errorf("error must name the layer and not the value: %s", msg)
 			}
+			if !strings.Contains(msg, "remove it from the git config file that sets it (in "+layer+")") || strings.Contains(msg, ".git/config") || strings.Contains(msg, "global") {
+				t.Errorf("error must give the remedy for its own layer: %s", msg)
+			}
 		})
 	}
 }
@@ -166,6 +169,34 @@ func TestCheckSeedRepoConfigLayers_NonRegularLayerFailsClosed(t *testing.T) {
 	}
 }
 
+// A root-level .git/commondir or .git/gitdir refuses the seed with the file
+// remedy and no host path: Dir is empty and the repository path is not printed.
+func TestCheckSeedRepoConfigLayers_RootRedirectFileRefuses(t *testing.T) {
+	for _, name := range []string{"commondir", "gitdir"} {
+		t.Run(name, func(t *testing.T) {
+			commonDir, _, adminName := seedLayersRepo(t)
+			writeLayer(t, filepath.Join(commonDir, name), "../elsewhere\n")
+			err := CheckSeedRepoConfigLayers(context.Background(), commonDir, adminName)
+			var refused *RepoConfigRefusedError
+			if !errors.As(err, &refused) {
+				t.Fatalf("error = %v, want *RepoConfigRefusedError", err)
+			}
+			if !refused.Seeded || refused.Dir != "" || refused.Key != ".git/"+name {
+				t.Errorf("refusal = seeded %v dir %q key %q; want true, \"\", .git/%s", refused.Seeded, refused.Dir, refused.Key, name)
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "remove that file from the repository's .git directory") {
+				t.Errorf("refusal lacks the file remedy: %s", msg)
+			}
+			for _, bad := range []string{filepath.Dir(commonDir), "global", "config file"} {
+				if strings.Contains(msg, bad) {
+					t.Errorf("refusal mentions %q: %s", bad, msg)
+				}
+			}
+		})
+	}
+}
+
 // A key git resolves but the parsed set lacks (a parser differential, made here
 // by a reader that drops one key) refuses through the cross-check.
 func TestCheckSeedRepoConfigLayers_ParserDifferentialRefuses(t *testing.T) {
@@ -203,6 +234,10 @@ func TestCheckSeedRepoConfigLayers_ParserDifferentialRefuses(t *testing.T) {
 	var refused *RepoConfigRefusedError
 	if !errors.As(err, &refused) || !strings.Contains(refused.Reason, "read differently") || refused.Key != "core.sparsecheckout" || !refused.Seeded {
 		t.Fatalf("error = %v, want a seeded cross-check refusal for core.sparsecheckout", err)
+	}
+	// The differing key may come from any layer, so the remedy names them all.
+	if msg := err.Error(); !strings.Contains(msg, "remove it from the git config file that sets it (in .git/config or a config.worktree)") || strings.Contains(msg, "global") {
+		t.Errorf("cross-check refusal lacks the combined-layer remedy: %s", msg)
 	}
 	_ = name
 }

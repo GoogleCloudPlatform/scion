@@ -449,8 +449,8 @@ func TestSeedPrivateGitConfig_RefusesCommandKeys(t *testing.T) {
 			if msg := err.Error(); !strings.Contains(msg, tc.key) || strings.Contains(msg, "seedmarker-h1") {
 				t.Errorf("error must name the key and not the value: %s", msg)
 			}
-			if !strings.Contains(err.Error(), "global git config") {
-				t.Errorf("error lacks the remedy: %s", err)
+			if !strings.Contains(err.Error(), "remove it from the repository's .git/config") || strings.Contains(err.Error(), "global") {
+				t.Errorf("error lacks the repository-config remedy: %s", err)
 			}
 			if _, statErr := os.Lstat(filepath.Join(agentDir, "git")); !os.IsNotExist(statErr) {
 				t.Errorf("a refused seed created the git dir (stat err %v)", statErr)

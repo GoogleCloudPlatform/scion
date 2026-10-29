@@ -64,7 +64,8 @@ const (
 )
 
 // RepoConfigRefusedError reports that a repository config key (or an
-// include directive) is not allowed for a host-side git command.
+// include directive) is not allowed for a host-side git command or an agent
+// start.
 //
 // Error never includes Value: a refused value can carry a secret.
 type RepoConfigRefusedError struct {
@@ -72,12 +73,11 @@ type RepoConfigRefusedError struct {
 	Key    string
 	Value  string
 	Reason string
-	// Seeded marks a refusal of an agent's seeded copy of the repository
-	// config (PrepareSeededGitConfig) rather than of a host-side git command.
-	// Error then names the remedy for that case.
+	// Seeded marks a refusal from an agent-start (seed) check rather than
+	// from a host-side git command. Error then names the remedy for that case.
 	Seeded bool
-	// Layer names the config file the refused key is in when it is not the
-	// repository's .git/config, as a fixed label (never a raw path).
+	// Layer names, by a fixed or relative label, the config file, submodule
+	// or combined layers the refusal concerns (never a raw path).
 	Layer string
 }
 
@@ -110,7 +110,23 @@ func (e *RepoConfigRefusedError) Error() string {
 	}
 	var msg string
 	if e.Seeded {
-		msg = fmt.Sprintf("agent git config refused: repository config sets %s, which is %s; move the setting to your own global git config, or remove it from the repository's .git/config", e.Key, reason)
+		// The agent reads no host global git config, so the only remedy is to
+		// remove the setting from the layer that sets it. A structural refusal
+		// (a <placeholder> key) names a submodule directory or git link, and a
+		// ".git/<name>" key names a file, not a setting. No config key starts
+		// with either: a section name starts with a letter, digit or '-'
+		// (isConfigNameChar), and a legacy [section.sub] header cannot start
+		// with '.' (parseSection).
+		remedy := "remove it from the repository's .git/config"
+		switch {
+		case strings.HasPrefix(e.Key, "<"):
+			remedy = "remove or repair the submodule directory or git link it names"
+		case strings.HasPrefix(e.Key, ".git/"):
+			remedy = "remove that file from the repository's .git directory"
+		case e.Layer != "":
+			remedy = "remove it from the git config file that sets it"
+		}
+		msg = fmt.Sprintf("agent git config refused: repository config sets %s, which is %s; %s", e.Key, reason, remedy)
 	} else {
 		msg = fmt.Sprintf("git in %s refused: repository config sets %s, which is %s; remove it from the repository's .git/config (or config.worktree)", e.Dir, e.Key, reason)
 	}
@@ -540,7 +556,7 @@ func set(keys ...string) map[string]bool {
 // if git resolves any entry the parser did not, so a parser divergence fails
 // closed. It fails closed on anything it cannot locate, read or parse.
 func checkRepoConfigPolicy(ctx context.Context, dir string, env []string, policy RepoConfigPolicy, opts repoConfigAllowOptions) error {
-	if err := refuseRootCommonDirRedirect(dir); err != nil {
+	if err := refuseRootCommonDirRedirect(dir, false); err != nil {
 		return err
 	}
 	parsed, err := parseRepoConfig(dir, env)
@@ -695,10 +711,11 @@ func prepareSeededGitConfig(raw []byte, parse func([]byte) ([]gitConfigVar, erro
 	return serializeGitConfig(kept), stripped, nil
 }
 
-// refuseRootCommonDirRedirect refuses a host-side git command when the
-// repository's `.git` directory carries a root-level `commondir` or `gitdir`
-// file. A normal repository never has one there (a `commondir`/`gitdir` belongs
-// inside a worktree admin dir, `.git/worktrees/<name>/`); at the `.git` root it
+// refuseRootCommonDirRedirect refuses a host-side git command or, when seeded
+// is true, an agent start, when the repository's `.git` directory carries a
+// root-level `commondir` or `gitdir` file. A normal repository never has one
+// there (a `commondir`/`gitdir` belongs inside a worktree admin dir,
+// `.git/worktrees/<name>/`); at the `.git` root it
 // makes git treat the repository itself as a linked worktree and resolve the
 // common dir — the place it reads config, hooks and refs from — through an
 // agent-writable path. The container-side read-only `.git` root closes this for
@@ -706,7 +723,9 @@ func prepareSeededGitConfig(raw []byte, parse func([]byte) ([]gitConfigVar, erro
 // read-only (shared-plain and any pre-existing state). A linked worktree, whose
 // `.git` is a gitfile pointing at its admin dir, legitimately resolves a
 // commondir and is not the target here, so only a `.git` directory is checked.
-func refuseRootCommonDirRedirect(dir string) error {
+// The seeded form is an agent-start (seed) refusal and leaves Dir empty, so it
+// prints no host path; the host-side form sets Dir to dir.
+func refuseRootCommonDirRedirect(dir string, seeded bool) error {
 	gitPath := filepath.Join(dir, ".git")
 	fi, err := os.Lstat(gitPath)
 	if err != nil || !fi.IsDir() {
@@ -714,7 +733,11 @@ func refuseRootCommonDirRedirect(dir string) error {
 	}
 	for _, name := range []string{"commondir", "gitdir"} {
 		if _, err := os.Lstat(filepath.Join(gitPath, name)); err == nil {
-			return newRepoConfigRefusedError(dir, "", ".git/"+name, "", "a root-level "+name+" would redirect the repository's common git directory", false)
+			reason := "a root-level " + name + " would redirect the repository's common git directory"
+			if seeded {
+				return newRepoConfigRefusedError("", "", ".git/"+name, "", reason, true)
+			}
+			return newRepoConfigRefusedError(dir, "", ".git/"+name, "", reason, false)
 		}
 	}
 	return nil
