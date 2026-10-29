@@ -929,8 +929,9 @@ func (s *BrokerAuthService) GenerateAndStoreSecret(ctx context.Context, brokerID
 // base64-encoded secret and minted=true when it stored one, or "" and
 // minted=false when a secret already exists: unlike GenerateAndStoreSecret,
 // it never returns a stored secret. A secret created concurrently between
-// the check and the insert makes the insert fail, so a stored secret is
-// still never returned.
+// the check and the insert makes the insert fail with store.ErrAlreadyExists,
+// which is reported the same way as an existing secret ("" and
+// minted=false): the stored secret is not read and never returned.
 func (s *BrokerAuthService) MintSecretIfAbsent(ctx context.Context, brokerID string) (string, bool, error) {
 	if brokerID == "" {
 		return "", false, errors.New("brokerId is required")
@@ -957,6 +958,9 @@ func (s *BrokerAuthService) MintSecretIfAbsent(ctx context.Context, brokerID str
 		Status:    store.BrokerSecretStatusActive,
 	}
 	if err := s.store.CreateBrokerSecret(ctx, brokerSecret); err != nil {
+		if errors.Is(err, store.ErrAlreadyExists) {
+			return "", false, nil
+		}
 		return "", false, fmt.Errorf("failed to store broker secret: %w", err)
 	}
 

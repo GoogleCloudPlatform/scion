@@ -340,6 +340,41 @@ func TestProjectRegisterEmbeddedBroker_LeftoverSecretNotReturned(t *testing.T) {
 	assertBodyCarriesNoStoredSecret(t, rec.Body.String(), encoded, raw)
 }
 
+// TestProjectRegisterEmbeddedBroker_LostSecretInsertIsKeyless pins that a
+// first registration whose secret insert loses to a concurrent insert for
+// the same broker answers like a broker that already has a secret: no
+// secretKey and no brokerToken, and the concurrently stored secret is
+// unchanged.
+func TestProjectRegisterEmbeddedBroker_LostSecretInsertIsKeyless(t *testing.T) {
+	srv, s := testServer(t)
+	requester := newHubMemberUser(t, s, "register-lost-insert-requester")
+	winnerKey := bytes.Repeat([]byte{0x6b}, 32)
+	race := &mintRaceStore{Store: s, winnerKey: winnerKey}
+	require.NotNil(t, srv.brokerAuthService)
+	srv.brokerAuthService.store = race
+
+	rec := doRequestAsUser(t, srv, requester, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		Name: "register-lost-insert-project",
+		Broker: &RegisterProjectBrokerInfo{
+			Name:    "register lost insert broker",
+			Version: "1.0.0",
+		},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	body := rec.Body.String()
+	assertBodyCarriesNoStoredSecret(t, body, base64.StdEncoding.EncodeToString(winnerKey), winnerKey)
+	assert.NotContains(t, body, "brokerToken", "the response must not fall back to a broker token")
+	assert.Equal(t, 1, race.creates, "one insert")
+	assert.Equal(t, 1, race.gets, "only the lookup before the insert reads the secret")
+
+	var resp RegisterProjectResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.Broker)
+	stored, err := s.GetBrokerSecret(context.Background(), resp.Broker.ID)
+	require.NoError(t, err)
+	assert.Equal(t, winnerKey, stored.SecretKey, "the concurrently stored secret must not change")
+}
+
 // TestProjectRegisterEmbeddedBroker_DeniedResponseIsKeyless pins that a
 // denied re-registration of a broker with a stored secret answers with a
 // fixed error that carries no key material.

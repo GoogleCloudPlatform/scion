@@ -24,6 +24,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -951,6 +952,73 @@ func TestMintSecretIfAbsent_RequiresBrokerID(t *testing.T) {
 	secretKey, minted, err := svc.MintSecretIfAbsent(context.Background(), "")
 	require.Error(t, err)
 	assert.Equal(t, "brokerId is required", err.Error())
+	assert.False(t, minted)
+	assert.Empty(t, secretKey)
+}
+
+// mintRaceStore stands in for a concurrent first-secret insert that wins
+// against MintSecretIfAbsent: the lookup always reports no secret, and the
+// insert fails. With winnerKey set, the insert first stores a secret with
+// that key for the same broker and then makes the real insert, so the
+// underlying store reports its own duplicate error; otherwise it returns
+// createErr. It counts lookups and inserts.
+type mintRaceStore struct {
+	store.Store
+	winnerKey []byte
+	createErr error
+	gets      int
+	creates   int
+}
+
+func (m *mintRaceStore) GetBrokerSecret(ctx context.Context, brokerID string) (*store.BrokerSecret, error) {
+	m.gets++
+	return nil, store.ErrNotFound
+}
+
+func (m *mintRaceStore) CreateBrokerSecret(ctx context.Context, secret *store.BrokerSecret) error {
+	m.creates++
+	if m.winnerKey == nil {
+		return m.createErr
+	}
+	if err := m.Store.CreateBrokerSecret(ctx, &store.BrokerSecret{
+		BrokerID:  secret.BrokerID,
+		SecretKey: m.winnerKey,
+		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
+		CreatedAt: time.Now(),
+		Status:    store.BrokerSecretStatusActive,
+	}); err != nil {
+		return err
+	}
+	return m.Store.CreateBrokerSecret(ctx, secret)
+}
+
+// TestMintSecretIfAbsent_LostInsertIsNotMinted pins that an insert failing
+// with a wrapped store.ErrAlreadyExists is reported like an existing
+// secret, and that nothing reads the stored secret after the insert.
+func TestMintSecretIfAbsent_LostInsertIsNotMinted(t *testing.T) {
+	race := &mintRaceStore{createErr: fmt.Errorf("insert broker secret: %w", store.ErrAlreadyExists)}
+	svc := NewBrokerAuthService(DefaultBrokerAuthConfig(), race)
+	t.Cleanup(svc.Close)
+
+	secretKey, minted, err := svc.MintSecretIfAbsent(context.Background(), uuid.New().String())
+	require.NoError(t, err)
+	assert.False(t, minted)
+	assert.Empty(t, secretKey)
+	assert.Equal(t, 1, race.creates, "one insert")
+	assert.Equal(t, 1, race.gets, "only the lookup before the insert reads the secret")
+}
+
+// TestMintSecretIfAbsent_InsertErrorPropagates pins that any other insert
+// error is still returned, with no key.
+func TestMintSecretIfAbsent_InsertErrorPropagates(t *testing.T) {
+	insertErr := errors.New("disk unavailable")
+	race := &mintRaceStore{createErr: insertErr}
+	svc := NewBrokerAuthService(DefaultBrokerAuthConfig(), race)
+	t.Cleanup(svc.Close)
+
+	secretKey, minted, err := svc.MintSecretIfAbsent(context.Background(), uuid.New().String())
+	require.ErrorIs(t, err, insertErr)
+	assert.Contains(t, err.Error(), "failed to store broker secret")
 	assert.False(t, minted)
 	assert.Empty(t, secretKey)
 }
