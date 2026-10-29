@@ -432,6 +432,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	var s store.Store
 	var entClient *ent.Client
 	if enableHub {
+		// Before the database is opened: the boot-failure guard must know
+		// that this update target may have migrated the schema.
+		markUpdateStateBooting(resolveMaintenanceConfig(cfg).InstallRoot)
 		s, entClient, err = initStore(ctx, cfg)
 		if err != nil {
 			return err

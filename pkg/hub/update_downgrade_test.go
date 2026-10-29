@@ -568,3 +568,109 @@ func TestWriteMaintenanceRequestError_Details(t *testing.T) {
 		t.Fatalf("body = %s", rr.Body.String())
 	}
 }
+
+func TestMarkRunRestarting_WritesUpdateState(t *testing.T) {
+	ctx := context.Background()
+	p := maintenance.PendingRestart{From: "v0.3.0-preview.4", To: "nightly-20261024", Strategy: maintenance.StrategySymlink,
+		Channel: "nightly", Pin: maintenance.PinLatest, FromPublishedAt: time.Date(2026, 10, 22, 18, 0, 0, 0, time.UTC)}
+
+	t.Run("symlink layout: from is the release previous points to", func(t *testing.T) {
+		srv, s := newTestServerWithStore(t)
+		root := t.TempDir()
+		srv.config.MaintenanceConfig.InstallRoot = root
+		if runtime.GOOS != "windows" {
+			if err := os.Symlink(filepath.Join("releases", "v0.3.0-preview.4"), filepath.Join(root, "previous")); err != nil {
+				t.Fatal(err)
+			}
+		}
+		run := newRun(t, s)
+		if err := srv.markRunRestarting(ctx, run, &runLogBuffer{}, p); err != nil {
+			t.Fatal(err)
+		}
+		st, err := maintenance.ReadUpdateState(root)
+		if err != nil || st == nil {
+			t.Fatalf("st = %+v, err = %v", st, err)
+		}
+		want := maintenance.UpdateState{Target: "nightly-20261024", From: "v0.3.0-preview.4", RunID: run.ID,
+			PreviousSafe: true, FromPublishedAt: "2026-10-22T18:00:00Z"}
+		if *st != want {
+			t.Fatalf("st = %+v, want %+v", st, want)
+		}
+	})
+
+	t.Run("other installers write nothing", func(t *testing.T) {
+		srv, s := newTestServerWithStore(t)
+		root := t.TempDir()
+		srv.config.MaintenanceConfig.InstallRoot = root
+		q := p
+		q.Strategy = maintenance.StrategySudoInstall
+		if err := srv.markRunRestarting(ctx, newRun(t, s), &runLogBuffer{}, q); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(filepath.Join(root, maintenance.UpdateStateFileName)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("update state written for sudo-install: %v", err)
+		}
+	})
+
+	t.Run("a failed write does not stop the restart", func(t *testing.T) {
+		srv, s := newTestServerWithStore(t)
+		srv.config.MaintenanceConfig.InstallRoot = filepath.Join(t.TempDir(), "missing")
+		if err := srv.markRunRestarting(ctx, newRun(t, s), &runLogBuffer{}, p); err != nil {
+			t.Fatalf("markRunRestarting = %v, want nil (best-effort update state)", err)
+		}
+	})
+}
+
+func TestReconcilePendingUpdate_UpdateStateVerified(t *testing.T) {
+	ctx := context.Background()
+	write := func(t *testing.T, root, runID string) {
+		t.Helper()
+		if err := maintenance.WriteUpdateState(root, maintenance.UpdateState{Target: "nightly-20261024", From: "nightly-20261023",
+			RunID: runID, Migrated: true, PreviousSafe: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("a verified update run", func(t *testing.T) {
+		srv, s := newTestServerWithStore(t)
+		root := t.TempDir()
+		srv.config.MaintenanceConfig.InstallRoot = root
+		run := newRestartingRun(t, s)
+		write(t, root, run.ID)
+		putPendingUpdate(t, s, PendingUpdate{RunID: run.ID, From: "nightly-20261023", To: "nightly-20261024", At: "2026-10-24T03:00:00Z"})
+		if err := srv.reconcilePendingUpdate(ctx, "nightly-20261024"); err != nil {
+			t.Fatal(err)
+		}
+		if st, _ := maintenance.ReadUpdateState(root); st == nil || !st.Verified {
+			t.Fatalf("st = %+v, want verified", st)
+		}
+	})
+
+	t.Run("a deploy.sh install without a pending update", func(t *testing.T) {
+		srv, _ := newTestServerWithStore(t)
+		root := t.TempDir()
+		srv.config.MaintenanceConfig.InstallRoot = root
+		write(t, root, maintenance.UpdateStateRunIDDeploy)
+		if err := srv.reconcilePendingUpdate(ctx, "nightly-20261024"); err != nil {
+			t.Fatal(err)
+		}
+		if st, _ := maintenance.ReadUpdateState(root); st == nil || !st.Verified {
+			t.Fatalf("st = %+v, want verified", st)
+		}
+	})
+
+	t.Run("a rolled-back hub leaves it unverified", func(t *testing.T) {
+		srv, s := newTestServerWithStore(t)
+		root := t.TempDir()
+		srv.config.MaintenanceConfig.InstallRoot = root
+		run := newRestartingRun(t, s)
+		write(t, root, run.ID)
+		putPendingUpdate(t, s, PendingUpdate{RunID: run.ID, From: "nightly-20261023", To: "nightly-20261024", At: "2026-10-24T03:00:00Z"})
+		if err := srv.reconcilePendingUpdate(ctx, "nightly-20261023"); err != nil {
+			t.Fatal(err)
+		}
+		if st, _ := maintenance.ReadUpdateState(root); st == nil || st.Verified {
+			t.Fatalf("st = %+v, want unverified", st)
+		}
+	})
+}

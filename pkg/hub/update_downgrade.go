@@ -234,3 +234,44 @@ func markerMatchesPending(m *RollbackMarker, p PendingUpdate) bool {
 	}
 	return true
 }
+
+// writeUpdateStateBeforeRestart writes <install_root>/update-state.json
+// for the boot-failure guard just before the self-restart of an update
+// (best-effort: a failure is logged, the update goes on). Only the symlink
+// layout has the guard. from is the release `previous` now points to (the
+// guard checks it against that link), else the running version.
+func (s *Server) writeUpdateStateBeforeRestart(runID string, p maintenance.PendingRestart) {
+	mc := s.config.MaintenanceConfig
+	if p.Strategy != maintenance.StrategySymlink || mc.InstallRoot == "" {
+		return
+	}
+	from := p.From
+	if link, err := os.Readlink(filepath.Join(mc.InstallRoot, "previous")); err == nil && filepath.Base(link) != "" {
+		from = filepath.Base(link)
+	}
+	st := maintenance.UpdateState{
+		Target:       p.To,
+		From:         from,
+		RunID:        runID,
+		PreviousSafe: true,
+	}
+	if !p.FromPublishedAt.IsZero() {
+		st.FromPublishedAt = p.FromPublishedAt.UTC().Format(time.RFC3339)
+	}
+	if err := maintenance.WriteUpdateState(mc.InstallRoot, st); err != nil {
+		s.maintenanceLog.Warn("Failed to write the update state for the boot-failure guard", "run_id", runID, "error", err)
+	}
+}
+
+// markUpdateStateVerified sets verified=true in the update-state file once
+// the hub runs its target (best-effort, logged), whether the target was
+// installed by an update run or by deploy.sh.
+func (s *Server) markUpdateStateVerified(running string) {
+	changed, err := maintenance.MarkUpdateStateVerified(s.config.MaintenanceConfig.InstallRoot, running)
+	switch {
+	case err != nil:
+		s.maintenanceLog.Warn("Failed to mark the update state verified", "error", err)
+	case changed:
+		s.maintenanceLog.Info("Update state marked verified", "version", running)
+	}
+}

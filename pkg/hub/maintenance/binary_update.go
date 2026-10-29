@@ -154,6 +154,11 @@ type PendingRestart struct {
 	Snapshot string // database snapshot path; "" when none could be taken (PostgreSQL)
 	Channel  string // the installed release's channel
 	Pin      string // PinLatest or the installed tag (the pin parameter)
+	// FromPublishedAt is the publish date of a preview or stable From
+	// (zero for a nightly, which carries its date, a git build, or when the
+	// lookup failed). It goes into the update-state file for the target's
+	// previous_safe computation.
+	FromPublishedAt time.Time
 }
 
 // BeforeRestartFunc runs after the new binary is activated and before the
@@ -522,6 +527,7 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 	if err := e.checkTarget(dlCtx, target, rel, params); err != nil {
 		return err
 	}
+	fromPublished := e.runningPublished(dlCtx)
 
 	assetName := BinaryAssetName()
 	binAsset, ok := rel.Asset(assetName)
@@ -609,12 +615,13 @@ func (e *BinaryUpdateExecutor) RunWithBeforeRestart(ctx context.Context, logger 
 		displayVersion(e.current), target, time.Now().UTC().Format(time.RFC3339))
 	if before != nil {
 		p := PendingRestart{
-			From:     e.current,
-			To:       target,
-			Strategy: e.installer.Name(),
-			Snapshot: snapshot,
-			Channel:  update.DetectChannel(target),
-			Pin:      pinParam(params),
+			From:            e.current,
+			To:              target,
+			Strategy:        e.installer.Name(),
+			Snapshot:        snapshot,
+			Channel:         update.DetectChannel(target),
+			Pin:             pinParam(params),
+			FromPublishedAt: fromPublished,
 		}
 		hookCtx, cancelHook := context.WithTimeout(ctx, e.hookTimeout)
 		err := before(hookCtx, p)
@@ -772,6 +779,21 @@ func (e *BinaryUpdateExecutor) snapshot(ctx context.Context, logger io.Writer) (
 		return "", fmt.Errorf("database snapshot failed, nothing was installed: %w", err)
 	}
 	return path, nil
+}
+
+// runningPublished returns the publish date of the running preview or
+// stable release, zero for a nightly (its tag carries the date), a git
+// build or a failed lookup. It is best-effort: it only dates the
+// update-state file's from.
+func (e *BinaryUpdateExecutor) runningPublished(ctx context.Context) time.Time {
+	if !update.IsReleaseTag(e.current) || update.DetectChannel(e.current) == "nightly" {
+		return time.Time{}
+	}
+	rel, err := e.releases.ReleaseByTag(ctx, e.current)
+	if err != nil || rel == nil {
+		return time.Time{}
+	}
+	return rel.PublishedAt
 }
 
 // TargetChecker is implemented by executors that can check a request

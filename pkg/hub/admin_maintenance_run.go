@@ -405,6 +405,8 @@ func (s *Server) markRunRestarting(ctx context.Context, run *store.MaintenanceOp
 		s.clearPendingUpdateAfterFailure(ctx, run.ID)
 		return fmt.Errorf("record run as restarting: %w", err)
 	}
+	// For the boot-failure guard (best-effort; the restart goes ahead).
+	s.writeUpdateStateBeforeRestart(run.ID, p)
 	// system.update_available is deliberately left alone: the update is not
 	// confirmed until the new binary boots (boot reconciliation clears it on
 	// "verified"), and a restart that fails and rolls back must keep the
