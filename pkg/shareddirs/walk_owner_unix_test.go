@@ -38,18 +38,16 @@ type chownCall struct {
 // without root. It returns the recorded calls.
 func recordChowns(t *testing.T, euid int) *[]chownCall {
 	t.Helper()
-	oldEuid, oldChown := geteuid, fchownDir
-	t.Cleanup(func() { geteuid, fchownDir = oldEuid, oldChown })
 	calls := &[]chownCall{}
-	geteuid = func() int { return euid }
-	fchownDir = func(fd, uid, gid int) error {
+	restore := SetOwnerHooksForTest(func() int { return euid }, func(fd, uid, gid int) error {
 		var st unix.Stat_t
 		if err := unix.Fstat(fd, &st); err != nil {
 			return err
 		}
 		*calls = append(*calls, chownCall{ino: uint64(st.Ino), uid: uid, gid: gid})
 		return nil
-	}
+	})
+	t.Cleanup(restore)
 	return calls
 }
 
@@ -63,10 +61,10 @@ func inodeOf(t *testing.T, path string) uint64 {
 
 var testOwner = Owner{UID: 1000, GID: 1001}
 
-// A root creator with an owner gives every directory it creates (each
-// intermediate and the leaf) that owner, on the walk's descriptor, and
-// the leaf keeps mode 2775.
-func TestEnsureLeafOwned_RootCreatorChownsCreatedDirs(t *testing.T) {
+// A root creator with an owner gives the LEAF it creates that owner, on the
+// walk's descriptor; the intermediates it creates are not given the owner,
+// and the leaf keeps mode 2775.
+func TestEnsureLeafOwned_RootCreatorChownsCreatedLeafOnly(t *testing.T) {
 	base := t.TempDir()
 	calls := recordChowns(t, 0)
 	rel := filepath.Join("projects", "pid-1", "shared-dirs", "scratchpad")
@@ -76,34 +74,26 @@ func TestEnsureLeafOwned_RootCreatorChownsCreatedDirs(t *testing.T) {
 	t.Cleanup(func() { _ = CloseFd(fd) })
 	assert.False(t, existed)
 
-	var want []chownCall
-	for _, p := range []string{"projects", "projects/pid-1", "projects/pid-1/shared-dirs", rel} {
-		want = append(want, chownCall{ino: inodeOf(t, filepath.Join(base, p)), uid: 1000, gid: 1001})
-	}
-	assert.Equal(t, want, *calls, "every created directory, and only those, gets the owner")
+	assert.Equal(t, []chownCall{{ino: inodeOf(t, filepath.Join(base, rel)), uid: 1000, gid: 1001}}, *calls,
+		"only the created leaf gets the owner; created intermediates are not nfs-owned")
 
 	info, err := os.Stat(filepath.Join(base, rel))
 	require.NoError(t, err)
 	assert.Equal(t, os.ModeDir|os.ModeSetgid|0o775, info.Mode(), "the leaf keeps setgid 2775")
+	for _, p := range []string{"projects", "projects/pid-1", "projects/pid-1/shared-dirs"} {
+		info, err := os.Stat(filepath.Join(base, p))
+		require.NoError(t, err)
+		assert.Equal(t, os.ModeDir|os.ModeSetgid|0o755, info.Mode(), "intermediate %s keeps 2755", p)
+	}
 }
 
-// Directories that already existed are never changed; only what the call
-// creates gets the owner.
-func TestEnsureLeafOwned_PreExistingDirsUnchanged(t *testing.T) {
+// Directories that already existed are never changed.
+func TestEnsureLeafOwned_PreExistingLeafUnchanged(t *testing.T) {
 	base := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(base, "projects", "pid-1"), 0o755))
-	calls := recordChowns(t, 0)
 	rel := filepath.Join("projects", "pid-1", "shared-dirs", "scratchpad")
+	require.NoError(t, os.MkdirAll(filepath.Join(base, rel), 0o755))
+	calls := recordChowns(t, 0)
 
-	fd, _, err := EnsureLeafOwned(base, rel, testOwner)
-	require.NoError(t, err)
-	require.NoError(t, CloseFd(fd))
-	assert.Equal(t, []chownCall{
-		{ino: inodeOf(t, filepath.Join(base, "projects", "pid-1", "shared-dirs")), uid: 1000, gid: 1001},
-		{ino: inodeOf(t, filepath.Join(base, rel)), uid: 1000, gid: 1001},
-	}, *calls)
-
-	*calls = nil
 	fd, existed, err := EnsureLeafOwned(base, rel, testOwner)
 	require.NoError(t, err)
 	require.NoError(t, CloseFd(fd))
@@ -151,68 +141,106 @@ func TestEnsureLeafOwned_SymlinkedIntermediateRefusedNotChowned(t *testing.T) {
 }
 
 // A failed chown of a leaf this call created removes the leaf, as a failed
-// chmod does, and keeps the intermediates (chowned before it).
+// chmod does, and keeps the intermediates.
 func TestEnsureLeafOwned_ChownFailureRemovesLeaf(t *testing.T) {
 	base := t.TempDir()
-	recordChowns(t, 0)
 	rel := filepath.Join("projects", "pid-1", "shared-dirs", "a")
 	n := 0
-	fchownDir = func(fd, uid, gid int) error {
+	t.Cleanup(SetOwnerHooksForTest(func() int { return 0 }, func(fd, uid, gid int) error {
 		n++
-		if n == 4 { // the three intermediates come first, then the leaf
-			return unix.EPERM
-		}
-		return nil
-	}
+		return unix.EPERM
+	}))
 
 	_, _, err := EnsureLeafOwned(base, rel, testOwner)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, unix.EPERM), "err = %v", err)
+	assert.Equal(t, 1, n, "only the leaf is chowned")
 	assert.NoDirExists(t, filepath.Join(base, rel), "the leaf this call created is removed")
 	assert.DirExists(t, filepath.Join(base, "projects", "pid-1", "shared-dirs"), "intermediates are kept")
-	assert.Equal(t, 4, n)
 }
 
-// EnsurePrivateDirOwned applies the same rule to a private directory such
-// as a project's configuration directory, which keeps mode 2755.
-func TestEnsurePrivateDirOwned_RootCreatorChownsCreatedDirs(t *testing.T) {
+// When a concurrent creator wins the mkdirat race for the leaf, this call
+// did not create it and never chowns it.
+func TestEnsureLeafOwned_ConcurrentCreatorWinsNotChowned(t *testing.T) {
 	base := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(base, "projects"), 0o755))
+	rel := filepath.Join("projects", "pid-1", "shared-dirs", "raced")
+	require.NoError(t, os.MkdirAll(filepath.Join(base, filepath.Dir(rel)), 0o755))
 	calls := recordChowns(t, 0)
-	rel := filepath.Join("projects", "pid-1", ".scion")
+	oldMkdirat := mkdirat
+	t.Cleanup(func() { mkdirat = oldMkdirat })
+	mkdirat = func(dirfd int, path string, mode uint32) error {
+		if path == "raced" {
+			// The other creator's mkdirat lands first; ours then sees EEXIST.
+			if err := oldMkdirat(dirfd, path, mode); err != nil {
+				return err
+			}
+			return unix.EEXIST
+		}
+		return oldMkdirat(dirfd, path, mode)
+	}
+
+	fd, existed, err := EnsureLeafOwned(base, rel, testOwner)
+	require.NoError(t, err)
+	require.NoError(t, CloseFd(fd))
+	assert.False(t, existed, "the first open saw no directory")
+	assert.Empty(t, *calls, "a directory a concurrent creator made is not chowned")
+}
+
+// An existing intermediate without other-execute is left unchanged (it is
+// warned about, never chmod'ed).
+func TestEnsureLeafOwned_UntraversableIntermediateUnchanged(t *testing.T) {
+	base := t.TempDir()
+	mid := filepath.Join(base, "projects", "pid-1")
+	require.NoError(t, os.MkdirAll(mid, 0o755))
+	require.NoError(t, os.Chmod(mid, 0o750))
+	recordChowns(t, 0)
+
+	fd, _, err := EnsureLeafOwned(base, filepath.Join("projects", "pid-1", "shared-dirs", "a"), testOwner)
+	require.NoError(t, err)
+	require.NoError(t, CloseFd(fd))
+	info, err := os.Stat(mid)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o750), info.Mode().Perm(), "the existing intermediate is not chmod'ed")
+}
+
+// EnsurePrivateDirOwned gives only the created leaf the owner; the leaf
+// keeps mode 2755.
+func TestEnsurePrivateDirOwned_RootCreatorChownsCreatedLeafOnly(t *testing.T) {
+	base := t.TempDir()
+	calls := recordChowns(t, 0)
+	rel := filepath.Join("projects", "pid-1", "private")
 
 	fd, existed, err := EnsurePrivateDirOwned(base, rel, testOwner)
 	require.NoError(t, err)
 	require.NoError(t, CloseFd(fd))
 	assert.False(t, existed)
-	assert.Equal(t, []chownCall{
-		{ino: inodeOf(t, filepath.Join(base, "projects", "pid-1")), uid: 1000, gid: 1001},
-		{ino: inodeOf(t, filepath.Join(base, rel)), uid: 1000, gid: 1001},
-	}, *calls)
+	assert.Equal(t, []chownCall{{ino: inodeOf(t, filepath.Join(base, rel)), uid: 1000, gid: 1001}}, *calls)
 	info, err := os.Stat(filepath.Join(base, rel))
 	require.NoError(t, err)
 	assert.Equal(t, os.ModeDir|os.ModeSetgid|0o755, info.Mode())
 }
 
-// With real root (no recorder), the created leaf and intermediates really
-// get the owner's uid and gid with setgid 2775. It needs root: CI runs
-// unprivileged and skips it; the recorder tests above cover the rule there.
-// Run it as root on a Linux host (for example: sudo go test -run
-// TestEnsureLeafOwned_RealRoot ./pkg/shareddirs/).
+// With real root (no recorder), the created leaf really gets the owner's
+// uid and gid with setgid 2775, and the created intermediates keep root's.
+// It needs root: CI runs unprivileged and skips it; the recorder tests
+// above cover the rule there. Run it as root on a Linux host (for example:
+// sudo go test -run TestEnsureLeafOwned_RealRoot ./pkg/shareddirs/).
 func TestEnsureLeafOwned_RealRoot(t *testing.T) {
 	if os.Geteuid() != 0 {
-		t.Skip("needs root (chown to another uid); covered without root by TestEnsureLeafOwned_RootCreatorChownsCreatedDirs")
+		t.Skip("needs root (chown to another uid); covered without root by TestEnsureLeafOwned_RootCreatorChownsCreatedLeafOnly")
 	}
 	base := t.TempDir()
 	rel := filepath.Join("projects", "pid-1", "shared-dirs", "scratchpad")
 	fd, _, err := EnsureLeafOwned(base, rel, testOwner)
 	require.NoError(t, err)
 	require.NoError(t, CloseFd(fd))
-	for _, p := range []string{"projects", "projects/pid-1", "projects/pid-1/shared-dirs", rel} {
-		var st unix.Stat_t
+	var st unix.Stat_t
+	require.NoError(t, unix.Lstat(filepath.Join(base, rel), &st))
+	assert.Equal(t, uint32(1000), st.Uid)
+	assert.Equal(t, uint32(1001), st.Gid)
+	for _, p := range []string{"projects", "projects/pid-1", "projects/pid-1/shared-dirs"} {
 		require.NoError(t, unix.Lstat(filepath.Join(base, p), &st))
-		assert.Equal(t, uint32(1000), st.Uid, p)
-		assert.Equal(t, uint32(1001), st.Gid, p)
+		assert.Equal(t, uint32(0), st.Uid, "intermediate %s keeps root's owner", p)
 	}
 	info, err := os.Stat(filepath.Join(base, rel))
 	require.NoError(t, err)

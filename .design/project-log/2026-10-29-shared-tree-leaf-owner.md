@@ -15,26 +15,36 @@ agents running as the nfs uid could not write shared dirs.
 ## Change
 
 - **`pkg/shareddirs`:**
-  - `Owner{UID, GID}` names the owner a root creator gives the directories it
-    creates.
-  - `EnsureLeafOwned` and `EnsurePrivateDirOwned` give every directory the
-    walk creates itself (its own `mkdirat` succeeded) that owner, with
-    `fchown` on the descriptor the walk opened, before the modes and the
-    default ACL.
+  - `Owner{UID, GID}` names the owner a root creator gives the leaf
+    directories it creates.
+  - `EnsureLeafOwned` and `EnsurePrivateDirOwned` give the leaf the walk
+    itself creates (its own `mkdirat` succeeded) that owner, with `fchown` on
+    the descriptor the walk opened, before the leaf's mode and default ACL.
   - This applies only when the process runs as root and the owner names a
-    non-root uid and gid. A component that already existed, or that a
-    concurrent creator made first, is never changed.
-  - A symlinked component is refused by the existing `O_NOFOLLOW` walk before
-    anything past it is created or chowned.
-  - A failed chown of a leaf this call created removes the leaf, as a failed
-    chmod does.
-  - `EnsureLeaf` and `EnsurePrivateDir` are the zero-owner forms and are
-    unchanged.
+    non-root uid and gid.
+- **Intermediates stay as before.** `<subpath_root>`, `<project uuid>`,
+  `shared-dirs` and `agents/<slug>` keep the creator's owner and mode 2755,
+  because agents only traverse them. An agent-owned upper directory would let
+  one project's agents rename or unlink other projects' trees. An existing
+  intermediate without other-execute is warned about and never changed.
+- **Unchanged directories:**
+  - a leaf that already existed, or that a concurrent creator made first;
+  - anything behind a symlinked component, which the existing `O_NOFOLLOW`
+    walk refuses before anything past it is created.
+- **Failure:** a failed chown of a leaf this call created removes the leaf,
+  as a failed chmod does. The intermediate-rollback concern does not arise:
+  intermediates are never chowned, and a failed intermediate chmod behaves as
+  before.
+- `EnsureLeaf` and `EnsurePrivateDir` are the zero-owner forms and are
+  unchanged.
+- **The project configuration directory** `<ProjectRoot>/.scion` keeps the
+  zero owner (`EnsurePrivateDir`). It holds the project's identity
+  (project-id, project-slug), only Scion components write it, and it must
+  never be agent-writable.
 - **`pkg/projectfs`:** `Resolved` carries the Layout's `UID` and `GID`
-  (`OwnerUID`, `OwnerGID`, `Owner()`). `Resolved.Open(create)` and
-  `Layout.EnsureProjectConfigDir` use the owned walks, so the hub file
-  browser, the hub-native workspace leaf, project configuration directories
-  and migration leaves get the owner.
+  (`OwnerUID`, `OwnerGID`, `Owner()`). `Resolved.Open(create)` uses the owned
+  walk, so shared-dir, workspace and migration leaves created through it get
+  the owner.
 - **Call sites passing the Layout's owner:**
   - shared-dir leaves: `pkg/agent` `resolveSharedDirs` and `pkg/runtime`
     `ResolveSharedDirHostPath`;
@@ -45,31 +55,44 @@ agents running as the nfs uid could not write shared dirs.
 
   `ProvisionShared` keeps setting the workspace content's ownership as
   before. It does not chown the leaf a second time.
+- **`pkg/config`:** the transitional shared-dir block
+  (`LegacySharedDirsNFS`) gets the nfs uid and gid defaults (1000), as the
+  workspace block does, so its Layout names an owner.
+- **Backends:** the affected deployment uses the nfs backend, whose
+  Layout carries the nfs ids. The volume backends (cloudrun-volume,
+  gke-shared-volume) carry none and are unchanged.
 - **Unchanged:**
   - a non-root creator;
   - Layouts without a uid and gid;
-  - existing directories;
-  - the Kubernetes NFS workspace leaf helpers, whose provisioning init
-    container sets ownership;
   - nfs agent homes;
-  - the hub migration's provisioning lock directory.
+  - the hub migration's provisioning lock directory;
+  - the Kubernetes NFS workspace, agent and worktree leaves. Their pod runs as
+    the container uid, and the provisioning init container chowns them to its
+    RunAsUser and fsGroup. A follow-up remains: under a pre-created workspace
+    (best-effort init chown) on a root-squash export, the broker should give
+    such a leaf setgid and group write for the fsGroup.
 
 ## Tests
 
-- `pkg/shareddirs` (`walk_owner_unix_test.go`, with the `geteuid` and
-  `fchownDir` seams, so they run without root):
-  - a root creator chowns each created intermediate and the leaf, and the
-    leaf keeps 2775;
-  - pre-existing directories are unchanged;
+- `pkg/shareddirs` (`walk_owner_unix_test.go`, with the `geteuid`,
+  `fchownDir` and `mkdirat` seams, so they run without root):
+  - a root creator chowns only the created leaf; created intermediates are
+    not nfs-owned and keep 2755; the leaf keeps 2775;
+  - a pre-existing leaf is unchanged;
   - a non-root creator, or a missing owner, is unchanged;
   - a symlinked intermediate is refused and not chowned;
   - a chown failure removes the leaf;
+  - a concurrent creator that wins the race is not chowned;
+  - an untraversable existing intermediate is left unchanged;
   - `EnsurePrivateDirOwned` follows the same rule.
-- `TestEnsureLeafOwned_RealRoot` checks the real uid and gid. It runs only as
-  root and skips in CI, which runs unprivileged:
-  `sudo go test -run TestEnsureLeafOwned_RealRoot ./pkg/shareddirs/`.
-- `pkg/projectfs` `TestResolvedOwner`: a Layout's ids travel with
-  `Resolved`.
-- `pkg/agent` `TestResolveSharedDirs_NFS_LeafOwnerAndAgentGroup`: the
-  Layout's nfs uid and gid reach the leaf walk. A leaf in the nfs gid becomes
-  the agent's supplemental group, and a root-group leaf does not.
+- `TestEnsureLeafOwned_RealRoot` checks the real uid and gid, including root
+  intermediates. It runs only as root and skips in CI, which runs
+  unprivileged: `sudo go test -run TestEnsureLeafOwned_RealRoot
+  ./pkg/shareddirs/`.
+- `pkg/projectfs`:
+  - `TestResolvedOwner`;
+  - `TestEnsureProjectConfigDir_RootCreatorKeepsZeroOwner`: `.scion` is not
+    nfs-owned;
+  - `TestOpenCreate_RootCreatorOwnsSharedDirLeaf`.
+- `pkg/agent` `TestResolveSharedDirs_NFS_LeafOwnerAndAgentGroup`.
+- `pkg/config` `TestSynthesizeProjectStorage_LegacySharedDirsOwnerDefaults`.

@@ -120,8 +120,10 @@ func (r Resolved) VerifyNoSymlinks() (string, error) {
 // workspace/, inside no Mount), through pkg/shareddirs'
 // O_NOFOLLOW component walk, and returns its host path. A newly created
 // directory gets mode 2755 and no default ACL: only Scion components write
-// it. Missing intermediates are created as the brokers create them. A root
-// creator gives every directory it creates the Layout's owner (UID:GID).
+// it. Missing intermediates are created as the brokers create them. It
+// always keeps the zero owner (the creator's uid and gid), never the
+// Layout's nfs owner: the directory holds the project's identity
+// (project-id, project-slug) and must never be agent-writable.
 func (l Layout) EnsureProjectConfigDir(projectID string) (string, error) {
 	cfg, err := l.ProjectConfig(projectID)
 	if err != nil {
@@ -131,7 +133,7 @@ func (l Layout) EnsureProjectConfigDir(projectID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	fd, _, err := shareddirs.EnsurePrivateDirOwned(base, cfg.RelPath, cfg.Owner())
+	fd, _, err := shareddirs.EnsurePrivateDir(base, cfg.RelPath)
 	if err != nil {
 		return "", fmt.Errorf("create project configuration directory: %w", err)
 	}
