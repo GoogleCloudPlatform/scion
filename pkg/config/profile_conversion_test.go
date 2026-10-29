@@ -540,6 +540,9 @@ func TestConvert_InvalidChoicesBlock(t *testing.T) {
 			if f == nil || f.Code != ConversionUnknownSettingsKey || f.Severity != ConversionSeverityBlocking {
 				t.Fatalf("no blocking unknown_settings_key finding at choices[2]: %+v", got.Findings)
 			}
+			if name == "field without conflict" && !strings.Contains(f.Message, "has no conflict to resolve") {
+				t.Fatalf("an unused field choice is not reported as unused: %q", f.Message)
+			}
 			if tc.blocks && len(got.ProfileMap) != 0 {
 				t.Fatalf("profile map %v, want none", got.ProfileMap)
 			}
@@ -554,8 +557,9 @@ func TestConvert_InvalidChoicesBlock(t *testing.T) {
 }
 
 // A template choice is refused for an infrastructure field, which no
-// template can set: the conflict stays reported and the field stays unset,
-// rather than silently falling through to the global setting.
+// template can set: the profiles stay split on the field (reported in the
+// split notice), rather than the field silently falling through to the
+// global setting.
 func TestConvert_TemplateChoiceRefusedForInfraField(t *testing.T) {
 	vs := &VersionedSettings{
 		Runtimes: map[string]V1RuntimeConfig{"cluster": {Type: "kubernetes", Namespace: "agents"}},
@@ -573,11 +577,14 @@ func TestConvert_TemplateChoiceRefusedForInfraField(t *testing.T) {
 				strings.Contains(f.Message, "no template can set it") {
 				refused = true
 			}
-			if f.Path == "profiles.*."+field {
-				if f.Code != ConversionProfileConflict {
-					t.Errorf("case %d: %s is %s, want an unresolved profile_conflict", i, field, f.Code)
+			if f.Path == "profiles.*" && strings.Contains(f.Message, field) {
+				if f.Code != ConversionProfileConflict || f.Severity != ConversionSeverityNotice {
+					t.Errorf("case %d: %s is %s %s, want a profile_conflict split notice", i, field, f.Code, f.Severity)
 				}
 				conflict = true
+			}
+			if f.Path == "profiles.*."+field {
+				t.Errorf("case %d: %s is reported as %s, want it split", i, field, f.Code)
 			}
 		}
 		if !refused || !conflict {
@@ -660,16 +667,16 @@ func TestConvert_InstanceKeysUniqueAcrossScopes(t *testing.T) {
 	}
 }
 
-// A harness override that only one profile has is reported once per
-// conflicting sub-field, not again for its presence; an override that
-// differs only in presence is reported once, for its presence.
+// A harness override that only one profile has splits the profiles; the
+// one split notice names the override's presence and each differing
+// sub-field, and only the profile that has the override gets it.
 func TestConvert_HarnessOverridePresenceReportedOnce(t *testing.T) {
 	for name, tc := range map[string]struct {
 		override V1HarnessOverride
 		want     string
 	}{
-		"with a sub-field": {V1HarnessOverride{Image: "claude:2"}, "profiles.*.harness_overrides.claude.image"},
-		"empty override":   {V1HarnessOverride{}, "profiles.*.harness_overrides.claude"},
+		"with a sub-field": {V1HarnessOverride{Image: "claude:2"}, "differ in harness_overrides.claude, harness_overrides.claude.image;"},
+		"empty override":   {V1HarnessOverride{}, "differ in harness_overrides.claude;"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			vs := &VersionedSettings{
@@ -680,11 +687,18 @@ func TestConvert_HarnessOverridePresenceReportedOnce(t *testing.T) {
 				},
 			}
 			got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs})
-			if len(got.Findings) != 1 || got.Findings[0].Path != tc.want || got.Findings[0].Code != ConversionProfileConflict {
-				t.Fatalf("findings %+v, want one profile_conflict at %s", got.Findings, tc.want)
+			if len(got.Findings) != 1 || got.Findings[0].Path != "profiles.*" || got.Findings[0].Severity != ConversionSeverityNotice ||
+				!strings.Contains(got.Findings[0].Message, tc.want) {
+				t.Fatalf("findings %+v, want one split notice containing %q", got.Findings, tc.want)
 			}
-			if d := got.Instances[0].AgentDefaults; d != nil {
-				t.Fatalf("agent_defaults %+v, want none", d)
+			if len(got.Instances) != 2 || got.ProfileMap["a"] != "k8s-agents-a" || got.ProfileMap["b"] != "k8s-agents-b" {
+				t.Fatalf("instances %+v, profile map %v", got.Instances, got.ProfileMap)
+			}
+			if d := got.Instances[0].AgentDefaults; d == nil || !reflect.DeepEqual(d.HarnessOverrides, map[string]V1HarnessOverride{"claude": tc.override}) {
+				t.Fatalf("instance a agent_defaults %+v, want the override", d)
+			}
+			if d := got.Instances[1].AgentDefaults; d != nil {
+				t.Fatalf("instance b agent_defaults %+v, want none", d)
 			}
 		})
 	}
