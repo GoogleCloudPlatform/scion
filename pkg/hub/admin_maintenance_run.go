@@ -54,7 +54,7 @@ func rawRequestParams(body map[string]interface{}) map[string]string {
 // status of a *maintenance.RequestError (400 invalid_request otherwise).
 func writeMaintenanceRequestError(w http.ResponseWriter, err error) {
 	if re, ok := maintenance.IsRequestError(err); ok {
-		writeError(w, re.HTTPStatus(), re.Code, re.Message, nil)
+		writeError(w, re.HTTPStatus(), re.Code, re.Message, re.Details)
 		return
 	}
 	writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
@@ -234,6 +234,10 @@ func maintenanceRunContext(key string) (context.Context, context.CancelFunc) {
 	return context.WithCancel(context.Background())
 }
 
+// maintenanceTargetCheckTimeout bounds the release lookups an operation
+// request makes before its run is created (maintenance.TargetChecker).
+const maintenanceTargetCheckTimeout = 20 * time.Second
+
 // maintenanceCleanupTimeout bounds a cleanup write made after a failure.
 const maintenanceCleanupTimeout = 10 * time.Second
 
@@ -323,6 +327,9 @@ func (s *Server) launchMaintenanceRun(run *store.MaintenanceOperationRun, execut
 			result := map[string]interface{}{"error": execErr.Error()}
 			if re, ok := maintenance.IsRequestError(execErr); ok {
 				result["code"] = re.Code
+				if re.Details != nil {
+					result["details"] = re.Details
+				}
 			}
 			resultJSON, _ := json.Marshal(result)
 			run.Result = string(resultJSON)

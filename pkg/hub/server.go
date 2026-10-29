@@ -632,6 +632,9 @@ type MaintenanceConfig struct {
 	// implements maintenance.ReleaseLister, backs the default catalog).
 	// nil: GitHub's API for GitHubRepo.
 	ReleaseSource maintenance.ReleaseSource
+	// DBSnapshotter takes the database snapshot before each update. nil:
+	// derived from the store (see updateSnapshotter).
+	DBSnapshotter maintenance.DBSnapshotter
 }
 
 // GitHubAppServerConfig holds the GitHub App configuration for the Hub server.
