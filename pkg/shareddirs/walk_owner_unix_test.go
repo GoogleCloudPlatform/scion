@@ -203,23 +203,6 @@ func TestEnsureLeafOwned_UntraversableIntermediateUnchanged(t *testing.T) {
 	assert.Equal(t, os.FileMode(0o750), info.Mode().Perm(), "the existing intermediate is not chmod'ed")
 }
 
-// EnsurePrivateDirOwned gives only the created leaf the owner; the leaf
-// keeps mode 2755.
-func TestEnsurePrivateDirOwned_RootCreatorChownsCreatedLeafOnly(t *testing.T) {
-	base := t.TempDir()
-	calls := recordChowns(t, 0)
-	rel := filepath.Join("projects", "pid-1", "private")
-
-	fd, existed, err := EnsurePrivateDirOwned(base, rel, testOwner)
-	require.NoError(t, err)
-	require.NoError(t, CloseFd(fd))
-	assert.False(t, existed)
-	assert.Equal(t, []chownCall{{ino: inodeOf(t, filepath.Join(base, rel)), uid: 1000, gid: 1001}}, *calls)
-	info, err := os.Stat(filepath.Join(base, rel))
-	require.NoError(t, err)
-	assert.Equal(t, os.ModeDir|os.ModeSetgid|0o755, info.Mode())
-}
-
 // With real root (no recorder), the created leaf really gets the owner's
 // uid and gid with setgid 2775, and the created intermediates keep root's.
 // It needs root: CI runs unprivileged and skips it; the recorder tests

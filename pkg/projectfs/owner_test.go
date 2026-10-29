@@ -21,27 +21,14 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 )
 
-// A shared Layout's UID and GID travel with every directory it resolves,
-// as the owner a root creator gives the directories it creates.
+// A shared Layout's UID and GID travel only with the workspace and
+// shared-dir Mounts it resolves (the leaves agents use), never with the
+// project root, the project configuration or an agent root.
 func TestResolvedOwner(t *testing.T) {
 	l := Layout{Backend: BackendNFS, HostBase: "/mnt/share-1", UID: 1000, GID: 1001}
 	const id = "4f1d2c3b-5a69-4e70-8b91-a2b3c4d5e6f7"
 	want := shareddirs.Owner{UID: 1000, GID: 1001}
 
-	pr, err := l.ProjectRoot(id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := pr.Owner(); got != want {
-		t.Errorf("ProjectRoot owner = %+v, want %+v", got, want)
-	}
-	cfg, err := l.ProjectConfig(id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := cfg.Owner(); got != want {
-		t.Errorf("ProjectConfig owner = %+v, want %+v", got, want)
-	}
 	sd, err := l.Resolve(Project{ID: id}, "", SharedDirMount(api.SharedDir{Name: "scratchpad"}, "/workspace"))
 	if err != nil {
 		t.Fatal(err)
@@ -49,7 +36,29 @@ func TestResolvedOwner(t *testing.T) {
 	if got := sd.Owner(); got != want {
 		t.Errorf("shared dir owner = %+v, want %+v", got, want)
 	}
-	if got := (Layout{Backend: BackendNFS, HostBase: "/mnt/share-1"}).shared("projects/x", Mount{}).Owner(); got != (shareddirs.Owner{}) {
-		t.Errorf("a Layout with no ids gives owner %+v, want the zero Owner", got)
+	ws, err := l.Resolve(Project{ID: id}, "", WorkspaceMount(ModeSharedPlain, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ws.Owner(); got != want {
+		t.Errorf("workspace owner = %+v, want %+v", got, want)
+	}
+
+	pr, err := l.ProjectRoot(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := l.ProjectConfig(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ar, err := l.AgentRoot(id, "worker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, r := range map[string]Resolved{"ProjectRoot": pr, "ProjectConfig": cfg, "AgentRoot": ar} {
+		if got := r.Owner(); got != (shareddirs.Owner{}) {
+			t.Errorf("%s owner = %+v, want the zero Owner", name, got)
+		}
 	}
 }

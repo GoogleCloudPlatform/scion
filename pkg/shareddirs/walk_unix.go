@@ -117,27 +117,12 @@ func EnsureLeafOwned(hostBase, rel string, owner Owner) (leafFd int, alreadyExis
 // before returning the error, as EnsureLeaf does. Returns the leaf's open
 // fd (caller must close via CloseFd) and whether it already existed.
 func EnsurePrivateDir(hostBase, rel string) (leafFd int, alreadyExisted bool, err error) {
-	return EnsurePrivateDirOwned(hostBase, rel, Owner{})
-}
-
-// EnsurePrivateDirOwned is EnsurePrivateDir with EnsureLeafOwned's owner
-// rule: a root caller gives the leaf this call creates owner's uid and gid
-// (fchown on the walk's descriptor) before its mode is applied. A
-// directory only Scion components write, such as a project's configuration
-// directory, must keep the zero owner (EnsurePrivateDir).
-func EnsurePrivateDirOwned(hostBase, rel string, owner Owner) (leafFd int, alreadyExisted bool, err error) {
 	// The leaf is created at 0755, so it never has a group-write window.
-	parentFd, leafName, fd, existed, created, walkErr := createViaComponentWalk(hostBase, rel, 0o2755, 0o755, owner)
+	// A private directory always keeps the creator's ownership: only Scion
+	// components write it.
+	parentFd, leafName, fd, existed, _, walkErr := createViaComponentWalk(hostBase, rel, 0o2755, 0o755, Owner{})
 	if walkErr != nil {
 		return -1, false, walkErr
-	}
-	if created && owner.chownsCreated() {
-		if chownErr := fchownDir(fd, owner.UID, owner.GID); chownErr != nil {
-			_ = CloseFd(fd)
-			_ = unix.Unlinkat(parentFd, leafName, unix.AT_REMOVEDIR)
-			_ = unix.Close(parentFd)
-			return -1, false, fmt.Errorf("chown directory: %w", chownErr)
-		}
 	}
 	if !existed {
 		if chmodErr := chmodLeaf(fd, 0o2755); chmodErr != nil {

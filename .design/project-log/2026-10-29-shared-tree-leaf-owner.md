@@ -17,8 +17,7 @@ agents running as the nfs uid could not write shared dirs.
 - **`pkg/shareddirs`:**
   - `Owner{UID, GID}` names the owner a root creator gives the leaf
     directories it creates.
-  - `EnsureLeafOwned` and `EnsurePrivateDirOwned` give the leaf the walk
-    itself creates (its own `mkdirat` succeeded) that owner, with `fchown` on
+  - `EnsureLeafOwned` gives the leaf the walk itself creates (its own `mkdirat` succeeded) that owner, with `fchown` on
     the descriptor the walk opened, before the leaf's mode and default ACL.
   - This applies only when the process runs as root and the owner names a
     non-root uid and gid.
@@ -35,8 +34,8 @@ agents running as the nfs uid could not write shared dirs.
   as a failed chmod does. The intermediate-rollback concern does not arise:
   intermediates are never chowned, and a failed intermediate chmod behaves as
   before.
-- `EnsureLeaf` and `EnsurePrivateDir` are the zero-owner forms and are
-  unchanged.
+- `EnsureLeaf` is the zero-owner form and is unchanged. `EnsurePrivateDir`
+  always keeps the creator's ownership; it has no owned form.
 - **The project-root trust directories keep the zero owner:**
   - the project configuration directory `<ProjectRoot>/.scion`
     (`EnsurePrivateDir`), which holds the project's identity (project-id,
@@ -46,10 +45,11 @@ agents running as the nfs uid could not write shared dirs.
 
   Only Scion components write them, and they must never be agent-writable.
   Only the leaves agents use are given the owner.
-- **`pkg/projectfs`:** `Resolved` carries the Layout's `UID` and `GID`
-  (`OwnerUID`, `OwnerGID`, `Owner()`). `Resolved.Open(create)` uses the owned
-  walk, so shared-dir, workspace and migration leaves created through it get
-  the owner.
+- **`pkg/projectfs`:** a workspace or shared-dir Mount resolved on a shared
+  backend carries the Layout's `UID` and `GID` (`OwnerUID`, `OwnerGID`,
+  `Owner()`), and `Resolved.Open(create)` gives the leaf it creates that owner.
+  `ProjectRoot`, `ProjectConfig` and `AgentRoot` carry the zero owner, so
+  opening them never chowns.
 - **Call sites passing the Layout's owner (agent-used leaves only):**
   - shared-dir leaves: `pkg/agent` `resolveSharedDirs` and `pkg/runtime`
     `ResolveSharedDirHostPath`;
@@ -91,7 +91,6 @@ agents running as the nfs uid could not write shared dirs.
   - a chown failure removes the leaf;
   - a concurrent creator that wins the race is not chowned;
   - an untraversable existing intermediate is left unchanged;
-  - `EnsurePrivateDirOwned` follows the same rule.
 - `TestEnsureLeafOwned_RealRoot` checks the real uid and gid, including root
   intermediates. It runs only as root and skips in CI, which runs
   unprivileged: `sudo go test -run TestEnsureLeafOwned_RealRoot
@@ -100,6 +99,8 @@ agents running as the nfs uid could not write shared dirs.
   - `TestResolvedOwner`;
   - `TestEnsureProjectConfigDir_RootCreatorKeepsZeroOwner`: `.scion` is not
     nfs-owned;
+  - `TestOpenCreate_RootCreatorTrustDirsNotChowned`: opening the project root
+    or the project configuration directory chowns nothing;
   - `TestOpenCreate_RootCreatorOwnsSharedDirLeaf`.
 - `pkg/agent` `TestResolveSharedDirs_NFS_LeafOwnerAndAgentGroup`.
 - `pkg/runtimebroker`

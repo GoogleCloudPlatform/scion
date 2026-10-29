@@ -303,8 +303,11 @@ type Resolved struct {
 	// ClaimName is the PersistentVolumeClaim of the share this directory
 	// is on (the Layout's Share.PVName), for pod mounts; empty on local.
 	ClaimName string
-	// OwnerUID and OwnerGID are the Layout's UID and GID: a root creator
-	// gives the directories Open(true) creates that owner (Owner).
+	// OwnerUID and OwnerGID are the Layout's UID and GID on a workspace or
+	// shared-dir Mount resolved on a shared backend (the leaves agents use):
+	// a root creator gives the leaf Open(true) creates that owner (Owner).
+	// They are zero on every other Resolved, including ProjectRoot,
+	// ProjectConfig and AgentRoot, whose directories never get the owner.
 	OwnerUID, OwnerGID int
 }
 
@@ -429,8 +432,6 @@ func (l Layout) shared(rel string, m Mount) Resolved {
 		ClaimName:   l.Share.PVName,
 		Kind:        m.Kind,
 		Name:        m.Name,
-		OwnerUID:    l.UID,
-		OwnerGID:    l.GID,
 	}
 	if l.Share.Export != "" {
 		r.ServerPath = path.Join(l.Share.Export, filepath.ToSlash(rel))
@@ -495,7 +496,7 @@ func (l Layout) resolveShared(p Project, agent string, m Mount) (Resolved, error
 
 	switch m.Kind {
 	case KindSharedDir:
-		r := l.shared(filepath.Join(pr.RelPath, sharedDirsDir, m.Name), m)
+		r := l.mountLeaf(filepath.Join(pr.RelPath, sharedDirsDir, m.Name), m)
 		// Defense in depth alongside the validation above: the leaf must sit
 		// directly under this project's shared-dirs/.
 		if err := shareddirs.ConfineLeaf(r.HostPath, l.HostBase, root, p.ID, m.Name); err != nil {
@@ -505,17 +506,26 @@ func (l Layout) resolveShared(p Project, agent string, m Mount) (Resolved, error
 	default: // KindWorkspace
 		ws := filepath.Join(pr.RelPath, workspaceDir)
 		if agent == "" || m.Scope != ScopeAgent {
-			return l.shared(ws, m), nil
+			return l.mountLeaf(ws, m), nil
 		}
 		switch m.Mode {
 		case ModeWorktreePerAgent:
-			return l.shared(filepath.Join(ws, worktreesDir, agent), m), nil
+			return l.mountLeaf(filepath.Join(ws, worktreesDir, agent), m), nil
 		case ModeClonePerAgent, ModeEmptyPerAgent:
-			return l.shared(filepath.Join(pr.RelPath, agentsDir, agent, workspaceDir), m), nil
+			return l.mountLeaf(filepath.Join(pr.RelPath, agentsDir, agent, workspaceDir), m), nil
 		default:
 			return Resolved{}, fmt.Errorf("projectfs: mode %q has no agent-scoped workspace", m.Mode)
 		}
 	}
+}
+
+// mountLeaf is shared for a workspace or shared-dir Mount, the leaves
+// agents use: it also stamps the Layout's UID and GID as the owner a root
+// creator gives the leaf (Resolved.Owner).
+func (l Layout) mountLeaf(rel string, m Mount) Resolved {
+	r := l.shared(rel, m)
+	r.OwnerUID, r.OwnerGID = l.UID, l.GID
+	return r
 }
 
 func (l Layout) resolveLocal(p Project, agent string, m Mount) (Resolved, error) {

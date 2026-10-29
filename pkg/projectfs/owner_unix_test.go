@@ -74,3 +74,29 @@ func TestOpenCreate_RootCreatorOwnsSharedDirLeaf(t *testing.T) {
 		t.Errorf("chown calls = %v, want %v (the leaf only)", *calls, want)
 	}
 }
+
+// Open(true) of the project root or the project configuration directory by
+// a root creator chowns nothing: those are trust directories, never
+// agent-writable.
+func TestOpenCreate_RootCreatorTrustDirsNotChowned(t *testing.T) {
+	l := Layout{Backend: BackendNFS, HostBase: t.TempDir(), UID: 1000, GID: 1001}
+	calls := ownerCalls(t)
+	pr, err := l.ProjectRoot(ownerTestProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := l.ProjectConfig(ownerTestProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []Resolved{pr, cfg} {
+		root, err := r.Open(true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = root.Close()
+	}
+	if len(*calls) != 0 {
+		t.Errorf("a trust directory was chowned: %v", *calls)
+	}
+}
