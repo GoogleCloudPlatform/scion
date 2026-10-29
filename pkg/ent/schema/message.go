@@ -146,6 +146,16 @@ func (Message) Indexes() []ent.Index {
 		// (created, id) keyset cursor. Without this index every page reads
 		// and sorts all of the project's messages.
 		index.Fields("project_id", "created", "id"),
+		// Participant reads (the agent DM inter-agent view, a user's message
+		// listing) filter on recipient_id = X OR sender_id = X across all
+		// projects. One index per column lets SQLite run a MULTI-INDEX OR
+		// and Postgres a BitmapOr, instead of scanning the whole table. The
+		// trailing created, id also serves single-column filters in order.
+		index.Fields("sender_id", "created", "id"),
+		index.Fields("recipient_id", "created", "id"),
+		// The inter-agent view's legacy lookup filters on project_id and
+		// the sender text ("agent:<slug>") and orders by created, id.
+		index.Fields("project_id", "sender", "created", "id"),
 	}
 }
 
