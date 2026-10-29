@@ -34,6 +34,9 @@
 # Usage: hack/check-fork-ci-gate.sh [WORKFLOW_DIR]   (default .github/workflows)
 #        hack/check-fork-ci-gate.sh --selftest       (runs the fixtures in
 #                                                     hack/testdata/fork-ci-gate)
+# Exit: 0 every gated job carries the gate; 1 gate or layout findings;
+#       2 no workflow files, or a workflow could not be checked (not a
+#       readable regular file, or its check failed or was killed).
 # Needs bash, grep and awk only.
 set -euo pipefail
 
@@ -204,11 +207,16 @@ gated() {
   # injected job without an if: is reported. Grep for that one error, as
   # layout errors are printed whatever the triggers are.
   # The probe lives in PROBE_DIR, which the EXIT/INT/TERM trap removes.
+  # A failure here exits 2 (gated runs in the main shell): treating it as
+  # "out of scope" would be a silent pass.
   local tmp="$PROBE_DIR/probe.yml"
-  awk '/^jobs:/ { exit } { print }' "$f" >"$tmp"
-  printf 'jobs:\n  probe:\n    runs-on: x\n' >>"$tmp"
   local o
-  o=$(check_file "$tmp")
+  { awk '/^jobs:/ { exit } { print }' "$f" >"$tmp" &&
+    printf 'jobs:\n  probe:\n    runs-on: x\n' >>"$tmp" &&
+    o=$(check_file "$tmp"); } || {
+    echo "check-fork-ci-gate: cannot check $f (scope probe failed)" >&2
+    exit 2
+  }
   grep -qF 'job probe has no if:' <<<"$o"
 }
 
@@ -223,9 +231,23 @@ check_dir() {
     echo "check-fork-ci-gate: no workflow files in $dir" >&2
     return 2
   fi
-  local o
+  # A file that cannot be checked (not a regular readable file, or check_file
+  # failed: awk could not read it, or its subshell was killed) is exit 2, never
+  # a pass: set -e is suspended under "if check_dir", so the status of each
+  # check_file must be tested here.
+  local o rc
   for f in "${files[@]}"; do
-    o=$(check_file "$f")
+    rc=0
+    if [ -f "$f" ] && [ -r "$f" ]; then
+      o=$(check_file "$f") || rc=$?
+    else
+      rc=1
+    fi
+    if [ "$rc" -ne 0 ]; then
+      [ -z "$out" ] || printf '%s' "$out"
+      echo "check-fork-ci-gate: cannot check $f (not a readable regular file, or the check failed with rc=$rc)" >&2
+      return 2
+    fi
     [ -z "$o" ] || out+="$o"$'\n'
   done
   if [ -n "$out" ]; then
@@ -282,6 +304,58 @@ selftest() {
       echo "selftest FAILED: ${d##*/} (exit $rc) did not report: $want"; printf '%s\n' "$out"; fail=1
     fi
   done
+  # A workflow that cannot be checked must fail with rc 2 and no "ok" line.
+  # Built at run time in PROBE_DIR (git cannot store a mode-000 file): an
+  # unreadable copy of a good fixture, and a directory named like a workflow.
+  # The whole script is run, so the final summary is covered too.
+  local cd_unr="$PROBE_DIR/st-unreadable" cd_dir="$PROBE_DIR/st-not-a-file" case_dir
+  mkdir -p "$cd_unr" "$cd_dir/ci.yml"
+  cp "$td/good/push.yml" "$cd_unr/ci.yml"
+  chmod 000 "$cd_unr/ci.yml"
+  for case_dir in "$cd_unr" "$cd_dir"; do
+    if [ "$case_dir" = "$cd_unr" ] && [ -r "$cd_unr/ci.yml" ]; then
+      echo "selftest skipped: unreadable-file case (mode 000 is still readable here, e.g. as root)"
+      continue
+    fi
+    rc=0; out=$(bash "${BASH_SOURCE[0]}" "$case_dir" 2>&1) || rc=$?
+    if [ "$rc" -eq 2 ] && grep -qF 'cannot check' <<<"$out" && ! grep -qF ': ok (' <<<"$out"; then
+      echo "selftest ok: ${case_dir##*/} fails with rc 2: cannot check"
+    else
+      echo "selftest FAILED: ${case_dir##*/} (exit $rc) did not fail with rc 2 and 'cannot check':"; printf '%s\n' "$out"; fail=1
+    fi
+  done
+  chmod 600 "$cd_unr/ci.yml"
+  # A readable workflow whose check dies (awk killed by SIGKILL, through an
+  # awk shim first on PATH) must also be rc 2, not a silent pass. SHIM_MODE
+  # picks the awk call that dies: "check" kills check_file's read of the
+  # workflow (the call with "file=" in its arguments), pinning check_dir's
+  # status test; "probe" kills the copy gated() makes of it, pinning the
+  # scope probe's exit 2.
+  local shim="$PROBE_DIR/st-shim" cd_kill="$PROBE_DIR/st-killed-check" real_awk mode
+  real_awk=$(command -v awk)
+  mkdir -p "$shim" "$cd_kill"
+  cp "$td/good/push.yml" "$cd_kill/victim.yml"
+  # The shim source is written literally: its $ must not expand here.
+  # shellcheck disable=SC2016
+  {
+    echo '#!/usr/bin/env bash'
+    echo 'v=0; c=0'
+    echo 'for a in "$@"; do case $a in *victim.yml) v=1 ;; esac; case $a in file=*) c=1 ;; esac; done'
+    echo 'k=0'
+    echo '[ "$v$SHIM_MODE$c" = 1check1 ] && k=1'
+    echo '[ "$v$SHIM_MODE$c" = 1probe0 ] && k=1'
+    echo '[ "$k" = 0 ] || kill -KILL $$'
+    printf 'exec %q "$@"\n' "$real_awk"
+  } >"$shim/awk"
+  chmod 700 "$shim/awk"
+  for mode in check probe; do
+    rc=0; out=$(SHIM_MODE=$mode PATH="$shim:$PATH" bash "${BASH_SOURCE[0]}" "$cd_kill" 2>&1) || rc=$?
+    if [ "$rc" -eq 2 ] && grep -qF 'cannot check' <<<"$out" && ! grep -qF ': ok (' <<<"$out"; then
+      echo "selftest ok: ${cd_kill##*/} ($mode killed) fails with rc 2: cannot check"
+    else
+      echo "selftest FAILED: ${cd_kill##*/} ($mode killed, exit $rc) did not fail with rc 2 and 'cannot check':"; printf '%s\n' "$out"; fail=1
+    fi
+  done
   if [ "$nbad" -eq 0 ]; then
     echo "selftest FAILED: no bad-* fixtures in $td"; fail=1
   fi
@@ -301,6 +375,10 @@ if check_dir "$dir"; then
   echo "check-fork-ci-gate: ok ($n push- or schedule-triggered workflow file(s) gated)"
 else
   rc=$?
+  if [ "$rc" -ne 1 ]; then
+    echo "check-fork-ci-gate: FAILED (rc=$rc): no gate result; see the error above" >&2
+    exit "$rc"
+  fi
   echo "check-fork-ci-gate: FAILED; every job in a push- or schedule-triggered workflow needs:" >&2
   echo "    if: \${{ $GATE }}" >&2
   echo "  or, with the job's own condition:" >&2
