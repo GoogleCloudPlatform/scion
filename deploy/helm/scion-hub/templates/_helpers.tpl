@@ -4629,8 +4629,10 @@ messages and by NOTES.txt, so the two say the same thing.
 {{- define "scion-hub.relayOffRemedy" -}}
 {{- if eq (toString .) "extra" -}}
 remove the config.extra internal_listen (or bind it to loopback)
-{{- else -}}
+{{- else if eq (toString .) "wiring" -}}
 set conduit.internalTls.enabled: false
+{{- else -}}
+{{- fail (printf "scion-hub.relayOffRemedy: unknown path %q" (toString .)) -}}
 {{- end -}}
 {{- end }}
 

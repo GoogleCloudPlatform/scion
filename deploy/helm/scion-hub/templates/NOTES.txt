@@ -25,7 +25,7 @@ Reach the hub:
 {{- /* The remedy follows the path that triggered the check: the chart's relay
 wiring (conduit.internalTls on), or a non-loopback config.extra internal_listen
 with the wiring off. */}}
-{{- $relayOff := include "scion-hub.relayOffRemedy" (ternary "wiring" "extra" (not (empty (include "scion-hub.relayTls" . | fromYaml)))) }}
+{{- $relayOff := include "scion-hub.relayOffRemedy" (ternary "extra" "wiring" (empty (include "scion-hub.relayTls" . | fromYaml))) }}
 !! RELAY TLS: THE HUB IMAGE VERSION COULD NOT BE CHECKED.
 
   The relay hop between hub nodes is configured for TLS, but the image is set by
