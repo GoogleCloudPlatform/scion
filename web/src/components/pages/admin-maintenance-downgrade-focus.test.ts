@@ -16,15 +16,64 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 
-// Focus of the typed downgrade confirmation, with the real Shoelace
-// sl-dialog and sl-input registered (the other maintenance page tests
-// leave Shoelace unregistered). An sl-dialog created already open skips
-// Shoelace's initial focus; the page renders it closed and opens it after
-// its first update, so focus must land in the typed input.
+// Focus of the typed downgrade confirmation. The real Shoelace sl-dialog
+// and sl-input do not run under happy-dom (cloning sl-input throws "Cannot
+// read from private field", and ShadowRoot.activeElement throws for the
+// nested shadow roots), so this file registers stand-ins that follow the
+// Shoelace 2.20 sl-dialog contract (dialog.component.ts):
+// - initial focus runs only in handleOpenChange, @watch('open',
+//   { waitUntilFirstUpdate: true }): a dialog created already open never
+//   focuses anything;
+// - when open turns true after the first update, the [autofocus] child is
+//   focused in the next animation frame.
+// The page must therefore render the dialog closed and open it after its
+// first update, and on a re-prompt focus the input itself.
 
 vi.mock('../../utils/toast.js', () => ({ showToast: vi.fn() }));
 
-import { deepActiveElement } from '../shared/deep-active-element.js';
+/** The element the stand-ins last focused. */
+let focused: Element | null = null;
+
+function recordFocus(e: Element): void {
+  focused = e;
+}
+
+class StandInInput extends HTMLElement {
+  value = '';
+  updateComplete: Promise<boolean> = Promise.resolve(true);
+  override focus(): void {
+    recordFocus(this);
+  }
+}
+
+class StandInDialog extends HTMLElement {
+  static observedAttributes = ['open'];
+  /** Whether open was already set when the first update ran. */
+  bornOpen: boolean | null = null;
+  updateComplete: Promise<boolean> = Promise.resolve(true);
+  private firstUpdateDone = false;
+
+  connectedCallback(): void {
+    this.updateComplete = Promise.resolve().then(() => {
+      if (!this.firstUpdateDone) {
+        this.firstUpdateDone = true;
+        this.bornOpen = this.hasAttribute('open');
+      }
+      return true;
+    });
+  }
+
+  attributeChangedCallback(name: string, oldValue: string | null, value: string | null): void {
+    if (name !== 'open' || !this.firstUpdateDone || oldValue !== null || value === null) return;
+    requestAnimationFrame(() => {
+      this.querySelector<HTMLElement>('[autofocus]')?.focus();
+    });
+  }
+
+  get open(): boolean {
+    return this.hasAttribute('open');
+  }
+}
 
 type Json = Record<string, unknown>;
 
@@ -98,8 +147,8 @@ type Page = HTMLElement & {
 const runBodies: unknown[] = [];
 
 beforeAll(async () => {
-  await import('@shoelace-style/shoelace/dist/components/dialog/dialog.js');
-  await import('@shoelace-style/shoelace/dist/components/input/input.js');
+  customElements.define('sl-dialog', StandInDialog);
+  customElements.define('sl-input', StandInInput);
   await import('./admin-maintenance.js');
 }, 60_000);
 
@@ -110,6 +159,7 @@ afterEach(() => {
   el?.remove();
   el = null;
   runBodies.length = 0;
+  focused = null;
   vi.unstubAllGlobals();
 });
 
@@ -157,11 +207,9 @@ function typedInput(e: Page): HTMLElement & { value: string } {
   return dialog(e)!.querySelector<HTMLElement & { value: string }>('sl-input.downgrade-typed')!;
 }
 
-/** Whether focus is on the typed input (the sl-input or its inner input). */
+/** Whether the typed input was the last element focused. */
 function typedInputFocused(e: Page): boolean {
-  const input = typedInput(e);
-  const active = deepActiveElement();
-  return !!active && (active === input || !!input.shadowRoot?.contains(active));
+  return focused !== null && focused === typedInput(e);
 }
 
 /** Confirms the Update Hub dialog, which gets the 409 and opens the confirmation. */
@@ -179,8 +227,10 @@ describe('Downgrade confirmation focus', () => {
     el = await mount([needsConfirmation('nightly-20261020')]);
     await openConfirmation(el);
 
-    const d = dialog(el) as (HTMLElement & { open: boolean }) | null;
+    const d = dialog(el) as StandInDialog | null;
     expect(d).not.toBeNull();
+    // Created closed: a dialog born open would never move focus.
+    expect(d!.bornOpen).toBe(false);
     await vi.waitFor(() => expect(d!.open).toBe(true));
     await vi.waitFor(() => expect(typedInputFocused(el!)).toBe(true));
   });
@@ -199,8 +249,7 @@ describe('Downgrade confirmation focus', () => {
     await settle(el);
     // Focus leaves the input (a click on Confirm, or the input disabled
     // while the request is in flight).
-    (deepActiveElement() as HTMLElement | null)?.blur();
-    expect(typedInputFocused(el)).toBe(false);
+    focused = null;
     dialog(el)!.querySelector<HTMLElement>('sl-button.confirm-downgrade')!.click();
     await settle(el);
 
