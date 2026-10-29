@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"gopkg.in/yaml.v3"
 )
@@ -193,9 +194,10 @@ func SettingsWarnings(data []byte, schemaVersion string) []string {
 		return nil
 	}
 	var vs struct {
-		Runtimes map[string]V1RuntimeConfig `yaml:"runtimes"`
-		Profiles map[string]V1ProfileConfig `yaml:"profiles"`
-		Server   struct {
+		Runtimes         map[string]V1RuntimeConfig `yaml:"runtimes"`
+		Profiles         map[string]V1ProfileConfig `yaml:"profiles"`
+		DefaultResources *api.ResourceSpec          `yaml:"default_resources"`
+		Server           struct {
 			HomeStorage *V1HomeStorageConfig `yaml:"home_storage"`
 		} `yaml:"server"`
 	}
@@ -203,6 +205,13 @@ func SettingsWarnings(data []byte, schemaVersion string) []string {
 		return nil
 	}
 	warnings := SafeToEvictIgnoredWarnings(vs.Runtimes, vs.Profiles)
+	// Resource quantities the server-config API rejects or warns about
+	// (ptone/scion#6581) are warnings here: a loaded file is never refused
+	// for them.
+	qErrs, qWarnings := ValidateResourceQuantities(vs.DefaultResources, vs.Profiles)
+	for _, e := range append(qErrs, qWarnings...) {
+		warnings = append(warnings, e.Error())
+	}
 	warnings = append(warnings, PlacementIgnoredWarnings(vs.Runtimes, vs.Profiles)...)
 	warnings = append(warnings, PlacementSettingsWarnings(vs.Runtimes, vs.Profiles)...)
 	return append(warnings, HomeStorageWindowWarnings(vs.Server.HomeStorage)...)
