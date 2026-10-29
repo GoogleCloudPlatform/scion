@@ -35,6 +35,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestBrokerRegistrationAndJoin(t *testing.T) {
@@ -893,6 +895,64 @@ func TestGenerateAndStoreSecret_RequiresBrokerID(t *testing.T) {
 	if !strings.Contains(err.Error(), "brokerId is required") {
 		t.Errorf("Expected 'brokerId is required' error, got: %v", err)
 	}
+}
+
+// TestMintSecretIfAbsent_MintsFirstSecret pins that MintSecretIfAbsent
+// stores and returns a new secret when the broker has none.
+func TestMintSecretIfAbsent_MintsFirstSecret(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+	brokerID := uuid.New().String()
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: brokerID, Name: "mint-first", Slug: "mint-first", Status: store.BrokerStatusOnline,
+		Created: time.Now(), Updated: time.Now(),
+	}))
+
+	secretKey, minted, err := svc.MintSecretIfAbsent(ctx, brokerID)
+	require.NoError(t, err)
+	assert.True(t, minted)
+	secretBytes, err := base64.StdEncoding.DecodeString(secretKey)
+	require.NoError(t, err)
+	assert.Len(t, secretBytes, 32)
+
+	stored, err := s.GetBrokerSecret(ctx, brokerID)
+	require.NoError(t, err)
+	assert.True(t, bytes.Equal(stored.SecretKey, secretBytes), "the returned secret must be the stored one")
+}
+
+// TestMintSecretIfAbsent_NeverReturnsStoredSecret pins that a broker which
+// already has a secret gets no secret back, and that the stored secret is
+// left unchanged.
+func TestMintSecretIfAbsent_NeverReturnsStoredSecret(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+	brokerID := uuid.New().String()
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID: brokerID, Name: "mint-existing", Slug: "mint-existing", Status: store.BrokerStatusOnline,
+		Created: time.Now(), Updated: time.Now(),
+	}))
+	first, err := svc.GenerateAndStoreSecret(ctx, brokerID)
+	require.NoError(t, err)
+
+	secretKey, minted, err := svc.MintSecretIfAbsent(ctx, brokerID)
+	require.NoError(t, err)
+	assert.False(t, minted)
+	assert.Empty(t, secretKey, "a stored secret must never be returned")
+
+	stored, err := s.GetBrokerSecret(ctx, brokerID)
+	require.NoError(t, err)
+	assert.Equal(t, first, base64.StdEncoding.EncodeToString(stored.SecretKey), "the stored secret must not change")
+}
+
+// TestMintSecretIfAbsent_RequiresBrokerID pins the keyless error for an
+// empty broker ID.
+func TestMintSecretIfAbsent_RequiresBrokerID(t *testing.T) {
+	svc, _ := setupTestBrokerAuthService(t)
+	secretKey, minted, err := svc.MintSecretIfAbsent(context.Background(), "")
+	require.Error(t, err)
+	assert.Equal(t, "brokerId is required", err.Error())
+	assert.False(t, minted)
+	assert.Empty(t, secretKey)
 }
 
 // TestGenerateAndStoreSecret_CanBeUsedForHMACAuth tests the full flow:
