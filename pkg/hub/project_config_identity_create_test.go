@@ -650,13 +650,18 @@ func TestCreateHubNativeProject_SharedBackend_LaterFailureKeepsExistingRoot(t *t
 	assert.True(t, os.IsNotExist(err), "nothing was provisioned into the existing tree")
 }
 
-// providersErrStore fails GetProjectProviders, for the provider-lookup error
-// case of hubNativeWorkspaceProject.
-type providersErrStore struct {
+// providersFaultStore fails GetProjectProviders once its switch is armed,
+// for the provider-lookup error case of hubNativeWorkspaceProject. It is
+// installed with installStoreFault (never by reassigning srv.store).
+type providersFaultStore struct {
 	store.Store
+	fault *storeFaultSwitch
 }
 
-func (providersErrStore) GetProjectProviders(context.Context, string) ([]store.ProjectProvider, error) {
+func (w *providersFaultStore) GetProjectProviders(ctx context.Context, projectID string) ([]store.ProjectProvider, error) {
+	if !w.fault.Active() {
+		return w.Store.GetProjectProviders(ctx, projectID)
+	}
 	return nil, errors.New("simulated provider lookup failure")
 }
 
@@ -667,6 +672,10 @@ func (providersErrStore) GetProjectProviders(context.Context, string) ([]store.P
 // and a non-shared backend means no.
 func TestHubNativeWorkspaceProject_Predicate(t *testing.T) {
 	f := newWorkspaceLayoutFixture(t)
+	// Installed before any setup; transparent until armed below.
+	_, fault := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) *providersFaultStore {
+		return &providersFaultStore{Store: inner, fault: sw}
+	})
 	f.useNFS()
 	ctx := context.Background()
 	mk := func(id, slug, remote string, labels map[string]string) *store.Project {
@@ -707,12 +716,11 @@ func TestHubNativeWorkspaceProject_Predicate(t *testing.T) {
 		assert.Equal(t, tc.want, f.srv.hubNativeWorkspaceProject(ctx, tc.p), name)
 	}
 
-	realStore := f.srv.store
-	f.srv.store = providersErrStore{Store: realStore}
-	assert.False(t, f.srv.hubNativeWorkspaceProject(ctx, unlabeled), "a provider lookup error means not hub-native")
-	assert.True(t, f.srv.hubNativeWorkspaceProject(ctx, hubLabeled), "the hub origin label needs no provider lookup")
-	f.srv.store = realStore
-
 	local := newWorkspaceLayoutFixture(t)
 	assert.False(t, local.srv.hubNativeWorkspaceProject(ctx, hubLabeled), "the local backend is never hub-native-provisioned")
+
+	// Last, because the switch stays armed: a provider lookup error.
+	fault.Arm()
+	assert.False(t, f.srv.hubNativeWorkspaceProject(ctx, unlabeled), "a provider lookup error means not hub-native")
+	assert.True(t, f.srv.hubNativeWorkspaceProject(ctx, hubLabeled), "the hub origin label needs no provider lookup")
 }
