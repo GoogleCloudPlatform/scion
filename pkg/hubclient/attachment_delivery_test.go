@@ -152,7 +152,7 @@ func TestFetchAttachmentDelivery_ErrorsCarryNoURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = c.(AttachmentDeliveryFetcher).FetchAttachmentDelivery(context.Background(), "/api/v1/attachment-deliveries/"+token)
-	if err == nil || !errors.Is(err, errDeliveryUnexpectedStatus) || errors.Is(err, errDeliveryRefused) || strings.Contains(err.Error(), token) || strings.Contains(err.Error(), unexpected.URL) {
+	if !errors.Is(err, errDeliveryUnexpectedStatus) || errors.Is(err, errDeliveryRefused) || strings.Contains(err.Error(), token) || strings.Contains(err.Error(), unexpected.URL) {
 		t.Fatalf("unexpected status error = %v; want errDeliveryUnexpectedStatus without capability or URL", err)
 	}
 }

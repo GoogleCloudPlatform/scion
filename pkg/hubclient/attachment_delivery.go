@@ -42,10 +42,6 @@ const attachmentDeliveriesPath = "/api/v1/attachment-deliveries/"
 // errDeliveryRefused is returned for any refusal of a delivery capability.
 var errDeliveryRefused = errors.New("attachment delivery refused")
 
-// errDeliveryUnexpectedStatus is returned when the delivery endpoint returns
-// an unexpected non-error status (e.g. 204 No Content).
-var errDeliveryUnexpectedStatus = errors.New("attachment delivery: unexpected response status")
-
 // FetchAttachmentDelivery implements AttachmentDeliveryFetcher. Its errors
 // never carry a URL: the hub path holds the delivery capability and the
 // object-store URL is signed, so a caller may log any error it returns
@@ -58,10 +54,10 @@ func (c *client) FetchAttachmentDelivery(ctx context.Context, path string) (io.R
 	return body, nil
 }
 
-// deliveryError returns err without any URL: a refusal, an API error from
-// the hub (built from the response, never the request) and a status from
-// the object store pass as they are; a transport error (*url.Error, which
-// formats with the full URL) keeps only its operation and cause; anything
+// deliveryError returns err without any URL: a refusal, an unexpected status,
+// an API error from the hub (built from the response, never the request) and
+// a status from the object store pass as they are; a transport error (*url.Error,
+// which formats with the full URL) keeps only its operation and cause; anything
 // else becomes a fixed message.
 func deliveryError(err error) error {
 	var ue *url.Error
@@ -80,9 +76,10 @@ func deliveryError(err error) error {
 
 // Fixed errors of a delivery fetch; none carries a URL.
 var (
-	errDeliveryObjectStore = errors.New("attachment delivery: object store refused the download")
-	errDeliveryPath        = errors.New("attachment delivery: unexpected capability path")
-	errDeliveryRedirect    = errors.New("attachment delivery: invalid redirect")
+	errDeliveryObjectStore      = errors.New("attachment delivery: object store refused the download")
+	errDeliveryPath             = errors.New("attachment delivery: unexpected capability path")
+	errDeliveryRedirect         = errors.New("attachment delivery: invalid redirect")
+	errDeliveryUnexpectedStatus = errors.New("attachment delivery: unexpected response status")
 )
 
 func (c *client) fetchAttachmentDelivery(ctx context.Context, path string) (io.ReadCloser, error) {
