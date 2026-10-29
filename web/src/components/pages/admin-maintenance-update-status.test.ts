@@ -1291,7 +1291,7 @@ describe('Reconnect after an update restart', () => {
       vi.mocked(waitForHubRestart).mockImplementation(
         () =>
           new Promise<Awaited<ReturnType<typeof waitForHubRestart>>>((resolve) => {
-            finishWait = () =>
+            finishWait = (): void =>
               resolve({
                 ok: true,
                 observed: { version: 'nightly-20261023', uptime: '3s', uptimeSeconds: 3 },
