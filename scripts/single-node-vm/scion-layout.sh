@@ -458,10 +458,12 @@ activate() {
 # before its own update restart, with runId "deploy.sh". The new binary
 # fills in migrated/previous_safe/verified as it boots. Atomic (a fresh
 # temp file renamed over it, so a planted symlink is replaced, not
-# followed), 0644. Best effort. If the write fails, an older file is left
-# in place on purpose: it no longer matches the links, so the guard leaves
-# the hub stopped (fail closed). Removing it would hand the guard the
-# switch-time fallback, which cannot see a destructive migration.
+# followed), 0644. Best effort. If the write fails, whatever was there is
+# left in place on purpose. An older valid file normally no longer matches
+# the links, so the guard leaves the hub stopped (fail closed); an absent
+# or unreadable one gives the guard its switch-time fallback. Removing an
+# older file here would force that fallback, which cannot see a
+# destructive migration.
 write_update_state() {
   local tmp
   if tmp="$(mktemp "$INSTALL_ROOT/update-state.json.XXXXXX")" \
@@ -471,7 +473,7 @@ write_update_state() {
     return 0
   fi
   [[ -n "${tmp:-}" ]] && rm -f "$tmp"
-  echo "scion-layout: WARNING: could not write $INSTALL_ROOT/update-state.json; the boot-failure guard will not roll this release back automatically unless that file is absent and current was switched within the last 30 minutes" >&2
+  echo "scion-layout: WARNING: could not write $INSTALL_ROOT/update-state.json; the boot-failure guard will not roll this release back automatically unless that file is absent or unreadable and current was switched within the last 30 minutes" >&2
 }
 
 # cmd_as_owner TAG BINARY [TAG BINARY...] -- runs as the owner: create any

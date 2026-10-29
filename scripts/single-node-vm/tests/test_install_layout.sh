@@ -262,7 +262,7 @@ test_layout_install_update_state_write_failure_warns() {
   _layout install nightly-20261023 "${LH_DIR}/b"
   assert_eq "0" "$LAYOUT_RC" "a failed update-state write must not fail the install (output: ${LAYOUT_OUT})"
   assert_eq "releases/nightly-20261023" "$(readlink "$LH_ROOT/current")" "the release must still be installed"
-  assert_contains "$LAYOUT_OUT" "will not roll this release back automatically unless that file is absent and current was switched within the last 30 minutes" \
+  assert_contains "$LAYOUT_OUT" "will not roll this release back automatically unless that file is absent or unreadable and current was switched within the last 30 minutes" \
     "the warning must describe the guard's behaviour"
   assert_not_contains "$LAYOUT_OUT" "falls back to the switch time" "the old, misleading wording must be gone"
   assert_eq "" "$(find "$LH_ROOT" -maxdepth 1 -name 'update-state.json.*')" "no temporary file may be left"
