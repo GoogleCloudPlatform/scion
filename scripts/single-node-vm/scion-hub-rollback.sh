@@ -82,13 +82,26 @@
 #     (the symlink's own mtime; every switch creates a new link).
 #
 # It acts only when the hub crash-looped:
-#   - scion-hub's Result must be start-limit-hit. systemd >= 254 also
-#     triggers OnFailure= on every single crash before an automatic
-#     restart; those runs see Result=exit-code (or similar) and do nothing.
+#   - scion-hub must be failed for good: ActiveState=failed AND
+#     SubState=failed (systemd will not restart it), in each of
+#     SETTLE_READS reads SETTLE_INTERVAL_SEC apart. With Restart=always that
+#     happens only when the start limit stops the automatic restarts.
+#     systemd >= 254 passes through a transient failed state between
+#     automatic restart attempts (SubState failed-before-auto-restart, then
+#     activating/auto-restart) and fires OnFailure= there too; requiring
+#     SubState=failed in every read keeps those runs a no-op. The unit's Result is NOT a usable signal:
+#     on systemd 249 (Ubuntu 22.04) a crash loop that hits the start limit
+#     logs "Start request repeated too quickly" but keeps Result=exit-code
+#     (or signal, core-dump, ...); Result=start-limit-hit appears only when
+#     the previous result was success, i.e. after clean restarts. systemd
+#     >= 254 also triggers OnFailure= on every single crash before an
+#     automatic restart; the unit is then still activating (SubState
+#     auto-restart), not failed, and those runs do nothing.
 #   - The hub's last exit must be a failure. The start limit also counts
 #     clean restarts (an update or Restart Hub exits on SIGTERM and systemd
-#     starts it again), so five of those within five minutes trip it too.
-#     Then the script only restarts the hub, without swapping.
+#     starts it again), so five of those within five minutes trip it too
+#     (then Result=start-limit-hit). Then the script only restarts the
+#     hub, without swapping.
 #
 # Privileges: root runs only systemctl. The install root and everything
 # under it belong to the install owner (scion), who can change any entry
@@ -97,11 +110,12 @@
 # run as the owner (runuser). The marker is therefore owned by the owner.
 # Nothing outside the install root is changed.
 #
-# Safe to run more than once: after a successful rollback the hub's Result
-# is no longer start-limit-hit, and a rollback already recorded in the
+# Safe to run more than once: after a successful rollback the hub is
+# running again (not failed), and a rollback already recorded in the
 # marker is never repeated.
 #
 # Environment (defaults are what the VM uses; tests override them):
+#   SCION_ROLLBACK_SETTLE_SEC  seconds between the settle reads (default 1)
 #   SCION_INSTALL_ROOT    install root            (default /opt/scion)
 #   SCION_INSTALL_OWNER   user:group owning the root (default scion:scion);
 #                         empty runs the owner step in-process (tests)
@@ -129,6 +143,13 @@ readonly UPDATE_STATE_MAX_BYTES=4096
 # for a release that fails a little later, without reaching back to a
 # release that has been running normally.
 readonly RECENT_SWITCH_WINDOW_SEC=1800
+
+# The failed state must hold over SETTLE_READS reads of the unit,
+# SETTLE_INTERVAL_SEC apart (about 2 s in total), so a transient failed
+# between automatic restart attempts is never taken for the final one.
+readonly SETTLE_READS=3
+SETTLE_INTERVAL_SEC="${SCION_ROLLBACK_SETTLE_SEC:-1}"
+[[ "$SETTLE_INTERVAL_SEC" =~ ^[0-9]+$ ]] || SETTLE_INTERVAL_SEC=1
 
 log() { echo "scion-hub-rollback: $*"; }
 die() { echo "scion-hub-rollback: ERROR: $*" >&2; exit 1; }
@@ -321,19 +342,30 @@ run_as_owner() {
   fi
 }
 
-# hub_show PROPERTY -- one property of scion-hub.service.
-hub_show() {
-  systemctl show -p "$1" --value "$HUB_UNIT"
+# read_hub_state -- one `systemctl show` of scion-hub.service (a consistent
+# snapshot), into HUB_ACTIVE, HUB_SUB, HUB_RESULT, HUB_EXEC_CODE and
+# HUB_EXEC_STATUS.
+read_hub_state() {
+  local line key value
+  HUB_ACTIVE="" HUB_SUB="" HUB_RESULT="" HUB_EXEC_CODE="" HUB_EXEC_STATUS=""
+  while IFS= read -r line; do
+    key="${line%%=*}"
+    value="${line#*=}"
+    case "$key" in
+      ActiveState) HUB_ACTIVE="$value" ;;
+      SubState) HUB_SUB="$value" ;;
+      Result) HUB_RESULT="$value" ;;
+      ExecMainCode) HUB_EXEC_CODE="$value" ;;
+      ExecMainStatus) HUB_EXEC_STATUS="$value" ;;
+    esac
+  done < <(systemctl show -p ActiveState,SubState,Result,ExecMainCode,ExecMainStatus "$HUB_UNIT")
 }
 
 # last_exit_was_clean -- the hub's last main process ended the way systemd
 # counts as clean: exit status 0, or killed by SIGHUP, SIGINT, SIGTERM or
 # SIGPIPE. ExecMainCode is the waitid si_code: 1 exited, 2 killed, 3 dumped.
 last_exit_was_clean() {
-  local code status
-  code="$(hub_show ExecMainCode)"
-  status="$(hub_show ExecMainStatus)"
-  case "$code:$status" in
+  case "$HUB_EXEC_CODE:$HUB_EXEC_STATUS" in
     1:0|2:1|2:2|2:13|2:15) return 0 ;;
     *) return 1 ;;
   esac
@@ -344,18 +376,30 @@ restart_hub() {
   systemctl start "$HUB_UNIT"
 }
 
+# failed_for_good -- read the unit SETTLE_READS times, SETTLE_INTERVAL_SEC
+# apart; true only if every read shows ActiveState=failed and
+# SubState=failed. Leaves the last read in HUB_*.
+failed_for_good() {
+  local i
+  for (( i = 1; i <= SETTLE_READS; i++ )); do
+    (( i == 1 )) || sleep "$SETTLE_INTERVAL_SEC"
+    read_hub_state
+    if [[ "$HUB_ACTIVE" != "failed" || "$HUB_SUB" != "failed" ]]; then
+      log "$HUB_UNIT is $HUB_ACTIVE/$HUB_SUB (result $HUB_RESULT) at read $i of $SETTLE_READS, not failed for good; nothing to do"
+      return 1
+    fi
+  done
+}
+
 cmd_rollback() {
-  local result rc=0
-  result="$(hub_show Result)"
-  if [[ "$result" != "start-limit-hit" ]]; then
-    log "$HUB_UNIT result is '$result', not start-limit-hit; nothing to do"
-    return 0
-  fi
+  local rc=0
+  failed_for_good || return 0
   if last_exit_was_clean; then
-    log "$HUB_UNIT hit its start limit after clean exits (repeated restarts, not a crash loop); restarting it without a rollback"
+    log "$HUB_UNIT failed (result $HUB_RESULT) after clean exits (repeated restarts, not a crash loop); restarting it without a rollback"
     restart_hub
     return 0
   fi
+  log "$HUB_UNIT failed after a crash loop (result $HUB_RESULT, last exit $HUB_EXEC_CODE:$HUB_EXEC_STATUS)"
   run_as_owner || rc=$?
   case "$rc" in
     0) ;;

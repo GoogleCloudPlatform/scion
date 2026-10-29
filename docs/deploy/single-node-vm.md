@@ -229,9 +229,8 @@ installs a guard that restores the previous release after a failed update:
 - `scion-hub.service` sets `StartLimitIntervalSec=300`, `StartLimitBurst=5`
   and `OnFailure=scion-hub-rollback.service` in its `[Unit]` section. With
   `Restart=always` and `RestartSec=5`, a Hub that keeps failing is started
-  five times within five minutes. systemd then stops restarting it, marks
-  it failed with `Result=start-limit-hit`, and starts
-  `scion-hub-rollback.service`.
+  five times within five minutes. systemd then stops restarting it, leaves
+  it in the failed state, and starts `scion-hub-rollback.service`.
 - `scion-hub-rollback.service` is a root oneshot unit that runs
   `/usr/local/libexec/scion/scion-hub-rollback.sh`. The script and its
   directory are owned by root with mode 0755. They live outside
@@ -246,9 +245,13 @@ restart the unit through `systemctl`. It never reads, follows or writes
 anything under `/opt/scion` as root. All checks, the swap and the marker
 run as the `scion` user (through `runuser`):
 
-1. It acts only when `systemctl show -p Result scion-hub` is
-   `start-limit-hit`. Otherwise it exits successfully without doing
-   anything.
+1. It acts only when the Hub has **failed for good**: `systemctl show`
+   reports `ActiveState=failed` and `SubState=failed` (systemd will not
+   restart it) in three reads about a second apart. Otherwise it exits
+   successfully without doing anything. The unit's `Result` is not used
+   for this decision: after a crash loop it is the crash's own result
+   (`exit-code`, `signal`, `core-dump`), not `start-limit-hit` (see
+   **systemd versions** below).
 2. If the Hub's last exit was clean (exit status 0, or `SIGTERM`, `SIGINT`,
    `SIGHUP` or `SIGPIPE`), the limit was reached by restarts, not by a crash
    loop. Every update and **Restart Hub** exits cleanly and is restarted by
@@ -336,14 +339,25 @@ To start a Hub that the guard left stopped, fix the cause shown in
 `sudo systemctl reset-failed scion-hub && sudo systemctl start scion-hub`.
 
 **systemd versions.** The VM image is Ubuntu 22.04 LTS, which ships systemd
-249. There, `OnFailure=` fires only when the unit finally fails, that is
-when the start limit is hit. From systemd 254 on (Ubuntu 24.04 LTS ships
-255), `OnFailure=` also fires on every single crash before the automatic
-restart, unless the unit sets `RestartMode=direct`. On such a system the
-guard is started after each crash, sees a `Result` other than
-`start-limit-hit` (for example `exit-code`), and does nothing until the
-limit is actually reached. `StartLimitIntervalSec=` and `StartLimitBurst=`
-belong in `[Unit]` from systemd 230 on.
+249; Ubuntu 24.04 LTS ships 255.
+
+- **systemd 249.** `OnFailure=` fires only when the unit finally fails,
+  when the start limit stops the automatic restarts. The journal says
+  "Start request repeated too quickly", but the unit's `Result` stays the
+  crash's own result (`exit-code`, `signal` or `core-dump`).
+  `Result=start-limit-hit` is set only when the run before was successful,
+  that is when clean restarts hit the limit. This is why the guard decides
+  on the failed state and on the last exit, not on `Result`.
+- **systemd 254 and later.** Unless the unit sets `RestartMode=direct`,
+  `OnFailure=` also fires on every failed start while systemd still
+  intends to restart the unit. At that moment the unit is in a transient
+  failed state (`SubState=failed-before-auto-restart`), and then
+  `activating`/`auto-restart`. The guard requires `SubState=failed` in all
+  three of its reads, so those runs do nothing; only the final failure
+  after the start limit is acted on.
+
+`StartLimitIntervalSec=` and `StartLimitBurst=` belong in `[Unit]` from
+systemd 230 on.
 
 **The rollback marker.** `/opt/scion/rollback.marker` is one line of JSON:
 

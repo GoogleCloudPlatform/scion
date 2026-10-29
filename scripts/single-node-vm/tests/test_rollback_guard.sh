@@ -1,7 +1,8 @@
 # scripts/single-node-vm/tests/test_rollback_guard.sh -- covers the
 # boot-failure guard (design D1, Phase 3, ptone/scion#6009):
 #   - scion-hub-rollback.sh run against a temporary install root with a
-#     stubbed systemctl: the start-limit-hit gate, the inside-releases/
+#     stubbed systemctl that replays real unit states (systemd 249 and
+#     255 semantics): the failed-for-good gate, the inside-releases/
 #     check on `previous` (relative "..", absolute and chained symlinks),
 #     the current<->previous swap, the rollback.marker contents, a second
 #     run, and that a rollback is never swapped back;
@@ -23,8 +24,10 @@ RB_LAYOUT_SH="${TIER_DIR}/scion-layout.sh"
 # _rb_new_host -- a fake host: RB_ROOT with releases/nightly-20261020 and
 # releases/nightly-20261023 (each with a scion binary), current -> the
 # newer one, previous -> the older one; RB_SHIM, a PATH dir with a
-# systemctl stub (see _rb_systemctl); RB_CALLS, the stubs' call log.
-# Defaults: Result=start-limit-hit after a crash (exit status 1).
+# systemctl stub that replays the unit states set by _rb_scenario (one
+# state per `systemctl show`); RB_CALLS, the stubs' call log. The
+# scenario is RB_SCENARIO (default v249-crash: a crash loop stopped by the
+# start limit on systemd 249).
 _rb_new_host() {
   RB_DIR="$(mktemp -d)"
   RB_ROOT="${RB_DIR}/opt/scion"
@@ -37,29 +40,87 @@ _rb_new_host() {
   ln -s releases/nightly-20261023 "${RB_ROOT}/current"
   ln -s releases/nightly-20261020 "${RB_ROOT}/previous"
   : > "$RB_CALLS"
-  _rb_props start-limit-hit 1 1
+  # shellcheck disable=SC2086 # scenario name plus optional exit code/status
+  _rb_scenario ${RB_SCENARIO:-v249-crash}
   cat > "${RB_SHIM}/systemctl" <<EOF
 #!/usr/bin/env bash
 echo "systemctl \$*" >> "${RB_CALLS}"
 if [[ "\$1" == show ]]; then
-  # systemctl show -p PROP --value UNIT
-  grep "^\$3=" "${RB_DIR}/props" | head -1 | cut -d= -f2-
+  # systemctl show -p ActiveState,SubState,Result,ExecMainCode,ExecMainStatus UNIT:
+  # the next state line (the last one repeats), as KEY=VALUE lines.
+  n=\$(cat "${RB_DIR}/reads" 2>/dev/null || echo 0)
+  n=\$((n + 1))
+  echo "\$n" > "${RB_DIR}/reads"
+  line=\$(sed -n "\${n}p" "${RB_DIR}/states")
+  [[ -n "\$line" ]] || line=\$(tail -n 1 "${RB_DIR}/states")
+  read -r active sub result code status <<< "\$line"
+  printf 'ActiveState=%s\nSubState=%s\nResult=%s\nExecMainCode=%s\nExecMainStatus=%s\n' "\$active" "\$sub" "\$result" "\$code" "\$status"
 fi
 exit 0
 EOF
   chmod 0755 "${RB_SHIM}/systemctl"
 }
 
-# _rb_props RESULT EXEC_MAIN_CODE EXEC_MAIN_STATUS -- what the systemctl
-# stub reports for scion-hub.service.
-_rb_props() {
-  printf 'Result=%s\nExecMainCode=%s\nExecMainStatus=%s\n' "$1" "$2" "$3" > "${RB_DIR}/props"
+# _rb_states LINE... -- the unit states the stub replays, one per
+# `systemctl show` ("ACTIVE SUB RESULT EXEC_CODE EXEC_STATUS"); the last
+# repeats. Resets the read counter.
+_rb_states() {
+  printf '%s\n' "$@" > "${RB_DIR}/states"
+  rm -f "${RB_DIR}/reads"
 }
+
+# _rb_crash_result CODE -- the Result systemd records for a main process
+# that ended with ExecMainCode CODE (1 exited, 2 killed, 3 dumped).
+_rb_crash_result() {
+  case "$1" in 1) echo exit-code ;; 2) echo signal ;; 3) echo core-dump ;; *) echo exit-code ;; esac
+}
+
+# _rb_scenario NAME [CODE STATUS] -- real systemd behaviour of
+# scion-hub.service (Restart=always, StartLimitBurst=5) as the guard sees
+# it when OnFailure= starts it:
+#   v249-crash        systemd 249 (22.04): a crash loop stopped by the start
+#                     limit: failed/failed with the crash's own Result
+#                     (exit-code, signal, core-dump), NOT start-limit-hit;
+#   v249-clean        systemd 249: the limit hit by clean restarts:
+#                     failed/failed, Result=start-limit-hit, clean exit;
+#   v255-final        systemd 255 (24.04): the final failure after the start
+#                     limit: failed/failed with the crash's Result;
+#   v255-final-slh    the same, reported as Result=start-limit-hit;
+#   v255-transient    systemd 255: OnFailure= between automatic restarts:
+#                     failed/failed-before-auto-restart, then
+#                     activating/auto-restart;
+#   v255-autorestart  systemd 255: already activating/auto-restart;
+#   flip-second       failed/failed once, then auto-restart (not settled);
+#   flip-third        failed/failed twice, then auto-restart;
+#   recovered         the hub is running again (active/running).
+# CODE STATUS default to 1 1 (exit status 1), or 1 0 for v249-clean.
+_rb_scenario() {
+  local name="$1" code="${2:-1}" status="${3:-}" result
+  if [[ -z "$status" ]]; then
+    if [[ "$name" == v249-clean ]]; then status=0; else status=1; fi
+  fi
+  result="$(_rb_crash_result "$code")"
+  case "$name" in
+    v249-crash|v255-final) _rb_states "failed failed $result $code $status" ;;
+    v249-clean|v255-final-slh) _rb_states "failed failed start-limit-hit $code $status" ;;
+    v255-transient) _rb_states "failed failed-before-auto-restart $result $code $status" "activating auto-restart $result $code $status" ;;
+    v255-autorestart) _rb_states "activating auto-restart $result $code $status" ;;
+    flip-second) _rb_states "failed failed $result $code $status" "activating auto-restart $result $code $status" ;;
+    flip-third) _rb_states "failed failed $result $code $status" "failed failed $result $code $status" "activating auto-restart $result $code $status" ;;
+    recovered) _rb_states "active running success 1 0" ;;
+    *) echo "unknown scenario $name" >&2; return 1 ;;
+  esac
+}
+
+# RB_SHOW / RB_SHOW3 -- the one systemctl call the guard reads the unit
+# with, and the three settle reads it makes before acting.
+RB_SHOW="systemctl show -p ActiveState,SubState,Result,ExecMainCode,ExecMainStatus scion-hub.service"
+RB_SHOW3="${RB_SHOW}"$'\n'"${RB_SHOW}"$'\n'"${RB_SHOW}"
 
 # _rb_run -- runs scion-hub-rollback.sh unprivileged against the fake host
 # (no owner: the owner step runs in-process). Sets RB_RC and RB_OUT.
 _rb_run() {
-  RB_OUT="$(PATH="${RB_SHIM}:${PATH}" SCION_INSTALL_ROOT="$RB_ROOT" SCION_INSTALL_OWNER="" bash "$ROLLBACK_SH" 2>&1)"
+  RB_OUT="$(PATH="${RB_SHIM}:${PATH}" SCION_INSTALL_ROOT="$RB_ROOT" SCION_INSTALL_OWNER="" SCION_ROLLBACK_SETTLE_SEC=0 bash "$ROLLBACK_SH" 2>&1)"
   RB_RC=$?
 }
 
@@ -92,40 +153,78 @@ _rb_assert_refused() {
 }
 
 # =====================================================================
-# The start-limit-hit gate
+# The gate: failed for good (real systemd 249 and 255 semantics)
 # =====================================================================
 
-test_rollback_noop_unless_start_limit_hit() {
-  local result
-  for result in exit-code success signal core-dump timeout ""; do
+# Not failed for good: a successful no-op that reads the unit and nothing
+# else (no runuser, no reset-failed, no start).
+test_rollback_noop_unless_failed_for_good() {
+  local sc
+  for sc in v255-transient v255-autorestart flip-second flip-third recovered; do
     _rb_new_host
-    _rb_props "$result" 1 1
+    _rb_scenario "$sc"
     RB_BEFORE="$(_rb_state)"
     _rb_run
-    assert_eq "0" "$RB_RC" "Result='${result}': not a start-limit failure is a successful no-op (output: ${RB_OUT})"
-    assert_contains "$RB_OUT" "not start-limit-hit; nothing to do" "Result='${result}': the no-op must say why"
-    assert_eq "$RB_BEFORE" "$(_rb_state)" "Result='${result}': nothing may change"
-    assert_eq "systemctl show -p Result --value scion-hub.service" "$(cat "$RB_CALLS")" \
-      "Result='${result}': only the Result may be read; no reset-failed, no start"
+    assert_eq "0" "$RB_RC" "${sc}: not failed for good is a successful no-op (output: ${RB_OUT})"
+    assert_contains "$RB_OUT" "not failed for good; nothing to do" "${sc}: the no-op must say why"
+    assert_eq "$RB_BEFORE" "$(_rb_state)" "${sc}: nothing may change"
+    assert_not_contains "$(cat "$RB_CALLS")" "reset-failed" "${sc}: no reset-failed"
+    assert_not_contains "$(cat "$RB_CALLS")" "systemctl start" "${sc}: no start"
+    assert_eq "" "$(grep -vxF "${RB_SHOW}" "$RB_CALLS")" "${sc}: only the unit state may be read"
+    rm -rf "$RB_DIR"
+  done
+}
+
+# The settle: a settled failed state is read exactly three times before
+# acting; a state that changes at the third read is not acted on.
+test_rollback_settle_reads_three_times() {
+  _rb_new_host
+  _rb_scenario v249-crash
+  _rb_run
+  assert_eq "3" "$(grep -cxF "${RB_SHOW}" "$RB_CALLS")" "a settled failed state must be read exactly three times before acting"
+  rm -rf "$RB_DIR"
+  _rb_new_host
+  _rb_scenario flip-third
+  _rb_run
+  assert_eq "3" "$(grep -cxF "${RB_SHOW}" "$RB_CALLS")" "a state that changes at the third read must still be read three times"
+  assert_contains "$RB_OUT" "at read 3 of 3" "the log must name the read that disagreed"
+  assert_eq "releases/nightly-20261023" "$(readlink "${RB_ROOT}/current")" "a state that changes at the third read must not be rolled back"
+  rm -rf "$RB_DIR"
+}
+
+# The regression the real-systemd VM test found: on systemd 249 a crash
+# loop stopped by the start limit keeps Result=exit-code (or signal,
+# core-dump), not start-limit-hit. It must be rolled back.
+test_rollback_v249_crash_loop_with_crash_result_rolls_back() {
+  local spec
+  for spec in "1 1" "2 11" "3 6"; do
+    _rb_new_host
+    # shellcheck disable=SC2086 # two words: code and status
+    _rb_scenario v249-crash $spec
+    _rb_run
+    assert_eq "0" "$RB_RC" "v249 crash (${spec}): must roll back (output: ${RB_OUT})"
+    assert_eq "releases/nightly-20261020" "$(readlink "${RB_ROOT}/current")" "v249 crash (${spec}): current must be the restored release"
+    assert_contains "$RB_OUT" "result $(_rb_crash_result "${spec%% *}")" "v249 crash (${spec}): the log must show the real Result"
     rm -rf "$RB_DIR"
   done
 }
 
 # The start limit also counts clean restarts (self-SIGTERM on update or
 # Restart Hub): five intentional restarts within 300 s hit it with a clean
-# last exit, and the hub is restarted, not rolled back.
+# last exit (Result=start-limit-hit), and the hub is restarted, not rolled
+# back.
 test_rollback_clean_exits_restart_without_swap() {
   local exit_spec
   for exit_spec in "1 0" "2 15" "2 2" "2 1" "2 13"; do
     _rb_new_host
     # shellcheck disable=SC2086 # two words: code and status
-    _rb_props start-limit-hit $exit_spec
+    _rb_scenario v249-clean $exit_spec
     RB_BEFORE="$(_rb_state)"
     _rb_run
     assert_eq "0" "$RB_RC" "clean exit (${exit_spec}): must succeed (output: ${RB_OUT})"
     assert_eq "$RB_BEFORE" "$(_rb_state)" "clean exit (${exit_spec}): no swap and no marker"
     assert_contains "$RB_OUT" "not a crash loop" "clean exit (${exit_spec}): must say why it does not roll back"
-    assert_contains "$(cat "$RB_CALLS")" $'systemctl reset-failed scion-hub.service\nsystemctl start scion-hub.service' \
+    assert_eq "${RB_SHOW3}"$'\nsystemctl reset-failed scion-hub.service\nsystemctl start scion-hub.service' "$(cat "$RB_CALLS")" \
       "clean exit (${exit_spec}): the hub stopped by the start limit must be started again"
     rm -rf "$RB_DIR"
   done
@@ -138,19 +237,22 @@ test_rollback_clean_exits_restart_without_swap() {
 test_rollback_swaps_current_and_previous() {
   local exit_spec
   # exit 1, exec failure (203), killed by KILL/SEGV/ABRT, ABRT with core.
+  local sc
+  for sc in v249-crash v255-final v255-final-slh; do
   for exit_spec in "1 1" "1 203" "2 9" "2 11" "2 6" "3 6"; do
     _rb_new_host
     # shellcheck disable=SC2086 # two words: code and status
-    _rb_props start-limit-hit $exit_spec
+    _rb_scenario "$sc" $exit_spec
     _rb_run
     assert_eq "0" "$RB_RC" "crash (${exit_spec}): the rollback must succeed (output: ${RB_OUT})"
     assert_eq "releases/nightly-20261020" "$(readlink "${RB_ROOT}/current")" "crash (${exit_spec}): current must point at the old previous"
     assert_eq "releases/nightly-20261023" "$(readlink "${RB_ROOT}/previous")" "crash (${exit_spec}): previous must point at the failed release"
     assert_false "$([[ -e "${RB_ROOT}/current.new" || -e "${RB_ROOT}/previous.new" || -L "${RB_ROOT}/current.new" ]] && echo true)" \
       "crash (${exit_spec}): no temporary links may be left"
-    assert_eq $'systemctl show -p Result --value scion-hub.service\nsystemctl show -p ExecMainCode --value scion-hub.service\nsystemctl show -p ExecMainStatus --value scion-hub.service\nsystemctl reset-failed scion-hub.service\nsystemctl start scion-hub.service' \
-      "$(cat "$RB_CALLS")" "crash (${exit_spec}): reset-failed then start, after the swap"
+    assert_eq "${RB_SHOW3}"$'\nsystemctl reset-failed scion-hub.service\nsystemctl start scion-hub.service' \
+      "$(cat "$RB_CALLS")" "${sc} crash (${exit_spec}): three settle reads, then reset-failed and start, after the swap"
     rm -rf "$RB_DIR"
+  done
   done
 }
 
@@ -242,15 +344,15 @@ test_rollback_refuses_unsafe_install_root() {
 # Second runs: idempotent, never swaps back
 # =====================================================================
 
-# A second run with the hub healthy again (Result no longer
-# start-limit-hit, as after reset-failed + start): a no-op.
+# A second run with the hub healthy again (running, as after
+# reset-failed + start): a no-op.
 test_rollback_second_run_after_recovery_is_noop() {
   _rb_new_host
   _rb_run
   assert_eq "0" "$RB_RC" "the first run must succeed (output: ${RB_OUT})"
   local after_first
   after_first="$(_rb_state)"
-  _rb_props success 1 0
+  _rb_scenario recovered
   : > "$RB_CALLS"
   _rb_run
   assert_eq "0" "$RB_RC" "the second run must succeed (output: ${RB_OUT})"
@@ -353,7 +455,7 @@ EOF
 # owner (scion:scion). Sets RB_RC and RB_OUT.
 _rb_run_as_root() {
   chmod 000 "$RB_ROOT"
-  RB_OUT="$(PATH="${RB_SHIM}:${PATH}" SCION_INSTALL_ROOT="$RB_ROOT" bash "$ROLLBACK_SH" 2>&1)"
+  RB_OUT="$(PATH="${RB_SHIM}:${PATH}" SCION_INSTALL_ROOT="$RB_ROOT" SCION_ROLLBACK_SETTLE_SEC=0 bash "$ROLLBACK_SH" 2>&1)"
   RB_RC=$?
   chmod 0755 "$RB_ROOT"
 }
@@ -363,7 +465,7 @@ test_rollback_root_path_hands_install_root_to_owner() {
   _rb_root_shims
   _rb_run_as_root
   assert_eq "0" "$RB_RC" "the root path must succeed (output: ${RB_OUT})"
-  assert_eq $'systemctl show -p Result --value scion-hub.service\nsystemctl show -p ExecMainCode --value scion-hub.service\nsystemctl show -p ExecMainStatus --value scion-hub.service\nrunuser -u scion -- env SCION_INSTALL_ROOT='"${RB_ROOT}"$' SCION_INSTALL_OWNER= bash -s -- __swap\nsystemctl reset-failed scion-hub.service\nsystemctl start scion-hub.service' \
+  assert_eq "${RB_SHOW3}"$'\nrunuser -u scion -- env SCION_INSTALL_ROOT='"${RB_ROOT}"$' SCION_INSTALL_OWNER= bash -s -- __swap\nsystemctl reset-failed scion-hub.service\nsystemctl start scion-hub.service' \
     "$(cat "$RB_CALLS")" \
     "root must only query systemctl, hand the checks, swap and marker to the owner via runuser, then reset-failed and start"
   assert_eq "releases/nightly-20261020" "$(readlink "${RB_ROOT}/current")" "the owner step must have swapped current"
@@ -404,7 +506,7 @@ test_rollback_root_path_refusal_does_not_start() {
 test_rollback_root_path_noop_never_calls_runuser() {
   _rb_new_host
   _rb_root_shims
-  _rb_props exit-code 1 1
+  _rb_scenario v255-transient
   _rb_run_as_root
   assert_eq "0" "$RB_RC" "the no-op must succeed (output: ${RB_OUT})"
   assert_not_contains "$(cat "$RB_CALLS")" "runuser" "a no-op must not run the owner step"
@@ -609,12 +711,23 @@ _rb_case() {
   [[ "$stale" == stale ]] && _rb_stale
   RB_BEFORE="$(_rb_state)"
   _rb_run
-  _rb_expect "$outcome" "$what" "$snippet"
+  _rb_expect "$outcome" "${RB_SCENARIO:-v249-crash}: $what" "$snippet"
   rm -rf "$RB_DIR"
 }
 
+# The decision table runs under both real systemd semantics: a crash loop
+# stopped by the start limit on 249 (Result=exit-code) and the final
+# failure on 255.
+test_rollback_update_state_decision_table_v249() {
+  RB_SCENARIO=v249-crash _rb_decision_table
+}
+
+test_rollback_update_state_decision_table_v255() {
+  RB_SCENARIO=v255-final _rb_decision_table
+}
+
 # shellcheck disable=SC2016 # SETUP snippets are evaluated by _rb_case
-test_rollback_update_state_decision_table() {
+_rb_decision_table() {
   # Readable and matching: the booleans decide, whatever the switch time.
   _rb_case swap "happy path (fresh)" fresh "safe to undo" '_rb_update_state "$(_rb_happy_state)"'
   # Valid, matching and unverified also needs a recent switch (a release
