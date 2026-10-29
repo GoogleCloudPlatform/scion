@@ -26,9 +26,13 @@ the external root, so the run was not recorded.
   context in `Start`, `Provision` and `Reprovision`; a caller that records
   none counts as another runtime), because only Kubernetes creates that
   directory (the NFS leaf helpers and the workspace init container). Every
-  other runtime keeps the broker-local `<agentDir>/workspace` it had before;
-  placing it on the share there (a provision-side create with the share's
-  ownership) is a follow-up. It only applies to a
+  other runtime keeps the broker-local `<agentDir>/workspace` it had before.
+  For clone-per-agent that workspace is outside the project's root on the
+  share, so the workspace source guard refuses the start (fail closed, the
+  same as before this change); empty-per-agent is admitted, because its own
+  workspace is its guard root. Supporting clone-per-agent there (a
+  provision-side create on the share with the share's ownership) is a
+  follow-up. It only applies to a
   shared project configuration whose project storage Layout
   (`config.ResolveProjectStorage` + `config.ProjectStorageLayout`) is shared,
   and never to an agent whose state is its legacy in-project dir
@@ -105,10 +109,10 @@ the external root, so the run was not recorded.
   absent, Start succeeds and the leaf helper creates it.
 - `TestSharedLayoutAgentWorkspace`: Docker, Podman and no recorded runtime
   keep `<agentDir>/workspace`.
-- `TestStart_SharedLayoutDockerClonePerAgentKeepsBrokerLocalWorkspace`: a
-  Docker start on a shared nfs Layout keeps the broker-local workspace,
-  proceeds, and records the run in the agent's state dir, read back as delete
-  reads it.
+- `TestStart_SharedLayoutDockerClonePerAgentRefusedAsBefore`: a Docker clone-per-agent
+  start on a shared nfs Layout keeps the broker-local workspace, places
+  nothing on the share, and is refused by the workspace source guard ("is
+  outside the permitted workspace root"), as before this change.
 - `TestCheckStartWorkspaceExists`: a missing workspace is still refused off
   nfs and on non-Kubernetes runtimes on nfs, and skipped for Kubernetes on
   nfs.
@@ -130,3 +134,7 @@ the external root, so the run was not recorded.
   moving `Start`'s settings load ahead of `GetAgent`. That is left as a
   follow-up. Until then, a settings file changed between the two loads makes
   `Start`'s empty-per-agent workspace check refuse the start (fail closed).
+- Docker (or any non-Kubernetes runtime) with a shared nfs Layout and the
+  clone-per-agent mode is unsupported and fails closed, as before (the
+  workspace source guard refuses the broker-local workspace); empty-per-agent
+  is admitted. Support for clone-per-agent there is a follow-up.

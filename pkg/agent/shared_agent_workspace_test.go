@@ -460,22 +460,22 @@ func TestCheckStartWorkspaceExists(t *testing.T) {
 
 // A Docker broker on a shared nfs Layout keeps the pre-existing placement for
 // a clone-per-agent agent: its workspace is the broker-local
-// <agentDir>/workspace, which provisioning creates, nothing is placed in the
-// agent's directory on the share, and the start proceeds. The run is recorded
-// in the agent's state dir (the same dir as its workspace) and read back as
-// delete and launch recovery read it.
-func TestStart_SharedLayoutDockerClonePerAgentKeepsBrokerLocalWorkspace(t *testing.T) {
-	cfg, root, ext, opts, err := sharedLayoutStart(t, "docker", func(o *api.StartOptions) {
+// <agentDir>/workspace (which provisioning creates) and nothing is placed in
+// the agent's directory on the share. The workspace source guard refuses
+// that workspace, because it is outside the project's root on the share, so
+// the start fails closed, as it did before agent-scoped workspaces moved to
+// the share on Kubernetes. Running such agents on other runtimes is a
+// follow-up.
+func TestStart_SharedLayoutDockerClonePerAgentRefusedAsBefore(t *testing.T) {
+	cfg, root, ext, _, err := sharedLayoutStart(t, "docker", func(o *api.StartOptions) {
 		o.GitClone = &api.GitCloneConfig{URL: "https://example.com/repo.git"}
 		o.Env["SCION_WORKSPACE_MODE"] = "clone-per-agent"
 	})
-	require.NoError(t, err, "the start proceeds with the broker-local workspace")
-	assert.DirExists(t, filepath.Join(ext, "workspace"), "provisioning creates the broker-local workspace")
+	require.Error(t, err, "a Docker clone-per-agent start on a shared Layout is refused")
+	assert.Contains(t, err.Error(), "is outside the permitted workspace root", "the workspace source guard refuses the broker-local workspace")
+	assert.DirExists(t, filepath.Join(ext, "workspace"), "the workspace stays below the broker-local agent state dir")
+	assert.FileExists(t, filepath.Join(ext, "scion-agent.json"), "agent state stays in the broker-local external root")
 	assert.NoDirExists(t, filepath.Join(root, "agents", "test-agent"), "nothing is placed in the agent's directory on the share")
-	assert.Empty(t, cfg.NFSAgentDirName, "a Docker start gets no agent directory on the share")
-
-	assert.FileExists(t, filepath.Join(ext, HostStateFile), "the run is recorded in the agent's state dir")
-	got, err := RecordedRunOwner(RunOwnerTargetFor(opts))
-	require.NoError(t, err)
-	assert.Equal(t, "run-shared-1", got, "delete and launch recovery read the recorded run, not unknown")
+	assert.Empty(t, cfg.NFSAgentDirName, "the runtime is never reached")
+	assert.Empty(t, cfg.Name, "no run is started")
 }

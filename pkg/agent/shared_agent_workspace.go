@@ -107,7 +107,11 @@ func agentScopedWorkspace(ctx context.Context) bool {
 //     including a caller that recorded none. Only Kubernetes creates the
 //     agent's directory on the share (the NFS leaf helpers and the workspace
 //     init container), so every other runtime keeps the broker-local
-//     workspace it had before; placing it on the share there is a follow-up;
+//     workspace it had before. For clone-per-agent the workspace source
+//     guard refuses that workspace (it is outside the project's root on the
+//     share), so such a start fails closed, as before; empty-per-agent is
+//     admitted (its own workspace is its guard root). Placing it on the
+//     share for other runtimes is a follow-up;
 //   - projectDir is not a shared project configuration directory
 //     (config.IsSharedProjectConfigDir);
 //   - agentDir is the agent's legacy in-project directory
