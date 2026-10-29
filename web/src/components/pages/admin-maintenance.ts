@@ -194,7 +194,7 @@ interface TrackedUpdate {
    * picked the run up); undefined when not known. Recorded once, so a
    * status reload during the restart does not change it.
    */
-  fromVersion?: string;
+  fromVersion?: string | undefined;
 }
 
 /** Channel, pin and class of an update picked in the release picker. */
