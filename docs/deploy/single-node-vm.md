@@ -301,7 +301,7 @@ run as the `scion` user (through `runuser`):
    from swapping a Hub you stopped is `Result=timeout` being excluded, and
    the update state (step 5): a release that ran is verified as soon as its
    listener binds, and an unverified update is rolled back only within 30
-   minutes of the switch. Two residual cases are accepted:
+   minutes of the switch. Three residual cases are accepted:
 
    - If the previous release used four or more of the window's five starts
      (for example **Restart Hub** several times, then an update within five
@@ -312,6 +312,11 @@ run as the `scion` user (through `runuser`):
      verified. Within 30 minutes of switching to it, after two or more
      starts, a failed `systemctl stop` that exits non-zero is rolled back
      like a crash loop.
+   - On the switch-time fallback (`update-state.json` missing or
+     unreadable, including when `python3` is missing), `verified` is not
+     consulted. Within 30 minutes of a switch, after two or more starts, a
+     failed `systemctl stop` that exits non-zero can then roll back a
+     release that ran fine.
 4. It refuses unless `/opt/scion/current` and `/opt/scion/previous` each
    resolve to a release directory directly inside `/opt/scion/releases/`,
    and `previous` contains a `scion` binary. A link that leaves `releases/`

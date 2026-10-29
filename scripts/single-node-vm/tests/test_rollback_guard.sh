@@ -42,8 +42,8 @@ _rb_new_host() {
   chmod 0755 "${RB_ROOT}/releases/"*/scion
   ln -s releases/nightly-20261023 "${RB_ROOT}/current"
   ln -s releases/nightly-20261020 "${RB_ROOT}/previous"
-  # The crash loop's own start attempts: StartLimitBurst (5) starts of the
-  # current release since the switch.
+  # The crash loop's start attempts: 5 starts of the current release since
+  # the switch (the guard needs at least MIN_START_ATTEMPTS=2).
   _rb_attempts nightly-20261023 5
   : > "$RB_CALLS"
   # shellcheck disable=SC2086 # scenario name plus optional exit code/status

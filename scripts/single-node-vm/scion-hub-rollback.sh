@@ -122,12 +122,18 @@
 #     against swapping a hub the operator stopped is: Result=timeout is
 #     excluded, the update must be unverified (verified is set as soon as
 #     the hub's listener binds, so a release that ran is verified), and the
-#     switch must be recent (RECENT_SWITCH_WINDOW_SEC). Residuals, both fail
-#     closed or accepted: if the previous release used 4+ of the window's
-#     starts, a crash-looping new release can end at count 1 and the hub
-#     stays stopped (restore by hand); a release that predates the
-#     update-state contract never sets verified, so within the window, after
-#     2+ starts, a failed non-zero stop of it is rolled back.
+#     switch must be recent (RECENT_SWITCH_WINDOW_SEC). Residuals, each
+#     fail closed or accepted:
+#     (a) if the previous release used 4+ of the window's starts, a
+#         crash-looping new release can end at count 1 and the hub stays
+#         stopped (restore by hand);
+#     (b) a release that predates the update-state contract never sets
+#         verified, so within the window, after 2+ starts, a failed
+#         non-zero stop of it is rolled back;
+#     (c) on the switch-time fallback (update-state.json missing or
+#         unreadable, including no python3) verified is not consulted, so
+#         within the window, after 2+ starts, a failed non-zero stop of a
+#         release that ran fine is rolled back too.
 #   - Result=timeout (a stop that timed out) is never acted on.
 #   - A clean last exit (an update or Restart Hub exits on SIGTERM and
 #     systemd starts it again; or manual restarts) only restarts the hub,
