@@ -30,11 +30,13 @@ import (
 // plus protocol.http.allow=never over the fetch's network allow-list, and
 // GIT_ALLOW_PROTOCOL). The project's token is offered only when cloneURL
 // resolves to the project's recorded git remote over https
-// (provision.CloneTokenBound); it is not even resolved otherwise. For any
-// other URL git runs without the token, with the hub host user's credential
-// helpers and extra HTTP headers reset and askpass disabled
-// (util.HostGitHardening.NoCredentialHelpers; see util.NoCredentialHelperEnv
-// for what it does not cover).
+// (provision.CloneTokenBound); it is not even resolved otherwise. The
+// creator's personal token is used only for a remote on the GitHub host
+// (resolveCloneToken). For any other URL, and for a remote off the GitHub
+// host with no project credential, git runs without the token, with the hub
+// host user's credential helpers and extra HTTP headers reset and askpass
+// disabled (util.HostGitHardening.NoCredentialHelpers; see
+// util.NoCredentialHelperEnv for what it does not cover).
 func (s *Server) hostGitAccess(ctx context.Context, project *store.Project, cloneURL string) (string, util.HostGitHardening) {
 	h := util.HostGitHardening{
 		Config: append(provision.HostCloneGitConfig(), "protocol.http.allow=never"),
@@ -44,5 +46,12 @@ func (s *Server) hostGitAccess(ctx context.Context, project *store.Project, clon
 		h.NoCredentialHelpers = true
 		return "", h
 	}
-	return s.resolveCloneToken(ctx, project), h
+	token := s.resolveCloneToken(ctx, project)
+	if token == "" && !personalTokenHostAllowed(project.GitRemote, s.personalTokenGitHubHost()) {
+		// No project credential for a remote off the GitHub host: the
+		// creator's personal token was withheld (resolveCloneToken), and
+		// the hub host user's own helpers are not offered either.
+		h.NoCredentialHelpers = true
+	}
+	return token, h
 }

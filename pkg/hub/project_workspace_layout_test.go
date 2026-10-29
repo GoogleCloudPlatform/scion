@@ -926,8 +926,9 @@ func (b *userTokenSecretBackend) Get(_ context.Context, name, scope, _ string) (
 // TestCreateSharedWorkspaceProject_SharedBackend_TokenBoundToRecordedRemote:
 // the hub binds the project's git token to the project's own recorded
 // remote (CloneTokenRemote from the project record, never the clone-url
-// label). A non-GitHub remote (here a GitHub Enterprise-style host) gets the
-// creator's token through the user GITHUB_TOKEN path.
+// label). The creator's token (the user GITHUB_TOKEN path) is personal, so
+// a GitHub Enterprise-style host gets it only when it is the configured
+// GitHub host.
 func TestCreateSharedWorkspaceProject_SharedBackend_TokenBoundToRecordedRemote(t *testing.T) {
 	f := newWorkspaceLayoutFixture(t)
 	f.useNFS()
@@ -946,8 +947,14 @@ func TestCreateSharedWorkspaceProject_SharedBackend_TokenBoundToRecordedRemote(t
 		return (*seen)[before]
 	}
 
-	in := create("Token Own Remote", "ghe.example.invalid/team/app", nil)
-	assert.Equal(t, token, in.CloneToken, "the creator's token is resolved for a non-GitHub remote")
+	in := create("Token Unconfigured Host", "ghe.example.invalid/team/other", nil)
+	assert.Empty(t, in.CloneToken, "the creator's personal token is not resolved for a host other than the GitHub host")
+
+	f.srv.mu.Lock()
+	f.srv.config.GitHubAppConfig.APIBaseURL = "https://ghe.example.invalid/api/v3"
+	f.srv.mu.Unlock()
+	in = create("Token Own Remote", "ghe.example.invalid/team/app", nil)
+	assert.Equal(t, token, in.CloneToken, "the creator's token is resolved for the configured GitHub host")
 	assert.Equal(t, "ghe.example.invalid/team/app", in.CloneTokenRemote, "bound to the recorded remote")
 	require.NotNil(t, in.GitClone)
 	assert.Equal(t, "https://ghe.example.invalid/team/app.git", in.GitClone.URL)

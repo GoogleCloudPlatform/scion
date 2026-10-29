@@ -1779,7 +1779,8 @@ func (s *Server) autoAssociateGitHubInstallation(ctx context.Context, project *s
 // It tries GitHub App installation tokens first, then project secrets, then the
 // creating user's profile-level GitHub token as a final fallback. This last
 // fallback solves the bootstrap problem where a new project linked to a private
-// repo has no project-level credentials yet.
+// repo has no project-level credentials yet; it applies only to a project
+// whose recorded remote is on the GitHub host (personalTokenHostAllowed).
 func (s *Server) resolveCloneToken(ctx context.Context, project *store.Project) string {
 	// Try GitHub App token first
 	if project.GitHubInstallationID != nil {
@@ -1800,8 +1801,12 @@ func (s *Server) resolveCloneToken(ctx context.Context, project *store.Project) 
 			return sv.Value
 		}
 
-		// Fall back to the creating user's profile-level GITHUB_TOKEN
-		if project.CreatedBy != "" {
+		// Fall back to the creating user's profile-level GITHUB_TOKEN. It
+		// is a personal token, so it is used only when the project's
+		// recorded remote is on the GitHub host: a project's remote is
+		// chosen by its creator and inherited by a project clone, so it
+		// cannot decide alone where a user's token goes.
+		if project.CreatedBy != "" && personalTokenHostAllowed(project.GitRemote, s.personalTokenGitHubHost()) {
 			sv, err = s.secretBackend.Get(ctx, "GITHUB_TOKEN", "user", project.CreatedBy)
 			if err == nil && sv != nil && sv.Value != "" {
 				s.projectsLogger().Info("using creator's GitHub token for project clone",

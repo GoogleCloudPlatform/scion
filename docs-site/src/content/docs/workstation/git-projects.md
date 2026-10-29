@@ -155,6 +155,10 @@ scion hub secret set GITHUB_TOKEN github_pat_xxxxxxxx
 
 User-scoped secrets take priority over project-scoped ones with the same name (see [Secret Management](/scion/hosted/user/secrets/) for the full resolution hierarchy).
 
+A personal token (a user-scoped `GITHUB_TOKEN`, a token from the agent's own environment, or one collected from your shell) is offered to git only when the project's git remote is on the GitHub host: `github.com`, or the host of `github_app.api_base_url` when it is set for GitHub Enterprise.
+
+For a private repository on any other host, set `GITHUB_TOKEN` as a project secret: the Hub then clones and fetches it with that secret, and without a project secret it clones unauthenticated.
+
 ### Web Dashboard Alternative
 
 You can also upload secrets through the Web Dashboard:
