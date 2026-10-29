@@ -176,12 +176,15 @@ On the VM itself:
 | `/opt/scion/current` | Symlink to the active release (`releases/<tag>`); the unit runs `/opt/scion/current/scion` |
 | `/opt/scion/previous` | Symlink to the release that was active before the last switch |
 | `/opt/scion/snapshots/` | Database snapshots taken by the Hub |
+| `/opt/scion/rollback.marker` | Written by the [boot-failure guard](#boot-failure-guard) when it restores the previous release |
 | `/usr/local/bin/scion` | Root-owned symlink to `/opt/scion/current/scion`, for running `scion` on the VM |
+| `/usr/local/libexec/scion/scion-hub-rollback.sh` | Root-owned boot-failure guard script |
 | `/home/scion/.scion/settings.yaml` | Hub configuration (auth mode, storage, etc.) |
 | `/home/scion/.scion/hub.env` | Environment variables (session secret, project ID) |
 | `/home/scion/.scion/workspace-storage/` | Local workspace storage directory |
 | `/home/scion/.scion/plugins/broker/` | Chat plugin binaries (if selected) |
 | `/etc/systemd/system/scion-hub.service` | systemd unit file |
+| `/etc/systemd/system/scion-hub-rollback.service` | Root oneshot unit that runs the boot-failure guard |
 
 The unit runs as `User=scion` with `WorkingDirectory=/home/scion`, matching
 the paths above — the Hub's daemon working directory is that user's home
@@ -217,6 +220,144 @@ a different release, re-run `deploy.sh --version <tag>`, or update from the
 Maintenance page. A re-run without `--version` keeps the release `current`
 points at (see [Re-running the deploy script](#re-running-the-deploy-script)).
 
+### Boot-failure guard
+
+A release that crashes on startup cannot roll itself back, so `deploy.sh`
+installs a guard that restores the previous release:
+
+- `scion-hub.service` sets `StartLimitIntervalSec=300`, `StartLimitBurst=5`
+  and `OnFailure=scion-hub-rollback.service` in its `[Unit]` section. With
+  `Restart=always` and `RestartSec=5`, a Hub that keeps failing is started
+  five times within five minutes. systemd then stops restarting it, marks
+  it failed with `Result=start-limit-hit`, and starts
+  `scion-hub-rollback.service`.
+- `scion-hub-rollback.service` is a root oneshot unit that runs
+  `/usr/local/libexec/scion/scion-hub-rollback.sh`. The script and its
+  directory are owned by root with mode 0755. They live outside
+  `/opt/scion` on purpose: the `scion` user owns `/opt/scion` and could
+  replace any file in it, including a root-owned one, and root runs this
+  script. (The design originally placed it at `/opt/scion/rollback.sh`.)
+
+The script runs as root but, as root, does nothing except query and
+restart the unit through `systemctl`. It never reads, follows or writes
+anything under `/opt/scion` as root. All checks, the swap and the marker
+run as the `scion` user (through `runuser`):
+
+1. It acts only when `systemctl show -p Result scion-hub` is
+   `start-limit-hit`. Otherwise it exits successfully without doing
+   anything.
+2. If the Hub's last exit was clean (exit status 0, or `SIGTERM`, `SIGINT`,
+   `SIGHUP` or `SIGPIPE`), the limit was reached by restarts, not by a crash
+   loop. Every update and **Restart Hub** exits cleanly and is restarted by
+   systemd, and those starts count towards the limit too. In that case the
+   script restarts the Hub without changing releases.
+3. It refuses unless `/opt/scion/previous` resolves to a release directory
+   directly inside `/opt/scion/releases/` that contains a `scion` binary. A
+   `previous` that leaves `releases/` (through `..`, an absolute target or a
+   chain of symlinks) is refused, and so is a `previous` equal to
+   `current`. After a refusal nothing changes and the Hub stays stopped.
+4. It swaps `current` and `previous`, each with an atomic symlink rename.
+5. It writes `/opt/scion/rollback.marker` (see below).
+6. It runs `systemctl reset-failed scion-hub` and `systemctl start scion-hub`.
+
+It never swaps back. If the restored release crash-loops too, the start
+limit stops the Hub again and the guard runs again. It then finds that the
+marker already records this exact rollback (`from` is the current
+`previous` and `to` is the current `current`), does nothing, and leaves
+the Hub stopped for you to fix (see
+[Restoring after a failed update](#restoring-after-a-failed-update)).
+Running the script twice is therefore safe.
+
+**systemd versions.** The VM image is Ubuntu 22.04 LTS, which ships systemd
+249. There, `OnFailure=` fires only when the unit finally fails, that is
+when the start limit is hit. From systemd 254 on (Ubuntu 24.04 LTS ships
+255), `OnFailure=` also fires on every single crash before the automatic
+restart, unless the unit sets `RestartMode=direct`. On such a system the
+guard is started after each crash, sees a `Result` other than
+`start-limit-hit` (for example `exit-code`), and does nothing until the
+limit is actually reached. `StartLimitIntervalSec=` and `StartLimitBurst=`
+belong in `[Unit]` from systemd 230 on.
+
+**The rollback marker.** `/opt/scion/rollback.marker` is one line of JSON:
+
+```json
+{"at":"2026-10-29T07:30:00Z","from":"nightly-20261023","to":"nightly-20261020"}
+```
+
+`at` is the time of the rollback (RFC 3339, UTC), `from` the release that
+failed and `to` the release that was restored, both as release directory
+names under `releases/`. The file is owned by `scion`, mode 0644, and
+replaced with an atomic rename on each rollback, so `at` changes each time.
+The Hub reads it when it starts and reports the update that failed as
+**rolled back** on the Maintenance page. The Hub never deletes the marker.
+
+To see what the guard did:
+
+```bash
+sudo journalctl -u scion-hub-rollback.service
+sudo journalctl -u scion-hub.service
+cat /opt/scion/rollback.marker
+```
+
+### Restoring after a failed update
+
+The Hub takes a database snapshot before every update: SQLite only, with
+`VACUUM INTO`, as
+`/opt/scion/snapshots/hub-<from-version>-<timestamp>.db`. It also copies
+`settings.yaml` to `/opt/scion/snapshots/settings-<timestamp>.yaml`.
+The snapshot path is shown in the update run's result. The Hub keeps the
+last five snapshots. Database migrations are never reversed, so going back
+to an older release with the newer database can lose data or break the
+Hub. To go back to the state before an update, restore the snapshot
+together with the release:
+
+1. Stop the Hub:
+
+   ```bash
+   sudo systemctl stop scion-hub
+   ```
+
+2. Keep the current database, then copy the snapshot over it. Remove the
+   SQLite `-wal` and `-shm` files: they belong to the newer database and
+   must not be applied to the snapshot.
+
+   ```bash
+   sudo -u scion cp -p /home/scion/.scion/hub.db /home/scion/.scion/hub.db.before-restore
+   sudo -u scion cp /opt/scion/snapshots/hub-<from-version>-<timestamp>.db /home/scion/.scion/hub.db
+   sudo -u scion rm -f /home/scion/.scion/hub.db-wal /home/scion/.scion/hub.db-shm
+   ```
+
+3. If needed, copy the settings back. An older release can drop settings
+   keys it does not know when it rewrites the file.
+
+   ```bash
+   sudo -u scion cp /opt/scion/snapshots/settings-<timestamp>.yaml /home/scion/.scion/settings.yaml
+   ```
+
+4. Point `current` at the release the snapshot was taken from, and
+   `previous` at the release you are leaving. Each `ln`/`mv` pair is an
+   atomic rename:
+
+   ```bash
+   cd /opt/scion
+   sudo -u scion ln -sfn releases/<from-version> current.new && sudo -u scion mv -T current.new current
+   sudo -u scion ln -sfn releases/<failed-version> previous.new && sudo -u scion mv -T previous.new previous
+   ```
+
+   If the boot-failure guard already restored the release, `current` points
+   at it already. Skip this step.
+
+5. Start the Hub and check it:
+
+   ```bash
+   sudo systemctl reset-failed scion-hub
+   sudo systemctl start scion-hub
+   curl -s http://localhost:8080/healthz
+   ```
+
+A release that is no longer in `releases/` (the Hub keeps the last five) can
+be installed again with `deploy.sh --version <tag>` before step 4.
+
 ### Converting an existing VM (`migrate-layout`)
 
 VMs deployed before this layout have a plain binary at `/usr/local/bin/scion`
@@ -243,14 +384,20 @@ command:
    policy rule below. Comments (including a trailing comment on the two
    edited lines) and all other keys are left as they are. The edited file is parsed (with the VM's PyYAML) and compared with the
    original before it replaces it;
-6. re-renders the systemd unit with
-   `ExecStart=/opt/scion/current/scion ...`;
-7. runs `systemctl daemon-reload`, restarts the Hub, and waits for
+6. installs the [boot-failure guard](#boot-failure-guard)
+   (`/usr/local/libexec/scion/scion-hub-rollback.sh` and
+   `scion-hub-rollback.service`), exactly as a fresh deploy does;
+7. re-renders the systemd unit with
+   `ExecStart=/opt/scion/current/scion ...` and the guard's start limit and
+   `OnFailure=`;
+8. runs `systemctl daemon-reload`, restarts the Hub, and waits for
    `/healthz`.
 
 It is safe to re-run. On a converted VM the layout step does nothing, the
-settings edit changes only what is out of date, and the unit is re-rendered
-and the Hub restarted.
+settings edit changes only what is out of date, the guard is installed
+only if it changed, and the unit is re-rendered and the Hub restarted.
+Re-run `migrate-layout` on a VM converted before the guard existed to add
+it.
 
 If something goes wrong, the command stops at that step:
 
@@ -273,6 +420,11 @@ If something goes wrong, the command stops at that step:
   `/opt/scion` is neither created nor resumed. The same rule applies to
   `/usr/local/bin` and every directory above it, because root writes the
   `scion` symlink there. The script refuses before changing anything.
+- **`/usr/local/libexec/scion` (or a directory above it) is a symlink,
+  is not owned by root, or is writable by group or others.** Root installs
+  the guard script there, so the script refuses before writing it, and the
+  unit change and restart are skipped. Fix the directory
+  (`sudo chown root:root …`, `sudo chmod 0755 …`) and re-run.
 - **`/usr/local/bin/scion` is a symlink to a binary only root can read**
   (for example a hand-made `/usr/local/bin/scion -> /usr/local/lib/scion`
   at mode 0700). A binary reached through a symlink is copied by the
@@ -284,8 +436,8 @@ If something goes wrong, the command stops at that step:
   script cannot edit safely (for example a flow-style `maintenance: {...}`),
   or if PyYAML is missing (`sudo apt-get install python3-yaml`). By this
   point steps 1-4 are done: `/opt/scion` exists and `/usr/local/bin/scion`
-  is already the symlink. `settings.yaml` is unchanged, and the unit change
-  and restart (steps 6-7) are skipped. The Hub keeps running the same
+  is already the symlink. `settings.yaml` is unchanged, and the guard, the
+  unit change and the restart (steps 6-8) are skipped. The Hub keeps running the same
   binary through the symlink. To finish, set
   `install_root: "/opt/scion"` and `update_policy` by hand as block-style
   keys under `server:` → `maintenance:` in `settings.yaml`, then re-run
@@ -787,4 +939,6 @@ The script is idempotent. Re-running it will:
   warning and proceed, because the version was chosen explicitly. A
   downgrade can fail to start if the newer release already migrated the Hub
   database. The newer release stays installed as `/opt/scion/previous`.
+- Install or refresh the [boot-failure guard](#boot-failure-guard) and
+  re-render `scion-hub.service`
 - Re-deploy the Cloud Run proxy (converges to the same state)
