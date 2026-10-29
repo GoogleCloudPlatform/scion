@@ -459,8 +459,9 @@ func localContainerRuntime(runtimeName string) bool {
 // clone URL names the project's recorded remote (gc.TokenRemote, which the
 // hub sets from the project record): https, the same host and owner/repo
 // (provision.CloneTokenAllowed). A clone URL naming any other host or
-// repository, or no recorded remote, gets no token, and a private
-// repository then fails with the provisioner's "needs credentials" error. It reports whether it
+// repository, no recorded remote, or no agent token, gets no token and no
+// host git credential, and a private repository then fails with the
+// provisioner's "needs credentials" error. It reports whether it
 // provisioned (the caller then suppresses the in-container clone); false
 // with no error when the request is not such a dispatch.
 func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startContextInputs, env map[string]string) (bool, error) {
@@ -492,11 +493,15 @@ func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startCont
 		return false, err
 	}
 	// The token is bound to the recorded remote, never to the clone URL:
-	// runGitClone treats an empty CloneTokenRemote as unbound, so without a
-	// match the token itself is withheld.
-	var cloneToken string
-	if provision.CloneTokenAllowed(gc.TokenRemote, gc.URL) {
-		cloneToken = env[provision.GitTokenEnv]
+	// without a match the token itself is withheld. The recorded remote is
+	// passed on only together with an offered token: runGitClone keeps the
+	// host's own git authentication for a clone of its CloneTokenRemote, so
+	// a clone with no token offered (no match, or no agent token) gets no
+	// CloneTokenRemote and runs with no host credential of any form
+	// (util.NoCredentialHelperEnv).
+	var cloneToken, cloneTokenRemote string
+	if provision.CloneTokenAllowed(gc.TokenRemote, gc.URL) && env[provision.GitTokenEnv] != "" {
+		cloneToken, cloneTokenRemote = env[provision.GitTokenEnv], gc.TokenRemote
 	}
 	err = provisionSharedFn(provision.ProvisionInput{
 		Ctx:                 ctx,
@@ -506,7 +511,7 @@ func (s *Server) provisionSharedPlainWorkspace(ctx context.Context, in startCont
 		Mode:                store.SharingModeSharedPlain,
 		GitClone:            &gc,
 		CloneToken:          cloneToken,
-		CloneTokenRemote:    gc.TokenRemote,
+		CloneTokenRemote:    cloneTokenRemote,
 		HostGitHardened:     true,
 		NFSUID:              uid,
 		NFSGID:              gid,
