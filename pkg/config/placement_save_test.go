@@ -130,6 +130,31 @@ func TestRuntimeSaveChecks_Siblings(t *testing.T) {
 			t.Fatalf("errs %v warns %v", errs, warns)
 		}
 	})
+	// A stored entry whose empty placement field comes back nil (or the
+	// reverse) is unchanged: the untouched stored disagreement stays a
+	// warning, never a refusal.
+	for _, tc := range []struct {
+		name          string
+		before, after V1RuntimeConfig
+	}{
+		{"empty node selector comes back nil", k8sEntry("agents", map[string]string{}), k8sEntry("agents", nil)},
+		{"nil node selector comes back empty", k8sEntry("agents", nil), k8sEntry("agents", map[string]string{})},
+		{"empty tolerations come back nil",
+			V1RuntimeConfig{Type: "kubernetes", Context: "ctx", Namespace: "agents", NodeSelector: map[string]string{"pool": "b"}, Tolerations: []api.K8sToleration{}},
+			V1RuntimeConfig{Type: "kubernetes", Context: "ctx", Namespace: "agents", NodeSelector: map[string]string{"pool": "b"}}},
+		{"nil tolerations come back empty",
+			V1RuntimeConfig{Type: "kubernetes", Context: "ctx", Namespace: "agents", NodeSelector: map[string]string{"pool": "b"}},
+			V1RuntimeConfig{Type: "kubernetes", Context: "ctx", Namespace: "agents", NodeSelector: map[string]string{"pool": "b"}, Tolerations: []api.K8sToleration{}}},
+	} {
+		t.Run("an untouched stored disagreement stays a warning: "+tc.name, func(t *testing.T) {
+			errs, warns := RuntimeSaveChecks(
+				map[string]V1RuntimeConfig{"a": a, "e": tc.before},
+				map[string]V1RuntimeConfig{"a": a, "e": tc.after}, nil, nil)
+			if len(errs) != 0 || vePaths(warns) != "runtimes.a" {
+				t.Fatalf("errs %v warns %v", errs, warns)
+			}
+		})
+	}
 	t.Run("fixing a stored disagreement in the same save is accepted", func(t *testing.T) {
 		errs, warns := RuntimeSaveChecks(map[string]V1RuntimeConfig{"a": a, "b": bDiff}, map[string]V1RuntimeConfig{"a": a, "b": b}, nil, nil)
 		if len(errs)+len(warns) != 0 {

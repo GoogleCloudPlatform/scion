@@ -101,9 +101,13 @@ func RuntimeSaveChecks(before, after map[string]V1RuntimeConfig, beforeProfiles,
 }
 
 // siblingPlacementEqual reports whether a save left an entry's placement
-// fields exactly as stored.
+// unchanged. It uses the same equality as SiblingPlacementAgrees: a nil and
+// an empty node selector are equal, and tolerations compare as sets. Stored
+// settings decode an absent field as nil and an empty one as empty, so a
+// stricter comparison would mark an untouched entry as changed and turn a
+// stored sibling disagreement into a refusal.
 func siblingPlacementEqual(a, b V1RuntimeConfig) bool {
-	return reflect.DeepEqual(a.NodeSelector, b.NodeSelector) && reflect.DeepEqual(a.Tolerations, b.Tolerations) && a.RuntimeClassName == b.RuntimeClassName
+	return SiblingPlacementAgrees(a, b)
 }
 
 // checkIdentityFields checks one entry's placement and identity fields and
