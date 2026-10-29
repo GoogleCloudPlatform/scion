@@ -716,8 +716,8 @@ export class ScionChatMessage extends LitElement {
    * Show the message's More actions button (web.chat_starred_messages):
    * the keyboard entry to the message menu. The thread makes one message's
    * button the list's single tab stop (`actionsTabIndex` 0, the others
-   * -1) and moves it with the arrow keys; it shows on hover and while
-   * focus is in the message.
+   * -1) and moves it with the arrow keys. It is always visible: bare dots
+   * in the upper-right corner inside the bubble.
    */
   @property({ type: Boolean })
   actionsEnabled = false;
@@ -1720,47 +1720,52 @@ export class ScionChatMessage extends LitElement {
       color: var(--scion-neutral-400, #94a3b8);
     }
 
-    /* ---- More actions button: the keyboard entry to the message menu ---- */
+    /* ---- More actions button: the keyboard entry to the message menu ----
+       Always visible: bare dots in the upper-right corner inside the text
+       bubble. The bubble reserves a right-hand column for them, so they
+       never sit over the message text. An attachment-only message has no
+       text bubble: its bubble reserves the same column beside the
+       attachments. */
+    .bubble-content.has-actions,
+    .bubble.actions-corner {
+      position: relative;
+      padding-right: 2rem;
+    }
+
     .msg-actions {
       position: absolute;
-      bottom: 0;
-      right: calc(100% + 0.25rem);
+      top: 0.25rem;
+      right: 0.25rem;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      width: 1.75rem;
-      height: 1.75rem;
+      /* The touch target; the glyph inside is smaller. */
+      width: 1.5rem;
+      height: 1.5rem;
       padding: 0;
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 0.375rem;
-      background: var(--scion-surface, #ffffff);
+      border: none;
+      border-radius: 0.25rem;
+      background: none;
       color: var(--scion-text-muted, #64748b);
       font-size: 0.875rem;
+      line-height: 1;
       cursor: pointer;
-      /* Hidden until hovered or focused, but still focusable. */
-      opacity: 0;
     }
 
-    .from-agent .msg-actions {
-      right: auto;
-      left: calc(100% + 0.25rem);
+    /* The reserved column counts toward the bubble's max-width, so an
+       attachment-only bubble is no wider than its text neighbours. */
+    .bubble.actions-corner {
+      box-sizing: border-box;
     }
 
-    /* A headerless starred row keeps its gutter star next to the bubble:
-       the button moves one step further out, so neither covers the other. */
-    .bubble.has-star-meta .msg-actions {
-      right: calc(100% + 1.25rem);
+    .bubble.actions-corner > .msg-actions {
+      top: 0;
     }
 
-    .from-agent .bubble.has-star-meta .msg-actions {
-      right: auto;
-      left: calc(100% + 1.25rem);
-    }
-
-    .message-wrapper:hover .msg-actions,
-    .message-wrapper:focus-within .msg-actions,
-    .msg-actions[aria-expanded='true'] {
-      opacity: 1;
+    @media (hover: hover) {
+      .msg-actions:hover {
+        color: var(--scion-text, #1e293b);
+      }
     }
 
     .msg-actions:focus {
@@ -1769,7 +1774,7 @@ export class ScionChatMessage extends LitElement {
 
     .msg-actions:focus-visible {
       outline: 2px solid var(--scion-primary, #3b82f6);
-      outline-offset: 1px;
+      outline-offset: 0;
     }
 
     /* The message whose action button has keyboard focus. */
@@ -1785,13 +1790,6 @@ export class ScionChatMessage extends LitElement {
       overflow: hidden;
       clip: rect(0 0 0 0);
       white-space: nowrap;
-    }
-
-    @media (hover: none) {
-      /* Touch opens the action sheet with a tap; no floating button. */
-      .msg-actions {
-        display: none;
-      }
     }
 
     /* ---- Starred indicator (shape plus accent, never colour alone) ---- */
@@ -2499,6 +2497,8 @@ export class ScionChatMessage extends LitElement {
     const attachmentOnly =
       !(this.body ?? '').trim() &&
       ((this.attachmentRefs?.length ?? 0) > 0 || (this.attachments?.length ?? 0) > 0);
+    // The More actions dots sit inside the text bubble, in a reserved corner.
+    const contentActions = this.actionsEnabled ? ' has-actions' : '';
 
     return html`
       <div
@@ -2513,7 +2513,11 @@ export class ScionChatMessage extends LitElement {
           : this.fromAgent
             ? html`<div class="avatar-spacer"></div>`
             : nothing}
-        <div class="bubble${this.showsStarMeta() ? ' has-star-meta' : ''}">
+        <div
+          class="bubble${attachmentOnly && !isDeleted && this.actionsEnabled
+            ? ' actions-corner'
+            : ''}"
+        >
           ${this.showHeader && this.fromAgent
             ? html`
                 <div class="bubble-header">
@@ -2546,17 +2550,22 @@ export class ScionChatMessage extends LitElement {
             : nothing}
           ${this.renderAuthorizedBy()} ${this.replyPreview ? this.renderReplyPreview() : nothing}
           ${isDeleted
-            ? html`<div class="bubble-content">
+            ? html`<div class="bubble-content${contentActions}">
                 <span class="deleted-message">This message was deleted</span>
+                ${this.renderActionsButton()}
               </div>`
             : attachmentOnly
               ? nothing
-              : html`<div class="bubble-content">${this.renderBody()}</div>`}
+              : html`<div class="bubble-content${contentActions}">
+                  ${this.renderBody()}${this.renderActionsButton()}
+                </div>`}
           ${isDeleted ? nothing : this.renderAttachments()}
           ${isDeleted ? nothing : this.renderArtifactChips()}
           ${isDeleted ? nothing : this.renderBadges()}
           ${isDeleted ? nothing : this.renderDeliveryState()}
-          ${this.showsStarMeta() ? this.renderStarMeta() : nothing} ${this.renderActionsButton()}
+          ${this.showsStarMeta() ? this.renderStarMeta() : nothing}
+          ${attachmentOnly && !isDeleted ? this.renderActionsButton() : nothing}
+          ${this.renderActionsHelp()}
         </div>
       </div>
       ${this.renderFullPreview()}
@@ -2581,29 +2590,36 @@ export class ScionChatMessage extends LitElement {
     const label = `More actions, message from ${who}, ${this.formatTime()}`;
     const active = this.actionsTabIndex === 0;
     return html`<button
-        type="button"
-        class="msg-actions"
-        tabindex=${this.actionsTabIndex}
-        aria-label=${label}
-        aria-haspopup="menu"
-        aria-expanded=${this.actionsExpanded ? 'true' : 'false'}
-        aria-describedby=${active ? 'actions-help' : nothing}
-        @click=${this.handleActionsClick}
-        @keydown=${this.handleActionsKeydown}
-        @focus=${(): void => {
-          this.actionsFocused = true;
-        }}
-        @blur=${(): void => {
-          this.actionsFocused = false;
-        }}
-      >
-        <sl-icon name="three-dots-vertical" aria-hidden="true"></sl-icon></button
-      >${active
-        ? html`<span class="actions-help" id="actions-help"
-            >Up and Down arrows move between messages. Shift+F10 also opens the menu. Tab leaves the
-            messages.</span
-          >`
-        : nothing}`;
+      type="button"
+      class="msg-actions"
+      tabindex=${this.actionsTabIndex}
+      aria-label=${label}
+      aria-haspopup="menu"
+      aria-expanded=${this.actionsExpanded ? 'true' : 'false'}
+      aria-describedby=${active ? 'actions-help' : nothing}
+      @click=${this.handleActionsClick}
+      @keydown=${this.handleActionsKeydown}
+      @focus=${(): void => {
+        this.actionsFocused = true;
+      }}
+      @blur=${(): void => {
+        this.actionsFocused = false;
+      }}
+    >
+      <sl-icon name="three-dots-vertical" aria-hidden="true"></sl-icon>
+    </button>`;
+  }
+
+  /**
+   * The tab stop's usage hint (the button's aria-describedby). It renders
+   * outside the text bubble so the bubble's text stays the message alone.
+   */
+  private renderActionsHelp(): TemplateResult | typeof nothing {
+    if (!this.actionsEnabled || this.actionsTabIndex !== 0) return nothing;
+    return html`<span class="actions-help" id="actions-help"
+      >Up and Down arrows move between messages. Shift+F10 also opens the menu. Tab leaves the
+      messages.</span
+    >`;
   }
 
   private handleActionsClick = (e: MouseEvent): void => {

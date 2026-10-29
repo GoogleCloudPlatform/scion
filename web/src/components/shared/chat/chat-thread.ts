@@ -5968,15 +5968,15 @@ export class ScionChatThread extends LitElement {
   }
 
   /**
-   * Touch devices have no `:hover` state to reveal message actions, and a
+   * Touch devices have no right-click, and a
    * long-press (which would otherwise fire `contextmenu`) is consumed by
    * iOS's native text-selection gesture instead. A plain tap opens the same
    * context menu a desktop right-click would, positioned at the tap point,
    * so touch users have a reachable path to reply/edit/delete/copy.
    */
   private handleMessageTap(e: MouseEvent, msg: Message): void {
-    // Desktop already has hover-revealed actions and a working right-click
-    // menu — only intervene on devices that cannot hover.
+    // Desktop has a working right-click menu (and the always-visible More
+    // actions dots) — only intervene on devices that cannot hover.
     if (!window.matchMedia('(hover: none)').matches) return;
 
     // <scion-chat-message> renders into its own shadow root, so `e.target`
