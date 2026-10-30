@@ -54,9 +54,10 @@ export function rowsFromMap(
   map: Record<string, string> | null | undefined,
   nextKey: () => number
 ): ProfileDefaultRow[] {
-  return Object.keys(map ?? {})
+  const m = map ?? {};
+  return Object.keys(m)
     .sort()
-    .map((profile) => ({ key: nextKey(), profile, serviceAccountId: map![profile] ?? '' }));
+    .map((profile) => ({ key: nextKey(), profile, serviceAccountId: m[profile] ?? '' }));
 }
 
 /** The map a set of complete rows stands for. Incomplete rows are left out. */
@@ -108,10 +109,9 @@ export function knownProfiles(brokers: readonly Pick<RuntimeBroker, 'profiles'>[
       byName.set(p.name, entry);
     }
   }
-  return [...byName.keys()].sort().map((name) => {
-    const e = byName.get(name)!;
-    return { name, types: [...e.types].sort(), kubernetes: e.kubernetes };
-  });
+  return [...byName.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([name, e]) => ({ name, types: [...e.types].sort(), kubernetes: e.kubernetes }));
 }
 
 /**
