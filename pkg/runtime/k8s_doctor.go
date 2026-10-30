@@ -23,6 +23,18 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// brokerPermissionsDocsURL is the documentation section that holds the
+// Runtime Broker's Role and RoleBinding.
+const brokerPermissionsDocsURL = "https://googlecloudplatform.github.io/scion/hosted/ha/kubernetes/#runtime-broker-permissions"
+
+// brokerRoleRemediation is the remediation for a missing or unverifiable
+// Runtime Broker permission in namespace: a namespaced Role, holding only what
+// the broker uses, bound to the identity the broker itself runs as.
+func brokerRoleRemediation(namespace string) string {
+	return fmt.Sprintf("Bind a namespaced Role in %q, holding only the permissions the Runtime Broker uses, to the identity the Runtime Broker runs as "+
+		"(its own ServiceAccount when it runs in the cluster, or its kubeconfig user). See %s", namespace, brokerPermissionsDocsURL)
+}
+
 // RunDiagnostics performs preflight checks against the Kubernetes cluster
 // to verify that the runtime is properly configured and operational.
 func (r *KubernetesRuntime) RunDiagnostics(opts DiagnosticOpts) DiagnosticReport {
@@ -142,7 +154,7 @@ func (r *KubernetesRuntime) checkPodPermissions(namespace string) CheckResult {
 				Name:        "pod-permissions",
 				Status:      "warn",
 				Message:     fmt.Sprintf("Could not verify pod %s permission in %q: %v", c.verb, namespace, err),
-				Remediation: "Ensure your service account has RBAC permissions for pods (create, get, list, delete).",
+				Remediation: brokerRoleRemediation(namespace),
 			}
 		}
 		if !result.Status.Allowed {
@@ -150,7 +162,7 @@ func (r *KubernetesRuntime) checkPodPermissions(namespace string) CheckResult {
 				Name:        "pod-permissions",
 				Status:      "fail",
 				Message:     fmt.Sprintf("Missing pod %q permission in namespace %q", c.verb, namespace),
-				Remediation: fmt.Sprintf("Grant pod %s permission. Example: kubectl create rolebinding scion-pods --clusterrole=edit --serviceaccount=%s:default -n %s", c.verb, namespace, namespace),
+				Remediation: fmt.Sprintf("Grant pods %s. %s", c.verb, brokerRoleRemediation(namespace)),
 			}
 		}
 	}
@@ -172,7 +184,7 @@ func (r *KubernetesRuntime) checkPodPermissions(namespace string) CheckResult {
 			Name:        "pod-permissions",
 			Status:      "fail",
 			Message:     fmt.Sprintf("Missing pods/exec permission in namespace %q (required for attach and sync)", namespace),
-			Remediation: fmt.Sprintf("Grant pods/exec permission via RBAC in namespace %q.", namespace),
+			Remediation: "Grant pods/exec create. " + brokerRoleRemediation(namespace),
 		}
 	}
 
@@ -204,7 +216,7 @@ func (r *KubernetesRuntime) checkSecretPermissions(namespace string) CheckResult
 				Name:        "secret-permissions",
 				Status:      "warn",
 				Message:     fmt.Sprintf("Could not verify secret %s permission in %q: %v", verb, namespace, err),
-				Remediation: "Ensure your service account has RBAC permissions for secrets (create, list, delete).",
+				Remediation: brokerRoleRemediation(namespace),
 			}
 		}
 		if !result.Status.Allowed {
@@ -212,7 +224,7 @@ func (r *KubernetesRuntime) checkSecretPermissions(namespace string) CheckResult
 				Name:        "secret-permissions",
 				Status:      "fail",
 				Message:     fmt.Sprintf("Missing secret %q permission in namespace %q", verb, namespace),
-				Remediation: fmt.Sprintf("Grant secret %s permission via RBAC in namespace %q.", verb, namespace),
+				Remediation: fmt.Sprintf("Grant secrets %s. %s", verb, brokerRoleRemediation(namespace)),
 			}
 		}
 	}

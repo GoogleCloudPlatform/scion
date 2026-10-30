@@ -15,13 +15,18 @@
 package runtime
 
 import (
+	"errors"
+	"regexp"
+	"strings"
 	"testing"
 
+	authv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic/fake"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 )
@@ -184,5 +189,120 @@ func TestCheckResult_Fields(t *testing.T) {
 	}
 	if result.Remediation != "fix it" {
 		t.Errorf("unexpected Remediation: %s", result.Remediation)
+	}
+}
+
+// doctorWithAccess returns a Kubernetes runtime whose SelfSubjectAccessReviews
+// answer with decide: allowed, or an error when decide returns one.
+func doctorWithAccess(decide func(attrs *authv1.ResourceAttributes) (bool, error)) *KubernetesRuntime {
+	clientset := k8sfake.NewClientset(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "agents"}})
+	clientset.PrependReactor("create", "selfsubjectaccessreviews", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		review := action.(k8stesting.CreateAction).GetObject().(*authv1.SelfSubjectAccessReview).DeepCopy()
+		allowed, err := decide(review.Spec.ResourceAttributes)
+		if err != nil {
+			return true, nil, err
+		}
+		review.Status.Allowed = allowed
+		return true, review, nil
+	})
+	return NewKubernetesRuntime(k8s.NewTestClient(fake.NewSimpleDynamicClient(k8sruntime.NewScheme()), clientset))
+}
+
+var broadRoleWord = regexp.MustCompile(`(?i)\b(edit|admin|cluster-admin)\b`)
+
+// assertBrokerRoleRemediation fails unless remediation recommends a
+// namespaced Role for the Runtime Broker's own identity and points to the
+// permissions docs. It must not name a ClusterRole, the edit or admin roles,
+// or a namespace's default ServiceAccount.
+func assertBrokerRoleRemediation(t *testing.T, check, remediation string) {
+	t.Helper()
+	lower := strings.ToLower(remediation)
+	if !strings.Contains(lower, "namespaced role") {
+		t.Errorf("%s remediation does not mention a namespaced Role: %q", check, remediation)
+	}
+	if !strings.Contains(remediation, "identity the Runtime Broker runs as") {
+		t.Errorf("%s remediation does not name the broker's own identity: %q", check, remediation)
+	}
+	if !strings.Contains(remediation, brokerPermissionsDocsURL) {
+		t.Errorf("%s remediation does not point to %s: %q", check, brokerPermissionsDocsURL, remediation)
+	}
+	if strings.Contains(lower, "clusterrole") {
+		t.Errorf("%s remediation names a ClusterRole: %q", check, remediation)
+	}
+	if broadRoleWord.MatchString(remediation) {
+		t.Errorf("%s remediation names the edit or admin role: %q", check, remediation)
+	}
+	if strings.Contains(remediation, ":default") || strings.Contains(lower, "--serviceaccount") {
+		t.Errorf("%s remediation names a default ServiceAccount: %q", check, remediation)
+	}
+}
+
+// Every pod and secret permission remediation of scion doctor, failed or
+// unverifiable, recommends a namespaced Role bound to the Runtime Broker's
+// own identity.
+func TestRunDiagnostics_PermissionRemediationsUseNamespacedBrokerRole(t *testing.T) {
+	errReview := errors.New("review unavailable")
+	for _, tc := range []struct {
+		name       string
+		decide     func(attrs *authv1.ResourceAttributes) (bool, error)
+		check      string
+		wantStatus string
+	}{
+		{"pod verb denied", func(a *authv1.ResourceAttributes) (bool, error) {
+			return a.Resource != "pods" || a.Verb != "list", nil
+		}, "pod-permissions", "fail"},
+		{"pod review error", func(a *authv1.ResourceAttributes) (bool, error) {
+			if a.Resource == "pods" {
+				return false, errReview
+			}
+			return true, nil
+		}, "pod-permissions", "warn"},
+		{"exec denied", func(a *authv1.ResourceAttributes) (bool, error) {
+			return a.Subresource != "exec", nil
+		}, "pod-permissions", "fail"},
+		{"secret verb denied", func(a *authv1.ResourceAttributes) (bool, error) {
+			return a.Resource != "secrets" || a.Verb != "delete", nil
+		}, "secret-permissions", "fail"},
+		{"secret review error", func(a *authv1.ResourceAttributes) (bool, error) {
+			if a.Resource == "secrets" {
+				return false, errReview
+			}
+			return true, nil
+		}, "secret-permissions", "warn"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report := doctorWithAccess(tc.decide).RunDiagnostics(DiagnosticOpts{Namespace: "agents"})
+			var found bool
+			for _, c := range report.Checks {
+				if c.Name != tc.check {
+					continue
+				}
+				found = true
+				if c.Status != tc.wantStatus {
+					t.Fatalf("%s status = %q (%s), want %q", c.Name, c.Status, c.Message, tc.wantStatus)
+				}
+				assertBrokerRoleRemediation(t, c.Name, c.Remediation)
+				if !strings.Contains(c.Remediation, `"agents"`) {
+					t.Errorf("%s remediation does not name the namespace: %q", c.Name, c.Remediation)
+				}
+			}
+			if !found {
+				t.Fatalf("check %s not in the report", tc.check)
+			}
+		})
+	}
+}
+
+// With every review allowed, the pod and secret checks pass and carry no
+// remediation.
+func TestRunDiagnostics_PermissionChecksPassWhenAllowed(t *testing.T) {
+	report := doctorWithAccess(func(*authv1.ResourceAttributes) (bool, error) { return true, nil }).RunDiagnostics(DiagnosticOpts{Namespace: "agents"})
+	for _, c := range report.Checks {
+		if c.Name != "pod-permissions" && c.Name != "secret-permissions" {
+			continue
+		}
+		if c.Status != "pass" || c.Remediation != "" {
+			t.Errorf("%s = %q, remediation %q; want pass with no remediation", c.Name, c.Status, c.Remediation)
+		}
 	}
 }
