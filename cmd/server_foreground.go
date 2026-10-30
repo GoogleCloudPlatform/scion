@@ -437,7 +437,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		markUpdateStateBooting(maintenanceInstallRoot())
 		s, entClient, err = initStore(ctx, cfg)
 		if err != nil {
-			return err
+			// A stop during the migrations is a clean exit, not a failed
+			// start (startupShutdownErr); likewise for the other
+			// context-taking startup steps below.
+			return shutdownSeq.startupErr(ctx, err)
 		}
 		if closer, ok := s.(io.Closer); ok {
 			defer func() { _ = closer.Close() }()
@@ -488,7 +491,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	operatorEndpoint, operatorEndpointSrc := resolveServerHubEndpoint(cfg, brokerSettings)
 	hubEndpoints, err := resolveHubEndpoints(ctx, s, operatorHubEndpoint{URL: operatorEndpoint, Source: operatorEndpointSrc})
 	if err != nil {
-		return err
+		return shutdownSeq.startupErr(ctx, err)
 	}
 	hubEndpoint, hubEndpointSrc := effectiveHubEndpoint(hubEndpoints, operatorEndpointSrc)
 
@@ -542,6 +545,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		var hubInitErr error
 		hubSrv, hubInitErr = initHubServerFn(ctx, cfg, s, entClient, hubEndpoints, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, messageLogger, artifactLogger, globalDir, pluginMgr, secretBackend)
 		if hubInitErr != nil {
+			if shutdownSeq.startupErr(ctx, hubInitErr) == nil {
+				return nil
+			}
 			// Return rather than log.Fatalf so the deferred cleanups (store
 			// close, plugin shutdown, log flush including Cloud Logging) run.
 			// Startup stays fail-closed: nothing is serving yet. The exit
@@ -646,7 +652,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		// Wire command bus for cross-node dispatch (B2-4).
 		cmdBus, err := newCommandBus(ctx, cfg, hubSrv)
 		if err != nil {
-			return err
+			return shutdownSeq.startupErr(ctx, err)
 		}
 		hubSrv.SetCommandBus(cmdBus)
 
@@ -659,14 +665,14 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		hubSrv.SetShutdownHooks(frontShutdownHooks)
 
 		if err := startConduit(ctx, shutdownSeq, cfg, hubSrv, hubEndpoints.For(hub.HubEndpointForConduitCheck), &wg, errCh); err != nil {
-			return err
+			return shutdownSeq.startupErr(ctx, err)
 		}
 
 		if !enableWeb {
 			// Hub runs its own HTTP server (standalone mode).
 			eventPub, err := newEventPublisher(ctx, cfg, hubDBRec)
 			if err != nil {
-				return err
+				return shutdownSeq.startupErr(ctx, err)
 			}
 			hubSrv.SetEventPublisher(eventPub)
 			startSettingsPropagation(ctx, hubSrv, eventPub)
@@ -699,7 +705,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if enableWeb {
 		webSrv, err = initWebServer(ctx, cfg, hubSrv, devAuthToken, webBase, adminMode, maintenanceMessage, requestLogger, hubDBRec)
 		if err != nil {
-			return err
+			return shutdownSeq.startupErr(ctx, err)
 		}
 		shutdownSeq.addStep(shutdownPhaseMark, webSrv.BeginShutdown)
 		webSrv.SetShutdownHooks(frontShutdownHooks)
@@ -758,7 +764,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			brokerStop.markStopped()
 		}()
 		if brokerErr != nil {
-			return brokerErr
+			return shutdownSeq.startupErr(ctx, brokerErr)
 		}
 	}
 	// Phase 2 item 5: one, centralized call site for the shared_dir_storage
