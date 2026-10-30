@@ -306,6 +306,6 @@ To fix this:
 
 - Only Agent Plugins **1.0.0** is supported.
 - Sources are template-relative paths only: no GitHub or registry sources, no CLI flag and no Hub API to add plugins to an agent.
-- gemini-cli, grok-build, antigravity, hermes and opencode do not install plugins yet.
+- gemini-cli, grok-build, antigravity, hermes, opencode and pi do not install plugins yet.
 - Plugin MCP servers are not added to Scion's own MCP configuration (`mcp_servers`); each harness reads them from the plugin.
 - Install results inside the container (`status-<harness>.json`) are not reported back to the Hub.
