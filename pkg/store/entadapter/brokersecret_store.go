@@ -429,14 +429,22 @@ func (s *BrokerSecretStore) DeleteOrphanBrokerCredentials(ctx context.Context) (
 		// Already inside store.WithTx: run on the caller's transaction.
 		return deleteOrphanBrokerCredentials(ctx, s.client)
 	}
+	// The transaction is rolled back on every path that does not commit,
+	// including a panic inside deleteOrphanBrokerCredentials.
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 	secrets, tokens, err := deleteOrphanBrokerCredentials(ctx, tx.Client())
 	if err != nil {
-		_ = tx.Rollback()
 		return 0, 0, err
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, 0, fmt.Errorf("broker secret store: commit DeleteOrphanBrokerCredentials: %w", err)
 	}
+	committed = true
 	return secrets, tokens, nil
 }
 

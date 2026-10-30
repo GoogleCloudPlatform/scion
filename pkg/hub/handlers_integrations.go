@@ -1549,7 +1549,7 @@ func (s *Server) ensurePluginBroker(ctx context.Context, name, brokerID string) 
 	}
 	if _, err := s.store.GetRuntimeBroker(ctx, brokerID); err == nil || !errors.Is(err, store.ErrNotFound) {
 		if err != nil {
-			slog.Warn("Failed to look up plugin broker", "plugin", name, "brokerId", brokerID, "error", err)
+			slog.WarnContext(ctx, "Failed to look up plugin broker", "plugin", name, "brokerId", brokerID, "error", err)
 		}
 		return
 	}
@@ -1566,7 +1566,7 @@ func (s *Server) ensurePluginBroker(ctx context.Context, name, brokerID string) 
 		Updated:         now,
 	}
 	if err := s.store.CreateRuntimeBrokerClearingCredentials(ctx, b); err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-		slog.Warn("Failed to register broker entity for plugin", "plugin", name, "brokerId", brokerID, "error", err)
+		slog.WarnContext(ctx, "Failed to register broker entity for plugin", "plugin", name, "brokerId", brokerID, "error", err)
 	}
 }
 

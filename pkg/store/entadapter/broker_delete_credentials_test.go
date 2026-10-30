@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	entgo "entgo.io/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -239,6 +241,35 @@ func TestDeleteOrphanBrokerCredentials_InsideWithTxUsesCallerTransaction(t *test
 	require.NoError(t, err)
 	assert.Equal(t, 1, secrets)
 	assert.Equal(t, 1, tokens)
+}
+
+// A panic inside the sweep's transaction propagates, and the transaction is
+// rolled back: the secret delete that ran before the panic is undone, and
+// the store's single test connection is free for the next query (a
+// transaction left open would hold it until the read below times out).
+func TestDeleteOrphanBrokerCredentials_PanicRollsBackTransaction(t *testing.T) {
+	client := enttest.NewClient(t)
+	bs := NewBrokerSecretStore(client)
+	ctx := context.Background()
+	orphan := seedOrphanCredentials(t, bs)
+
+	const planted = "planted panic in the orphan sweep transaction"
+	client.BrokerJoinToken.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if m.Op().Is(entgo.OpDeleteOne | entgo.OpDelete) {
+				panic(planted)
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+	assert.PanicsWithValue(t, planted, func() { _, _, _ = bs.DeleteOrphanBrokerCredentials(ctx) })
+
+	readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, err := bs.GetBrokerSecret(readCtx, orphan)
+	require.NoError(t, err, "the transaction was rolled back: the orphan secret is still there and the connection is free")
+	_, err = bs.GetJoinTokenByBrokerID(readCtx, orphan)
+	require.NoError(t, err, "the orphan join token is still there")
 }
 
 // CreateRuntimeBrokerClearingCredentials creates the row and removes a

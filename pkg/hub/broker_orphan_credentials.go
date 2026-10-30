@@ -44,12 +44,12 @@ func sweepOrphanBrokerCredentials(ctx context.Context, s store.Store) (secrets, 
 	defer cancel()
 	secrets, joinTokens, err = s.DeleteOrphanBrokerCredentials(ctx)
 	if err != nil {
-		slog.Error("Failed to sweep broker credentials that have no broker row; they stay refused and the sweep runs again on the next start",
+		slog.ErrorContext(ctx, "Failed to sweep broker credentials that have no broker row; they stay refused and the sweep runs again on the next start",
 			"error", err)
 		return 0, 0, err
 	}
 	if secrets > 0 || joinTokens > 0 {
-		slog.Info("Swept broker credentials that have no broker row",
+		slog.InfoContext(ctx, "Swept broker credentials that have no broker row",
 			"secrets_removed", secrets, "join_tokens_removed", joinTokens)
 	}
 	return secrets, joinTokens, nil
