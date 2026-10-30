@@ -281,10 +281,13 @@ def _model_settings(ctx: sh.ProvisionContext) -> dict[str, str]:
     agent has an effective model: the Hub-resolved model, a SCION_MODEL in
     the start request or the settings harness-config env, or the
     configuration's model (resolveEffectiveModel in pkg/agent/run.go). pi
-    then starts on that model, and its provider, rather than the
-    defaultProvider/defaultModel startup settings. Only a SCION_MODEL from a
-    template's env: gets no --model; then the values written here are what
-    pi starts with.
+    then starts on that model rather than the defaultModel startup setting
+    (a provider/id value also overrides defaultProvider). When pi starts
+    without --model (no effective model, for example SCION_MODEL set only in
+    a harness-config directory's config.yaml env:, which the effective model
+    does not read), the values written here are what pi starts with. A
+    template cannot set SCION_MODEL: SCION_* keys in a template's env: are
+    ignored with a warning.
     """
     out: dict[str, str] = {}
     provider = os.environ.get(PROVIDER_ENV, "").strip()
