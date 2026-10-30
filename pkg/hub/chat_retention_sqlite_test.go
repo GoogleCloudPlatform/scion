@@ -447,9 +447,11 @@ VALUES (?, ?, 'user:alice', 'agent:bot', 'retention harness', 'chat', false, fal
 	require.NoError(t, err)
 	var prev string
 	span := 60 * 24 * time.Hour
+	// One step per row; span*i itself would overflow int64 nanoseconds.
+	step := span / time.Duration(rows)
 	for i := 0; i < rows; i++ {
 		id := uuid.NewString()
-		created := now.Add(-span + time.Duration(int64(span)*int64(i)/int64(rows)))
+		created := now.Add(-span + time.Duration(i)*step)
 		project := projects[i%len(projects)]
 		state := store.MessageDispatchDispatched
 		switch {
@@ -506,6 +508,11 @@ VALUES (?, ?, 'user:alice', 'agent:bot', 'retention harness', 'chat', false, fal
 	require.Equal(t, rows, total)
 	keptOld := chatRetentionCount(t, db, `SELECT COUNT(*) FROM messages WHERE created < ? AND dispatch_state IN ('pending', 'deferred')`, cutoff)
 	newer := chatRetentionCount(t, db, `SELECT COUNT(*) FROM messages WHERE created >= ?`, cutoff)
+	// The fixture must straddle the cutoff, or "nothing newer is purged"
+	// proves nothing: about half of the rows are newer than 30 days.
+	require.Greater(t, newer, rows/3, "seeded rows newer than the cutoff")
+	require.Greater(t, eligible, rows/3, "seeded rows eligible for purge")
+	require.Positive(t, keptOld, "seeded old pending or deferred rows")
 
 	cfg := opsettings.DefaultChatRetentionConfig()
 	cfg.Enabled = true
