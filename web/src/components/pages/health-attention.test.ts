@@ -380,7 +380,9 @@ describe('scion-health-attention hub-paused schedules', () => {
 
 describe('pausedReasonLabel', () => {
   it('maps known codes to fixed text and anything else to the generic label', () => {
-    expect(pausedReasonLabel('creator_deleted')).toBe('the agent or user it runs under was deleted');
+    expect(pausedReasonLabel('creator_deleted')).toBe(
+      'the agent or user it runs under was deleted'
+    );
     expect(pausedReasonLabel('cron_zone_unsupported')).toBe(
       'its cron expression names a time zone, which is not supported'
     );
