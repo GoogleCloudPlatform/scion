@@ -718,6 +718,7 @@ func TestUserSecretAttributionRepair_RereadOtherOwnAgentRepaired(t *testing.T) {
 	require.NotEqual(t, capturer, other)
 	row, err := f.Store.GetSecret(ctx, sdAlwaysKey, store.ScopeUser, f.UserID)
 	require.NoError(t, err)
+	require.NotNil(t, row)
 	id := row.ID
 	missed := false
 	s := &usaTxStore{Store: f.Store, wrap: func(tx store.Store) store.Store {
@@ -758,6 +759,9 @@ func (m usaRewriteOnMissTx) AttributeUserSecretToOwner(ctx context.Context, id, 
 		cur, err := m.Store.GetSecret(ctx, m.row.Key, m.row.Scope, m.row.ScopeID)
 		if err != nil {
 			return false, err
+		}
+		if cur == nil {
+			return false, errors.New("usaRewriteOnMissTx: row " + m.row.ID + " not found on re-read")
 		}
 		// UpdateSecret keeps created_by, so the writer replaces the row
 		// under the same ID (the row the repair listed).
