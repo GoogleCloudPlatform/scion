@@ -181,14 +181,14 @@ SCIONTOOL_BIN=/path/to/sciontool node --test scion-bridge.test.mjs
 - **MCP:** pi supports stdio and streamable HTTP; SSE servers are skipped
   with a warning.
 - **Usage/tokens:** no token mapping, so `SCION_USAGE_SOURCE` is not set.
-- **In-session `/reload`, `/new`, `/resume`, `/fork` are new sessions:** the
-  bridge forwards pi's `session_start` reason as the session-start source.
-  None of pi's reasons is `clear`/`compact`, and Scion classifies `reload`
-  like any unknown source, so each of these is treated as a new session: no
-  readiness effect under `ready: delay`, but a completed or waiting status
-  (including an agent-set `ask_user`/`blocked`) is replaced by working until
-  the next run settles. Classifying `reload` as in place is tracked in
-  ptone/scion#5527.
+- **In-session `/new`, `/resume`, `/fork` are new sessions; `/reload` is in
+  place:** the bridge forwards pi's `session_start` reason as the
+  session-start source. Scion classifies `reload` as an in-place restart,
+  like `clear` and `compact`: it has no readiness effect and keeps the
+  current status (it releases only a notification-set wait). `new`,
+  `resume` and `fork` are new sessions: no readiness effect under
+  `ready: delay`, but a completed or waiting status (including an agent-set
+  `ask_user`/`blocked`) is replaced by working until the next run settles.
 - **Synchronous bridge calls:** the bridge runs `sciontool` with
   `execFileSync`, so pi's event loop (and its TUI) waits for each call: up to
   5 s per hook event (session start, human/RPC input, each tool start and

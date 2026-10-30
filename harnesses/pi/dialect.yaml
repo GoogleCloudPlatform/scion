@@ -40,10 +40,9 @@ mappings:
   session_start:
     event: session-start
     # pi's reason (startup, reload, new, resume, fork) is Scion's source.
-    # None of these reasons is clear/compact, so every one, including an
-    # in-place /reload, counts as a new session: no readiness effect under
-    # ready=delay, but a completed or waiting status becomes working until
-    # the next run (ptone/scion#5527 tracks in-place classification).
+    # Scion classifies reload as an in-place restart (like clear and
+    # compact): no readiness effect, and an agent-set status is kept. The
+    # other reasons count as a new session.
     fields:
       source: reason
 

@@ -60,7 +60,8 @@ func loadPiBridgePayloads(t *testing.T) []map[string]interface{} {
 
 // TestPiDialect_BridgePayloads feeds the bridge's payloads through the real
 // harnesses/pi/dialect.yaml and pins the normalized event, the fields the
-// handlers read, readiness and the resulting status activity.
+// handlers read, readiness (and the in-place classification of a
+// session-start) and the resulting status activity.
 func TestPiDialect_BridgePayloads(t *testing.T) {
 	specPath := testutil.HarnessDialectPath(t, "pi")
 	md, err := dialects.LoadMappingDialect(specPath)
@@ -78,7 +79,10 @@ func TestPiDialect_BridgePayloads(t *testing.T) {
 		success   bool
 		errMsg    string
 		source    string
-		activity  state.Activity
+		// inPlace: a session-start that restarts the session inside the
+		// running harness (hooks.SessionInPlace): not a readiness event.
+		inPlace  bool
+		activity state.Activity
 	}
 	wants := []want{
 		{name: hooks.EventSessionStart, source: "startup", activity: state.ActivityWorking},
@@ -91,12 +95,12 @@ func TestPiDialect_BridgePayloads(t *testing.T) {
 		{name: hooks.EventPromptSubmit, activity: state.ActivityThinking},
 		{name: hooks.EventAgentEnd, errMsg: "429 rate limited: retry later", activity: state.ActivityWorking},
 		{name: hooks.EventSessionStart, source: "resume", activity: state.ActivityWorking},
-		// pi's /reload restarts in place, but the readiness classifier
-		// knows no "reload" source, so it counts as a new session: no
-		// readiness effect under ready=delay, but a completed or waiting
-		// status becomes working until the next run (a documented known
-		// limit; ptone/scion#5527).
-		{name: hooks.EventSessionStart, source: "reload", activity: state.ActivityWorking},
+		// pi's /reload restarts the session in place: no readiness
+		// effect, and the status handler releases only a
+		// notification-set wait (an agent-set status is kept). The
+		// activity is what eventToPhaseActivity maps a session-start to;
+		// the handler routes an in-place start around it.
+		{name: hooks.EventSessionStart, source: "reload", inPlace: true, activity: state.ActivityWorking},
 	}
 
 	records := loadPiBridgePayloads(t)
@@ -138,8 +142,13 @@ func TestPiDialect_BridgePayloads(t *testing.T) {
 		if ev.Data.Error != w.errMsg {
 			t.Errorf("record %d: Error = %q, want %q", i, ev.Data.Error, w.errMsg)
 		}
-		if !hooks.IsReadinessEvent(ev) {
-			t.Errorf("record %d: %s is not a readiness event", i, ev.Name)
+		if ev.Name == hooks.EventSessionStart {
+			if got := hooks.ClassifySessionStart(ev.Data.Source) == hooks.SessionInPlace; got != w.inPlace {
+				t.Errorf("record %d: source %q in place = %v, want %v", i, ev.Data.Source, got, w.inPlace)
+			}
+		}
+		if got := hooks.IsReadinessEvent(ev); got != !w.inPlace {
+			t.Errorf("record %d: %s readiness event = %v, want %v", i, ev.Name, got, !w.inPlace)
 		}
 		res := eventToPhaseActivity(ev)
 		if res == nil {
