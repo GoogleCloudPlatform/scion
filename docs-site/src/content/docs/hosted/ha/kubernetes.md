@@ -1067,7 +1067,7 @@ subjects:
 #   apiGroup: rbac.authorization.k8s.io
 ```
 
-GCP identity mode `assign` can also list ServiceAccounts to discover mappings; see [Granting discovery access](#gcp-identity-mode-assign-workload-identity-mapping). `scion doctor` checks the pod, pods/exec and secret permissions in the runtime's namespace, and its remediation points to this section.
+GCP identity mode `assign` can also list ServiceAccounts to discover mappings; see [Granting discovery access](#gcp-identity-mode-assign-workload-identity-mapping). `scion doctor` checks the pod, pods/exec and secret permissions in the runtime's namespace, and its remediation points to this section. Its namespace check works with this namespaced Role: when the Namespace object itself is not readable, it verifies access within the namespace instead.
 
 ### Additional for Multi-Namespace
 

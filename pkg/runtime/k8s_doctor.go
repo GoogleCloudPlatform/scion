@@ -20,6 +20,7 @@ import (
 	"time"
 
 	authv1 "k8s.io/api/authorization/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -107,19 +108,54 @@ func (r *KubernetesRuntime) checkNamespaceAccess(namespace string) CheckResult {
 	defer cancel()
 
 	_, err := r.Client.Clientset.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+	if k8serrors.IsForbidden(err) {
+		// The Namespace object is cluster-scoped, so the namespaced Role the
+		// Runtime Broker permissions docs recommend cannot read it. Verify
+		// access within the namespace instead.
+		return r.checkNamespaceAccessWithinNamespace(ctx, namespace, err)
+	}
 	if err != nil {
-		return CheckResult{
-			Name:        "namespace-access",
-			Status:      "fail",
-			Message:     fmt.Sprintf("Namespace %q is not accessible: %v", namespace, err),
-			Remediation: fmt.Sprintf("Create the namespace with 'kubectl create namespace %s' or verify your permissions.", namespace),
-		}
+		return namespaceAccessFailure(namespace, err)
 	}
 
 	return CheckResult{
 		Name:    "namespace-access",
 		Status:  "pass",
 		Message: fmt.Sprintf("Namespace %q exists and is accessible", namespace),
+	}
+}
+
+// checkNamespaceAccessWithinNamespace is the namespace check when the
+// Namespace object cannot be read: it passes if the broker may list pods in
+// namespace, and otherwise fails as an unreadable namespace does.
+func (r *KubernetesRuntime) checkNamespaceAccessWithinNamespace(ctx context.Context, namespace string, getErr error) CheckResult {
+	review := &authv1.SelfSubjectAccessReview{
+		Spec: authv1.SelfSubjectAccessReviewSpec{
+			ResourceAttributes: &authv1.ResourceAttributes{
+				Namespace: namespace,
+				Verb:      "list",
+				Resource:  "pods",
+			},
+		},
+	}
+	result, err := r.Client.Clientset.AuthorizationV1().SelfSubjectAccessReviews().Create(ctx, review, metav1.CreateOptions{})
+	if err != nil || !result.Status.Allowed {
+		return namespaceAccessFailure(namespace, getErr)
+	}
+	return CheckResult{
+		Name:    "namespace-access",
+		Status:  "pass",
+		Message: fmt.Sprintf("Namespace %q object not readable with namespaced permissions; access verified within the namespace", namespace),
+	}
+}
+
+// namespaceAccessFailure is the failed namespace check for namespace.
+func namespaceAccessFailure(namespace string, err error) CheckResult {
+	return CheckResult{
+		Name:        "namespace-access",
+		Status:      "fail",
+		Message:     fmt.Sprintf("Namespace %q is not accessible: %v", namespace, err),
+		Remediation: fmt.Sprintf("Create the namespace with 'kubectl create namespace %s' or verify your permissions.", namespace),
 	}
 }
 
@@ -162,7 +198,7 @@ func (r *KubernetesRuntime) checkPodPermissions(namespace string) CheckResult {
 				Name:        "pod-permissions",
 				Status:      "fail",
 				Message:     fmt.Sprintf("Missing pod %q permission in namespace %q", c.verb, namespace),
-				Remediation: fmt.Sprintf("Grant pods %s. %s", c.verb, brokerRoleRemediation(namespace)),
+				Remediation: fmt.Sprintf("Grant %q permission on pods. %s", c.verb, brokerRoleRemediation(namespace)),
 			}
 		}
 	}
@@ -184,7 +220,7 @@ func (r *KubernetesRuntime) checkPodPermissions(namespace string) CheckResult {
 			Name:        "pod-permissions",
 			Status:      "fail",
 			Message:     fmt.Sprintf("Missing pods/exec permission in namespace %q (required for attach and sync)", namespace),
-			Remediation: "Grant pods/exec create. " + brokerRoleRemediation(namespace),
+			Remediation: `Grant "create" permission on pods/exec. ` + brokerRoleRemediation(namespace),
 		}
 	}
 
@@ -224,7 +260,7 @@ func (r *KubernetesRuntime) checkSecretPermissions(namespace string) CheckResult
 				Name:        "secret-permissions",
 				Status:      "fail",
 				Message:     fmt.Sprintf("Missing secret %q permission in namespace %q", verb, namespace),
-				Remediation: fmt.Sprintf("Grant secrets %s. %s", verb, brokerRoleRemediation(namespace)),
+				Remediation: fmt.Sprintf("Grant %q permission on secrets. %s", verb, brokerRoleRemediation(namespace)),
 			}
 		}
 	}

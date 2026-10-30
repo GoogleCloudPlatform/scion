@@ -22,6 +22,7 @@ import (
 
 	authv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic/fake"
@@ -247,28 +248,29 @@ func TestRunDiagnostics_PermissionRemediationsUseNamespacedBrokerRole(t *testing
 		decide     func(attrs *authv1.ResourceAttributes) (bool, error)
 		check      string
 		wantStatus string
+		wantGrant  string // the remediation's leading "Grant" sentence ("" when it has none)
 	}{
 		{"pod verb denied", func(a *authv1.ResourceAttributes) (bool, error) {
 			return a.Resource != "pods" || a.Verb != "list", nil
-		}, "pod-permissions", "fail"},
+		}, "pod-permissions", "fail", `Grant "list" permission on pods. `},
 		{"pod review error", func(a *authv1.ResourceAttributes) (bool, error) {
 			if a.Resource == "pods" {
 				return false, errReview
 			}
 			return true, nil
-		}, "pod-permissions", "warn"},
+		}, "pod-permissions", "warn", ""},
 		{"exec denied", func(a *authv1.ResourceAttributes) (bool, error) {
 			return a.Subresource != "exec", nil
-		}, "pod-permissions", "fail"},
+		}, "pod-permissions", "fail", `Grant "create" permission on pods/exec. `},
 		{"secret verb denied", func(a *authv1.ResourceAttributes) (bool, error) {
 			return a.Resource != "secrets" || a.Verb != "delete", nil
-		}, "secret-permissions", "fail"},
+		}, "secret-permissions", "fail", `Grant "delete" permission on secrets. `},
 		{"secret review error", func(a *authv1.ResourceAttributes) (bool, error) {
 			if a.Resource == "secrets" {
 				return false, errReview
 			}
 			return true, nil
-		}, "secret-permissions", "warn"},
+		}, "secret-permissions", "warn", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			report := doctorWithAccess(tc.decide).RunDiagnostics(DiagnosticOpts{Namespace: "agents"})
@@ -282,6 +284,12 @@ func TestRunDiagnostics_PermissionRemediationsUseNamespacedBrokerRole(t *testing
 					t.Fatalf("%s status = %q (%s), want %q", c.Name, c.Status, c.Message, tc.wantStatus)
 				}
 				assertBrokerRoleRemediation(t, c.Name, c.Remediation)
+				if tc.wantGrant != "" && !strings.HasPrefix(c.Remediation, tc.wantGrant) {
+					t.Errorf("%s remediation = %q, want it to start with %q", c.Name, c.Remediation, tc.wantGrant)
+				}
+				if tc.wantGrant == "" && strings.HasPrefix(c.Remediation, "Grant") {
+					t.Errorf("%s remediation = %q, want no Grant sentence", c.Name, c.Remediation)
+				}
 				if !strings.Contains(c.Remediation, `"agents"`) {
 					t.Errorf("%s remediation does not name the namespace: %q", c.Name, c.Remediation)
 				}
@@ -304,5 +312,61 @@ func TestRunDiagnostics_PermissionChecksPassWhenAllowed(t *testing.T) {
 		if c.Status != "pass" || c.Remediation != "" {
 			t.Errorf("%s = %q, remediation %q; want pass with no remediation", c.Name, c.Status, c.Remediation)
 		}
+	}
+}
+
+// namespaceCheck returns the namespace-access check of a report.
+func namespaceCheck(t *testing.T, report DiagnosticReport) CheckResult {
+	t.Helper()
+	for _, c := range report.Checks {
+		if c.Name == "namespace-access" {
+			return c
+		}
+	}
+	t.Fatal("namespace-access check not in the report")
+	return CheckResult{}
+}
+
+// With a namespaced Role the Namespace object is not readable (Forbidden).
+// The namespace check then verifies access within the namespace: it passes
+// if pods may be listed there, and fails otherwise. NotFound still fails.
+func TestRunDiagnostics_NamespaceAccessWithNamespacedPermissions(t *testing.T) {
+	forbidden := k8serrors.NewForbidden(corev1.Resource("namespaces"), "agents", errors.New("namespaced role"))
+	notFound := k8serrors.NewNotFound(corev1.Resource("namespaces"), "agents")
+	for _, tc := range []struct {
+		name       string
+		getErr     error
+		listPods   bool
+		wantStatus string
+	}{
+		{"forbidden, pods listable", forbidden, true, "pass"},
+		{"forbidden, pods not listable", forbidden, false, "fail"},
+		{"not found", notFound, true, "fail"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := doctorWithAccess(func(a *authv1.ResourceAttributes) (bool, error) {
+				if a.Resource == "pods" && a.Verb == "list" && a.Subresource == "" {
+					return tc.listPods, nil
+				}
+				return true, nil
+			})
+			rt.Client.Clientset.(*k8sfake.Clientset).PrependReactor("get", "namespaces", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+				return true, nil, tc.getErr
+			})
+			c := namespaceCheck(t, rt.RunDiagnostics(DiagnosticOpts{Namespace: "agents"}))
+			if c.Status != tc.wantStatus {
+				t.Fatalf("namespace-access = %q (%s), want %q", c.Status, c.Message, tc.wantStatus)
+			}
+			switch tc.wantStatus {
+			case "pass":
+				if c.Remediation != "" || !strings.Contains(c.Message, "access verified within the namespace") {
+					t.Errorf("namespace-access pass = %q, remediation %q", c.Message, c.Remediation)
+				}
+			case "fail":
+				if !strings.Contains(c.Remediation, "verify your permissions") {
+					t.Errorf("namespace-access remediation = %q", c.Remediation)
+				}
+			}
+		})
 	}
 }
