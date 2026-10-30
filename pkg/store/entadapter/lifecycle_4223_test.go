@@ -153,14 +153,14 @@ func TestLifecycleStore4223_FailedAfterRunningObservedAlreadyError(t *testing.T)
 	require.NoError(t, err)
 	assert.Equal(t, store.LaunchEndReasonFailed, got.LaunchEndReason)
 
-	// P1: no phase-rule transition. The only phase-independent emitter is
-	// metadata_changed (a digest change), so any added event must be that;
-	// resynced, reincarnated, restored, stopped, launch_failed and the rest
-	// all fail.
+	// P1: the failed report's write (failedReportEndUpdate) changes only the
+	// phase (error -> error), the message and launch_* columns: no snapshot
+	// field (LifecycleMetadata), so neither digest moves and configured or
+	// metadata_changed cannot fire; no run state or generation (the segment
+	// was already closed by the error write), and no LaunchEnd hint, since
+	// the launch had ended running_observed. So no event may be added.
 	added := f.events(a.ID)[len(before):]
-	for _, e := range added {
-		require.Equal(t, tc.TransitionMetadataChanged, e.Transition, lcFull(added))
-	}
+	require.Empty(t, added, lcFull(added))
 }
 
 // TestLifecycleStore4223_FailedAfterRunningObservedStartKind: a start-kind
