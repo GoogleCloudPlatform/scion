@@ -31,12 +31,15 @@ import (
 // The failed report after running_observed (upstream ptone/scion#5368, in
 // failedReportEndUpdate via applyLaunchReportEnded) keeps LaunchReport
 // evidence only: it gets no LaunchEnd hint, so it never derives
-// launch_failed, and the phase rules decide by first match (P7a, P5, P5b,
-// P1). The active pre-running failure, now written by the same helper via
+// launch_failed, and the phase rules decide by first match. A launch
+// report is always run-correlated evidence (E(iii)), so for running ->
+// error: with no open segment P7a fires (stopped(error, start_unobserved));
+// with an open segment, P5 (stopped(error)); P5b, which needs no evidence,
+// is unreachable here; an error -> error write is P1 (no transition). A
+// start-kind launch ends in its stopped failure phase (P7 or P7a). The
+// active pre-running failure, now written by the same helper via
 // applyLaunchReportPreRunning, keeps its LaunchEnd hint and launch_failed
-// (TestLifecycleStore2_LaunchReports). P7a and P5b need a before row
-// without an open segment, which a running_observed start cannot give
-// here; the rule table pins them (derive_table_test.go).
+// (TestLifecycleStore2_LaunchReports).
 
 // failedAfterRunningObserved returns a failed report for the row's
 // current run, which applyLaunchReportEnded applies to a launch that
@@ -96,6 +99,36 @@ func TestLifecycleStore4223_FailedAfterRunningObservedOpenSegment(t *testing.T) 
 	require.Len(t, added, 1, lcFull(added))
 	assert.Equal(t, tc.TransitionStopped, added[0].Transition, lcFull(added))
 	assert.Equal(t, tc.StopKindError, added[0].StopKind, lcFull(added))
+	requireNoTransition(t, added, tc.TransitionLaunchFailed)
+}
+
+// TestLifecycleStore4223_FailedAfterRunningObservedNoSegment: a plain
+// running write (no evidence, P2) ends the launch running_observed without
+// opening a segment, so the failed report's running -> error write, which
+// is launch-report evidence, derives P7a: stopped(error, start_unobserved),
+// and no launch_failed.
+func TestLifecycleStore4223_FailedAfterRunningObservedNoSegment(t *testing.T) {
+	f, a := newS2Fixture(t)
+	ctx := context.Background()
+	f.mint(a.ID, "R1")
+	launchID, err := f.cs.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, time.Hour)
+	require.NoError(t, err)
+	f.status(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"})
+	got, err := f.cs.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.LaunchEndReasonRunningObserved, got.LaunchEndReason)
+	before := f.events(a.ID)
+	requireNoTransition(t, before, tc.TransitionStarted)
+
+	answer, _, err := f.cs.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, failedAfterRunningObserved(launchID, "R1"))
+	require.NoError(t, err)
+	require.Equal(t, store.LaunchReportResultApplied, answer.Result)
+
+	added := f.events(a.ID)[len(before):]
+	require.Len(t, added, 1, lcFull(added))
+	assert.Equal(t, tc.TransitionStopped, added[0].Transition, lcFull(added))
+	assert.Equal(t, "error", added[0].StopKind, lcFull(added))
+	assert.Equal(t, tc.CauseStartUnobserved, added[0].Cause, lcFull(added))
 	requireNoTransition(t, added, tc.TransitionLaunchFailed)
 }
 

@@ -95,7 +95,7 @@ var agentWriterClasses = map[string]writerEntry{
 	"launch_report.go:AgentStore.applyLaunchReportActive":                                                                    {classObserved, "configured, started, launch_failed (observed in ApplyLaunchReport)"},
 	"launch_report.go:AgentStore.applyLaunchReportEnded":                                                                     {classObserved, "started (late report; observed in ApplyLaunchReport)"},
 	"launch_report.go:failedReportEndUpdate via launch_report.go:AgentStore.applyLaunchReportPreRunning":                     {classObserved, "launch_failed(failed): active pre-running failure, LaunchEnd hint kept (#4223 refactor; observed in ApplyLaunchReport)"},
-	"launch_report.go:failedReportEndUpdate via launch_report.go:AgentStore.applyLaunchReportEnded":                          {classObserved, "failed report after running_observed (#4223): LaunchReport evidence only, no LaunchEnd hint; P7a, P5, P5b or P1 (observed in ApplyLaunchReport)"},
+	"launch_report.go:failedReportEndUpdate via launch_report.go:AgentStore.applyLaunchReportEnded":                          {classObserved, "failed report after running_observed (#4223): LaunchReport evidence only, no LaunchEnd hint; P7a, P5 or P1, never P5b (observed in ApplyLaunchReport)"},
 	"launch_reaper.go:reapRow":                                {classObserved, "launch_failed (per savepoint)"},
 	"start_claim_store.go:AgentStore.ClaimAgentReincarnation": {classObserved, "records the reincarnation base run"},
 	"agent_deletion_store.go:applyAgentDeletionFields via agent_deletion_store.go:AgentStore.updateAgentDeletionOnce": {classObserved, "delete claim and rollback (phase, deleted_at)"},
