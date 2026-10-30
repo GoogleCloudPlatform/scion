@@ -1726,6 +1726,9 @@ type V1ServerHubPortProxyConfig struct {
 	// headers, the WebSocket handshake included (e.g. "60s"; default
 	// "60s", between "5s" and "10m"). The body is not time-limited.
 	ResponseHeaderTimeout string `json:"response_header_timeout,omitempty" yaml:"response_header_timeout,omitempty" koanf:"response_header_timeout"`
+	// ViewTTL is how long a page view link stays valid (experiment
+	// hub.port_view; e.g. "2h"; default "2h", between "15m" and "24h").
+	ViewTTL string `json:"view_ttl,omitempty" yaml:"view_ttl,omitempty" koanf:"view_ttl"`
 }
 
 // V1ServerHubConduitConfig holds the conduit settings of the hub server
@@ -4317,7 +4320,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			}
 		}
 		if p := v1.Hub.PortProxy; p != nil {
-			gc.Hub.PortProxy = HubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
+			gc.Hub.PortProxy = HubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout, ViewTTL: p.ViewTTL}
 		}
 		if o := v1.Hub.Observability; o != nil {
 			gc.Hub.Observability = HubObservabilityConfig{
@@ -4716,7 +4719,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		}
 	}
 	if p := gc.Hub.PortProxy; !p.IsZero() {
-		v1Hub.PortProxy = &V1ServerHubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
+		v1Hub.PortProxy = &V1ServerHubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout, ViewTTL: p.ViewTTL}
 	}
 	if o := gc.Hub.Observability; !o.IsZero() {
 		v1Hub.Observability = &V1ServerHubObservabilityConfig{

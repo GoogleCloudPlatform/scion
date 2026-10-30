@@ -96,6 +96,42 @@ func TestProxyWriteGuard_PortViewExempt(t *testing.T) {
 	}
 }
 
+// TestProxyWriteGuard_PortViewExemptOnlyForPageViewRequests: only a request
+// the page view route accepts (isPortViewRequest) skips the guard. A path that
+// only decodes to the page view prefix, or is not clean, is checked like any
+// other state-changing request.
+func TestProxyWriteGuard_PortViewExemptOnlyForPageViewRequests(t *testing.T) {
+	cross := map[string]string{"Origin": "null", "Sec-Fetch-Site": "cross-site", "Content-Type": "text/plain"}
+	for _, path := range []string{
+		"/api/v1/portview%2FCAP/api/ping",
+		"/api/v1/portview/../projects",
+		"/api/v1/portview/CAP/../../projects",
+		"/api/v1/portview//api/ping",
+		"/api/v1/portview/CAP%2F/api/ping",
+		"/api/v1/portview/CA%25P/api/ping",
+		// Encoded separators and dots in either case, where the decoded
+		// path is clean, so only the escaped form decides.
+		"/api/v1/portview/CAP%2f/api/ping",
+		"/api/v1/portview/CAP/app%2ejs",
+		"/api/v1/portview/CAP/app%2Ejs",
+		"/api/v1/portview/CAP/a%5cb",
+		"/api/v1/portview/CAP/a%5Cb",
+	} {
+		code, reached := doGuardBody(proxyAuthMode, http.MethodPost, path, "hello", cross)
+		if reached || code != http.StatusForbidden {
+			t.Errorf("%s: want 403 and not reached, got code=%d reached=%v", path, code, reached)
+		}
+	}
+	// A page view CORS preflight passes, as does any other OPTIONS request.
+	code, reached := doGuard(proxyAuthMode, http.MethodOptions, "/api/v1/portview/CAP/api/ping", map[string]string{
+		"Origin": "null", "Sec-Fetch-Site": "cross-site",
+		"Access-Control-Request-Method": http.MethodPost, "Access-Control-Request-Headers": "content-type",
+	})
+	if !reached || code != http.StatusOK {
+		t.Errorf("page view preflight: want pass-through, got code=%d reached=%v", code, reached)
+	}
+}
+
 func TestProxyWriteGuard_CrossSiteRefused(t *testing.T) {
 	cases := []struct {
 		name    string

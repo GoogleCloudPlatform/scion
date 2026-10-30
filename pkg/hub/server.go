@@ -56,6 +56,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/portview"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/maintenance"
 	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/GoogleCloudPlatform/scion/pkg/lifecyclehooks"
@@ -212,6 +213,11 @@ type ServerConfig struct {
 	// The range (5s to 10m) is enforced at startup by config validation.
 	// On timeout the proxy answers 504.
 	PortProxyResponseHeaderTimeout time.Duration
+	// PortViewTTL is the lifetime of a page view link minted when a user
+	// opens an exposed port from the hub (server.hub.port_proxy.view_ttl,
+	// experiment hub.port_view; 0 = 2h). The range (15m to 24h) is
+	// enforced at startup by config validation.
+	PortViewTTL time.Duration
 	// AuthMode is the configured human auth mode (server.auth.mode). "proxy"
 	// is the only value the code checks: the auth handlers then list no
 	// OAuth providers and treat logout as a no-op. Any other value,
@@ -1843,6 +1849,12 @@ type Server struct {
 	downloadKeys           capabilityKeys
 	artifactViewKeys       capabilityKeys
 	attachmentDeliveryKeys capabilityKeys
+	// portViewKeys sign page view capabilities (port_view.go): a
+	// signing-ring purpose of its own in keyring mode, one fixed key of its
+	// own otherwise; separate from every other key.
+	portViewKeys capabilityKeys
+	// portViewClock replaces time.Now on the page view route (tests only).
+	portViewClock func() time.Time
 
 	// chatSpacesBatch sets the GET /chat/spaces rollup batch sizes; the
 	// zero value uses the defaults (handlers_chat_v2.go).
@@ -2839,6 +2851,11 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 
 	// Initialize the artifact view capability key (pkg/artifacts RouteView).
 	if err := srv.initArtifactViewKey(ctx); err != nil {
+		return nil, err
+	}
+
+	// Initialize the page view capability key (port_view.go).
+	if err := srv.initPortViewKey(ctx); err != nil {
 		return nil, err
 	}
 
@@ -7405,6 +7422,9 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("/api/v1/artifacts/", s.artifactsGuard("/api/v1/artifacts/", artifactsHandler))
 	s.mux.Handle("/api/v1/artifacts/shared/", s.artifactsGuard("/api/v1/artifacts/shared/", artifactsHandler))
 	s.mux.Handle("/api/v1/artifacts/view/", s.artifactsGuard("/api/v1/artifacts/view/", artifactsHandler))
+	// Page view of an agent's exposed port (hub.port_view experiment,
+	// checked per request in the handler).
+	s.mux.HandleFunc("/api/v1/portview/", s.guarded("/api/v1/portview/", s.handlePortView))
 
 	s.mux.HandleFunc("/api/v1/skills", s.guarded("/api/v1/skills", s.handleSkills))
 	s.mux.HandleFunc("/api/v1/skills/", s.guarded("/api/v1/skills/", s.handleSkillByID))
@@ -7823,6 +7843,12 @@ func traceableRequest(r *http.Request) bool {
 // corsMiddleware adds CORS headers.
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The page view route answers its own preflights and sets its own
+		// CORS headers (handlePortView).
+		if strings.HasPrefix(r.URL.Path, portview.Route) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		origin := r.Header.Get("Origin")
 		if origin == "" {
 			next.ServeHTTP(w, r)

@@ -32,6 +32,25 @@ const STATE_ENV = 'E2E_PP_STATE_DIR';
 export const TRANSPORTS = ['conduit', 'legacy'] as const;
 export type Transport = (typeof TRANSPORTS)[number];
 
+/**
+ * Set by playwright.view.config.ts: the page view journeys (3 and 4, with
+ * hub.port_view on). Global setup then starts the hub with the experiment
+ * on, serves the port from the conduit agent only and creates the extra
+ * identities those journeys use.
+ */
+export const VIEW_ENV = 'E2E_PP_VIEW';
+
+/** Whether this run is the page view suite (playwright.view.config.ts). */
+export function viewMode(): boolean {
+  return process.env[VIEW_ENV] === '1';
+}
+
+/** A signed-in test identity: its email and its session as a storage state file (0600). */
+export interface SuiteIdentity {
+  email: string;
+  storageFile: string;
+}
+
 /** Text single.html writes to #probe; the helper's readiness probe looks for it too. */
 export const SINGLE_PROBE_TEXT = 'single-ok';
 
@@ -59,7 +78,15 @@ export interface SuiteState {
    * Playwright storage state (0600, under the state dir). Unset until
    * setup has redeemed it.
    */
-  member?: { email: string; storageFile: string };
+  member?: SuiteIdentity;
+  /**
+   * Page view suite only. peer: project-admin of the fixture project, a
+   * second user who may open its ports. outsider: a signed-in user with no
+   * role in the project. In that suite the member is project-owner, so it
+   * can remove the peer's role.
+   */
+  peer?: SuiteIdentity;
+  outsider?: SuiteIdentity;
 }
 
 /** Creates the private state dir and publishes its path. */
