@@ -153,12 +153,14 @@ func TestLifecycleStore4223_FailedAfterRunningObservedAlreadyError(t *testing.T)
 	require.NoError(t, err)
 	assert.Equal(t, store.LaunchEndReasonFailed, got.LaunchEndReason)
 
-	// P1: the failed report's write (failedReportEndUpdate) changes only the
-	// phase (error -> error), the message and launch_* columns: no snapshot
-	// field (LifecycleMetadata), so neither digest moves and configured or
-	// metadata_changed cannot fire; no run state or generation (the segment
-	// was already closed by the error write), and no LaunchEnd hint, since
-	// the launch had ended running_observed. So no event may be added.
+	// P1: the failed report's write (failedReportEndUpdate and its save)
+	// changes no LifecycleMetadata snapshot or fingerprint field, so neither
+	// digest moves and configured or metadata_changed cannot fire (it writes,
+	// for example, the phase error -> error, the message, launch_* columns
+	// and state_version). It changes no run state or generation (the segment
+	// was already closed by the error write), and it carries no LaunchEnd
+	// hint, since the launch had ended running_observed. So no event may be
+	// added.
 	added := f.events(a.ID)[len(before):]
 	require.Empty(t, added, lcFull(added))
 }
