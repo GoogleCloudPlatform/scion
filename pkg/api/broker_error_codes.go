@@ -87,6 +87,13 @@ const (
 	// (ptone/scion#4668).
 	BrokerErrCodeBrokerDraining = "broker_draining"
 
+	// BrokerErrCodeStorageInvalid marks an agent create, start or restart
+	// refused because the broker's project storage settings are invalid
+	// (422). The broker started without storage; the operator must fix
+	// server.project_storage on the broker host and restart it. Stop and
+	// delete keep working.
+	BrokerErrCodeStorageInvalid = "storage_invalid"
+
 	// BrokerErrCodeLocalWorktreeRefused marks a worktree-per-agent dispatch
 	// for a linked checkout that the co-located broker refused because the
 	// checkout failed verification (409). Nothing was created. The hub

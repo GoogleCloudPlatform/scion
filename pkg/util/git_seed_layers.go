@@ -65,7 +65,7 @@ func CheckSeedRepoConfigLayers(ctx context.Context, commonDir, adminName string)
 // passed in, so a test can make the parsed set differ from what git reads and
 // see the cross-check refuse.
 func checkSeedRepoConfigLayers(ctx context.Context, commonDir, adminName string, read func(path, label string) ([]gitConfigVar, error)) error {
-	if err := refuseRootCommonDirRedirect(filepath.Dir(commonDir), true); err != nil {
+	if err := refuseRootCommonDirRedirect(filepath.Dir(commonDir), true, AudienceRemote); err != nil {
 		return err
 	}
 	type layer struct {
@@ -93,7 +93,7 @@ func checkSeedRepoConfigLayers(ctx context.Context, commonDir, adminName string,
 		}
 		parsed = append(parsed, vars...)
 	}
-	return crossCheckAgainstGit(ctx, commonDir, seedGitEnv(gitDir, commonDir), parsed, seedLayerCombined, true)
+	return crossCheckAgainstGit(ctx, commonDir, seedGitEnv(gitDir, commonDir), parsed, seedLayerCombined, true, AudienceRemote)
 }
 
 // readSeedConfigLayer reads one config file as data (no symlink followed, no

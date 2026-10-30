@@ -15,11 +15,14 @@
 package util
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -821,11 +824,12 @@ func TestPrepareSeededGitConfig_ParseErrorFailsClosed(t *testing.T) {
 
 // Guard: newRepoConfigRefusedError is the only place a RepoConfigRefusedError
 // is built, anywhere in the module's non-test code, so every refusal key is
-// redacted. It flags, outside that constructor:
+// redacted and every refusal carries the audience it was built for. It flags,
+// outside that constructor:
 //   - a composite literal of the type, in a function or at package level;
 //   - new(RepoConfigRefusedError);
-//   - an assignment to the Key or Layer field of a variable declared with the
-//     type (or bound from the constructor).
+//   - an assignment to the Key, Layer or Audience field of a variable declared
+//     with the type (or bound from the constructor).
 //
 // Without type checking, the Key check sees only variables whose declaration
 // names the type; the literal and new() checks see every construction.
@@ -925,7 +929,7 @@ func TestRepoConfigRefusedError_SingleConstructor(t *testing.T) {
 							}
 						}
 					}
-					if sel, ok := lhs.(*ast.SelectorExpr); ok && (sel.Sel.Name == "Key" || sel.Sel.Name == "Layer") {
+					if sel, ok := lhs.(*ast.SelectorExpr); ok && (sel.Sel.Name == "Key" || sel.Sel.Name == "Layer" || sel.Sel.Name == "Audience") {
 						if id, ok := sel.X.(*ast.Ident); ok && typed[id.Name] {
 							t.Errorf("%s: assignment to RepoConfigRefusedError.%s outside newRepoConfigRefusedError", fset.Position(sel.Pos()), sel.Sel.Name)
 						}
@@ -995,7 +999,7 @@ func TestCrossCheckAgainstGit_RefusalRedactsSubsectionUserinfo(t *testing.T) {
 	env := append(HostGitEnv(os.Environ()), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1")
 	// Parsed set without the url key: git reports it, so the cross-check refuses.
 	parsed := []gitConfigVar{{Section: "core", Name: "repositoryformatversion", Value: "0"}}
-	err := crossCheckAgainstGit(context.Background(), dir, env, parsed, "", false)
+	err := crossCheckAgainstGit(context.Background(), dir, env, parsed, "", false, AudienceLocal)
 	var refused *RepoConfigRefusedError
 	if !errors.As(err, &refused) {
 		t.Fatalf("error = %v, want *RepoConfigRefusedError", err)
@@ -1005,5 +1009,137 @@ func TestCrossCheckAgainstGit_RefusalRedactsSubsectionUserinfo(t *testing.T) {
 	}
 	if refused.Key != "url.https://h.example/<redacted>.insteadof" {
 		t.Errorf("refused key = %q, want url.https://h.example/<redacted>.insteadof", refused.Key)
+	}
+}
+
+// refusalSinks renders err through every fmt verb and both slog handlers, as
+// a refusal reaches logs and messages.
+func refusalSinks(t *testing.T, err error) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x"} {
+		out[verb] = fmt.Sprintf(verb, err)
+		out["wrapped "+verb] = fmt.Sprintf(verb, fmt.Errorf("start: %w", err))
+	}
+	var refused *RepoConfigRefusedError
+	if errors.As(err, &refused) {
+		out["deref %#v"] = fmt.Sprintf("%#v", *refused)
+		out["deref %+v"] = fmt.Sprintf("%+v", *refused)
+	}
+	for name, h := range map[string]func(*bytes.Buffer) slog.Handler{
+		"text": func(b *bytes.Buffer) slog.Handler { return slog.NewTextHandler(b, nil) },
+		"json": func(b *bytes.Buffer) slog.Handler { return slog.NewJSONHandler(b, nil) },
+	} {
+		var buf bytes.Buffer
+		logger := slog.New(h(&buf))
+		logger.Error("refused", "error", err)
+		if refused != nil {
+			logger.Error("refused", slog.Any("refusal", refused), slog.Any("copy", *refused))
+		}
+		out["slog "+name] = buf.String()
+	}
+	return out
+}
+
+// D-2: every fmt verb and every slog handler prints Error(), never the
+// fields, for a refusal of either audience and a seeded one.
+func TestRepoConfigRefusedError_FormatAndLogValue(t *testing.T) {
+	const marker = "dirmarker-k4w8"
+	for _, tc := range []struct {
+		name string
+		err  *RepoConfigRefusedError
+	}{
+		{"remote", newRepoConfigRefusedError("/srv/"+marker+"/repo", "", "core.sshcommand", "valmarker-z1", "x", false, AudienceRemote)},
+		{"seeded", newRepoConfigRefusedError("", "", "core.sshcommand", "valmarker-z1", "x", true, AudienceRemote)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := tc.err.Error()
+			if strings.Contains(want, marker) || strings.Contains(want, "valmarker-z1") {
+				t.Fatalf("Error() prints the directory or the value: %q", want)
+			}
+			for sink, got := range refusalSinks(t, tc.err) {
+				if strings.Contains(got, marker) || strings.Contains(got, "valmarker-z1") || strings.Contains(got, "Dir") {
+					t.Errorf("%s prints a field: %q", sink, got)
+				}
+			}
+			for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q"} {
+				if got := fmt.Sprintf(verb, tc.err); got != want {
+					t.Errorf("Sprintf(%s) = %q, want exactly Error() %q", verb, got, want)
+				}
+			}
+			v := slog.AnyValue(tc.err)
+			if v.Kind() != slog.KindLogValuer {
+				t.Fatalf("slog kind = %v, want LogValuer", v.Kind())
+			}
+			if got := v.Resolve().String(); got != want {
+				t.Errorf("LogValue = %q, want Error() %q", got, want)
+			}
+		})
+	}
+	var nilRefusal *RepoConfigRefusedError
+	if got := fmt.Sprintf("%+v", nilRefusal); got != "<nil>" {
+		t.Errorf("nil refusal formats as %q", got)
+	}
+}
+
+// The audience reaches the refusal through the constructor: AudienceRemote
+// names no directory; AudienceLocal keeps the host wording byte for byte.
+func TestRepoConfigRefusedError_Audience(t *testing.T) {
+	local := newRepoConfigRefusedError("/r", "", "core.sshCommand", "v", "x", false, AudienceLocal).Error()
+	if want := "git in /r refused: repository config sets core.sshCommand, which is x; remove it from the repository's .git/config (or config.worktree)"; local != want {
+		t.Errorf("local wording = %q, want %q", local, want)
+	}
+	remote := newRepoConfigRefusedError("/r", "", "core.sshCommand", "v", "x", false, AudienceRemote).Error()
+	if want := "git in the project repository refused: repository config sets core.sshCommand, which is x; remove it from the repository's .git/config (or config.worktree)"; remote != want {
+		t.Errorf("remote wording = %q, want %q", remote, want)
+	}
+}
+
+// D-1: a seeded cross-check refusal carries no directory, though git ran in
+// one; every sink of it is free of the path.
+func TestCrossCheckAgainstGit_SeededRefusalHasNoDir(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	dir := filepath.Join(t.TempDir(), "seedmarker-d1q9")
+	for _, d := range []string{"objects", "refs"} {
+		if err := os.MkdirAll(filepath.Join(dir, ".git", d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	body := "[core]\n\trepositoryformatversion = 0\n[user]\n\tname = n\n"
+	if err := os.WriteFile(filepath.Join(dir, ".git", "config"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env := append(HostGitEnv(os.Environ()), "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1")
+	// The parsed set lacks user.name, which git reports: the cross-check refuses.
+	parsed := []gitConfigVar{{Section: "core", Name: "repositoryformatversion", Value: "0"}}
+	for _, seeded := range []bool{true, false} {
+		err := crossCheckAgainstGit(context.Background(), dir, env, parsed, "", seeded, AudienceLocal)
+		var refused *RepoConfigRefusedError
+		if !errors.As(err, &refused) {
+			t.Fatalf("seeded=%v: error = %v, want *RepoConfigRefusedError", seeded, err)
+		}
+		if !seeded {
+			// The host form still names its directory for the local CLI.
+			if refused.Dir != dir {
+				t.Errorf("host cross-check refusal Dir = %q, want %q", refused.Dir, dir)
+			}
+			continue
+		}
+		if refused.Dir != "" {
+			t.Errorf("seeded cross-check refusal carries Dir %q", refused.Dir)
+		}
+		if refused.Audience != AudienceRemote {
+			t.Errorf("seeded cross-check refusal audience = %v, want AudienceRemote", refused.Audience)
+		}
+		for sink, got := range refusalSinks(t, err) {
+			if strings.Contains(got, "seedmarker-d1q9") {
+				t.Errorf("%s prints the directory: %q", sink, got)
+			}
+		}
 	}
 }

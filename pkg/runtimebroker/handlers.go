@@ -129,14 +129,24 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		}
 	}
 
-	// The project storage share on a shared Layout: not visible degrades
-	// the status (readiness is unaffected; stop, delete and status keep
-	// working). The value names configuration fields, never the path.
-	if v, notVisible, ok := s.shareHealthValue(); ok {
-		checks[shareHealthCheck] = v
-		if notVisible {
-			status = degradeHealthStatus(status)
-		}
+	// project_storage: ONE evaluation site for both conditions that report on
+	// this key. Invalid project storage settings win the value
+	// ("unavailable": the broker refuses every agent start; the fields at
+	// fault are in the startup log and in each refusal). Otherwise the share
+	// check on a shared Layout sets it: healthy, or share not visible, whose
+	// value names configuration fields, never the path. The status degrades
+	// when either condition holds (the worse of the two); readiness is
+	// unaffected, and stop, delete and status keep working.
+	storageInvalid := s.storageInvalid()
+	shareValue, shareNotVisible, shareChecked := s.shareHealthValue()
+	switch {
+	case storageInvalid:
+		checks[healthCheckProjectStorage] = api.BrokerHealthUnavailable
+	case shareChecked:
+		checks[shareHealthCheck] = shareValue
+	}
+	if storageInvalid || shareNotVisible {
+		status = degradeHealthStatus(status)
 	}
 
 	if s.storageOverridesError() != nil {
@@ -916,6 +926,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// Refused while the broker drains for shutdown, before the dispatch
 	// attempt, the registration and any file work (design wave 3 §1 C-e).
 	if s.refuseIfDraining(w, "create", req.ID) {
+		return
+	}
+	// Refused while the broker has no usable project storage settings,
+	// before any tracker, registration or file work.
+	if s.refuseIfStorageInvalid(w, "create", req.ID) {
 		return
 	}
 
@@ -2007,7 +2022,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		case config.IsAgentStateConflict(err):
 			markAttemptFailed(http.StatusConflict, "failed to create agent")
 		case errors.Is(err, agent.ErrProjectShareNotMounted):
-			markAttemptFailed(http.StatusServiceUnavailable, projectShareNotMountedText())
+			markAttemptFailed(http.StatusServiceUnavailable, projectShareNotMountedText(err))
 		default:
 			markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
 		}
@@ -2106,7 +2121,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			// The start found no project storage share on this broker
 			// (the Kubernetes workspace leaves). err names the mount
 			// point and is logged above; the body names the fields.
-			writeError(w, http.StatusServiceUnavailable, ErrCodeProjectStorageUnavailable, projectShareNotMountedText(), nil)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeProjectStorageUnavailable, projectShareNotMountedText(err), nil)
 		default:
 			writeCreateRuntimeError(w, err)
 		}
@@ -3440,6 +3455,11 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	if s.refuseIfDraining(w, "start", id) {
 		return
 	}
+	// Refused while the broker has no usable project storage settings,
+	// before any tracker, registration or file work.
+	if s.refuseIfStorageInvalid(w, "start", id) {
+		return
+	}
 	// An async start's launch deadline is measured from here (design
 	// §3.8.2 step 4), as a create's is from its receipt.
 	startReceivedAt := time.Now()
@@ -4002,7 +4022,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to start agent: "+err.Error(), details)
 		case errors.Is(err, agent.ErrProjectShareNotMounted):
 			// As on create: err names the mount point and is logged above.
-			writeError(w, http.StatusServiceUnavailable, ErrCodeProjectStorageUnavailable, projectShareNotMountedText(), details)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeProjectStorageUnavailable, projectShareNotMountedText(err), details)
 		default:
 			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, runtimeOpError("start agent", err).Error(), details)
 		}
@@ -4788,6 +4808,11 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	if s.refuseIfDraining(w, "restart", id) {
 		return
 	}
+	// Refused while the broker has no usable project storage settings,
+	// before any tracker, registration or file work.
+	if s.refuseIfStorageInvalid(w, "restart", id) {
+		return
+	}
 	// Tracked until the start leg, including Run's deferred cleanup, has
 	// returned, with its run from the runId query parameter as on start.
 	queryRunID := r.URL.Query().Get("runId")
@@ -5200,7 +5225,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		}
 		if errors.Is(err, agent.ErrProjectShareNotMounted) {
 			// As on create: err names the mount point and is logged above.
-			writeError(w, http.StatusServiceUnavailable, ErrCodeProjectStorageUnavailable, projectShareNotMountedText(), details)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeProjectStorageUnavailable, projectShareNotMountedText(err), details)
 			return
 		}
 		if errors.Is(err, agent.ErrContainerNameInUse) {

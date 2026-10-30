@@ -23,7 +23,12 @@
  * - A1: submitting the create form answers 201 at once with
  *   agent.launch.active true, the browser opens the agent page, and the
  *   browser sends no POST .../agents/{id}/start (read from the browser's
- *   own request log).
+ *   own request log). A1 is also the guard that the journey runs with
+ *   async create on, on both targets: the local hub's setup sets the
+ *   experiment and reads it back, but a remote hub (E2E_TARGET_URL) is
+ *   only checked here, so a remote run against a hub with
+ *   hub.async_agent_launch off (or a broker without async launch) fails A1
+ *   with a message saying so, never skips.
  * - A2 + A3 (needs a real launch): without a reload, the agent page shows
  *   the launch banner and then the agent reaches running; the Status tab
  *   phases only move forward; the SSE status events carry launch
@@ -365,8 +370,14 @@ async function expectAsyncSubmit(tracked: TrackedPage, submit: SubmitResult): Pr
   const formError = await tracked.page.locator(SELECTORS.createError).allInnerTexts();
   expect(submit.status, `POST create status (form error: ${formError.join(' | ')})`).toBe(201);
   expect(submit.agentId, 'agent id in the create response').toBeTruthy();
-  expect(submit.launch, 'agent.launch in the create response').toBeDefined();
-  expect(submit.launch?.active, 'agent.launch.active in the create response').toBe(true);
+  // The ON-path guard (see the header): a synchronous answer means the
+  // target hub runs with async create off, or its broker lacks it.
+  const syncAnswer =
+    'the create was answered synchronously: the target hub has the hub.async_agent_launch ' +
+    'experiment off, or its runtime broker does not support async launch';
+  const inResponse = (field: string): string => `${field} in the create response (${syncAnswer})`;
+  expect(submit.launch, inResponse('agent.launch')).toBeDefined();
+  expect(submit.launch?.active, inResponse('agent.launch.active')).toBe(true);
   expect(submit.launch?.kind).toBe('create');
   await expect(tracked.page).toHaveURL(new RegExp(`/agents/${submit.agentId}$`));
   submit.landedAt = Date.now();

@@ -179,15 +179,16 @@ var SecurityMutationSymbols = map[string]string{
 	"UpdateEncryptionMigration": "update-resource",
 
 	// Broker secret operations
-	"CreateBrokerSecret":     "create-resource",
-	"UpdateBrokerSecret":     "update-resource",
-	"DeleteBrokerSecret":     "delete-resource",
-	"CreateJoinToken":        "mint-credential",
-	"UpsertJoinToken":        "mint-credential",
-	"DeleteJoinToken":        "delete-resource",
-	"ConsumeJoinToken":       "delete-resource",
-	"DeleteExpiredJoinToken": "delete-resource",
-	"CleanExpiredJoinTokens": "delete-resource",
+	"CreateBrokerSecret":            "create-resource",
+	"UpdateBrokerSecret":            "update-resource",
+	"DeleteBrokerSecret":            "delete-resource",
+	"CreateJoinToken":               "mint-credential",
+	"UpsertJoinToken":               "mint-credential",
+	"DeleteJoinToken":               "delete-resource",
+	"ConsumeJoinToken":              "delete-resource",
+	"DeleteExpiredJoinToken":        "delete-resource",
+	"CleanExpiredJoinTokens":        "delete-resource",
+	"DeleteOrphanBrokerCredentials": "delete-resource",
 
 	// Invite code operations
 	"CreateInviteCode": "mint-credential",
@@ -285,6 +286,11 @@ var EntryPointExemptions = []EntryPointExemption{
 	// read access was checked; the artifact service verifies the
 	// capability on every request and never uses a session here.
 	{Pattern: "/api/v1/artifacts/view/", Kind: ExemptionPublicEndpoint, Reason: "Artifact view capability (minted on POST /api/v1/artifacts/{id}/versions/{seq}/view after artifact.read; HMAC over artifact, version and expiry, verified by the artifact service on every GET/HEAD), experiment-gated", Owner: "route_metadata.go"},
+	// Port page view (hub.port_view experiment): an agent's exposed port
+	// served on the short-lived page link in the path; the handler checks
+	// the link and the bound user's port access on every request and never
+	// authorizes by a session here.
+	{Pattern: "/api/v1/portview/", Kind: ExemptionPublicEndpoint, Reason: "Port page view link (created by the port link for a signed-in user after agent.port_access; checked on every request together with that user's current agent.port_access on the agent), experiment-gated", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/telegram/link", Kind: ExemptionInternalOnly, Reason: "Chat account link registration, broker-authenticated", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/telegram/link/status", Kind: ExemptionInternalOnly, Reason: "Chat account link status, broker-authenticated", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/discord/link", Kind: ExemptionInternalOnly, Reason: "Chat account link registration, broker-authenticated", Owner: "route_metadata.go"},
@@ -758,18 +764,13 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/brokerauth.go", Function: "CompleteBrokerJoin", Symbol: "CreateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker join completion, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "CompleteBrokerJoin", Symbol: "DeleteBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker join completion, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "CompleteBrokerJoin", Symbol: "ConsumeJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker join completion: single-use join token consumed in the join transaction, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
+	{File: "pkg/hub/broker_orphan_credentials.go", Function: "sweepOrphanBrokerCredentials", Symbol: "DeleteOrphanBrokerCredentials", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Startup removal of broker secrets and join tokens that have no broker row, no caller", Scope: "pkg/hub/broker_orphan_credentials.go"}},
 	{File: "pkg/hub/server.go", Function: "brokerJoinTokenCleanupHandler", Symbol: "CleanExpiredJoinTokens", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Scheduled removal of expired broker join tokens, no caller", Scope: "pkg/hub/server.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "classifyUnconsumedJoinToken", Symbol: "DeleteExpiredJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker join completion, expired join token cleanup, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "issueJoinToken", Symbol: "UpsertJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker registration, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "GenerateAndStoreSecret", Symbol: "CreateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker secret generation, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "MintSecretIfAbsent", Symbol: "CreateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "First broker secret on the deprecated embedded registration path, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
 	{File: "pkg/hub/brokerauth.go", Function: "RotateBrokerSecret", Symbol: "UpdateBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker secret rotation, broker-HMAC auth infrastructure", Scope: "pkg/hub/brokerauth.go"}},
-
-	// -----------------------------------------------------------------------
-	// pkg/hub/handlers_runtime_brokers.go — broker deregistration cleanup
-	// -----------------------------------------------------------------------
-	{File: "pkg/hub/handlers_runtime_brokers.go", Function: "deleteRuntimeBroker", Symbol: "DeleteBrokerSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker deregistration cleanup: delete HMAC secret for removed broker", Scope: "pkg/hub/handlers_runtime_brokers.go"}},
-	{File: "pkg/hub/handlers_runtime_brokers.go", Function: "deleteRuntimeBroker", Symbol: "DeleteJoinToken", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Broker deregistration cleanup: delete join token for removed broker", Scope: "pkg/hub/handlers_runtime_brokers.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/brokerclient.go / controlchannel_client.go / httpdispatcher.go

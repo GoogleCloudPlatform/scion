@@ -32,6 +32,12 @@
  * 6. Redeems the member's web-login code once and saves the session as a
  *    storage state (0600, state dir) that every browser context loads.
  *
+ * The page view suite (playwright.view.config.ts, E2E_PP_VIEW=1) also turns
+ * hub.port_view on from process start, serves the port from the conduit
+ * agent only, makes the member project-owner, and adds a peer
+ * (project-admin) and an outsider (no project role), each signed in the
+ * same way.
+ *
  * The hub binary (make build), the web assets (npm run build) and the
  * helper binary must exist with E2E_PREBUILT=1; otherwise they are built
  * here. E2E_FAKEAGENT_BINARY overrides the helper path.
@@ -52,6 +58,7 @@ import {
   SINGLE_PROBE_TEXT,
   type SuiteAgent,
   TRANSPORTS,
+  viewMode,
   writeSuiteState,
 } from './state.js';
 
@@ -148,7 +155,7 @@ async function setUp(dir: string): Promise<void> {
     testIdentities: true,
     build,
     stateFile: hubStateFile(),
-    startupExperiments: ['hub.conduit'],
+    startupExperiments: viewMode() ? ['hub.conduit', 'hub.port_view'] : ['hub.conduit'],
   });
   console.info(`[setup] Port proxy hub ${String(hub.hubId)} at ${hub.baseURL}`);
 
@@ -191,7 +198,8 @@ async function setUp(dir: string): Promise<void> {
       '-ready-file',
       helperReady,
       '-transports',
-      TRANSPORTS.join(','),
+      // The page view journeys use the conduit transport only (ptone/scion#5569).
+      viewMode() ? 'conduit' : TRANSPORTS.join(','),
       '-probe-path',
       'single.html',
       '-probe-text',
@@ -213,9 +221,22 @@ async function setUp(dir: string): Promise<void> {
     `[setup] Agents ready on port ${port}: ${ready.agents.map((a) => `${a.name} (${a.transport})`).join(', ')}`
   );
 
-  // The member identity, its web-login code and its project role need the
+  // The identities, their web-login codes and their project roles need the
   // dev token, so they are created before the restart below.
-  const member = await createMember(hub, dir, ready.projectId);
+  const view = viewMode();
+  const member = await createIdentity(
+    hub,
+    dir,
+    ready.projectId,
+    'member',
+    view ? 'project-owner' : 'project-admin'
+  );
+  const peer = view
+    ? await createIdentity(hub, dir, ready.projectId, 'peer', 'project-admin')
+    : undefined;
+  const outsider = view
+    ? await createIdentity(hub, dir, ready.projectId, 'outsider', null)
+    : undefined;
 
   // The journeys run against a hub without development sign-in, as in
   // production: a request without credentials is not signed in. The
@@ -225,13 +246,22 @@ async function setUp(dir: string): Promise<void> {
   // Redeem the single-use web-login code once, here, and keep the session
   // as a storage state, so a retried beforeAll reuses the session instead
   // of a code that is already spent.
-  const storageFile = await redeemToStorageState(hub.baseURL, member.codeFile, dir);
+  const signedIn = async (who: {
+    name: string;
+    email: string;
+    codeFile: string;
+  }): Promise<{ email: string; storageFile: string }> => ({
+    email: who.email,
+    storageFile: await redeemToStorageState(hub.baseURL, who.codeFile, dir, who.name),
+  });
   writeSuiteState({
     fixturePid,
     helperPid,
     port,
     ...ready,
-    member: { email: member.email, storageFile },
+    member: await signedIn(member),
+    ...(peer ? { peer: await signedIn(peer) } : {}),
+    ...(outsider ? { outsider: await signedIn(outsider) } : {}),
   });
 }
 
@@ -244,7 +274,8 @@ async function setUp(dir: string): Promise<void> {
 async function redeemToStorageState(
   baseURL: string,
   codeFile: string,
-  dir: string
+  dir: string,
+  name: string
 ): Promise<string> {
   const code = fs.readFileSync(codeFile, 'utf-8').trim();
   const ctx = await request.newContext({ baseURL });
@@ -258,7 +289,7 @@ async function redeemToStorageState(
     await res.dispose();
     if (status !== 204) throw new Error(`test identity redeem answered ${status}, want 204`);
     fs.rmSync(codeFile, { force: true });
-    const storageFile = path.join(dir, 'member-storage.json');
+    const storageFile = path.join(dir, `${name}-storage.json`);
     const state = await ctx.storageState();
     fs.writeFileSync(storageFile, JSON.stringify(state), { mode: 0o600, flag: 'wx' });
     return storageFile;
@@ -288,17 +319,19 @@ async function adminJSON(
 }
 
 /**
- * Issues a member test identity, writes its web-login code to a 0600 file
- * in the state dir (the API token is removed unused) and makes it
- * project-admin of the fixture project, the role that opens its agents'
- * exposed ports.
+ * Issues a member-level test identity, writes its web-login code to a 0600
+ * file in the state dir (the API token is removed unused) and gives it
+ * projectRole in the fixture project (project-admin and project-owner open
+ * its agents' exposed ports), or no project role when projectRole is null.
  */
-async function createMember(
+async function createIdentity(
   hub: HubState,
   dir: string,
-  projectId: string
-): Promise<{ email: string; codeFile: string }> {
-  const tokenFile = path.join(dir, 'member.token');
+  projectId: string,
+  name: string,
+  projectRole: string | null
+): Promise<{ name: string; email: string; codeFile: string }> {
+  const tokenFile = path.join(dir, `${name}.token`);
   const issued = JSON.parse(
     runScionCLI(hub, [
       'hub',
@@ -314,22 +347,23 @@ async function createMember(
     ])
   ) as { identity: { id: string; email: string } };
   fs.rmSync(tokenFile, { force: true });
-  const codeFile = path.join(dir, 'member.code');
+  const codeFile = path.join(dir, `${name}.code`);
   runScionCLI(hub, ['hub', 'test-identity', 'web-code', issued.identity.id, '--out', codeFile]);
+  if (projectRole === null) return { name, email: issued.identity.email, codeFile };
 
   const roles = (await adminJSON(
     hub,
     'GET',
     `/api/v1/projects/${projectId}/members/assignable-roles`
   )) as { items?: Array<{ id: string; name: string }> };
-  const role = roles.items?.find((r) => r.name === 'project-admin');
-  if (!role) throw new Error('no assignable project-admin role');
+  const role = roles.items?.find((r) => r.name === projectRole);
+  if (!role) throw new Error(`no assignable ${projectRole} role`);
   await adminJSON(hub, 'POST', `/api/v1/projects/${projectId}/members`, {
     roleDefinitionId: role.id,
     principalType: 'user',
     principalId: issued.identity.email,
   });
-  return { email: issued.identity.email, codeFile };
+  return { name, email: issued.identity.email, codeFile };
 }
 
 export default globalSetup;

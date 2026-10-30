@@ -366,14 +366,18 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 	var brokerNFS *config.V1NFSConfig
 	var workspaceStorageBackend string
 	brokerLayout := projectfs.Layout{Backend: projectfs.BackendLocal, Homes: projectfs.BackendLocal}
+	var brokerStorageErr error
 	if globalVS, _, gErr := config.LoadGlobalSettings(); gErr != nil {
 		log.Printf("WARNING: NFS mount checks disabled: loading global settings: %v", gErr)
 	} else {
 		workspaceStorageBackend = brokerWorkspaceStorageBackend(globalVS)
 		var layoutWarnings []string
-		brokerLayout, layoutWarnings = brokerStorageLayout(globalVS)
+		brokerLayout, layoutWarnings, brokerStorageErr = brokerStorageLayout(globalVS)
 		for _, w := range layoutWarnings {
 			log.Printf("WARNING: %s", w)
+		}
+		if brokerStorageErr != nil {
+			log.Printf("WARNING: %s", brokerStorageUnavailableWarning(brokerStorageErr))
 		}
 		var nfsWarning string
 		brokerNFS, nfsWarning = brokerNFSConfig(globalVS)
@@ -408,6 +412,7 @@ func startFlatRuntimeBrokerHost(ctx context.Context, p flatHostParams) error {
 		nfs:                     brokerNFS,
 		workspaceStorageBackend: workspaceStorageBackend,
 		storageLayout:           brokerLayout,
+		storageError:            brokerStorageErr,
 		workspaceLocks:          runtimebroker.NewWorkspaceLocks(),
 		containerHub:            containerHub,
 	}
@@ -640,6 +645,7 @@ type flatServerShared struct {
 	nfs                     *config.V1NFSConfig
 	workspaceStorageBackend string
 	storageLayout           projectfs.Layout
+	storageError            error
 	// workspaceLocks is the one process-wide workspace lock service every
 	// instance shares.
 	workspaceLocks *runtimebroker.WorkspaceLocks
@@ -685,6 +691,7 @@ func flatInstanceServerConfig(sh flatServerShared, ic brokerhost.InstanceContext
 		StorageBucket:                 brokerStorageBucket(cfg.Storage),
 		WorkspaceStorageBackend:       sh.workspaceStorageBackend,
 		StorageLayout:                 sh.storageLayout,
+		StorageError:                  sh.storageError,
 		WorkspaceLocks:                sh.workspaceLocks,
 		Debug:                         enableDebug,
 		SlowRequestThreshold:          cfg.SlowRequestThreshold,

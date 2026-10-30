@@ -603,8 +603,12 @@ func leafKeys(leaves []bodyLeaf) []string {
 }
 
 // serverConfigFileValidationError is a client error in the file-routed part
-// of a workstation PUT (400).
-type serverConfigFileValidationError struct{ msg string }
+// of a workstation PUT (400). details, when set, are the error's details
+// (the project storage field errors).
+type serverConfigFileValidationError struct {
+	msg     string
+	details map[string]interface{}
+}
 
 func (e *serverConfigFileValidationError) Error() string { return e.msg }
 
@@ -627,14 +631,14 @@ func validateServerConfigFileKeys(req *ServerConfigUpdateRequest, fileKeys []str
 	if under("server.hub.agent_endpoint") && req.Server != nil && req.Server.Hub != nil && req.Server.Hub.AgentEndpoint != "" {
 		normalized, err := config.ValidateAgentEndpoint(req.Server.Hub.AgentEndpoint)
 		if err != nil {
-			return &serverConfigFileValidationError{err.Error()}
+			return &serverConfigFileValidationError{msg: err.Error()}
 		}
 		req.Server.Hub.AgentEndpoint = normalized
 	}
 	if under("server.mode") && req.Server != nil {
 		// The server refuses to start with an unknown mode; never write one.
 		if err := config.ValidateServerMode(req.Server.Mode); err != nil {
-			return &serverConfigFileValidationError{err.Error()}
+			return &serverConfigFileValidationError{msg: err.Error()}
 		}
 	}
 	if under("server.broker.instances") && req.Server != nil && req.Server.Broker != nil {
@@ -645,7 +649,7 @@ func validateServerConfigFileKeys(req *ServerConfigUpdateRequest, fileKeys []str
 			for _, e := range errs {
 				all = append(all, e)
 			}
-			return &serverConfigFileValidationError{errors.Join(all...).Error()}
+			return &serverConfigFileValidationError{msg: errors.Join(all...).Error()}
 		}
 	}
 	if req.Server != nil && (under("server.project_storage") || under("server.workspace_storage") ||
@@ -653,11 +657,11 @@ func validateServerConfigFileKeys(req *ServerConfigUpdateRequest, fileKeys []str
 		// Same check as the file-mode handler: the storage blocks must
 		// resolve to one server.project_storage.
 		if _, _, err := config.SynthesizeProjectStorage(req.Server.ProjectStorage, req.Server.WorkspaceStorage, req.Server.SharedDirStorage, req.Server.HomeStorage); err != nil {
-			return &serverConfigFileValidationError{err.Error()}
+			return &serverConfigFileValidationError{msg: err.Error(), details: projectStorageFieldErrorDetails(err)}
 		}
 	}
 	if errs := config.RemovedStorageOverrideErrors(req.Runtimes, req.Profiles, nil); len(errs) > 0 {
-		return &serverConfigFileValidationError{errs[0].Error()}
+		return &serverConfigFileValidationError{msg: errs[0].Error()}
 	}
 	return validateStartupCheckedFileBlocks(req, fileKeys)
 }
@@ -978,4 +982,15 @@ func (s *Server) applyServerConfigFileSideEffects(changed []string) (applied, re
 	}
 	sort.Strings(requiresRestart)
 	return applied, requiresRestart
+}
+
+// projectStorageFieldErrorDetails returns the error details of a refused
+// storage block: {"fieldErrors": [{field, rule, value}, ...]} when err
+// carries config.FieldErrors (config.ValidateProjectStorage), else nil.
+func projectStorageFieldErrorDetails(err error) map[string]interface{} {
+	var fields config.FieldErrorList
+	if !errors.As(err, &fields) {
+		return nil
+	}
+	return map[string]interface{}{"fieldErrors": []config.FieldError(fields)}
 }

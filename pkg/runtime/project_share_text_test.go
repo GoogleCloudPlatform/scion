@@ -32,9 +32,13 @@ func TestProjectShareUnavailableText(t *testing.T) {
 		"project storage share could not be mounted on this broker at /mnt/nfs/ws1: check that the NFS server and export (server.project_storage.nfs.shares[0]) are reachable from the broker; the broker log has the details"; got != want {
 		t.Errorf("mount failure:\n got %q\nwant %q", got, want)
 	}
+	if got, want := ProjectShareInlineUnavailableText("/mnt/nfs/ws1"),
+		"project storage share is not visible on this broker at /mnt/nfs/ws1: make the share (the same storage the hub uses) available in this broker's container at that path, writable by the broker; without nfs.shares[0].pv_name, pods mount each directory by its server path, so the broker creates the directories before the pod starts"; got != want {
+		t.Errorf("inline share:\n got %q\nwant %q", got, want)
+	}
 	// A platform-mounting broker is never told to set auto_mount: it has no effect there.
 	// Nor is a broker whose auto_mount is already on and failed.
-	for _, s := range []string{ProjectShareUnavailableText("/mnt/nfs/ws1", true), ProjectShareMountFailedText("/mnt/nfs/ws1")} {
+	for _, s := range []string{ProjectShareUnavailableText("/mnt/nfs/ws1", true), ProjectShareInlineUnavailableText("/mnt/nfs/ws1"), ProjectShareMountFailedText("/mnt/nfs/ws1")} {
 		if strings.Contains(s, "auto_mount") {
 			t.Errorf("text must not advise auto_mount: %q", s)
 		}
@@ -42,8 +46,8 @@ func TestProjectShareUnavailableText(t *testing.T) {
 	// The client-safe forms carry the neutral mount point name, never a path,
 	// and are exactly the client texts.
 	texts := ProjectShareClientTexts()
-	if len(texts) != 3 {
-		t.Fatalf("ProjectShareClientTexts = %d texts, want 3", len(texts))
+	if len(texts) != 4 {
+		t.Fatalf("ProjectShareClientTexts = %d texts, want 4", len(texts))
 	}
 	for _, got := range texts {
 		if strings.Contains(got, "/mnt/") || !strings.Contains(got, ProjectShareMountPathField) {

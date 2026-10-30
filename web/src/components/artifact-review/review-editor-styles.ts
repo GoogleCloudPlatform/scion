@@ -16,10 +16,13 @@
 
 /**
  * Styles of the review editor, adopted in its shadow root: ProseMirror's
- * base rules, the document, and the marks. Colours come from Shoelace's
- * colour scales, which the dark theme inverts, so marks keep their
- * contrast in both themes; insertions are also underlined, deletions
- * struck through, and comments carry a numbered badge.
+ * base rules, the document, and the marks. Mark colours come from the
+ * --scion-review-* theme tokens (theme.css), each a text colour on its own
+ * background, so marks keep their contrast in both themes (the fallbacks
+ * are the light values); insertions are also underlined, deletions
+ * struck through, and comments carry a numbered badge. Task-list items
+ * show their checkbox (display only), and strikethrough is a plain line
+ * through, apart from a suggested deletion.
  */
 
 import { css } from 'lit';
@@ -114,6 +117,30 @@ export const reviewEditorStyles = css`
   }
   .ProseMirror li > p {
     margin: 0;
+  }
+  /*
+   * Task-list checkboxes, drawn from the item's own attributes: a box is
+   * not text, takes no input, and its state is read out before the item.
+   * An unticked item may carry no data-checked at all.
+   */
+  .ProseMirror li[data-item-type='task'] {
+    list-style: none;
+  }
+  .ProseMirror li[data-item-type='task']::before {
+    content: '☐';
+    content: '☐' / 'Not done: ';
+    position: absolute;
+    left: -1.35em;
+    top: 0;
+    width: 1.2em;
+    text-align: center;
+    color: var(--scion-text-muted, #64748b);
+    user-select: none;
+  }
+  .ProseMirror li[data-item-type='task'][data-checked='true']::before {
+    content: '☑';
+    content: '☑' / 'Done: ';
+    color: var(--scion-text, #0f172a);
   }
   .ProseMirror a {
     color: var(--sl-color-primary-600, #0284c7);
@@ -215,27 +242,33 @@ export const reviewEditorStyles = css`
   }
 
   /* Marks. */
+  s.gfm-strike {
+    color: inherit;
+    background: none;
+    text-decoration: line-through;
+    text-decoration-color: currentColor;
+  }
   ins.critic-ins,
   ins.critic-sub-new {
-    color: var(--sl-color-success-800, #166534);
-    background: var(--sl-color-success-100, #dcfce7);
+    color: var(--scion-review-ins-text, #166534);
+    background: var(--scion-review-ins-bg, #dcfce7);
     text-decoration: underline;
-    text-decoration-color: var(--sl-color-success-600, #16a34a);
+    text-decoration-color: var(--scion-review-ins-line, #16a34a);
     text-underline-offset: 0.18em;
     border-radius: 0.15rem;
   }
   del.critic-del,
   del.critic-sub-old {
-    color: var(--sl-color-danger-800, #991b1b);
-    background: var(--sl-color-danger-100, #fee2e2);
+    color: var(--scion-review-del-text, #991b1b);
+    background: var(--scion-review-del-bg, #fee2e2);
     text-decoration: line-through;
-    text-decoration-color: var(--sl-color-danger-600, #dc2626);
+    text-decoration-color: var(--scion-review-del-line, #dc2626);
     border-radius: 0.15rem;
   }
   mark.critic-hl {
-    background: var(--sl-color-warning-200, #fef08a);
-    color: inherit;
-    border-bottom: 2px solid var(--sl-color-warning-500, #ca8a04);
+    background: var(--scion-review-hl-bg, #fef08a);
+    color: var(--scion-review-hl-text, #0f172a);
+    border-bottom: 2px solid var(--scion-review-hl-line, #ca8a04);
     border-radius: 0.15rem;
   }
   .critic-comment {
@@ -246,9 +279,9 @@ export const reviewEditorStyles = css`
     gap: 0.15rem;
     font-size: 0.6875rem;
     font-weight: 700;
-    color: var(--sl-color-violet-700, #6d28d9);
-    background: var(--sl-color-violet-100, #ede9fe);
-    border: 1px solid var(--sl-color-violet-400, #8b5cf6);
+    color: var(--scion-review-note-text, #6d28d9);
+    background: var(--scion-review-note-bg, #ede9fe);
+    border: 1px solid var(--scion-review-note-line, #8b5cf6);
     border-radius: 0.6rem 0.6rem 0.6rem 0.1rem;
     min-width: 1.15rem;
     height: 1.05rem;
@@ -280,6 +313,9 @@ export const reviewEditorStyles = css`
     .critic-comment {
       border: 1px solid CanvasText;
     }
+    .ProseMirror li[data-item-type='task']::before {
+      color: CanvasText;
+    }
   }
 
   /* Comment card (read-only: it never takes the pointer). */
@@ -291,7 +327,7 @@ export const reviewEditorStyles = css`
     max-width: calc(100vw - 2rem);
     background: var(--scion-surface, #fff);
     color: var(--scion-text, #0f172a);
-    border: 1px solid var(--sl-color-violet-400, #8b5cf6);
+    border: 1px solid var(--scion-review-note-line, #8b5cf6);
     border-radius: 0.45rem;
     box-shadow: var(--sl-shadow-large, 0 10px 30px rgba(15, 23, 42, 0.25));
     padding: 0.55rem 0.7rem;

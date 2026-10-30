@@ -480,6 +480,11 @@ func notFoundResourceText(err error, templateSlug string) string {
 // text for the same failure (ptone/scion#3113).
 const opCreateAgent = "create agent"
 
+// opStartAgent is the runtimeOpError op for a start launch's Manager.Start
+// failure: the same "Failed to start agent" lead the synchronous start
+// handler writes.
+const opStartAgent = "start agent"
+
 // runtimeCauseCodes maps the Kubernetes reasons that get a details.cause
 // code on a create's 500 to that code: an api.BrokerRuntimeCause value, the
 // set the hub relays. The reasons are kept few on purpose

@@ -15,6 +15,7 @@
 package agent
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -107,5 +108,85 @@ func TestScanLocalLegacyPlacement(t *testing.T) {
 	ScanLocalLegacyPlacement(&none, []string{empty}, placementScanPolicy)
 	if none.Scanned != 0 || none.Incomplete != 0 || none.RecordsUnreadable {
 		t.Fatalf("empty project: %+v", none)
+	}
+}
+
+// The co-located scan counts agents of other Runtime Brokers and unplaced
+// agents as not covered, agents of a missing project as incomplete, and
+// categorizes the co-located broker's agents from disk.
+func TestScanColocatedLegacyPlacementNotCovered(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	globalDir := t.TempDir()
+	linked := filepath.Join(t.TempDir(), "linked", config.DotScion)
+	if err := os.MkdirAll(linked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writePlacementScanAgent(t, linked, "a1", `{"runtime":"kubernetes"}`, `{"kubernetes":{"runtimeClassName":"kata"}}`)
+	in := ProfileRefInputs{
+		Providers: []ProfileRefProvider{{ProjectID: "p-linked", LocalPath: linked}},
+		Projects:  []ProfileRefProject{{ID: "p-linked", Slug: "linked"}},
+		Agents: []ProfileRefAgentRow{
+			{Slug: "a1", ProjectID: "p-linked", RuntimeBrokerID: refsColocated},
+			{Slug: "a2", ProjectID: "p-missing", RuntimeBrokerID: refsColocated},
+			{Slug: "a3", ProjectID: "p-linked", RuntimeBrokerID: refsOther},
+			{Slug: "a4", ProjectID: "p-linked"},
+		},
+	}
+	r := ScanColocatedLegacyPlacement(context.Background(), globalDir, refsColocated, in, placementScanPolicy)
+	if r.Scanned != 1 || r.Incomplete != 1 || r.NotCovered != 2 || r.Counts[config.PreflightAgentRuntimeClassWithoutOperatorPolicy] != 1 {
+		t.Fatalf("report = %+v", r)
+	}
+	// Without a co-located legacy broker nothing is covered.
+	r = ScanColocatedLegacyPlacement(context.Background(), globalDir, "", in, placementScanPolicy)
+	if r.Scanned != 0 || r.NotCovered != 4 || !r.NeedsAttention() {
+		t.Fatalf("no co-located broker: %+v", r)
+	}
+}
+
+// Without an operator policy every co-located agent is incomplete, never
+// clean.
+func TestScanColocatedLegacyPlacementNilPolicy(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	globalDir := t.TempDir()
+	linked := filepath.Join(t.TempDir(), "linked", config.DotScion)
+	if err := os.MkdirAll(linked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writePlacementScanAgent(t, linked, "a1", `{"runtime":"kubernetes"}`, `{}`)
+	in := ProfileRefInputs{
+		Providers: []ProfileRefProvider{{ProjectID: "p-linked", LocalPath: linked}},
+		Projects:  []ProfileRefProject{{ID: "p-linked", Slug: "linked"}},
+		Agents:    []ProfileRefAgentRow{{Slug: "a1", ProjectID: "p-linked", RuntimeBrokerID: refsColocated}},
+	}
+	r := ScanColocatedLegacyPlacement(context.Background(), globalDir, refsColocated, in, nil)
+	if r.Scanned != 0 || r.Incomplete != 1 || !r.NeedsAttention() {
+		t.Fatalf("report = %+v", r)
+	}
+}
+
+// The scan stops reading at its deadline: with a done context, every
+// co-located agent is incomplete (never clean), and the others stay not
+// covered.
+func TestScanColocatedLegacyPlacementDeadline(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	linked := filepath.Join(t.TempDir(), "linked", config.DotScion)
+	if err := os.MkdirAll(linked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writePlacementScanAgent(t, linked, "a1", `{"runtime":"kubernetes"}`, `{"kubernetes":{"runtimeClassName":"kata"}}`)
+	in := ProfileRefInputs{
+		Providers: []ProfileRefProvider{{ProjectID: "p-linked", LocalPath: linked}},
+		Projects:  []ProfileRefProject{{ID: "p-linked", Slug: "linked"}},
+		Agents: []ProfileRefAgentRow{
+			{Slug: "a1", ProjectID: "p-linked", RuntimeBrokerID: refsColocated},
+			{Slug: "a2", ProjectID: "p-linked", RuntimeBrokerID: refsColocated},
+			{Slug: "a3", ProjectID: "p-linked", RuntimeBrokerID: refsOther},
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := ScanColocatedLegacyPlacement(ctx, t.TempDir(), refsColocated, in, placementScanPolicy)
+	if r.Scanned != 0 || r.Incomplete != 2 || r.NotCovered != 1 || len(r.Counts) != 0 || !r.NeedsAttention() {
+		t.Fatalf("report = %+v", r)
 	}
 }

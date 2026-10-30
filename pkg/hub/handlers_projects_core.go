@@ -2562,9 +2562,14 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// The node image registry is shown redacted (ptone/scion#3916).
+	// The node image registry is shown redacted (ptone/scion#3916), and the
+	// storage values only to a hub admin or the broker itself.
 	if broker != nil {
-		shown := brokerForDisplay(*broker)
+		self := false
+		if brokerIdent := GetBrokerIdentityFromContext(ctx); brokerIdent != nil && brokerIdent.BrokerID() == broker.ID {
+			self = true
+		}
+		shown := brokerForDisplay(s.brokerStorageForViewer(ctx, *broker, self))
 		broker = &shown
 	}
 	writeJSON(w, http.StatusOK, RegisterProjectResponse{
@@ -3396,6 +3401,14 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		if err == store.ErrNotFound {
 			agent, err = s.store.GetAgent(ctx, agentID)
+			// For the message action, a caller who cannot read the target
+			// agent's project gets exactly the unknown-agent answer for a
+			// soft-deleted target; a reader keeps the answer it gets today.
+			// canReadProject fails closed: a lookup fault counts as no read.
+			if err == nil && action == api.AgentActionMessage && (agent == nil ||
+				(!agent.DeletedAt.IsZero() && !s.canReadProject(ctx, GetIdentityFromContext(ctx), agent.ProjectID))) {
+				err = store.ErrNotFound
+			}
 			if (errors.Is(err, store.ErrNotFound) || (err == nil && agent.ProjectID != projectID)) && isVisitorIdentity(GetIdentityFromContext(ctx)) {
 				// A visitor gets the one refusal for an unknown agent too
 				// (admitVisitorSubRoute already refused it before here).

@@ -2994,6 +2994,7 @@ func isCompressBypassPath(path string) bool {
 		"/api/v1/admin/invites",
 		"/api/v1/artifacts/view/",
 		"/api/v1/artifacts/shared/",
+		"/api/v1/portview/",
 	} {
 		if strings.HasPrefix(path, prefix) {
 			return true

@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
@@ -221,8 +222,12 @@ func isResponseHeaderTimeout(err error) bool {
 // is bounded (portProxyResponseHeaderTimeout; 504 on timeout); once they
 // arrive the exchange lasts as long as the request. Credentials are
 // stripped from the request and the response is sandboxed exactly as on
-// the tunnel path.
-func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent *store.Agent, port int, proxyPath string, conn net.Conn) {
+// the tunnel path. policy is the surface's: the page view surface
+// (policy.portView) also removes the request headers in
+// portViewStrippedRequestHeader and applies portViewModifyResponse, and
+// each surface logs its own caller string. Every surface removes the front
+// proxy's identity headers (stripFrontProxyIdentityHeaders).
+func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent *store.Agent, port int, proxyPath string, conn net.Conn, policy portProxyPolicy) {
 	start := time.Now()
 	reqPath := "/" + strings.TrimPrefix(proxyPath, "/")
 	target := net.JoinHostPort(conduitProxyHost, strconv.Itoa(port))
@@ -237,7 +242,7 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 			pr.Out.URL.RawQuery = r.URL.RawQuery
 			pr.Out.Host = target
 			for k := range pr.Out.Header {
-				if sensitiveHeader(k) {
+				if sensitiveHeader(k) || (policy.portView && portViewStrippedRequestHeader(k)) {
 					pr.Out.Header.Del(k)
 				}
 			}
@@ -254,6 +259,9 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 				if stripFromProxyResponse(k) {
 					resp.Header.Del(k)
 				}
+			}
+			if policy.portView {
+				portViewModifyResponse(resp.Header)
 			}
 			setUntrustedContentHeaders(resp.Header, agentServedPageSandboxCSP)
 			resp.Header.Set("X-Content-Type-Options", "nosniff")
@@ -302,9 +310,10 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 		slog.Debug("Proxy request", append([]any{
 			"agent_id", agent.ID,
 			"port", port,
-			"caller", identityStringFromContext(r.Context()),
+			"caller", policy.caller,
+			"surface", policy.surface,
 			"method", r.Method,
-			"path", reqPath,
+			"path", logging.SubPath(reqPath),
 			"status", status,
 			"transport", "conduit",
 			"duration", time.Since(start),

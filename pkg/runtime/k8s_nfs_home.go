@@ -419,14 +419,20 @@ type nfsHomePodParts struct {
 }
 
 // nfsHomePodSpec builds the home volume, the agent container's home mount
-// and the home init containers. workspaceClaim is the claim of the
-// workspace volume "workspace", or "" when the workspace is not a PVC; the
-// home shares that volume when the claims match.
-func (r *KubernetesRuntime) nfsHomePodSpec(config RunConfig, containerHome, workspaceClaim string) (nfsHomePodParts, error) {
+// and the home init containers. workspaceShare is the share of the
+// workspace volume "workspace", or the zero share when the workspace is not
+// on NFS; the home shares that volume when it is the same claim.
+func (r *KubernetesRuntime) nfsHomePodSpec(config RunConfig, containerHome string, workspaceShare NFSPodShare) (nfsHomePodParts, error) {
 	var parts nfsHomePodParts
 	hs := config.HomeStorage
 	if hs == nil || hs.PVClaimName == "" {
 		return parts, fmt.Errorf("home storage %q needs a claim", HomeStorageNFS)
+	}
+	if workspaceShare.Inline() {
+		// The same refusal as at agent start: an inline workspace share
+		// (no shares[0].pv_name) does not carry NFS homes yet.
+		return parts, fmt.Errorf("home storage %q needs a claim (shares[0].pv_name) on the workspace share: "+
+			"without it Kubernetes pods mount the share inline, which NFS homes do not support yet", HomeStorageNFS)
 	}
 	agentDir, home, err := NFSHomeSubPaths(hs.SubPathRoot, hs.ProjectID, hs.AgentSlug, hs.AgentID)
 	if err != nil {
@@ -441,15 +447,19 @@ func (r *KubernetesRuntime) nfsHomePodSpec(config RunConfig, containerHome, work
 	}
 
 	volName := k8sHomeVolume
-	if workspaceClaim != "" && workspaceClaim == hs.PVClaimName {
+	if workspaceShare.Same(NFSPodShare{ClaimName: hs.PVClaimName}) {
 		volName = "workspace"
 	} else {
-		parts.volume = &corev1.Volume{
-			Name: volName,
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: hs.PVClaimName},
-			},
+		// NFS homes are on a claim only (an inline workspace share is
+		// refused above and at agent start); the volume source comes from
+		// the same translation as every other NFS share volume. A
+		// whole-claim volume is the deliberate exception to
+		// projectfs.Layout.Realize, which models subPath mounts only.
+		src, err := podVolumeSource(projectfs.Realized{ClaimName: hs.PVClaimName, Target: containerHome})
+		if err != nil {
+			return parts, err
 		}
+		parts.volume = &corev1.Volume{Name: volName, VolumeSource: src}
 	}
 	parts.mount = corev1.VolumeMount{Name: volName, MountPath: containerHome, SubPath: home}
 

@@ -147,10 +147,14 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 
 		// Build extended broker list with provider data
 		extendedBrokers := make([]RuntimeBrokerWithProvider, 0, len(result.Items))
+		// Storage layout values are shown to readers with hub.config.read
+		// only: decided once for the whole listing.
+		showStorage := s.storageValuesAllowed(ctx)
 		for i, broker := range result.Items {
 			if caps != nil && !capabilityAllows(caps[i], ActionRead) {
 				continue
 			}
+			broker = redactBrokerStorage(broker, showStorage)
 			eb := RuntimeBrokerWithProvider{
 				RuntimeBroker: brokerForDisplay(broker),
 				LocalPath:     brokerLocalPaths[broker.ID],
@@ -190,10 +194,14 @@ func (s *Server) listRuntimeBrokers(w http.ResponseWriter, r *http.Request) {
 	hubVersion := s.hubFleetVersion(ctx)
 
 	brokersWithCaps := make([]RuntimeBrokerWithCapabilities, 0, len(result.Items))
+	// Storage layout values are shown to readers with hub.config.read only:
+	// decided once for the whole listing.
+	showStorage := s.storageValuesAllowed(ctx)
 	for i, broker := range result.Items {
 		if caps != nil && !capabilityAllows(caps[i], ActionRead) {
 			continue
 		}
+		broker = redactBrokerStorage(broker, showStorage)
 		resp := RuntimeBrokerWithCapabilities{RuntimeBroker: withHostIdentity(brokerForDisplay(broker), false)}
 		resp.HostedByThisServer = embedded.has(broker.ID)
 		resp.VersionStatus = runtimeBrokerVersionStatus(&result.Items[i], hubVersion)
@@ -414,13 +422,17 @@ func (s *Server) getRuntimeBroker(w http.ResponseWriter, r *http.Request, id str
 		}
 	}
 
+	// Storage layout values are shown to readers with hub.config.read and
+	// to the broker itself only.
+	shown := s.brokerStorageForViewer(ctx, *broker, brokerSelf)
+
 	// Compute capabilities for the requesting user
-	resp := RuntimeBrokerWithCapabilities{RuntimeBroker: withHostIdentity(brokerForDisplay(*broker), false)}
+	resp := RuntimeBrokerWithCapabilities{RuntimeBroker: withHostIdentity(brokerForDisplay(shown), false)}
 	resp.HostedByThisServer = s.embeddedBrokerSnapshot().has(broker.ID)
 	resp.VersionStatus = runtimeBrokerVersionStatus(broker, s.hubFleetVersion(ctx))
 	if ident := GetIdentityFromContext(ctx); ident != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, ident, brokerResource(broker))
-		resp.RuntimeBroker = brokerForDisplayWithCap(*broker, resp.Cap)
+		resp.RuntimeBroker = brokerForDisplayWithCap(shown, resp.Cap)
 		s.reportBrokerDispatchCapability(ctx, resp.Cap, broker, nil)
 	}
 
@@ -613,7 +625,7 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	}
 
 	// The caller holds broker.update (checked above).
-	writeJSON(w, http.StatusOK, withHostIdentity(brokerForDisplay(*after), true))
+	writeJSON(w, http.StatusOK, withHostIdentity(brokerForDisplay(s.brokerStorageForViewer(ctx, *after, false)), true))
 }
 
 func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id string) {
@@ -684,15 +696,10 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	// release requires that), audited as the sweep does (ptone/scion#3994).
 	s.releaseDeletedBrokerReservations(ctx, broker.ID)
 
-	// Clean up the broker's HMAC secret (best-effort, post-delete).
-	if err := s.store.DeleteBrokerSecret(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
-		slog.WarnContext(ctx, "failed to delete broker secret during deregistration", "brokerId", id, "error", err)
-	}
+	// DeleteRuntimeBroker removed the broker's HMAC secret and any
+	// unconsumed join token in the same transaction as the row; announce
+	// the credential change now that it is committed.
 	s.conduitBrokerCredentialChanged(id)
-	// Clean up any unconsumed join token (best-effort, post-delete).
-	if err := s.store.DeleteJoinToken(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
-		slog.WarnContext(ctx, "failed to delete broker join token during deregistration", "brokerId", id, "error", err)
-	}
 
 	// Log the deregistration event
 	LogDeregisterEvent(ctx, s.auditLogger, id, brokerName, actorID, clientIP)
