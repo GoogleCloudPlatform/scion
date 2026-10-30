@@ -192,7 +192,8 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 			refused = append(refused, m.Name)
 		}
 	}
-	if len(refused) > 0 {
+	// Not logged once the request has ended (a cancel, not a refusal).
+	if len(refused) > 0 && ctx.Err() == nil {
 		// Names only: a refused secret that is set would otherwise look,
 		// from the broker's skill error, as if it were missing.
 		sort.Strings(refused)
