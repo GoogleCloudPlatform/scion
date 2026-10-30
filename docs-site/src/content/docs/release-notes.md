@@ -10,6 +10,10 @@ Scion now mounts repository git metadata into agents read-only with a private, c
 
 [Read the full release notes for this week ->](/scion/release-notes/2026-10-19/)
 
+## Kubernetes agent pods no longer mount a Kubernetes API token
+
+Kubernetes agent pods no longer mount a Kubernetes API token. Restart running agents to apply this to them. To list agent pods that still have a token across all namespaces, see [Agent pod identity](/scion/hosted/ha/kubernetes/#agent-pod-identity).
+
 ## Agent mounts that reach Runtime Broker host files are refused
 
 A Runtime Broker now refuses any agent mount whose host source reaches its own credentials, local settings, identity and state files, plugins or co-located Hub database, read-only or not. This includes any source that contains the Scion global directory, such as `~` or `/`. Inside `~/.scion`, `volumes:` and shared directories may only use workspace, worktree and shared-directory subtrees. Harness auth files and `SCION_DEV_BINARIES` may not come from `~/.scion` at all, and relative bind sources are refused. A refused create or start returns `400` with the code `control_path_mount`, and a broker whose worktree base or NFS mount root reaches these files does not start.
