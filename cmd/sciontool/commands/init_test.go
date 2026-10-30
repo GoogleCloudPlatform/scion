@@ -1673,21 +1673,17 @@ func TestGitCloneWorkspace_LateFailureCleansUpWholeWorkspace_RetrySucceeds(t *te
 	}
 
 	// A local, offline "origin" repo with one commit on main.
-	originDir := t.TempDir()
-	runGitForTest(t, originDir, "init", "-b", "main")
-	runGitForTest(t, originDir, "config", "user.email", "test@example.com")
-	runGitForTest(t, originDir, "config", "user.name", "Test")
-	if err := os.WriteFile(filepath.Join(originDir, "README.md"), []byte("hello"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	runGitForTest(t, originDir, "add", "README.md")
-	runGitForTest(t, originDir, "commit", "-m", "init")
+	// An https origin (a public repository) whose URL names the recorded
+	// remote, so the clone reaches the credential-helper step (a clone URL
+	// that does not name it, such as file://, gets no helper at all).
+	origin := newTokenGitServer(t, tokenRemoteBareRepo(t, t.TempDir()), false)
+	t.Setenv(api.EnvGitTokenRemote, origin.remote)
 
 	workspacePath := t.TempDir()
 
-	t.Setenv("SCION_GIT_CLONE_URL", "file://"+originDir)
+	t.Setenv("SCION_GIT_CLONE_URL", origin.url)
 	t.Setenv("SCION_GIT_BRANCH", "main")
-	t.Setenv("SCION_GIT_DEPTH", "")
+	t.Setenv("SCION_GIT_DEPTH", "0") // the dumb-http fixture cannot serve a shallow fetch
 	t.Setenv("SCION_AGENT_NAME", "test-agent")
 	t.Setenv("GITHUB_TOKEN", "")
 	t.Setenv("SCION_WORKSPACE_PATH", workspacePath)
@@ -1799,15 +1795,11 @@ func TestGitCloneWorkspace_FailedCloneKeepsWorkspaceDir(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
-	originDir := t.TempDir()
-	runGitForTest(t, originDir, "init", "-b", "main")
-	runGitForTest(t, originDir, "config", "user.email", "test@example.com")
-	runGitForTest(t, originDir, "config", "user.name", "Test")
-	if err := os.WriteFile(filepath.Join(originDir, "README.md"), []byte("hello"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	runGitForTest(t, originDir, "add", "README.md")
-	runGitForTest(t, originDir, "commit", "-m", "init")
+	// An https origin (a public repository) whose URL names the recorded
+	// remote, so the clone reaches the credential-helper step (a clone URL
+	// that does not name it, such as file://, gets no helper at all).
+	origin := newTokenGitServer(t, tokenRemoteBareRepo(t, t.TempDir()), false)
+	t.Setenv(api.EnvGitTokenRemote, origin.remote)
 
 	// The workspace directory exists before the clone, with a marker
 	// directory in it, as the mount and the runtime leave it.
@@ -1827,9 +1819,9 @@ func TestGitCloneWorkspace_FailedCloneKeepsWorkspaceDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Setenv("SCION_GIT_CLONE_URL", "file://"+originDir)
+	t.Setenv("SCION_GIT_CLONE_URL", origin.url)
 	t.Setenv("SCION_GIT_BRANCH", "main")
-	t.Setenv("SCION_GIT_DEPTH", "")
+	t.Setenv("SCION_GIT_DEPTH", "0") // the dumb-http fixture cannot serve a shallow fetch
 	t.Setenv("SCION_AGENT_NAME", "test-agent")
 	t.Setenv("GITHUB_TOKEN", "")
 	t.Setenv("SCION_WORKSPACE_PATH", workspacePath)
@@ -3369,12 +3361,13 @@ func TestConfigureSharedWorkspaceGit_WithoutRunScionAvailable(t *testing.T) {
 		t.Skip("/run/scion exists in this environment; this test wants to prove it is not needed, not that it is absent")
 	}
 	agentHome := t.TempDir()
+	t.Setenv(api.EnvGitTokenRemote, "github.com/org/shared")
 	if err := configureSharedWorkspaceGit(agentHome, 0, 0, false); err != nil {
 		t.Fatalf("configureSharedWorkspaceGit: %v", err)
 	}
 	gitconfigPath := filepath.Join(agentHome, ".gitconfig")
-	if got := gitConfigGet(t, gitconfigPath, "credential.helper"); got == "" {
-		t.Error("credential.helper is empty; expected it to be configured without /run/scion available")
+	if got := gitConfigGet(t, gitconfigPath, "credential.https://github.com.helper"); got == "" {
+		t.Error("credential helper is empty; expected it to be configured without /run/scion available")
 	}
 }
 
@@ -3585,6 +3578,7 @@ func TestConfigureSharedWorkspaceGit_UsablePairWritesConfig(t *testing.T) {
 	if uid <= 0 || gid <= 0 {
 		t.Skipf("test process uid/gid %d/%d is not a usable pair", uid, gid)
 	}
+	t.Setenv(api.EnvGitTokenRemote, "github.com/org/shared")
 	for _, enforced := range []bool{false, true} {
 		t.Run(fmt.Sprintf("enforced=%v", enforced), func(t *testing.T) {
 			agentHome := t.TempDir()
@@ -3595,8 +3589,8 @@ func TestConfigureSharedWorkspaceGit_UsablePairWritesConfig(t *testing.T) {
 			if got := gitConfigGet(t, gitconfig, "user.email"); got != "agent@scion.dev" {
 				t.Errorf("user.email = %q, want agent@scion.dev", got)
 			}
-			if got := gitConfigGet(t, gitconfig, "credential.helper"); got == "" {
-				t.Error("credential.helper not written")
+			if got := gitConfigGet(t, gitconfig, "credential.https://github.com.helper"); got == "" {
+				t.Error("credential helper not written")
 			}
 		})
 	}
@@ -3915,6 +3909,8 @@ func TestGitCloneWorkspace_FetchUsesHostScopedCredential(t *testing.T) {
 	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(root, "gc"))
 	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
 	t.Setenv("SCION_GIT_CLONE_URL", "https://github.com/org/repo.git")
+	// The recorded remote the clone URL names: the fetch gets the helper.
+	t.Setenv(api.EnvGitTokenRemote, "github.com/org/repo")
 	t.Setenv("SCION_WORKSPACE_PATH", workspace)
 	t.Setenv("SCION_GIT_BRANCH", "main")
 	t.Setenv("SCION_GIT_DEPTH", "0")

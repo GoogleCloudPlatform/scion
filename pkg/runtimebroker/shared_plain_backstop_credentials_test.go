@@ -73,10 +73,31 @@ func (s *backstopCredentialServer) seen() (requests, auth []string) {
 // environment for an unbound https URL (util.NoCredentialHelperEnv): giving
 // the backstop the agent's token and its URL as the token remote again, or
 // dropping the no-credential-helper environment, makes it fail.
+//
+// The second case is a project whose recorded remote names the clone URL
+// but whose agent has no git token: with no token offered the backstop must
+// not pass the recorded remote on either, since runGitClone keeps the host's
+// own git authentication for a clone of its CloneTokenRemote. Passing the
+// recorded remote without a token makes it fail.
 func TestCreateAgent_SharedPlainBackstopOffersNoCredential(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Fatalf("git is required for this test: %v", err)
 	}
+	for _, tc := range []struct {
+		name           string
+		recordedRemote bool // the hub sends the clone URL's repository as the token remote
+		agentToken     string
+	}{
+		{"no recorded remote, agent token", false, backstopAgentToken},
+		{"recorded remote names the clone URL, no agent token", true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testBackstopOffersNoCredential(t, tc.recordedRemote, tc.agentToken)
+		})
+	}
+}
+
+func testBackstopOffersNoCredential(t *testing.T, recordedRemote bool, agentToken string) {
 	f := newSharedRootFixture(t, true)
 	t.Setenv("SCION_HOST_UID", "")
 	t.Setenv(provision.GitTokenEnv, backstopEnvToken)
@@ -128,7 +149,14 @@ func TestCreateAgent_SharedPlainBackstopOffersNoCredential(t *testing.T) {
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	t.Setenv("GIT_ASKPASS", askpass)
 
-	w := createSharedPlainAgentForURL(t, f, cloneURL)
+	var tokenRemote string
+	if recordedRemote {
+		tokenRemote = strings.TrimSuffix(cloneURL, ".git")
+		if !provision.CloneTokenAllowed(tokenRemote, cloneURL) {
+			t.Fatalf("fixture check: recorded remote %q does not name the clone URL %q", tokenRemote, cloneURL)
+		}
+	}
+	w := createSharedPlainAgentWithToken(t, f, cloneURL, tokenRemote, agentToken)
 
 	requests, auth := cs.seen()
 	if len(requests) == 0 {

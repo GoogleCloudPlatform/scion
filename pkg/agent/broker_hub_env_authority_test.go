@@ -161,16 +161,19 @@ func TestWarnDroppedBrokerEnv(t *testing.T) {
 	}
 	for i, want := range []struct{ value, layer string }{{"Europe/Paris", "config"}, {"Asia/Tokyo", "harness-config entry"}} {
 		w := warnings[i]
-		for _, s := range []string{"agent-123", want.value, want.layer, "TZ"} {
+		for _, s := range []string{"agent-123", want.layer, "TZ"} {
 			if !strings.Contains(w, s) {
 				t.Errorf("warning %q does not name %q", w, s)
 			}
+		}
+		if strings.Contains(w, want.value) {
+			t.Errorf("warning %q echoes the dropped value", w)
 		}
 	}
 
 	// A value equal to the hub's is what the container gets anyway.
 	warnings = warnDroppedBrokerEnv("agent-123", map[string]string{"TZ": "Europe/Paris"}, dropped)
-	if len(warnings) != 1 || !strings.Contains(warnings[0], "Asia/Tokyo") {
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "harness-config entry") {
 		t.Errorf("only the value that differs from the hub's should warn, got %v", warnings)
 	}
 }
@@ -272,19 +275,25 @@ func TestStart_BrokerMode_HubIsOnlyTZSource(t *testing.T) {
 	}
 	var tzWarnings []string
 	for _, w := range info.Warnings {
-		if strings.Contains(w, "TZ=") {
+		if strings.Contains(w, "ignoring TZ ") {
 			tzWarnings = append(tzWarnings, w)
 		}
 	}
 	for _, layer := range []string{"broker config layer", "broker harness-config entry layer"} {
 		found := false
 		for _, w := range tzWarnings {
-			if strings.Contains(w, layer) && strings.Contains(w, "Europe/Paris") && strings.Contains(w, "agent-uuid-tz") {
+			if strings.Contains(w, layer) && strings.Contains(w, "agent-uuid-tz") {
 				found = true
 			}
 		}
 		if !found {
-			t.Errorf("no start warning names the %q with the value and agent ID; TZ warnings: %v", layer, tzWarnings)
+			t.Errorf("no start warning names the %q and the agent ID; TZ warnings: %v", layer, tzWarnings)
+		}
+	}
+	// A drop warning names the key and the layer, never the dropped value.
+	for _, w := range tzWarnings {
+		if strings.Contains(w, "Europe/Paris") {
+			t.Errorf("TZ drop warning %q echoes the dropped value", w)
 		}
 	}
 	// The same drop warnings, and only those, are carried for the hub.
@@ -292,7 +301,7 @@ func TestStart_BrokerMode_HubIsOnlyTZSource(t *testing.T) {
 		t.Errorf("HubOnlyEnvWarnings = %v, want the %d TZ drop warnings", info.HubOnlyEnvWarnings, len(tzWarnings))
 	}
 	for _, w := range info.HubOnlyEnvWarnings {
-		if !strings.Contains(w, "TZ=") {
+		if !strings.Contains(w, "ignoring TZ ") {
 			t.Errorf("HubOnlyEnvWarnings carries a non-TZ warning %q", w)
 		}
 	}

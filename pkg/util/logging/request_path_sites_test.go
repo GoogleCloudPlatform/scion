@@ -87,6 +87,7 @@ var requestPathSites = []requestPathSite{
 	{"conduit_relay_admit.go", "Server.hubAdmit", "URL(bare)", 1, "not the served request: the forwarded handshake request (fixed path /api/v1/conduit) a relay admission runs through the middleware chain"},
 	{"conduit_relay_admit.go", "relayServesHost", "URL(bare)", 1, "comparison: a URL built from the dialer's Host for hostname and port matching; not logged"},
 	{"devauth.go", "DevAuthMiddlewareWithDebug", "URL.Path", 2, "comparison: health endpoint checks"},
+	{"dispatch_workspace.go", "checkDispatchCloneURLs", "URL(bare)", 4, "clone URL read only for the host-side clone-URL refusal check (CheckHostCloneURL), which returns a URL-free sentinel; never logged, never embedded in a returned error, never delivered."},
 	{"download_signing.go", "Server.signSkillFileDownloadURLs", "URL(bare)", 3, "not a request URL: a signed storage URL field"},
 	{"download_signing.go", "isSignedSkillFileRequest", "URL.Path", 3, "comparison: shape check of a signed skill file read"},
 	{"federation_visitor_messaging.go", "matchVisitorAgentSubRoute", "URL.EscapedPath", 1, "routing: resolves the agent sub-route a visitor may use from the percent-encoded path; compared only, never logged"},
