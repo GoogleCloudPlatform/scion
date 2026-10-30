@@ -32,9 +32,11 @@ variables below at every start and writes `~/.pi/agent/settings.json`; the
 bridge extension reads `SCION_PI_NO_AUTO_COMPLETE` and `SCION_HOOK_DEBUG`
 (and also `SCION_PI_PROJECT_TRUST`) from pi's environment at runtime, so
 `settings.json` cannot set those two.
-Other pi settings can also be edited in `settings.json` directly, except
-`defaultProjectTrust`, which is rewritten from `SCION_PI_PROJECT_TRUST` on
-every start.
+Other pi settings can also be edited in `settings.json` directly, except the
+keys provisioning overwrites at every start: `defaultProjectTrust` (always,
+from `SCION_PI_PROJECT_TRUST`), `defaultProvider` and `defaultModel` (when
+`SCION_PI_PROVIDER` or a concrete `SCION_MODEL` is set), and any key set in
+`SCION_PI_SETTINGS`.
 
 | Setting | Env var | Default | Notes |
 |---------|---------|---------|-------|
@@ -106,12 +108,12 @@ What the policy does and does not cover (pi v1.3.0,
 | `input` (human/RPC) | `prompt-submit` |
 | `tool_execution_start` / `_end` | `tool-start` / `tool-end` |
 | `agent_end` | `agent-end` (carries a provider error) |
-| `agent_settled`, not aborted, no error, and the agent has not run `sciontool status` `ask_user`/`blocked`/`limits_exceeded`/`task_completed` itself since the last human input | `sciontool status task_completed -- <summary>` |
+| `agent_settled`, not aborted, no error, and the agent has not run `sciontool status` `ask_user`/`blocked`/`limits_exceeded`/`task_completed` itself since the last human/RPC input | `sciontool status task_completed -- <summary>` |
 
 `ask_user` and `blocked` are not pi events. Instruct the agent to run
 `sciontool status ask_user "<question>"` or `sciontool status blocked "<reason>"`
 through its bash tool; the bridge sees that command on `tool_execution_start`
-and skips the automatic `task_completed` until the next human input.
+and skips the automatic `task_completed` until the next human/RPC input.
 The same applies when the agent runs `sciontool status task_completed "<summary>"`
 itself: the bridge skips its own call, so the agent's summary is kept.
 The call must be in command position: at the start of the command or of a
