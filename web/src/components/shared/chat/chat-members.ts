@@ -330,6 +330,19 @@ export class ScionChatMembers extends LitElement {
       flex-shrink: 0;
     }
 
+    /* Text for assistive technology only. */
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
     .member-item {
       display: flex;
       align-items: center;
@@ -660,7 +673,8 @@ export class ScionChatMembers extends LitElement {
       <sl-icon name="chevron-down" class="chevron ${collapsed ? 'collapsed' : ''}"></sl-icon>
       <span>${label}</span>
       ${collapsed && unread
-        ? html`<span class="section-unread-dot" aria-label="Unread messages"></span>`
+        ? html`<span class="section-unread-dot" aria-hidden="true"></span
+            ><span class="sr-only">, unread messages</span>`
         : nothing}
     </button>`;
   }
@@ -937,7 +951,8 @@ export class ScionChatMembers extends LitElement {
   private renderHumans() {
     // Filter out the current user so they don't appear in their own
     // members sidebar.
-    let visible = this.humans.filter((m) => m.id !== this.currentUserId);
+    const others = this.humans.filter((m) => m.id !== this.currentUserId);
+    let visible = others;
 
     // Apply the people search (only offered for a bounded people list).
     const query = this.humansTruncated ? this.peopleQuery.trim().toLowerCase() : '';
@@ -961,7 +976,9 @@ export class ScionChatMembers extends LitElement {
       return a.displayName.localeCompare(b.displayName);
     });
 
-    const unread = visible.some((m) => this.unreadFromIds.includes(m.id));
+    // Unread counts every other person, not just the search matches, so a
+    // folded section still signals messages from someone filtered out.
+    const unread = others.some((m) => this.unreadFromIds.includes(m.id));
     const header = this.renderSectionHeader('people', `People — ${sorted.length}`, unread);
 
     // The wrapper only groups the people part (it carries no styles), so it

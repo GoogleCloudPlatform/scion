@@ -126,4 +126,48 @@ describe('scion-chat-members section folding', () => {
     expect(toggle(el, 'agents').querySelector('.section-unread-dot')).not.toBeNull();
     expect(toggle(el, 'people').querySelector('.section-unread-dot')).toBeNull();
   });
+
+  it("names the unread state in the folded heading's accessible text", async () => {
+    const el = await mount({ unreadFromIds: ['a2'] });
+    toggle(el, 'agents').click();
+    await el.updateComplete;
+    const button = toggle(el, 'agents');
+    expect(button.querySelector('.section-unread-dot')?.getAttribute('aria-hidden')).toBe('true');
+    expect(button.querySelector('.sr-only')?.textContent).toContain('unread messages');
+  });
+
+  it('lights the People dot for an unread person outside the search', async () => {
+    const el = await mount({ unreadFromIds: ['u2'] });
+    el.humansTruncated = true;
+    await el.updateComplete;
+    const input = el.shadowRoot?.querySelector<HTMLInputElement>('.people-search input');
+    if (!input) throw new Error('no people search');
+    input.value = 'ada';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+    toggle(el, 'people').click();
+    await el.updateComplete;
+    expect(toggle(el, 'people').querySelector('.section-unread-dot')).not.toBeNull();
+  });
+
+  it('does not light the People dot for the current user', async () => {
+    const el = await mount({ unreadFromIds: ['me'] });
+    el.humans = [...el.humans, human('me', 'Me')];
+    toggle(el, 'people').click();
+    await el.updateComplete;
+    expect(toggle(el, 'people').querySelector('.section-unread-dot')).toBeNull();
+  });
+
+  it('hides the People search while People is folded', async () => {
+    const el = await mount();
+    el.humansTruncated = true;
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('.people-search input')).not.toBeNull();
+    toggle(el, 'people').click();
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('.people-search input')).toBeNull();
+    toggle(el, 'people').click();
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('.people-search input')).not.toBeNull();
+  });
 });
