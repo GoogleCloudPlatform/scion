@@ -9,7 +9,7 @@ Scion supports running agents as Pods in a Kubernetes cluster. This enables remo
 - A running Kubernetes cluster (GKE, EKS, AKS, or self-managed).
 - Kubeconfig file configured with access to the target cluster (or running within the cluster using In-Cluster Authentication).
 - Scion agent images available to the cluster (pushed to a container registry accessible by the cluster).
-- Appropriate RBAC permissions for pod creation, execution, and secret management.
+- The [Runtime Broker permissions](#runtime-broker-permissions) for pod creation, execution, and secret management, granted to the identity the Runtime Broker runs as.
 
 :::note
 Scion utilizes the native Kubernetes Go client API for operations like `exec` and `attach`. The `kubectl` binary is **not** required on the host machine.
@@ -953,7 +953,7 @@ When the Hub uses transport auth (see [Auth Proxy (IAP)](/scion/hosted/ha/auth-p
 
 The per-agent Secret is created even when the agent has no other secrets. It is rebuilt on every start, resume, and restart, so the new Pod always reads the value the Hub sent for that dispatch. In GKE mode the value is stored in this Kubernetes Secret, not in the SecretProviderClass. If a user or project secret also targets `SCION_TRANSPORT_TOKEN`, the value from the Hub is used and the other secret is skipped, with a warning in the broker log. A secret named `scion-transport-credential` is also skipped, because that key is reserved. `SCION_TRANSPORT_TOKEN_EXPIRY` and `SCION_TRANSPORT_AUDIENCE` stay plain environment values. Docker and the other runtimes are unchanged.
 
-No extra RBAC is needed: this uses the same `secrets` create, list, and delete permissions the runtime already needs for agent Secrets (see [Required Permissions](#required-permissions)).
+No extra RBAC is needed: this uses the same `secrets` create, list, and delete permissions the runtime already needs for agent Secrets (see [Runtime Broker permissions](#runtime-broker-permissions)).
 
 ### Git Credential
 
@@ -994,40 +994,84 @@ Tar sync includes retry with exponential backoff (1s, 2s, 4s — up to 3 retries
 | Namespace/pod ID format | Supported (`namespace/podname` for all operations) |
 | Namespace annotation | Supported (`scion.namespace` persisted on pod) |
 
-## Required Permissions
+## Runtime Broker permissions
 
-The user or service account running scion needs the following RBAC permissions in the target namespace:
+The Runtime Broker creates and manages agent pods with its own Kubernetes identity. Bind the permissions below to that identity, in each namespace agents run in, with a namespaced `Role` and `RoleBinding`:
+
+- **Runtime Broker running in the cluster without a kubeconfig:** the broker pod's own ServiceAccount. To find it, run `kubectl get pod <broker-pod> -n <broker-namespace> -o jsonpath='{.spec.serviceAccountName}'`.
+- **Runtime Broker using a kubeconfig:** the user of the runtime entry's `context` (or of the current context). `kubectl config view --minify -o jsonpath='{.contexts[0].context.user}'` shows the user. With the same credentials, `kubectl auth whoami` shows the name the cluster sees.
 
 When Scion runs on GCE or GKE and the kubeconfig's exec credential plugin fails (for example, `gke-gcloud-auth-plugin` is not on the process `PATH`), it falls back to Application Default Credentials and requests the `cloud-platform` and `userinfo.email` scopes. The `userinfo.email` scope makes GKE see the caller as its service account email rather than its numeric ID, so RBAC bindings whose subject is the email match. On a plain GCE VM, the instance's access scopes must already include `userinfo.email` for this to work.
 
-### Minimum RBAC
+| API group | Resource | Verbs | Used for |
+|---|---|---|---|
+| `""` | pods | create, get, list, delete | Creating agent pods, reading their status, listing agents, stopping and deleting them |
+| `""` | pods/exec | create | Attach, exec, home and workspace sync, readiness checks |
+| `""` | pods/log | get | Agent logs |
+| `""` | secrets | create, get, list, delete | Per-agent Secrets and their cleanup |
+| `""` | persistentvolumeclaims | create, get | The [claim check before the pod](#claim-check-before-the-pod), and creating shared-dir claims on the local backend |
+| `""` | events | list | The reason shown for a claim that is not ready, and for a pod that disappeared |
+| `secrets-store.csi.x-k8s.io` | secretproviderclasses | create, get, list, delete | GKE mode only: Secret Manager mounts |
 
-| Resource | Verbs |
-|---|---|
-| pods | create, get, list, delete |
-| pods/exec | create |
-| pods/log | get |
-| secrets | create, list, delete |
+Without `get` on persistentvolumeclaims or `list` on events, agents still start: the claim check is skipped or uses the claim phase only, and a vanished pod gets a generic reason. `create` on persistentvolumeclaims is needed only to create shared-dir claims.
 
-Recommended, for the [claim check before the pod](#claim-check-before-the-pod) and shared-dir claims:
+The names below are examples. Replace the namespace and the subject:
 
-| Resource | Verbs |
-|---|---|
-| persistentvolumeclaims | get (create, to create shared-dir claims on the local backend) |
-| events | list |
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: scion-runtime-broker
+  namespace: scion-agents          # a namespace agents run in
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["create", "get", "list", "delete"]
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["create", "get", "list", "delete"]
+- apiGroups: [""]
+  resources: ["persistentvolumeclaims"]
+  verbs: ["create", "get"]
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["list"]
+# GKE mode only:
+- apiGroups: ["secrets-store.csi.x-k8s.io"]
+  resources: ["secretproviderclasses"]
+  verbs: ["create", "get", "list", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: scion-runtime-broker
+  namespace: scion-agents
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: scion-runtime-broker
+subjects:
+# A Runtime Broker running in the cluster: its own ServiceAccount.
+- kind: ServiceAccount
+  name: scion-broker
+  namespace: scion-system
+# A Runtime Broker using a kubeconfig: that user instead, for example
+# - kind: User
+#   name: broker@example.com
+#   apiGroup: rbac.authorization.k8s.io
+```
 
-### Additional for GKE Mode
-
-| Resource | Verbs |
-|---|---|
-| secretproviderclasses (secrets-store.csi.x-k8s.io) | create, list, delete |
+GCP identity mode `assign` can also list ServiceAccounts to discover mappings; see [Granting discovery access](#gcp-identity-mode-assign-workload-identity-mapping). `scion doctor` checks the pod, pods/exec and secret permissions in the runtime's namespace, and its remediation points to this section. Its namespace check works with this namespaced Role: when the Namespace object itself is not readable, it verifies access within the namespace instead.
 
 ### Additional for Multi-Namespace
 
-| Resource | Verbs |
-|---|---|
-| namespaces | get, list |
-| pods (cluster-wide) | list |
+With `list_all_namespaces: true`, the Runtime Broker lists agent pods and Secrets (and, in GKE mode, SecretProviderClasses) in all namespaces, so it needs `list` on them across the cluster, in addition to the permissions above in each namespace agents run in. The [Helm chart](/scion/hosted/ha/helm/) grants this when `runtime.listAllNamespaces` is `true`.
 
 ### Additional for Flat Kubernetes Runtime Broker Instances
 
@@ -1073,28 +1117,6 @@ Cannot identify Kubernetes execution scope: access denied reading Namespace kube
 ```
 
 Other instances in the same process are not affected. If the Namespace object is missing, the request fails, or the UID is empty, the instance is also not activated, with a message that names the cause. Losing the permission after activation does not change the running instance; the next restart refuses to activate it.
-
-### Example ClusterRole
-
-```yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: scion-agent-manager
-rules:
-- apiGroups: [""]
-  resources: ["pods"]
-  verbs: ["create", "get", "list", "delete"]
-- apiGroups: [""]
-  resources: ["pods/exec", "pods/log"]
-  verbs: ["create", "get"]
-- apiGroups: [""]
-  resources: ["secrets"]
-  verbs: ["create", "list", "delete"]
-- apiGroups: [""]
-  resources: ["namespaces"]
-  verbs: ["get", "list"]
-```
 
 ## Execution Flow
 
