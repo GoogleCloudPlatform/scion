@@ -233,15 +233,16 @@ func buildKeyStatus(ctx context.Context, in keyStatusInputs) (KeyStatusReport, e
 		MaterialDigest:              nil,
 		MaterialDigestOmittedReason: MaterialDigestOmittedPendingLegacyIndependence,
 	}
-	managed := k.Source() == keyring.SourceFile
+	// The same conditions as /readyz: signingNotReadyReason checks any
+	// keyring but the legacy adapter, backupNotReadyReason a managed cipher.
 	var reasons []string
-	if managed {
+	if in.keyring != nil && in.keyring.Source() != keyring.SourceLegacy {
 		if reason := signingIssuanceReason(k.Signing(), in.now); reason != "" {
 			reasons = append(reasons, reason)
 		}
-		if len(in.audit.BackupUnreadable) > 0 {
-			reasons = append(reasons, readyReasonBackupUnreadable)
-		}
+	}
+	if in.cipher.Managed() && len(in.audit.BackupUnreadable) > 0 {
+		reasons = append(reasons, readyReasonBackupUnreadable)
 	}
 	if in.store != nil {
 		policy, migration, err := keyStatusPolicy(ctx, in.store)
