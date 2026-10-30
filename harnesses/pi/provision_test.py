@@ -393,8 +393,10 @@ class CaptureAuthTest(unittest.TestCase):
             }
             if conflict:
                 child_env["FAKE_CONFLICT"] = "1"
+            # -B: child_env drops PYTHONDONTWRITEBYTECODE, and the child imports
+            # scion_harness from this directory; keep its bytecode out of the tree.
             proc = subprocess.run(
-                [sys.executable, os.path.join(HERE, "capture_auth.py"), *args],
+                [sys.executable, "-B", os.path.join(HERE, "capture_auth.py"), *args],
                 env=child_env, capture_output=True, text=True, timeout=60,
             )
             calls = []
