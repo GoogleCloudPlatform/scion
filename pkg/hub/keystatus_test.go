@@ -46,6 +46,13 @@ import (
 
 const keyStatusPath = "/api/v1/admin/keys/status"
 
+// Seeded secret record IDs (secret IDs are UUIDs).
+const (
+	ksRecordLegacy     = "6b0f2f1e-5a4b-4c3d-8e2f-00000000a001"
+	ksRecordReadable   = "6b0f2f1e-5a4b-4c3d-8e2f-00000000a002"
+	ksRecordUnreadable = "6b0f2f1e-5a4b-4c3d-8e2f-00000000a003"
+)
+
 // ksFile writes doc as a keyring file with mode 0400 and loads it with the
 // real loader.
 func ksFile(t *testing.T, doc map[string]any) *keyring.Keyring {
@@ -366,7 +373,15 @@ func TestKeyStatus_PolicyAndMigration(t *testing.T) {
 func TestKeyStatus_LegacyModeEndpoint(t *testing.T) {
 	st := encStore(t)
 	clk := &krClock{t: krT0}
-	srv := ksRestart(t, ksServer(t, st, nil, clk), st, nil, clk)
+	// A legacy-mode Hub derives its signing keys from the shared secret and
+	// stores no backups, so seed one user secret for the audit to read.
+	srv := ksServer(t, st, nil, clk)
+	sealed, err := secret.NewLegacyValueCipher(krLegacySecret).Encrypt("ks-synthetic-legacy-payload")
+	require.NoError(t, err)
+	_, err = st.UpsertSecret(context.Background(), &store.Secret{ID: ksRecordLegacy, Key: "KS_RECORD_KEY_LEGACY", EncryptedValue: sealed,
+		Scope: store.ScopeUser, ScopeID: "ks-user", SecretType: store.SecretTypeEnvironment})
+	require.NoError(t, err)
+	srv = ksRestart(t, srv, st, nil, clk)
 
 	r, _ := ksGet(t, srv)
 	assert.Equal(t, KeyStatusReportVersion, r.ReportVersion)
@@ -379,7 +394,9 @@ func TestKeyStatus_LegacyModeEndpoint(t *testing.T) {
 	assert.True(t, r.Audit.Ran)
 	assert.Equal(t, KeyStatusAuditStartup, r.Audit.Scope)
 	require.NotNil(t, r.Audit.CompletedAt)
-	assert.Positive(t, r.Audit.Scanned, "the startup audit saw the signing backups")
+	assert.Equal(t, 1, r.Audit.Scanned, "the startup audit saw the seeded row")
+	assert.Equal(t, 1, r.Audit.Readable)
+	assert.Equal(t, map[string]int{"v1": 1}, r.Audit.ByFormat)
 	assert.Nil(t, r.MaterialDigest)
 	assert.Equal(t, MaterialDigestOmittedPendingLegacyIndependence, r.MaterialDigestOmittedReason)
 
@@ -504,8 +521,8 @@ func TestKeyStatus_NoLeak(t *testing.T) {
 	readable, err := c.Encrypt("ks-synthetic-payload-readable")
 	require.NoError(t, err)
 	for _, row := range []*store.Secret{
-		{ID: "ks-record-id-readable", Key: "KS_RECORD_KEY_READABLE", EncryptedValue: readable},
-		{ID: "ks-record-id-unreadable", Key: "KS_RECORD_KEY_UNREADABLE", EncryptedValue: sealForeign(t, "legacy", "ks-synthetic-payload-foreign")},
+		{ID: ksRecordReadable, Key: "KS_RECORD_KEY_READABLE", EncryptedValue: readable},
+		{ID: ksRecordUnreadable, Key: "KS_RECORD_KEY_UNREADABLE", EncryptedValue: sealForeign(t, "legacy", "ks-synthetic-payload-foreign")},
 	} {
 		row.Scope, row.ScopeID, row.SecretType = store.ScopeUser, "ks-user", store.SecretTypeEnvironment
 		_, err := st.UpsertSecret(ctx, row)
@@ -541,7 +558,7 @@ func TestKeyStatus_NoLeak(t *testing.T) {
 		assert.NotContains(t, body, f)
 		assert.NotContains(t, logs.String(), f)
 	}
-	for _, id := range []string{"ks-record-id-readable", "ks-record-id-unreadable", "KS_RECORD_KEY_READABLE", "KS_RECORD_KEY_UNREADABLE", "ks-synthetic-payload"} {
+	for _, id := range []string{ksRecordReadable, ksRecordUnreadable, "KS_RECORD_KEY_READABLE", "KS_RECORD_KEY_UNREADABLE", "ks-synthetic-payload"} {
 		assert.NotContains(t, body, id)
 	}
 	for _, row := range rows {

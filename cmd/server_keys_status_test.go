@@ -58,8 +58,8 @@ func keysStatusDBFixture(t *testing.T, home, keyringPath string) (string, store.
 	foreign, err := secret.NewLegacyValueCipher("test-only-some-other-secret").Encrypt("cmd-keys-synthetic-foreign")
 	require.NoError(t, err)
 	for _, row := range []*store.Secret{
-		{ID: "cmd-keys-record-readable", Key: "CMD_KEYS_READABLE", EncryptedValue: readable},
-		{ID: "cmd-keys-record-foreign", Key: "CMD_KEYS_FOREIGN", EncryptedValue: foreign},
+		{ID: "7c1e3d2a-6b5c-4d4e-9f30-00000000b001", Key: "CMD_KEYS_READABLE", EncryptedValue: readable},
+		{ID: "7c1e3d2a-6b5c-4d4e-9f30-00000000b002", Key: "CMD_KEYS_FOREIGN", EncryptedValue: foreign},
 	} {
 		row.Scope, row.ScopeID, row.SecretType = store.ScopeUser, "cmd-keys-user", store.SecretTypeEnvironment
 		_, err := cs.UpsertSecret(ctx, row)
@@ -111,7 +111,7 @@ func TestServerKeysStatus_JSONMatchesBuilder(t *testing.T) {
 	assert.JSONEq(t, string(wantJSON), string(gotJSON))
 
 	assertNoCmdKRSecret(t, out)
-	for _, s := range []string{"cmd-keys-record-readable", "cmd-keys-record-foreign", "CMD_KEYS_READABLE", "CMD_KEYS_FOREIGN", "cmd-keys-synthetic"} {
+	for _, s := range []string{"7c1e3d2a-6b5c-4d4e-9f30-00000000b001", "7c1e3d2a-6b5c-4d4e-9f30-00000000b002", "CMD_KEYS_READABLE", "CMD_KEYS_FOREIGN", "cmd-keys-synthetic"} {
 		assert.NotContains(t, out, s)
 	}
 }
