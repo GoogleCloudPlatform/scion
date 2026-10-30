@@ -255,8 +255,12 @@ func DeleteSharedDir(hostBase, subPathRoot, projectID, name string) error {
 // component: like openat(2) itself, O_NOFOLLOW here only refuses a symlink
 // AT comp, not at an intermediate component if comp contains a "/" — see
 // openExistingDirPathNoFollow for a relative path of arbitrarily many
-// components.
+// components. A "." or ".." comp is refused: O_NOFOLLOW does not stop ".."
+// (a real parent entry), so opening it would leave parentFd's directory.
 func openExistingDirNoFollow(parentFd int, comp string) (fd int, existed bool, err error) {
+	if comp == "." || comp == ".." {
+		return -1, false, &confinementError{fmt.Sprintf("path component %q; refusing", comp)}
+	}
 	const openFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
 	fd, err = unix.Openat(parentFd, comp, openFlags, 0)
 	if err == nil {
@@ -275,10 +279,21 @@ func openExistingDirNoFollow(parentFd int, comp string) (fd int, existed bool, e
 // along the way doesn't exist (matching openExistingDirNoFollow's
 // "not existing at all is not an error" contract): there is nothing under
 // that path, existing or not, for the caller to remove.
+//
+// A "." or ".." component is refused before anything is opened, so the walk
+// stays under baseFd even when a caller passes a path that did not go
+// through config.ValidateSubPathRoot.
 func openExistingDirPathNoFollow(baseFd int, relPath string) (fd int, existed bool, err error) {
+	comps := strings.Split(filepath.ToSlash(relPath), "/")
+	for _, comp := range comps {
+		if comp == "." || comp == ".." {
+			return -1, false, &confinementError{fmt.Sprintf(
+				"path %q has a %q component; refusing", relPath, comp)}
+		}
+	}
 	currentFd := baseFd
 	opened := false
-	for _, comp := range strings.Split(filepath.ToSlash(relPath), "/") {
+	for _, comp := range comps {
 		if comp == "" {
 			continue
 		}

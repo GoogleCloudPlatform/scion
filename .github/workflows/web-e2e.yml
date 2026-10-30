@@ -70,8 +70,10 @@
 # total). The three real-hub jobs, test-identity-session, page-policy and
 # port-proxy, each add setup-go, a Go build (make build; a few minutes on a
 # cold Go cache, less with the setup-go cache) and a Vite production build
-# before a short suite; port-proxy also builds the helper. iap-driver is
-# the 18th job.
+# before a short suite; port-proxy also builds the helper and runs a second
+# suite (the page view journeys, ptone/scion#5569) on a second hub, which
+# adds a few minutes; its job timeout is 35 minutes, the others' 20.
+# iap-driver is the 18th job.
 # Wall clock is bounded by the slowest job, about 8-10 minutes.
 
 name: Web E2E (advisory)
@@ -93,6 +95,10 @@ on:
       - 'pkg/hub/auth.go'
       - 'pkg/hub/port_proxy_metrics.go'
       - 'pkg/hub/web.go'
+      - 'pkg/hub/port_view.go'
+      - 'pkg/hub/internal/portview/**'
+      - 'pkg/hub/server.go'
+      - 'pkg/util/logging/**'
       - 'pkg/portforward/**'
       - 'pkg/sciontool/portforward/**'
       - 'pkg/sciontool/conduit/**'
@@ -113,6 +119,10 @@ on:
       - 'pkg/hub/auth.go'
       - 'pkg/hub/port_proxy_metrics.go'
       - 'pkg/hub/web.go'
+      - 'pkg/hub/port_view.go'
+      - 'pkg/hub/internal/portview/**'
+      - 'pkg/hub/server.go'
+      - 'pkg/util/logging/**'
       - 'pkg/portforward/**'
       - 'pkg/sciontool/portforward/**'
       - 'pkg/sciontool/conduit/**'
@@ -130,11 +140,15 @@ concurrency:
 permissions:
   contents: read
 
+# Fork CI gate (hack/check-fork-ci-gate.sh, cr-ci/workflows/README.md): on push
+# and schedule every job runs only in GoogleCloudPlatform/scion; forks stage PRs.
 jobs:
   e2e:
     name: e2e (${{ matrix.suite }})
+    if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # port-proxy runs two suites, each on its own hub (see below).
+    timeout-minutes: ${{ matrix.suite == 'port-proxy' && 35 || 20 }}
     strategy:
       fail-fast: false
       matrix:
@@ -248,6 +262,7 @@ jobs:
       # exported. The step stops with a clear error if the binary is
       # missing, for example after a partial install or cache restore.
       - name: Run Playwright suite
+        id: suite
         working-directory: ./web
         env:
           SUITE: ${{ matrix.suite }}
@@ -264,6 +279,20 @@ jobs:
           export TERMINAL_OWNER_CHROMIUM="$CHROMIUM_EXECUTABLE"
           npx playwright test -c "e2e/$SUITE/playwright.config.ts"
 
+      # The page view journeys (ptone/scion#5569) need the hub.port_view
+      # experiment on from hub start, so they run on a second hub of the
+      # same rig, under their own config. They run whenever the suite above
+      # ran, also when its journeys failed, so both results are reported.
+      - name: Run Playwright page view suite (port-proxy)
+        if: ${{ !cancelled() && matrix.suite == 'port-proxy' && (steps.suite.outcome == 'success' || steps.suite.outcome == 'failure') }}
+        working-directory: ./web
+        env:
+          E2E_PREBUILT: '1'
+        run: |
+          CHROMIUM_EXECUTABLE="$(node -p "require('playwright-core').chromium.executablePath()")"
+          export CHROMIUM_EXECUTABLE
+          npx playwright test -c e2e/port-proxy/playwright.view.config.ts
+
       # Uploaded whenever the suite ran, so retry traces of flaky tests (which
       # pass the job) are kept too. Paths match each config's HTML report
       # folder (playwright-report/<suite>) and outputDir (test-results/<suite>).
@@ -271,7 +300,7 @@ jobs:
       # terminal-workspace) use Playwright's default, web/test-results.
       - name: Upload traces and report
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: web-e2e-${{ matrix.suite }}
           path: |

@@ -73,13 +73,14 @@ func (s *Server) experimentEnabledIn(snap ExperimentsSnapshot, name string) bool
 // this deployment when it differs by deployment from the compiled default,
 // with ok true; otherwise ok is false and the compiled default applies.
 //
-// hub.attachment_artifacts defaults on when the hub's resource storage is an
-// object store (ptone/scion#5827): uploads then go to the artifact
-// service and reach agents through inbox delivery, and a hub replica keeps
-// no attachment bytes on its own disk. A hub with local resource storage
-// (the workstation server) keeps the compiled default, off.
+// hub.attachment_artifacts defaults on wherever the artifact service is
+// ready (attachmentArtifactsReady), local blob storage included
+// (ptone/scion#5828), and on every hub whose resource storage is an object
+// store (ptone/scion#5827): uploads then go to the artifact service and
+// reach each recipient agent through inbox delivery, so a workstation or
+// single-node hub needs no object storage for attachments.
 func (s *Server) deploymentExperimentDefault(name string) (bool, bool) {
-	if name == experiments.AttachmentArtifacts && s.objectStorageConfigured() {
+	if name == experiments.AttachmentArtifacts && (s.objectStorageConfigured() || s.attachmentArtifactsReady()) {
 		return true, true
 	}
 	return false, false
@@ -143,9 +144,10 @@ var dispatchExperimentNames = []string{experiments.K8sNFSHome, experiments.Agent
 
 // dispatchExperiments returns the dispatch experiments that are enabled
 // now, resolved from one snapshot, or nil when none is. hub.conduit is a
-// derived entry: it is included only while this node serves conduit (the
-// experiment is on in the same snapshot and the relay is running), so an
-// agent dials conduit only where a relay can admit it.
+// derived entry: it is included only while a relay can admit an agent that
+// dials this hub, with the experiment on in the same snapshot: the
+// in-process relay is running (conduitServingIn), or, in external relay
+// mode, the ingress serves and a relay is eligible (conduitIngressServingIn).
 func (s *Server) dispatchExperiments() []string {
 	snap := s.experimentsSnapshot()
 	var out []string
@@ -154,7 +156,7 @@ func (s *Server) dispatchExperiments() []string {
 			out = append(out, name)
 		}
 	}
-	if s.conduitServingIn(snap) {
+	if s.conduitServingIn(snap) || s.conduitIngressServingIn(snap) {
 		out = append(out, conduitExperiment)
 	}
 	return out

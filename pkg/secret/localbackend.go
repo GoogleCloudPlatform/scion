@@ -116,9 +116,12 @@ func (b *LocalBackend) fetchValue(ctx context.Context, meta SecretMeta) FetchRes
 	}
 	sv, err := b.decryptStoreSecret(s)
 	if err != nil {
-		return FetchResult{Err: err}
+		// The typed error Resolve returns for an undecryptable value
+		// (errors.Is ErrResolveDecrypt), naming the key and scope only.
+		return FetchResult{Err: newResolveDecryptError([]ResolveFailure{{Key: s.Key, Scope: s.Scope, Kind: DecryptFailureKind(err)}})}
 	}
-	return FetchResult{Value: sv.Value}
+	// The stored ref verbatim, as Resolve reports it.
+	return FetchResult{Value: sv.Value, Ref: s.SecretRef}
 }
 
 func (b *LocalBackend) Set(ctx context.Context, input *SetSecretInput) (bool, *SecretMeta, error) {
@@ -236,6 +239,13 @@ func (b *LocalBackend) Resolve(ctx context.Context, userID, projectID, brokerID 
 			// Never project hub-internal infrastructure secrets (e.g. signing keys)
 			// into agent environments.
 			if s.SecretType == store.SecretTypeInternal {
+				continue
+			}
+			// The owner path: a user-scope row of userID is held to the
+			// caller's UserScopeCheck before its value is read. A rejected
+			// row is skipped, so a lower-scope row with the same key stays
+			// in effect.
+			if sc.scope == store.ScopeUser && opts != nil && opts.UserScopeCheck != nil && !opts.UserScopeCheck(*fromStoreSecretMeta(&s)) {
 				continue
 			}
 

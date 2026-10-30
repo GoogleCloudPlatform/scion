@@ -1664,9 +1664,47 @@ func ExtractOrgRepo(gitURL string) (org, repo string) {
 // If the requested branch does not exist on the remote, the clone falls back to
 // the remote's default branch and creates the requested branch locally.
 func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
+	return cloneSharedWorkspace(workspacePath, cloneURL, branch, token, HostGitHardening{})
+}
+
+// HostGitHardening is what a host-side clone or fetch of a URL the host
+// does not choose itself adds to the base host pins.
+type HostGitHardening struct {
+	// Config holds key=value settings passed as -c after HostGitArgs (and,
+	// on a fetch, after the network transport allow-list), so a setting
+	// here overrides a base pin of the same key.
+	Config []string
+	// Env is appended to the command environment.
+	Env []string
+	// NoCredentialHelpers runs git with no credential helper, no configured
+	// extra HTTP header and no askpass (NoCredentialHelperEnv); the token is
+	// not used.
+	NoCredentialHelpers bool
+}
+
+// configArgs returns h.Config as -c arguments.
+func (h HostGitHardening) configArgs() []string {
+	var args []string
+	for _, kv := range h.Config {
+		args = append(args, "-c", kv)
+	}
+	return args
+}
+
+// CloneSharedWorkspaceHardened is CloneSharedWorkspace for a clone URL the
+// host does not choose itself, with h applied to every clone subcommand.
+func CloneSharedWorkspaceHardened(workspacePath, cloneURL, branch, token string, h HostGitHardening) error {
+	return cloneSharedWorkspace(workspacePath, cloneURL, branch, token, h)
+}
+
+func cloneSharedWorkspace(workspacePath, cloneURL, branch, token string, h HostGitHardening) error {
+	gitArgs := h.configArgs()
 	baseEnv := append(HostGitEnv(os.Environ()), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1")
+	baseEnv = append(baseEnv, h.Env...)
 	env := baseEnv
-	if token != "" {
+	if h.NoCredentialHelpers {
+		env = NoCredentialHelperEnv(baseEnv, cloneURL)
+	} else if token != "" {
 		if scoped, ok := ScopedCredentialHelperEnv(baseEnv, cloneURL, token); ok {
 			env = scoped
 		}
@@ -1680,18 +1718,20 @@ func CloneSharedWorkspace(workspacePath, cloneURL, branch, token string) error {
 		return cmd.CombinedOutput()
 	}
 
-	args := []string{"clone"}
+	// "--" ends the options: a URL or path starting with "-" is never read
+	// as one.
+	args := append(append([]string{}, gitArgs...), "clone")
 	if branch != "" {
 		args = append(args, "--branch", branch)
 	}
-	args = append(args, cloneURL, workspacePath)
+	args = append(args, "--", cloneURL, workspacePath)
 	output, err := runClone(args...)
 
 	if err != nil && branch != "" && isRemoteBranchNotFound(string(output)) {
 		// The branch doesn't exist on the remote yet. Clone the default branch
 		// instead and create the requested branch locally.
 		_ = os.RemoveAll(workspacePath)
-		output, err = runClone("clone", cloneURL, workspacePath)
+		output, err = runClone(append(append([]string{}, gitArgs...), "clone", "--", cloneURL, workspacePath)...)
 		if err != nil {
 			sanitized := strings.TrimSpace(sanitizeGitOutput(string(output), token))
 			gitErr := ClassifyGitError(sanitized)
@@ -1767,6 +1807,16 @@ type PullResult struct {
 // current branch's configured upstream branch, or the current branch's own
 // name; it is fetched into refs/remotes/origin/<branch>.
 func PullSharedWorkspace(workspacePath, cloneURL, token string) (*PullResult, error) {
+	return pullSharedWorkspace(workspacePath, cloneURL, token, HostGitHardening{})
+}
+
+// PullSharedWorkspaceHardened is PullSharedWorkspace for a clone URL the
+// host does not choose itself, with h applied to the fetch.
+func PullSharedWorkspaceHardened(workspacePath, cloneURL, token string, h HostGitHardening) (*PullResult, error) {
+	return pullSharedWorkspace(workspacePath, cloneURL, token, h)
+}
+
+func pullSharedWorkspace(workspacePath, cloneURL, token string, h HostGitHardening) (*PullResult, error) {
 	pullErr := func(msg string) error {
 		msg = sanitizeGitOutput(msg, token)
 		gitErr := ClassifyGitError(msg)
@@ -1787,12 +1837,14 @@ func PullSharedWorkspace(workspacePath, cloneURL, token string) (*PullResult, er
 	// .lfsconfig might name. The merge/checkout step below gets no credential
 	// config at all and skips the LFS smudge, so no host-side checkout can
 	// leak the token to an agent-chosen endpoint.
-	fetchEnv := baseEnv
-	if token != "" {
+	fetchEnv := append(append([]string{}, baseEnv...), h.Env...)
+	if h.NoCredentialHelpers {
+		fetchEnv = NoCredentialHelperEnv(fetchEnv, cloneURL)
+	} else if token != "" {
 		// Only an http(s) clone URL can carry a host-scoped credential helper.
 		// For an ssh/scp or local-path URL the token is ignored (git uses its
 		// own transport auth), rather than failing the pull.
-		if scoped, ok := ScopedCredentialHelperEnv(baseEnv, cloneURL, token); ok {
+		if scoped, ok := ScopedCredentialHelperEnv(fetchEnv, cloneURL, token); ok {
 			fetchEnv = scoped
 		}
 	}
@@ -1818,7 +1870,7 @@ func PullSharedWorkspace(workspacePath, cloneURL, token string) (*PullResult, er
 	oldHeadStr := strings.TrimSpace(string(oldHead))
 
 	ctx := context.Background()
-	fetch, err := HostGitCommand(ctx, workspacePath, HostGitOptions{Env: fetchEnv, Network: true},
+	fetch, err := HostGitCommand(ctx, workspacePath, HostGitOptions{Env: fetchEnv, Network: true, Config: h.Config},
 		"fetch", "--no-tags", "--", cloneURL, "+refs/heads/"+remoteBranch+":"+trackingRef)
 	if err != nil {
 		return nil, pullErr(err.Error())

@@ -29,6 +29,8 @@ on:
         type: string
         default: ''
 
+# Fork CI gate (hack/check-fork-ci-gate.sh, cr-ci/workflows/README.md): on push
+# and schedule every job runs only in GoogleCloudPlatform/scion; forks stage PRs.
 jobs:
   select-and-tag:
     name: Select Nightly and Tag Preview
@@ -91,7 +93,7 @@ jobs:
   build:
     name: Build Preview Release
     needs: select-and-tag
-    if: needs.select-and-tag.outputs.tagged == 'true'
+    if: ${{ ((github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion') && (needs.select-and-tag.outputs.tagged == 'true') }}
     permissions:
       contents: write
       pull-requests: write    # Needed by update-manifest job

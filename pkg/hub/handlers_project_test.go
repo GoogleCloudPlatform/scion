@@ -1855,6 +1855,8 @@ func TestCreateProject_SharedWorkspace_SetsLabelAndInitFilesystem(t *testing.T) 
 		require.NoError(t, cmd.Run(), "git %v", args)
 	}
 
+	allowLocalCloneFixture(t, sourceDir)
+
 	body := CreateProjectRequest{
 		Name:          "Shared WS Project",
 		GitRemote:     "github.com/test/shared-ws",
@@ -2105,6 +2107,8 @@ func TestCloneSharedWorkspaceProject_Success(t *testing.T) {
 		require.NoError(t, cmd.Run(), "git %v", args)
 	}
 
+	allowLocalCloneFixture(t, sourceDir)
+
 	project := &store.Project{
 		ID:        "project-clone-test",
 		Name:      "Clone Test",
@@ -2165,6 +2169,8 @@ func TestCloneSharedWorkspaceProject_IgnoreRuleFailure_CleansUpWithoutPath(t *te
 		cmd.Dir = sourceDir
 		require.NoError(t, cmd.Run(), "git %v", args)
 	}
+
+	allowLocalCloneFixture(t, sourceDir)
 
 	project := &store.Project{
 		ID:        "project-clone-unignored",
@@ -2338,6 +2344,8 @@ func TestCreateProject_AutoAssociatesGitHubInstallation(t *testing.T) {
 		cmd.Dir = sourceDir
 		require.NoError(t, cmd.Run(), "git %v", args)
 	}
+
+	allowLocalCloneFixture(t, sourceDir)
 
 	body := CreateProjectRequest{
 		Name:          "Auto Assoc Project",

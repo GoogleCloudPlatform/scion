@@ -369,16 +369,18 @@ func TestAgentPortProxyStripsEveryHubPageHeader(t *testing.T) {
 // sandbox policy (agent ports, workspace files, attachments) can't be
 // embedded in other pages, with or without the web frontend.
 func TestUntrustedContentPolicyRefusesEmbedding(t *testing.T) {
-	if got := cspDirective(untrustedContentSandboxCSP, "frame-ancestors"); len(got) != 1 || got[0] != "'none'" {
-		t.Errorf("frame-ancestors = %v, want ['none']", got)
-	}
-	// Positive control: the sandbox directive is still there, scripts
-	// allowed and never allow-same-origin.
-	sandbox := cspDirective(untrustedContentSandboxCSP, "sandbox")
-	if !containsSource(sandbox, "allow-scripts") {
-		t.Errorf("sandbox = %v, want allow-scripts", sandbox)
-	}
-	if containsSource(sandbox, "allow-same-origin") {
-		t.Errorf("sandbox = %v must not allow-same-origin", sandbox)
+	for _, csp := range []string{untrustedContentSandboxCSP, agentServedPageSandboxCSP} {
+		if got := cspDirective(csp, "frame-ancestors"); len(got) != 1 || got[0] != "'none'" {
+			t.Errorf("%q: frame-ancestors = %v, want ['none']", csp, got)
+		}
+		// Positive control: the sandbox directive is still there, scripts
+		// allowed and never allow-same-origin.
+		sandbox := cspDirective(csp, "sandbox")
+		if !containsSource(sandbox, "allow-scripts") {
+			t.Errorf("sandbox = %v, want allow-scripts", sandbox)
+		}
+		if containsSource(sandbox, "allow-same-origin") {
+			t.Errorf("sandbox = %v must not allow-same-origin", sandbox)
+		}
 	}
 }

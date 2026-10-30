@@ -86,19 +86,21 @@ job no longer has those since #4061 (`hack/golangci-lint-split.sh`).
 **Only host-process jobs may be routed.** Cloud Run cannot run Docker, so
 jobs with `services:` (the Postgres jobs) or Docker steps must stay on
 `ubuntu-latest` ([architecture: constraints](../docs/architecture.md#constraints)).
-v1 routes `lint` only.
+`hack/check-runner-routing.sh` enforces this for every job whose `runs-on` reads
+the variable (`grep -n SCION_LARGE_RUNNER .github/workflows/*.yml` lists them).
 
 ### Things P6 must look at before P7
 
 - **golangci-lint binary.** `ci.yml`'s lint job runs golangci-lint v2.15.0
   built with the go-tools#1839 patch by `cr-ci/runner/golangci-lint/build.sh`:
   it restores the binary from its own Actions cache entry (key
-  `golangci-lint-patched-<os>-<arch>-go<version>-<hash of cr-ci/runner/golangci-lint/**>`,
+  `golangci-lint-patched-<runner.environment>-<os>-<arch>-go<version>-<hash of cr-ci/runner/golangci-lint/**>`,
   path `$RUNNER_TEMP/golangci-lint-patched`), or builds it, and puts it first on
   `PATH`; `golangci-lint-action` then only restores the analysis cache
   (`install-mode: none`). A routed `lint` job does the same on the cr-ci runner
-  (`RUNNER_TEMP` is `/home/runner/work/_temp` on both runner types, so the entry
-  is shared) and uses that binary, not the image's. The image ships the same
+  (`RUNNER_TEMP` is `/home/runner/work/_temp` on both runner types, but the key
+  carries `runner.environment`, so each runner type has its own entry; see "Cache
+  scope") and uses that binary, not the image's. The image ships the same
   build (`runner/Dockerfile`, `golangci-lint` stage) for the PoC template and
   anything else that calls `golangci-lint` directly. One set of pins
   (`cr-ci/runner/golangci-lint/VERSIONS`) serves all of them.
@@ -178,8 +180,48 @@ zstd are wrong.
 
 | | Result |
 | :--- | :--- |
-| **Parity holds** (the check passes) | **Shared.** A routed job restores the entries ubuntu-latest saved, and the entries it saves on `main` restore unchanged on a fallback ubuntu-latest run. One set of entries; quota unchanged. |
+| **Parity holds** (the check passes) | **Shared key and paths.** A routed job restores the entries ubuntu-latest saved, and the entries it saves on `main` restore unchanged on a fallback ubuntu-latest run. One set of entries; quota unchanged. The Go build cache's *contents* still differ by runner type (cgo; see "Cache scope"), so a restore is warm only for the type that saved it. |
 | Parity broken (the check fails) | **Separate.** Every restore misses or extracts beside the cache (a cold lint; ci.yml's comments cite 818-1063 s cold against 584-776 s warm, and the warm lint took 1310-1802 s on ubuntu-latest in October 2026, see "Tuning"). Routed `main` runs save a second set (about 4.2 GB of Go build cache plus module zips and the golangci-lint analysis cache) inside the repository's 10 GB Actions cache quota, which raises eviction pressure on every other workload. |
+
+**Cache scope (ptone/scion#5979).** Routed jobs on pushes to `main` save caches in
+`main`'s scope, and every later run on either runner type restores them. Decision:
+- **The patched golangci-lint binary is scoped by runner type.** Its key includes
+  `runner.environment` (`github-hosted` or `self-hosted`): a job executes the binary
+  it restores, so each runner type only runs binaries it built itself. Only the type
+  that runs lint on main pushes saves an entry: on a fork with `SCION_LARGE_RUNNER`
+  set that is `self-hosted`, so a hosted lint run there (a fork pull request) builds
+  the binary each time (about 50 s); upstream, with the variable unset, only
+  `github-hosted` exists. Harmless either way.
+- **The Go build and module caches and golangci-lint's analysis cache keep one key
+  for both runner types, but the build cache is warm only for the type that saved
+  it (decision: document this, cr-ci-rev-16 R1 option (a)).** The cr-ci image has no
+  C compiler, so Go there defaults to `CGO_ENABLED=0`, while ubuntu-latest builds
+  with cgo on. With cgo off, `net` and `os/user` compile other files, and every
+  package that imports them, which is nearly all of scion and most dependencies,
+  gets another build-cache key. Path parity holds; content parity does not, beyond
+  the standard library and dependencies below `net`. The analysis cache splits the
+  same way; module zips do not.
+  - On a fork with the variable set, the routed main push is the only writer, so
+    a workload's cache holds cgo-off entries: warm for cr-ci, effectively cold for
+    a hosted run of the same workload (a fork pull request, a run with the variable
+    unset, or a job moved back after a problem). Accepted: same-repo pull requests,
+    which run on cr-ci, are nearly all of the fork's.
+  - The first routed main push of a workload restores the hosted (cgo-on) cache,
+    misses on almost all of it, and `save-go-cache` then deletes every entry it did
+    not use ("trim"), so from that day on the key holds a cgo-off cache.
+  - Follow-up for the owner (option (b)): set `CGO_ENABLED: "0"` for the routed Go
+    jobs on both runner types, which restores true parity. Release builds are
+    already cgo-off, but it changes what hosted runs test (the pure-Go resolver,
+    `os/user`), so it needs the owner's decision. Adding gcc to the image is not an
+    option: it widens what a job can do there.
+- **Who may write these caches.** Only pushes to `main` save them; pull requests
+  restore but never save, and fork pull requests never run on cr-ci. Module zips are
+  verified against `go.sum`; build-cache and analysis entries are not. Routing adds
+  the cr-ci execution environment (runner image, mediator, GCP project) to the
+  trusted writers of `main`'s caches, whose build-cache objects can be linked into
+  binaries a hosted run executes. That is acceptable: those are trusted main-push
+  jobs, cr-ci already gates merges through the jobs it runs, and per the cgo split
+  above little is reused across runner types in practice.
 
 **`GITHUB_WORKSPACE` stays `/home/runner/work/scion/scion`.** In actions/runner
 v2.338.0 the work directory is `Path.GetFullPath(Path.Combine(root,
@@ -200,6 +242,64 @@ step prints both the reported and the physical path.
   `main` run on cr-ci save the lint cache under a fresh key, then restore
   that key on ubuntu-latest and check that the entries land in
   `/home/runner/.cache/go-build`.
+
+## Fork CI gate
+
+Forks of `GoogleCloudPlatform/scion` (such as `ptone/scion`) are for staging
+pull requests, so a fork does not run CI on `push` or `schedule`. Every job in
+a workflow triggered by a branch push or a schedule starts its job-level `if:`
+with the same gate:
+
+```yaml
+if: ${{ (github.event_name != 'push' && github.event_name != 'schedule') || github.repository == 'GoogleCloudPlatform/scion' }}
+```
+
+A job that already had an `if:` keeps it, ANDed after the gate:
+`${{ (<gate>) && (<old condition>) }}`. Upstream, the gate is always true, so
+push and schedule runs are unchanged. `pull_request`, `pull_request_target`
+and `workflow_dispatch` runs are unchanged everywhere, the fork included. On
+a fork push or schedule every job is skipped, including the `always()`
+summary jobs, so nothing turns red and no check is left pending. Jobs that
+already carry the stricter upstream-only guard
+(`if: github.repository == 'GoogleCloudPlatform/scion'`, in
+`build-nightly.yml` and `build-preview-weekly.yml`) keep it as it is. No
+variable or other fork-side setting is involved.
+
+As a result, the routing expression's `push` branch routes nothing for now.
+Upstream, `SCION_LARGE_RUNNER` is unset, and on a fork the push run is
+skipped. On a fork, cr-ci serves only same-repository pull requests.
+
+To run push CI on a fork anyway, start the workflow with `workflow_dispatch`
+where it has that trigger (`docs.yml`, `full-test-suite.yml`, `web-e2e.yml`,
+`build-nightly.yml`, `build-preview-weekly.yml`, `race-detection.yml`), or
+edit the gate in that fork's copy of the workflow.
+
+`hack/check-fork-ci-gate.sh` (the `fork-ci-gate-check` job in `ci.yml`, with
+fixtures in `hack/testdata/fork-ci-gate/`) fails when such a job lacks the
+gate. It also fails when the gate is weakened, for example by an `||` outside the
+job's own condition. It skips push triggers that filter only tags. It has no
+YAML parser and reads only the 2-space block style used here. In every
+workflow except `build-release.yml` (skipped by name, layout rules included),
+it reports `unrecognised layout` (exit 1) for:
+
+- an inline `on:` value that is not a bare event or a one-line list of bare
+  events (for example a flow map, a quoted event, or a list over several lines);
+- any line under a block `on:` that is not one of: a 2-space `- event` entry,
+  a 2-space `event:` key, that key's settings indented by 4 or more spaces, a
+  comment, or a blank line. This covers entries at column 0, a list or scalar
+  on the next line, and 4-space entries;
+- an `on:` with no entry (a block `on:` holding only comments or blank lines,
+  or `on: []`);
+- no top-level `on:` or `jobs:` key it recognises (for example a quoted
+  `"jobs":` or `jobs :`);
+- an inline `jobs:` value, a job key that is not an unquoted 2-space key, or a
+  `jobs:` with no job.
+
+Keep each `if:` on one line. A block-scalar `if:` is reported, and a trailing
+comment with no quotes in it is ignored.
+
+`build-release.yml` (tag pushes) is not gated yet; its jobs carry the
+upstream-only repository guard instead.
 
 ## PoC success criteria
 

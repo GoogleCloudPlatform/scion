@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/portforward"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
@@ -397,12 +398,7 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	}
 	exposed := findExposedPort(agent.ExposedPorts, port)
 	if exposed == nil {
-		if isBrowserRequest(r) {
-			writeProxyErrorHTML(w, http.StatusNotFound, "Port Not Available",
-				"The requested port is not exposed on this agent.")
-		} else {
-			NotFound(w, "Port")
-		}
+		writePortNotExposed(w, r)
 		return
 	}
 	// The bare proxy URL (.../proxy, no trailing slash) is answered with a
@@ -418,6 +414,60 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 		redirectToProxyRoot(w, r)
 		return
 	}
+	// With hub.port_view on, a page navigation by a signed-in user is sent
+	// to a page link instead (port_view.go); access was decided above.
+	if s.redirectToPortView(w, r, agent, exposed) {
+		return
+	}
+	s.proxyToAgentPort(w, r, GetIdentityFromContext(r.Context()), agent, exposed, proxyPath, portProxyPolicy{
+		surface: portProxySurfacePath,
+		caller:  identityStringFromContext(r.Context()),
+	}, start)
+}
+
+// Surfaces of the agent port proxy, as logged.
+const (
+	portProxySurfacePath = "path"     // /api/v1/agents/{id}/ports/{port}/proxy
+	portProxySurfaceView = "portview" // /api/v1/portview/<capability> (port_view.go)
+)
+
+// portProxyPolicy is what differs between the surfaces that proxy to an
+// agent port (proxyToAgentPort).
+type portProxyPolicy struct {
+	// surface is logged with each proxied request.
+	surface string
+	// caller is the identity string logged with each proxied request.
+	caller string
+	// conduitOnly: only the conduit transport serves; without it the
+	// answer is writeAgentOffline.
+	conduitOnly bool
+	// portView applies the page view headers (setPortViewResponseHeaders)
+	// and request and response rules (portViewStrippedRequestHeader,
+	// portViewModifyResponse).
+	portView bool
+}
+
+// writePortNotExposed answers a request for a port the agent has not
+// exposed: the proxy error page for a browser, else a JSON 404.
+func writePortNotExposed(w http.ResponseWriter, r *http.Request) {
+	if isBrowserRequest(r) {
+		writeProxyErrorHTML(w, http.StatusNotFound, "Port Not Available",
+			"The requested port is not exposed on this agent.")
+		return
+	}
+	NotFound(w, "Port")
+}
+
+// proxyToAgentPort proxies r to the agent's exposed port as identity, the
+// caller's access already decided: over the agent's conduit session when
+// this node can route it and the port is loopback, else (unless
+// policy.conduitOnly) over the port-forward tunnel, subject to the
+// refuseLegacyProxy rule.
+func (s *Server) proxyToAgentPort(w http.ResponseWriter, r *http.Request, identity Identity, agent *store.Agent, exposed *store.ExposedPort, proxyPath string, policy portProxyPolicy, start time.Time) {
+	port := exposed.Port
+	if policy.portView {
+		setPortViewResponseHeaders(w)
+	}
 	// Conduit first (hub.conduit on and this node runs the relay): an agent
 	// with a conduit session is proxied over it. An agent without one may
 	// be an older sciontool on the port-forward tunnel below. Every loopback
@@ -425,17 +475,20 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	// retargeted: the stream always goes to conduitProxyHost (127.0.0.1)
 	// inside the agent.
 	conduitOn := s.conduitRoutable()
-	identity := GetIdentityFromContext(r.Context())
 	if conduitOn && isLoopbackHost(exposed.Host) {
 		conn, err := s.openConduitPort(r.Context(), identity, agent, exposed.Port)
 		switch {
 		case err == nil:
-			s.serveConduitProxy(w, r, agent, exposed.Port, proxyPath, conn)
+			s.serveConduitProxy(w, r, agent, exposed.Port, proxyPath, conn, policy)
 			return
 		case !errors.Is(err, router.ErrNoSession):
 			writeConduitProxyError(w, r, agent.ID, err)
 			return
 		}
+	}
+	if policy.conduitOnly {
+		writeAgentOffline(w, r)
+		return
 	}
 	// No path without a target-side deadline (design §3.5 Q14, v2.21.46):
 	// in external relay mode with enforce, a user request that only the
@@ -471,6 +524,9 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	ctx, cancel := context.WithTimeout(legacy.context(r), portForwardTimeout)
 	defer cancel()
 	reqPath := "/" + strings.TrimPrefix(proxyPath, "/")
+	fwdHeader := cloneForwardHeaders(r.Header)
+	// The front proxy's identity headers are not passed to the agent's app.
+	s.stripFrontProxyIdentityHeaders(fwdHeader)
 	resp, err := s.portTunnels.Do(ctx, agent.ID, portforward.Request{
 		StreamID: uuid.NewString(),
 		Port:     exposed.Port,
@@ -478,7 +534,7 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 		Method:   r.Method,
 		Path:     reqPath,
 		Query:    r.URL.RawQuery,
-		Header:   cloneForwardHeaders(r.Header),
+		Header:   fwdHeader,
 		Body:     body,
 	})
 	if hook := s.legacyPortTunnelReturnedTestHook; hook != nil {
@@ -525,7 +581,7 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	// Hub-controlled response headers: the proxied content cannot override
 	// these, so it is sandboxed to an opaque origin and cannot set cookies
 	// on the hub origin.
-	w.Header().Set("Content-Security-Policy", untrustedContentSandboxCSP)
+	setUntrustedContentHeaders(w.Header(), agentServedPageSandboxCSP)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if resp.Status == 0 {
 		resp.Status = http.StatusOK
@@ -535,9 +591,10 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	slog.Debug("Proxy request",
 		"agent_id", agent.ID,
 		"port", port,
-		"caller", identityStringFromContext(r.Context()),
+		"caller", policy.caller,
+		"surface", policy.surface,
 		"method", r.Method,
-		"path", reqPath,
+		"path", logging.SubPath(reqPath),
 		"status", resp.Status,
 		"duration", time.Since(start),
 	)
@@ -589,8 +646,7 @@ func (s *Server) authorizePortAccess(w http.ResponseWriter, r *http.Request, age
 		return agent, true
 	}
 	if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
-		decision := s.authzService.CheckAccess(ctx, userIdent, agentResource(agent), action)
-		if !decision.Allowed {
+		if !s.userPortAccessAllowed(ctx, userIdent, agent, action) {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Access denied", nil)
 			return nil, false
 		}
@@ -598,6 +654,13 @@ func (s *Server) authorizePortAccess(w http.ResponseWriter, r *http.Request, age
 	}
 	writeError(w, http.StatusForbidden, ErrCodeForbidden, "This action requires user or agent authentication", nil)
 	return nil, false
+}
+
+// userPortAccessAllowed is the user decision of authorizePortAccess: may
+// user take action on agent's ports. The page view route
+// (portViewIdentity) makes the same decision.
+func (s *Server) userPortAccessAllowed(ctx context.Context, user UserIdentity, agent *store.Agent, action Action) bool {
+	return s.authzService.CheckAccess(ctx, user, agentResource(agent), action).Allowed
 }
 
 // authorizePortRegistration authorizes registering, deleting and clearing an

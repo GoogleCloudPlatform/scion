@@ -1329,6 +1329,19 @@ type ReimportHarnessConfigRequest struct {
 	SourceURL string `json:"sourceUrl,omitempty"`
 }
 
+// reimportHarnessConfigNewStore returns the reimport's newStore: the same
+// config.yaml validation as an import, confined to the directory
+// (loadLocalHarnessConfigDir: a linked config.yaml fails it), then the store
+// that writes the source entry into the row targetID.
+func (s *Server) reimportHarnessConfigNewStore(targetID string) func(dir string) (*ResourceStore, error) {
+	return func(dir string) (*ResourceStore, error) {
+		if _, err := loadLocalHarnessConfigDir(dir); err != nil {
+			return nil, err
+		}
+		return s.targetHarnessConfigStore(targetID), nil
+	}
+}
+
 // handleHarnessConfigReimport re-imports a harness-config from its stored
 // source_url (or an override URL). POST /api/v1/harness-configs/{id}/reimport
 func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
@@ -1419,14 +1432,7 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 	// of the entry or the row is by the time it is persisted
 	// (ptone/scion#4219).
 	kind := s.harnessConfigImportKind()
-	targetID := hc.ID
-	kind.newStore = func(dir string) (*ResourceStore, error) {
-		// The same config.yaml validation as an import.
-		if _, err := config.LoadHarnessConfigDir(dir); err != nil {
-			return nil, err
-		}
-		return s.targetHarnessConfigStore(targetID), nil
-	}
+	kind.newStore = s.reimportHarnessConfigNewStore(hc.ID)
 	slug := reimportTargetSlug(hc)
 	run := func(progress importProgressFunc) ([]string, error) {
 		return s.importFromRemoteSelected(ctx, hc.ScopeID, sourceURL, hc.Scope, kind, progress,

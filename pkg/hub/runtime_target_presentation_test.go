@@ -34,6 +34,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -340,7 +341,7 @@ func TestBrokerHeartbeat_BrokerSelfOnlyForBrokerIdentity(t *testing.T) {
 		for k, v := range headers {
 			req.Header.Set(k, v)
 		}
-		require.NoError(t, f.srv.brokerAuthService.SignRequest(req, f.flat.ID, secretKey))
+		require.NoError(t, (&apiclient.HMACAuth{BrokerID: f.flat.ID, SecretKey: secretKey}).ApplyAuth(req))
 		rec := httptest.NewRecorder()
 		BrokerAuthMiddleware(f.srv.brokerAuthService)(f.srv.mux).ServeHTTP(rec, req)
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())

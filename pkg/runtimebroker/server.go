@@ -55,6 +55,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -209,6 +210,14 @@ type ServerConfig struct {
 	// NFS-backed agent dispatches. Nil leaves all NFS handling off.
 	NFSConfig *config.V1NFSConfig
 
+	// StorageOverridesCheck, when set, reports whether the settings this
+	// broker starts agents with still carry a removed per-runtime or
+	// per-profile storage override (config.RemovedStorageOverridesError):
+	// /healthz then shows storage_overrides and the broker is degraded
+	// (ptone/scion#6371). The process keeps serving; agent starts of the
+	// affected profiles are refused. Nil disables the check.
+	StorageOverridesCheck func() error
+
 	// WorkspaceStorageBackend is the configured server.workspace_storage
 	// backend name ("" means "local"). It is reported to the hub, with
 	// NFSConfig's first share, as the broker's workspace storage descriptor
@@ -222,6 +231,15 @@ type ServerConfig struct {
 	// can refuse shared-mode dispatch to a broker whose layout disagrees
 	// with its own (projectfs.Layout.DescriptorDiff).
 	StorageLayout projectfs.Layout
+
+	// StorageError, when set, is why the broker's project storage settings
+	// are unusable (an invalid server.project_storage block, reported with
+	// the fields at fault). The broker then has no storage: StorageLayout
+	// is the zero Layout, every agent start (create, start, restart) is
+	// refused with this error, the workspace storage descriptor is marked
+	// invalid and health is degraded. Stop, delete, logs and status keep
+	// working, so existing agents can still be managed.
+	StorageError error
 
 	// DefaultProfile is the broker's default (active) profile name from its
 	// settings (active_profile), reported to the hub on every heartbeat. A
@@ -271,8 +289,8 @@ func DefaultServerConfig() ServerConfig {
 		Host:                 "0.0.0.0",
 		ReadTimeout:          30 * time.Second,
 		WriteTimeout:         120 * time.Second,
-		CORSEnabled:          true,
-		CORSAllowedOrigins:   []string{"*"},
+		CORSEnabled:          false, // off by default: nothing calls the broker from a browser (opt in with server.broker.cors)
+		CORSAllowedOrigins:   []string{},
 		CORSAllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		CORSAllowedHeaders:   []string{"Authorization", "Content-Type", "X-Scion-Broker-Token", "X-API-Key", "X-Scion-Broker-ID", "X-Scion-Timestamp", "X-Scion-Nonce", "X-Scion-Signature", "X-Scion-Signed-Headers"},
 		CORSMaxAge:           3600,
@@ -443,6 +461,9 @@ type Server struct {
 	// stateDirSetupErr refuses to start a server whose broker ID cannot
 	// name its default state directory (DefaultStateDir; startServices).
 	stateDirSetupErr error
+	// controlPathSetupErr refuses to start a server whose layout roots
+	// reach Runtime Broker control paths (checkLayoutRoots).
+	controlPathSetupErr error
 
 	// auxiliaryRuntimes holds runtime+manager pairs for non-default runtimes
 	// created via profile resolution (e.g. kubernetes when default is docker).
@@ -540,6 +561,8 @@ type Server struct {
 
 	// NFS mount reconciler (nil when backend != "nfs")
 	nfsMountReconciler *NFSMountReconciler
+	// storageOverrides caches the StorageOverridesCheck result for /healthz.
+	storageOverrides storageOverridesCache
 	// nfsHostOwned is set when nfsMountReconciler is the host mounter's:
 	// the host runs its loop, this server never does.
 	nfsHostOwned bool
@@ -555,7 +578,17 @@ type Server struct {
 	nfsStartupReconcileDone chan struct{}
 	nfsReconcileStopped     chan struct{}
 	nfsReconcileOnce        sync.Once
-	nfsReconcileCancel      context.CancelFunc
+	// sharedDirsMigrateOnce runs the node-local shared-dir migration hook
+	// once per process (startSharedDirsMigrationHook).
+	sharedDirsMigrateOnce sync.Once
+	nfsReconcileCancel    context.CancelFunc
+	// controlPathSweepOnce and controlPathSweepCancel run and stop the
+	// running-agent control-path sweep (startControlPathSweep).
+	controlPathSweepOnce   sync.Once
+	controlPathSweepCancel context.CancelFunc
+	// shareHealth is the project storage share's visibility on a shared
+	// Layout, re-checked by startShareHealthLoop (share_health.go).
+	shareHealth shareHealthState
 	// nfsReconcileInterval overrides DefaultNFSReconcileInterval (tests).
 	nfsReconcileInterval time.Duration
 
@@ -611,7 +644,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime, rec config.Run
 		runtimeRecord:     rec,
 		mux:               http.NewServeMux(),
 		startTime:         time.Now(),
-		version:           "0.1.0", // TODO: Get from build info
+		version:           version.Short(),
 		hubConnections:    make(map[string]*HubConnection),
 		dispatchAttempts:  make(map[string]*dispatchAttempt),
 		auxiliaryRuntimes: make(map[string]auxiliaryRuntime),
@@ -654,6 +687,14 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime, rec config.Run
 		} else {
 			srv.stateDir = dir
 		}
+	}
+	// The state directory, a configured credentials file and a co-located
+	// Hub's database are Runtime Broker control paths no agent may mount,
+	// wherever they are configured (brokercontrol).
+	registerControlPaths(cfg.BrokerID, srv.stateDir, cfg.BrokerCredentialsPath)
+	if err := checkLayoutRoots(cfg); err != nil {
+		srv.controlPathSetupErr = fmt.Errorf("runtime broker layout: %w", err)
+		slog.Error("Runtime Broker will not start", "error", srv.controlPathSetupErr)
 	}
 	if fi := srv.flatInstance(); fi != nil {
 		srv.flatK8sIdentity = newFlatKubernetesIdentityPolicy(fi)
@@ -1316,10 +1357,11 @@ func (s *Server) validateBrokerAuthStartup() error {
 		if !loopbackOnly {
 			return fmt.Errorf("runtime broker API bound to %q in hub mode requires HMAC auth keys; register first on loopback or provide credentials", s.config.Host)
 		}
-		slog.Warn("Runtime Broker starting in hub mode without HMAC keys — pending registration",
+		slog.Warn("Runtime Broker starting in hub mode without HMAC keys — pending registration; only health endpoints are served until keys are loaded",
 			"host", s.config.Host,
 			"hint", "run 'scion runtime-broker register' to complete setup",
 		)
+		s.warnCORSWildcard()
 		return nil
 	}
 
@@ -1328,8 +1370,16 @@ func (s *Server) validateBrokerAuthStartup() error {
 		return fmt.Errorf("runtime broker API bound to %q requires strict broker auth with valid HMAC keys", s.config.Host)
 	}
 
-	// Loopback-only listeners may be temporarily permissive, but emit a warning.
-	if loopbackOnly && (!strictAuthConfigured || !hasKeys) {
+	// Loopback-only listeners may start without keys or strict auth, but emit
+	// a warning. With broker auth enabled and no keys, the auth gate serves
+	// only the health endpoints.
+	switch {
+	case loopbackOnly && s.config.BrokerAuthEnabled && !hasKeys:
+		slog.Warn("Runtime Broker has no HMAC keys; only health endpoints are served until keys are loaded",
+			"host", s.config.Host,
+			"brokerAuthStrictMode", s.config.BrokerAuthStrictMode,
+		)
+	case loopbackOnly && (!strictAuthConfigured || !hasKeys):
 		slog.Warn("Runtime Broker API is loopback-only and running without strict broker auth",
 			"host", s.config.Host,
 			"brokerAuthEnabled", s.config.BrokerAuthEnabled,
@@ -1338,7 +1388,24 @@ func (s *Server) validateBrokerAuthStartup() error {
 		)
 	}
 
+	s.warnCORSWildcard()
 	return nil
+}
+
+// warnCORSWildcard logs a warning when the broker's CORS settings allow
+// every origin. CORS is off by default; a wildcard is only ever set
+// explicitly by the operator.
+func (s *Server) warnCORSWildcard() {
+	if !s.config.CORSEnabled {
+		return
+	}
+	for _, o := range s.config.CORSAllowedOrigins {
+		if o == "*" {
+			slog.Warn("Runtime Broker CORS allows every origin (server.broker.cors.allowed_origins contains \"*\"); list the origins that need cross-origin access instead",
+				"host", s.config.Host)
+			return
+		}
+	}
 }
 
 // SetWorkspaceDownloader replaces the GCS download used to bootstrap an
@@ -1500,6 +1567,9 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 	if s.stateDirSetupErr != nil {
 		return s.stateDirSetupErr
 	}
+	if s.controlPathSetupErr != nil {
+		return s.controlPathSetupErr
+	}
 	if s.hostSetupErr != nil {
 		return s.hostSetupErr
 	}
@@ -1574,6 +1644,15 @@ func (s *Server) startServices(ctx context.Context, withListener bool) error {
 	// NFS. Until the first pass finishes, /healthz reports the shares as not
 	// reconciled.
 	s.startNFSReconcileLoop(ctx)
+	s.startShareHealthLoop(ctx)
+
+	// Re-check the binds of agents already running, now and periodically,
+	// against the Runtime Broker control paths (controlPathSweeper).
+	s.startControlPathSweep(ctx)
+
+	// Move shared dirs this broker kept node-local onto the shared tree
+	// its Layout now places them on (background, once per process).
+	s.startSharedDirsMigrationHook(ctx)
 
 	// Start all hub connections' services. Start is called without
 	// s.hubMu held: it takes the connection's lifecycle lock and, inside,
@@ -1634,6 +1713,11 @@ func (s *Server) logNFSStartupResult() {
 			"status", r.HealthCheckString(), "autoMount", r.AutoMount())
 		return
 	}
+	if r.UnhealthyAdvisoryOnly() {
+		slog.Warn("NFS mount-table check failed at startup; advisory on this broker, which does not mount the share, and the share directory is visible",
+			"detail", r.HealthCheckString(), "autoMount", r.AutoMount())
+		return
+	}
 	slog.Error("NFS mounts unhealthy at startup; the broker keeps serving",
 		"detail", r.HealthCheckString(), "autoMount", r.AutoMount())
 }
@@ -1689,6 +1773,13 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if nfsCancel != nil {
 		nfsCancel()
 	}
+	s.mu.RLock()
+	sweepCancel := s.controlPathSweepCancel
+	s.mu.RUnlock()
+	if sweepCancel != nil {
+		sweepCancel()
+	}
+	s.stopShareHealthLoop()
 
 	// Cancel every start still running on a start, restart or create
 	// handler and wait for Run's deferred cleanup, before the hub
@@ -1814,6 +1905,12 @@ func (s *Server) sortedAuxiliaryRuntimes() []namedAuxiliaryRuntime {
 // resolve to a runtime different from the broker's default. Any discovered
 // non-default runtimes are registered as auxiliary runtimes so that agents
 // running on them (e.g. Kubernetes pods) can be found after a broker restart.
+//
+// Linked projects elsewhere on disk are not scanned here; their runtime
+// profiles are registered on first use, so the running-agent control-path
+// sweep (controlPathSweeper) reaches their agents only from then on. Scanning
+// the project dirs this broker has local agent state for is a follow-up (see
+// the Limitations in the Volume Source Restrictions reference).
 func (s *Server) discoverAuxiliaryRuntimes() {
 	// Collect project paths to scan
 	var projectPaths []string
@@ -1835,6 +1932,10 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 			}
 		}
 	}
+
+	// Hub-managed projects on shared project storage that this broker has
+	// agent state for (sharedProjectsWithLocalAgents).
+	projectPaths = append(projectPaths, s.sharedProjectsWithLocalAgents()...)
 
 	// Current project dir
 	if pd, _ := config.GetResolvedProjectDir(""); pd != "" {
@@ -3183,16 +3284,37 @@ func (s *Server) outerMiddleware(h http.Handler) http.Handler {
 }
 
 // currentMiddlewareGate passes each request through the component that
-// buildAuthMiddleware has in place at the time, or straight to next when
-// there is none.
+// buildAuthMiddleware has in place at the time. When broker auth is enabled
+// but no hub keys are loaded yet (pending registration, or a credential
+// that failed to load), only the health endpoints are served and every
+// other request is refused, so the API is never served without auth. With
+// broker auth disabled, requests go straight to next.
 func (s *Server) currentMiddlewareGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if mw := s.loadBrokerMiddleware(); mw != nil {
 			mw.ServeWith(w, r, next)
 			return
 		}
+		if s.config.BrokerAuthEnabled && !isHealthPath(r.URL.Path) {
+			writeBrokerAuthUnavailable(w)
+			return
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isHealthPath reports whether path is one of the broker's unauthenticated
+// health endpoints.
+func isHealthPath(path string) bool {
+	return path == "/healthz" || path == "/readyz"
+}
+
+// writeBrokerAuthUnavailable answers a request that arrived while broker
+// auth is enabled but no hub keys are loaded.
+func writeBrokerAuthUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = fmt.Fprint(w, `{"error":{"code":"broker_auth_unavailable","message":"no hub keys are loaded; only health endpoints are served until keys are loaded"}}`)
 }
 
 // loadBrokerMiddleware returns the middleware in place now, or nil.

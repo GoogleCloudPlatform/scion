@@ -21,6 +21,9 @@
  * before the serializer runs and back after the parser runs.
  */
 
+import { InitReady, marksCtx, schemaTimerCtx } from '@milkdown/core';
+import { createTimer } from '@milkdown/ctx';
+import type { MilkdownPlugin } from '@milkdown/ctx';
 import type { DOMOutputSpec, Mark, Node } from '@milkdown/prose/model';
 import { $markSchema, $nodeSchema } from '@milkdown/utils';
 
@@ -108,7 +111,44 @@ export const commentNode = $nodeSchema(COMMENT, () => ({
   toMarkdown: { match: (n: Node): boolean => n.type.name === COMMENT, runner: (): void => {} },
 }));
 
-export const criticSchema = [insMark, delMark, subOldMark, subNewMark, hlMark, commentNode].flat();
+/** The GFM strikethrough mark (preset-gfm). */
+export const STRIKE = 'strike_through';
+
+const CriticRanked = createTimer('CriticRanked');
+
+/**
+ * Places the critic marks just before strikethrough in the schema, so a
+ * suggestion is the outer element of struck text it covers (and of text
+ * struck inside it): a suggested deletion of struck text reads as a
+ * deletion first. Every other mark keeps its place.
+ */
+export const criticRank: MilkdownPlugin = (ctx) => {
+  ctx.record(CriticRanked);
+  ctx.update(schemaTimerCtx, (timers) => [...timers, CriticRanked]);
+  return async (): Promise<void> => {
+    await ctx.wait(InitReady);
+    ctx.update(marksCtx, (marks) => {
+      const critic = marks.filter(([name]) => CRITIC_MARK_NAMES.has(name));
+      const rest = marks.filter(([name]) => !CRITIC_MARK_NAMES.has(name));
+      const at = rest.findIndex(([name]) => name === STRIKE);
+      // No strikethrough mark (a renamed preset mark): nothing to order.
+      // gfm-display.test.ts guards this by checking del.critic-del > s.gfm-strike.
+      if (at < 0) return marks;
+      return [...rest.slice(0, at), ...critic, ...rest.slice(at)];
+    });
+    ctx.done(CriticRanked);
+  };
+};
+
+export const criticSchema = [
+  insMark,
+  delMark,
+  subOldMark,
+  subNewMark,
+  hlMark,
+  commentNode,
+  criticRank,
+].flat();
 
 /** Whether the critic mark of a set of marks was added in this session. */
 export function isMine(marks: readonly Mark[]): boolean {

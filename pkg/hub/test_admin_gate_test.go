@@ -225,7 +225,7 @@ func TestSigningKeySource_EveryClassHubLocalAfterNew(t *testing.T) {
 		src := srv.signingKeySource(c.KeyName)
 		assert.True(t, signingKeySourceIsHubLocal(src), "%s source %q", c.Class, src)
 	}
-	for _, want := range []string{"user_jwt", "agent_token", "oidc", "download_url", "artifact_view_url", "attachment_delivery", "list_cursor", "conduit_grant", "web_session"} {
+	for _, want := range []string{"user_jwt", "agent_token", "oidc", "download_url", "artifact_view_url", "attachment_delivery", "port_view_url", "list_cursor", "conduit_grant", "web_session"} {
 		assert.True(t, got[want], "class %s is checked", want)
 	}
 	assert.Len(t, testAdminSigningKeyClasses(false), len(classes)-1, "OIDC is checked only when enabled")
@@ -236,7 +236,7 @@ func TestSigningKeySource_SharedAndPreconfiguredLabels(t *testing.T) {
 	cfg.SharedSigningSecret = "synthetic-test-secret"
 	srv, _, err := tiaNewServer(t, cfg)
 	require.NoError(t, err)
-	for _, k := range []string{SecretKeyUserSigningKey, SecretKeyAgentSigningKey, SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyAttachmentDeliveryKey, SecretKeyListCursorKey} {
+	for _, k := range []string{SecretKeyUserSigningKey, SecretKeyAgentSigningKey, SecretKeyDownloadSigningKey, SecretKeyArtifactViewKey, SecretKeyAttachmentDeliveryKey, SecretKeyListCursorKey, SecretKeyPortViewKey} {
 		assert.Equal(t, signingKeySourceSharedSecret, srv.signingKeySource(k), k)
 	}
 	assert.Equal(t, signingKeySourceUnresolved, srv.signingKeySource(SecretKeyOIDCSigningKey), "OIDC off: unresolved")
@@ -850,6 +850,7 @@ var tiaSecretKeyClasses = map[string]string{
 	"SecretKeyDownloadSigningKey":    "download_url",
 	"SecretKeyArtifactViewKey":       "artifact_view_url",
 	"SecretKeyAttachmentDeliveryKey": "attachment_delivery",
+	"SecretKeyPortViewKey":           "port_view_url",
 	"SecretKeyListCursorKey":         "list_cursor",
 	"SecretKeyOIDCSigningKey":        "oidc",
 	"SecretKeyOIDCKeyset":            "oidc", // the same manager's persisted keyset
@@ -901,12 +902,16 @@ var tiaDefaultImportNames = map[string]string{
 var tiaKeyMaterialSites = map[string]string{
 	"agenttoken.go:NewAgentTokenService:github.com/go-jose/go-jose/v4.NewSigner":                    "agent_token",
 	"usertoken.go:NewUserTokenService:github.com/go-jose/go-jose/v4.NewSigner":                      "user_jwt",
+	"agenttoken.go:newRingAgentTokenService:github.com/go-jose/go-jose/v4.NewSigner":                "agent_token",
+	"usertoken.go:newRingUserTokenService:github.com/go-jose/go-jose/v4.NewSigner":                  "user_jwt",
 	"oidckeys.go:NewOIDCKeyManager:github.com/go-jose/go-jose/v4.NewSigner":                         "oidc",
 	"oidckeys.go:RotateKey:github.com/go-jose/go-jose/v4.NewSigner":                                 "oidc",
 	"oidckeys.go:refreshKeysFromDB:github.com/go-jose/go-jose/v4.NewSigner":                         "oidc",
 	"oidckeys.go:generateRSAKeyPair:crypto/rsa.GenerateKey":                                         "oidc",
 	"oidckeys.go:decodePEMPrivateKey:crypto/x509.ParsePKCS8PrivateKey":                              "oidc",
 	"download_signing.go:computeSkillFileHMAC:crypto/hmac.New":                                      "download_url",
+	"internal/portview/capability.go:mac:crypto/hmac.New":                                           "port_view_url",
+	"internal/portview/capability.go:macKeyed:crypto/hmac.New":                                      "port_view_url",
 	"download_signing.go:computeSkillFileHMACv2:crypto/hmac.New":                                    "download_url",
 	"attachment_delivery.go:deliveryMACv2:crypto/hmac.New":                                          "attachment_delivery",
 	"attachment_delivery.go:deliveryMAC:crypto/hmac.New":                                            "attachment_delivery",

@@ -16,15 +16,20 @@ package hubclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
+
+// errArtifactRedirect is returned when an artifact file redirect target is invalid.
+var errArtifactRedirect = errors.New("artifact file: invalid redirect")
 
 // ArtifactService handles artifact operations (/api/v1/artifacts).
 type ArtifactService interface {
@@ -429,19 +434,37 @@ func (s *artifactService) OpenFile(ctx context.Context, id string, seq int, file
 		}
 		return s.fetchObject(ctx, loc.String())
 	default:
-		return nil, apiclient.CheckResponse(resp)
+		if err := apiclient.CheckResponse(resp); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("artifact file: unexpected status %d", resp.StatusCode)
 	}
 }
 
+// fetchObject downloads signedURL, an object-store URL, with a client that
+// carries no credential and follows no further redirect. Only https is
+// followed, unless the hub itself is reached over plain http (a local
+// development hub), matching fetchRedirect's contract.
 func (s *artifactService) fetchObject(ctx context.Context, signedURL string) (io.ReadCloser, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, signedURL, nil)
+	u, err := url.Parse(signedURL)
+	allowHTTP := strings.HasPrefix(s.c.transport.BaseURL, "http://")
+	if err != nil || (u.Scheme != "https" && (u.Scheme != "http" || !allowHTTP)) || u.Host == "" {
+		return nil, errArtifactRedirect
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("create object request: %w", err)
 	}
 	hc := s.objectClient
 	if hc == nil {
 		// No whole-exchange timeout: the caller's context bounds it.
-		hc = &http.Client{}
+		// An object-store URL follows no further redirect.
+		hc = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	} else {
+		// Ensure the custom client also does not follow subsequent redirects.
+		clientCopy := *hc
+		clientCopy.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+		hc = &clientCopy
 	}
 	resp, err := hc.Do(req)
 	if err != nil {

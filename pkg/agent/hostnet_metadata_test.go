@@ -128,6 +128,9 @@ func startHostNetFixture(t *testing.T, hubEndpoint, mode string) (*api.AgentInfo
 		ProjectPath: projectScionDir,
 		BrokerMode:  true,
 		NoAuth:      true,
+		// A hub-dispatched start carries the token the hub issued for it
+		// (made-up value); a start without one fails with ErrNoHubToken.
+		HubIssuedToken: "fake.hostnet.hub.token",
 		Env: map[string]string{
 			"SCION_AGENT_ID":      "agent-uuid-hostnet",
 			"SCION_HUB_ENDPOINT":  hubEndpoint,
@@ -187,7 +190,12 @@ func TestStart_BridgeBlockGrantsInterception(t *testing.T) {
 	if !cfg.MetadataInterception {
 		t.Error("MetadataInterception = false for block on bridge, want true")
 	}
+	// The fixture is a hub dispatch with a hub-issued token, so on bridge the
+	// start relays no warning at all (no host networking warning).
 	if len(info.RelayedWarnings) != 0 {
-		t.Errorf("RelayedWarnings = %v, want none on bridge", info.RelayedWarnings)
+		t.Errorf("RelayedWarnings = %v, want none on bridge with a hub-issued token", info.RelayedWarnings)
+	}
+	if slices.Contains(info.RelayedWarnings, hostNetworkMetadataWarning) {
+		t.Errorf("RelayedWarnings = %v, want no host networking warning on bridge", info.RelayedWarnings)
 	}
 }

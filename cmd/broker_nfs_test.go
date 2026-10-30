@@ -52,6 +52,9 @@ func withDefaultRuntime(vs *config.VersionedSettings, key, rtType string) *confi
 
 var share1 = config.V1NFSShare{ID: "ws1", Server: "10.0.0.2", Export: "/scion-workspaces"}
 
+// extraShare is a second share without a Kubernetes PV name.
+var extraShare = config.V1NFSShare{ID: "ws2", Server: "10.0.0.2", Export: "/scion-extra"}
+
 // pvShare is share1 with a Kubernetes PV name.
 var pvShare = config.V1NFSShare{ID: "ws1", Server: "10.0.0.2", Export: "/scion-workspaces", PVName: "scion-ws1"}
 
@@ -282,8 +285,24 @@ func TestCheckDoctorNFSMounts(t *testing.T) {
 			wantStatus: "warn", wantMessage: []string{"ws1: not mounted at /mnt/nfs/ws1", "auto_mount is off", "(auto_mount off)"}, wantRemedy: "Mount each export"},
 		{name: "not mounted, auto_mount on: fail", vs: nfsSettings(true, share1),
 			wantStatus: "fail", wantMessage: []string{"not mounted", "auto_mount on"}, wantRemedy: "broker.nfs-mount"},
-		{name: "not mounted, auto_mount on, kubernetes default runtime: warn", vs: withDefaultRuntime(nfsSettings(true, share1), "gke", "kubernetes"),
-			wantStatus: "warn", wantMessage: []string{"not mounted at /mnt/nfs/ws1", "default runtime is kubernetes", "verify only"}, wantRemedy: "mounts the export into each agent"},
+		{name: "not mounted, no pv_name, kubernetes default runtime: fail (inline pod volumes need the broker mount)", vs: withDefaultRuntime(nfsSettings(true, share1), "gke", "kubernetes"),
+			wantStatus: "fail", wantMessage: []string{"not mounted at /mnt/nfs/ws1", "no pv_name", "mount the export, writable"},
+			wantRemedy: "Mount 10.0.0.2:/scion-workspaces at /mnt/nfs/ws1 on this host, writable by the broker"},
+		{name: "not mounted, no pv_name, auto_mount off, k8s default runtime: fail", vs: withDefaultRuntime(nfsSettings(false, share1), "gke", "k8s"),
+			wantStatus: "fail", wantMessage: []string{"no pv_name"}, wantRemedy: "or set nfs.shares[0].pv_name"},
+		{name: "not mounted, no pv_name, remote default runtime: fail", vs: withDefaultRuntime(nfsSettings(true, share1), "cluster", "remote"),
+			wantStatus: "fail", wantMessage: []string{"not mounted at /mnt/nfs/ws1", "no pv_name"}, wantRemedy: "writable by the broker"},
+		{name: "two shares, shares[0] has pv_name, second not mounted, kubernetes default runtime: warn", vs: withDefaultRuntime(nfsSettings(true, pvShare, extraShare), "gke", "kubernetes"),
+			probe:      fakeNFSProbe{mounts: map[string]string{"/mnt/nfs/ws1": "10.0.0.2:/scion-workspaces"}},
+			wantStatus: "warn", wantMessage: []string{"ws2: not mounted at /mnt/nfs/ws2", "default runtime is kubernetes"}, wantRemedy: "mounts the export into each agent"},
+		{name: "two shares, no pv_name, second not mounted, kubernetes default runtime: warn", vs: withDefaultRuntime(nfsSettings(true, share1, extraShare), "gke", "kubernetes"),
+			probe:      fakeNFSProbe{mounts: map[string]string{"/mnt/nfs/ws1": "10.0.0.2:/scion-workspaces"}},
+			wantStatus: "warn", wantMessage: []string{"ws2: not mounted at /mnt/nfs/ws2", "default runtime is kubernetes"}, wantRemedy: "mounts the export into each agent"},
+		{name: "two shares, no pv_name, neither mounted, kubernetes default runtime: fail on the first", vs: withDefaultRuntime(nfsSettings(true, share1, extraShare), "gke", "kubernetes"),
+			wantStatus: "fail", wantMessage: []string{"ws1: not mounted at /mnt/nfs/ws1 (no pv_name", "ws2: not mounted at /mnt/nfs/ws2 (the default runtime is kubernetes"},
+			wantRemedy: "Mount 10.0.0.2:/scion-workspaces at /mnt/nfs/ws1"},
+		{name: "not mounted, pv_name share, kubernetes default runtime: warn", vs: withDefaultRuntime(nfsSettings(true, pvShare), "gke", "kubernetes"),
+			wantStatus: "warn", wantMessage: []string{"not mounted at /mnt/nfs/ws1", "pv_name is set", "verify only"}, wantRemedy: "mounts the export into each agent"},
 		{name: "not mounted, auto_mount on, cloudrun default runtime: warn", vs: withDefaultRuntime(nfsSettings(true, share1), "cloudrun", ""),
 			wantStatus: "warn", wantMessage: []string{"default runtime is cloudrun"}},
 		{name: "not mounted, auto_mount on, docker default runtime: fail", vs: withDefaultRuntime(nfsSettings(true, share1), "docker", ""),
@@ -294,7 +313,11 @@ func TestCheckDoctorNFSMounts(t *testing.T) {
 			return vs
 		}(), wantStatus: "fail", wantMessage: []string{"not mounted"}},
 		{name: "wrong source, auto_mount on, kubernetes default runtime: fail", vs: withDefaultRuntime(nfsSettings(true, share1), "gke", "kubernetes"),
-			probe: fakeNFSProbe{mounts: map[string]string{"/mnt/nfs/ws1": "10.9.9.9:/x"}}, wantStatus: "fail", wantMessage: []string{"mounted from 10.9.9.9:/x"}},
+			probe: fakeNFSProbe{mounts: map[string]string{"/mnt/nfs/ws1": "10.9.9.9:/x"}}, wantStatus: "fail", wantMessage: []string{"mounted from 10.9.9.9:/x"},
+			wantRemedy: "Mount 10.0.0.2:/scion-workspaces at /mnt/nfs/ws1 on this host, writable by the broker"},
+		{name: "wrong source, pv_name share, kubernetes default runtime: fail with the verify-only remediation", vs: withDefaultRuntime(nfsSettings(true, pvShare), "gke", "kubernetes"),
+			probe: fakeNFSProbe{mounts: map[string]string{"/mnt/nfs/ws1": "10.9.9.9:/x"}}, wantStatus: "fail", wantMessage: []string{"mounted from 10.9.9.9:/x", "verify only"},
+			wantRemedy: "mounts the export into each agent"},
 		{name: "not mounted, pv_name share, auto_mount on: warn", vs: nfsSettings(true, pvShare),
 			wantStatus: "warn", wantMessage: []string{"not mounted", "pv_name is set"}},
 		{name: "not mounted with auto_mount off, server unreachable: fail", vs: nfsSettings(false, share1),

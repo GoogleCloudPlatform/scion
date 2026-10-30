@@ -84,13 +84,15 @@ kubernetes:
       nvidia.com/gpu: "1"
 ```
 
+On a flat Kubernetes Runtime Broker instance (`server.broker.instances`), pod placement (`nodeSelector`, `tolerations`, and `runtimeClassName`) is owned by the instance's `runtime_target` rather than the agent: an agent's `kubernetes.nodeSelector`, `tolerations`, or `runtimeClassName` is refused before any pod or volume is touched unless it matches the instance's value, or the instance leaves that placement field unset and enables `allow_agent_node_selector`, `allow_agent_tolerations`, or `allow_agent_runtime_class_name`. See [Flat instance placement](/scion/reference/server-config/#flat-instance-placement).
+
 ### Shared Directory PVCs
 
 Each project [shared directory](/scion/local/workspace/#5-project-shared-directories) gets its own `ReadWriteMany` PersistentVolumeClaim, created on first use and reused by later agents in the same project. Two keys control these claims:
 
 | Key | Default | Description |
 |---|---|---|
-| `shared_dir_storage_class` | cluster default class | StorageClass for new shared-dir PVCs. It must support `ReadWriteMany`. |
+| `shared_dir_storage_class` | none (required to create a claim) | StorageClass for new shared-dir PVCs. It must support `ReadWriteMany`. |
 | `shared_dir_size` | `10Gi` | Requested size for each new shared-dir PVC. |
 
 You can set them in three places. Each key is resolved separately, and the first source that sets it wins:
@@ -99,7 +101,7 @@ You can set them in three places. Each key is resolved separately, and the first
 2. The profile entry in `settings.yaml`.
 3. The profile's runtime entry in `settings.yaml`.
 
-If none of them sets a key, the cluster's default StorageClass and `10Gi` are used.
+If none of them sets `shared_dir_size`, `10Gi` is used. If none of them sets `shared_dir_storage_class`, Scion does not create shared-dir claims (see [Starts that need a new claim](#starts-that-need-a-new-claim)).
 
 An empty value means "not set", so it does not override a lower source. Once a runtime entry or profile sets a class, an agent cannot reset it to the cluster default; name the class explicitly instead.
 
@@ -107,7 +109,7 @@ An empty value means "not set", so it does not override a lower source. Once a r
 
 The settings values are read every time an agent starts. They apply only on the Kubernetes runtime.
 
-On GKE Autopilot the default class (`standard-rwo`) cannot provision `ReadWriteMany` volumes. The claim stays unbound and the agent pod stays `Pending`. To avoid this, set an RWX class such as `standard-rwx` (Filestore CSI) on the runtime or the profile:
+On GKE Autopilot the default class (`standard-rwo`) cannot provision `ReadWriteMany` volumes, so set an RWX class such as `standard-rwx` (Filestore CSI) on the runtime or the profile:
 
 ```yaml
 runtimes:
@@ -133,6 +135,23 @@ kubernetes:
   shared_dir_size: 10Gi
 ```
 
+#### Starts that need a new claim
+
+When a shared directory's claim does not exist yet and no `shared_dir_storage_class` is set, the agent start fails before its pod is created, and no claim is created. The cluster's default class usually cannot provide `ReadWriteMany` volumes, so such a claim would stay `Pending`, and the agent pod with it. The error names the shared directory and the claim, and the fixes:
+
+- configure [`server.project_storage`](/scion/reference/server-config/#project-storage-serverproject_storage) with `backend: nfs` (one share for all projects; recommended), or
+- set `shared_dir_storage_class` to a `ReadWriteMany` class, in any of the places listed above.
+
+This applies only when a claim must be created. Existing claims, including claims you made by hand, are reused as they are, with no class needed.
+
+#### Claims of another project
+
+A shared-dir claim is named `scion-shared-<project>-<dir>`, so two projects with the same name can collide in one namespace. If an existing claim's `scion.project_id` label names a different project, the start fails with an error naming both projects, and the claim is left unchanged. Delete or rename that claim if the other project no longer uses it. A claim without a `scion.project_id` label (for example one you made by hand) is reused, and Scion logs a warning.
+
+#### Upgrading
+
+Earlier versions created shared-dir claims in the cluster's default class when no class was set. If your cluster's default class already supports `ReadWriteMany`, starts that need a new claim now fail until you set `shared_dir_storage_class` to that class, or configure `server.project_storage` backend `nfs`. Existing claims keep working unchanged.
+
 :::note
 Existing PVCs are reused as they are and never changed. A new class or size only applies to claims created after the change. To move an existing shared directory to a new class, delete its PVC (`scion-shared-…`, labelled `scion.shared-dir=<name>`) after copying out its data. When an agent reuses a claim whose class differs from the requested one, Scion logs a warning naming the claim and both classes.
 :::
@@ -140,6 +159,20 @@ Existing PVCs are reused as they are and never changed. A new class or size only
 :::caution[Cost with many projects]
 Each dynamically provisioned RWX PVC can be its own backing volume. On GKE, every `standard-rwx` claim is a separate Filestore instance, with that tier's minimum capacity. With many projects or shared directories this adds up quickly. For larger fleets, use the NFS backend instead: one pre-provisioned RWX export, mounted by every pod with a `subPath` per project and directory, and no per-directory PVCs. See [`server.project_storage`](/scion/reference/server-config/#project-storage-serverproject_storage) (`backend: nfs`), which serves shared directories from the workspace export.
 :::
+
+### Claim Check Before the Pod
+
+Before it creates an agent pod, the Kubernetes runtime checks every PersistentVolumeClaim the pod mounts: the shared-dir claims, the claim of the NFS share (`server.project_storage` `nfs.shares[0].pv_name`), and any other claim in the pod spec. The check only reads.
+
+| Claim state | Result |
+|---|---|
+| Does not exist | The start fails at once. The error names the claim and, where known, the setting that names it. |
+| `Bound` | The start continues. |
+| Newest event is `ProvisioningFailed` | The start fails at once. The error quotes the event. A newer event after a `ProvisioningFailed` one means the provisioner is retrying, and the claim is treated as `Pending`. |
+| A `WaitForFirstConsumer` event | The start continues: the claim is bound once the pod is scheduled. |
+| Other (`Pending`, `Lost`) | The runtime re-reads the claim every 2 seconds, for up to 30 seconds in total across all the pod's claims. If it is still not bound, the runtime logs a warning and creates the pod anyway. |
+
+The events need `list` on `events` in the agent namespace. Without them, the check uses the claim phase only and logs that once: a provisioning failure is then not detected early, and the first start that uses a new claim of a `WaitForFirstConsumer` class waits the full 30 seconds before its pod is created. Without `get` on `persistentvolumeclaims`, the check is skipped, and that is logged once too.
 
 ### Resource Configuration
 
@@ -715,7 +748,7 @@ Each KSA must exist in its namespace, carry the `iam.gke.io/gcp-service-account`
 
 Starting an agent pod can take several minutes when the cluster has to add a node first, for example a GKE Autopilot cold start followed by a multi-minute image pull. A synchronous Hub create is bounded by the CLI's 30-second HTTP timeout and the Hub's `write_timeout`, so it is not suited to these starts.
 
-Turn on asynchronous create on the Hub, the `hub.async_agent_launch` [experiment](/scion/reference/experiments/) in **Admin → Server Config → Experiments** (no restart needed), and raise the launch budget above your slowest expected start:
+Use asynchronous create, the `hub.async_agent_launch` [experiment](/scion/reference/experiments/). It is on by default; check that it has not been turned off in **Admin → Server Config → Experiments** (no restart needed to change it). Then raise the launch budget above your slowest expected start:
 
 ```yaml
 server:
@@ -723,7 +756,7 @@ server:
     launch_timeout: "15m"   # default 5m
 ```
 
-`launch_timeout` is read only at Hub startup, so restart the Hub after changing it. The Hub, the Runtime Broker, and the CLI must all run a version that includes asynchronous create. With an older broker the Hub falls back to the synchronous create. `scion start` waits for the agent by default; if the wait ends first, the agent still comes up unless the launch reaches `launch_timeout`. While the agent's Pod is `Pending` (waiting for a node, pulling its image or running init containers), the Runtime Broker reports the agent as `starting`, not `running`, so the launch stays active until the container starts and `launch_timeout` still applies. An image pull failure (`ErrImagePull` or `ImagePullBackOff`) still ends the launch at once with `image_pull_failed`. See [Asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create) for the details.
+`launch_timeout` is read only at Hub startup, so restart the Hub after changing it. It also bounds asynchronous starts of existing agents, which are the separate `hub.async_agent_start` experiment (off by default; see [Asynchronous agent start](/scion/reference/server-config/#asynchronous-agent-start)). The Hub, the Runtime Broker, and the CLI must all run a version that includes asynchronous create. With an older broker the Hub falls back to the synchronous create. `scion start` waits for the agent by default; if the wait ends first, the agent still comes up unless the launch reaches `launch_timeout`. While the agent's Pod is `Pending` (waiting for a node, pulling its image or running init containers), the Runtime Broker reports the agent as `starting`, not `running`, so the launch stays active until the container starts and `launch_timeout` still applies. An image pull failure (`ErrImagePull` or `ImagePullBackOff`) still ends the launch at once with `image_pull_failed`. See [Asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create) for the details.
 
 A broker pod that stops during a launch reports it failed with `broker_restarted`. Give broker and combined Hub and broker pods `terminationGracePeriodSeconds: 45` so that report fits in the shutdown. To also recover launches after a crash or a pod replacement, point `server.broker.state_dir` at a persistent local volume. See [Broker restarts during a launch](/scion/reference/server-config/#asynchronous-agent-create).
 
@@ -757,13 +790,14 @@ On a node that has just scaled up from zero, such as on GKE Autopilot, the API s
 | EmptyDir (workspace) | Supported | Default workspace volume, always created. Contents are lost when the Pod stops (see [Empty-per-agent workspaces](#empty-per-agent-workspaces)) |
 | GCS FUSE CSI | Supported | Requires `gcsfuse.csi.storage.gke.io` CSI driver; GKE only |
 | Local/bind-mount | Not supported | Logged as warning, skipped. Use tar sync instead |
-| PersistentVolumeClaim | Supported | Used for the NFS-backed shared `project_storage` backend; requires a pre-provisioned PV/PVC (for example, Filestore-backed) and `project_storage.backend: nfs` in `settings.yaml`. See [NFS workspace export requirements](#nfs-workspace-export-requirements) |
+| PersistentVolumeClaim | Supported | Used for the NFS-backed shared `project_storage` backend when `nfs.shares[0].pv_name` names a pre-provisioned PV/PVC (for example, Filestore-backed). See [NFS workspace export requirements](#nfs-workspace-export-requirements) |
+| NFS (inline) | Supported | Used for the NFS-backed shared `project_storage` backend when the share has no `pv_name`: one inline `nfs` volume per directory, with no NFS mount options. See [Inline NFS volumes](#inline-nfs-volumes-no-pv_name) |
 
 ### NFS Workspace Export Requirements
 
-With `project_storage.backend: nfs` (or the deprecated `workspace_storage.backend: nfs`), each project's workspace is mounted into the agent Pod from the shared volume at the subPath `<subpath_root>/<project-id>/workspace` (`subpath_root` defaults to `projects`). The project's shared directories are mounted from the same volume at `<subpath_root>/<project-id>/shared-dirs/<name>`. In shared-plain and worktree-per-agent modes, the workspace provisioning init container (and only that container) also mounts the project's provisioning state directory, `<subpath_root>/<project-id>/provision`, at `/scion-provision`. It holds the provisioning sentinel (`.scion-provisioned`) and the per-project provisioning lock, so neither is visible in the workspace. These directories have to exist before the Pod starts. How they get created depends on whether the Runtime Broker that creates the Pod has the export mounted at `project_storage.nfs.mount_root/<share id>`:
+With `project_storage.backend: nfs` (or the deprecated `workspace_storage.backend: nfs`) and a `pv_name` on the share, each project's workspace is mounted into the agent Pod from the shared volume at the subPath `<subpath_root>/<project-id>/workspace` (`subpath_root` defaults to `projects`). The project's shared directories are mounted from the same volume at `<subpath_root>/<project-id>/shared-dirs/<name>`. In shared-plain and worktree-per-agent modes, the workspace provisioning init container (and only that container) also mounts the project's provisioning state directory, `<subpath_root>/<project-id>/provision`, at `/scion-provision`. It holds the provisioning sentinel (`.scion-provisioned`) and the per-project provisioning lock, so neither is visible in the workspace. These directories have to exist before the Pod starts. How they get created depends on whether the Runtime Broker that creates the Pod has the export mounted at `project_storage.nfs.mount_root/<share id>`:
 
-- **Runtime Broker has the export mounted (recommended).** Before it creates the Pod, the Runtime Broker creates the workspace directory, the provisioning state directory and each of those shared directories itself, the same way it creates shared-directory leaves: missing parent directories get mode `2755`, and each new directory gets mode `2775` (setgid) with a default ACL that gives the group write access. Existing directories and their contents are left as they are. For this to help on exports that map root or all users to an anonymous user, the Runtime Broker's writes must not be mapped to an anonymous user that cannot write in `<subpath_root>/<project-id>`. If the Runtime Broker is not allowed to create a directory (permission denied or a read-only mount, for example a Runtime Broker that does not run as root where `<subpath_root>/<project-id>` is owned by root), it logs a warning and leaves that directory to the kubelet, as described in the next item. If the path cannot be used at all (a symlink or a regular file where a directory should be, or an export mount path that is not a directory), agent create fails straight away with an error that names the export requirement, rather than timing out while the Pod waits.
+- **Runtime Broker has the export mounted (recommended).** Before it creates the Pod, the Runtime Broker creates the workspace directory, the provisioning state directory and each of those shared directories itself, the same way it creates shared-directory leaves: missing parent directories get mode `2755`, and each new leaf directory gets mode `2775` (setgid) with a default ACL that gives the group write access. When the Hub or Runtime Broker runs as root and creates a new workspace or shared-directory leaf on the shared export, it `fchown`s that newly created leaf to `project_storage.nfs.uid` and `project_storage.nfs.gid` before applying `2775` and the default ACL (intermediate directories, `<subpath_root>/<project-id>/.scion`, and `<subpath_root>/<project-id>/provision` remain owned by the creator). Existing directories and their contents are left as they are. For this to help on exports that map root or all users to an anonymous user, the Runtime Broker's writes must not be mapped to an anonymous user that cannot write in `<subpath_root>/<project-id>`. If the Runtime Broker is not allowed to create a directory (permission denied or a read-only mount, for example a Runtime Broker that does not run as root where `<subpath_root>/<project-id>` is owned by root), it logs a warning and leaves that directory to the kubelet, as described in the next item. If the path cannot be used at all (a symlink or a regular file where a directory should be, or an export mount path that is not a directory), agent create fails straight away with an error that names the export requirement, rather than timing out while the Pod waits.
 - **Runtime Broker does not have the export mounted.** The kubelet creates the directories when the Pod starts. This only works on exports that let root create directories (`no_root_squash`, the Filestore default). On exports that map root to an anonymous user (`root_squash` or `all_squash`), the kubelet's mkdir is denied and the Pod stays in `CreateContainerConfigError` ("failed to create subPath directory for volumeMount workspace"). Mount the export on the Runtime Broker host, or use `no_root_squash`.
 
 When the kubelet created the provisioning state directory, the provisioning init container gives it to the agent runtime uid and `project_storage.nfs.gid` with mode `2775`. It does the same to a directory the Runtime Broker created whenever any other directory of the Pod was left to the kubelet. A Runtime Broker outside that group can still see whether the sentinel exists. If it cannot write there, it removes a deleted agent's worktree under the legacy workspace-root lock only (see below).
@@ -778,14 +812,33 @@ The provisioning init container runs the agent's own image, so an older `scionto
 
 No data is lost in these cases, but to keep the workspace free of provisioning files, make sure every agent of the project runs an image from a release that includes the provisioning state directory.
 
-`mount_root/<share id>` must be the mounted export itself, not a parent of the mount point or an ordinary directory. The Runtime Broker treats it as the export once it exists: if the export is not actually mounted there, the directories are created on the Runtime Broker host's local disk, and the Pod still depends on the kubelet creating them on the export.
+`mount_root/<share id>` must be the mounted export itself, not a parent of the mount point or an ordinary directory. The Runtime Broker treats it as the export once it exists: if the export is not actually mounted there, the directories are created on the Runtime Broker host's local disk, and the Pod still depends on the kubelet creating them on the export. On a verify-only Runtime Broker (whose default runtime is Kubernetes or Cloud Run, so the platform mounts the export into agent pods), an exact `/proc/mounts` `server:export` string match is advisory (logged as a warning and reported in health when the container's mount source differs in form, such as hostname vs IP or a trailing slash): shared-storage dispatches are admitted when `<mount_root>/<share id>/<subpath_root>` is a visible directory (`503 project_storage_unavailable` when absent) and `<subpath_root>/<project-id>/.scion/project-id` matches the dispatched project (`409` on mismatch).
+
+#### Inline NFS volumes (no pv_name)
+
+When `nfs.shares[0].pv_name` is not set, agent Pods mount the share inline instead of through a PersistentVolumeClaim. Each directory the Pod uses (the workspace or the agent's own directory, the provisioning state directory, each shared directory, and in worktree-per-agent mode the `.git` directory and the worktree) is its own `nfs` volume of that directory's server path, `<export>/<subpath_root>/<project-id>/...`, mounted with no subPath. The workspace's `.scion` entry is mounted read-only from the workspace volume by the subPath `.scion`, so the node resolves it within that volume. No container gets the whole export or the project directory. The containers see the same paths as with a claim. The agent runtime logs `k8s NFS volumes: inline, by server path; no mount options` at startup.
+
+Inline volumes carry **no NFS mount options**: there is no `nconnect`, and the NFS version is negotiated between the node and the server. `project_storage.nfs.mount_options` applies only to host mounts. To get mount options in agent Pods, create a PersistentVolume and PersistentVolumeClaim with the options you need and set `pv_name` to the claim. Inline volumes take no NFS mount options at all (for example `sec=krb5*`, `xprtsec=tls`, `nosuid` or `nodev`); if you need such options, set `pv_name` to the claim of a PersistentVolume you create and put them in that PersistentVolume's `mountOptions`.
+
+**Requirement: the Runtime Broker mounts the export, writable.** An inline volume names a directory that must exist before the Pod starts, and the kubelet does not create it. The Runtime Broker creates every one of these directories itself, so:
+
+- Mount the share's export (`<server>:<export>`) on the Runtime Broker at `project_storage.nfs.mount_root/<share id>`, the path the storage layout uses. In the Helm chart, the hub Pod (which runs the Runtime Broker) already mounts it there.
+- The Runtime Broker's writes must not be mapped to an anonymous user that cannot write in `<subpath_root>/<project-id>` (check the export's `root_squash`/`all_squash` settings against the user the Runtime Broker runs as).
+- Directory modes are as described above: missing parents get `2755`, and new directories get `2775` (setgid) with a default ACL that gives the group write access.
+
+If the export is not mounted on the Runtime Broker, or the Runtime Broker is not allowed to create a directory, the agent start is refused before the Pod is created. A missing export mount is refused as a project storage share the Runtime Broker cannot see: the client gets a fixed text that says to make the share available, writable, in the Runtime Broker's container at its configured mount point, and the Runtime Broker log names the path. For a directory the Runtime Broker may not create, the Runtime Broker log names the directory and says to mount the export writably. With a `pv_name`, a directory the Runtime Broker is not allowed to create is still left to the kubelet, as described above. `scion doctor` reports a missing export mount as a failure when the default runtime is Kubernetes and the share has no `pv_name`.
+
+Also refused in inline mode, with a message that says what to change:
+
+- agents with NFS homes (`project_storage.homes: nfs`). Set `pv_name` to use them.
+- shared directories on the deprecated split `shared_dir_storage` export, which still need that share's `pv_name`.
 
 On exports that map root or all users to an anonymous user, the workspace provisioning init container cannot change file ownership, because the NFS server decides ownership changes. When the Runtime Broker created all of these directories, or found them already in place with setgid and group write (for example `2775`), the provisioning step tries to set ownership to the agent runtime uid (`1000`) and `project_storage.nfs.gid`, logs a warning if that is not allowed, and continues. If any of them already exists without setgid and group write (for example a root-owned `0755` directory left by an earlier kubelet mkdir), or was left to the kubelet, a failed ownership change still stops the Pod; fix that directory's group and mode on the export. Agents get access through the directories' group: set `project_storage.nfs.gid` to the group that owns `<subpath_root>/<project-id>` on the export (the agent Pod uses it as its `fsGroup`), so files created under the setgid directories stay writable by the agent.
 
 #### Sharing Modes on the NFS Workspace
 
 :::caution[Git projects sharing one repository are refused on Kubernetes]
-The Kubernetes runtime refuses to start agents for git projects that share one repository across agents (`worktree-per-agent` or git-backed `shared-plain` on NFS) before creating a Pod, because it cannot give each agent a private, redacted `.git/config` on the shared export. Use `clone-per-agent` on Kubernetes (where each agent gets its own clone under `agents/<agent-name>/workspace`), or run `worktree-per-agent` and git-backed `shared-plain` projects on a local or Docker Runtime Broker; see [Git that Scion runs on the host](/scion/local/workspace/#git-that-scion-runs-on-the-host). Non-git `shared-plain` projects (marked non-git when the agent starts) and `empty-per-agent` projects on NFS continue to work on Kubernetes.
+The Kubernetes runtime refuses to start agents for git projects that share one repository across agents (`worktree-per-agent` or git-backed `shared-plain` on NFS) before creating a Pod, because it cannot give each agent a private, redacted `.git/config` on the shared export. Use `clone-per-agent` on Kubernetes (where each agent gets its own clone under `agents/<agent-name>/workspace`), or run `worktree-per-agent` and git-backed `shared-plain` projects on a local or Docker Runtime Broker; see [Git that Scion runs on the host](/scion/local/workspace/#git-that-scion-runs-on-the-host). Non-git `shared-plain` projects and `empty-per-agent` projects on NFS continue to work on Kubernetes. The Runtime Broker marks a `shared-plain` workspace non-git at each start only when the Hub records no git remote for the project and the workspace directory on the share is there and is not a git repository; otherwise the start is refused. The Runtime Broker computes `SCION_WORKSPACE_GIT` itself; a value set in settings, harness-config or project env is no longer honoured. Running `git init` in a non-git project's shared workspace therefore makes later Kubernetes starts of its agents refuse.
 :::
 
 How agents of a git-backed project use `<subpath_root>/<project-id>/workspace` depends on the project's sharing mode:
@@ -829,7 +882,7 @@ Older agent images behave in one of two ways. With an image whose `sciontool` pr
 In Empty-per-agent mode the agent's directory works the same way as in clone-per-agent mode, without the branch and the clone. The broker creates `agents/<agent-name>` and the empty `workspace` directory in it before the Pod starts, with the same modes, and creates nothing else in `agents/<agent-name>`. The agent container mounts `agents/<agent-name>/workspace` at `/workspace`. No container in the Pod mounts the project's workspace directory. The provisioning init container mounts `agents/<agent-name>`, creates `workspace` if it is missing, sets the ownership of the `workspace` directory while it is empty, prepares the shared directories and writes its sentinel. It records no branch and runs no git. The workspace's files are kept across restarts and suspend/resume, and deleting the agent together with its files removes its workspace as described above for clone-per-agent. Starting such an agent stops with an error, so it never falls back to the project's workspace directory, when:
 
 - the agent name is not an agent slug (lower-case letters, digits and dashes).
-- the NFS share has no `pv_name`, so the Pod cannot mount the agent's directory.
+- the NFS share has neither a `pv_name` nor a server and export, so the Pod cannot mount the agent's directory.
 - the agent runs on a runtime other than Kubernetes on a broker with `project_storage.backend: nfs`. Use a broker with local workspace storage for those runtimes.
 
 An agent image whose `sciontool` predates `SCION_WORKSPACE_MODE` prepares `agents/<agent-name>` as a plain workspace, and the agent still gets the empty `workspace` directory the broker created. An image whose `sciontool` knows Empty-per-agent but not this NFS support stops the provisioning init container with an error; use an agent image with this version of `sciontool`.
@@ -857,9 +910,9 @@ To keep the work, push it before stopping the agent, or use [NFS workspace stora
 
 ### Persistent Agent Home (NFS)
 
-With [`server.project_storage.homes: nfs`](/scion/reference/server-config/#project-storage-serverproject_storage) and the `hub.k8s_nfs_home` experiment, a Kubernetes agent keeps its home directory on the NFS export of `server.project_storage` (which needs `backend: nfs`). Files, harness sessions and credentials the harness writes into the home then survive stops, restarts and pod replacements. The feature is in development and also needs `server.project_storage.homes_options.allow_incomplete_phases`. Homes are placed for the whole deployment; there is no per-profile or per-runtime home setting.
+With [`server.project_storage.homes: nfs`](/scion/reference/server-config/#project-storage-serverproject_storage) and the `hub.k8s_nfs_home` experiment, a Kubernetes agent keeps its home directory on the NFS export of `server.project_storage` (which needs `backend: nfs`). Files, harness sessions and credentials the harness writes into the home then survive stops, restarts and pod replacements. The feature is in development and also needs `server.project_storage.homes_options.allow_incomplete_phases`. Homes are placed for the whole deployment; the former per-profile and per-runtime `home_storage_backend`, `home_storage_leaf`, `shared_dir_storage_backend` and `shared_dir_storage_backends` keys are removed, flagged as `storage_overrides` at startup (`storage_override_errors` on `GET /api/v1/admin/server-config`), and refused at agent start with `422 storage_migration_required`.
 
-- **Layout**: each agent's home is `<subpath_root>/<project id>/agents/<agent slug>/home-<agent id>` on the export, mounted by `subPath` at the agent's home directory. It is named after the hub agent ID, so a new agent with the same name gets a new, empty home.
+- **Layout**: each agent's home is `<subpath_root>/<project id>/agents/<agent slug>/home-<agent id>` on the export (the same unified path shape used on Cloud Run), mounted by `subPath` at the agent's home directory. It is named after the hub agent ID, so a new agent with the same name gets a new, empty home.
 - **Export requirements**: the export's group must be the pod group, gid 1000. The home directory is mode 2771 and owned by that group, and the agent writes through the group. A start whose home is not writable by uid 1000 fails with `home_storage_unavailable` and names the requirement.
 - **Creating the home directory** (`homes_options.leaf`):
   - `pod` (default): a `home-leaf` init container in the agent's pod creates it. The container runs as root with only the `CHOWN`, `FOWNER` and `DAC_OVERRIDE` capabilities and mounts only the agent's directory. This needs an export without root squashing; on a squashed export the start fails with `home_leaf_failed`. The broker does nothing on its host.
@@ -956,6 +1009,13 @@ When Scion runs on GCE or GKE and the kubeconfig's exec credential plugin fails 
 | pods/log | get |
 | secrets | create, list, delete |
 
+Recommended, for the [claim check before the pod](#claim-check-before-the-pod) and shared-dir claims:
+
+| Resource | Verbs |
+|---|---|
+| persistentvolumeclaims | get (create, to create shared-dir claims on the local backend) |
+| events | list |
+
 ### Additional for GKE Mode
 
 | Resource | Verbs |
@@ -1038,9 +1098,9 @@ rules:
 
 ## Execution Flow
 
-1. **Start**: `scion start` creates a Pod with the configured image, resources, and secrets. Pods don't keep a workspace across a stop, so when the Hub starts an existing agent it sends the same git clone config, branch, and workspace mode that it sends on create. This lets the agent's workspace be recreated on the new Pod.
-2. **Sync**: Workspace and agent home are transferred to the Pod via tar streaming over `pods/exec`.
-3. **Ready**: Pod readiness is polled with detailed error classification (image pull, scheduling, config errors).
+1. **Start**: `scion start` creates a Pod with the configured image, resources, and secrets. Pods don't keep a workspace across a stop, so when the Hub starts an existing agent it sends the same git clone config, branch, and workspace mode that it sends on create. This lets the agent's workspace be recreated on the new Pod. Because the Runtime Broker copies the agent home into the Pod after creation, it writes the agent's local phase in `agent-info.json` as `starting` before `Run` and advances it to `running` (via compare-and-set so a concurrent phase change is not overwritten) only after `Run` returns.
+2. **Sync**: Workspace and agent home are transferred to the Pod via tar streaming over `pods/exec`. When placing individual files in the container, the placement script re-verifies each path component immediately after `mkdir` and aborts before writing any file if a component is a symlink or not a directory.
+3. **Ready**: Pod readiness is polled with detailed error classification (image pull, scheduling, config errors). If the Pod is preempted or evicted while waiting to become ready, the start error names whether it was preempted or evicted along with the Kubernetes disruption reason (`: it was preempted (<reason>)` or `: it was evicted (<reason>)`).
 4. **Attach**: `scion attach` connects to the tmux session inside the Pod via `pods/exec`.
 5. **Sync back**: the Kubernetes runtime copies files only to the Pod, never back from it. With the default (emptyDir) workspace, an agent's changes reach the host only when the agent commits and pushes them to the remote. The CLI's `scion sync from <agent>` does not read the Pod: it goes through the Hub, which returns the broker's copy of the workspace.
 6. **Delete**: `scion rm <agent>` deletes the Pod and associated Secrets/SecretProviderClasses. `scion stop` uses the same deletion path, so the per-agent Secret and, in GKE mode, the SecretProviderClass are deleted when the agent is stopped or deleted. If the Pod is removed outside scion, the objects are removed on the next stop/delete or start of that agent.
@@ -1089,6 +1149,10 @@ The Kubernetes runtime provides structured error messages with remediation hints
 | CrashLoopBackOff | Check container logs with `scion logs` |
 | Unschedulable | Check node selectors, tolerations, and resource availability |
 | Invalid resource values | Error includes the field name and invalid value |
+| Shared dir claim does not exist and no `shared_dir_storage_class` is set | Configure `server.project_storage` backend `nfs`, or set `shared_dir_storage_class` to a `ReadWriteMany` class. See [Starts that need a new claim](#starts-that-need-a-new-claim) |
+| Claim is labelled for another project | Delete or rename that claim if the other project no longer uses it |
+| Claim does not exist (before the pod) | Create the claim in the agent namespace, or correct the setting the error names |
+| Claim cannot be provisioned (`ProvisioningFailed`) | Fix the cause the event names, for example the claim's StorageClass |
 
 When an agent create fails on Kubernetes, the Runtime Broker's answer stays generic (`500 runtime_error`), but it keeps the cause: when the Kubernetes API refused the Runtime Broker's own credentials, `error.details.cause` is `runtime_forbidden` (its credentials may not perform the operation) or `runtime_unauthorized` (its credentials were rejected). The Hub relays it as `502 runtime_error` with the same `error.details.cause`. The Runtime Broker's server log records the full cause, with `k8s_reason` (the Kubernetes status reason) and `cause_code` fields. Namespace, ServiceAccount and object names appear only in the log, never in the answer.
 

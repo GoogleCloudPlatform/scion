@@ -32,16 +32,24 @@ import { setPreferredTimeZone } from '../../../utils/time.js';
 // A stand-in for marked + DOMPurify. It reproduces the shapes the mention
 // post-processing has to cope with — paragraphs, fenced code, inline code and
 // links — without pulling the real parser into the test.
-vi.mock('../../../utils/markdown.js', () => ({
-  getMarkdownRenderer: () =>
-    Promise.resolve({
-      render: (markdown: string) =>
-        `<p>${markdown
-          .replace(/```([\s\S]*?)```/g, '</p><pre><code>$1</code></pre><p>')
-          .replace(/`([^`]+)`/g, '<code>$1</code>')
-          .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" title="see $1">$1</a>')}</p>`,
-    }),
-}));
+vi.mock('../../../utils/markdown.js', () => {
+  const render = (markdown: string): string =>
+    `<p>${markdown
+      .replace(/```([\s\S]*?)```/g, '</p><pre><code>$1</code></pre><p>')
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" title="see $1">$1</a>')}</p>`;
+  return {
+    getMarkdownRenderer: () =>
+      Promise.resolve({
+        render,
+        renderFragment: (markdown: string) => {
+          const tpl = document.createElement('template');
+          tpl.innerHTML = render(markdown);
+          return tpl.content;
+        },
+      }),
+  };
+});
 
 // The real editor pulls the CodeMirror bundle in on connect; the preview
 // tests only care about what the message hands it.
@@ -1581,5 +1589,235 @@ describe('inline image thumbnail box', () => {
       height: 600,
     });
     expect(knownImageSize(ref('broken', { width: 0, height: 0 }))).toBeNull();
+  });
+});
+
+describe('scion-chat-message attachment-only (ptone/scion#6146)', () => {
+  async function mountWith(
+    body: string,
+    attachments: string[],
+    deletedAt = ''
+  ): Promise<ScionChatMessage> {
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    el.body = body;
+    el.attachments = attachments;
+    el.deletedAt = deletedAt;
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await Promise.resolve();
+    await el.updateComplete;
+    return el;
+  }
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('renders the attachments without an empty text bubble', async () => {
+    const el = await mountWith('', ['/scratch/shot.png']);
+    expect(el.shadowRoot?.querySelector('.bubble-content')).toBeNull();
+    const chip = el.shadowRoot?.querySelector('.attachments .attachment-chip');
+    expect(chip?.textContent).toContain('shot.png');
+  });
+
+  it('keeps the text bubble for a message with text and attachments', async () => {
+    const el = await mountWith('see this', ['/scratch/shot.png']);
+    expect(el.shadowRoot?.querySelector('.bubble-content')).not.toBeNull();
+    expect(el.shadowRoot?.querySelector('.attachments')).not.toBeNull();
+  });
+
+  it('still shows a deleted message as deleted', async () => {
+    const el = await mountWith('', ['/scratch/shot.png'], '2026-10-24T00:00:00Z');
+    expect(el.shadowRoot?.querySelector('.deleted-message')).not.toBeNull();
+    expect(el.shadowRoot?.querySelector('.attachments')).toBeNull();
+  });
+});
+
+describe('scion-chat-message More actions dots (ptone/scion#6556)', () => {
+  interface CssBlock {
+    prelude: string;
+    body: string;
+  }
+
+  /** Split CSS text into its blocks at one nesting level: `prelude { body }`. */
+  function cssBlocks(css: string): CssBlock[] {
+    const blocks: CssBlock[] = [];
+    const text = css.replace(/\/\*[\s\S]*?\*\//g, '');
+    let start = 0;
+    let i = 0;
+    while (i < text.length) {
+      if (text[i] !== '{') {
+        i++;
+        continue;
+      }
+      let depth = 1;
+      let j = i + 1;
+      while (j < text.length && depth > 0) {
+        if (text[j] === '{') depth++;
+        else if (text[j] === '}') depth--;
+        j++;
+      }
+      blocks.push({
+        prelude: text.slice(start, i).replace(/\s+/g, ' ').trim(),
+        body: text.slice(i + 1, j - 1),
+      });
+      start = i = j;
+    }
+    return blocks;
+  }
+
+  /** The merged declarations of every rule in `blocks` whose selector list has `selector`. */
+  function declarationsFor(blocks: CssBlock[], selector: string): Record<string, string> {
+    const decls: Record<string, string> = {};
+    for (const block of blocks) {
+      if (!block.prelude.split(',').some((sel) => sel.trim() === selector)) continue;
+      for (const decl of block.body.split(';')) {
+        const colon = decl.indexOf(':');
+        if (colon < 0) continue;
+        decls[decl.slice(0, colon).trim()] = decl
+          .slice(colon + 1)
+          .replace(/\s+/g, ' ')
+          .trim();
+      }
+    }
+    return decls;
+  }
+
+  function componentCss(): string {
+    const Msg = customElements.get('scion-chat-message') as unknown as {
+      styles: { cssText: string } | { cssText: string }[];
+    };
+    return [Msg.styles]
+      .flat()
+      .map((s) => s.cssText)
+      .join('\n');
+  }
+
+  const rem = (v: string | undefined): number => {
+    const m = /^(-?[\d.]+)rem$/.exec(v ?? '');
+    if (!m) throw new Error(`not a rem length: ${v}`);
+    return Number(m[1]);
+  };
+
+  async function mountActions(props: Partial<ScionChatMessage>): Promise<ScionChatMessage> {
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    Object.assign(el, { senderName: 'Alice', timestamp: '2026-10-24T09:05:00Z' }, props, {
+      actionsEnabled: true,
+    });
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await Promise.resolve();
+    await el.updateComplete;
+    return el;
+  }
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  for (const fromAgent of [false, true]) {
+    it(`sits inside the text bubble, in its reserved corner (${fromAgent ? "someone else's" : 'own'} message)`, async () => {
+      const el = await mountActions({ body: 'hello', fromAgent });
+      const button = el.actionsButton!;
+      expect(button).not.toBeNull();
+      const content = button.parentElement!;
+      expect(content.classList.contains('bubble-content')).toBe(true);
+      expect(content.classList.contains('has-actions')).toBe(true);
+      // The text is a sibling of the button, never inside it.
+      expect(content.querySelector('.md-content')?.textContent).toContain('hello');
+      expect(button.textContent?.trim()).toBe('');
+    });
+  }
+
+  it('keeps the exact accessible label and the menu semantics', async () => {
+    const el = await mountActions({ body: 'hello', fromAgent: true, showHeader: true });
+    const button = el.actionsButton!;
+    const time = el.shadowRoot!.querySelector('.msg-time')?.textContent?.trim();
+    expect(time).toBeTruthy();
+    expect(button.getAttribute('aria-label')).toBe(`More actions, message from Alice, ${time}`);
+    expect(button.getAttribute('aria-haspopup')).toBe('menu');
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    expect(button.querySelector('sl-icon')?.getAttribute('name')).toBe('three-dots-vertical');
+  });
+
+  it('keeps the usage hint out of the text bubble', async () => {
+    const el = await mountActions({ body: 'hello', actionsTabIndex: 0 });
+    const help = el.shadowRoot!.getElementById('actions-help')!;
+    expect(help).not.toBeNull();
+    expect(el.actionsButton!.getAttribute('aria-describedby')).toBe('actions-help');
+    expect(help.closest('.bubble-content')).toBeNull();
+    expect(el.shadowRoot!.querySelector('.bubble-content')?.textContent).not.toContain('arrows');
+  });
+
+  it('sits in the deleted-message bubble too', async () => {
+    const el = await mountActions({ body: 'gone', deletedAt: '2026-10-24T10:00:00Z' });
+    const content = el.actionsButton!.parentElement!;
+    expect(content.classList.contains('bubble-content')).toBe(true);
+    expect(content.querySelector('.deleted-message')).not.toBeNull();
+  });
+
+  it('reserves a corner beside the attachments of an attachment-only message', async () => {
+    const el = await mountActions({ body: '', attachments: ['/scratch/shot.png'] });
+    expect(el.shadowRoot!.querySelector('.bubble-content')).toBeNull();
+    const button = el.actionsButton!;
+    expect(button.parentElement!.classList.contains('bubble')).toBe(true);
+    expect(button.parentElement!.classList.contains('actions-corner')).toBe(true);
+    expect(button.closest('.attachments')).toBeNull();
+  });
+
+  it('reserves no corner while the button is off', async () => {
+    const el = document.createElement('scion-chat-message') as ScionChatMessage;
+    el.body = 'hello';
+    el.attachments = [];
+    document.body.appendChild(el);
+    await el.updateComplete;
+    expect(el.actionsButton).toBeNull();
+    expect(el.shadowRoot!.querySelector('.has-actions, .actions-corner')).toBeNull();
+  });
+
+  it('is always visible: no hover reveal, and nothing hides it on touch (hover: none)', () => {
+    const css = componentCss();
+    const top = cssBlocks(css);
+    const button = declarationsFor(top, '.msg-actions');
+    expect(button.opacity).toBeUndefined();
+    expect(button.display).not.toBe('none');
+    expect(button.visibility).toBeUndefined();
+    // No rule anywhere, media queries included, hides or fades the button.
+    const allBlocks = top.flatMap((b) => (b.prelude.startsWith('@') ? cssBlocks(b.body) : [b]));
+    for (const b of allBlocks.filter((b) => b.prelude.includes('.msg-actions'))) {
+      expect(b.body, b.prelude).not.toMatch(/opacity|display\s*:\s*none|visibility/);
+    }
+    const hoverNone = top.filter((b) => /^@media\s*\(\s*hover\s*:\s*none\s*\)/.test(b.prelude));
+    for (const b of hoverNone) expect(b.body).not.toContain('msg-actions');
+  });
+
+  it('is bare dots with a touch target of at least 24px, in theme colours', () => {
+    const button = declarationsFor(cssBlocks(componentCss()), '.msg-actions');
+    expect(button.border).toBe('none');
+    expect(button.background).toBe('none');
+    expect(rem(button.width) * 16).toBeGreaterThanOrEqual(24);
+    expect(rem(button.height) * 16).toBeGreaterThanOrEqual(24);
+    expect(button.color).toMatch(/^var\(--scion-/);
+  });
+
+  it('stays outside the text box: the bubble reserves the whole corner column', () => {
+    const top = cssBlocks(componentCss());
+    const button = declarationsFor(top, '.msg-actions');
+    for (const sel of ['.bubble-content.has-actions', '.bubble.actions-corner']) {
+      const reserve = declarationsFor(top, sel);
+      expect(reserve.position, sel).toBe('relative');
+      if (sel === '.bubble.actions-corner') expect(reserve['box-sizing'], sel).toBe('border-box');
+      expect(rem(reserve['padding-right']), sel).toBeGreaterThanOrEqual(
+        rem(button.right) + rem(button.width)
+      );
+    }
+  });
+
+  it('shows a focus ring for keyboard focus only', () => {
+    const top = cssBlocks(componentCss());
+    expect(declarationsFor(top, '.msg-actions:focus').outline).toBe('none');
+    expect(declarationsFor(top, '.msg-actions:focus-visible').outline).toMatch(
+      /^2px solid var\(--scion-primary/
+    );
   });
 });

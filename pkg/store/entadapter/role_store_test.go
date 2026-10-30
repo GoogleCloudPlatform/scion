@@ -23,8 +23,8 @@ import (
 	"testing"
 	"time"
 
-	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -1491,7 +1491,7 @@ func TestCreateRoleBinding_BuiltInMembership_ConcurrentRace(t *testing.T) {
 
 	// Install the D4 membership-only partial unique index to test concurrent
 	// enforcement. In production, server.go installs this at startup.
-	drv, ok := env.client.Driver().(*entsql.Driver)
+	drv, ok := entc.SQLDriver(env.client.Driver())
 	require.True(t, ok, "expected ent SQL driver")
 	db := drv.DB()
 	_, err := db.ExecContext(ctx,

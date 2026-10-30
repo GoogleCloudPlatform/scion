@@ -112,6 +112,7 @@ var infraPayloadValidators = map[string]func(string) error{
 	SecretKeyArtifactViewKey:       validateSigningKeyPayload,
 	SecretKeyAttachmentDeliveryKey: validateSigningKeyPayload,
 	SecretKeyListCursorKey:         validateSigningKeyPayload,
+	SecretKeyPortViewKey:           validateSigningKeyPayload,
 	SecretKeyOIDCSigningKey:        validateOIDCKeyPayload,
 	SecretKeyOIDCKeyset:            validateOIDCKeysetPayload,
 	conduitGrantKeySecretName:      validateGrantRingPayload,

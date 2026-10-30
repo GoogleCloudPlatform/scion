@@ -963,14 +963,12 @@ func TestHTTPAgentDispatcher_ReprovisionCarriesSkillDispatchMetadata(t *testing.
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 	dispatcher.SetHubEndpoint(hubEndpoint)
-	dispatcher.SetSecretBackend(&mockProvisionCredsBackend{
-		projectSecrets: []secret.SecretMeta{
-			{Name: "GH_EXAMPLE", SecretType: "environment", Scope: secret.ScopeProject},
-		},
-		secretValues: map[string]*secret.SecretWithValue{
-			"GH_EXAMPLE": {SecretMeta: secret.SecretMeta{Name: "GH_EXAMPLE", SecretType: "environment"}, Value: "value-1"},
-		},
-	})
+	// The provision credential is a stored project secret whose name is the
+	// owner key of the agent's gh:// skill reference.
+	dispatcher.SetSecretBackend(launchSecretBackend(t, memStore, "test-hub", []secret.SecretWithValue{
+		{SecretMeta: secret.SecretMeta{Name: "GH_EXAMPLE", SecretType: "environment", Scope: secret.ScopeProject, ScopeID: tid("project-1")}, Value: "value-1"},
+	}))
+	dispatcher.SetSkillRefLister(provisionSkillRefs("gh://example/skills/test"))
 
 	wantPreResolved := &ResolveSkillsResponse{
 		Resolved: []ResolvedSkillResponse{{URI: "skill://scion/global/test@1.0.0", Name: "test"}},
@@ -990,6 +988,9 @@ func TestHTTPAgentDispatcher_ReprovisionCarriesSkillDispatchMetadata(t *testing.
 		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig:   &store.AgentAppliedConfig{HarnessConfig: "claude"},
 	}
+	// The provision credential is delivered to the agent under the
+	// delivery credential, which needs its recorded edge.
+	grantLaunchDelivery(t, memStore, dispatcher, agent)
 	require.NoError(t, dispatcher.DispatchAgentReprovision(ctx, agent))
 
 	req := mockClient.lastCreateReq
@@ -1720,14 +1721,12 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_CarriesSkillDispatchMetadata(t *
 
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
-	dispatcher.SetSecretBackend(&mockProvisionCredsBackend{
-		projectSecrets: []secret.SecretMeta{
-			{Name: "GH_EXAMPLE", SecretType: "environment", Scope: secret.ScopeProject},
-		},
-		secretValues: map[string]*secret.SecretWithValue{
-			"GH_EXAMPLE": {SecretMeta: secret.SecretMeta{Name: "GH_EXAMPLE", SecretType: "environment"}, Value: "value-1"},
-		},
-	})
+	// The provision credential is a stored project secret whose name is the
+	// owner key of the agent's gh:// skill reference.
+	dispatcher.SetSecretBackend(launchSecretBackend(t, memStore, "test-hub", []secret.SecretWithValue{
+		{SecretMeta: secret.SecretMeta{Name: "GH_EXAMPLE", SecretType: "environment", Scope: secret.ScopeProject, ScopeID: tid("project-1")}, Value: "value-1"},
+	}))
+	dispatcher.SetSkillRefLister(provisionSkillRefs("gh://example/skills/test"))
 
 	wantPreResolved := &ResolveSkillsResponse{
 		Resolved: []ResolvedSkillResponse{{URI: "skill://scion/global/test@1.0.0", Name: "test"}},
@@ -1742,13 +1741,18 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_CarriesSkillDispatchMetadata(t *
 	})
 
 	agent := &store.Agent{
-		ID:              "agent-uuid-123",
+		ID:              tid("agent-uuid-123"),
 		Name:            "test-agent",
 		Slug:            "test-agent-slug",
 		ProjectID:       tid("project-1"),
 		OwnerID:         "owner-uuid-789",
 		RuntimeBrokerID: tid("broker-1"),
 	}
+
+	// The provision credential, and launch selection, deliver the stored
+	// project secret under the delivery credential, which needs the
+	// agent's recorded edge.
+	grantLaunchDelivery(t, memStore, dispatcher, agent)
 
 	if err := dispatcher.DispatchAgentStart(ctx, agent, "", false); err != nil {
 		t.Fatalf("DispatchAgentStart failed: %v", err)
@@ -1807,14 +1811,12 @@ func TestHTTPAgentDispatcher_DispatchAgentRestart_CarriesSkillDispatchMetadata(t
 
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
-	dispatcher.SetSecretBackend(&mockProvisionCredsBackend{
-		projectSecrets: []secret.SecretMeta{
-			{Name: "GH_EXAMPLE", SecretType: "environment", Scope: secret.ScopeProject},
-		},
-		secretValues: map[string]*secret.SecretWithValue{
-			"GH_EXAMPLE": {SecretMeta: secret.SecretMeta{Name: "GH_EXAMPLE", SecretType: "environment"}, Value: "value-1"},
-		},
-	})
+	// The provision credential is a stored project secret whose name is the
+	// owner key of the agent's gh:// skill reference.
+	dispatcher.SetSecretBackend(launchSecretBackend(t, memStore, "test-hub", []secret.SecretWithValue{
+		{SecretMeta: secret.SecretMeta{Name: "GH_EXAMPLE", SecretType: "environment", Scope: secret.ScopeProject, ScopeID: tid("project-1")}, Value: "value-1"},
+	}))
+	dispatcher.SetSkillRefLister(provisionSkillRefs("gh://example/skills/test"))
 
 	wantPreResolved := &ResolveSkillsResponse{
 		Resolved: []ResolvedSkillResponse{{URI: "skill://scion/global/test@1.0.0", Name: "test"}},
@@ -1827,13 +1829,18 @@ func TestHTTPAgentDispatcher_DispatchAgentRestart_CarriesSkillDispatchMetadata(t
 	})
 
 	agent := &store.Agent{
-		ID:              "agent-uuid-123",
+		ID:              tid("agent-uuid-123"),
 		Name:            "test-agent",
 		Slug:            "test-agent-slug",
 		ProjectID:       tid("project-1"),
 		OwnerID:         "owner-uuid-789",
 		RuntimeBrokerID: tid("broker-1"),
 	}
+
+	// The provision credential, and launch selection, deliver the stored
+	// project secret under the delivery credential, which needs the
+	// agent's recorded edge.
+	grantLaunchDelivery(t, memStore, dispatcher, agent)
 
 	if err := dispatcher.DispatchAgentRestart(ctx, agent); err != nil {
 		t.Fatalf("DispatchAgentRestart failed: %v", err)
@@ -2222,7 +2229,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ResolvesEnvFromStorage(t *testin
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-env",
+		ID:              tid("agent-env"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
 		ProjectID:       tid("project-env"),
@@ -2234,6 +2241,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ResolvesEnvFromStorage(t *testin
 		},
 	}
 
+	grantLaunchDelivery(t, memStore, dispatcher, agent)
 	err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
 	if err != nil {
 		t.Fatalf("DispatchAgentStart failed: %v", err)
@@ -2305,7 +2313,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ConfigEnvTakesPrecedence(t *test
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-prec",
+		ID:              tid("agent-prec"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
 		ProjectID:       tid("project-prec"),
@@ -2316,6 +2324,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_ConfigEnvTakesPrecedence(t *test
 		},
 	}
 
+	grantLaunchDelivery(t, memStore, dispatcher, agent)
 	err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
 	if err != nil {
 		t.Fatalf("DispatchAgentStart failed: %v", err)
@@ -2369,7 +2378,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_StorageOverridesEmptyConfigEnv(t
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	agent := &store.Agent{
-		ID:              "agent-empty-env",
+		ID:              tid("agent-empty-env"),
 		Name:            "test-agent",
 		Slug:            "test-agent",
 		ProjectID:       tid("project-empty-env"),
@@ -2384,6 +2393,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_StorageOverridesEmptyConfigEnv(t
 		},
 	}
 
+	grantLaunchDelivery(t, memStore, dispatcher, agent)
 	err := dispatcher.DispatchAgentStart(ctx, agent, "", false)
 	if err != nil {
 		t.Fatalf("DispatchAgentStart failed: %v", err)
@@ -4515,28 +4525,6 @@ func TestBuildCreateRequest_NoAuth_SkipsSecrets(t *testing.T) {
 	})
 }
 
-// mockProvisionCredsBackend extends mockSecretBackend with List and Get support
-// for testing provisionCredentials collection.
-type mockProvisionCredsBackend struct {
-	mockSecretBackend
-	projectSecrets []secret.SecretMeta
-	secretValues   map[string]*secret.SecretWithValue
-}
-
-func (m *mockProvisionCredsBackend) List(_ context.Context, filter secret.Filter) ([]secret.SecretMeta, error) {
-	if filter.Scope == secret.ScopeProject {
-		return m.projectSecrets, nil
-	}
-	return nil, nil
-}
-
-func (m *mockProvisionCredsBackend) Get(_ context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
-	if sv, ok := m.secretValues[name]; ok {
-		return sv, nil
-	}
-	return nil, nil
-}
-
 func TestBuildCreateRequest_NoAuth_ProvisionCredentialsSurvive(t *testing.T) {
 	ctx := context.Background()
 	memStore := createTestStore(t)
@@ -4554,19 +4542,11 @@ func TestBuildCreateRequest_NoAuth_ProvisionCredentialsSurvive(t *testing.T) {
 
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
-	dispatcher.SetSecretBackend(&mockProvisionCredsBackend{
-		mockSecretBackend: mockSecretBackend{
-			secrets: []secret.SecretWithValue{
-				{SecretMeta: secret.SecretMeta{Name: "CLAUDE_AUTH", SecretType: "file", Target: "~/.claude/.credentials.json"}, Value: "secret-data"},
-			},
-		},
-		projectSecrets: []secret.SecretMeta{
-			{Name: "GH_EXAMPLE", SecretType: "environment", Scope: secret.ScopeProject},
-		},
-		secretValues: map[string]*secret.SecretWithValue{
-			"GH_EXAMPLE": {SecretMeta: secret.SecretMeta{Name: "GH_EXAMPLE", SecretType: "environment"}, Value: "ghp_token123"},
-		},
-	})
+	dispatcher.SetSecretBackend(launchSecretBackend(t, memStore, "test-hub", []secret.SecretWithValue{
+		{SecretMeta: secret.SecretMeta{Name: "CLAUDE_AUTH", SecretType: "file", Target: "~/.claude/.credentials.json", Scope: secret.ScopeUser, ScopeID: tid("user-1")}, Value: "secret-data"},
+		{SecretMeta: secret.SecretMeta{Name: "GH_EXAMPLE", SecretType: "environment", Scope: secret.ScopeProject, ScopeID: tid("project-1")}, Value: "ghp_token123"},
+	}))
+	dispatcher.SetSkillRefLister(provisionSkillRefs("gh://example/skills/test"))
 
 	agent := &store.Agent{
 		ID:              tid("agent-noauth-prov"),
@@ -4577,6 +4557,8 @@ func TestBuildCreateRequest_NoAuth_ProvisionCredentialsSurvive(t *testing.T) {
 		RuntimeBrokerID: tid("host-1"),
 		AppliedConfig:   &store.AgentAppliedConfig{NoAuth: true},
 	}
+
+	grantLaunchDelivery(t, memStore, dispatcher, agent)
 
 	req, err := dispatcher.buildCreateRequest(ctx, agent, "TestNoAuthProvisionCreds")
 	if err != nil {
@@ -5906,12 +5888,12 @@ func TestHTTPAgentDispatcher_BuildStartEnv_StartAndRestartProduceIdenticalEnv(t 
 
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
-	dispatcher.SetSecretBackend(&mockSecretBackend{
-		secrets: []secret.SecretWithValue{
-			{SecretMeta: secret.SecretMeta{Name: "CLAUDE_AUTH", SecretType: "file", Target: "~/.claude/.credentials.json"}, Value: "file-secret-data"},
-			{SecretMeta: secret.SecretMeta{Name: "SECRET_API_KEY", SecretType: "environment", Target: "SECRET_API_KEY"}, Value: "secret-value"},
-		},
-	})
+	// Owner-scope stored secrets: start and restart select secrets by
+	// stored metadata (material_delivery.go), not through Resolve.
+	dispatcher.SetSecretBackend(launchSecretBackend(t, memStore, "test-hub", []secret.SecretWithValue{
+		{SecretMeta: secret.SecretMeta{Name: "CLAUDE_AUTH", SecretType: "file", Target: "~/.claude/.credentials.json", Scope: "user", ScopeID: "golden-owner"}, Value: "file-secret-data"},
+		{SecretMeta: secret.SecretMeta{Name: "SECRET_API_KEY", SecretType: "environment", Target: "SECRET_API_KEY", Scope: "user", ScopeID: "golden-owner"}, Value: "secret-value"},
+	}))
 
 	agent := &store.Agent{
 		ID:              tid("agent-golden"),
@@ -5925,6 +5907,8 @@ func TestHTTPAgentDispatcher_BuildStartEnv_StartAndRestartProduceIdenticalEnv(t 
 			Env:           map[string]string{"CONFIG_VAR": "config-value"},
 		},
 	}
+
+	grantLaunchDelivery(t, memStore, dispatcher, agent)
 
 	if err := dispatcher.DispatchAgentStart(ctx, agent, "", false); err != nil {
 		t.Fatalf("DispatchAgentStart failed: %v", err)

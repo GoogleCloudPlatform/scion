@@ -15,8 +15,10 @@
 package apiclient
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -81,5 +83,89 @@ func TestParseErrorResponse_MessageDeniedReason(t *testing.T) {
 	want := "message_denied: Message delivery denied [reason: mode_none_sender, sender mode: none, recipient mode: project] (status: 403)"
 	if got := apiErr.Error(); got != want {
 		t.Errorf("Error() = %q\nwant      %q", got, want)
+	}
+}
+
+func TestParseErrorResponse_NilResponse(t *testing.T) {
+	got := ParseErrorResponse(nil)
+	if got == nil {
+		t.Fatal("ParseErrorResponse(nil) = nil, want non-nil *APIError")
+	}
+	if got.Code != ErrCodeInternalError {
+		t.Errorf("Code = %q, want %q", got.Code, ErrCodeInternalError)
+	}
+	if got.Message != "nil response" {
+		t.Errorf("Message = %q, want %q", got.Message, "nil response")
+	}
+	var err error = got
+	if err.Error() == "" {
+		t.Error("err.Error() is empty")
+	}
+}
+
+func TestParseErrorResponse_NilBody(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusInternalServerError,
+		Header:     http.Header{},
+	}
+	got := ParseErrorResponse(resp)
+	if got == nil {
+		t.Fatal("ParseErrorResponse returned nil for 500 response")
+	}
+	if got.StatusCode != http.StatusInternalServerError {
+		t.Errorf("StatusCode = %d, want 500", got.StatusCode)
+	}
+	if got.Code != ErrCodeInternalError {
+		t.Errorf("Code = %q, want %q", got.Code, ErrCodeInternalError)
+	}
+}
+
+func TestParseErrorResponse_NilHeader(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusNotFound,
+		Body:       io.NopCloser(strings.NewReader(`{"error":{"code":"not_found","message":"item missing"}}`)),
+		Header:     nil,
+	}
+	got := ParseErrorResponse(resp)
+	if got == nil {
+		t.Fatal("ParseErrorResponse returned nil")
+	}
+	if got.Code != ErrCodeNotFound || got.Message != "item missing" {
+		t.Errorf("got Code=%q Message=%q, want not_found / item missing", got.Code, got.Message)
+	}
+}
+
+type chunkReader struct {
+	totalRead int
+	limit     int
+}
+
+func (r *chunkReader) Read(p []byte) (n int, err error) {
+	if r.totalRead >= r.limit {
+		return 0, io.EOF
+	}
+	toRead := len(p)
+	if r.totalRead+toRead > r.limit {
+		toRead = r.limit - r.totalRead
+	}
+	for i := 0; i < toRead; i++ {
+		p[i] = 'a'
+	}
+	r.totalRead += toRead
+	return toRead, nil
+}
+
+func (r *chunkReader) Close() error { return nil }
+
+func TestParseErrorResponse_BoundedBodyRead(t *testing.T) {
+	reader := &chunkReader{limit: 256 * 1024}
+	resp := &http.Response{
+		StatusCode: http.StatusBadRequest,
+		Body:       reader,
+		Header:     http.Header{},
+	}
+	_ = ParseErrorResponse(resp)
+	if reader.totalRead > maxErrorResponseBodyBytes {
+		t.Errorf("read %d bytes, want <= %d", reader.totalRead, maxErrorResponseBodyBytes)
 	}
 }

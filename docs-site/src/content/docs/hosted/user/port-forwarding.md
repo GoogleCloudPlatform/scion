@@ -28,7 +28,7 @@ When the `hub.conduit` [experiment](/scion/reference/experiments/) is on and the
 :::
 
 :::note[Proxied responses are sandboxed]
-Agent port responses are served from the Hub's own origin, so the Hub treats them as untrusted content. Every proxied response carries the Hub's sandbox `Content-Security-Policy` (`sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads; frame-ancestors 'none'`) and `X-Content-Type-Options: nosniff`, which the agent's service cannot override. Exposed agent pages can't be embedded in other pages or sites. The Hub never relays the service's `Set-Cookie`, `Content-Security-Policy`, `X-Content-Type-Options`, `Clear-Site-Data`, or CORS response headers. The service's `X-Frame-Options`, `X-XSS-Protection`, `Referrer-Policy` and `Permissions-Policy` headers are not relayed either; when the web frontend serves the Hub, the Hub's own values for these page headers apply. A forwarded web app therefore runs in an opaque origin: it cannot set cookies or use storage on the Hub origin, and apps that rely on cookies, `localStorage`, or same-origin requests may not work through the proxy.
+Agent port responses are served from the Hub's own origin, so the Hub treats them as untrusted content. Every proxied response carries the Hub's sandbox `Content-Security-Policy` (`sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-forms allow-pointer-lock allow-orientation-lock allow-presentation; frame-ancestors 'none'`), a `Permissions-Policy` that turns off camera, microphone, location, screen capture, motion sensors, USB/serial/HID/Bluetooth devices, payments, passkeys and clipboard reads, and `X-Content-Type-Options: nosniff`, none of which the agent's service can override. Exposed agent pages can't be embedded in other pages or sites. The Hub never relays the service's `Set-Cookie`, `Content-Security-Policy`, `X-Content-Type-Options`, `Clear-Site-Data`, or CORS response headers. The service's `X-Frame-Options`, `X-XSS-Protection`, `Referrer-Policy` and `Permissions-Policy` headers are not relayed either; when the web frontend serves the Hub, the Hub's own values for the first three apply, and the sandbox `Permissions-Policy` above replaces the Hub's page one. A forwarded web app therefore runs in an opaque origin: it cannot set cookies or use storage on the Hub origin, and apps that rely on cookies, `localStorage`, or same-origin requests may not work through the proxy. Forms, `print()` and `alert`/`confirm`/`prompt` dialogs, pointer lock, screen-orientation lock and the Presentation API work, and copying to the clipboard is allowed. None of them reaches past the app's opaque origin. A `GET` form works like following a link, so search and filter boxes work. A `POST` form the app submits, to the Hub or back to the app through the proxy, arrives without the Hub session, so the Hub asks the viewer to sign in instead of passing it on.
 :::
 
 ```d2
@@ -136,6 +136,14 @@ scion tunnel my-agent --port 5173 --local-port 5173
 ```
 
 Then open `http://127.0.0.1:5173/` in your browser. The app behaves as it does on its own machine.
+
+### Behind an authenticating front proxy
+
+When the Hub runs behind an authenticating front proxy, for example Google IAP or another [proxy-auth](/scion/hosted/ha/auth-proxy-iap/) deployment (`auth.mode: proxy`), the front proxy sits in front of every request, including the requests a page opened through the proxy URL makes back to its app. Depending on how the front proxy is configured, some of those requests may be answered by the front proxy's own sign-in flow instead of by the app, so a multi-file page can behave unpredictably: the page opens, and some of its parts load while others do not.
+
+For anything beyond a single self-contained page in such a deployment, use [`scion tunnel`](#tunnels-from-your-machine-scion-tunnel), which does not go through the browser and is not affected.
+
+With the IAP provider, apps served through an agent's port do not receive the IAP assertion or the IAP user email and ID headers. With the JWT provider, they do not receive the configured assertion header. The Hub reads only that header, so configure the front proxy not to add other user identity headers, such as email or ID headers.
 
 ---
 

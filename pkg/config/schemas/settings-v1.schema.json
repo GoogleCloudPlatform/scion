@@ -1343,7 +1343,7 @@
       "properties": {
         "hub_internal_url": {
           "type": "string",
-          "description": "Base URL of the hub internal API the relay calls for admission, RPCs and re-checks; any hub replica serves it (e.g. 'http://hub-internal.scion.svc:9811').",
+          "description": "Base URL of the hub internal API the relay calls for admission, RPCs and re-checks; any hub replica serves it (e.g. 'https://hub-internal.scion.svc:9811'). Must be https:// unless its host is a loopback IP literal (127.0.0.0/8 or ::1, not localhost).",
           "x-env-var": "SCION_SERVER_RELAY_HUBINTERNALURL",
           "x-since": "1"
         },
@@ -1554,14 +1554,38 @@
             },
             "internal_listen": {
               "type": "string",
-              "description": "host:port of the internal relay API listener (multi-node deployments). It serves only the internal relay API and must be reachable only inside the cluster/VPC, never publicly. TLS on the internal hop is recommended (e.g. a service mesh or TLS-terminating proxy, advertised as https://); plain http:// is accepted.",
+              "description": "host:port of the internal relay API listener (multi-node deployments). It serves only the internal relay API and must be reachable only inside the cluster/VPC, never publicly. Without internal_tls_cert_file and internal_tls_key_file it must be a loopback IP literal (127.0.0.0/8 or ::1, not localhost; for example 127.0.0.1:<port> behind a same-host TLS terminator); a wildcard or network address refuses startup.",
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALLISTEN",
               "x-since": "1"
             },
             "internal_advertise": {
               "type": "string",
-              "description": "Base URL (http(s)://host:port) other hub nodes use to reach this node's internal listener. Default: POD_IP with the listen port, else the listen host if it is not a wildcard. Prefer https:// (TLS on the internal hop); http:// is accepted.",
+              "description": "Base URL (http(s)://host:port) other hub nodes use to reach this node's internal listener. Default: POD_IP with the listen port, else the listen host if it is not a wildcard. Must be https:// unless its host is a loopback IP literal (127.0.0.0/8 or ::1, not localhost); derived as https:// when the listener serves TLS.",
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALADVERTISE",
+              "x-since": "1"
+            },
+            "internal_tls_cert_file": {
+              "type": "string",
+              "description": "Path of the PEM certificate chain the internal relay listener serves TLS with. Set together with internal_tls_key_file. Re-read when the file changes.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALTLSCERTFILE",
+              "x-since": "1"
+            },
+            "internal_tls_key_file": {
+              "type": "string",
+              "description": "Path of the PEM private key of internal_tls_cert_file. Set together with internal_tls_cert_file.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALTLSKEYFILE",
+              "x-since": "1"
+            },
+            "internal_tls_ca_file": {
+              "type": "string",
+              "description": "Path of the PEM CA bundle every internal relay hop client verifies peers with. When set it replaces the system roots. A private or internal CA REQUIRES it: the system roots do not validate such a certificate, and the hop then fails closed.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALTLSCAFILE",
+              "x-since": "1"
+            },
+            "internal_tls_server_name": {
+              "type": "string",
+              "description": "Name internal relay hop clients verify in the peer certificate instead of the dialed host, so one certificate (for example with the SAN scion-relay.internal) can serve every node dialed by pod IP. Default: the dialed host.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALTLSSERVERNAME",
               "x-since": "1"
             },
             "peer_auth": {
@@ -1686,6 +1710,12 @@
               "type": "string",
               "description": "Bound on the wait for an agent port's response headers, the WebSocket handshake included; on timeout the proxy answers 504. The response body is not time-limited (e.g. '60s'; default '60s', between '5s' and '10m').",
               "x-env-var": "SCION_SERVER_HUB_PORTPROXY_RESPONSEHEADERTIMEOUT",
+              "x-since": "1"
+            },
+            "view_ttl": {
+              "type": "string",
+              "description": "Lifetime of a page view link minted when a user opens an exposed port from the hub (hub.port_view experiment). Opening the port's link again mints a new one (e.g. '2h'; default '2h', between '15m' and '24h').",
+              "x-env-var": "SCION_SERVER_HUB_PORTPROXY_VIEWTTL",
               "x-since": "1"
             }
           }
@@ -1851,6 +1881,29 @@
               "type": ["boolean", "null"],
               "description": "Kubernetes only. This instance's safe_to_evict default: false adds the cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\" annotation to agent pods; true is accepted and adds nothing; unset or null adds nothing. An agent's kubernetes.safeToEvict wins over it."
             },
+            "node_selector": {
+              "type": "object",
+              "additionalProperties": { "type": "string" },
+              "description": "Kubernetes only. Node selector labels (label key to value) for this instance's agent pods. Operator-owned: an agent may add other keys but cannot change one set here. Validated like the Kubernetes API server (qualified-name keys, label values)."
+            },
+            "tolerations": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "key": { "type": "string" },
+                  "operator": { "type": "string", "enum": ["", "Equal", "Exists"] },
+                  "value": { "type": "string" },
+                  "effect": { "type": "string", "enum": ["", "NoSchedule", "PreferNoSchedule", "NoExecute"] }
+                },
+                "additionalProperties": false
+              },
+              "description": "Kubernetes only. Tolerations for this instance's agent pods. An agent's own tolerations must each match one of these; when none are set, agent tolerations are refused. An empty key requires operator Exists; Exists requires an empty value. Never derived from node_selector."
+            },
+            "runtime_class_name": {
+              "type": "string",
+              "description": "Kubernetes only. RuntimeClass name (DNS-1123 subdomain) for this instance's agent pods. Operator-owned: an agent cannot choose or change it. The RuntimeClass must already exist on the cluster."
+            },
             "shared_dir_storage_backend": {
               "type": "string",
               "enum": ["", "local", "nfs"],
@@ -1887,6 +1940,9 @@
                 { "required": ["gke"], "properties": { "gke": { "const": true } } },
                 { "required": ["priority_class_name"], "properties": { "priority_class_name": { "minLength": 1 } } },
                 { "required": ["safe_to_evict"], "properties": { "safe_to_evict": { "type": "boolean" } } },
+                { "required": ["node_selector"], "properties": { "node_selector": { "minProperties": 1 } } },
+                { "required": ["tolerations"], "properties": { "tolerations": { "minItems": 1 } } },
+                { "required": ["runtime_class_name"], "properties": { "runtime_class_name": { "minLength": 1 } } },
                 { "required": ["home_storage_backend"], "properties": { "home_storage_backend": { "minLength": 1 } } },
                 { "required": ["home_storage_leaf"], "properties": { "home_storage_leaf": { "minLength": 1 } } }
               ]
@@ -1940,11 +1996,10 @@
     "corsConfig": {
       "type": "object",
       "properties": {
-        "enabled": { "type": "boolean", "default": true },
+        "enabled": { "type": "boolean" },
         "allowed_origins": {
           "type": "array",
-          "items": { "type": "string" },
-          "default": ["*"]
+          "items": { "type": "string" }
         },
         "allowed_methods": {
           "type": "array",
@@ -1983,6 +2038,33 @@
           "default": false,
           "description": "PostgreSQL only. By default the hub refuses to start, and the maintenance commands that migrate the hub database refuse to run, when current_schema() has no hub tables but a later schema on the connection's search_path does, because the migration would create a new, empty table set that hides the existing data. Set true to log a warning and continue anyway, creating the new table set in the current schema.",
           "x-env-var": "SCION_SERVER_DATABASE_ALLOWSHADOWEDSCHEMA"
+        },
+        "tx_diagnostics": {
+          "type": "object",
+          "description": "Transaction-hold and lock-wait diagnostics for the hub database. A transaction or connection checkout held past hold_warn_threshold, or a request that waited past lock_wait_warn_threshold for a connection, logs one WARN per call site and kind per warn_interval; hold and wait histograms are recorded when metrics export is on.",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Install the diagnostics. false leaves the database open path exactly as without them."
+            },
+            "hold_warn_threshold": {
+              "type": "string",
+              "default": "2s",
+              "description": "Log a transaction or connection held at least this long (Go duration). '0' turns these WARNs off; metrics are still recorded."
+            },
+            "lock_wait_warn_threshold": {
+              "type": "string",
+              "default": "1s",
+              "description": "Log a request that waited at least this long for a database connection (Go duration). '0' turns these WARNs off."
+            },
+            "warn_interval": {
+              "type": "string",
+              "default": "1m",
+              "description": "Rate-limit window: at most one WARN per call site and kind per interval (Go duration, positive)."
+            }
+          }
         }
       }
     },

@@ -22,8 +22,6 @@ import (
 	"testing"
 	"time"
 
-	entsql "entgo.io/ent/dialect/sql"
-
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/auditevent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -68,7 +66,7 @@ func TestFixtureLoadable(t *testing.T) {
 	client, err := entc.OpenSQLite("file:"+path, entc.PoolConfig{})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
-	db := client.Driver().(*entsql.Driver).DB()
+	db := entc.SQLDB(client.Driver())
 	require.NoError(t, db.PingContext(ctx))
 
 	var users int

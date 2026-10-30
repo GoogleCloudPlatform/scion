@@ -165,7 +165,7 @@ func (s *Server) dispatchLocked(ctx context.Context, v *view, repo githubapp.Rep
 		return fail("issue_claim", err)
 	}
 	ref, err := s.o.Launcher.Launch(ctx, launcher.LaunchSpec{
-		JobID: serve, RunID: runID, Repo: repo.String(), RunnerName: name, ClaimToken: token,
+		JobID: serve, RunID: runID, Repo: repo.String(), ServedRepos: s.servedRepos(repo), RunnerName: name, ClaimToken: token,
 	})
 	if err != nil {
 		s.o.Claims.DropJob(nameID)
@@ -195,7 +195,11 @@ func (s *Server) deleteAfterFailure(repo githubapp.Repo, runnerID int64, attrs [
 type stopResult struct {
 	busy                bool // registration busy and left alone (requireIdle)
 	registrationDeleted bool // registration deleted or already absent
-	ref                 string
+	// registrationErr is GitHub's refusal when a hijacked (not requireIdle) runner's
+	// registration could not be deleted because it is busy (422): GitHub keeps it
+	// until it times the untrusted job out, about 10 minutes (D11 live test).
+	registrationErr string
+	ref             string
 }
 
 // stopRunner deletes runner `name`'s registration and cancels its
@@ -233,6 +237,7 @@ func (s *Server) stopRunner(repo githubapp.Repo, name string, requireIdle bool) 
 					res.busy = true
 					return res, nil
 				}
+				res.registrationErr = err.Error()
 			default:
 				errs = append(errs, err)
 			}

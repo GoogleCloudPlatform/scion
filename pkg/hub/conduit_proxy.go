@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
@@ -221,8 +222,12 @@ func isResponseHeaderTimeout(err error) bool {
 // is bounded (portProxyResponseHeaderTimeout; 504 on timeout); once they
 // arrive the exchange lasts as long as the request. Credentials are
 // stripped from the request and the response is sandboxed exactly as on
-// the tunnel path.
-func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent *store.Agent, port int, proxyPath string, conn net.Conn) {
+// the tunnel path. policy is the surface's: the page view surface
+// (policy.portView) also removes the request headers in
+// portViewStrippedRequestHeader and applies portViewModifyResponse, and
+// each surface logs its own caller string. Every surface removes the front
+// proxy's identity headers (stripFrontProxyIdentityHeaders).
+func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent *store.Agent, port int, proxyPath string, conn net.Conn, policy portProxyPolicy) {
 	start := time.Now()
 	reqPath := "/" + strings.TrimPrefix(proxyPath, "/")
 	target := net.JoinHostPort(conduitProxyHost, strconv.Itoa(port))
@@ -237,10 +242,13 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 			pr.Out.URL.RawQuery = r.URL.RawQuery
 			pr.Out.Host = target
 			for k := range pr.Out.Header {
-				if sensitiveHeader(k) {
+				if sensitiveHeader(k) || (policy.portView && portViewStrippedRequestHeader(k)) {
 					pr.Out.Header.Del(k)
 				}
 			}
+			// The front proxy's identity headers are not passed to the
+			// agent's app.
+			s.stripFrontProxyIdentityHeaders(pr.Out.Header)
 		},
 		Transport:     conduitProxyTransport(conn, headerTimeout),
 		FlushInterval: -1,
@@ -252,7 +260,10 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 					resp.Header.Del(k)
 				}
 			}
-			resp.Header.Set("Content-Security-Policy", untrustedContentSandboxCSP)
+			if policy.portView {
+				portViewModifyResponse(resp.Header)
+			}
+			setUntrustedContentHeaders(resp.Header, agentServedPageSandboxCSP)
 			resp.Header.Set("X-Content-Type-Options", "nosniff")
 			return nil
 		},
@@ -261,7 +272,7 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 		// makes ReverseProxy panic with http.ErrAbortHandler: the client
 		// sees a truncated response, never an error body appended to it.
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			w.Header().Set("Content-Security-Policy", untrustedContentSandboxCSP)
+			setUntrustedContentHeaders(w.Header(), untrustedContentSandboxCSP)
 			w.Header().Set("X-Content-Type-Options", "nosniff")
 			if r.Context().Err() == nil && isResponseHeaderTimeout(err) {
 				// The transport closed the stream; the agent end closes
@@ -299,20 +310,22 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 		slog.Debug("Proxy request", append([]any{
 			"agent_id", agent.ID,
 			"port", port,
-			"caller", identityStringFromContext(r.Context()),
+			"caller", policy.caller,
+			"surface", policy.surface,
 			"method", r.Method,
-			"path", reqPath,
+			"path", logging.SubPath(reqPath),
 			"status", status,
 			"transport", "conduit",
 			"duration", time.Since(start),
 		}, route...)...)
 	}()
 	// ReverseProxy adds the upstream response headers to the ones already
-	// on w. Drop the web pages' policy and nosniff header set further up
-	// the handler chain, so the sandbox headers set in ModifyResponse are
-	// the only ones and pages served from an agent's port keep working as
-	// on the tunnel path.
+	// on w. Drop the web pages' policy, Permissions-Policy and nosniff
+	// header set further up the handler chain, so the sandbox headers set
+	// in ModifyResponse are the only ones and pages served from an agent's
+	// port keep working as on the tunnel path.
 	w.Header().Del("Content-Security-Policy")
+	w.Header().Del("Permissions-Policy")
 	w.Header().Del("X-Content-Type-Options")
 	rp.ServeHTTP(w, r)
 }

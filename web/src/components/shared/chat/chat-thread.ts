@@ -58,9 +58,13 @@ import { showToast } from '../../../utils/toast.js';
 import {
   ChatStarsController,
   conversationSupportsStars,
+  fetchStarDetail,
   isStarrableMessageId,
   starredMessagesEnabled,
+  VisibleReconciler,
+  type StarItem,
 } from '../../../client/chat-stars.js';
+import type { ChatMessageFilter } from '../../../client/chat-routes.js';
 import { isFeatureEnabled } from '../../../utils/feature-flags.js';
 import {
   ARTIFACTS_FLAG,
@@ -100,8 +104,10 @@ import type { PreviewTarget } from './chat-file-preview.js';
 import './chat-action-sheet.js';
 import type { ActionSheetSelectDetail } from './chat-action-sheet.js';
 import {
+  focusedElement,
+  MenuFocus,
   placeMenuInViewport,
-  renderMenuRows,
+  renderMenu,
   runMenuAction,
   shouldUseMenuSheet,
   type MenuAction,
@@ -115,13 +121,16 @@ import {
 import { chatRecentFiles } from '../../../client/chat-recent-files.js';
 import {
   findTopVisibleRow,
+  rememberFilteredScrollAnchor,
   scrollTopForAnchor,
+  takeFilteredScrollAnchor,
   type ChatScrollAnchor,
 } from './chat-scroll-anchor.js';
 import { ComposerRoomController, type RoomComposer } from './composer-room.js';
 import { PinOnResizeController } from './pin-on-resize.js';
 import { focusElement } from '../focus-moved.js';
 import { findDefaultAgent } from './default-agent.js';
+import { replyToContent } from './message-text.js';
 import { coalescedRefresh, type CoalescedRefresh } from '../../../client/coalesced-refresh.js';
 
 /** Result from server-side mention fan-out. */
@@ -138,6 +147,76 @@ const MAX_BUFFER = 500;
 
 /** Number of messages to fetch per history request. */
 const HISTORY_PAGE_SIZE = 50;
+
+/** The largest page the history endpoint serves (a starred-only refresh). */
+const HISTORY_MAX_PAGE_SIZE = 200;
+
+/** How many around targets a deep starred-only refresh tries before the newest window. */
+const FILTER_AROUND_TRIES = 5;
+
+/**
+ * Detail of `chat-message-filter-change`: the thread asks the page to show
+ * the conversation under `filter`. `messageId`, when set, is the message a
+ * jump opens in full context (the page puts it in the URL fragment).
+ */
+export interface MessageFilterChangeDetail {
+  filter: ChatMessageFilter;
+  messageId?: string;
+}
+
+/** Detail of `chat-star-open`: a starred message now in another conversation. */
+export interface StarOpenDetail {
+  item: StarItem;
+}
+
+/** One history response, as the thread reads it. */
+interface HistoryWindow {
+  items?: Message[];
+  messages?: Message[];
+  nextCursor?: string;
+  messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
+  messageArtifacts?: Record<string, MessageArtifactRef[]>;
+  messageArtifactsUnavailable?: string[];
+  messageExtensions?: Record<
+    string,
+    { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
+  >;
+  replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
+}
+
+/** Where the full conversation opens when the starred-only center is left. */
+interface FilterExitTarget {
+  /** The conversation the target belongs to; used only there. */
+  conversationKey: string;
+  messageId: string;
+  highlight: boolean;
+  /** Seed the composer with a reply to, or an edit of, the message. */
+  action?: 'reply' | 'edit';
+  /** Move focus to the message when it lands (a jump). */
+  focus?: boolean;
+}
+
+/** Whether the user asked for reduced motion. */
+function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  );
+}
+
+/**
+ * Focus a message a jump landed on, for keyboard and assistive users,
+ * without putting every message in the tab order: the row is focusable
+ * (tabindex -1) only until focus leaves it.
+ */
+function focusArrivedMessage(el: HTMLElement): void {
+  if (!el.hasAttribute('tabindex')) {
+    el.setAttribute('tabindex', '-1');
+    el.addEventListener('blur', () => el.removeAttribute('tabindex'), { once: true });
+  }
+  el.focus({ preventScroll: true });
+}
 
 /** Delay that coalesces a burst of live messages with artifacts into one refresh. */
 const ARTIFACT_REFRESH_DEBOUNCE_MS = 150;
@@ -348,6 +427,16 @@ function isJumpScrollClamped(
 }
 
 /**
+ * Whether a key event comes from inside an open popup menu (its
+ * `.context-menu` container): the menu's own keys, never a scroll gesture.
+ */
+function isInOpenMenu(e: Event): boolean {
+  return e
+    .composedPath()
+    .some((n) => n instanceof HTMLElement && n.classList.contains('context-menu'));
+}
+
+/**
  * Whether `node` is (or is inside) an editable element — an input, textarea,
  * select, or contenteditable — for the purpose of ignoring scroll-shaped
  * keydowns (Space, arrows, ...) typed there as ordinary text input rather
@@ -539,6 +628,16 @@ export class ScionChatThread extends LitElement {
   @property()
   conversationKey = '';
 
+  /**
+   * The center message filter: 'starred' shows only the signed-in user's
+   * starred messages of the conversation (the starred-only center), '' the
+   * whole history. The page sets it from the URL (`?messages=starred`). A
+   * change reloads the conversation as a switch would, so a request made
+   * under one filter never lands under the other.
+   */
+  @property({ attribute: false })
+  messageFilter: ChatMessageFilter = '';
+
   /** The project ID this conversation belongs to (for v2 mode). */
   @property()
   projectId = '';
@@ -592,6 +691,11 @@ export class ScionChatThread extends LitElement {
    */
   private get isV2(): boolean {
     return (this.conversationKey?.length ?? 0) > 0;
+  }
+
+  /** Whether the starred-only center is shown. */
+  private get filtered(): boolean {
+    return this.isV2 && this.messageFilter === 'starred';
   }
 
   /** Whether starred messages are offered in this conversation. */
@@ -788,6 +892,15 @@ export class ScionChatThread extends LitElement {
   /** The open message menu is the mobile bottom sheet, not the popup. */
   @state() private contextMenuAsSheet = false;
 
+  /** The message a popup menu follows, and its last viewport top. */
+  private _menuAnchor: { messageId: string; top: number | null } | null = null;
+
+  /** The user scrolled since the popup menu opened (it then closes). */
+  private _menuUserScrolled = false;
+
+  /** Keyboard focus around the popup message menu. */
+  private readonly _menuFocus = new MenuFocus();
+
   // ---- Starred messages (web.chat_starred_messages) ----
 
   /** Star state of this conversation's loaded messages (in memory only). */
@@ -803,10 +916,45 @@ export class ScionChatThread extends LitElement {
   /** Text of the polite live region announcing a star change. */
   @state() private starAnnouncement = '';
 
+  /** Where the full conversation opens once the page clears the filter. */
+  private _filterExitTarget: FilterExitTarget | null = null;
+
+  /** A starred-only refresh is running / is owed once more afterwards. */
+  private _filterRefreshing = false;
+  private _filterRefreshAgain = false;
+
   /** An SSE star invalidation: refetch the state of loaded messages. */
   private _starsUpdatedHandler = (): void => {
-    if (this.starsActive) void this.stars.invalidate();
+    if (!this.starsActive) return;
+    this._starCenterReconciler.noteRefetched();
+    void this.stars.invalidate();
+    // The starred-only center lists the collection itself: refetch it.
+    if (this.filtered && this.loaded) void this.refreshFilteredWindow();
   };
+
+  /**
+   * The starred-only center is a visible collection: it reconciles at most
+   * once a minute while shown and the page is visible, and on returning to
+   * the page, in case an invalidation was missed.
+   */
+  private readonly _starCenterReconciler = new VisibleReconciler(() => this._starsUpdatedHandler());
+
+  /**
+   * The full conversation is not a collection surface (no polling), but
+   * returning to the page refetches the loaded messages' star state.
+   */
+  private readonly _starReturnReconciler = new VisibleReconciler(() => {
+    if (this.starsActive && !this.filtered) void this.stars.invalidate();
+  }, null);
+
+  /** Run the reconciler that fits the current view, and stop the other. */
+  private syncStarReconcilers(): void {
+    const active = this.isConnected && this.starsActive;
+    if (active && this.filtered) this._starCenterReconciler.start();
+    else this._starCenterReconciler.stop();
+    if (active && !this.filtered) this._starReturnReconciler.start();
+    else this._starReturnReconciler.stop();
+  }
 
   // ---- Path-link file preview state (#1148) ----
 
@@ -932,6 +1080,9 @@ export class ScionChatThread extends LitElement {
     }
     // Star invalidations sent while the stream was down were lost.
     this._starsUpdatedHandler();
+    // The starred-only center never appends live messages; the star
+    // refetch above is its catch-up.
+    if (this.filtered) return;
     if (!this.loaded || this.viewingAroundMessage) return;
     void this.fetchHistoryV2().catch((err) => {
       console.warn('[chat-thread] catch-up fetch after reconnect failed:', err);
@@ -1260,6 +1411,24 @@ export class ScionChatThread extends LitElement {
         }
       }
 
+      /* Reduced motion: the same mark, held without the fade. */
+      @media (prefers-reduced-motion: reduce) {
+        .permalink-highlight {
+          animation: none;
+          background-color: rgba(59, 130, 246, 0.2);
+        }
+      }
+
+      /* A message focused on arrival from a jump. */
+      scion-chat-message:focus {
+        outline: none;
+      }
+
+      scion-chat-message:focus-visible {
+        outline: 2px solid var(--scion-primary, #3b82f6);
+        outline-offset: -2px;
+      }
+
       /* Empty / Loading / Error states */
       .state-msg {
         display: flex;
@@ -1312,6 +1481,47 @@ export class ScionChatThread extends LitElement {
         color: var(--scion-text-muted, #64748b);
         border-top: 1px solid var(--scion-border, #e2e8f0);
         text-align: center;
+      }
+
+      /* The starred-only center's filter banner, in place of the composer. */
+      .star-filter-banner {
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.625rem 1rem calc(0.625rem + env(safe-area-inset-bottom, 0px));
+        font-size: var(--chat-fs-base);
+        border-top: 1px solid var(--scion-border, #e2e8f0);
+        background: var(--scion-surface-2, #f8fafc);
+      }
+
+      .star-filter-banner > sl-icon {
+        flex-shrink: 0;
+        color: var(--sl-color-warning-500, #f59e0b);
+      }
+
+      .star-filter-text {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 0.125rem;
+      }
+
+      .star-filter-text span {
+        color: var(--scion-text-muted, #64748b);
+      }
+
+      .star-filter-show-all {
+        flex-shrink: 0;
+      }
+
+      /* A 44 px touch target on a phone or tablet; Shoelace centres the
+         label from this height. */
+      @media (max-width: 768px), (pointer: coarse) {
+        .star-filter-show-all {
+          --sl-input-height-small: 2.75rem;
+        }
       }
 
       .send-error {
@@ -1519,8 +1729,15 @@ export class ScionChatThread extends LitElement {
         transition: background 0.1s;
       }
 
-      .context-menu-item:hover {
+      .context-menu-item:hover,
+      .context-menu-item:focus {
         background: var(--scion-primary-50, #eff6ff);
+        outline: none;
+      }
+
+      .context-menu-item:focus-visible {
+        outline: 2px solid var(--scion-primary, #3b82f6);
+        outline-offset: -2px;
       }
 
       .context-menu-item.danger {
@@ -1578,6 +1795,8 @@ export class ScionChatThread extends LitElement {
    * new conversationKey — we must tear down old state and reload.
    */
   override updated(changedProperties: Map<string, unknown>): void {
+    this.syncStarReconcilers();
+    this.syncActionsTabStop();
     this.measureSendErrorTruncation();
     this.observeSendError();
     // The typing indicator is in the list on a phone or tablet: when it
@@ -1592,10 +1811,9 @@ export class ScionChatThread extends LitElement {
       if (list) list.scrollTop = list.scrollHeight;
     }
     if (this.contextMenuMessage && !this.contextMenuAsSheet) {
-      placeMenuInViewport(
-        this.renderRoot.querySelector<HTMLElement>('.context-menu'),
-        this.contextMenuPosition
-      );
+      const menu = this.renderRoot.querySelector<HTMLElement>('.context-menu');
+      placeMenuInViewport(menu, this.contextMenuPosition);
+      this._menuFocus.afterRender(menu);
     }
     if (
       changedProperties.has('conversationKey') &&
@@ -1603,9 +1821,20 @@ export class ScionChatThread extends LitElement {
     ) {
       const oldKey = changedProperties.get('conversationKey') as string;
       if (oldKey !== this.conversationKey && this.isV2) {
+        // A target left for the conversation we are leaving is never used.
+        this._filterExitTarget = null;
         this.resetV2State();
         this.loadHistory();
       }
+    } else if (
+      changedProperties.has('messageFilter') &&
+      changedProperties.get('messageFilter') !== undefined &&
+      changedProperties.get('messageFilter') !== this.messageFilter &&
+      this.isV2
+    ) {
+      // Same conversation, other filter: a fresh open of it.
+      this.resetV2State();
+      this.loadHistory();
     }
 
     // Resolve foreign project slugs when messages change — keeps async work
@@ -1697,6 +1926,7 @@ export class ScionChatThread extends LitElement {
     // Clear unread divider state.
     this.lastReadMessageId = '';
     this.showUnreadDivider = false;
+    this._filterRefreshAgain = false;
 
     // A backfill queued by the previous conversation's events is not owed.
     this._eventBackfill.cancel();
@@ -1752,6 +1982,9 @@ export class ScionChatThread extends LitElement {
     this._sendErrorObserver = null;
     this._observedSendError = null;
     this.stopStream();
+    this.untrackMenuAnchor();
+    this._starCenterReconciler.stop();
+    this._starReturnReconciler.stop();
     this.deactivateUnreadAnchor();
     this._bottomPinObserver?.disconnect();
     this._bottomPinObserver = null;
@@ -2174,27 +2407,41 @@ export class ScionChatThread extends LitElement {
       // it: merging the latest page in as well would leave a gap.
       if (!(await this.fetchHistoryV2(undefined, () => !this.viewingAroundMessage))) return;
       this.startStreamV2();
-      // Set up read tracking
-      window.addEventListener('focus', this._focusHandler);
-      window.addEventListener('blur', this._blurHandler);
-      // Fetch inter-agent exchanges for agent DMs (non-blocking).
-      if (this.isAgentDM) {
-        void this.fetchInteragentExchanges();
-        void this.resolvePeerAgentProject();
+      // The starred-only center reads nothing: no read tracking, no unread
+      // divider, no inter-agent exchanges and no read receipts there.
+      if (!this.filtered) {
+        // Set up read tracking
+        window.addEventListener('focus', this._focusHandler);
+        window.addEventListener('blur', this._blurHandler);
+        // Fetch inter-agent exchanges for agent DMs (non-blocking).
+        if (this.isAgentDM) {
+          void this.fetchInteragentExchanges();
+          void this.resolvePeerAgentProject();
+        }
+        // Human DMs show a read receipt — seed it so "Seen" survives a reload
+        // instead of waiting for the peer's next watermark advance.
+        if (this.isHumanDM) {
+          void this.fetchPeerReadState();
+        }
+        // Fetch own read watermark for the unread divider.
+        await this.fetchOwnReadState();
       }
-      // Human DMs show a read receipt — seed it so "Seen" survives a reload
-      // instead of waiting for the peer's next watermark advance.
-      if (this.isHumanDM) {
-        void this.fetchPeerReadState();
-      }
-      // Fetch own read watermark for the unread divider.
-      await this.fetchOwnReadState();
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to load messages';
     } finally {
       // The loading flag, the restore anchor, the scroll target and the
       // watermark timer all belong to the conversation now on screen.
-      if (loadId === this.fetchId) {
+      if (loadId === this.fetchId && this.filtered) {
+        this.loading = false;
+        // Back to the starred-only center restores where it was left;
+        // otherwise it opens at the newest starred message.
+        const restore = this.takeFilteredRestore();
+        if (restore) {
+          void this.restoreScrollPosition(restore);
+        } else {
+          this.scrollToBottomAfterRender();
+        }
+      } else if (loadId === this.fetchId) {
         this.loading = false;
         // Determine scroll target: permalink hash > restored position >
         // unread divider > bottom. A restored position that was following the
@@ -2204,15 +2451,25 @@ export class ScionChatThread extends LitElement {
         // An explicit jump made while loading (e.g. a search result in
         // this conversation) outranks all of them, including the hash.
         const jumped = this._jumpSeq !== this._jumpSeqAtOpen;
-        const hashMsgId = jumped ? '' : this.parseMessageHash();
-        const restore = jumped ? null : this.takeRestoreScrollAnchor();
+        // Leaving the starred-only center (a jump, Show all, Reply or Edit)
+        // names the message to open the full conversation at.
+        const pendingExit = this._filterExitTarget;
+        this._filterExitTarget = null;
+        const exit =
+          !jumped && pendingExit?.conversationKey === this.conversationKey ? pendingExit : null;
+        const hashMsgId = jumped || exit ? '' : this.parseMessageHash();
+        const restore = jumped || exit ? null : this.takeRestoreScrollAnchor();
         if (jumped) {
           // The jump owns the scroll position. Deferred only while it has
           // not landed and no earlier jump has landed since the open.
           this._openScrollDeferred =
             this._landedJumpSeq !== this._jumpSeq && this._landedJumpSeq <= this._jumpSeqAtOpen;
+        } else if (exit) {
+          void this.landFilterExit(exit);
         } else if (hashMsgId) {
-          void this.scrollToMessageById(hashMsgId, true);
+          // A permalink (also a starred entry in another conversation)
+          // lands focus on its message for keyboard and assistive users.
+          void this.scrollToMessageById(hashMsgId, true, true);
         } else if (restore && !(restore.pinnedToBottom && this.showUnreadDivider)) {
           void this.restoreScrollPosition(restore);
         } else if (this.showUnreadDivider) {
@@ -2268,9 +2525,7 @@ export class ScionChatThread extends LitElement {
         params.set('cursor', cursor);
       }
 
-      const res = await apiFetch(
-        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages?${params.toString()}`
-      );
+      const res = await apiFetch(this.historyUrl(params));
 
       // Early out only: the catch below and the check after the body is
       // read would also drop a stale page, but there is no need to read it.
@@ -2328,16 +2583,23 @@ export class ScionChatThread extends LitElement {
         }
       }
 
-      if (items.length < HISTORY_PAGE_SIZE) {
-        this.hasOlderMessages = false;
-      }
+      if (this.filtered) {
+        // The starred-only variant says whether older starred messages
+        // remain by its cursor alone.
+        this.nextCursor = data?.nextCursor || null;
+        this.hasOlderMessages = this.nextCursor !== null;
+      } else {
+        if (items.length < HISTORY_PAGE_SIZE) {
+          this.hasOlderMessages = false;
+        }
 
-      if (data?.nextCursor) {
-        this.nextCursor = data.nextCursor;
+        if (data?.nextCursor) {
+          this.nextCursor = data.nextCursor;
+        }
       }
 
       this.mergeMessages(items);
-      this.scheduleStarLoad();
+      this.afterHistoryPage(items);
       this.recordRecentFilesForHistory(items, recentFilesGeneration);
       return true;
     } catch (err) {
@@ -2451,6 +2713,9 @@ export class ScionChatThread extends LitElement {
       return;
     }
     if (this.viewingAroundMessage) return;
+    // The starred-only center never appends a live message: a new message
+    // is not starred, and a star made elsewhere arrives as an invalidation.
+    if (this.filtered) return;
 
     // The sender finished typing the moment their message landed — drop the
     // indicator now rather than waiting out TYPING_EXPIRY_MS.
@@ -2669,6 +2934,8 @@ export class ScionChatThread extends LitElement {
 
   /** Handle v2 SSE typing events. Only show for this conversation, and skip self. */
   private handleV2TypingEvent(e: Event): void {
+    // No typing indicators in the starred-only center.
+    if (this.filtered) return;
     const detail = (e as CustomEvent).detail as {
       data?: { threadId?: string; userId?: string; displayName?: string };
     };
@@ -2723,6 +2990,9 @@ export class ScionChatThread extends LitElement {
    */
   private async backfillV2(): Promise<void> {
     if (!this.conversationKey || this.viewingAroundMessage) return;
+    // The starred-only center never takes the ordinary latest page; its
+    // catch-up is refreshFilteredWindow.
+    if (this.filtered) return;
     if (this._backfillInFlight) {
       this._backfillPending = true;
       return;
@@ -2750,7 +3020,7 @@ export class ScionChatThread extends LitElement {
       `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages?${params.toString()}`
     );
 
-    if (currentId !== this.fetchId) return;
+    if (currentId !== this.fetchId || this.filtered) return;
     if (!res.ok) return;
 
     const data = (await res.json()) as {
@@ -3439,8 +3709,9 @@ export class ScionChatThread extends LitElement {
         onSuccess();
         // Backfill to get the full server-enriched message. The optimistic
         // message (now keyed by the real ID) stays visible until the backfill
-        // overwrites it, so there is no gap.
-        void this.backfillV2();
+        // overwrites it, so there is no gap. Not once the thread moved on (a
+        // filter change keeps the key): the page belongs to the view left.
+        if (!threadMovedOn()) void this.backfillV2();
       }
     } catch (err) {
       // Remove optimistic message on failure.
@@ -3706,6 +3977,12 @@ export class ScionChatThread extends LitElement {
 
   /** Handle scroll-to-message from reply preview click. */
   private handleScrollToMessage(e: CustomEvent<{ messageId: string }>): void {
+    // From the starred-only center a reply preview opens its target in the
+    // full conversation instead of adding it to the filtered list.
+    if (this.filtered) {
+      this.exitFilter({ messageId: e.detail.messageId, highlight: true }, true);
+      return;
+    }
     void this.scrollToMessageById(e.detail.messageId);
   }
 
@@ -3740,6 +4017,7 @@ export class ScionChatThread extends LitElement {
       this.v2MessageExtMap.set(messageId, ext);
       // Force re-render by cloning messages array.
       this.messages = [...this.messages];
+      if (this.filtered) void this.refreshFilteredWindow();
     }
   }
 
@@ -3767,6 +4045,15 @@ export class ScionChatThread extends LitElement {
     // A deleted message shows no artifact refs, so it no longer keeps the
     // could-not-load notice up.
     this._artifactRefsUnavailable.delete(messageId);
+    // Its stars are gone too: drop the indicator without a request.
+    this.stars.evict(messageId);
+    if (this.filtered && this.messageMap.has(messageId)) {
+      // A deleted message leaves the starred-only center at once.
+      this.messageMap.delete(messageId);
+      this.messages = this.messages.filter((m) => m.id !== messageId);
+      void this.refreshFilteredWindow();
+      return;
+    }
     // Force re-render.
     this.messages = [...this.messages];
   }
@@ -3803,6 +4090,8 @@ export class ScionChatThread extends LitElement {
 
   /** Advance the read watermark if conditions are met. */
   private maybeAdvanceReadWatermark(): void {
+    // The starred-only center omits messages: reading it reads nothing.
+    if (this.filtered) return;
     if (!this.isV2 || !this._tabFocused || !this.pinnedToBottom) return;
     if (this._autoAdvanceSuppressed) return;
     if (this.messages.length === 0) return;
@@ -3832,6 +4121,7 @@ export class ScionChatThread extends LitElement {
     // more often than it changes; re-POSTing the same ID would also re-fan the
     // read-state event out to the peer for nothing.
     if (!messageId || messageId === this._lastAdvancedMessageId) return;
+    if (this.filtered) return;
     // Defence in depth: callers already filter these out via
     // lastReadableMessageId(), but never let an optimistic temp ID reach the
     // network regardless of caller.
@@ -3924,12 +4214,12 @@ export class ScionChatThread extends LitElement {
     this.scheduleScrollAnchorCapture();
 
     // A tap-opened (or right-clicked) context menu is positioned at a fixed
-    // viewport point; once the thread scrolls it no longer points at the
-    // message it targets, so dismiss it rather than leave it stranded. The
-    // mobile sheet is not anchored to the message, so it stays open (a new
-    // message arriving scrolls the list underneath it).
+    // viewport point: a user scroll dismisses it rather than leave it
+    // stranded, and any other scroll moves it with its message
+    // (followMenuAnchor). The mobile sheet is not anchored to the message,
+    // so it stays open (a new message arriving scrolls the list underneath).
     if (this.contextMenuMessage && !this.contextMenuAsSheet) {
-      this.closeContextMenu();
+      this.followMenuAnchor(el);
     }
 
     // Load older messages when scrolled near top
@@ -4014,7 +4304,9 @@ export class ScionChatThread extends LitElement {
    */
   get scrollAnchor(): ChatScrollAnchor | null {
     const anchor = this._scrollAnchor;
-    return anchor && anchor.conversationKey === this.conversationKey ? { ...anchor } : null;
+    if (!anchor || anchor.conversationKey !== this.conversationKey) return null;
+    const { messageFilter: _ignored, ...rest } = anchor;
+    return this.filtered ? { ...rest, messageFilter: 'starred' } : rest;
   }
 
   private scheduleScrollAnchorCapture(): void {
@@ -4068,6 +4360,8 @@ export class ScionChatThread extends LitElement {
     const anchor = this.restoreScrollAnchor;
     if (!anchor || anchor === this._usedRestoreAnchor) return null;
     if (anchor.conversationKey !== this.conversationKey) return null;
+    // A position is only restored under the filter it was taken under.
+    if ((anchor.messageFilter ?? '') !== this.messageFilter) return null;
     this._usedRestoreAnchor = anchor;
     this.dispatchEvent(
       new CustomEvent<ChatScrollAnchor>('scroll-restore-consumed', { detail: anchor })
@@ -4256,7 +4550,7 @@ export class ScionChatThread extends LitElement {
    * Scroll to a specific message by ID, with optional highlight animation.
    * Can be called externally (e.g. from search navigation on same conversation).
    */
-  async scrollToMessageById(messageId: string, highlight = true): Promise<void> {
+  async scrollToMessageById(messageId: string, highlight = true, focus = false): Promise<void> {
     // Explicit programmatic navigation (search-jump, reply-jump, deep link)
     // takes precedence over the open-time unread anchor (rule 5). Without
     // this, a same-thread search-jump made inside the anchor window is
@@ -4303,7 +4597,11 @@ export class ScionChatThread extends LitElement {
       !isJumpTargetInView(containerRect, targetRect) &&
       !isJumpScrollClamped(scrollEl, containerRect, targetRect);
 
-    msgEl.scrollIntoView({ behavior: 'smooth', block: align });
+    msgEl.scrollIntoView({ behavior: prefersReducedMotion() ? 'auto' : 'smooth', block: align });
+    if (focus) {
+      focusArrivedMessage(msgEl);
+      if (this.starsActive) this.setActiveActions(messageId);
+    }
     if (willScroll) {
       // A large layout shift mid-scroll (image load, late markdown,
       // attachment height) can leave the target off screen because the
@@ -4381,7 +4679,8 @@ export class ScionChatThread extends LitElement {
    * grab/middle-click via `pointerdown`, or a scroll-relevant `keydown`
    * anywhere in the document — not just on the scroll container, since focus
    * often isn't there, and ignoring the same keys typed into an editable
-   * field like the composer, review N3), another jump (scrollToMessageById
+   * field like the composer, review N3, or inside the open message menu),
+   * another jump (scrollToMessageById
    * re-entry, or scrollToBottom for "Jump to latest" / autoscroll), or
    * thread switch/disconnect — never yanks the user back to a target they've
    * since scrolled away from on purpose.
@@ -4413,6 +4712,8 @@ export class ScionChatThread extends LitElement {
       // they're in JUMP_SCROLL_CANCEL_KEYS for the document-wide case (review
       // N3).
       if (isEditableKeydownTarget(e.composedPath()[0])) return;
+      // Keys inside the open message menu move between its items.
+      if (isInOpenMenu(e)) return;
       cleanup();
     };
     // Not a cancel signal — Chromium fires `scroll` every frame of the
@@ -4567,26 +4868,27 @@ export class ScionChatThread extends LitElement {
     });
 
     try {
-      const res = await apiFetch(
-        `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages?${params.toString()}`
-      );
+      const res = await apiFetch(this.historyUrl(params));
       if (currentId !== this.fetchId || !res.ok || !isCurrent()) return;
 
-      const data = (await res.json()) as {
-        items?: Message[];
-        messages?: Message[];
-        nextCursor?: string;
-        messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
-        messageArtifacts?: Record<string, MessageArtifactRef[]>;
-        messageArtifactsUnavailable?: string[];
-        messageExtensions?: Record<
-          string,
-          { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
-        >;
-        replyPreviews?: Record<string, { messageId: string; senderName: string; content: string }>;
-      };
+      const data = (await res.json()) as HistoryWindow;
       if (currentId !== this.fetchId || !isCurrent()) return;
 
+      this.replaceHistoryWindow(data, recentFilesGeneration);
+      this.viewingAroundMessage = true;
+      this.pinnedToBottom = false;
+    } catch (err) {
+      console.error('Failed to fetch around message:', err);
+    }
+  }
+
+  /**
+   * Replace the loaded messages with one history window (an around page,
+   * or a refetched starred-only window), with its attachments, artifacts,
+   * extensions and reply previews.
+   */
+  private replaceHistoryWindow(data: HistoryWindow, recentFilesGeneration: number): void {
+    {
       const items = data.items ?? data.messages ?? [];
       this.messageMap.clear();
       this.v2AttachmentMap.clear();
@@ -4612,13 +4914,9 @@ export class ScionChatThread extends LitElement {
 
       this.nextCursor = data.nextCursor || null;
       this.hasOlderMessages = this.nextCursor !== null;
-      this.viewingAroundMessage = true;
-      this.pinnedToBottom = false;
       this.mergeMessages(items);
-      this.scheduleStarLoad();
+      this.afterHistoryPage(items);
       this.recordRecentFilesForHistory(items, recentFilesGeneration);
-    } catch (err) {
-      console.error('Failed to fetch around message:', err);
     }
   }
 
@@ -4825,6 +5123,7 @@ export class ScionChatThread extends LitElement {
 
   /** The actions of a message's menu, shared by the popup and the sheet. */
   private messageMenuActions(msg: Message): MenuAction[] {
+    if (this.filtered) return this.filteredMenuActions(msg);
     const isOwnMessage = msg.senderId === (this._currentUserId || this.currentUserId);
     const canEditDelete = isOwnMessage && !this.hasAgentReplyAfter(msg);
     const actions: MenuAction[] = [
@@ -4912,6 +5211,9 @@ export class ScionChatThread extends LitElement {
     try {
       await this.stars.setStarred(messageId, key, starred);
       if (key !== this.conversationKey) return;
+      // Unstarred in the starred-only center: it leaves the list (and the
+      // conversation may be left with none); the view stays where it is.
+      if (!starred && this.filtered) void this.refreshFilteredWindow();
       await this.announceStar(starred ? 'Message starred' : 'Message unstarred');
     } catch {
       if (key !== this.conversationKey) return;
@@ -4940,6 +5242,323 @@ export class ScionChatThread extends LitElement {
     this.starAnnouncement = text;
   }
 
+  // ---- Starred-only center (?messages=starred) ----
+
+  /** The history URL of this conversation with `params`, under the filter. */
+  private historyUrl(params: URLSearchParams): string {
+    if (this.filtered) params.set('starred', 'true');
+    return `/api/v1/chat/conversations/${encodeURIComponent(this.conversationKey)}/messages?${params.toString()}`;
+  }
+
+  /**
+   * After a history page merged: a starred-only page confirms its messages
+   * are starred (no state request); an ordinary page fetches their state.
+   */
+  private afterHistoryPage(items: readonly Message[]): void {
+    if (!this.filtered) {
+      this.scheduleStarLoad();
+      return;
+    }
+    if (!this.starsActive) return;
+    this.stars.setConversation(this.conversationKey);
+    this.stars.markStarred(items.map((m) => m.id));
+  }
+
+  /**
+   * The position to reopen the starred-only center at: the one it was
+   * left at for the full conversation (Back), else a handed-over position
+   * taken under the same filter.
+   */
+  private takeFilteredRestore(): ChatScrollAnchor | null {
+    const left = takeFilteredScrollAnchor(this.conversationKey);
+    const handed = this.takeRestoreScrollAnchor();
+    return left ?? handed;
+  }
+
+  /**
+   * Ask the page to show the full conversation. The starred-only position
+   * is kept for Back, and `target` is where the full conversation opens.
+   * `jump` puts the target in the URL (a permalink-like entry).
+   */
+  private exitFilter(
+    target: Omit<FilterExitTarget, 'conversationKey'> | null,
+    jump: boolean
+  ): void {
+    if (!this.filtered) return;
+    this.captureScrollAnchor();
+    const anchor = this.scrollAnchor;
+    if (anchor) rememberFilteredScrollAnchor(anchor);
+    this._filterExitTarget = target ? { ...target, conversationKey: this.conversationKey } : null;
+    const detail: MessageFilterChangeDetail = { filter: '' };
+    if (target && jump) detail.messageId = target.messageId;
+    this.dispatchEvent(
+      new CustomEvent<MessageFilterChangeDetail>('chat-message-filter-change', {
+        detail,
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
+  /**
+   * Open a message of this conversation in the full conversation: from the
+   * starred-only center this leaves the filter (a new history entry);
+   * otherwise it is the ordinary jump.
+   */
+  openInFullContext(messageId: string): void {
+    if (this.filtered) {
+      this.exitFilter({ messageId, highlight: true, focus: true }, true);
+      return;
+    }
+    void this.scrollToMessageById(messageId, true, true);
+  }
+
+  /** Show all messages: the full conversation at the nearest visible message. */
+  private handleShowAllMessages(): void {
+    this.captureScrollAnchor();
+    const id = this.pinnedToBottom ? '' : (this._scrollAnchor?.messageId ?? '');
+    this.exitFilter(
+      id && this.messageMap.has(id) ? { messageId: id, highlight: false } : null,
+      false
+    );
+  }
+
+  /**
+   * Jump to message in conversation: resolve the star's current target
+   * first. A star that is gone is dropped from the list with a notice; one
+   * whose message moved to another conversation (a promotion) opens there;
+   * otherwise the full conversation opens at the message.
+   */
+  private async jumpToMessageInConversation(messageId: string): Promise<void> {
+    const fetchId = this.fetchId;
+    let item: StarItem | null;
+    try {
+      item = await fetchStarDetail(messageId);
+    } catch {
+      if (fetchId !== this.fetchId) return;
+      showToast('Could not open the starred message', 'danger', {
+        action: {
+          label: 'Retry',
+          run: (): void => {
+            if (fetchId === this.fetchId) void this.jumpToMessageInConversation(messageId);
+          },
+        },
+      });
+      return;
+    }
+    if (fetchId !== this.fetchId || !this.filtered) return;
+    if (!item) {
+      showToast('This starred message is no longer available', 'warning');
+      void this.refreshFilteredWindow();
+      return;
+    }
+    if (item.conversationKey !== this.conversationKey) {
+      this.dispatchEvent(
+        new CustomEvent<StarOpenDetail>('chat-star-open', {
+          detail: { item },
+          bubbles: true,
+          composed: true,
+        })
+      );
+      return;
+    }
+    this.exitFilter({ messageId: item.messageId, highlight: true, focus: true }, true);
+  }
+
+  /**
+   * The full conversation has loaded after leaving the starred-only
+   * center: go to the message, then seed a reply or an edit if asked (an
+   * edit only when it is still allowed with the full history in view).
+   */
+  private async landFilterExit(exit: FilterExitTarget): Promise<void> {
+    const fetchId = this.fetchId;
+    // A jump focuses its message; Reply and Edit focus the composer below.
+    await this.scrollToMessageById(exit.messageId, exit.highlight, exit.focus === true);
+    if (!exit.action || fetchId !== this.fetchId || this.filtered) return;
+    const msg = this.messageMap.get(exit.messageId);
+    if (!msg) return;
+    if (exit.action === 'reply') {
+      this.seedReply(msg);
+      return;
+    }
+    const isOwn = msg.senderId === (this._currentUserId || this.currentUserId);
+    if (isOwn && !this.hasAgentReplyAfter(msg)) this.seedEdit(msg);
+  }
+
+  /**
+   * Refetch the starred-only window after a star, edit or deletion change,
+   * keeping the reader's place: the loaded size is refetched (at most the
+   * largest page), and the view stays on the anchor message, or on the
+   * nearest surviving one when it left. Invalidations during a refetch
+   * coalesce into one more.
+   */
+  private async refreshFilteredWindow(): Promise<void> {
+    if (!this.filtered) return;
+    if (this._filterRefreshing) {
+      this._filterRefreshAgain = true;
+      return;
+    }
+    this._filterRefreshing = true;
+    try {
+      do {
+        this._filterRefreshAgain = false;
+        await this.reloadFilteredWindow();
+      } while (this._filterRefreshAgain && this.filtered);
+    } finally {
+      this._filterRefreshing = false;
+    }
+  }
+
+  private async reloadFilteredWindow(): Promise<void> {
+    const fetchId = this.fetchId;
+    const recentFilesGeneration = chatRecentFiles.scopeGeneration;
+    this.captureScrollAnchor();
+    const anchor = this._scrollAnchor ? { ...this._scrollAnchor } : null;
+    const wasPinned = this.pinnedToBottom;
+    const before = this.messages.map((m) => m.id);
+    const limit = Math.min(HISTORY_MAX_PAGE_SIZE, Math.max(HISTORY_PAGE_SIZE, before.length));
+    // A reader further up than the largest page can hold: refetch around
+    // the anchor (or, if it left, its nearest loaded neighbours) instead of
+    // the newest window, which would not contain it.
+    const anchorAt = anchor ? before.indexOf(anchor.messageId) : -1;
+    // A window already around an older message is deep too: the newest page
+    // would not hold the anchor, whatever its distance in the loaded list.
+    const deep =
+      !wasPinned &&
+      anchorAt >= 0 &&
+      (this.viewingAroundMessage || before.length - anchorAt > HISTORY_MAX_PAGE_SIZE);
+    const requests: URLSearchParams[] = [];
+    if (deep) {
+      for (let d = 0; d <= FILTER_AROUND_TRIES && requests.length < FILTER_AROUND_TRIES; d++) {
+        for (const i of d === 0 ? [anchorAt] : [anchorAt + d, anchorAt - d]) {
+          const id = before[i];
+          if (id && requests.length < FILTER_AROUND_TRIES) {
+            requests.push(new URLSearchParams({ around: id, limit: String(HISTORY_PAGE_SIZE) }));
+          }
+        }
+      }
+    }
+    requests.push(new URLSearchParams({ limit: String(limit) }));
+    let data: HistoryWindow | null = null;
+    let around = false;
+    for (const params of requests) {
+      try {
+        const res = await apiFetch(this.historyUrl(params));
+        if (fetchId !== this.fetchId || !this.filtered) return;
+        // An around target no longer starred is a 404: try the next one.
+        if (res.status === 404 && params.has('around')) continue;
+        if (!res.ok) {
+          console.warn('[chat-thread] starred-only refresh failed:', res.status);
+          return;
+        }
+        data = (await res.json()) as HistoryWindow;
+        around = params.has('around');
+        break;
+      } catch (err) {
+        console.warn('[chat-thread] starred-only refresh failed:', err);
+        return;
+      }
+    }
+    if (!data) return;
+    if (fetchId !== this.fetchId || !this.filtered) return;
+    this.replaceHistoryWindow(data, recentFilesGeneration);
+    // A window around an older message is not the tail: Jump to latest and
+    // the bottom pin treat it as such. The newest page is the tail again.
+    if (around) {
+      this.viewingAroundMessage = true;
+      this.pinnedToBottom = false;
+    } else {
+      this.viewingAroundMessage = false;
+    }
+    if (wasPinned || !anchor) {
+      this.scrollToBottomAfterRender();
+      return;
+    }
+    // The anchor message, or the closest surviving one (later first, then
+    // earlier), at the anchor's offset.
+    let keep = anchor.messageId;
+    if (!this.messageMap.has(keep)) {
+      const at = before.indexOf(keep);
+      keep = '';
+      for (let d = 1; at >= 0 && d < before.length && !keep; d++) {
+        for (const i of [at + d, at - d]) {
+          const id = before[i];
+          if (id && this.messageMap.has(id)) {
+            keep = id;
+            break;
+          }
+        }
+      }
+    }
+    if (!keep) {
+      // Nothing of the old window survived: follow the newest message (the
+      // bottom pin, else scrollToBottomAfterRender would not move).
+      this.pinnedToBottom = true;
+      this.scrollToBottomAfterRender();
+      return;
+    }
+    void this.restoreScrollPosition({
+      ...anchor,
+      messageId: keep,
+      offset: keep === anchor.messageId ? anchor.offset : 0,
+    });
+  }
+
+  /** The menu of a message in the starred-only center. */
+  private filteredMenuActions(msg: Message): MenuAction[] {
+    const isOwnMessage = msg.senderId === (this._currentUserId || this.currentUserId);
+    const actions: MenuAction[] = [
+      {
+        id: 'jump',
+        label: 'Jump to message in conversation',
+        icon: 'box-arrow-in-right',
+        run: (): void => {
+          this.closeContextMenu();
+          void this.jumpToMessageInConversation(msg.id);
+        },
+      },
+      // Reply and Edit open the full conversation first, then seed the
+      // composer there; the filtered center has no composer.
+      {
+        id: 'reply',
+        label: 'Reply',
+        icon: 'reply',
+        run: (): void => {
+          this.closeContextMenu();
+          this.exitFilter({ messageId: msg.id, highlight: true, action: 'reply' }, true);
+        },
+      },
+    ];
+    if (isOwnMessage) {
+      actions.push({
+        id: 'edit',
+        label: 'Edit',
+        icon: 'pencil',
+        run: (): void => {
+          this.closeContextMenu();
+          this.exitFilter({ messageId: msg.id, highlight: true, action: 'edit' }, true);
+        },
+      });
+    }
+    actions.push(
+      {
+        id: 'copy-text',
+        label: 'Copy text',
+        icon: 'clipboard',
+        run: () => this.handleContextMenuCopyText(),
+      },
+      {
+        id: 'copy-link',
+        label: 'Copy link',
+        icon: 'link-45deg',
+        run: () => this.handleContextMenuCopyLink(),
+      }
+    );
+    if (this.starsActive && isStarrableMessageId(msg.id)) actions.push(this.starMenuAction(msg));
+    if (this.isSenderAgent(msg)) actions.push(...this.agentMenuActions(msg));
+    return actions;
+  }
+
   /**
    * Fetch the star state of the loaded messages not yet known, once per
    * history load (the first page, an older page, an around jump, a
@@ -4959,11 +5578,21 @@ export class ScionChatThread extends LitElement {
   /** Render the context menu when a message is right-clicked or tapped. */
   private renderContextMenu() {
     if (!this.contextMenuMessage || this.contextMenuAsSheet) return nothing;
+    const msg = this.contextMenuMessage;
+    const sender = this.getSenderDisplayName(msg) || msg.sender;
     return html`
-      <div class="context-menu-overlay" @click=${this.closeContextMenu}></div>
-      <div class="context-menu">
-        ${renderMenuRows(this.messageMenuActions(this.contextMenuMessage))}
-      </div>
+      <div
+        class="context-menu-overlay"
+        @click=${(): void => {
+          this.closeContextMenu();
+          this._menuFocus.closed();
+        }}
+      ></div>
+      ${renderMenu(this.messageMenuActions(msg), {
+        label: sender ? `Message actions, ${sender}` : 'Message actions',
+        focus: this._menuFocus,
+        close: () => this.closeContextMenu(),
+      })}
     `;
   }
 
@@ -5070,24 +5699,284 @@ export class ScionChatThread extends LitElement {
   /** Handle right-click on a message to show context menu. */
   private handleMessageContextMenu(e: MouseEvent, msg: Message): void {
     e.preventDefault();
-    // Star states whose request failed are retried when a menu opens.
-    if (this.starsActive) void this.stars.retryFailed();
-    this.contextMenuMessage = msg;
-    this.contextMenuPosition = { x: e.clientX, y: e.clientY };
-    this.contextMenuAsSheet = shouldUseMenuSheet();
-    document.addEventListener('keydown', this.handleContextMenuKeydown);
+    // A context menu the keyboard raised (the ContextMenu key on a focused
+    // message) carries no pointer position: anchor it to the message.
+    let at = { x: e.clientX, y: e.clientY };
+    if (e.clientX === 0 && e.clientY === 0) {
+      const el = this.shadowRoot?.getElementById(`msg-${msg.id}`);
+      if (el) {
+        const r = el.getBoundingClientRect();
+        at = { x: r.left + 16, y: r.top + 16 };
+      }
+    }
+    this.openMessageMenu(msg, at);
   }
 
   /**
-   * Touch devices have no `:hover` state to reveal message actions, and a
+   * Open the message menu at `at`. The message becomes the list's tab stop
+   * (pointer or keyboard alike), and its More actions button is where
+   * Escape returns focus.
+   */
+  private openMessageMenu(msg: Message, at: { x: number; y: number }): void {
+    // Star states whose request failed are retried when a menu opens.
+    if (this.starsActive) void this.stars.retryFailed();
+    this.contextMenuMessage = msg;
+    this.contextMenuPosition = at;
+    this.contextMenuAsSheet = shouldUseMenuSheet();
+    document.addEventListener('keydown', this.handleContextMenuKeydown);
+    if (this.starsActive) this.setActiveActions(msg.id);
+    if (!this.contextMenuAsSheet) {
+      const el = this.messageElement(msg.id);
+      this._menuFocus.opened(el?.actionsButton ?? undefined);
+    }
+    this.trackMenuAnchor(msg.id);
+  }
+
+  // ---- Message list tab stop (the roving More actions button) ----
+
+  /** The message whose More actions button is the list's one tab stop. */
+  private _activeActionsId = '';
+
+  /** That message's index the last time the stop was synced. */
+  private _activeActionsIndex = -1;
+
+  /** The message whose More actions button holds focus, if any. */
+  private _actionsFocusId = '';
+
+  private messageElement(
+    messageId: string
+  ): (HTMLElement & import('./chat-message.js').ScionChatMessage) | null {
+    return (this.shadowRoot?.getElementById(`msg-${messageId}`) ?? null) as
+      | (HTMLElement & import('./chat-message.js').ScionChatMessage)
+      | null;
+  }
+
+  private messageElements(): Array<import('./chat-message.js').ScionChatMessage> {
+    return [...(this.shadowRoot?.querySelectorAll('scion-chat-message') ?? [])];
+  }
+
+  /** Make `messageId`'s More actions button the list's tab stop. */
+  private setActiveActions(messageId: string): void {
+    this._activeActionsId = messageId;
+    this.syncActionsTabStop();
+  }
+
+  /**
+   * Keep exactly one rendered message's More actions button in the tab
+   * order, and its aria-expanded in step with the menu. An active message
+   * that is still rendered keeps the stop (live messages, edits and
+   * refreshes do not move it). When it left: the closest surviving
+   * message takes the stop, and takes focus only if focus was on the
+   * removed button (an empty starred-only center gives it to Show all).
+   * With no stop yet, the last message in view takes it, without focus.
+   */
+  private syncActionsTabStop(): void {
+    if (!this.starsActive) return;
+    const els = this.messageElements();
+    let index = this._activeActionsId
+      ? els.findIndex((m) => m.messageId === this._activeActionsId)
+      : -1;
+    let repairFocus = false;
+    if (index < 0) {
+      if (this._activeActionsId && this._activeActionsIndex >= 0) {
+        // The active message left.
+        repairFocus = this._actionsFocusId === this._activeActionsId && focusedElement() === null;
+        index = els.length > 0 ? Math.min(this._activeActionsIndex, els.length - 1) : -1;
+      } else {
+        index = this.lastVisibleMessageIndex(els);
+      }
+      this._activeActionsId = index >= 0 ? els[index].messageId : '';
+    }
+    this._activeActionsIndex = index;
+    const open = this.contextMenuAsSheet ? '' : (this.contextMenuMessage?.id ?? '');
+    for (let i = 0; i < els.length; i++) {
+      const tab = i === index ? 0 : -1;
+      if (els[i].actionsTabIndex !== tab) els[i].actionsTabIndex = tab;
+      const expanded = els[i].messageId === open;
+      if (els[i].actionsExpanded !== expanded) els[i].actionsExpanded = expanded;
+    }
+    if (!repairFocus) return;
+    this._actionsFocusId = '';
+    if (index >= 0) {
+      const target = els[index];
+      void target.updateComplete.then(() => target.actionsButton?.focus());
+    } else if (this.filtered) {
+      void this.updateComplete.then(() =>
+        this.shadowRoot?.querySelector<HTMLElement>('.star-filter-empty sl-button')?.focus()
+      );
+    }
+  }
+
+  /**
+   * The last rendered message whose box is inside the scroller; else the last one that overlaps
+   * it (a message taller than the view); else the last.
+   */
+  private lastVisibleMessageIndex(
+    els: Array<import('./chat-message.js').ScionChatMessage>
+  ): number {
+    if (els.length === 0) return -1;
+    const scroller = this.shadowRoot?.querySelector<HTMLElement>('.messages-scroll');
+    if (scroller) {
+      const view = scroller.getBoundingClientRect();
+      let overlapping = -1;
+      for (let i = els.length - 1; i >= 0; i--) {
+        const r = els[i].getBoundingClientRect();
+        if (r.height <= 0) continue;
+        if (r.top >= view.top && r.bottom <= view.bottom) return i;
+        if (overlapping < 0 && r.bottom > view.top && r.top < view.bottom) overlapping = i;
+      }
+      if (overlapping >= 0) return overlapping;
+    }
+    return els.length - 1;
+  }
+
+  /** Up/Down/Home/End on a More actions button: move the tab stop and focus. */
+  private handleActionsNav = (e: Event): void => {
+    const { messageId, key } = (e as CustomEvent<{ messageId: string; key: string }>).detail;
+    const els = this.messageElements();
+    const from = els.findIndex((m) => m.messageId === messageId);
+    if (from < 0) return;
+    let to = from;
+    if (key === 'ArrowUp') to = Math.max(0, from - 1);
+    else if (key === 'ArrowDown') to = Math.min(els.length - 1, from + 1);
+    else if (key === 'Home') to = 0;
+    else if (key === 'End') to = els.length - 1;
+    const target = els[to];
+    this.setActiveActions(target.messageId);
+    void target.updateComplete.then(() => target.actionsButton?.focus());
+  };
+
+  /** A More actions button was activated (or Shift+F10 / ContextMenu on it). */
+  private handleActionsOpen = (e: Event): void => {
+    const { messageId } = (e as CustomEvent<{ messageId: string }>).detail;
+    const msg = this.messageMap.get(messageId);
+    const el = this.messageElement(messageId);
+    if (!msg || !el) return;
+    const r = (el.actionsButton ?? el).getBoundingClientRect();
+    this.openMessageMenu(msg, { x: r.left, y: r.bottom });
+  };
+
+  /** Shift+F10 / ContextMenu on a message focused by a jump opens its menu. */
+  private handleMessageHostKeydown(e: KeyboardEvent, msg: Message): void {
+    if (e.composedPath()[0] !== e.currentTarget) return;
+    if (e.key !== 'ContextMenu' && !(e.key === 'F10' && e.shiftKey)) return;
+    e.preventDefault();
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    this.openMessageMenu(msg, { x: r.left + 16, y: r.top + 16 });
+  }
+
+  private handleActionsFocusIn = (e: FocusEvent): void => {
+    const target = e.composedPath()[0];
+    if (!(target instanceof HTMLElement) || !target.classList.contains('msg-actions')) return;
+    const host = (target.getRootNode() as ShadowRoot).host as
+      | import('./chat-message.js').ScionChatMessage
+      | undefined;
+    if (host?.messageId) {
+      this._actionsFocusId = host.messageId;
+      if (this._activeActionsId !== host.messageId) this.setActiveActions(host.messageId);
+    }
+  };
+
+  /** Focus moved somewhere else on purpose: no repair is owed. */
+  private handleActionsFocusOut = (e: FocusEvent): void => {
+    if (e.relatedTarget) this._actionsFocusId = '';
+  };
+
+  /**
+   * Follow the message a popup menu was opened on. A scroll the user makes
+   * (wheel, touch, a scroll key, a scrollbar grab) dismisses the menu, as
+   * before. A scroll the user did not make (a jump's smooth scroll still
+   * settling, its correction, a late layout shift) moves the menu with its
+   * message instead, so a menu opened right after a jump lands is not lost;
+   * it closes only if the message leaves the view.
+   */
+  private trackMenuAnchor(messageId: string): void {
+    this.untrackMenuAnchor();
+    if (this.contextMenuAsSheet) return;
+    const el = this.shadowRoot?.getElementById(`msg-${messageId}`);
+    this._menuAnchor = { messageId, top: el ? el.getBoundingClientRect().top : null };
+    this._menuUserScrolled = false;
+    for (const type of ['wheel', 'touchmove'] as const) {
+      document.addEventListener(type, this.handleMenuUserScroll, { capture: true, passive: true });
+    }
+    document.addEventListener('keydown', this.handleMenuUserScrollKey, { capture: true });
+    document.addEventListener('pointerdown', this.handleMenuScrollbarGrab, { capture: true });
+  }
+
+  private untrackMenuAnchor(): void {
+    this._menuAnchor = null;
+    for (const type of ['wheel', 'touchmove'] as const) {
+      document.removeEventListener(type, this.handleMenuUserScroll, { capture: true });
+    }
+    document.removeEventListener('keydown', this.handleMenuUserScrollKey, { capture: true });
+    document.removeEventListener('pointerdown', this.handleMenuScrollbarGrab, { capture: true });
+  }
+
+  private handleMenuUserScroll = (): void => {
+    this._menuUserScrolled = true;
+  };
+
+  private handleMenuUserScrollKey = (e: KeyboardEvent): void => {
+    if (!JUMP_SCROLL_CANCEL_KEYS.has(e.key)) return;
+    if (isEditableKeydownTarget(e.composedPath()[0])) return;
+    // Arrow keys, Home/End and Space inside the open menu move between its
+    // items; they scroll nothing.
+    if (isInOpenMenu(e)) return;
+    this._menuUserScrolled = true;
+  };
+
+  /** A pointer down on the scroller itself (not a row) is a scrollbar grab. */
+  private handleMenuScrollbarGrab = (e: PointerEvent): void => {
+    const target = e.composedPath()[0];
+    if (target instanceof HTMLElement && target.classList.contains('messages-scroll')) {
+      this._menuUserScrolled = true;
+    }
+  };
+
+  /**
+   * The thread scrolled while a popup menu is open: dismiss it after a
+   * user scroll, otherwise move it with its message (see trackMenuAnchor).
+   */
+  private followMenuAnchor(scrollEl: HTMLElement): void {
+    const anchor = this._menuAnchor;
+    const dismiss = (): void => {
+      this.closeContextMenu();
+      this._menuFocus.restoreIfLost();
+    };
+    if (this._menuUserScrolled || !anchor || anchor.top === null) {
+      dismiss();
+      return;
+    }
+    const el = this.shadowRoot?.getElementById(`msg-${anchor.messageId}`);
+    if (!el) {
+      dismiss();
+      return;
+    }
+    const rect = el.getBoundingClientRect();
+    const view = scrollEl.getBoundingClientRect();
+    if (rect.bottom <= view.top || rect.top >= view.bottom) {
+      dismiss();
+      return;
+    }
+    const delta = rect.top - anchor.top;
+    if (Math.abs(delta) < 0.5) return;
+    anchor.top = rect.top;
+    this.contextMenuPosition = {
+      x: this.contextMenuPosition.x,
+      y: this.contextMenuPosition.y + delta,
+    };
+  }
+
+  /**
+   * Touch devices have no right-click, and a
    * long-press (which would otherwise fire `contextmenu`) is consumed by
    * iOS's native text-selection gesture instead. A plain tap opens the same
    * context menu a desktop right-click would, positioned at the tap point,
    * so touch users have a reachable path to reply/edit/delete/copy.
    */
   private handleMessageTap(e: MouseEvent, msg: Message): void {
-    // Desktop already has hover-revealed actions and a working right-click
-    // menu — only intervene on devices that cannot hover.
+    // Desktop has a working right-click menu (and the always-visible More
+    // actions dots) — only intervene on devices that cannot hover.
     if (!window.matchMedia('(hover: none)').matches) return;
 
     // <scion-chat-message> renders into its own shadow root, so `e.target`
@@ -5105,6 +5994,7 @@ export class ScionChatThread extends LitElement {
   private handleContextMenuKeydown = (e: KeyboardEvent): void => {
     if (e.key === 'Escape') {
       this.closeContextMenu();
+      this._menuFocus.restore();
     }
   };
 
@@ -5112,6 +6002,7 @@ export class ScionChatThread extends LitElement {
   private closeContextMenu(): void {
     this.contextMenuMessage = null;
     document.removeEventListener('keydown', this.handleContextMenuKeydown);
+    this.untrackMenuAnchor();
   }
 
   /** Context menu: Reply to the right-clicked message. */
@@ -5119,12 +6010,7 @@ export class ScionChatThread extends LitElement {
     const msg = this.contextMenuMessage;
     this.closeContextMenu();
     if (!msg) return;
-    this.composerEditMessage = null; // Cancel any pending edit
-    this.composerReplyTo = {
-      messageId: msg.id,
-      senderName: this.getSenderDisplayName(msg) || msg.sender,
-      content: msg.msg.length > 100 ? msg.msg.slice(0, 100) + '...' : msg.msg,
-    };
+    this.seedReply(msg);
   }
 
   /** Context menu: Edit the right-clicked message. */
@@ -5132,6 +6018,21 @@ export class ScionChatThread extends LitElement {
     const msg = this.contextMenuMessage;
     this.closeContextMenu();
     if (!msg) return;
+    this.seedEdit(msg);
+  }
+
+  /** Start a reply to `msg` in the composer. */
+  private seedReply(msg: Message): void {
+    this.composerEditMessage = null; // Cancel any pending edit
+    this.composerReplyTo = {
+      messageId: msg.id,
+      senderName: this.getSenderDisplayName(msg) || msg.sender,
+      content: replyToContent(msg.msg),
+    };
+  }
+
+  /** Start an edit of `msg` in the composer. */
+  private seedEdit(msg: Message): void {
     this.composerReplyTo = null; // Cancel any pending reply
     this.composerEditMessage = { messageId: msg.id, content: msg.msg };
   }
@@ -5951,6 +6852,7 @@ export class ScionChatThread extends LitElement {
   }
 
   private renderV2() {
+    if (this.filtered) return this.renderFilteredV2();
     return html`
       <div class="thread-container">
         ${this.renderInteragentToggle()} ${this.renderContentAndTyping()}
@@ -5961,6 +6863,36 @@ export class ScionChatThread extends LitElement {
         ></scion-chat-scheduled-list>
         ${this.renderArtifactRefsNotice()} ${this.renderSendError()}
         ${this.isDM || this.canPost ? this.renderComposerV2() : this.renderReadOnlyNotice()}
+        ${this.renderContextMenu()} ${this.renderContextMenuSheet()} ${this.renderFilePreview()}
+        ${this.starsActive
+          ? html`<div class="star-live-region" role="status" aria-live="polite">
+              ${this.starAnnouncement}
+            </div>`
+          : nothing}
+      </div>
+    `;
+  }
+
+  /**
+   * The starred-only center: only the caller's starred messages, each
+   * standalone, with the filter banner and Show all in place of the
+   * composer (a send here would vanish from the filtered list). No
+   * inter-agent exchanges, typing indicator or scheduled messages.
+   */
+  private renderFilteredV2(): TemplateResult {
+    return html`
+      <div class="thread-container" data-message-filter="starred">
+        ${this.renderContent()}
+        <div class="star-filter-banner" role="region" aria-label="Starred messages only">
+          <sl-icon name="star-fill" aria-hidden="true"></sl-icon>
+          <div class="star-filter-text">
+            <strong>Starred messages only</strong>
+            <span>Other messages in this conversation are omitted.</span>
+          </div>
+          <sl-button size="small" class="star-filter-show-all" @click=${this.handleShowAllMessages}>
+            Show all messages
+          </sl-button>
+        </div>
         ${this.renderContextMenu()} ${this.renderContextMenuSheet()} ${this.renderFilePreview()}
         ${this.starsActive
           ? html`<div class="star-live-region" role="status" aria-live="polite">
@@ -6080,16 +7012,16 @@ export class ScionChatThread extends LitElement {
   private renderContent() {
     if (this.loading && this.messages.length === 0) {
       return html`
-        <div class="state-msg">
-          <sl-spinner></sl-spinner>
-          <span>Loading messages...</span>
+        <div class="state-msg" role=${this.filtered ? 'status' : nothing}>
+          <sl-spinner aria-hidden=${this.filtered ? 'true' : nothing}></sl-spinner>
+          <span>${this.filtered ? 'Loading starred messages...' : 'Loading messages...'}</span>
         </div>
       `;
     }
 
     if (this.error && this.messages.length === 0) {
       return html`
-        <div class="state-msg">
+        <div class="state-msg" role=${this.filtered ? 'alert' : nothing}>
           <sl-icon name="exclamation-triangle"></sl-icon>
           <span>${this.error}</span>
           <sl-button
@@ -6101,6 +7033,16 @@ export class ScionChatThread extends LitElement {
           >
             Retry
           </sl-button>
+        </div>
+      `;
+    }
+
+    if (this.filtered && this.messages.length === 0) {
+      return html`
+        <div class="state-msg star-filter-empty" role="status">
+          <sl-icon name="star" aria-hidden="true"></sl-icon>
+          <span>No starred messages in this conversation</span>
+          <sl-button size="small" @click=${this.handleShowAllMessages}>Show all messages</sl-button>
         </div>
       `;
     }
@@ -6120,8 +7062,15 @@ export class ScionChatThread extends LitElement {
     return html`
       <div
         class="messages-scroll"
+        role=${this.filtered ? 'region' : nothing}
+        aria-label=${this.filtered ? 'Starred messages' : nothing}
+        aria-busy=${this.filtered && this.loading ? 'true' : nothing}
         @scroll=${this.handleScroll}
         @click=${this.handleMessageAreaClick}
+        @message-actions-nav=${this.handleActionsNav}
+        @message-actions-open=${this.handleActionsOpen}
+        @focusin=${this.handleActionsFocusIn}
+        @focusout=${this.handleActionsFocusOut}
       >
         <div class="messages-list">
           ${this.loadingOlder
@@ -6295,7 +7244,9 @@ export class ScionChatThread extends LitElement {
       // Grouping: consecutive *visible* messages from same sender within GROUP_WINDOW_MS
       const sameSender = msg.sender === prevSender;
       const withinWindow = msgTime - prevTimestamp < GROUP_WINDOW_MS;
-      const showHeader = !sameSender || !withinWindow;
+      // In the starred-only center every message stands alone, with its own
+      // author and time: neighbours there need not have been consecutive.
+      const showHeader = this.filtered || !sameSender || !withinWindow;
 
       // In v2 mode, use currentUserId to determine own vs. others' messages.
       // Own messages (fromAgent=false): right-aligned, no header/avatar.
@@ -6330,6 +7281,7 @@ export class ScionChatThread extends LitElement {
         tpl: html`
           <scion-chat-message
             @contextmenu=${(e: MouseEvent) => this.handleMessageContextMenu(e, msg)}
+            @keydown=${(e: KeyboardEvent) => this.handleMessageHostKeydown(e, msg)}
             @click=${(e: MouseEvent) => this.handleMessageTap(e, msg)}
             id="msg-${msg.id}"
             messageId=${msg.id}
@@ -6360,6 +7312,7 @@ export class ScionChatThread extends LitElement {
             editedAt=${ext?.editedAt || ''}
             deletedAt=${ext?.deletedAt || ''}
             ?starred=${this.starsActive && this.stars.state(msg.id) === 'starred'}
+            ?actionsEnabled=${this.starsActive}
             senderProjectSlug=${msg.senderProjectId
               ? this.resolveProjectSlug(msg.senderProjectId)
               : ''}

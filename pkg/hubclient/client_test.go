@@ -293,6 +293,44 @@ func TestAgentsDelete(t *testing.T) {
 	}
 }
 
+func TestAgentsDelete_UnfollowedRedirect(t *testing.T) {
+	var deleteRequests, redirectedRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/moved" {
+			redirectedRequests.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		deleteRequests.Add(1)
+		if r.Method != http.MethodDelete || r.URL.Path != "/api/v1/agents/agent-to-delete" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("X-Request-ID", "delete-redirect")
+		http.Redirect(w, r, "/moved", http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+
+	hc := server.Client()
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	client, err := New(server.URL, WithHTTPClient(hc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = client.Agents().Delete(context.Background(), "agent-to-delete", nil)
+	if deleteRequests.Load() != 1 || redirectedRequests.Load() != 0 {
+		t.Errorf("request replayed: DELETE requests=%d, redirect requests=%d", deleteRequests.Load(), redirectedRequests.Load())
+	}
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("unfollowed redirect must not report a successful deletion, got %v", err)
+	}
+	if apiErr.StatusCode != http.StatusTemporaryRedirect || apiErr.RequestID != "delete-redirect" {
+		t.Errorf("redirect details not preserved: %+v", apiErr)
+	}
+}
+
 func TestAgentsDelete_PreserveFiles(t *testing.T) {
 	// DeleteFiles=false should explicitly send deleteFiles=false to override server default
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1206,5 +1244,19 @@ func TestHealth_AbsentContentType_NonJSON(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "failed to decode response") {
 		t.Errorf("expected decode error, got: %v", err)
+	}
+}
+
+func TestWithTimeout_NilHTTPClient(t *testing.T) {
+	c, err := New("http://hub.example", WithHTTPClient(nil), WithTimeout(10*time.Second))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	concrete := c.(*client)
+	if concrete.transport.HTTPClient == nil {
+		t.Fatal("transport.HTTPClient is nil")
+	}
+	if concrete.transport.HTTPClient.Timeout != 10*time.Second {
+		t.Errorf("Timeout = %v, want 10s", concrete.transport.HTTPClient.Timeout)
 	}
 }

@@ -32,6 +32,12 @@ import { customElement, property } from 'lit/decorators.js';
 import { ifDefined } from 'lit/directives/if-defined.js';
 
 import { formatRelative } from '../../utils/time.js';
+import { mismatchLines } from '../../shared/broker-storage.js';
+import {
+  brokerVersionStyles,
+  renderBrokerVersion,
+  renderHubVersionNote,
+} from '../shared/broker-version.js';
 
 /** One runtime broker row of GET /api/v1/admin/health/summary. */
 export interface HealthSummaryBroker {
@@ -39,6 +45,11 @@ export interface HealthSummaryBroker {
   name: string;
   /** Empty when the broker never reported a version. */
   version: string;
+  /**
+   * The version against hub.version, compared by the hub: match, mismatch
+   * or unknown. Absent from an older hub (shown as unknown).
+   */
+  version_status?: string;
   /** Liveness: online, offline or degraded. */
   status: string;
   /** Null when the broker has never sent a heartbeat. */
@@ -46,7 +57,17 @@ export interface HealthSummaryBroker {
   /** Null when the broker reported no runtime profile. */
   runtime: { type: string; profile?: string } | null;
   /** Null when the broker never reported its workspace storage. */
-  workspace_storage: { backend: string; nfs_healthy?: boolean } | null;
+  workspace_storage: {
+    backend: string;
+    nfs_healthy?: boolean;
+    /**
+     * How the broker's reported storage layout differs from the hub's.
+     * Absent when the hub lists no difference; that is not a confirmed
+     * match (it is also absent when the hub's layout is not shared or could
+     * not be read).
+     */
+    layout_mismatch?: string[];
+  } | null;
   /**
    * The broker's self-reported health; null when it never reported one
    * (an older broker). As fresh as last_heartbeat.
@@ -118,11 +139,15 @@ function healthIsProblem(h: HealthBrokerSelf | null | undefined): boolean {
 
 /**
  * True when the row needs a look: not online, self-reported degraded or
- * unhealthy, or an unhealthy NFS share.
+ * unhealthy, an unhealthy NFS share, or online with a version that differs
+ * from the hub's (the broker_version_mismatch item; unknown does not count).
  */
 export function brokerHasProblem(b: HealthSummaryBroker): boolean {
   return (
-    b.status !== 'online' || healthIsProblem(b.health) || b.workspace_storage?.nfs_healthy === false
+    b.status !== 'online' ||
+    healthIsProblem(b.health) ||
+    b.workspace_storage?.nfs_healthy === false ||
+    b.version_status === 'mismatch'
   );
 }
 
@@ -218,7 +243,13 @@ export class ScionHealthBrokerTable extends LitElement {
   @property({ attribute: false })
   brokers: HealthSummaryBrokerList | null = null;
 
+  /** The summary's hub.version, which each row's version_status compares with. */
+  @property({ attribute: false })
+  hubVersion = '';
+
   static override styles = css`
+    ${brokerVersionStyles}
+
     :host {
       display: block;
     }
@@ -353,6 +384,14 @@ export class ScionHealthBrokerTable extends LitElement {
       background: var(--scion-badge-neutral-bg);
       color: var(--scion-badge-neutral-text);
     }
+
+    .card-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 0.5rem;
+    }
   `;
 
   override render(): TemplateResult {
@@ -368,7 +407,10 @@ export class ScionHealthBrokerTable extends LitElement {
     }
     return html`
       <div class="card">
-        <div class="card-title">Runtime brokers</div>
+        <div class="card-head">
+          <div class="card-title">Runtime brokers</div>
+          ${renderHubVersionNote(this.hubVersion)}
+        </div>
         <div class="table-wrap">
           <table>
             <thead>
@@ -393,6 +435,19 @@ export class ScionHealthBrokerTable extends LitElement {
           : nothing}
       </div>
     `;
+  }
+
+  /**
+   * A "layout mismatch" pill when the hub reports that the broker's storage
+   * layout differs from its own; the differences are its title and are read
+   * out by screen readers.
+   */
+  private renderLayoutMismatch(b: HealthSummaryBroker): TemplateResult | typeof nothing {
+    const lines = mismatchLines(b.workspace_storage?.layout_mismatch);
+    if (lines.length === 0) return nothing;
+    return html`<span class="pill tone-warn layout-mismatch" title=${lines.join('\n')}
+        >layout mismatch</span
+      ><span class="visually-hidden">: ${lines.join('; ')}</span>`;
   }
 
   private renderRow(b: HealthSummaryBroker): TemplateResult {
@@ -422,6 +477,7 @@ export class ScionHealthBrokerTable extends LitElement {
           ${storage.tone === 'plain'
             ? storage.text
             : html`<span class="pill tone-${storage.tone}">${storage.text}</span>`}
+          ${this.renderLayoutMismatch(b)}
         </td>
         <td class="agents num" title=${ifDefined(agents?.title)}>
           ${agents
@@ -433,7 +489,9 @@ export class ScionHealthBrokerTable extends LitElement {
                 ><span class="visually-hidden">${agents.title}</span>`
             : html`<span class="muted">—</span>`}
         </td>
-        <td class="version">${b.version || html`<span class="muted">—</span>`}</td>
+        <td class="version">
+          ${renderBrokerVersion(b.version, b.version_status, this.hubVersion)}
+        </td>
         <td class="heartbeat" title=${ifDefined(b.last_heartbeat || undefined)}>
           ${formatHeartbeatAge(b.last_heartbeat)}
         </td>

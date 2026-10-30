@@ -45,6 +45,10 @@ type ProxyUserInfo struct {
 type ProxyAuthenticator interface {
 	Authenticate(r *http.Request) (*ProxyUserInfo, error)
 	Name() string // for logging/metrics, e.g. "iap"
+	// AssertionHeaders names the request headers this authenticator reads to
+	// establish identity. They are not forwarded to a proxied agent app (see
+	// Server.stripFrontProxyIdentityHeaders).
+	AssertionHeaders() []string
 }
 
 // ---- Google IAP Authenticator ----
@@ -89,6 +93,11 @@ type IAPAuthenticator struct {
 
 // Name returns "iap" for logging/metrics.
 func (a *IAPAuthenticator) Name() string { return "iap" }
+
+// AssertionHeaders names the headers an IAP front proxy sets to assert identity.
+func (a *IAPAuthenticator) AssertionHeaders() []string {
+	return []string{IAPAssertionHeader}
+}
 
 // Authenticate reads the IAP assertion header, verifies the JWT, and returns
 // the verified ProxyUserInfo. Returns (nil, nil) if no assertion is present.
@@ -641,6 +650,14 @@ type JWTProxyAuthenticator struct {
 
 // Name returns "jwt" for logging/metrics.
 func (a *JWTProxyAuthenticator) Name() string { return "jwt" }
+
+// AssertionHeaders names the configured JWT assertion header (or the default).
+func (a *JWTProxyAuthenticator) AssertionHeaders() []string {
+	if a.Header != "" {
+		return []string{a.Header}
+	}
+	return []string{DefaultJWTHeader}
+}
 
 // Authenticate reads the configured JWT assertion header, verifies the JWT,
 // and returns the verified ProxyUserInfo. Returns (nil, nil) if no assertion

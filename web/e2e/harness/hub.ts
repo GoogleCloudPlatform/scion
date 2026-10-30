@@ -94,7 +94,9 @@ export interface StartHubOptions {
   stateFile?: string;
   /**
    * Extra environment of the hub process, e.g. supported configuration
-   * such as SCION_SERVER_HUB_ASYNCAGENTLAUNCH=true or SCION_IMAGE_REGISTRY.
+   * such as SCION_IMAGE_REGISTRY or SCION_SERVER_HUB_LAUNCHTIMEOUT.
+   * Experiments are not environment settings: use experiments or
+   * startupExperiments.
    * Applied over the harness environment (also over the SCION_*-free
    * environment of a member-level test hub). Keys the harness owns
    * (HARNESS_OWNED_ENV) are refused.
@@ -118,6 +120,15 @@ export interface StartHubOptions {
    * the same database, port, HOME and hub id. Default: none (one start).
    */
   startupExperiments?: string[];
+  /**
+   * Experiments to turn on for the run. Each one is set on through the
+   * admin experiments API once the hub is healthy (after any
+   * startupExperiments restart), with no restart, and then read back:
+   * startHub throws, and kills the hub, unless every one is enabled. The
+   * override is stored in the hub's database, so it survives
+   * restartHubWithoutDevAuth. Default: none.
+   */
+  experiments?: string[];
 }
 
 /**
@@ -419,6 +430,34 @@ async function setExperimentOverrides(
   }
 }
 
+/**
+ * Reads the admin experiments listing back and throws unless every named
+ * experiment is enabled: the guard that a suite really runs with them on.
+ */
+async function assertExperimentsEnabled(
+  baseURL: string,
+  devToken: string,
+  names: string[]
+): Promise<void> {
+  const url = `${baseURL}/api/v1/admin/experiments`;
+  const read = await fetch(url, {
+    headers: { Authorization: `Bearer ${devToken}` },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (read.status !== 200) {
+    throw new Error(`startHub: GET /api/v1/admin/experiments answered ${read.status}`);
+  }
+  const { experiments } = (await read.json()) as {
+    experiments?: Array<{ name: string; enabled: boolean }>;
+  };
+  const off = names.filter(
+    (name) => (experiments ?? []).find((e) => e.name === name)?.enabled !== true
+  );
+  if (off.length > 0) {
+    throw new Error(`startHub: experiments not enabled after setting them on: ${off.join(', ')}`);
+  }
+}
+
 /** SIGKILLs a hub started by launchHub (its process group); a gone process is fine. */
 function killProcessGroup(child: ChildProcess): void {
   if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
@@ -581,6 +620,20 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
       }));
     } catch (err) {
       killProcessGroup(current);
+      throw err;
+    }
+  }
+
+  // Run-time experiments: set on through the admin API (no restart), then
+  // read back, so a suite never runs with one silently off.
+  const runExperiments = options.experiments ?? [];
+  if (runExperiments.length > 0) {
+    try {
+      await setExperimentOverrides(baseURL, devToken, runExperiments);
+      await assertExperimentsEnabled(baseURL, devToken, runExperiments);
+      console.info(`[hub] Experiments on: ${runExperiments.join(', ')}`);
+    } catch (err) {
+      killProcessGroup(hubProcess);
       throw err;
     }
   }

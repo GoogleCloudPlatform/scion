@@ -203,13 +203,13 @@ func TestResolveHomeStorage_FirstStartFailures(t *testing.T) {
 	}{
 		{"shared-dir storage not nfs", func(h *hsHarness, in *homeStorageInput) {
 			h.gs.Server.SharedDirStorage.Backend = "local"
-		}, "needs shared_dir_storage nfs for profile \"gke\""},
+		}, "needs usable project storage settings for profile \"gke\""},
 		{"shared-dir storage unset", func(h *hsHarness, in *homeStorageInput) {
 			h.gs.Server.SharedDirStorage = nil
-		}, "needs shared_dir_storage nfs for profile \"gke\""},
+		}, "needs usable project storage settings for profile \"gke\""},
 		{"shared-dir nfs block incomplete", func(h *hsHarness, in *homeStorageInput) {
 			h.gs.Server.SharedDirStorage.NFS.MountRoot = ""
-		}, "complete shared_dir_storage nfs block"},
+		}, "needs usable project storage settings for profile \"gke\""},
 		{"no claim", func(h *hsHarness, in *homeStorageInput) {
 			h.gs.Server.SharedDirStorage.NFS.Shares[0].PVName = ""
 		}, "needs a claim"},
@@ -352,14 +352,13 @@ func TestResolveHomeStorage_RecordReadBack(t *testing.T) {
 		require.NoError(t, err)
 
 		// Settings now select a local home, another leaf mode, another
-		// first share and another subpath root; the recorded share is
-		// still configured.
+		// mount root and another subpath root; the recorded share is still
+		// the project storage share (homes use that one share,
+		// ptone/scion#5825).
 		h.gs.Server.HomeStorage.Backend = "local"
 		h.gs.Server.HomeStorage.Leaf = "broker"
-		h.gs.Server.SharedDirStorage.Backend = "local"
 		h.gs.Server.SharedDirStorage.NFS.SubPathRoot = "other"
 		h.gs.Server.SharedDirStorage.NFS.MountRoot = "/mnt/new"
-		h.gs.Server.SharedDirStorage.NFS.Shares = []config.V1NFSShare{{ID: "share-2", PVName: "pv-2"}, {ID: "share-1", PVName: "pv-1"}}
 
 		plan, err := resolveHomeStorage(h.input("kubernetes", "gke"))
 		require.NoError(t, err)
@@ -511,23 +510,49 @@ func TestResolveHomeStorage_RecordedNFSNeedsValidNFSBlock(t *testing.T) {
 	h.gs.Server.SharedDirStorage.NFS.MountRoot = ""
 	_, err := resolveHomeStorage(h.input("kubernetes", "gke"))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "server.shared_dir_storage.nfs is not valid")
+	assert.Contains(t, err.Error(), "recorded home share share-1 not configured: home storage nfs needs usable project storage settings")
 	h.gs.Server.SharedDirStorage.NFS.MountRoot = "/srv/nfs"
 	h.gs.Server.SharedDirStorage.NFS.SubPathRoot = "../x"
 	_, err = resolveHomeStorage(h.input("kubernetes", "gke"))
 	require.Error(t, err)
 }
 
-func TestFirstNFSShare(t *testing.T) {
-	for _, sd := range []*config.V1SharedDirStorageConfig{
-		nil,
-		{Backend: "nfs"},
-		{Backend: "nfs", NFS: &config.V1NFSConfig{}},
-	} {
-		_, err := firstNFSShare(sd)
-		assert.Error(t, err, "%+v", sd)
-	}
-	share, err := firstNFSShare(&config.V1SharedDirStorageConfig{Backend: "nfs", NFS: &config.V1NFSConfig{Shares: []config.V1NFSShare{{ID: "s", PVName: "pv"}}}})
+// Homes on nfs take their share from the project storage Layout
+// (ptone/scion#5825): server.project_storage's nfs share, or, on the
+// deprecated blocks, the share shared dirs resolve on.
+func TestHomeShareLayout(t *testing.T) {
+	share := []config.V1NFSShare{{ID: "s", Server: "10.0.0.2", Export: "/e", PVName: "pv"}}
+	ps := &config.VersionedSettings{Server: &config.V1ServerConfig{ProjectStorage: &config.V1ProjectStorageConfig{
+		Backend: "nfs", Homes: "nfs", NFS: &config.V1NFSConfig{MountRoot: "/mnt/nfs", Shares: share},
+	}}}
+	hl, err := homeShareLayout(ps, "gke")
 	require.NoError(t, err)
-	assert.Equal(t, "s", share.ID)
+	assert.Equal(t, "s", hl.Share.ID)
+	assert.Equal(t, "pv", hl.Share.PVName)
+	assert.Equal(t, "/mnt/nfs/s", hl.HostBase)
+
+	legacy := hsSettings()
+	hl, err = homeShareLayout(legacy, "gke")
+	require.NoError(t, err)
+	assert.Equal(t, "share-1", hl.Share.ID, "the shared-dir share on the deprecated blocks")
+	assert.Equal(t, "trees", hl.SubPathRoot)
+
+	for name, gs := range map[string]*config.VersionedSettings{
+		"no settings": nil,
+		"local":       {Server: &config.V1ServerConfig{ProjectStorage: &config.V1ProjectStorageConfig{Backend: "local"}}},
+	} {
+		_, err := homeShareLayout(gs, "gke")
+		assert.Error(t, err, name)
+	}
+}
+
+// Homes use the one project storage share: a recorded nfs home whose share
+// is no longer that share (only another share of the list) is refused.
+func TestResolveHomeStorage_RecordedShareMustBeProjectShare(t *testing.T) {
+	h := newHSHarness(t)
+	require.NoError(t, writeHomeStorageRecord(h.agentDir, homeStorageRecord{Backend: "nfs", Leaf: "pod", ShareID: "share-1", PVClaimName: "pv-1", SubPathRoot: "trees"}))
+	h.gs.Server.SharedDirStorage.NFS.Shares = []config.V1NFSShare{{ID: "share-2", PVName: "pv-2"}, {ID: "share-1", PVName: "pv-1"}}
+	_, err := resolveHomeStorage(h.input("kubernetes", "gke"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "recorded home share share-1 not configured")
 }

@@ -191,6 +191,9 @@ func (s *Server) healthChecks(ctx context.Context) map[string]string {
 	// Legacy storage blocks still in use (non-critical).
 	s.checkProjectStorageConfig(checks)
 
+	// Removed per-runtime/per-profile storage overrides (non-critical).
+	s.checkRemovedStorageOverrides(checks)
+
 	return checks
 }
 

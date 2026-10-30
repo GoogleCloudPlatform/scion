@@ -78,9 +78,8 @@ func (s *Server) withSkillContentHashV2(sv *store.SkillVersion) *store.SkillVers
 // constraint that matches no version's v1 hash is matched against the v2
 // hash of each published or deprecated version (v1 first, then v2). When
 // several versions share that v2 (the same files republished), the oldest
-// wins (created ascending, then ID). The store's v1 lookup has no explicit
-// order (First() with no ORDER BY, so the database decides); making it
-// match is ptone/scion#6248.
+// wins (created ascending, then ID). The store's v1 lookup uses the same
+// status set and order (ptone/scion#6248).
 func (s *Server) resolveSkillVersion(ctx context.Context, skillID, constraint string) (*store.SkillVersion, error) {
 	sv, err := s.store.ResolveSkillVersion(ctx, skillID, constraint)
 	if err == nil || !errors.Is(err, store.ErrNotFound) ||

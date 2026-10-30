@@ -337,7 +337,11 @@ the agent start or workspace pull rather than being ignored.
   A git token is supplied only through a credential helper scoped to the clone URL's host (so it is
   offered to that host and no other, in particular not to an LFS endpoint), and only for an `http(s)`
   URL; for any other URL the token is ignored. The scoped helper also disables any other configured
-  credential helper for the command, so nothing persists the token.
+  credential helper for the command, so nothing persists the token. On a shared storage layout
+  (`server.project_storage`), the Hub provisions `shared-plain` git workspaces; if a Runtime Broker
+  reaches its backstop clone path because the Hub's provisioning sentinel is missing, it passes no git
+  token and sets no token remote, so a private repository fails with the "needs credentials" error
+  until provisioned through the Hub.
 - **Updating a shared workspace** (pull) fetches from the project's clone URL known to the Hub, not
   from the remote configured in the clone, then fast-forwards the current branch.
 
@@ -350,7 +354,16 @@ and refs from). Only the paths an in-container git must write are re-opened read
 The rerere cache (`.git/rr-cache`) is re-opened read-write only if it already exists — Scion never
 creates it, because creating it would turn on rerere in your own checkout. On docker and podman,
 `.git/config` is served from each agent's own **private, read-only copy** in place of the shared one;
-the private copy has credential-bearing settings stripped and is pre-seeded (the agent's branch
+the private copy has credential-bearing settings stripped (`credential.*`, `http.extraheader`,
+`http.cookiefile`, client TLS key and certificate paths `http.sslKey` and `http.sslCert` with or
+without a URL subsection while keeping `http.sslCAInfo` and `http.sslCAPath`, and plaintext password
+keys `sendemail.smtppass`, `imap.pass`, `git-p4.password`, and `gitcvs.dbpass`; embedded userinfo is
+also scrubbed from URL-valued keys `remote.*.url`/`pushurl`/`lfsurl`/`lfspushurl`,
+`lfs.url`/`pushurl`, `url.*.insteadof`/`pushinsteadof`, `http.proxy`, `remote.*.proxy`,
+`submodule.*.url`, `bundle.*.uri`, `fetch.bundleuri`, `imap.host`,
+`svn-remote.*.url`/`pushurl`/`commiturl`/`rewriteroot`, and `svn.commiturl`, as well as from
+`branch.*.remote`, `branch.*.pushremote`, and `remote.pushdefault` when their value is a URL or
+remote-helper form rather than a remote name) and is pre-seeded (the agent's branch
 upstream plus `push.autoSetupRemote`) so that a bare `git push` exits 0 — without the pre-seed a bare
 push fails with "no upstream branch". `git push -u origin <branch>` exits 0 and reaches the remote
 either way; git cannot persist the upstream (the private `.git/config` is read-only) and prints an
@@ -362,7 +375,7 @@ Apple runtime agents read the repository's git config directly (the runtime cann
 private file), so the private-copy settings above (credential stripping, the push pre-seed, the
 housekeeping defaults) do not apply there; keep credentials out of repository git config (use a
 credential helper in your global git config). An Apple agent whose repository `.git/config` holds
-credential-bearing settings is refused at start, naming the sections that must be cleared; use a
+any of the credential-bearing settings above is refused at start, naming the sections that must be cleared; use a
 credential helper in your global git config, or run the project on a runtime that provides the private
 config copy.
 

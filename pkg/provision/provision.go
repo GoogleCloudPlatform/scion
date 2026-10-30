@@ -2910,6 +2910,16 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 		if scoped, ok := util.ScopedCredentialHelperEnv(env, gc.URL, token); ok {
 			env = scoped
 		}
+	} else if in.HostGitHardened && strings.HasPrefix(gc.URL, "https://") {
+		// A hardened host-side clone with no token offered, of an https URL
+		// that is not the project's recorded remote (CloneTokenRemote): git
+		// runs with no credential helper, no extra HTTP header and no
+		// askpass (util.NoCredentialHelperEnv), as the hub's local-backend
+		// clone and workspace pull do. The recorded remote itself keeps the
+		// host's own git authentication.
+		if _, bound := cloneTokenHost(in.CloneTokenRemote, gc.URL); !bound {
+			env = util.NoCredentialHelperEnv(env, gc.URL)
+		}
 	}
 	cmd.Env = env
 	output, err := cmd.CombinedOutput()
@@ -4389,6 +4399,13 @@ func checkChownEPERM(path string, uid, gid int, lerr error) error {
 // provisionFileLockName, and provisionClockProbeFile is defined as
 // provisionFileLockName plus a suffix specifically so this one prefix check
 // catches all of them.
+// IsProvisioningArtifact reports whether name is provisioning bookkeeping
+// rather than workspace content: the provisioning file lock or one of its
+// satellites (isLockArtifactPath), or the provisioning sentinel.
+func IsProvisioningArtifact(name string) bool {
+	return isLockArtifactPath(name) || filepath.Base(name) == ProvisionSentinelFile
+}
+
 func isLockArtifactPath(path string) bool {
 	base := filepath.Base(path)
 	return base == provisionFileLockName || strings.HasPrefix(base, provisionFileLockName+".")
@@ -4411,6 +4428,19 @@ func resolveUID(in ProvisionInput) int {
 // resolveGID returns the NFS GID to use for chown, defaulting to 1000.
 func resolveGID(in ProvisionInput) int {
 	return DefaultOwnerID(in.NFSGID)
+}
+
+// MarkProvisioned writes the provisioning sentinel in sentinelDir (the
+// project state directory, ProjectStateDir, for a shared workspace), so
+// every later provisioner takes the reuse path. The caller holds the
+// provisioning locks (WithWorkspaceProvisionLocks) and has placed the
+// workspace's content first: a broker applying a workspace bootstrap upload
+// into a shared workspace that no provisioner has populated yet.
+func MarkProvisioned(sentinelDir string) error {
+	if sentinelDir == "" || !filepath.IsAbs(sentinelDir) {
+		return errors.New("provision: an absolute sentinel directory is required")
+	}
+	return writeSentinel(filepath.Join(sentinelDir, ProvisionSentinelFile))
 }
 
 // writeSentinel writes the provisioning sentinel file atomically using

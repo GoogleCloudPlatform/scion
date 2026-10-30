@@ -3,4 +3,4 @@
 # C7: runner image gh-runner:golden
 ? gcloud artifacts docker images describe us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:golden --project=example-project '--format=value(image_summary.digest)'
 + gcloud builds submit runner --config=scripts/cloudbuild.yaml --substitutions=_IMAGE=us-central1-docker.pkg.dev/example-project/cr-runners/gh-runner:golden,_DOCKERFILE=Dockerfile --gcs-source-staging-dir=gs://example-project-cr-ci-staging/source --service-account=projects/example-project/serviceAccounts/cr-runner-build-sa@example-project.iam.gserviceaccount.com --region=us-central1 --project=example-project
-# done; next: deploy-job.sh --tag golden
+# done; next: deploy-mediator.sh if the mediator changed too, then deploy-job.sh --tag golden

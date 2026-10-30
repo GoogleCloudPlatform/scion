@@ -119,6 +119,13 @@ type ServerConfigResponse struct {
 	// it cannot be shown safely) and whether the hub runs with that value.
 	// Additive: EnvOverrides is unchanged.
 	EnvValues map[string]EnvKeyValue `json:"env_values,omitempty"`
+
+	// StorageOverrideErrors lists, read-only, the removed per-runtime or
+	// per-profile storage overrides the settings file (as read at startup)
+	// or the stored settings still carry, one message per source with the
+	// keys and the migration (ptone/scion#6371). Agents of those profiles
+	// are refused at start. There is no request field for it.
+	StorageOverrideErrors []string `json:"storage_override_errors,omitempty"`
 }
 
 // ServerConfigUpdateRequest is the payload for updating settings.
@@ -393,6 +400,7 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to read settings", nil)
 		return
 	}
+	resp.StorageOverrideErrors = s.removedStorageOverrideErrors()
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -593,9 +601,19 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
 		return
 	}
+
+	// Resource quantities (ptone/scion#6581): a value that is not a
+	// Kubernetes quantity, memory or disk below 1Mi ("16" is 16 bytes) or a
+	// request above its limit is rejected, naming its key; a unitless byte
+	// count or low memory is accepted with a warning.
+	qErrs, qWarnings := config.ValidateResourceQuantities(req.DefaultResources, req.Profiles)
+	if len(qErrs) > 0 {
+		writeResourceQuantityError(w, http.StatusBadRequest, ErrCodeInvalidRequest, qErrs)
+		return
+	}
 	if req.Server != nil {
 		if _, _, err := config.SynthesizeProjectStorage(req.Server.ProjectStorage, req.Server.WorkspaceStorage, req.Server.SharedDirStorage, req.Server.HomeStorage); err != nil {
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), projectStorageFieldErrorDetails(err))
 			return
 		}
 	}
@@ -671,7 +689,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// server.broker.instances is kept unless the body set it explicitly.
 	storedInstances := storedBrokerInstances(raw)
 	rawServer := rawServerObject(rawBody)
-	applySettingsUpdatesFromBody(raw, &req, rawBody)
+	runtimeMergeWarnings := applySettingsUpdatesFromBody(raw, &req, rawBody)
 	carryOverBrokerInstances(raw, storedInstances, instancesPresent, instances)
 	// default_thinking_level is cleared by an explicit null, which the typed
 	// decode leaves as a nil pointer (indistinguishable from an omitted key).
@@ -685,7 +703,7 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// only in part is validated again as merged with the stored fields.
 	if req.Server != nil {
 		if err := validateMergedServerSections(raw, rawServer); err != nil {
-			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), projectStorageFieldErrorDetails(err))
 			return
 		}
 	}
@@ -755,6 +773,8 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 			saveWarnings = safeToEvictSaveWarnings(merged.Runtimes, merged.Profiles)
 		}
 	}
+	saveWarnings = append(saveWarnings, resourceQuantityWarnings(qWarnings)...)
+	saveWarnings = append(saveWarnings, runtimeMergeWarnings...)
 
 	if err := config.WriteSettingsFileLocked(settingsLock, settingsPath, newData); err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
@@ -875,8 +895,9 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 // body, whose "server", "telemetry" and "federation" objects tell
 // mergeServerSettings and mergeSettingsSection which fields the client
 // sent. A nil rawBody derives that from req.Server, req.Telemetry and
-// req.Federation.
-func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigUpdateRequest, rawBody []byte) {
+// req.Federation. It returns the warnings of the runtimes merge
+// (mergeRuntimeEntries).
+func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigUpdateRequest, rawBody []byte) []string {
 	if req.SchemaVersion != nil {
 		raw["schema_version"] = *req.SchemaVersion
 	}
@@ -897,8 +918,12 @@ func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigU
 	if req.Telemetry != nil {
 		mergeSettingsSection(raw, "telemetry", req.Telemetry, rawRequestObject(rawBody, "Telemetry"))
 	}
+	// runtimes: each sent entry is merged key by key on the stored one, so
+	// a stored key the body leaves out is kept (ptone/scion#6580;
+	// mergeRuntimeEntries). An entry the body leaves out is deleted.
+	var runtimeMergeWarnings []string
 	if req.Runtimes != nil {
-		raw["runtimes"] = marshalToMap(req.Runtimes)
+		raw["runtimes"], runtimeMergeWarnings = mergeRuntimesFile(raw["runtimes"], req.Runtimes, sentRuntimesObject(rawBody))
 	}
 	if req.HarnessConfigs != nil {
 		raw["harness_configs"] = marshalToMap(req.HarnessConfigs)
@@ -1020,6 +1045,7 @@ func applySettingsUpdatesFromBody(raw map[string]interface{}, req *ServerConfigU
 			delete(raw, "server")
 		}
 	}
+	return runtimeMergeWarnings
 }
 
 // marshalToMap converts a struct to a map[string]interface{} via YAML round-trip.
