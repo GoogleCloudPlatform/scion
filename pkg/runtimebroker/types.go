@@ -267,6 +267,10 @@ type CreateAgentRequest struct {
 	// sets workspaceAbsentAtAdmission). Without the check, a workspace
 	// bootstrap is never treated as finding an existing workspace.
 	workspaceAdmissionChecked bool
+	// workspaceHubConn names the Hub connection the create arrived on
+	// (resolveHubNameForLaunch), which the signed-URL workspace download
+	// asks for its URLs. It is never read from the wire.
+	workspaceHubConn string
 
 	RequestID   string             `json:"requestId,omitempty"`
 	ID          string             `json:"id,omitempty"`   // Hub UUID for status reporting
@@ -348,6 +352,13 @@ type CreateAgentRequest struct {
 	// sent by the hub that uploaded it. When empty the broker falls back to
 	// its own StorageBucket setting (older hubs do not send it).
 	WorkspaceStorageBucket string `json:"workspaceStorageBucket,omitempty"`
+	// WorkspaceDownloadMode selects how a WorkspaceStoragePath upload is
+	// downloaded: empty for the bucket download with this broker's
+	// credentials, api.WorkspaceDownloadModeSignedURLs for the Hub's
+	// signed-URL workspace download (no storage credential, no bucket
+	// listing). Any other value is refused: the broker never falls back to
+	// the bucket download for a mode it does not know.
+	WorkspaceDownloadMode string `json:"workspaceDownloadMode,omitempty"`
 
 	// ProjectSlug is the project slug for hub-managed projects.
 	// When set, the broker creates the workspace at ~/.scion.projects/<slug>/

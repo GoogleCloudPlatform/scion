@@ -321,7 +321,12 @@ type Server struct {
 	// bootstrap (create-time and handleWorkspaceApply) when set (see
 	// SetWorkspaceDownloader).
 	workspaceDownload func(ctx context.Context, bucket, prefix, localPath string) error
-	version           string
+	// signedDownload overrides the signed-URL workspace download's object
+	// client, page source and timing (tests only; zero values mean the
+	// defaults, see signedDownloadSettings).
+	signedDownload signedDownloadSettings
+
+	version string
 
 	// Workspace transfer and project delete steps, like workspaceDownload:
 	// each replaces its real implementation when set (see the setters in

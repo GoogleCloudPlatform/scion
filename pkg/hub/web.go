@@ -3048,6 +3048,11 @@ func isCompressBypassPath(path string) bool {
 				switch segs[i+2] {
 				case "pty", "ports", "workspace", "pending-config":
 					return true
+				case "workspace-download":
+					// The broker-self signed workspace download
+					// (/api/v1/runtime-brokers/{id}/agents/{agentId}/workspace-download)
+					// answers with signed object URLs.
+					return true
 				}
 			}
 		}

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -75,6 +76,15 @@ type RuntimeBrokerService interface {
 	// 409 stale_launch with its reason — is returned in the result with a nil
 	// error, so the sender can switch on it directly.
 	ReportAgentLaunch(ctx context.Context, brokerID, agentID string, req *AgentLaunchReport) (*AgentLaunchReportResult, error)
+
+	// WorkspaceDownload requests one page of the signed-URL workspace
+	// download for an agent this broker runs (POST
+	// /api/v1/runtime-brokers/{id}/agents/{agentId}/workspace-download). It
+	// is sent exactly once (no transport retry): the caller owns the retry
+	// budget. A non-200 answer is an *apiclient.APIError carrying the status
+	// and the error code only; the response body never reaches error text,
+	// because a 200 body holds signed URLs.
+	WorkspaceDownload(ctx context.Context, brokerID, agentID string, req *api.WorkspaceDownloadRequest) (*api.WorkspaceDownloadResponse, error)
 }
 
 // AgentLaunchReport is the broker->hub launch report wire type (design §3.2).
@@ -686,3 +696,41 @@ func (s *runtimeBrokerService) ReportAgentLaunch(ctx context.Context, brokerID, 
 		return nil, apiclient.ParseErrorResponse(resp)
 	}
 }
+
+// maxWorkspaceDownloadPageBytes bounds a workspace download page response
+// (500 files with their signed URLs is well under 4 MiB).
+const maxWorkspaceDownloadPageBytes = 8 << 20
+
+// WorkspaceDownload requests one workspace download page. See the
+// RuntimeBrokerService doc comment.
+func (s *runtimeBrokerService) WorkspaceDownload(ctx context.Context, brokerID, agentID string, req *api.WorkspaceDownloadRequest) (*api.WorkspaceDownloadResponse, error) {
+	path := "/api/v1/runtime-brokers/" + url.PathEscape(brokerID) + "/agents/" + url.PathEscape(agentID) + "/workspace-download"
+	resp, err := s.c.postNoRetry(ctx, path, req, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		// Only the error code is read from the error body; its message is
+		// not carried, so no response text can reach a log or error value.
+		var body struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&body)
+		return nil, &apiclient.APIError{StatusCode: resp.StatusCode, Code: body.Error.Code, Message: "workspace download request refused"}
+	}
+	var out api.WorkspaceDownloadResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxWorkspaceDownloadPageBytes)).Decode(&out); err != nil {
+		// A decode error can quote the body, which holds signed URLs: it is
+		// replaced with fixed text.
+		return nil, ErrWorkspaceDownloadDecode
+	}
+	return &out, nil
+}
+
+// ErrWorkspaceDownloadDecode is returned for a 200 workspace download page
+// that does not decode. It is fixed text: a decode error could quote the
+// body, which holds signed URLs.
+var ErrWorkspaceDownloadDecode = errors.New("workspace download page did not decode")

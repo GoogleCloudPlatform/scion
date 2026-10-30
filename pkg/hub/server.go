@@ -1524,6 +1524,12 @@ type RemoteCreateAgentRequest struct {
 	// WorkspaceStorageBucket is the GCS bucket holding WorkspaceStoragePath.
 	// Brokers that predate it ignore it and use their own bucket setting.
 	WorkspaceStorageBucket string `json:"workspaceStorageBucket,omitempty"`
+	// WorkspaceDownloadMode mirrors
+	// runtimebroker.CreateAgentRequest.WorkspaceDownloadMode: "signed_urls"
+	// (api.WorkspaceDownloadModeSignedURLs) when the broker must bootstrap the
+	// workspace through the Hub's signed-URL workspace download; empty for
+	// the bucket download. Set by buildCreateRequestFor only.
+	WorkspaceDownloadMode string `json:"workspaceDownloadMode,omitempty"`
 
 	// GatherEnv indicates the broker should evaluate env completeness before starting.
 	// If required keys are missing, the broker returns HTTP 202 with env requirements.
@@ -5182,6 +5188,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 
 	dispatcher := NewHTTPAgentDispatcherWithClient(s.store, client, s.config.Debug, logging.Subsystem("hub.dispatcher"))
 	dispatcher.SetStorageLayout(s.projectStorageLayout)
+	dispatcher.SetWorkspaceStorage(s.GetStorage)
 
 	// Configure token generator if available
 	if s.agentTokenService != nil {

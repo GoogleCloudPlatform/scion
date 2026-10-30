@@ -75,6 +75,10 @@ const (
 	// it unchanged instead of folding it into a 502 (ptone/scion#3422).
 	ErrCodeWorkspaceStorageUnconfigured = api.BrokerErrCodeWorkspaceStorageUnconfigured
 
+	// ErrCodeWorkspaceDownloadModeUnsupported marks a create whose
+	// workspaceDownloadMode this broker does not know (422).
+	ErrCodeWorkspaceDownloadModeUnsupported = api.BrokerErrCodeWorkspaceDownloadModeUnsupported
+
 	// ErrCodeIdentityNotMapped and ErrCodeIdentityKSAMismatch mark a GCP
 	// identity "assign" dispatch on Kubernetes refused for a missing or
 	// conflicting kubernetes_service_account_mappings entry (400). The hub

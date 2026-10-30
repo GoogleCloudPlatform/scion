@@ -845,6 +845,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	// The signed-URL workspace download asks the Hub the create came from.
+	if req.WorkspaceDownloadMode != "" {
+		req.workspaceHubConn = s.resolveHubNameForLaunch(r)
+	}
 
 	ctx, span := tracer.Start(ctx, "broker.agent.create")
 	defer span.End()
@@ -1766,6 +1770,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				writeWorkspaceStorageUnconfigured(w)
 				return
 			}
+			if errors.Is(dlErr, errWorkspaceDownloadModeUnsupported) {
+				markAttemptFailed(http.StatusUnprocessableEntity, attemptMsg)
+				writeWorkspaceDownloadModeUnsupported(w)
+				return
+			}
 			markAttemptFailed(http.StatusInternalServerError, attemptMsg)
 			RuntimeError(w, httpMessage)
 			return
@@ -2239,6 +2248,12 @@ func writeWorkspaceStorageUnconfigured(w http.ResponseWriter) {
 	writeError(w, http.StatusUnprocessableEntity, ErrCodeWorkspaceStorageUnconfigured, workspaceStorageUnconfiguredMessage, nil)
 }
 
+// writeWorkspaceDownloadModeUnsupported answers a create whose workspace
+// download mode this broker does not know.
+func writeWorkspaceDownloadModeUnsupported(w http.ResponseWriter) {
+	writeError(w, http.StatusUnprocessableEntity, ErrCodeWorkspaceDownloadModeUnsupported, workspaceDownloadModeUnsupportedMessage, nil)
+}
+
 // downloadWorkspaceFromGCS performs the non-git GCS workspace bootstrap when
 // req.WorkspaceStoragePath is set. It was factored out of createAgent's
 // inline admission step so the async-launch path (runLaunch) performs the
@@ -2269,6 +2284,15 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		return opts, "", "", nil
 	}
 
+	// The download mode is chosen before anything is created: a mode this
+	// broker does not know is refused, never answered with the bucket
+	// download (errWorkspaceDownloadModeUnsupported, 422).
+	signed, modeErr := selectWorkspaceDownloadMode(req)
+	if modeErr != nil {
+		s.logWorkspaceBootstrapFailure(req, opSelectWorkspaceDownload, modeErr)
+		return opts, "workspace download mode not supported", workspaceDownloadModeUnsupportedMessage, modeErr
+	}
+
 	// Validate (inside resolveGCSWorkspaceDir) before anything below
 	// creates or writes under the directory.
 	workspaceDir, attemptMsg, httpMessage, err := s.resolveGCSWorkspaceDir(req)
@@ -2285,8 +2309,9 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 	// Resolve the bucket before creating anything: a broker with no bucket
 	// for the upload refuses the create with errWorkspaceStorageUnconfigured
 	// (422) instead of leaving an empty workspace directory behind.
+	// The signed-URL download needs no bucket: the Hub lists and signs.
 	bucket := s.workspaceStorageBucket(req)
-	if bucket == "" {
+	if bucket == "" && !signed {
 		return opts, "storage bucket not configured", workspaceStorageUnconfiguredMessage,
 			errWorkspaceStorageUnconfigured
 	}
@@ -2302,12 +2327,27 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 	}
 	defer unlockWorkspace()
 
+	// The signed download stages beside the workspace. A stage left by a
+	// crashed attempt on a host-local workspace is removed right after the
+	// lock is taken, before the skip check; a shared Layout leaf's stages are
+	// removed inside its provisioning locks (applySharedSignedBootstrap).
+	_, sharedRel, sharedWS, _ := s.sharedBootstrapWorkspace(req)
+	if signed && !sharedWS {
+		if recErr := recoverLocalBootstrapStages(filepath.Dir(workspaceDir), filepath.Base(workspaceDir)); recErr != nil {
+			attemptMsg, httpMessage, err = s.workspaceBootstrapFailed(req, opDownloadWorkspace, recErr)
+			return opts, attemptMsg, httpMessage, err
+		}
+	}
+
 	// A project-level workspace that already existed when the create was
 	// admitted is in use (by earlier agents of the project): it is never
 	// overwritten from a laptop's upload. The agent uses it as it is and
 	// the create answers with bootstrapSkippedWarning (ptone/scion#5815). Nothing is downloaded, recorded or
 	// re-marked.
-	if bootstrapSkipsExistingWorkspace(req) {
+	// The signed mode decides its skip under this lock instead, after
+	// recovery (signedBootstrapLocal): a project workspace that holds only
+	// its root identity entry counts as absent there.
+	if !signed && bootstrapSkipsExistingWorkspace(req) {
 		s.agentLifecycleLog.Info("Workspace bootstrap skipped: the project workspace already exists on this broker",
 			"agent_id", req.ID, "project_id", req.ProjectID)
 		opts.Workspace = workspaceDir
@@ -2320,16 +2360,22 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 	// sentinel is written after it. No broker-local record or workspace
 	// marker is written: the project's identity lives in its configuration
 	// at the project root.
-	if _, rel, shared, _ := s.sharedBootstrapWorkspace(req); shared {
-		skipped, applyErr := s.applySharedBootstrap(ctx, workspaceDir, rel, func(lockCtx context.Context) error {
-			if s.config.Debug {
-				s.agentLifecycleLog.Debug("Downloading workspace from GCS into the shared workspace", "agent_id", req.ID,
-					"bucket", bucket, "storagePath", req.WorkspaceStoragePath+"/files", "projectSlug", req.ProjectSlug)
-			}
-			return s.workspaceDownloader()(lockCtx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir)
-		})
+	if sharedWS {
+		var skipped bool
+		var applyErr error
+		if signed {
+			skipped, applyErr = s.applySharedSignedBootstrap(ctx, req, sharedRel)
+		} else {
+			skipped, applyErr = s.applySharedBootstrap(ctx, workspaceDir, sharedRel, func(lockCtx context.Context) error {
+				if s.config.Debug {
+					s.agentLifecycleLog.Debug("Downloading workspace from GCS into the shared workspace", "agent_id", req.ID,
+						"bucket", bucket, "storagePath", req.WorkspaceStoragePath+"/files", "projectSlug", req.ProjectSlug)
+				}
+				return s.workspaceDownloader()(lockCtx, bucket, req.WorkspaceStoragePath+"/files", workspaceDir)
+			})
+		}
 		if applyErr != nil {
-			attemptMsg, httpMessage, err = s.workspaceBootstrapFailed(req, opDownloadWorkspace, applyErr)
+			attemptMsg, httpMessage, err = s.workspaceBootstrapFailed(req, signedBootstrapOp(applyErr), applyErr)
 			return opts, attemptMsg, httpMessage, err
 		}
 		if skipped {
@@ -2342,6 +2388,26 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		}
 		opts.Workspace = workspaceDir
 		return opts, "", "", nil
+	}
+
+	if signed {
+		skipped, signedErr := s.signedBootstrapLocal(ctx, req, workspaceDir)
+		if signedErr != nil {
+			attemptMsg, httpMessage, err = s.workspaceBootstrapFailed(req, signedBootstrapOp(signedErr), signedErr)
+			return opts, attemptMsg, httpMessage, err
+		}
+		if skipped {
+			// The project workspace came into use after admission: it is
+			// never overwritten, as for one that existed at admission.
+			s.agentLifecycleLog.Info("Workspace bootstrap skipped: the project workspace came into use meanwhile",
+				"agent_id", req.ID, "project_id", req.ProjectID)
+			if out, ok := ctx.Value(bootstrapOutcomeKey{}).(*bootstrapOutcome); ok {
+				out.skipped = true
+			}
+			opts.Workspace = workspaceDir
+			return opts, "", "", nil
+		}
+		return s.finishWorkspaceBootstrap(req, opts, workspaceDir), "", "", nil
 	}
 
 	if mkErr := os.MkdirAll(workspaceDir, 0755); mkErr != nil {
@@ -2362,7 +2428,13 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 		attemptMsg, httpMessage, err = s.workspaceBootstrapFailed(req, opDownloadWorkspace, syncErr)
 		return opts, attemptMsg, httpMessage, err
 	}
+	return s.finishWorkspaceBootstrap(req, opts, workspaceDir), "", "", nil
+}
 
+// finishWorkspaceBootstrap records a host-local workspace bootstrap that
+// completed: the broker workspace record for a project directory created by
+// it, and the workspace marker. It returns opts with the workspace set.
+func (s *Server) finishWorkspaceBootstrap(req CreateAgentRequest, opts api.StartOptions, workspaceDir string) api.StartOptions {
 	if req.ProjectSlug != "" {
 		if recErr := recordBrokerWorkspaceCopy(req.ProjectSlug, req.ProjectID, !req.workspaceAbsentAtAdmission); recErr != nil {
 			s.agentLifecycleLog.Warn("Failed to write broker workspace record",
@@ -2382,7 +2454,7 @@ func (s *Server) downloadWorkspaceFromGCS(ctx context.Context, req CreateAgentRe
 			s.agentLifecycleLog.Warn("Failed to write workspace marker", "agent_id", req.ID, "project_id", req.ProjectID, "error", writeErr)
 		}
 	}
-	return opts, "", "", nil
+	return opts
 }
 
 // bootstrapOutcome records, for the synchronous create path, that the
