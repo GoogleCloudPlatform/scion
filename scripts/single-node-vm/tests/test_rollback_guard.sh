@@ -111,11 +111,11 @@ _rb_crash_result() {
 #                     Restart Hub self-exits): failed/failed,
 #                     Result=start-limit-hit, clean exit, NRestarts=5 (the
 #                     automatic restarts incl. the one the limit refused;
-#                     observed on 255.4, VM2 T4x);
+#                     observed on systemd 255.4 (Ubuntu 24.04));
 #   v255-final        systemd 255 (24.04): the final failure after the start
 #                     limit: failed/failed with the crash's Result;
 #   v255-final-slh    the same, reported as Result=start-limit-hit;
-#   v255-autorestart  systemd 255, OBSERVED (255.4, VM2 T1): every
+#   v255-autorestart  systemd 255, observed on systemd 255.4 (Ubuntu 24.04): every
 #                     intermediate OnFailure= of a crash loop reads
 #                     activating/auto-restart;
 #   v255-transient    systemd >= 254 per the source, NOT observed on 255.4

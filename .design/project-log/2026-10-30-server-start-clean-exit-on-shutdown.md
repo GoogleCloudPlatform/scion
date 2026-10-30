@@ -18,16 +18,18 @@ evidence T4, note N1).
   Everything else is returned unchanged, so it still exits non-zero.
   `(*serverShutdownSequence).startupErr(ctx, err)` feeds it the sequence's
   own begun flag (`startedAt`), set by the signal handler's `claim`.
-- `cmd/server_foreground.go` `runServerStart` uses it for every startup
-  step after the signals are armed that runs under the server context and
-  can fail:
+- `cmd/server_foreground.go` `runServerStart` uses it for the startup
+  steps after the signals are armed that run under the server context and
+  can fail (all but one, see below):
   `initStore` (migrations), `resolveHubEndpoints`, `initHubServerFn`
   (returns before the "failed to start" log), `newCommandBus`,
   `startConduit`, `newEventPublisher`, `initWebServer`, and
   `startRuntimeBroker`.
   Steps that take no context, or that cannot fail (`managedImageRegistryConfigured`,
   `initPluginManagerFn`, a secret backend error which is only logged), are
-  unchanged.
+  unchanged. One context-taking step is deliberately not routed:
+  `hubSrv.VerifyTestAdminBrokerSet(ctx)` (step 14a, test admin tier only).
+  A shutdown that cancels it still exits 1, which fails safe.
 
 ## Tests
 `cmd/server_startup_shutdown_test.go`: `TestStartupShutdownErr` (shutdown
