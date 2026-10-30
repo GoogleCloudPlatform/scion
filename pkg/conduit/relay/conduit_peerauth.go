@@ -24,6 +24,7 @@ import (
 	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/keyring"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth/adcsource"
 	"google.golang.org/api/idtoken"
@@ -35,8 +36,10 @@ import (
 // Relay-peer requests are signed in all modes. Every request carries an
 // HMAC signature over the method, request URI, timestamp, nonce, caller id,
 // body digest, Want header and target relay (instance id and generation),
-// keyed with an HKDF derivation of the hub's shared signing secret
-// (NewHMACPeerAuthFromSecret). The serving relay refuses a stale
+// keyed with an HKDF derivation of the dedicated relay-peer secret
+// (NewHMACPeerAuthFromPeerSecret), else of the hub's signing ring in
+// managed ring mode (NewHMACPeerAuthFromRing), else of the hub's shared
+// signing secret (NewHMACPeerAuthFromSecret). The serving relay refuses a stale
 // timestamp, a replayed nonce, and a request signed for another relay
 // instance or generation. On GCP (peer_auth
 // "oidc", or "auto" on GCP) the caller also presents a Google-signed OIDC
@@ -68,6 +71,12 @@ type ConduitPeerAuthOptions struct {
 	// label, and SharedSecret is not used. External
 	// relay mode and --role relay require it (design §3.9).
 	PeerSecret string
+	// SigningRing is the hub's signing ring in managed ring mode (a
+	// keyring file; ptone/scion#1530 Phase 5). When set and PeerSecret is
+	// unset, the HMAC keys are derived from its generations
+	// (NewHMACPeerAuthFromRing) instead of from SharedSecret. A relay role
+	// never sets it: it never loads the keyring.
+	SigningRing *keyring.SigningRing
 	// Audience is the OIDC audience ("" = DefaultConduitPeerAudience).
 	Audience string
 	// ServiceAccounts is the OIDC caller allow-list. Empty: OwnServiceAccount.
@@ -87,6 +96,7 @@ const (
 	peerSecretSetting          = "server.hub.conduit.peer_secret"
 	peerServiceAccountsSetting = "server.hub.conduit.peer_service_accounts"
 	sessionSecretSetting       = "--session-secret (SCION_SERVER_SESSION_SECRET)"
+	keyringFileSetting         = "server.keyring_file"
 )
 
 // SettingError is a relay startup refusal caused by one setting. Key names
@@ -142,6 +152,11 @@ func NewConduitPeerAuth(o ConduitPeerAuthOptions) (PeerAuth, string, error) {
 		signer, err = NewHMACPeerAuthFromPeerSecret(HMACPeerAuthConfig{Secret: []byte(peerSecret), SelfID: o.SelfID})
 		if err != nil {
 			return nil, mode, &SettingError{Key: peerSecretSetting, Err: fmt.Errorf("conduit peer auth (%s): server.hub.conduit.peer_secret: %w", mode, err)}
+		}
+	case o.SigningRing != nil:
+		signer, err = NewHMACPeerAuthFromRing(HMACPeerAuthConfig{SelfID: o.SelfID}, o.SigningRing)
+		if err != nil {
+			return nil, mode, &SettingError{Key: keyringFileSetting, Err: fmt.Errorf("conduit peer auth (%s): %w", mode, err)}
 		}
 	case o.SharedSecret != "":
 		signer, err = NewHMACPeerAuthFromSecret(HMACPeerAuthConfig{Secret: []byte(o.SharedSecret), SelfID: o.SelfID})
