@@ -110,7 +110,9 @@ type SQLiteSnapshotOptions struct {
 	// FreeSpace returns the bytes available in a directory; default the
 	// file system's figure for an unprivileged user. Tests inject it.
 	FreeSpace func(dir string) (uint64, error)
-	// Now is the clock for snapshot names; default time.Now.
+	// Now is the clock for snapshot names and for the stale-partial cutoff
+	// (pruneStalePartials); default time.Now. Snapshot reads it once per
+	// snapshot.
 	Now func() time.Time
 }
 
@@ -216,6 +218,10 @@ func (s *SQLiteSnapshotter) Snapshot(ctx context.Context, fromVersion string, lo
 	dbPath := filepath.Join(s.dir, dbSnapshotPrefix+snapshotVersionLabel(fromVersion)+"-"+ts+dbSnapshotSuffix)
 	_, _ = fmt.Fprintf(logger, "Writing a database snapshot of %d bytes; the hub's database is busy until it completes.\n", size)
 	start := time.Now()
+	// writeAtomically hands VACUUM INTO an existing, empty .partial file.
+	// SQLite allows that: "The file named by the INTO clause must not
+	// previously exist, or else it must be an empty file"
+	// (https://www.sqlite.org/lang_vacuum.html).
 	if err := writeAtomically(dbPath, func(tmp string) error {
 		_, err := s.db.ExecContext(ctx, "VACUUM INTO ?", tmp)
 		return err
@@ -287,6 +293,13 @@ func snapshotVersionLabel(v string) string {
 // write it, then renames it to path. On failure the partial file is
 // removed. An existing partial file (another snapshot in progress, or a
 // killed one) fails the call.
+//
+// The partial file is created up front, empty, rather than left for fill
+// to create: O_EXCL claims the name, so two writers can never fill the
+// same file, and the 0600 mode is set at creation (fill's writer, such as
+// SQLite's VACUUM INTO, keeps an existing file's mode instead of applying
+// its own). VACUUM INTO accepts an existing target only when it is empty,
+// which this file is.
 func writeAtomically(path string, fill func(tmp string) error) error {
 	tmp := path + snapshotPartialSuffix
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)

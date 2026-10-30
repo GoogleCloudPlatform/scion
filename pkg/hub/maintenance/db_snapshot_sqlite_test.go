@@ -248,16 +248,16 @@ func TestSQLiteSnapshotter_DiskCheck(t *testing.T) {
 func TestSQLiteSnapshotter_ExistingPartialFails(t *testing.T) {
 	db := openSnapshotTestDB(t)
 	dir := t.TempDir()
+	at := snapshotTestClock()() // the clock's first reading
 	s := NewSQLiteSnapshotter(SQLiteSnapshotOptions{DB: db, Dir: dir, FreeSpace: unlimitedFreeSpace,
-		Now: func() time.Time { return time.Date(2026, 10, 29, 7, 1, 0, 0, time.UTC) }})
-	partial := filepath.Join(dir, "hub-nightly-20261023-20261029T070100Z.db"+snapshotPartialSuffix)
+		Now: func() time.Time { return at }})
+	partial := filepath.Join(dir, "hub-nightly-20261023-"+at.UTC().Format(snapshotTimeFormat)+".db"+snapshotPartialSuffix)
 	if err := os.WriteFile(partial, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// In use: written "now" by the injected clock, so stale-partial pruning
 	// keeps it and the exclusive create is what fails.
-	inUse := time.Date(2026, 10, 29, 7, 1, 0, 0, time.UTC)
-	if err := os.Chtimes(partial, inUse, inUse); err != nil {
+	if err := os.Chtimes(partial, at, at); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Snapshot(context.Background(), "nightly-20261023", &bytes.Buffer{}); !errors.Is(err, os.ErrExist) {
@@ -275,7 +275,7 @@ func TestSQLiteSnapshotter_StalePartialsFreedBeforeDiskCheck(t *testing.T) {
 	// stale-partial cutoff and the snapshot name. File times are set
 	// relative to it, not to the wall clock, so the test depends on
 	// Snapshot using the injected clock (Gemini review on #4371).
-	clockNow := time.Date(2026, 10, 29, 7, 1, 0, 0, time.UTC)
+	clockNow := snapshotTestClock()()
 	stale := filepath.Join(dir, "hub-nightly-20261020-20261028T060000Z.db"+snapshotPartialSuffix)
 	if err := os.WriteFile(stale, bytes.Repeat([]byte("x"), 4096), 0o600); err != nil {
 		t.Fatal(err)
