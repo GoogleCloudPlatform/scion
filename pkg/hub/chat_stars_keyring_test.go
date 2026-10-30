@@ -363,3 +363,46 @@ func TestCapabilityKeyring_StarredHistoryCursorRotation(t *testing.T) {
 	assert.Equal(t, want[1:2], historyIDs(l2))
 	assert.True(t, strings.HasPrefix(l2.NextCursor, listCursorPrefixV2+"gen2."), l2.NextCursor)
 }
+
+// TestCapabilityKeyring_ChatStarsCursorLegacyReplicaRefusesVersioned: the
+// reverse of TestCapabilityKeyring_ChatStarsCursor's legacy-replica upgrade
+// case. A chat-stars cursor sealed by a versioned ring replica (c2.<kid>.)
+// is refused with invalid_cursor by a replica of the same deployment still
+// in legacy mode (no keyring), which reads only the ID-less c1. form and
+// holds no generation key. The same cursor resumes on the ring replica, so
+// the refusal comes from the legacy replica, not from a broken cursor, and
+// a fresh first page on the legacy replica still works.
+func TestCapabilityKeyring_ChatStarsCursorLegacyReplicaRefusesVersioned(t *testing.T) {
+	allowVersionedRings(t)
+	f := newStarFixture(t, true)
+	for i := 0; i < 3; i++ {
+		id := f.threadMsg(t, f.topicA, f.projA, fmt.Sprintf("starred %d", i), time.Now().Add(-time.Duration(10-i)*time.Hour))
+		decodeStarPut(t, f.put(t, f.admin, id, f.topicA))
+		time.Sleep(time.Millisecond)
+	}
+	clk := &krClock{t: krT0}
+	_, ub := capRollout(t, "versioned")
+	legacy := starRingReplica(t, f, nil, clk)
+	upgraded := starRingReplica(t, f, ub, clk)
+
+	rec, v1 := getStarPage(t, f, upgraded, f.admin, f.topicA, "limit=1")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Len(t, v1.Items, 1)
+	require.True(t, strings.HasPrefix(v1.NextCursor, listCursorPrefixV2+"gen2."), v1.NextCursor)
+
+	// Control: the cursor resumes on the ring replica that sealed it.
+	rec, v2 := getStarPage(t, f, upgraded, f.admin, f.topicA, "limit=1", "cursor="+url.QueryEscape(v1.NextCursor))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Len(t, v2.Items, 1)
+	assert.NotEqual(t, v1.Items[0].MessageID, v2.Items[0].MessageID)
+
+	// The legacy-mode replica fails closed on it.
+	rec, _ = getStarPage(t, f, legacy, f.admin, f.topicA, "limit=1", "cursor="+url.QueryEscape(v1.NextCursor))
+	assertInvalidCursor(t, rec)
+	assert.NotContains(t, rec.Body.String(), `"items"`, "a refused cursor returns no page")
+
+	rec, l1 := getStarPage(t, f, legacy, f.admin, f.topicA, "limit=1")
+	require.Equal(t, http.StatusOK, rec.Code, "a fresh first page always works: %s", rec.Body.String())
+	require.Len(t, l1.Items, 1)
+	assert.True(t, strings.HasPrefix(l1.NextCursor, listCursorPrefix), l1.NextCursor)
+}
