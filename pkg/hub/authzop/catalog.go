@@ -285,6 +285,11 @@ var EntryPointExemptions = []EntryPointExemption{
 	// read access was checked; the artifact service verifies the
 	// capability on every request and never uses a session here.
 	{Pattern: "/api/v1/artifacts/view/", Kind: ExemptionPublicEndpoint, Reason: "Artifact view capability (minted on POST /api/v1/artifacts/{id}/versions/{seq}/view after artifact.read; HMAC over artifact, version and expiry, verified by the artifact service on every GET/HEAD), experiment-gated", Owner: "route_metadata.go"},
+	// Port page view (hub.port_view experiment): an agent's exposed port
+	// served on the short-lived page link in the path; the handler checks
+	// the link and the bound user's port access on every request and never
+	// authorizes by a session here.
+	{Pattern: "/api/v1/portview/", Kind: ExemptionPublicEndpoint, Reason: "Port page view link (created by the port link for a signed-in user after agent.port_access; checked on every request together with that user's current agent.port_access on the agent), experiment-gated", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/telegram/link", Kind: ExemptionInternalOnly, Reason: "Chat account link registration, broker-authenticated", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/telegram/link/status", Kind: ExemptionInternalOnly, Reason: "Chat account link status, broker-authenticated", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/discord/link", Kind: ExemptionInternalOnly, Reason: "Chat account link registration, broker-authenticated", Owner: "route_metadata.go"},

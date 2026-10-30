@@ -79,6 +79,8 @@ func TestWorkstation_PutServerConfig_StartupBlockValidSaved(t *testing.T) {
 	}{
 		{"port_proxy response_header_timeout", `{"server":{"hub":{"port_proxy":{"response_header_timeout":"30s"}}}}`,
 			[]string{"server", "hub", "port_proxy", "response_header_timeout"}, "30s"},
+		{"port_proxy view_ttl", `{"server":{"hub":{"port_proxy":{"view_ttl":"4h"}}}}`,
+			[]string{"server", "hub", "port_proxy", "view_ttl"}, "4h"},
 		{"conduit lifetime_cap", `{"server":{"hub":{"conduit":{"lifetime_cap":"3h"}}}}`,
 			[]string{"server", "hub", "conduit", "lifetime_cap"}, "3h"},
 	}
@@ -108,6 +110,10 @@ func TestWorkstation_PutServerConfig_StartupBlockInvalidRejected(t *testing.T) {
 			`"port_proxy":{"response_header_timeout":"1s"}`,
 			"server.hub.port_proxy.response_header_timeout",
 			config.HubPortProxyConfig{ResponseHeaderTimeout: "1s"}.Validate().Error()},
+		{"port_proxy view_ttl above maximum",
+			`"port_proxy":{"view_ttl":"25h"}`,
+			"server.hub.port_proxy.view_ttl",
+			config.HubPortProxyConfig{ViewTTL: "25h"}.Validate().Error()},
 		{"conduit lifetime_cap below minimum",
 			`"conduit":{"lifetime_cap":"10s"}`,
 			"server.hub.conduit.lifetime_cap",

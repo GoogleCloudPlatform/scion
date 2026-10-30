@@ -1756,6 +1756,17 @@ func portProxyResponseHeaderTimeoutSetting(cfg *config.GlobalConfig) time.Durati
 	return d
 }
 
+// portViewTTLSetting returns the configured lifetime of a page view link
+// (default 2h). validateServerPreflight has already rejected a malformed
+// or out-of-range value.
+func portViewTTLSetting(cfg *config.GlobalConfig) time.Duration {
+	d, err := cfg.Hub.PortProxy.ViewTTLDuration()
+	if err != nil {
+		return config.PortProxyDefaultViewTTL
+	}
+	return d
+}
+
 // agentRunScopeSetting returns the parsed agent run-scope setting.
 // validateServerPreflight has already rejected an invalid value, so an
 // error here falls back to the default (off).
@@ -2913,6 +2924,8 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		NativeChatEnabled: cfg.NativeChat.EnabledSetting(),
 		// server.hub.port_proxy.response_header_timeout (validated at startup).
 		PortProxyResponseHeaderTimeout: portProxyResponseHeaderTimeoutSetting(cfg),
+		// server.hub.port_proxy.view_ttl (validated at startup).
+		PortViewTTL: portViewTTLSetting(cfg),
 	}
 }
 

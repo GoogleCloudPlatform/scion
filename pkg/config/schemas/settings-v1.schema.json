@@ -1711,6 +1711,12 @@
               "description": "Bound on the wait for an agent port's response headers, the WebSocket handshake included; on timeout the proxy answers 504. The response body is not time-limited (e.g. '60s'; default '60s', between '5s' and '10m').",
               "x-env-var": "SCION_SERVER_HUB_PORTPROXY_RESPONSEHEADERTIMEOUT",
               "x-since": "1"
+            },
+            "view_ttl": {
+              "type": "string",
+              "description": "Lifetime of a page view link minted when a user opens an exposed port from the hub (hub.port_view experiment). Opening the port's link again mints a new one (e.g. '2h'; default '2h', between '15m' and '24h').",
+              "x-env-var": "SCION_SERVER_HUB_PORTPROXY_VIEWTTL",
+              "x-since": "1"
             }
           }
         },

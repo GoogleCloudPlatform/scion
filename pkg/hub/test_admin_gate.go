@@ -350,8 +350,8 @@ type testAdminSigningKeyClass struct {
 
 // testAdminSigningKeyClasses lists every hub signing-key class: user JWTs,
 // agent tokens, signed download URLs, artifact view capability URLs,
-// attachment delivery capabilities, list
-// cursors, conduit stream grants and the web session cookie key. The OIDC
+// attachment delivery capabilities, port page view links, list cursors,
+// conduit stream grants and the web session cookie key. The OIDC
 // identity-token key is added when OIDC is enabled.
 func testAdminSigningKeyClasses(oidcEnabled bool) []testAdminSigningKeyClass {
 	classes := []testAdminSigningKeyClass{
@@ -359,6 +359,7 @@ func testAdminSigningKeyClasses(oidcEnabled bool) []testAdminSigningKeyClass {
 		{Class: "agent_token", KeyName: SecretKeyAgentSigningKey},
 		{Class: "download_url", KeyName: SecretKeyDownloadSigningKey},
 		{Class: "artifact_view_url", KeyName: SecretKeyArtifactViewKey},
+		{Class: "port_view_url", KeyName: SecretKeyPortViewKey},
 		{Class: "attachment_delivery", KeyName: SecretKeyAttachmentDeliveryKey},
 		{Class: "list_cursor", KeyName: SecretKeyListCursorKey},
 		{Class: "conduit_grant", KeyName: conduitGrantKeySecretName},

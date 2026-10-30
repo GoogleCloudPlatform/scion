@@ -567,6 +567,7 @@ var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.AgentEditHeld:                testAdminPolicyDeny,
 	experiments.AttachmentArtifacts:          testAdminPolicyDeny,
 	experiments.AgentPlugins:                 testAdminPolicyDeny,
+	experiments.PortView:                     testAdminPolicyDeny,
 	experiments.AgentBadges:                  testAdminPolicyDeny,
 	experiments.SSEHiddenTabClose:            testAdminPolicyDeny,
 	experiments.SecretRotation:               testAdminPolicyDeny,

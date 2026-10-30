@@ -24,6 +24,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -48,10 +51,11 @@ import (
 
 const encTestHubID = "enc-test-hub"
 
-// encSigningKeys are the six ensureSigningKey backups New creates.
+// encSigningKeys are the seven ensureSigningKey backups New creates.
 var encSigningKeys = []string{
 	SecretKeyAgentSigningKey, SecretKeyUserSigningKey, SecretKeyDownloadSigningKey,
 	SecretKeyArtifactViewKey, SecretKeyAttachmentDeliveryKey, SecretKeyListCursorKey,
+	SecretKeyPortViewKey,
 }
 
 // v2Cipher is a managed cipher writing enc:v2: under active, holding ids.
@@ -719,4 +723,89 @@ func TestAuditRecordIDs_Capped(t *testing.T) {
 	assert.True(t, strings.HasSuffix(got, "id-19 (decrypt_failed), and 3 more"))
 	assert.NotContains(t, got, "SECRET_KEY_NAME")
 	assert.Equal(t, "id-00 (decrypt_failed)", auditRecordIDs(recs[:1], 20))
+}
+
+// TestEncryptionAudit_CoversEveryEnsureSigningKeyBackup: every signing key
+// that production code in this package resolves through ensureSigningKey is
+// a backup New creates, so it must be classed and validated by the startup
+// encryption audit (infraPayloadValidators) and listed in encSigningKeys,
+// which the backup round-trip and no-overwrite tests iterate. A new
+// ensureSigningKey call site that is missing from either fails here.
+func TestEncryptionAudit_CoversEveryEnsureSigningKeyBackup(t *testing.T) {
+	fset := token.NewFileSet()
+	// pkgmove:scan-covers guardScanSubdirs
+	// scanned through guardScanSubdirs: pkg/hub and every area moved out of it.
+	files, err := globGuardScanDirs(".", "*.go")
+	require.NoError(t, err)
+	require.NotEmpty(t, files)
+	used := map[string]string{} // key constant -> first call site
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		af, err := parser.ParseFile(fset, f, nil, 0)
+		require.NoError(t, err, f)
+		ast.Inspect(af, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "ensureSigningKey" || len(call.Args) < 2 {
+				return true
+			}
+			arg, ok := call.Args[1].(*ast.Ident)
+			if assert.True(t, ok, "%s: ensureSigningKey key name must be a constant", fset.Position(call.Pos())) {
+				if _, seen := used[arg.Name]; !seen {
+					used[arg.Name] = fset.Position(call.Pos()).String()
+				}
+			}
+			return true
+		})
+	}
+	require.GreaterOrEqual(t, len(used), 7, "input assertion: the ensureSigningKey call sites were found")
+
+	// compositeKeys returns the identifier keys (map literal) or elements
+	// (slice literal) of the package-level var name declared in file.
+	compositeKeys := func(file, name string) map[string]bool {
+		af, err := parser.ParseFile(fset, file, nil, 0)
+		require.NoError(t, err, file)
+		out := map[string]bool{}
+		for _, d := range af.Decls {
+			gd, ok := d.(*ast.GenDecl)
+			if !ok || gd.Tok != token.VAR {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs := spec.(*ast.ValueSpec)
+				for i, n := range vs.Names {
+					if n.Name != name || i >= len(vs.Values) {
+						continue
+					}
+					lit, ok := vs.Values[i].(*ast.CompositeLit)
+					require.True(t, ok, "%s: %s is not a composite literal", file, name)
+					for _, e := range lit.Elts {
+						if kv, ok := e.(*ast.KeyValueExpr); ok {
+							e = kv.Key
+						}
+						if id, ok := e.(*ast.Ident); ok {
+							out[id.Name] = true
+						}
+					}
+				}
+			}
+		}
+		require.NotEmpty(t, out, "input assertion: %s found in %s", name, file)
+		return out
+	}
+	audited := compositeKeys("encryption_audit.go", "infraPayloadValidators")
+	listed := compositeKeys("encryption_ring_test.go", "encSigningKeys")
+	for key, site := range used {
+		assert.True(t, audited[key], "%s (%s) is an ensureSigningKey backup missing from infraPayloadValidators", key, site)
+		assert.True(t, listed[key], "%s (%s) is an ensureSigningKey backup missing from encSigningKeys", key, site)
+	}
+	for key := range listed {
+		_, ok := used[key]
+		assert.True(t, ok, "encSigningKeys lists %s, which no ensureSigningKey call site uses", key)
+	}
 }
