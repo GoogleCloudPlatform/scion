@@ -325,6 +325,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			ChangedFields: true,
 			// cleared_fields is applied at start (ptone/scion#4890).
 			ClearedFields: true,
+			// An explicit count limit of 0 is "no limit"
+			// (ptone/scion#5605).
+			UnlimitedCountLimits: true,
 			// Hub telemetry defaults and policy are separate tiers
 			// (ptone/scion#4218).
 			TemplateTiers: true,
@@ -4100,7 +4103,7 @@ func (s *Server) applyInlineConfigUpdate(ctx context.Context, agentName, project
 	}
 	if s.config.Debug {
 		s.agentLifecycleLog.Debug("applyInlineConfigUpdate: applied inline config update",
-			"agent", agentName, "maxTurns", inlineConfig.MaxTurns, "maxModelCalls", inlineConfig.MaxModelCalls)
+			"agent", agentName, "maxTurns", api.FormatCountLimit(inlineConfig.MaxTurns), "maxModelCalls", api.FormatCountLimit(inlineConfig.MaxModelCalls))
 	}
 }
 

@@ -61,12 +61,12 @@ func TestAgentConfigPatch_ClearsReachTheStart(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, code, body)
 	first := start()
-	assert.Equal(t, 9, first.inline.MaxTurns)
+	assert.Equal(t, api.IntPtr(9), first.inline.MaxTurns)
 	assert.Empty(t, first.inline.ClearedFields)
 
 	resp, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{
 		"config": map[string]interface{}{
-			"max_turns": 0, "thinking_level": nil, "system_prompt": "", "resources": nil,
+			"max_turns": nil, "thinking_level": nil, "system_prompt": "", "resources": nil,
 			"env": map[string]string{"BAR": "2"},
 		},
 	})
@@ -80,7 +80,7 @@ func TestAgentConfigPatch_ClearsReachTheStart(t *testing.T) {
 	for i := 0; i < 2; i++ { // the start after the clear, and the one after it
 		got := start()
 		assert.Equal(t, want, got.inline.ClearedFields, "start %d", i+1)
-		assert.Zero(t, got.inline.MaxTurns)
+		assert.Nil(t, got.inline.MaxTurns)
 		assert.Nil(t, got.inline.ThinkingLevel)
 	}
 
@@ -90,7 +90,7 @@ func TestAgentConfigPatch_ClearsReachTheStart(t *testing.T) {
 	require.Equal(t, http.StatusOK, code, body)
 	got := start()
 	assert.Equal(t, []string{"resources", "system_prompt", "thinking_level"}, got.inline.ClearedFields)
-	assert.Equal(t, 4, got.inline.MaxTurns)
+	assert.Equal(t, api.IntPtr(4), got.inline.MaxTurns)
 
 	// A client-sent list that differs from the stored one is refused like
 	// any other fixed key.

@@ -3585,7 +3585,7 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesInlineConfig(t *testing.
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	inlineCfg := &api.ScionConfig{
-		MaxTurns:    3,
+		MaxTurns:    api.IntPtr(3),
 		MaxDuration: "30m",
 	}
 
@@ -3613,8 +3613,8 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_IncludesInlineConfig(t *testing.
 	if mockClient.lastInlineConfig == nil {
 		t.Fatal("expected InlineConfig to be passed to StartAgent")
 	}
-	if mockClient.lastInlineConfig.MaxTurns != 3 {
-		t.Errorf("expected MaxTurns=3, got %d", mockClient.lastInlineConfig.MaxTurns)
+	if !api.IntPtrEqual(mockClient.lastInlineConfig.MaxTurns, api.IntPtr(3)) {
+		t.Errorf("expected MaxTurns=3, got %s", api.FormatCountLimit(mockClient.lastInlineConfig.MaxTurns))
 	}
 	if mockClient.lastInlineConfig.MaxDuration != "30m" {
 		t.Errorf("expected MaxDuration='30m', got '%s'", mockClient.lastInlineConfig.MaxDuration)

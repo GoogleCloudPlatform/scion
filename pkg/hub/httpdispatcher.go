@@ -969,6 +969,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		// provisioning, with its telemetry rebuilt for this broker (a copy;
 		// the agent record is not modified).
 		req.InlineConfig = tel.inlineConfig(agent.AppliedConfig.InlineConfig)
+		// An inline (requested or project-stamped) Unlimited count limit
+		// on a broker that cannot apply it: say so (ptone/scion#5605).
+		d.warnUnlimitedUnsupported(ctx, agent, req.InlineConfig)
 
 		if d.debug {
 			d.log.Debug("buildCreateRequest: config sent to broker",
@@ -3688,6 +3691,9 @@ func (d *HTTPAgentDispatcher) dispatchAgentStart(ctx context.Context, agent *sto
 	// (no changedFields capability) starts with their previous files: say
 	// so in the start response (ptone/scion#3982).
 	d.warnRerenderUnsupported(ctx, agent, inlineConfig)
+	// Likewise for an Unlimited count limit the broker cannot apply
+	// (ptone/scion#5605).
+	d.warnUnlimitedUnsupported(ctx, agent, inlineConfig)
 
 	// TODO(#1350): Thread envClassifications to broker via client.StartAgent.
 	// PRECONDITION for P3b: without this, the broker receives nil (state 3,

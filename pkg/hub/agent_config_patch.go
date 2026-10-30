@@ -104,7 +104,44 @@ func (s *Server) validateAgentConfigPatch(ctx context.Context, w http.ResponseWr
 			return false
 		}
 	}
-	return true
+	return s.validateUnlimitedCounts(ctx, w, agent, cfg)
+}
+
+// validateUnlimitedCounts refuses a change of a count limit to Unlimited (0)
+// that the agent's broker cannot apply (ptone/scion#5605): 422 with the
+// per-field reasons, or 503 when the broker record cannot be read. Only a
+// change counts, against the value the agent's next run would otherwise
+// use: with held edits on, the applied inline config overlaid by the
+// pending config, except that a count limit pending as 0 counts at its
+// applied value (unlimitedCheckBase); with them off, pending rows are
+// inert, so the applied inline config alone. The broker is looked up only when there is such a
+// change. It runs for the live PATCH and for the held save alike.
+func (s *Server) validateUnlimitedCounts(ctx context.Context, w http.ResponseWriter, agent *store.Agent, cfg *api.ScionConfig) bool {
+	var applied *api.ScionConfig
+	if agent != nil && agent.AppliedConfig != nil {
+		applied = agent.AppliedConfig.InlineConfig
+	}
+	base := applied
+	if s.heldEditsEnabled() {
+		base = unlimitedCheckBase(agent, applied)
+	}
+	fields, err := s.unlimitedCountRefusal(ctx, agent, cfg, base)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+			"The agent's runtime broker could not be read to check that it supports Unlimited; retry", nil)
+		return false
+	}
+	if len(fields) == 0 {
+		return true
+	}
+	details := make(map[string]interface{}, len(fields))
+	for k, v := range fields {
+		details[k] = v
+	}
+	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+		"Unlimited is not supported for this agent's runtime broker; reload the page, or upgrade the broker",
+		map[string]interface{}{"fields": details})
+	return false
 }
 
 // configPatchResult is what applyAgentConfigPatch did: the warnings for the
@@ -255,10 +292,41 @@ func (s *Server) applyAgentConfigPatch(ctx context.Context, agent *store.Agent, 
 	// What is reported applied follows what was recorded above.
 	sup := s.agentBrokerStartSupport(ctx, agent)
 	provision = sup.heldProvisionEdits(provision, old.InlineConfig, cfg, merged.ClearedFields)
-	cleared = sup.heldClearEdits(cleared, p.raw, merged.ClearedFields, droppedEnvKeys(old.InlineConfig, cfg, p.present))
+	cleared = sup.heldClearEdits(cleared, merged.ClearedFields, droppedEnvKeys(old.InlineConfig, cfg, p.present))
 	removed = sup.heldRemovals(removed, merged.ClearedFields)
 	res.warnings = append(res.warnings, sup.reincarnateOnlyEditWarnings(provision, cleared)...)
 	res.warnings = append(res.warnings, removedEntriesWarnings(removed)...)
 	res.applied, res.heldForReincarnate = configEditDisposition(p.raw, cfg, old.InlineConfig, provision, cleared, removed)
 	return res
+}
+
+// unlimitedCheckBase is the base validateUnlimitedCounts compares a request
+// with when held edits are on: the agent's next-run inline config
+// (effectiveNextRunInline), but with each count limit pending as 0 taken
+// from applied instead. A pending 0 may be waiting for a broker that can
+// apply it (foldKeep), so it is not known to be the next run's value, and a
+// request that sends 0 again must still be checked against the broker:
+// otherwise a PATCH of an agent with no container would write the 0 to the
+// applied config and report it applied on a broker that keeps the inherited
+// limit. On a capable broker the extra check refuses nothing.
+func unlimitedCheckBase(agent *store.Agent, applied *api.ScionConfig) *api.ScionConfig {
+	base := effectiveNextRunInline(agent)
+	if agent.PendingConfig.IsEmpty() {
+		return base
+	}
+	p := pendingConfigPatch(agent.PendingConfig)
+	if base == nil {
+		base = &api.ScionConfig{}
+	}
+	var appliedTurns, appliedCalls *int
+	if applied != nil {
+		appliedTurns, appliedCalls = applied.MaxTurns, applied.MaxModelCalls
+	}
+	if p.present["max_turns"] && api.IsUnlimitedCount(p.cfg.MaxTurns) {
+		base.MaxTurns = api.CloneIntPtr(appliedTurns)
+	}
+	if p.present["max_model_calls"] && api.IsUnlimitedCount(p.cfg.MaxModelCalls) {
+		base.MaxModelCalls = api.CloneIntPtr(appliedCalls)
+	}
+	return base
 }

@@ -72,7 +72,7 @@ func TestCanonicalConfigRaw(t *testing.T) {
 	raw := canonicalConfigRaw(p)
 	assert.JSONEq(t, `"m"`, string(raw["model"]), "keys are stored by their json key")
 	assert.JSONEq(t, `{"A":"1"}`, string(raw["env"]), "the stripped TZ is not stored")
-	assert.Equal(t, "0", string(raw["max_turns"]), "a null count is stored as its zero value, which applies the same way")
+	assert.Equal(t, "null", string(raw["max_turns"]), "a null count is stored as null (a clear), apart from 0 (Unlimited, ptone/scion#5605)")
 	assert.Equal(t, "null", string(raw["thinking_level"]), "a null pointer key is kept as null")
 	assert.NotContains(t, raw, "Model")
 
@@ -120,7 +120,7 @@ func TestPendingConfigPatch_DecodesStoredKeys(t *testing.T) {
 
 func TestEffectiveNextRunInline(t *testing.T) {
 	agent := &store.Agent{
-		AppliedConfig: &store.AgentAppliedConfig{InlineConfig: &api.ScionConfig{Model: "a", MaxTurns: 3, SystemPrompt: "old"}},
+		AppliedConfig: &store.AgentAppliedConfig{InlineConfig: &api.ScionConfig{Model: "a", MaxTurns: api.IntPtr(3), SystemPrompt: "old"}},
 		PendingConfig: &store.AgentPendingConfig{Config: map[string]json.RawMessage{
 			"model":         json.RawMessage(`"b"`),
 			"system_prompt": json.RawMessage(`null`),
@@ -128,7 +128,7 @@ func TestEffectiveNextRunInline(t *testing.T) {
 	}
 	got := effectiveNextRunInline(agent)
 	assert.Equal(t, "b", got.Model)
-	assert.Equal(t, 3, got.MaxTurns)
+	assert.Equal(t, api.IntPtr(3), got.MaxTurns)
 	assert.Empty(t, got.SystemPrompt, "a pending null clears the key")
 	assert.Equal(t, "a", agent.AppliedConfig.InlineConfig.Model, "the applied config is not changed")
 

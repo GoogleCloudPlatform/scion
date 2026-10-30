@@ -62,9 +62,11 @@ These platform skills are managed by Scion and do not need to be manually includ
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
-| `max_turns` | int | Maximum number of LLM turns before the agent stops. Exceeding this triggers a `LIMITS_EXCEEDED` state and termination. |
-| `max_model_calls` | int | Maximum number of model calls before the agent stops. |
-| `max_duration` | string | Maximum runtime duration (e.g., `"2h"`, `"30m"`). Exceeding this triggers a `LIMITS_EXCEEDED` state and termination. |
+| `max_turns` | int | Maximum number of LLM turns before the agent stops. Exceeding this triggers a `LIMITS_EXCEEDED` state and termination. `0` means no limit and overrides any inherited or default limit; leave the key out to inherit. |
+| `max_model_calls` | int | Maximum number of model calls before the agent stops. `0` means no limit and overrides any inherited or default limit; leave the key out to inherit. |
+| `max_duration` | string | Maximum runtime duration (e.g., `"2h"`, `"30m"`). Exceeding this triggers a `LIMITS_EXCEEDED` state and termination. `"0"` means no limit; leave the key out to inherit. |
+
+Each limit has three states: left out (or `null`), which inherits the value from the template chain and then from the hub and broker default limits; an explicit "no limit" (`0` for a count, `"0"` for a duration), which overrides an inherited limit and is never filled by a default; and a limit. A negative count is invalid. Before count limits were typed, a `max_turns: 0` or `max_model_calls: 0` in a template or config file was accepted silently and meant "inherit"; it now means no limit, so remove the key to inherit. A Runtime Broker logs each template that sets a count limit to `0` when it provisions an agent. An explicit count limit of `0` takes effect only on a Runtime Broker that advertises the `unlimitedCountLimits` capability; an older broker keeps the inherited limit, and the Hub warns about it.
 
 ### Environment variables (`env`)
 

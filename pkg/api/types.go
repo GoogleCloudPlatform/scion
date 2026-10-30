@@ -523,8 +523,8 @@ type ScionConfig struct {
 	// are the transport-agnostic config translated by each harness's
 	// container-side provisioner into native format.
 	MCPServers    map[string]MCPServerConfig `json:"mcp_servers,omitempty" yaml:"mcp_servers,omitempty"`
-	MaxTurns      int                        `json:"max_turns,omitempty" yaml:"max_turns,omitempty"`
-	MaxModelCalls int                        `json:"max_model_calls,omitempty" yaml:"max_model_calls,omitempty"`
+	MaxTurns      *int                       `json:"max_turns,omitempty" yaml:"max_turns,omitempty"`             // nil inherits, 0 is no limit (limits.go)
+	MaxModelCalls *int                       `json:"max_model_calls,omitempty" yaml:"max_model_calls,omitempty"` // nil inherits, 0 is no limit (limits.go)
 	MaxDuration   string                     `json:"max_duration,omitempty" yaml:"max_duration,omitempty"`
 	Hub           *AgentHubConfig            `json:"hub,omitempty" yaml:"hub,omitempty"`
 	Telemetry     *TelemetryConfig           `json:"telemetry,omitempty" yaml:"telemetry,omitempty"`

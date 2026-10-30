@@ -154,7 +154,7 @@ func TestAgentConfigPatch_ChangedFieldsNeverFromRequest(t *testing.T) {
 	stored, err := s.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)
 	assert.Nil(t, stored.AppliedConfig.InlineConfig.ChangedFields)
-	assert.Equal(t, 8, stored.AppliedConfig.InlineConfig.MaxTurns)
+	assert.Equal(t, api.IntPtr(8), stored.AppliedConfig.InlineConfig.MaxTurns)
 }
 
 // TestWarnRerenderUnsupported_StartResponseWarning: the start dispatch adds
@@ -181,8 +181,9 @@ func TestWarnRerenderUnsupported_StartResponseWarning(t *testing.T) {
 // that applies cleared_fields (ptone/scion#4890), clearing max_turns (null)
 // and removing env keys on a stopped agent is reported applied with no
 // reincarnation warning, and the start dispatches the cleared paths; a
-// count limit set to 0 (Unlimited, ptone/scion#5605) and a clear the
-// broker cannot apply (the model) are still held.
+// count limit set to 0 (Unlimited) is refused, since this broker lacks
+// unlimitedCountLimits (ptone/scion#5605), and a clear the broker cannot
+// apply (the model) is still held.
 func TestAgentConfigPatch_ClearingBrokerAppliesClearsAtStart(t *testing.T) {
 	disp := &inlineCaptureDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher()}
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
@@ -193,7 +194,7 @@ func TestAgentConfigPatch_ClearingBrokerAppliesClearsAtStart(t *testing.T) {
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 		a.Phase = string(state.PhaseStopped)
 		a.AppliedConfig.Model = "old-model"
-		a.AppliedConfig.InlineConfig = &api.ScionConfig{Harness: "claude", Model: "old-model", MaxTurns: 3, MaxModelCalls: 7, Env: map[string]string{"KEEP": "1", "DROP": "2"}}
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{Harness: "claude", Model: "old-model", MaxTurns: api.IntPtr(3), MaxModelCalls: api.IntPtr(7), Env: map[string]string{"KEEP": "1", "DROP": "2"}}
 	})
 
 	resp, code, body := patchAgentBody(t, srv, agent.ID, map[string]interface{}{
@@ -204,16 +205,13 @@ func TestAgentConfigPatch_ClearingBrokerAppliesClearsAtStart(t *testing.T) {
 	assert.Empty(t, resp.Disposition.HeldForReincarnate)
 	assert.Empty(t, resp.Warnings)
 
-	// Unlimited (0) on a count limit is not reported applied: no start
-	// removes an inherited limit (ptone/scion#5605).
-	resp, code, body = patchAgentBody(t, srv, agent.ID, map[string]interface{}{
+	// Unlimited (0) on a count limit is refused: this broker would keep
+	// the inherited limit (ptone/scion#5605).
+	_, code, body = patchAgentBody(t, srv, agent.ID, map[string]interface{}{
 		"config": map[string]interface{}{"max_model_calls": 0},
 	})
-	require.Equal(t, http.StatusOK, code, body)
-	assert.Empty(t, resp.Disposition.Applied)
-	assert.Equal(t, []string{"config.max_model_calls"}, resp.Disposition.HeldForReincarnate)
-	require.Len(t, resp.Warnings, 1, "%v", resp.Warnings)
-	assert.Contains(t, resp.Warnings[0], "config.max_model_calls: cleared now")
+	require.Equal(t, http.StatusUnprocessableEntity, code, body)
+	assert.Contains(t, body, "unlimited_not_supported_by_broker")
 
 	resp, code, body = patchAgentBody(t, srv, agent.ID, map[string]interface{}{
 		"config": map[string]interface{}{"model": ""},
@@ -225,14 +223,15 @@ func TestAgentConfigPatch_ClearingBrokerAppliesClearsAtStart(t *testing.T) {
 	ed := getAgentEditability(t, srv, nil, agent.ID)
 	assert.False(t, ed.Fields["config.resources"].ClearNeedsReincarnate)
 	assert.False(t, ed.Fields["config.thinking_level"].ClearNeedsReincarnate)
-	assert.True(t, ed.Fields["config.max_turns"].ClearNeedsReincarnate, "Unlimited on a count limit still needs a reincarnation note (ptone/scion#5605)")
+	assert.False(t, ed.Fields["config.max_turns"].ClearNeedsReincarnate, "a null clear of a count limit is applied by a clearedFields broker")
+	assert.True(t, ed.Fields["config.max_turns"].UnlimitedUnsupported, "this broker cannot apply Unlimited (ptone/scion#5605)")
 	assert.True(t, ed.Fields["config.model"].ClearNeedsReincarnate)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
 	require.Less(t, rec.Code, 300, rec.Body.String())
 	starts := disp.snapshot()
 	require.Len(t, starts, 1)
-	assert.Equal(t, []string{"env.DROP", "max_model_calls", "max_turns"}, starts[0].inline.ClearedFields)
+	assert.Equal(t, []string{"env.DROP", "max_turns"}, starts[0].inline.ClearedFields)
 }
 
 // newT2EditAgent is a stopped agent whose inline config already sets all
