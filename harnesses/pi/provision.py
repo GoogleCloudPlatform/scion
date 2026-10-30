@@ -277,11 +277,14 @@ def _model_settings(ctx: sh.ProvisionContext) -> dict[str, str]:
     value is a pi --model pattern rather than an exact model ID. Only an
     unresolved tier name that reaches this point is skipped.
 
-    Scion prepends --model <resolved value> to pi's command only when the
-    agent's configuration has a model (pkg/agent/run.go); pi then starts on
-    that model rather than the defaultModel startup setting. When SCION_MODEL
-    comes only from the environment, no --model is passed and the
-    defaultProvider/defaultModel written here are what pi starts with.
+    Scion prepends --model <resolved value> to pi's command whenever the
+    agent has an effective model: the Hub-resolved model, a SCION_MODEL in
+    the start request or the settings harness-config env, or the
+    configuration's model (resolveEffectiveModel in pkg/agent/run.go). pi
+    then starts on that model, and its provider, rather than the
+    defaultProvider/defaultModel startup settings. Only a SCION_MODEL from a
+    template's env: gets no --model; then the values written here are what
+    pi starts with.
     """
     out: dict[str, str] = {}
     provider = os.environ.get(PROVIDER_ENV, "").strip()

@@ -77,8 +77,11 @@ func TestPiDialect_BridgePayloads(t *testing.T) {
 		toolName  string
 		toolInput map[string]interface{} // nil: ToolInput must be empty
 		success   bool
-		errMsg    string
-		source    string
+		// failed: EventData.Failed, set by the mapping from success
+		// (false -> true); only record 5 reports a failed tool call.
+		failed bool
+		errMsg string
+		source string
 		// inPlace: a session-start that restarts the session inside the
 		// running harness (hooks.SessionInPlace): not a readiness event.
 		inPlace  bool
@@ -90,7 +93,7 @@ func TestPiDialect_BridgePayloads(t *testing.T) {
 		{name: hooks.EventToolStart, toolName: "bash", toolInput: map[string]interface{}{"command": "ls -la", "timeout": float64(30)}, activity: state.ActivityExecuting},
 		{name: hooks.EventToolEnd, toolName: "bash", success: true, activity: state.ActivityWorking},
 		{name: hooks.EventToolStart, toolName: "read", toolInput: map[string]interface{}{"path": "missing.txt"}, activity: state.ActivityExecuting},
-		{name: hooks.EventToolEnd, toolName: "read", success: false, activity: state.ActivityWorking},
+		{name: hooks.EventToolEnd, toolName: "read", success: false, failed: true, activity: state.ActivityWorking},
 		{name: hooks.EventAgentEnd, activity: state.ActivityWorking},
 		{name: hooks.EventPromptSubmit, activity: state.ActivityThinking},
 		{name: hooks.EventAgentEnd, errMsg: "429 rate limited: retry later", activity: state.ActivityWorking},
@@ -135,6 +138,9 @@ func TestPiDialect_BridgePayloads(t *testing.T) {
 		}
 		if ev.Data.Success != w.success {
 			t.Errorf("record %d: Success = %v, want %v", i, ev.Data.Success, w.success)
+		}
+		if ev.Data.Failed != w.failed {
+			t.Errorf("record %d: Failed = %v, want %v", i, ev.Data.Failed, w.failed)
 		}
 		if ev.Data.Source != w.source {
 			t.Errorf("record %d: Source = %q, want %q", i, ev.Data.Source, w.source)
