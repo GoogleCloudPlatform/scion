@@ -317,15 +317,17 @@ run as the `scion` user (through `runuser`):
      consulted. Within 30 minutes of a switch, after two or more starts, a
      failed `systemctl stop` that exits non-zero can then roll back a
      release that ran fine.
-   - A failed `systemctl stop` that lands before the Hub's listener has
-     bound (during startup, for example while it runs database migrations)
-     can make a Hub exit non-zero. `verified` is not set yet, so within 30
-     minutes of the switch, if the release has started at least twice since
-     then and `previous_safe` is true, it is rolled back. The first boot
-     after a switch (a count of 1) is not affected. A Hub that exits 0 when
-     a requested shutdown interrupts its startup ends stopped, not failed,
-     so the guard never runs; the Go change on `scion/hu-p3-n1-go` makes
-     the Hub do that from Phase 3 releases on.
+   - A `systemctl stop` that lands while the target (the release `current`
+     points at, the one being started) is still starting up, before its
+     listener binds, for example during database migrations. Hub releases
+     that include this guard exit 0 when a requested shutdown interrupts
+     their startup, so the stop leaves the Hub stopped, not failed, and the
+     guard never runs. A target that predates the guard exits non-zero
+     instead and never marks its update verified or migrated, so within 30
+     minutes of switching to it, after two or more starts, the failed stop
+     is rolled back like a crash loop (a special case of the previous
+     release-older-than-the-update-state-contract case). The first boot
+     after a switch (a count of 1) is never rolled back.
 4. It refuses unless `/opt/scion/current` and `/opt/scion/previous` each
    resolve to a release directory directly inside `/opt/scion/releases/`,
    and `previous` contains a `scion` binary. A link that leaves `releases/`

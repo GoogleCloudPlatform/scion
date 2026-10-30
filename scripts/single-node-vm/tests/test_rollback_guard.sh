@@ -1,5 +1,5 @@
 # scripts/single-node-vm/tests/test_rollback_guard.sh -- covers the
-# boot-failure guard (design D1, Phase 3, ptone/scion#6009):
+# boot-failure guard (design D1, ptone/scion#6009):
 #   - scion-hub-rollback.sh run against a temporary install root with a
 #     stubbed systemctl that replays real unit states (systemd 249 and
 #     255 semantics): the failed-for-good gate, the inside-releases/

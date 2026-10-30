@@ -135,15 +135,16 @@
 #         unreadable, including no python3) verified is not consulted, so
 #         within the window, after 2+ starts, a failed non-zero stop of a
 #         release that ran fine is rolled back too;
-#     (d) a failed non-zero stop that lands before the hub's listener has
-#         bound (during startup, e.g. migrations; a hub that exits non-zero
-#         when a requested shutdown interrupts its startup) of a release
-#         that has started at least twice since its switch, within the
-#         window, with previous_safe true, is rolled back: verified is not
-#         set yet. The first boot after a switch (count 1) is safe. A hub
-#         that exits 0 when a requested shutdown interrupts startup ends
-#         inactive, not failed, so OnFailure never fires (the Go change on
-#         scion/hu-p3-n1-go does this for P3+ releases).
+#     (d) a stop that lands while the target -- the release current points
+#         at, the one being started -- is still starting up (before its
+#         listener binds, e.g. during migrations). Hub releases that
+#         include this guard exit 0 when a requested shutdown interrupts
+#         startup, so the stop ends inactive, not failed, and OnFailure
+#         never fires. A target that predates the guard exits non-zero
+#         instead and never sets verified or migrated, so within the window,
+#         after 2+ starts of it, the failed stop is rolled back like a
+#         crash (a special case of (b)). The first boot after a switch
+#         (count 1) is never rolled back.
 #   - Result=timeout (a stop that timed out) is never acted on.
 #   - A clean last exit (an update or Restart Hub exits on SIGTERM and
 #     systemd starts it again; or manual restarts) only restarts the hub,
