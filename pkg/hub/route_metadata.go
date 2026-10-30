@@ -946,6 +946,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "hub.conduit_grant_keys.execute", Resource: "hub", Action: "execute",
 		SessionOnly: authzop.ReasonCredentialManagement,
 	},
+	// Server key status (ptone/scion#1530 Phase 6), behind
+	// server.secret_rotation. Deliberately no registered permission: the
+	// guard falls back to requireAdmin, so only an unscoped platform admin
+	// on a session or dev credential reads it, and it cannot be delegated.
+	"/api/v1/admin/keys/status": {
+		Pattern: "/api/v1/admin/keys/status", RouteID: "admin.keys.status",
+		Classification: RouteHubAdmin,
+	},
 	// Bulk agent auth reset. Session only: a session-recovery route, like
 	// revoke-sessions.
 	"/api/v1/admin/agents/reset-auth-all": {
