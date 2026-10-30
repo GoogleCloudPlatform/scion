@@ -76,6 +76,45 @@ const TERMINAL_STATUSES = new Set([
 /** How long an agent avatar wobbles after a state change. */
 const WOBBLE_DURATION_MS = 3000;
 
+/** A foldable section of the members sidebar. */
+export type MembersSection = 'people' | 'agents';
+
+/**
+ * localStorage key for the folded members sections, scoped to the user like
+ * the space rail's thread-group collapse key (chat-space-rail.ts).
+ */
+const MEMBERS_COLLAPSE_STORAGE_KEY = 'scion-chat-members-collapse';
+
+function membersCollapseKey(userId: string): string {
+  return userId ? `${MEMBERS_COLLAPSE_STORAGE_KEY}:${userId}` : MEMBERS_COLLAPSE_STORAGE_KEY;
+}
+
+/**
+ * Read the folded sections. Missing or unavailable storage, a parse error or
+ * an unexpected shape fall back to nothing folded: folding is a nicety and
+ * must never hide the members list by accident.
+ */
+function loadCollapsedSections(userId: string): Set<MembersSection> {
+  try {
+    const raw = localStorage.getItem(membersCollapseKey(userId));
+    if (!raw) return new Set();
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((s): s is MembersSection => s === 'people' || s === 'agents'));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveCollapsedSections(userId: string, sections: Set<MembersSection>): void {
+  try {
+    localStorage.setItem(membersCollapseKey(userId), JSON.stringify([...sections]));
+  } catch {
+    // Storage unavailable (private browsing) or full: the fold just won't
+    // survive a reload this time.
+  }
+}
+
 /** A human member from the GET /chat/spaces/{id}/members endpoint. */
 export interface ChatHumanMember {
   id: string;
@@ -194,6 +233,11 @@ export class ScionChatMembers extends LitElement {
   /** Sort mode: 'alpha' sorts A-Z by display name, 'activity' sorts by recent activity. */
   @state() private memberSort: 'alpha' | 'activity' = 'alpha';
 
+  /** Sections folded down to their heading, persisted per user. */
+  @state() private collapsedSections = new Set<MembersSection>();
+  /** The `currentUserId` that `collapsedSections` was last restored for. */
+  private _collapseRestoredFor: string | null = null;
+
   /** Agent IDs that recently changed state — drives wobble animation. */
   @state() private recentlyChangedAgents = new Set<string>();
   /** Timers for clearing the recently-changed state after WOBBLE_DURATION_MS. */
@@ -243,6 +287,47 @@ export class ScionChatMembers extends LitElement {
       text-transform: uppercase;
       letter-spacing: 0.05em;
       color: var(--scion-text-muted, #94a3b8);
+    }
+
+    /* A foldable section heading, styled like the plain label. */
+    .section-toggle {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      width: 100%;
+      border: none;
+      background: none;
+      font-family: inherit;
+      text-align: left;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .section-toggle:hover {
+      color: var(--scion-text, #1e293b);
+    }
+
+    .section-toggle:focus-visible {
+      outline: 2px solid var(--scion-primary, #3b82f6);
+      outline-offset: -2px;
+    }
+
+    .section-toggle .chevron {
+      transition: transform 0.15s;
+      font-size: 0.625rem;
+      flex-shrink: 0;
+    }
+
+    .section-toggle .chevron.collapsed {
+      transform: rotate(-90deg);
+    }
+
+    .section-unread-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--scion-primary, #3b82f6);
+      flex-shrink: 0;
     }
 
     .member-item {
@@ -540,6 +625,44 @@ export class ScionChatMembers extends LitElement {
     // The search belongs to the bounded list it was typed over: a view
     // without one (a space) drops it, and so starts clean when it returns.
     if (changedProps.has('humansTruncated') && !this.humansTruncated) this.peopleQuery = '';
+    if (this._collapseRestoredFor !== this.currentUserId) {
+      this._collapseRestoredFor = this.currentUserId;
+      this.collapsedSections = loadCollapsedSections(this.currentUserId);
+    }
+  }
+
+  /** Fold or unfold a section and remember the choice. */
+  private toggleSection(section: MembersSection): void {
+    const next = new Set(this.collapsedSections);
+    if (next.has(section)) next.delete(section);
+    else next.add(section);
+    this.collapsedSections = next;
+    saveCollapsedSections(this.currentUserId, next);
+  }
+
+  /**
+   * The heading of a foldable section: a button showing the count, with an
+   * unread dot while folded so a folded section never hides new messages.
+   */
+  private renderSectionHeader(
+    section: MembersSection,
+    label: string,
+    unread: boolean
+  ): TemplateResult {
+    const collapsed = this.collapsedSections.has(section);
+    return html`<button
+      type="button"
+      class="section-label section-toggle"
+      data-section=${section}
+      aria-expanded=${collapsed ? 'false' : 'true'}
+      @click=${() => this.toggleSection(section)}
+    >
+      <sl-icon name="chevron-down" class="chevron ${collapsed ? 'collapsed' : ''}"></sl-icon>
+      <span>${label}</span>
+      ${collapsed && unread
+        ? html`<span class="section-unread-dot" aria-label="Unread messages"></span>`
+        : nothing}
+    </button>`;
   }
 
   override updated(changedProps: PropertyValues): void {
@@ -777,7 +900,7 @@ export class ScionChatMembers extends LitElement {
 
   /** The people search box, shown while the people list is a bounded page. */
   private renderPeopleSearch(): TemplateResult | typeof nothing {
-    if (!this.humansTruncated) return nothing;
+    if (!this.humansTruncated || this.collapsedSections.has('people')) return nothing;
     return html`
       <div class="people-search">
         <input
@@ -838,10 +961,16 @@ export class ScionChatMembers extends LitElement {
       return a.displayName.localeCompare(b.displayName);
     });
 
+    const unread = visible.some((m) => this.unreadFromIds.includes(m.id));
+    const header = this.renderSectionHeader('people', `People — ${sorted.length}`, unread);
+
     // The wrapper only groups the people part (it carries no styles), so it
     // can be told apart from the agents part.
+    if (this.collapsedSections.has('people')) {
+      return html`<div class="people-section">${header}</div>`;
+    }
     return html`<div class="people-section">
-      <div class="section-label">People — ${sorted.length}</div>
+      ${header}
       ${sorted.length === 0
         ? html`<div class="empty-note" role="status">
             ${query ? (this.searching ? 'Searching…' : 'No matches') : 'No members'}
@@ -921,8 +1050,12 @@ export class ScionChatMembers extends LitElement {
     const rest = defaultAgent ? agents.filter((a) => a !== defaultAgent) : agents;
     const sortedRest = this.sortAgents(rest);
 
+    const unread = agents.some((a) => this.unreadFromIds.includes(a.id));
+    const header = this.renderSectionHeader('agents', `Agents — ${agents.length}`, unread);
+    if (this.collapsedSections.has('agents')) return header;
+
     return html`
-      <div class="section-label">Agents — ${agents.length}</div>
+      ${header}
       ${agents.length === 0
         ? html`<div class="empty-note">No agents</div>`
         : html`
