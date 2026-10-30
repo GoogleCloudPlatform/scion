@@ -53,7 +53,12 @@ import (
 // UpdateEncryptionMigration) in a WithTx transaction that has already run
 // a fenced write is refused with store.ErrPolicyTransitionAfterFencedWrite.
 // A transition may still precede fenced writes or other transitions in
-// the same transaction, which then see the new policy.
+// the same transaction, which then see the new policy. Transitions are
+// not refused in every caller-supplied transaction, because a policy
+// change and its migration record must be able to commit together (for
+// example creating the migration in the same short transition, or marking
+// the migration and the policy verified at once). Refusing only after a
+// fenced write closes the hazard above and keeps that possible.
 
 // encryptionPolicyID is the singleton policy row's ID.
 const encryptionPolicyID = 1
