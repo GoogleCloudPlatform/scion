@@ -254,6 +254,12 @@ func TestSQLiteSnapshotter_ExistingPartialFails(t *testing.T) {
 	if err := os.WriteFile(partial, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// In use: written "now" by the injected clock, so stale-partial pruning
+	// keeps it and the exclusive create is what fails.
+	inUse := time.Date(2026, 10, 29, 7, 1, 0, 0, time.UTC)
+	if err := os.Chtimes(partial, inUse, inUse); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.Snapshot(context.Background(), "nightly-20261023", &bytes.Buffer{}); !errors.Is(err, os.ErrExist) {
 		t.Fatalf("err = %v, want ErrExist", err)
 	}
@@ -265,12 +271,28 @@ func TestSQLiteSnapshotter_ExistingPartialFails(t *testing.T) {
 func TestSQLiteSnapshotter_StalePartialsFreedBeforeDiskCheck(t *testing.T) {
 	db := openSnapshotTestDB(t)
 	dir := t.TempDir()
+	// snapshotTestClock's first reading, which Snapshot takes once for the
+	// stale-partial cutoff and the snapshot name. File times are set
+	// relative to it, not to the wall clock, so the test depends on
+	// Snapshot using the injected clock (Gemini review on #4371).
+	clockNow := time.Date(2026, 10, 29, 7, 1, 0, 0, time.UTC)
 	stale := filepath.Join(dir, "hub-nightly-20261020-20261028T060000Z.db"+snapshotPartialSuffix)
 	if err := os.WriteFile(stale, bytes.Repeat([]byte("x"), 4096), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	old := time.Now().Add(-2 * time.Hour)
+	old := clockNow.Add(-2 * time.Hour)
 	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	// Ten minutes old by the injected clock (about a day old by the wall
+	// clock): possibly in use, so it must be kept. A snapshotter reading
+	// the wall clock would remove it.
+	fresh := filepath.Join(dir, "settings-20261029T065100Z.yaml"+snapshotPartialSuffix)
+	if err := os.WriteFile(fresh, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recent := clockNow.Add(-10 * time.Minute)
+	if err := os.Chtimes(fresh, recent, recent); err != nil {
 		t.Fatal(err)
 	}
 	var staleAtCheck bool
@@ -286,6 +308,9 @@ func TestSQLiteSnapshotter_StalePartialsFreedBeforeDiskCheck(t *testing.T) {
 	}
 	if staleAtCheck {
 		t.Fatal("the stale partial still existed at the free-space check")
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatalf("a partial that is fresh by the injected clock was removed: %v", err)
 	}
 	for _, want := range []string{"Removed a leftover partial snapshot", "Writing a database snapshot of", "busy until it completes"} {
 		if !strings.Contains(log.String(), want) {

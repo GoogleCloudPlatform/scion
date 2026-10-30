@@ -188,7 +188,10 @@ func (s *SQLiteSnapshotter) Snapshot(ctx context.Context, fromVersion string, lo
 	if err := os.MkdirAll(s.dir, 0o700); err != nil {
 		return "", fmt.Errorf("create snapshot directory %s: %w", s.dir, err)
 	}
-	removed, err := pruneStalePartials(s.dir, time.Now())
+	// One reading of the injected clock dates both the stale-partial
+	// cutoff and the snapshot's name.
+	now := s.now()
+	removed, err := pruneStalePartials(s.dir, now)
 	for _, name := range removed {
 		_, _ = fmt.Fprintf(logger, "Removed a leftover partial snapshot %s\n", name)
 	}
@@ -209,7 +212,7 @@ func (s *SQLiteSnapshotter) Snapshot(ctx context.Context, fromVersion string, lo
 			free, s.dir, need, size, s.dir)
 	}
 
-	ts := s.now().UTC().Format(snapshotTimeFormat)
+	ts := now.UTC().Format(snapshotTimeFormat)
 	dbPath := filepath.Join(s.dir, dbSnapshotPrefix+snapshotVersionLabel(fromVersion)+"-"+ts+dbSnapshotSuffix)
 	_, _ = fmt.Fprintf(logger, "Writing a database snapshot of %d bytes; the hub's database is busy until it completes.\n", size)
 	start := time.Now()
