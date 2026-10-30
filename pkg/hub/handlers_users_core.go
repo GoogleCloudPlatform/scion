@@ -261,10 +261,11 @@ func stripPreferencesForViewer(ctx context.Context, u *store.User, cap *Capabili
 // ---------------------------------------------------------------------------
 // Credential boundary enforcement (R4-C5)
 //
-// User mutation endpoints (PATCH, DELETE) require an interactive session JWT
-// or dev credential, except that PATCH admits a user access token for the
-// fields updateUserTokenFields allows. Broker, agent and federation
-// credentials, and a token on DELETE, are rejected at the boundary by
+// User mutation endpoints (PATCH, DELETE) and the deletion reads
+// (delete-blockers, deletion) require an interactive session JWT or dev
+// credential, or a user access token: PATCH for the fields
+// updateUserTokenFields allows, the others with user:delete. Broker, agent
+// and federation credentials are rejected at the boundary by
 // requireSessionCredentialFor (session_only_gate.go), which reports the
 // session-only reason.
 // ---------------------------------------------------------------------------
@@ -329,12 +330,13 @@ func (s *Server) sessionOrUserTokenCredential(w http.ResponseWriter, ctx context
 const userCrossProfileDenialMessage = "requires user.update permission to modify another user's profile"
 
 // userPatchTokenRefusalMessage is the refusal message of a PATCH of
-// another user by a token that may use neither user.update nor
-// user.suspend on that user.
-const userPatchTokenRefusalMessage = "requires user.update or user.suspend permission to modify another user"
+// another user by a token that may use none of user.update, user.suspend
+// and user.promote on that user.
+const userPatchTokenRefusalMessage = "requires user.update, user.suspend or user.promote permission to modify another user"
 
 // tokenMayUpdateUser reports whether the token identity actor may use
-// user.update or user.suspend on the hub-level record of user id. Each
+// user.update, user.suspend or user.promote on the hub-level record of
+// user id. Each
 // permission is one authorization decision (Decide, which audits a deny),
 // evaluated on the token identity, so the holder's current authority and
 // the token's selectors and boundary all apply. The decision uses only the
@@ -348,6 +350,7 @@ func (s *Server) tokenMayUpdateUser(ctx context.Context, actor UserIdentity, id 
 	}{
 		{Action("update"), "user.update"},
 		{Action("suspend"), "user.suspend"},
+		{Action("promote"), "user.promote"},
 	} {
 		decision := s.authzService.Decide(ctx, AuthzRequest{
 			Principal:  principalContextForIdentity(actor),
@@ -364,8 +367,8 @@ func (s *Server) tokenMayUpdateUser(ctx context.Context, actor UserIdentity, id 
 }
 
 // writeUserPatchTokenRefusal writes the refusal of PATCH
-// /api/v1/users/{id} for a token that may use neither user.update nor
-// user.suspend on another user's id. Its status, code, message and
+// /api/v1/users/{id} for a token that may use none of user.update,
+// user.suspend and user.promote on another user's id. Its status, code, message and
 // details are the same for every such token and every id.
 func writeUserPatchTokenRefusal(w http.ResponseWriter) {
 	writeForbiddenStructured(w, userPatchTokenRefusalMessage, "user", Action("update"))
@@ -373,21 +376,16 @@ func writeUserPatchTokenRefusal(w http.ResponseWriter) {
 
 // updateUserTokenFields applies the field rules of PATCH
 // /api/v1/users/{id} for a user access token, before any permission check
-// or write. It writes the refusal and returns false when:
-//   - the body names role: a role change is session-only (GOV_PENDING);
-//   - the path names the token holder's own record and the body names a
-//     profile field, or no status field: the caller's own profile is
-//     session-only (INTERACTIVE_STATE).
+// or write. It writes the refusal and returns false when the path names the
+// token holder's own record and the body names a profile field, or no
+// status field: the caller's own record is session-only
+// (INTERACTIVE_STATE), its role included.
 //
 // A status field on the holder's own record passes here and is refused by
-// the self-status guard after its user.suspend check.
+// the self-status guard after its user.suspend check. A role field on
+// another user's record passes here and is checked by
+// checkUserPromotePermission.
 func updateUserTokenFields(w http.ResponseWriter, updates userPatchPayload, prefsPatch *userPreferencesPatch, isSelf bool) bool {
-	if updates.Role != nil {
-		writeSessionOnlyDenial(w, ErrCodeForbidden,
-			"changing a user's role requires an interactive session",
-			authzop.ReasonGovernancePending)
-		return false
-	}
 	profile := updates.DisplayName != nil || prefsPatch != nil || updates.Status == nil
 	if isSelf && profile {
 		writeSessionOnlyDenial(w, ErrCodeForbidden,
@@ -408,12 +406,15 @@ func updateUserTokenFields(w http.ResponseWriter, updates userPatchPayload, pref
 //
 // A user access token is checked on the hub-level user record
 // (hubScopedResource): status needs user:suspend, another user's profile
-// needs user:update, and a token PATCH that names no status field is
-// checked as a profile update. A token PATCH that names role, or that
-// changes its holder's own profile, is refused (updateUserTokenFields). A
-// token PATCH of another user by a token that may use neither user:update
-// nor user:suspend gets one refusal for every id
-// (writeUserPatchTokenRefusal).
+// needs user:update, role needs user:promote, and a token PATCH that names
+// neither status nor role is checked as a profile update. The role field
+// keeps CanDelegate for super-admin bindings, which a token never passes
+// (enforceUATDelegation denies system-scoped grants), and the
+// last-super-admin, self-demotion, invited-user and binding-drift guards.
+// A token PATCH that changes its holder's own record other than its status
+// is refused (updateUserTokenFields). A token PATCH of another user by a
+// token that may use none of user:update, user:suspend and user:promote
+// gets one refusal for every id (writeUserPatchTokenRefusal).
 //
 // A mixed PATCH must hold ALL required permissions before any write.
 // Unknown JSON fields are rejected. ALL mutations (bindings + User record +
@@ -482,9 +483,9 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	if !ok {
 		return
 	}
-	// A token on another user's id needs user.update or user.suspend on
-	// that user before the record is read; otherwise it gets one fixed
-	// refusal for every id and body.
+	// A token on another user's id needs user.update, user.suspend or
+	// user.promote on that user before the record is read; otherwise it
+	// gets one fixed refusal for every id and body.
 	if token != nil && actor.ID() != id && !s.tokenMayUpdateUser(ctx, actor, id) {
 		writeUserPatchTokenRefusal(w)
 		return
@@ -612,8 +613,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 
 	isSelf := actor.ID() == user.ID
 
-	// Token field rules run before the field values are validated, so a
-	// token's role field is refused whatever its value.
+	// Token field rules run before the field values are validated.
 	if token != nil && !updateUserTokenFields(w, updates, prefsPatch, isSelf) {
 		return
 	}
@@ -658,9 +658,10 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	needsUpdate := updates.DisplayName != nil || prefsPatch != nil
 
 	needsCrossUserUpdate := needsUpdate && !isSelf
-	// A token PATCH of another user that names no status field is checked
-	// as a profile update, so it needs user:update even with no field set.
-	if token != nil && !isSelf && !needsSuspend {
+	// A token PATCH of another user that names neither status nor role is
+	// checked as a profile update, so it needs user:update even with no
+	// field set.
+	if token != nil && !isSelf && !needsSuspend && !needsPromote {
 		needsCrossUserUpdate = true
 	}
 
@@ -699,7 +700,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	}
 
 	if needsPromote {
-		if err := s.checkUserPromotePermission(ctx, w, actor, user, *updates.Role, preAuthBindingState); err != nil {
+		if err := s.checkUserPromotePermission(ctx, w, actor, userTarget, *updates.Role, preAuthBindingState); err != nil {
 			return
 		}
 	}
@@ -910,7 +911,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		if errors.Is(err, errLastSuperAdmin) || errors.Is(err, errSelfDemotion) || errors.Is(err, errRoleOnInvitedUser) || errors.Is(err, errActivateInvitedUser) || errors.Is(err, errRoleOnTestFixture) {
 			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), nil)
 		} else if errors.Is(err, errBindingStateDrift) {
-			writeError(w, http.StatusConflict, "binding_state_drift", err.Error(), nil)
+			writeBindingStateDrift(w, err)
 		} else {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"user update failed: "+err.Error(), nil)
@@ -998,17 +999,19 @@ func (s *Server) superAdminBindingStateForUser(
 	return state, nil
 }
 
-// checkUserPromotePermission verifies the actor has user.promote + CanDelegate
-// authority for the role transition. Writes HTTP error and returns non-nil on failure.
+// checkUserPromotePermission verifies the actor has user.promote on target
+// (the user record, or for a token the hub-level user record) and
+// CanDelegate authority for the role transition. Writes HTTP error and
+// returns non-nil on failure.
 func (s *Server) checkUserPromotePermission(
 	ctx context.Context, w http.ResponseWriter,
-	actor UserIdentity, user *store.User, newRole string,
+	actor UserIdentity, target Resource, newRole string,
 	bindingState superAdminBindingState,
 ) error {
 	decision := s.authzService.Decide(ctx, AuthzRequest{
 		Principal:  principalContextForIdentity(actor),
 		Credential: credentialContextForIdentity(actor),
-		Resource:   Resource{Type: "user", ID: user.ID},
+		Resource:   target,
 		Action:     Action("promote"),
 		Permission: "user.promote",
 	})
@@ -1344,7 +1347,17 @@ func (s *Server) checkLastSuperAdminTx(
 // ---------------------------------------------------------------------------
 // DELETE /api/v1/users/{id} — user deletion (R3/R4)
 //
-// Authorization: requires user.delete permission via session credential.
+// Authorization: requires user.delete permission via session credential,
+// or via a user access token with user:delete on a hub boundary, checked
+// on the hub-level user record. A token is refused while the user holds a
+// direct system-scope role binding of any lifecycle state other than the
+// canonical hub-viewer binding of a viewer
+// (refuseTokenDeleteOfSystemBindingHolder, 403 with details.reason
+// system_role_binding_held). Inside the transaction the rule is judged
+// again on the exact bindings the cascade deletes
+// (tokenDeleteBindingsCheck), which answers 409 conflict with
+// details.reason binding_state_drift. A token's forced delete follows the
+// same rules.
 // Guards: self-deletion and last-active-super-admin are prevented based on
 // bindings (not User.Role). All operations — last-admin check, skill cleanup,
 // user deletion, and audit — execute in a single atomic transaction (R4-C2).
@@ -1362,7 +1375,7 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
 	// Credential boundary + identity check (R4-C5).
-	actor, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending)
+	actor, token, ok := s.sessionOrUserTokenCredential(w, ctx, authzop.ReasonGovernancePending)
 	if !ok {
 		return
 	}
@@ -1377,15 +1390,7 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 	}
 
 	// Authorization: require user.delete permission.
-	decision := s.authzService.Decide(ctx, AuthzRequest{
-		Principal:  principalContextForIdentity(actor),
-		Credential: credentialContextForIdentity(actor),
-		Resource:   Resource{Type: "user", ID: id},
-		Action:     Action("delete"),
-		Permission: "user.delete",
-	})
-	if !decision.Allowed {
-		writeForbiddenStructured(w, "requires user.delete permission", "user", Action("delete"))
+	if !s.authorizeUserDelete(ctx, w, actor, token, id) {
 		return
 	}
 
@@ -1409,16 +1414,28 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
+	// A token may not delete a user holding a direct system-scope role
+	// binding other than its role's canonical representation.
+	if token != nil && s.refuseTokenDeleteOfSystemBindingHolder(ctx, w, user) {
+		return
+	}
+
 	// A forced delete of a user whom agents or delegations depend on
 	// revokes and records a tombstone instead (forceDeleteUser); with
 	// nothing blocking, it falls through to the plain delete.
-	if force && s.forceDeleteUser(w, r, actor, user, superAdminRD) {
+	if force && s.forceDeleteUser(w, r, actor, token != nil, user, superAdminRD) {
 		return
 	}
 
 	auditActor := s.buildAuditActorFromContext(ctx)
 
 	// Execute everything in a single atomic transaction (R4-C2).
+	// For a token, the cascade judges the system-binding rule on the
+	// bindings it deletes.
+	var bindingsCheck userBindingsCheck
+	if token != nil {
+		bindingsCheck = tokenDeleteBindingsCheck
+	}
 	err = s.store.WithTx(ctx, func(tx store.Store) error {
 		// Last-admin guard based on bindings, not User.Role (R4-C2).
 		if err := s.checkLastSuperAdminTx(ctx, tx, user.ID, superAdminRD); err != nil {
@@ -1430,9 +1447,9 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 			return err
 		}
 
-		// Agent guard, binding cascade, skill injections, group
-		// memberships and the user row (deleteUserRowCascadeTx).
-		if err := deleteUserRowCascadeTx(ctx, tx, user.ID, s.membershipNow()); err != nil {
+		// Agent guard, binding cascade (with the token rule for a
+		// token), skill injections, group memberships and the user row.
+		if err := deleteUserRowCascadeModeTx(ctx, tx, user.ID, s.membershipNow(), false, bindingsCheck); err != nil {
 			return err
 		}
 
@@ -1456,6 +1473,12 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 		if errors.Is(err, errLastSuperAdmin) {
 			writeError(w, http.StatusConflict, ErrCodeConflict,
 				"cannot delete the last super-admin; promote another user first", nil)
+		} else if errors.Is(err, errBindingStateDrift) {
+			writeBindingStateDrift(w, err)
+		} else if errors.Is(err, errDeleteTargetMissing) {
+			// Only the user itself gone by the transaction is a 404; a
+			// not-found from any other read keeps the 500 below.
+			NotFound(w, "User")
 		} else if !writeConstraintAdminLockoutError(w, err) && !writeUserDeleteCascadeError(w, err) {
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"user deletion failed: "+err.Error(), nil)
@@ -1471,8 +1494,9 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 // ---------------------------------------------------------------------------
 // GET /api/v1/users/{id}/delete-blockers — what blocks a user deletion
 //
-// Authorization: the same as DELETE /api/v1/users/{id} (session credential,
-// then user.delete on the user). It returns the lists a plain delete would
+// Authorization: the same as DELETE /api/v1/users/{id} (a session
+// credential with user.delete on the user, or a user access token with
+// user:delete on the hub-level user record). It returns the lists a plain delete would
 // refuse with (listUserDeleteBlockers): {agents, edges, truncated}, each
 // list capped. It reads outside a transaction, takes no lock and writes
 // nothing, so a delete can find a blocker added after the listing.
@@ -1481,19 +1505,11 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 func (s *Server) getUserDeleteBlockers(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
-	actor, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending)
+	actor, token, ok := s.sessionOrUserTokenCredential(w, ctx, authzop.ReasonGovernancePending)
 	if !ok {
 		return
 	}
-	decision := s.authzService.Decide(ctx, AuthzRequest{
-		Principal:  principalContextForIdentity(actor),
-		Credential: credentialContextForIdentity(actor),
-		Resource:   Resource{Type: "user", ID: id},
-		Action:     Action("delete"),
-		Permission: "user.delete",
-	})
-	if !decision.Allowed {
-		writeForbiddenStructured(w, "requires user.delete permission", "user", Action("delete"))
+	if !s.authorizeUserDelete(ctx, w, actor, token, id) {
 		return
 	}
 
@@ -1536,6 +1552,144 @@ type userDeleteBlockersResponse struct {
 	InProgress *userDeletionRef `json:"inProgress,omitempty"`
 }
 
+// authorizeUserDelete decides user.delete for DELETE /api/v1/users/{id} and
+// its deletion reads, on the user record for a session and on the
+// hub-level user record (hubScopedResource) for a user access token
+// (token non-nil). The decision uses only the path id, so its outcome is
+// the same whether or not user id exists. It writes the refusal and
+// returns false when the permission is denied.
+func (s *Server) authorizeUserDelete(ctx context.Context, w http.ResponseWriter, actor UserIdentity, token *ScopedUserIdentity, id string) bool {
+	target := Resource{Type: "user", ID: id}
+	if token != nil {
+		target = hubScopedResource("user", id)
+	}
+	decision := s.authzService.Decide(ctx, AuthzRequest{
+		Principal:  principalContextForIdentity(actor),
+		Credential: credentialContextForIdentity(actor),
+		Resource:   target,
+		Action:     Action("delete"),
+		Permission: "user.delete",
+	})
+	if !decision.Allowed {
+		writeForbiddenStructured(w, "requires user.delete permission", "user", Action("delete"))
+		return false
+	}
+	return true
+}
+
+// userDeleteSystemBindingReason is the details.reason of the refusal of a
+// token's user delete while the user holds a direct system-scope role
+// binding.
+const userDeleteSystemBindingReason = "system_role_binding_held"
+
+// tokenRefusedSystemBinding reports whether bindings, the direct role
+// bindings of user of any lifecycle state (active, scheduled or expired),
+// hold a system-scope binding other than the canonical representation of
+// the user's role: the unconditional hub-viewer binding of a user whose
+// role is viewer (syncHubRoleGrantsTx). The role is governed by
+// user.promote, not conferred as a separate grant; the hub-members group
+// membership that represents the member role is not a role binding of the
+// user.
+func tokenRefusedSystemBinding(ctx context.Context, st store.Store, user *store.User, bindings []*store.RoleBinding) (bool, error) {
+	var hubViewerID string
+	for _, b := range bindings {
+		if b.ScopeType != store.RoleScopeSystem {
+			continue
+		}
+		if user.Role == store.UserRoleViewer && b.NotBefore == nil && b.ExpiresAt == nil {
+			if hubViewerID == "" {
+				rd, err := st.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
+				if err != nil {
+					return false, fmt.Errorf("hub-viewer role definition lookup: %w", err)
+				}
+				if rd == nil {
+					return false, fmt.Errorf("hub-viewer role definition not found")
+				}
+				hubViewerID = rd.ID
+			}
+			if b.RoleDefinitionID == hubViewerID {
+				continue
+			}
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// userHoldsSystemRoleBinding reports whether user holds a direct
+// system-scope role binding that tokenRefusedSystemBinding refuses.
+func userHoldsSystemRoleBinding(ctx context.Context, st store.Store, user *store.User) (bool, error) {
+	bindings, err := st.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, user.ID)
+	if err != nil {
+		return false, fmt.Errorf("list bindings for user: %w", err)
+	}
+	return tokenRefusedSystemBinding(ctx, st, user, bindings)
+}
+
+// refuseTokenDeleteOfSystemBindingHolder applies the user delete rule for
+// a user access token: a token confers and removes no system-scope grant
+// beyond the representation of the role that user.promote governs, so it
+// may not delete a user who holds any other direct system-scope role
+// binding of any lifecycle state (userHoldsSystemRoleBinding), whose
+// bindings the delete removes. It writes 403 forbidden with details.reason
+// system_role_binding_held, or a 500 when the bindings cannot be read, and
+// returns true when it wrote a response.
+func (s *Server) refuseTokenDeleteOfSystemBindingHolder(ctx context.Context, w http.ResponseWriter, user *store.User) bool {
+	held, err := userHoldsSystemRoleBinding(ctx, s.store, user)
+	if err != nil {
+		slog.ErrorContext(ctx, "user delete: list role bindings failed", "user_id", user.ID, "error", err)
+		InternalError(w)
+		return true
+	}
+	if !held {
+		return false
+	}
+	writeError(w, http.StatusForbidden, ErrCodeForbidden,
+		"a user access token cannot delete a user who holds a system-scope role binding",
+		map[string]interface{}{"reason": userDeleteSystemBindingReason})
+	return true
+}
+
+// userBindingsCheck judges a user's role bindings inside a delete
+// transaction: bindings are exactly the bindings
+// guardAndCascadeUserRoleBindingsCheckTx lists and then deletes, read after
+// the user row is locked. A non-nil error aborts the delete.
+type userBindingsCheck func(ctx context.Context, tx store.Store, userID string, bindings []*store.RoleBinding) error
+
+// tokenDeleteBindingsCheck is the user delete rule for a user access token
+// (refuseTokenDeleteOfSystemBindingHolder), judged on the bindings the
+// cascade deletes: it returns errBindingStateDrift when they hold a
+// system-scope binding the rule refuses, so a token delete never removes
+// such a binding. It reads the user in tx, under the user row lock that
+// the delete holds, so the role it judges the hub-viewer binding against
+// cannot change before the delete commits.
+func tokenDeleteBindingsCheck(ctx context.Context, tx store.Store, userID string, bindings []*store.RoleBinding) error {
+	user, err := tx.GetUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+	refused, err := tokenRefusedSystemBinding(ctx, tx, user, bindings)
+	if err != nil {
+		return err
+	}
+	if refused {
+		return errBindingStateDrift
+	}
+	return nil
+}
+
+// bindingStateDriftReason is the details.reason of the 409 conflict that a
+// role change or a token's user delete answers when the user's role
+// bindings changed after the authorization check.
+const bindingStateDriftReason = "binding_state_drift"
+
+// writeBindingStateDrift writes the 409 conflict for errBindingStateDrift,
+// with details.reason binding_state_drift.
+func writeBindingStateDrift(w http.ResponseWriter, err error) {
+	writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(),
+		map[string]interface{}{"reason": bindingStateDriftReason})
+}
+
 // deleteUserRowCascadeTx deletes the user row of userID and what hangs off
 // it, inside the caller's transaction. It is the part of a user deletion
 // shared by DELETE /api/v1/users/{id} and DELETE
@@ -1554,14 +1708,16 @@ type userDeleteBlockersResponse struct {
 // errors with writeUserDeleteCascadeError, and calls afterUserDeleted once
 // the transaction commits.
 func deleteUserRowCascadeTx(ctx context.Context, tx store.Store, userID string, at time.Time) error {
-	return deleteUserRowCascadeModeTx(ctx, tx, userID, at, false)
+	return deleteUserRowCascadeModeTx(ctx, tx, userID, at, false, nil)
 }
 
 // deleteUserRowCascadeModeTx is deleteUserRowCascadeTx. completing is set
 // only by the completion of a forced deletion (completeUserDeletion),
 // which deletes a user whose status is deleting; every other caller
-// refuses such a user with *userDeletionInProgressError.
-func deleteUserRowCascadeModeTx(ctx context.Context, tx store.Store, userID string, at time.Time, completing bool) error {
+// refuses such a user with *userDeletionInProgressError. A non-nil check
+// judges the bindings the cascade deletes before any is deleted
+// (guardAndCascadeUserRoleBindingsCheckTx).
+func deleteUserRowCascadeModeTx(ctx context.Context, tx store.Store, userID string, at time.Time, completing bool, check userBindingsCheck) error {
 	// Refuse while agents or active delegations depend on the user
 	// (ptone/scion#2769, ptone/scion#2143), or while a forced deletion
 	// of the user is in progress.
@@ -1575,7 +1731,7 @@ func deleteUserRowCascadeModeTx(ctx context.Context, tx store.Store, userID stri
 	// user's bindings that commits before the cascade aborts the
 	// delete with 409 conflict (a concurrent revoke does not; residual
 	// race: ptone/scion#2769).
-	if err := guardAndCascadeUserRoleBindingsTx(ctx, tx, userID, at); err != nil {
+	if err := guardAndCascadeUserRoleBindingsCheckTx(ctx, tx, userID, at, check); err != nil {
 		return err
 	}
 
@@ -1744,9 +1900,25 @@ func writeLastProjectOwnerDeleteError(w http.ResponseWriter, e *lastProjectOwner
 // project. role_bindings.principal_id has no foreign key, so without the
 // cascade the bindings would dangle after the user is deleted.
 func guardAndCascadeUserRoleBindingsTx(ctx context.Context, tx store.Store, userID string, now time.Time) error {
+	return guardAndCascadeUserRoleBindingsCheckTx(ctx, tx, userID, now, nil)
+}
+
+// guardAndCascadeUserRoleBindingsCheckTx is guardAndCascadeUserRoleBindingsTx
+// with a check of the listed bindings. A non-nil check runs on exactly the
+// bindings this function then deletes by ID, before any is deleted; its
+// error aborts the delete. A binding added after the list is never deleted:
+// the predicate delete below finds it and aborts the delete with
+// errUserRoleBindingsChanged, or, when it commits after that statement, it
+// is left in place.
+func guardAndCascadeUserRoleBindingsCheckTx(ctx context.Context, tx store.Store, userID string, now time.Time, check userBindingsCheck) error {
 	bindings, err := tx.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
 	if err != nil {
 		return fmt.Errorf("list role bindings: %w", err)
+	}
+	if check != nil {
+		if err := check(ctx, tx, userID, bindings); err != nil {
+			return err
+		}
 	}
 
 	var ownerProjectIDs []string

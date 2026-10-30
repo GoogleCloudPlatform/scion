@@ -604,11 +604,14 @@ BROKER_RESERVATION_TRANSFER_POSTGRES_TESTS := TestMoveBrokerQuota_SourceAtCapTar
 # USER_DELETION_POSTGRES_TESTS are the forced user delete concurrency tests
 # (ptone/scion#2143): a restore racing the delete request, a restore racing
 # the completion, two hub processes completing one deletion, and a finalize
-# racing the completion's reopen of a blocking agent.
+# racing the completion's reopen of a blocking agent; and a token's user
+# delete refused in its transaction for a system-scope binding the
+# pre-check did not see.
 USER_DELETION_POSTGRES_TESTS := TestForceDeleteUser_RestoreRacesRequest_Postgres \
 	TestForceDeleteUser_RestoreRacesCompletion_Postgres \
 	TestForceDeleteUser_TwoReconcilersOneCompletion_Postgres \
-	TestForceDeleteUser_FinalizeRacesCompletionReopen_Postgres
+	TestForceDeleteUser_FinalizeRacesCompletionReopen_Postgres \
+	TestUserDeleteToken_InTransactionBindingRefused_Postgres
 
 # HUB_INTEGRATION_POSTGRES_TESTS are the pkg/hub Postgres tests that need
 # -tags integration (the integration TestMain sets up the ent test

@@ -59,11 +59,15 @@ import (
 // in progress joins it: no new write, 202 with the same resource. With no
 // blocker at all, force behaves as a plain delete (204).
 
-// userDeletionRequesterKind and userDeletionCredentialKind are the only
-// requester kinds in this version: a user with a session credential.
+// userDeletionRequesterKind is the only requester kind in this version, a
+// user. userDeletionCredentialKind is the credential kind of a deletion a
+// session requested, userDeletionTokenCredentialKind that of one a user
+// access token requested; the completion of the latter applies the token's
+// system-binding rule (completeUserDeletion).
 const (
-	userDeletionRequesterKind  = "user"
-	userDeletionCredentialKind = "session"
+	userDeletionRequesterKind       = "user"
+	userDeletionCredentialKind      = store.InitiatorCredentialKindSession
+	userDeletionTokenCredentialKind = store.InitiatorCredentialKindUAT
 )
 
 // errUserDeleteBlockersChanged is returned by the forced delete transaction
@@ -119,11 +123,15 @@ func (s *Server) forceUserDeletionEnabled(r *http.Request) bool {
 }
 
 // forceDeleteUser serves DELETE /api/v1/users/{id}?force=true after the
-// shared guards (session credential, self-delete, user.delete, the user
-// read). It reports false, having written nothing, when nothing blocks the
+// shared guards (session credential or user access token, self-delete,
+// user.delete, the user read, and for a token the system-scope binding
+// rule). It reports false, having written nothing, when nothing blocks the
 // deletion and no deletion is in progress: the caller then runs the plain
-// delete.
-func (s *Server) forceDeleteUser(w http.ResponseWriter, r *http.Request, actor UserIdentity, user *store.User, superAdminRD *store.RoleDefinition) bool {
+// delete. byToken is set for a user access token: the agent.delete checks
+// are decided on the token identity, the system-scope binding rule is
+// judged again on the bindings the cascade deletes (forceDeleteUserTx), and
+// the deletion records the token credential kind.
+func (s *Server) forceDeleteUser(w http.ResponseWriter, r *http.Request, actor UserIdentity, byToken bool, user *store.User, superAdminRD *store.RoleDefinition) bool {
 	ctx := r.Context()
 
 	// A deletion in progress: join it.
@@ -189,7 +197,7 @@ func (s *Server) forceDeleteUser(w http.ResponseWriter, r *http.Request, actor U
 			return err
 		}
 		var err error
-		d, joined, err = s.forceDeleteUserTx(ctx, tx, actor, user, authorized, auditActor)
+		d, joined, err = s.forceDeleteUserTx(ctx, tx, actor, byToken, user, authorized, auditActor)
 		return err
 	})
 	if err != nil {
@@ -198,6 +206,8 @@ func (s *Server) forceDeleteUser(w http.ResponseWriter, r *http.Request, actor U
 		case errors.Is(err, errLastSuperAdmin):
 			writeError(w, http.StatusConflict, ErrCodeConflict,
 				"cannot delete the last super-admin; promote another user first", nil)
+		case errors.Is(err, errBindingStateDrift):
+			writeBindingStateDrift(w, err)
 		case errors.Is(err, errUserDeleteBlockersChanged):
 			writeError(w, http.StatusConflict, ErrCodeUserDeleteBlockersChanged, err.Error(), nil)
 		case errors.As(err, &inProgress):
@@ -235,7 +245,11 @@ func (s *Server) forceDeleteUser(w http.ResponseWriter, r *http.Request, actor U
 // transaction body, after the last super-admin and lockout guards. It
 // returns the deletion, and joined=true when a deletion of the user was
 // already recorded (by a concurrent request); then it writes nothing.
-func (s *Server) forceDeleteUserTx(ctx context.Context, tx store.Store, actor UserIdentity, user *store.User, authorized map[string]bool, auditActor AuditActor) (*store.UserDeletion, bool, error) {
+// byToken is set for a user access token: the role-binding cascade judges
+// the token's system-binding rule on the bindings it deletes
+// (tokenDeleteBindingsCheck), and the deletion records the token
+// credential kind, so its completion applies the same rule.
+func (s *Server) forceDeleteUserTx(ctx context.Context, tx store.Store, actor UserIdentity, byToken bool, user *store.User, authorized map[string]bool, auditActor AuditActor) (*store.UserDeletion, bool, error) {
 	// User row first, exclusively: agent create, restore and the
 	// completion serialize on it (lockAgentGuardUserTx).
 	if err := tx.LockUserRow(ctx, user.ID, true); err != nil {
@@ -265,9 +279,15 @@ func (s *Server) forceDeleteUserTx(ctx context.Context, tx store.Store, actor Us
 	}
 
 	ts := time.Now()
-	// Last-project-owner guard and the role-binding cascade, before any
-	// other write.
-	if err := guardAndCascadeUserRoleBindingsTx(ctx, tx, user.ID, s.membershipNow()); err != nil {
+	// Last-project-owner guard and the role-binding cascade (with the
+	// token rule for a token), before any other write.
+	var bindingsCheck userBindingsCheck
+	credentialKind := userDeletionCredentialKind
+	if byToken {
+		bindingsCheck = tokenDeleteBindingsCheck
+		credentialKind = userDeletionTokenCredentialKind
+	}
+	if err := guardAndCascadeUserRoleBindingsCheckTx(ctx, tx, user.ID, s.membershipNow(), bindingsCheck); err != nil {
 		return nil, false, err
 	}
 	tokens, err := revokeUserAccessTokensForUserTx(ctx, tx, user.ID)
@@ -310,7 +330,7 @@ func (s *Server) forceDeleteUserTx(ctx context.Context, tx store.Store, actor Us
 		UserID:           user.ID,
 		RequestedByKind:  userDeletionRequesterKind,
 		RequestedByID:    actor.ID(),
-		CredentialKind:   userDeletionCredentialKind,
+		CredentialKind:   credentialKind,
 		RequestedAt:      ts,
 		BeforeSummary:    string(before),
 		OrphanedByRevoke: string(orphanedJSON),
@@ -472,22 +492,16 @@ func (s *Server) writeUserDeletion(w http.ResponseWriter, ctx context.Context, s
 	writeJSON(w, status, v)
 }
 
-// getUserDeletion serves GET /api/v1/users/{id}/deletion.
+// getUserDeletion serves GET /api/v1/users/{id}/deletion. It needs
+// user.delete on the user (authorizeUserDelete): a session credential, or
+// a user access token with user:delete on the hub-level user record.
 func (s *Server) getUserDeletion(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
-	actor, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending)
+	actor, token, ok := s.sessionOrUserTokenCredential(w, ctx, authzop.ReasonGovernancePending)
 	if !ok {
 		return
 	}
-	decision := s.authzService.Decide(ctx, AuthzRequest{
-		Principal:  principalContextForIdentity(actor),
-		Credential: credentialContextForIdentity(actor),
-		Resource:   Resource{Type: "user", ID: id},
-		Action:     Action("delete"),
-		Permission: "user.delete",
-	})
-	if !decision.Allowed {
-		writeForbiddenStructured(w, "requires user.delete permission", "user", Action("delete"))
+	if !s.authorizeUserDelete(ctx, w, actor, token, id) {
 		return
 	}
 	d, err := s.store.GetUserDeletionByUser(ctx, id)

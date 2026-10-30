@@ -214,10 +214,10 @@
 - [user.admin.suspend](#useradminsuspend) — Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present). A token needs user:suspend on a hub boundary, checked on the hub-level user record. The caller's own status and activating an invited user are refused for every credential
 - [user.admin.invite](#useradmininvite) — Invite users to the platform (single or bulk) and manage invitation codes (list, create, read stats, read, revoke, delete). The invited record has status invited, the placeholder role member and no role binding or group membership; an invitation code names no role. A token needs user:invite on the hub boundary and the holder's live user.invite authority
 - [user.admin.provision](#useradminprovision) — Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants. A token needs user:invite on the hub boundary and the holder's live user.invite authority, checked at the hub user collection; the user_provision audit records the token as the credential. Refused for every caller on a hub running with dev authentication
-- [user.admin.promote](#useradminpromote) — Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present)
-- [user.admin.delete](#useradmindelete) — Delete a user account
-- [user.admin.deleteblockers](#useradmindeleteblockers) — List what blocks deleting a user (agents and active delegations), without deleting
-- [user.admin.deletion](#useradmindeletion) — Read the forced deletion of a user: its state and the outcome of each of the user's agents
+- [user.admin.promote](#useradminpromote) — Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present). A token needs user:promote on a hub boundary, checked on the hub-level user record. CanDelegate applies to every change that involves a super-admin binding, so a token never creates or removes one; the last super-admin, self-demotion, invited-user and binding-drift guards apply to every credential, and a token's own role is session-only
+- [user.admin.delete](#useradmindelete) — Delete a user account. A token needs user:delete on a hub boundary, checked on the hub-level user record, and is refused while the user holds a direct system-scope role binding of any lifecycle state (403 forbidden, details.reason system_role_binding_held; judged again in the transaction on the bindings the delete removes, 409 conflict with details.reason binding_state_drift), with or without force. The completion of a forced deletion a token requested applies the same rule
+- [user.admin.deleteblockers](#useradmindeleteblockers) — List what blocks deleting a user (agents and active delegations), without deleting. A token needs user:delete on a hub boundary, checked on the hub-level user record
+- [user.admin.deletion](#useradmindeletion) — Read the forced deletion of a user: its state and the outcome of each of the user's agents. A token needs user:delete on a hub boundary, checked on the hub-level user record
 - [group.read](#groupread) — Read group details
 - [group.list](#grouplist) — List groups. Each row is shown only when the caller may read it (group.read); a user access token needs group:read on a hub boundary, and a group with no project resolves to the hub
 - [group.create](#groupcreate) — Create a new group. A user access token needs group:create on a hub boundary; the target is the hub's group collection. Creating under a parent group runs the member-add delegation check on the parent
@@ -8194,7 +8194,7 @@
 
 **Domain:** user.admin
 
-**Description:** Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present)
+**Description:** Promote or demote a user's administrative level (dispatched from PATCH /api/v1/users/{id} when role field is present). A token needs user:promote on a hub boundary, checked on the hub-level user record. CanDelegate applies to every change that involves a super-admin binding, so a token never creates or removes one; the last super-admin, self-demotion, invited-user and binding-drift guards apply to every credential, and a token's own role is session-only
 
 ### Entry Points
 
@@ -8204,9 +8204,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `session_only` (reason `GOV_PENDING`)
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`; pinned by `TestUserRoleToken_PromotionToAdminDenied`)
 
 **Base Permission:** `user.promote`
 
@@ -8229,11 +8229,14 @@
 - **After Fields:** new_level
 - **Atomic:** Yes
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `conflict`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestUserRoleToken_PromotionToAdminDenied`
+- `pkg/hub:TestUserRoleToken_LastSuperAdminProtected`
+- `pkg/hub:TestUserPatchToken_MixedRoleAndStatusAllOrNothing`
 
 ---
 
@@ -8241,7 +8244,7 @@
 
 **Domain:** user.admin
 
-**Description:** Delete a user account
+**Description:** Delete a user account. A token needs user:delete on a hub boundary, checked on the hub-level user record, and is refused while the user holds a direct system-scope role binding of any lifecycle state (403 forbidden, details.reason system_role_binding_held; judged again in the transaction on the bindings the delete removes, 409 conflict with details.reason binding_state_drift), with or without force. The completion of a forced deletion a token requested applies the same rule
 
 ### Entry Points
 
@@ -8251,9 +8254,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `session_only` (reason `GOV_PENDING`)
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `user.delete`
 
@@ -8268,13 +8271,19 @@
 - **Before Fields:** target_user_id, email, role, status
 - **Atomic:** Yes
 
-**Denial Codes:** `forbidden`, `last_owner`, `user_delete_blocked`, `conflict`, `user_delete_force_forbidden`, `user_delete_blockers_changed`, `user_deletion_in_progress`
+**Denial Codes:** `forbidden`, `last_owner`, `user_delete_blocked`, `conflict`, `user_delete_force_forbidden`, `user_delete_blockers_changed`, `user_deletion_in_progress`, `not_found`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestDeleteUser_GuardOrder`
 - `pkg/hub:TestForceDeleteUser_ForbiddenWritesNothing`
+- `pkg/hub:TestUserDeleteToken_LastProjectOwnerProtected`
+- `pkg/hub:TestUserDeleteToken_SystemBindingHolderRefused`
+- `pkg/hub:TestUserDeleteToken_ForceUsesTokenAgentDelete`
+- `pkg/hub:TestUserDeleteToken_BindingAddedAfterPreCheckRefused`
+- `pkg/hub:TestUserDeleteToken_ForcedCompletionKeepsSystemBinding`
+- `pkg/hub:TestUserDeleteToken_ConcurrentlyDeletedUserNotFound`
 
 ---
 
@@ -8282,7 +8291,7 @@
 
 **Domain:** user.admin
 
-**Description:** List what blocks deleting a user (agents and active delegations), without deleting
+**Description:** List what blocks deleting a user (agents and active delegations), without deleting. A token needs user:delete on a hub boundary, checked on the hub-level user record
 
 ### Entry Points
 
@@ -8292,9 +8301,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `session_only` (reason `GOV_PENDING`)
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `user.delete`
 
@@ -8308,7 +8317,7 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestUserDeleteBlockers_RequiresUserDelete`
-- `pkg/hub:TestSessionOnlyGate_ReasonIsReported`
+- `pkg/hub:TestUserDeleteReadsToken_RequireDeleteSelectorAndHubBoundary`
 
 ---
 
@@ -8316,7 +8325,7 @@
 
 **Domain:** user.admin
 
-**Description:** Read the forced deletion of a user: its state and the outcome of each of the user's agents
+**Description:** Read the forced deletion of a user: its state and the outcome of each of the user's agents. A token needs user:delete on a hub boundary, checked on the hub-level user record
 
 ### Entry Points
 
@@ -8326,9 +8335,9 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
 
-**Bearer:** `session_only` (reason `GOV_PENDING`)
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `user.delete`
 
@@ -8342,6 +8351,7 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestUserDeletion_RequiresUserDelete`
+- `pkg/hub:TestUserDeleteReadsToken_RequireDeleteSelectorAndHubBoundary`
 
 ---
 
