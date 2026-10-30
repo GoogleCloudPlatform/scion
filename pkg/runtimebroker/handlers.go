@@ -3880,6 +3880,17 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		s.writeStartContextError(w, sce, "start agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
 		return
 	}
+	// An NFS workspace share bound into a local container must show
+	// nosuid,nodev (a fresh mount table read; see checkNFSMountFlagsForStart).
+	if err := s.checkNFSMountFlagsForStart(ctx, id, opts.ProjectPath, resolvedRuntimeType); err != nil {
+		if s.refuseCancelledStart(w, span, ss, id, projectID, trackedRunID) {
+			return
+		}
+		span.SetStatus(codes.Error, "NFS workspace storage is not available: "+err.Error())
+		writeError(w, http.StatusServiceUnavailable, "nfs_unavailable",
+			"NFS workspace storage is not available: "+err.Error(), nil)
+		return
+	}
 
 	// Harness-config policy gate: runs on create, start and restart against
 	// the single hydrated harness-config launch will use (opts, as built by
@@ -5101,6 +5112,14 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// above report their own, more actionable errors first.
 	if sce := rejectRuntimeClassificationMismatch(sc.RuntimeType, resolvedRuntimeType); sce != nil {
 		s.writeStartContextError(w, sce, "restart agent", "agent_id", id, "runtime", resolvedRuntimeType, "profile", runtimeOpts.Profile)
+		return
+	}
+	// As on start: checked before the stop below, so a refused restart
+	// leaves the running agent alone.
+	if err := s.checkNFSMountFlagsForStart(ctx, id, opts.ProjectPath, resolvedRuntimeType); err != nil {
+		trace.SpanFromContext(ctx).SetStatus(codes.Error, "NFS workspace storage is not available: "+err.Error())
+		writeError(w, http.StatusServiceUnavailable, "nfs_unavailable",
+			"NFS workspace storage is not available: "+err.Error(), nil)
 		return
 	}
 
@@ -9246,9 +9265,10 @@ func isLocalhostEndpoint(endpoint string) bool {
 
 // checkNFSForDispatch is the NFS pre-flight for an agent create. It
 // applies only when NFS is configured with nfs.auto_mount on (otherwise
-// mounts are managed externally and the broker never gates on them) and the
-// project's effective settings select the nfs workspace backend (projects
-// on any other backend are never affected by NFS state).
+// mounts are managed externally and the broker does not gate on them, see
+// checkNFSMountFlagsForDispatch for the one exception) and the project's
+// effective settings select the nfs workspace backend (projects on any
+// other backend are never affected by NFS state).
 //
 // It is decided by the dispatch's resolved runtime, which is checked before
 // anything is mounted:
@@ -9265,8 +9285,11 @@ func isLocalhostEndpoint(endpoint string) bool {
 //     local disk under the mount point.
 func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, projectSlug, profile string) error {
 	r := s.nfsMountReconciler
-	if r == nil || !r.AutoMount() {
+	if r == nil {
 		return nil
+	}
+	if !r.AutoMount() {
+		return s.checkNFSMountFlagsForDispatch(ctx, name, projectPath, projectSlug, profile)
 	}
 	nfsCfg := s.config.NFSConfig
 	if nfsCfg == nil || len(nfsCfg.Shares) == 0 {
@@ -9331,6 +9354,95 @@ func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, pro
 			"agent", name, "runtime", runtimeType, "share", shareID, "error", err)
 		// auto_mount is on here (checked above): the mount failed.
 		return errors.New(scionrt.ProjectShareMountFailedText(scionrt.ProjectShareMountPathField))
+	}
+	// nosuid,nodev confirmed from a fresh mount table read, whatever the
+	// reconciler's mode (a verify-only reconciler does not require them).
+	// The detail (paths, sources) goes to the broker log only.
+	if err := r.CheckShareMountFlags(ctx, shareID); err != nil {
+		s.agentLifecycleLog.Error("NFS share nosuid,nodev not confirmed; refusing dispatch",
+			"agent", name, "runtime", runtimeType, "share", shareID, "error", err)
+		return mountFlagsRefusal(err)
+	}
+	return nil
+}
+
+// pathFreeRefusal is a refusal whose text goes into a response body: Error
+// returns only text (it names configuration fields, never a path or an NFS
+// source), while Unwrap keeps the detailed cause for errors.Is and the log.
+type pathFreeRefusal struct {
+	text  string
+	cause error
+}
+
+func (e *pathFreeRefusal) Error() string { return e.text }
+func (e *pathFreeRefusal) Unwrap() error { return e.cause }
+
+// mountFlagsRefusal is the refusal of a dispatch, start or restart whose
+// workspace share's nosuid,nodev could not be confirmed (cause is
+// CheckShareMountFlags' error, which names paths and sources).
+func mountFlagsRefusal(cause error) error {
+	return &pathFreeRefusal{text: scionrt.ProjectShareMountFlagsText(scionrt.ProjectShareMountPathField), cause: cause}
+}
+
+// checkNFSMountFlagsForStart is the NFS check of a start or restart of an
+// existing agent. Starts are otherwise not gated on NFS state, but a start
+// on a local-container runtime of a project on the nfs workspace backend
+// binds the workspace share into a new container, so the share must show
+// nosuid and nodev (CheckShareMountFlags: a fresh mount table read, any
+// reconciler mode, auto_mount on or off). Kubernetes and Cloud Run starts
+// are not checked: the platform mounts the export.
+func (s *Server) checkNFSMountFlagsForStart(ctx context.Context, name, projectPath, runtimeType string) error {
+	r := s.nfsMountReconciler
+	nfsCfg := s.config.NFSConfig
+	if r == nil || nfsCfg == nil || len(nfsCfg.Shares) == 0 || NFSWarnOnlyRuntime(runtimeType) {
+		return nil
+	}
+	if !dispatchUsesNFSWorkspace(resolveDispatchProjectDir(projectPath, "")) {
+		return nil
+	}
+	// The nfs workspace backend places workspaces on the first share only.
+	shareID := nfsCfg.Shares[0].ID
+	if err := r.CheckShareMountFlags(ctx, shareID); err != nil {
+		s.agentLifecycleLog.Error("NFS share nosuid,nodev not confirmed; refusing start",
+			"agent", name, "runtime", runtimeType, "share", shareID, "error", err)
+		return mountFlagsRefusal(err)
+	}
+	return nil
+}
+
+// checkNFSMountFlagsForDispatch is checkNFSForDispatch with auto_mount off.
+// The broker does not gate on externally managed mounts (a share that is
+// not mounted, or mounted from another source, does not refuse the
+// dispatch), with one exception: a dispatch to a local-container runtime of
+// a project on the nfs workspace backend is refused unless
+// CheckShareMountFlags confirms nosuid and nodev on the workspace share
+// from a fresh mount table read (never from a recorded status). The backend
+// and runtime are decided first, so other dispatches never touch NFS
+// state. It never mounts.
+func (s *Server) checkNFSMountFlagsForDispatch(ctx context.Context, name, projectPath, projectSlug, profile string) error {
+	r := s.nfsMountReconciler
+	nfsCfg := s.config.NFSConfig
+	if r == nil || nfsCfg == nil || len(nfsCfg.Shares) == 0 {
+		return nil
+	}
+	projectDir := resolveDispatchProjectDir(projectPath, projectSlug)
+	if !dispatchUsesNFSWorkspace(projectDir) {
+		return nil
+	}
+	runtimeType := s.resolveManagerForOpts(api.StartOptions{
+		Name:        name,
+		ProjectPath: projectDir,
+		Profile:     profile,
+	}).RuntimeType
+	if NFSWarnOnlyRuntime(runtimeType) {
+		return nil
+	}
+	// The nfs workspace backend places workspaces on the first share only.
+	shareID := nfsCfg.Shares[0].ID
+	if err := r.CheckShareMountFlags(ctx, shareID); err != nil {
+		s.agentLifecycleLog.Error("NFS share nosuid,nodev not confirmed; refusing dispatch",
+			"agent", name, "runtime", runtimeType, "share", shareID, "error", err)
+		return mountFlagsRefusal(err)
 	}
 	return nil
 }
