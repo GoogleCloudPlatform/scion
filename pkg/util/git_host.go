@@ -415,22 +415,39 @@ func (c *HostGitCmd) after(runErr error) error {
 //
 // Discovery mode: when dir has no .git entry and env pins no GIT_DIR, there
 // is no repository at dir for the policy to read, and git would look for one
-// in dir's ancestors. This mode is for read-only subcommands (rev-parse and
-// the like). With opts.Ceiling at its default (CeilingOn) git runs with
-// GIT_CEILING_DIRECTORIES set to dir's parent (symlinks resolved), so it
+// in dir's ancestors. This mode runs only the subcommands in
+// hostGitDiscoverySubcommands (currently rev-parse), in the resolved
+// directory, which is checked again for a .git or HEAD entry just before the
+// command is built. With opts.Ceiling at its default (CeilingOn) git runs
+// with GIT_CEILING_DIRECTORIES set to dir's parent (symlinks resolved), so it
 // finds no repository above dir. A parent whose resolved path contains the
 // path-list separator (':' or, on Windows, ';') cannot be expressed as a
 // ceiling, so the command is refused. With CeilingOff git may discover a
-// repository above dir, whose config is not checked here. A dir that git
+// repository above dir, whose config is not checked here. In either ceiling
+// mode, a directory that cannot be resolved is refused. A dir that git
 // would itself treat as a git directory (it holds a HEAD entry) is refused.
 // A .git or HEAD created in dir while the command runs is seen only after it
-// has run, and fails the command (ErrRepoConfigChanged).
+// has run, and fails the command (ErrRepoConfigChanged), as does dir
+// resolving elsewhere after the run.
+//
+// In every mode the caller's first argument must be the subcommand: no
+// arguments, an empty first argument, or a first argument that starts with
+// an option is refused before anything runs (errHostGitArgsOption). The
+// directory, repository and config come only from dir, opts.Env and
+// opts.Config, never from a global option such as -C, --git-dir, --work-tree
+// or -c. Options after the subcommand are the caller's.
 //
 // For opts.Audience AudienceRemote, the errors of discovery mode carry no
-// host path.
+// host path; the argument and subcommand refusals carry none for either
+// audience.
 func HostGitCommand(ctx context.Context, dir string, opts HostGitOptions, args ...string) (*HostGitCmd, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("HostGitCommand: dir is required")
+	}
+	// args is exactly the slice appended after HostGitArgs (and the pins)
+	// below, so its first element is what git reads first after them.
+	if len(args) == 0 || args[0] == "" || strings.HasPrefix(args[0], "-") {
+		return nil, errHostGitArgsOption
 	}
 	switch opts.Ceiling {
 	case CeilingOn, CeilingOff:
@@ -449,26 +466,56 @@ func HostGitCommand(ctx context.Context, dir string, opts HostGitOptions, args .
 		return nil, err
 	}
 	allowOpts := repoConfigAllowOptions{worktreePath: opts.AllowedWorktreePath, audience: opts.Audience}
+	// runDir is where git runs: dir, or in discovery mode the resolved
+	// directory, so a link swapped after resolution cannot move the command.
+	runDir := dir
 	var verify func() error
 	if discover {
+		if !hostGitDiscoverySubcommands[args[0]] {
+			return nil, errHostGitDiscoverySubcommand
+		}
+		resolved, err := hostGitResolveDir(dir, opts.Audience)
+		if err != nil {
+			return nil, err
+		}
+		hostGitAfterResolve(resolved)
+		// Detection, the ceiling and cmd.Dir must agree on one directory:
+		// check the resolved one again, so a directory swapped in after the
+		// first check (one holding a .git) is refused before git runs there.
+		stillNone, err := hostGitDiscovers(resolved, env, opts.Audience)
+		if err != nil {
+			return nil, err
+		}
+		if !stillNone {
+			return nil, fmt.Errorf("%w: a repository appeared in the command's directory before it ran", ErrRepoConfigChanged)
+		}
+		runDir = resolved
 		switch opts.Ceiling {
 		case CeilingOn:
-			ceiling, err := hostGitCeilingDir(dir, opts.Audience)
-			if err != nil {
-				return nil, err
+			ceiling := filepath.Dir(resolved)
+			if strings.ContainsRune(ceiling, filepath.ListSeparator) {
+				return nil, errHostGitCeilingSeparator
 			}
 			env = setEnvValue(env, "GIT_CEILING_DIRECTORIES", ceiling)
 		case CeilingOff:
 			// No bound: git may discover a repository above dir.
 		}
 		verify = func() error {
-			// Nothing was read before the command; it must still find no
-			// repository at dir afterwards.
-			again, err := hostGitDiscovers(dir, env, opts.Audience)
+			// dir must still resolve to where git ran.
+			again, err := hostGitResolveDir(dir, opts.Audience)
 			if err != nil {
 				return fmt.Errorf("%w: %v", ErrRepoConfigChanged, err)
 			}
-			if !again {
+			if again != resolved {
+				return fmt.Errorf("%w: the command's directory resolved elsewhere after it ran", ErrRepoConfigChanged)
+			}
+			// Nothing was read before the command; it must still find no
+			// repository at dir afterwards.
+			stillNone, err := hostGitDiscovers(dir, env, opts.Audience)
+			if err != nil {
+				return fmt.Errorf("%w: %v", ErrRepoConfigChanged, err)
+			}
+			if !stillNone {
 				return fmt.Errorf("%w: a repository appeared in the command's directory while it ran", ErrRepoConfigChanged)
 			}
 			return nil
@@ -514,13 +561,13 @@ func HostGitCommand(ctx context.Context, dir string, opts HostGitOptions, args .
 	for _, kv := range opts.Config {
 		lead = append(lead, "-c", kv)
 	}
-	pins, err := readFilterPins(ctx, dir, lead, env)
+	pins, err := readFilterPins(ctx, runDir, lead, env)
 	if err != nil {
 		return nil, err
 	}
 	full := append(append(append([]string{}, lead...), pins...), args...)
 	cmd := exec.CommandContext(ctx, "git", full...)
-	cmd.Dir = dir
+	cmd.Dir = runDir
 	cmd.Env = env
 	return &HostGitCmd{Cmd: cmd, verify: verify}, nil
 }
@@ -557,28 +604,49 @@ func hostGitDiscovers(dir string, env []string, audience Audience) (bool, error)
 	return true, nil
 }
 
-// hostGitCeilingDir returns the parent of dir with symlinks resolved, the
-// GIT_CEILING_DIRECTORIES value that lets git check dir itself and nothing
-// above it. git compares ceilings against its resolved working directory, so
-// an unresolved parent would not stop it. git splits the value at the
+// hostGitResolveDir returns dir made absolute with symlinks resolved: where
+// discovery-mode git runs, and the base of its GIT_CEILING_DIRECTORIES (the
+// parent of this value lets git check the directory itself and nothing above
+// it; git compares ceilings against its resolved working directory, so an
+// unresolved parent would not stop it). git splits the ceiling at the
 // path-list separator, so a parent containing one would become several
-// unrelated ceilings: refused, with an error that names no path for either
-// audience.
-func hostGitCeilingDir(dir string, audience Audience) (string, error) {
+// unrelated ceilings: the caller refuses it, with an error that names no
+// path for either audience.
+func hostGitResolveDir(dir string, audience Audience) (string, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
-		return "", hostGitError(audience, "cannot bound repository discovery", err)
+		return "", hostGitError(audience, "cannot resolve the command's directory", err)
 	}
 	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		return "", hostGitError(audience, "cannot bound repository discovery", err)
+		return "", hostGitError(audience, "cannot resolve the command's directory", err)
 	}
-	ceiling := filepath.Dir(resolved)
-	if strings.ContainsRune(ceiling, filepath.ListSeparator) {
-		return "", errHostGitCeilingSeparator
-	}
-	return ceiling, nil
+	return resolved, nil
 }
+
+// hostGitDiscoverySubcommands are the git subcommands discovery mode runs:
+// read-only ones that need no repository at the command's directory. Adding
+// a subcommand, or a discovery-mode caller, needs security review of the
+// options it passes too: for example, rev-parse
+// --show-superproject-working-tree starts a child git in the parent
+// directory, which CeilingOff does not bound.
+var hostGitDiscoverySubcommands = map[string]bool{
+	"rev-parse": true,
+}
+
+// hostGitAfterResolve runs in discovery mode between resolving the command's
+// directory and checking it again. It does nothing; it is a variable so a
+// test can change the directory in that window.
+var hostGitAfterResolve = func(resolved string) {}
+
+// errHostGitArgsOption refuses caller arguments that are missing, start with
+// an empty argument or start with an option: the first argument must be the
+// git subcommand.
+var errHostGitArgsOption = errors.New("host-side git: the first argument must be the git subcommand, not an option; refusing")
+
+// errHostGitDiscoverySubcommand refuses, in discovery mode, a subcommand
+// outside hostGitDiscoverySubcommands.
+var errHostGitDiscoverySubcommand = errors.New("host-side git: without a repository at the command's directory only read-only subcommands run; refusing")
 
 // errHostGitCeilingInvalid refuses a Ceiling value other than CeilingOn and
 // CeilingOff.
