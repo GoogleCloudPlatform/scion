@@ -84,11 +84,12 @@
 # It acts only when the hub crash-looped:
 #   - scion-hub must be failed for good: ActiveState=failed AND
 #     SubState=failed (systemd will not restart it), in each of
-#     SETTLE_READS reads SETTLE_INTERVAL_SEC apart. systemd >= 254 passes
-#     through a transient failed state between automatic restart attempts
-#     (SubState failed-before-auto-restart, then activating/auto-restart)
-#     and fires OnFailure= there too; requiring SubState=failed in every
-#     read keeps those runs a no-op.
+#     SETTLE_READS reads SETTLE_INTERVAL_SEC apart. systemd >= 254 fires
+#     OnFailure= on every failed start while a restart is still pending: on
+#     255.4 (Ubuntu 24.04) those runs see activating/auto-restart; the
+#     source also has a transient failed/failed-before-auto-restart state,
+#     which was not observed there. Requiring SubState=failed in every read
+#     keeps all of those runs a no-op.
 #   - The unit's Result is NOT a usable signal: on systemd 249 (Ubuntu
 #     22.04) a crash loop that hits the start limit logs "Start request
 #     repeated too quickly" but keeps Result=exit-code (or signal,
@@ -133,7 +134,16 @@
 #     (c) on the switch-time fallback (update-state.json missing or
 #         unreadable, including no python3) verified is not consulted, so
 #         within the window, after 2+ starts, a failed non-zero stop of a
-#         release that ran fine is rolled back too.
+#         release that ran fine is rolled back too;
+#     (d) a failed non-zero stop that lands before the hub's listener has
+#         bound (during startup, e.g. migrations; a hub that exits non-zero
+#         when a requested shutdown interrupts its startup) of a release
+#         that has started at least twice since its switch, within the
+#         window, with previous_safe true, is rolled back: verified is not
+#         set yet. The first boot after a switch (count 1) is safe. A hub
+#         that exits 0 when a requested shutdown interrupts startup ends
+#         inactive, not failed, so OnFailure never fires (the Go change on
+#         scion/hu-p3-n1-go does this for P3+ releases).
 #   - Result=timeout (a stop that timed out) is never acted on.
 #   - A clean last exit (an update or Restart Hub exits on SIGTERM and
 #     systemd starts it again; or manual restarts) only restarts the hub,

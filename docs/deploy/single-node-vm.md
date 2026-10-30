@@ -301,7 +301,7 @@ run as the `scion` user (through `runuser`):
    from swapping a Hub you stopped is `Result=timeout` being excluded, and
    the update state (step 5): a release that ran is verified as soon as its
    listener binds, and an unverified update is rolled back only within 30
-   minutes of the switch. Three residual cases are accepted:
+   minutes of the switch. Four residual cases are accepted:
 
    - If the previous release used four or more of the window's five starts
      (for example **Restart Hub** several times, then an update within five
@@ -317,6 +317,15 @@ run as the `scion` user (through `runuser`):
      consulted. Within 30 minutes of a switch, after two or more starts, a
      failed `systemctl stop` that exits non-zero can then roll back a
      release that ran fine.
+   - A failed `systemctl stop` that lands before the Hub's listener has
+     bound (during startup, for example while it runs database migrations)
+     can make a Hub exit non-zero. `verified` is not set yet, so within 30
+     minutes of the switch, if the release has started at least twice since
+     then and `previous_safe` is true, it is rolled back. The first boot
+     after a switch (a count of 1) is not affected. A Hub that exits 0 when
+     a requested shutdown interrupts its startup ends stopped, not failed,
+     so the guard never runs; the Go change on `scion/hu-p3-n1-go` makes
+     the Hub do that from Phase 3 releases on.
 4. It refuses unless `/opt/scion/current` and `/opt/scion/previous` each
    resolve to a release directory directly inside `/opt/scion/releases/`,
    and `previous` contains a `scion` binary. A link that leaves `releases/`
@@ -408,11 +417,12 @@ To start a Hub that the guard left stopped, fix the cause shown in
   on the failed state and on the last exit, not on `Result`.
 - **systemd 254 and later.** Unless the unit sets `RestartMode=direct`,
   `OnFailure=` also fires on every failed start while systemd still
-  intends to restart the unit. At that moment the unit is in a transient
-  failed state (`SubState=failed-before-auto-restart`), and then
-  `activating`/`auto-restart`. The guard requires `SubState=failed` in all
-  three of its reads, so those runs do nothing; only the final failure
-  after the start limit is acted on.
+  intends to restart the unit. On systemd 255.4 (Ubuntu 24.04) those runs
+  see the unit `activating`/`auto-restart`. The systemd source also has a
+  transient failed state before that (`SubState=failed-before-auto-restart`),
+  which was not observed on 255.4. The guard requires `SubState=failed` in
+  all three of its reads, so those runs do nothing either way; only the
+  final failure after the start limit is acted on.
 
 `StartLimitIntervalSec=` and `StartLimitBurst=` belong in `[Unit]` from
 systemd 230 on.

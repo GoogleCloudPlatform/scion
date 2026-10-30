@@ -107,16 +107,22 @@ _rb_crash_result() {
 #   v249-crash        systemd 249 (22.04): a crash loop stopped by the start
 #                     limit: failed/failed with the crash's own Result
 #                     (exit-code, signal, core-dump), NOT start-limit-hit;
-#   v249-clean        systemd 249: the limit hit by clean restarts:
-#                     failed/failed, Result=start-limit-hit, clean exit;
+#   v249-clean        the limit hit by clean automatic restarts (update or
+#                     Restart Hub self-exits): failed/failed,
+#                     Result=start-limit-hit, clean exit, NRestarts=5 (the
+#                     automatic restarts incl. the one the limit refused;
+#                     observed on 255.4, VM2 T4x);
 #   v255-final        systemd 255 (24.04): the final failure after the start
 #                     limit: failed/failed with the crash's Result;
 #   v255-final-slh    the same, reported as Result=start-limit-hit;
-#   v255-transient    systemd 255: OnFailure= between automatic restarts:
-#                     failed/failed-before-auto-restart, then
+#   v255-autorestart  systemd 255, OBSERVED (255.4, VM2 T1): every
+#                     intermediate OnFailure= of a crash loop reads
 #                     activating/auto-restart;
-#   v255-autorestart  systemd 255: already activating/auto-restart;
-#   v255-pending      systemd 255: failed/failed-before-auto-restart in
+#   v255-transient    systemd >= 254 per the source, NOT observed on 255.4
+#                     (defensive): failed/failed-before-auto-restart, then
+#                     activating/auto-restart;
+#   v255-pending      systemd >= 254 per the source, NOT observed on 255.4
+#                     (defensive): failed/failed-before-auto-restart in
 #                     every read (ActiveState=failed, but a restart is still
 #                     pending) -- only the SubState check rejects it;
 #   flip-second       failed/failed once, then auto-restart (not settled);
@@ -152,7 +158,8 @@ _rb_scenario() {
   local x="$code $status 4 5"
   case "$name" in
     v249-crash|v255-final) _rb_states "failed failed $result $x" ;;
-    v249-clean|v255-final-slh) _rb_states "failed failed start-limit-hit $x" ;;
+    v249-clean) _rb_states "failed failed start-limit-hit $code $status 5 5" ;;
+    v255-final-slh) _rb_states "failed failed start-limit-hit $x" ;;
     v255-transient) _rb_states "failed failed-before-auto-restart $result $x" "activating auto-restart $result $x" ;;
     v255-autorestart) _rb_states "activating auto-restart $result $x" ;;
     v255-pending) _rb_states "failed failed-before-auto-restart $result $x" ;;
