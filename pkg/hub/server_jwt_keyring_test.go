@@ -508,11 +508,11 @@ func TestP3_ManagedStartupRefusesWithoutAliasReads(t *testing.T) {
 				assert.Contains(t, err.Error(), `no "legacy" entry`)
 			}
 			requireNoAliasAccess(t, f)
-			// Audit reads are attributed apart from alias reads; a refusal in
-			// validateKeyringConfig comes before the audit (zero), a later one
-			// after it.
-			t.Logf("audit reads: %s=%d %s=%d", SecretKeyAgentSigningKey, f.c.auditsOf(SecretKeyAgentSigningKey),
-				SecretKeyUserSigningKey, f.c.auditsOf(SecretKeyUserSigningKey))
+			// Every case refuses in validateKeyringConfig, before the startup
+			// encryption audit runs: no audit read either.
+			for _, name := range p3AliasNames {
+				assert.Zero(t, f.c.auditsOf(name), "%s audit reads before the refusal", name)
+			}
 			assert.Equal(t, before, f.snapshot(t))
 			assertNoJWTKeyMaterial(t, err.Error())
 			assertNoJWTKeyMaterial(t, logs.String())

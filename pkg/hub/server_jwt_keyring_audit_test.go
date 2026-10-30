@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -43,6 +44,51 @@ import (
 // p3bForeignSecret seals a backup under encryption material no fixture
 // server holds.
 const p3bForeignSecret = "test-only-p3b-foreign-secret"
+
+// p3bE2Key is a second encryption key (ID "e2"), 32 bytes.
+var p3bE2Key = []byte("test-only-p3b-e2-encryption-key!")
+
+// p3bRing builds and parses a keyring file whose signing ring is the
+// fixture's legacy generation and whose encryption ring holds the legacy
+// key and "e2" (p3bE2Key). With active "legacy" and write_format "v1" it is
+// a ring this release accepts, which still reads enc:v2: values under e2;
+// with active "e2" and "v2" it only seals test values (never given to a
+// server).
+func p3bRing(t *testing.T, encActive, writeFormat string) *keyring.Keyring {
+	t.Helper()
+	doc := map[string]any{
+		"schema":   1,
+		"revision": "test-p3b-rev",
+		"signing": map[string]any{"active": "legacy", "emit": "legacy", "legacy_read_ids": []any{"legacy"},
+			"keys": []any{map[string]any{"id": "legacy", "secret": jkLegacySecret, "sign_until": nil, "verify_until": nil}}},
+		"encryption": map[string]any{
+			"active": encActive, "write_format": writeFormat, "legacy_v1_read_ids": []any{"legacy"},
+			"keys": []any{
+				map[string]any{"id": "legacy", "key_b64": base64.StdEncoding.EncodeToString(keyring.DeriveLegacyEncryptionKey(jkLegacySecret))},
+				map[string]any{"id": "e2", "key_b64": base64.StdEncoding.EncodeToString(p3bE2Key)},
+			},
+		},
+	}
+	data, err := json.Marshal(doc)
+	require.NoError(t, err)
+	k, err := keyring.Parse(data)
+	require.NoError(t, err)
+	return k
+}
+
+// tamperV2 flips the last byte (in the authentication tag) of a version 2
+// envelope's sealed bytes: the envelope and its key ID still parse,
+// decryption fails.
+func tamperV2(t *testing.T, v, kid string) string {
+	t.Helper()
+	prefix := "enc:v2:" + kid + ":"
+	require.True(t, strings.HasPrefix(v, prefix), "a version 2 envelope under %s", kid)
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(v, prefix))
+	require.NoError(t, err)
+	require.NotEmpty(t, raw)
+	raw[len(raw)-1] ^= 0x01
+	return prefix + base64.StdEncoding.EncodeToString(raw)
+}
 
 // setAliasRow replaces the stored payload and reference of a retained alias
 // through the raw store (uncounted), before the test's snapshot.
@@ -162,11 +208,13 @@ func TestP3b_ManagedAuditSecretRefRows(t *testing.T) {
 
 // TestP3b_ManagedUnreadableSigningBackupNotReady: an agent_signing_key
 // backup the managed ring cannot authenticate (sealed under other material,
-// or a well-formed envelope with tampered sealed bytes) keeps the instance
-// not ready with reason backup_unreadable, is classified as a decryption
-// failure (not trusted from its envelope), and is preserved byte- and
-// Version-equal across restarts; the ring still signs and verifies, nothing
-// reads or writes the aliases, and no log names key material.
+// a well-formed v1 envelope with tampered sealed bytes, or a well-formed v2
+// envelope naming a key ID the ring holds, with a tampered tag) keeps the
+// instance not ready with reason backup_unreadable, is classified as a
+// decryption failure (not trusted from its envelope or key ID), and is
+// preserved byte- and Version-equal across restarts; the ring still signs
+// and verifies, nothing reads or writes the aliases, and no log names key
+// material.
 func TestP3b_ManagedUnreadableSigningBackupNotReady(t *testing.T) {
 	cases := map[string]func(t *testing.T, f *p3Fixture) string{
 		"sealed under other encryption material": func(t *testing.T, f *p3Fixture) string {
@@ -178,11 +226,20 @@ func TestP3b_ManagedUnreadableSigningBackupNotReady(t *testing.T) {
 		"well-formed envelope, tampered sealed bytes": func(t *testing.T, f *p3Fixture) string {
 			return tamperV1(t, aliasCiphertext(t, f, SecretKeyAgentSigningKey))
 		},
+		"well-formed v2 envelope with a known key ID, tampered tag": func(t *testing.T, f *p3Fixture) string {
+			sealer, err := secret.NewValueCipher(p3bRing(t, "e2", "v2"))
+			require.NoError(t, err)
+			v, err := sealer.Encrypt(base64.StdEncoding.EncodeToString(p3StaleKey(SecretKeyAgentSigningKey)))
+			require.NoError(t, err)
+			return tamperV2(t, v, "e2")
+		},
 	}
 	for name, unreadable := range cases {
 		t.Run(name, func(t *testing.T) {
 			f := newP3Fixture(t)
-			k := jkRing(t, "legacy", "legacy", []string{"legacy"}, jkEntry{id: "legacy", secret: jkLegacySecret})
+			// The server's ring holds e2, so a v2 value under e2 is decrypted,
+			// not rejected as an unknown key ID.
+			k := p3bRing(t, "legacy", "v1")
 			setAliasRow(t, f, SecretKeyAgentSigningKey, unreadable(t, f), "")
 			before := f.snapshot(t)
 			logs := captureLogs(t)
