@@ -69,6 +69,7 @@ describe('scion-chat-members section folding', () => {
     localStorage.clear();
   });
   afterEach(() => {
+    vi.restoreAllMocks();
     document.body.innerHTML = '';
     localStorage.clear();
   });
@@ -157,6 +158,67 @@ describe('scion-chat-members section folding', () => {
     localStorage.setItem(STORAGE_KEY, '{not json');
     const el = await mount();
     expect(names(el)).toEqual(['Ada', 'Grace', 'Coder', 'Reviewer']);
+  });
+
+  it('ignores a stored value that is not an array', async () => {
+    localStorage.setItem(STORAGE_KEY, '{"people":true}');
+    const el = await mount();
+    expect(names(el)).toEqual(['Ada', 'Grace', 'Coder', 'Reviewer']);
+  });
+
+  it('keeps only known section names from stored state', async () => {
+    localStorage.setItem(STORAGE_KEY, '["agents","bogus"]');
+    const el = await mount();
+    expect(toggle(el, 'agents').getAttribute('aria-expanded')).toBe('false');
+    expect(toggle(el, 'people').getAttribute('aria-expanded')).toBe('true');
+    expect(names(el)).toEqual(['Ada', 'Grace']);
+  });
+
+  it('starts unfolded when reading storage throws', async () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new Error('storage unavailable');
+    });
+    const el = await mount();
+    expect(names(el)).toEqual(['Ada', 'Grace', 'Coder', 'Reviewer']);
+  });
+
+  it('still folds for the session when writing storage throws', async () => {
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('quota exceeded');
+    });
+    const el = await mount();
+    toggle(el, 'people').click();
+    await el.updateComplete;
+    expect(toggle(el, 'people').getAttribute('aria-expanded')).toBe('false');
+    expect(names(el)).toEqual(['Coder', 'Reviewer']);
+  });
+
+  function notes(el: ScionChatMembers): string[] {
+    return Array.from(el.shadowRoot?.querySelectorAll('.empty-note') ?? []).map(
+      (n) => n.textContent?.trim() ?? ''
+    );
+  }
+
+  it('drops the empty notes while folded', async () => {
+    const el = await mount();
+    el.humans = [];
+    el.agents = [];
+    await el.updateComplete;
+    expect(notes(el)).toEqual(['No members', 'No agents']);
+    toggle(el, 'people').click();
+    toggle(el, 'agents').click();
+    await el.updateComplete;
+    expect(notes(el)).toEqual([]);
+  });
+
+  it('drops the bounded-list note while People is folded', async () => {
+    const el = await mount();
+    el.humansTruncated = true;
+    await el.updateComplete;
+    expect(notes(el).some((n) => n.startsWith('Showing up to'))).toBe(true);
+    toggle(el, 'people').click();
+    await el.updateComplete;
+    expect(notes(el)).toEqual([]);
   });
 
   it('shows an unread dot on a folded section only when one of its members has unread', async () => {
