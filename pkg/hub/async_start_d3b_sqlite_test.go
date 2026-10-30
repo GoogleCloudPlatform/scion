@@ -1736,6 +1736,10 @@ func TestAsyncStartHeartbeatGuard_OldContainerIgnored(t *testing.T) {
 	require.Equal(t, string(state.PhaseRunning), done.Phase, "the launch completes despite the old container's reports")
 	require.Equal(t, store.LaunchStateEnded, done.LaunchState)
 	require.Equal(t, store.LaunchEndReasonSucceeded, done.LaunchEndReason)
+	// The launch's end settles the start claim, so from here on only the
+	// store's run check stands between an old-run entry and the phase:
+	// case (d) below tests that guard alone.
+	require.Empty(t, done.StartClaimID, "the succeeded launch released the start claim")
 
 	// (d) After the launch, a late stopped entry of the old run does not
 	// move the running agent: the run check drops it.

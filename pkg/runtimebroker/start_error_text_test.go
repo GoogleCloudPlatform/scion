@@ -249,7 +249,8 @@ func TestClassifyStartError_FixedText(t *testing.T) {
 // (also a restart's start leg) reports "Failed to start agent", the lead
 // the synchronous start handler writes, and a create keeps "Failed to
 // create agent". Texts that do not name the operation are the same for
-// both kinds.
+// both kinds. TestAsyncStart_FailedLaunchReportsStartText pins the kind's
+// wiring from the launch record through runLaunch.
 func TestClassifyStartError_FixedTextByKind(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -276,10 +277,6 @@ func TestClassifyStartError_FixedTextByKind(t *testing.T) {
 				t.Errorf("start launch message = %q, want %q", got, c.wantStart)
 			}
 		})
-	}
-	// The start lead is the synchronous start handler's own text.
-	if got := runtimeOpError("start agent", errors.New("x")).Error(); got != runtimeOpError(opStartAgent, errors.New("x")).Error() {
-		t.Errorf("opStartAgent text %q differs from the synchronous start handler's", got)
 	}
 }
 
