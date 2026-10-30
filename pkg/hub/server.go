@@ -1470,6 +1470,15 @@ type RemoteCreateAgentRequest struct {
 	// request (hub-side only, never sent). The dispatch signs it for the
 	// request's run and records its credential before setting AgentToken.
 	tokenGrant *AgentTokenGrant
+	// projectGitRemote is the project's recorded git remote, githubAppToken
+	// the App installation token minted for the agent's own project in this
+	// dispatch, and noAuthProjectToken the project-scope GITHUB_TOKEN the
+	// no-auth path put into ResolvedEnv ("" when none); hub-side only, never
+	// sent. restrictCreateRequestTokenRemote decides the token remote from
+	// them.
+	projectGitRemote   string
+	githubAppToken     string
+	noAuthProjectToken string
 	// CreatorName is the human-readable identity of who created this agent.
 	// Injected as the SCION_CREATOR environment variable in the agent container.
 	CreatorName string `json:"creatorName,omitempty"`
@@ -5227,6 +5236,9 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	if s.config.GitHubAppConfig.AppID != 0 {
 		dispatcher.SetGitHubAppMinter(s)
 	}
+	// Personal git tokens go only to the GitHub host, which follows the
+	// configured GitHub API base URL whether or not an App is configured.
+	dispatcher.SetGitHubWebHostProvider(s.personalTokenGitHubHost)
 
 	// Wire cross-node lifecycle dispatch deps (B4-2) so the dispatcher
 	// can handle ErrLifecycleDeferred from route-gated Start/Stop/Restart

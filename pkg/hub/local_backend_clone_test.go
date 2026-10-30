@@ -32,6 +32,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
+	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/stretchr/testify/assert"
@@ -184,7 +185,8 @@ func TestLocalBackendClone_RefusesHostCloneURLs(t *testing.T) {
 }
 
 // Legitimate https and ssh clone URLs still clone on the local backend,
-// through the hardened host-clone settings.
+// through the hardened host-clone settings. An ssh clone URL needs a project
+// git secret, so the ssh cases give the project one.
 func TestLocalBackendClone_HTTPSAndSSHCloneHardened(t *testing.T) {
 	for i, cloneURL := range []string{
 		"https://git.example.invalid/org/repo.git",
@@ -193,10 +195,20 @@ func TestLocalBackendClone_HTTPSAndSSHCloneHardened(t *testing.T) {
 	} {
 		t.Run(cloneURL, func(t *testing.T) {
 			identityTestHome(t)
-			srv, _ := testServer(t)
+			srv, st := testServer(t)
 			argvLog, envLog := localGateFakeGit(t)
 			project := sharedWorkspaceProject("local-gate-ok-" + string(rune('a'+i)))
 			project.Labels[store.LabelCloneURL] = cloneURL
+			if !strings.HasPrefix(cloneURL, "https://") {
+				backend := secret.NewLocalBackend(st, "local-gate-hub", "local-gate-secret")
+				srv.SetSecretBackend(backend)
+				_, _, err := backend.Set(context.Background(), &secret.SetSecretInput{
+					Name: "GITHUB_TOKEN", Value: "local-gate-token", SecretType: store.SecretTypeEnvironment,
+					Target: "GITHUB_TOKEN", Scope: store.ScopeProject, ScopeID: project.ID,
+					CreatedBy: DevUserID, UpdatedBy: DevUserID,
+				})
+				require.NoError(t, err)
+			}
 			workspacePath, err := localProjectPath(project.Slug)
 			require.NoError(t, err)
 

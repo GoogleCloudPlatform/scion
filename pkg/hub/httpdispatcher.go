@@ -265,6 +265,10 @@ type HTTPAgentDispatcher struct {
 	// change broker or agent behaviour, read once on every create, start
 	// and restart dispatch. Nil provider = none sent.
 	dispatchExperimentsProvider func() []string
+
+	// gitHubWebHost returns the GitHub host personal git tokens may go to
+	// (SetGitHubWebHostProvider); nil means github.com.
+	gitHubWebHost func() string
 }
 
 // NewHTTPAgentDispatcher creates a new HTTP-based agent dispatcher.
@@ -762,6 +766,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		// earlier agent row went with the earlier project (ptone/scion#4476).
 		PreviousProjectIDs: d.previousProjectIDs(ctx, projectInfo),
 	}
+	req.projectGitRemote = projectInfo.gitRemote
 	// The single setter of the expected runtime target on create-shaped
 	// requests: any non-NULL pin. A stale pin sends the old target, which the
 	// receiving Runtime Broker refuses before any side effect.
@@ -1034,6 +1039,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 				}
 			} else if ghSecret != nil && ghSecret.Value != "" {
 				req.ResolvedEnv["GITHUB_TOKEN"] = ghSecret.Value
+				req.noAuthProjectToken = ghSecret.Value
 				// From secret store → secret-fetchable.
 				classifyEnv(&req.EnvClassifications, "GITHUB_TOKEN", api.EnvKindSecretFetchable)
 				if d.debug {
@@ -1187,6 +1193,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 						// A test pins this ordering dependency.
 						req.ResolvedEnv["GITHUB_TOKEN"] = token
 						classifyEnv(&req.EnvClassifications, "GITHUB_TOKEN", api.EnvKindSecretInjected)
+						if mintProject.ID == project.ID {
+							req.githubAppToken = token
+						}
 						req.ResolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
 						classifyEnv(&req.EnvClassifications, "SCION_GITHUB_APP_ENABLED", api.EnvKindPlain)
 						req.ResolvedEnv["SCION_GITHUB_TOKEN_EXPIRY"] = expiry
@@ -1204,6 +1213,11 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 			}
 		}
 	}
+
+	// A personal git token goes only to a recorded remote on the GitHub
+	// host (personal_git_token.go). This runs after secret resolution and
+	// the App mint, when the token git will see is known.
+	d.restrictCreateRequestTokenRemote(req)
 
 	// Collect project-scope secrets for provision-time credential resolution.
 	// These are NOT merged into ResolvedEnv and will not appear in the container env.
@@ -2021,6 +2035,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 			for k, v := range asNeededEnv {
 				req.ResolvedEnv[k] = v
 			}
+			d.restrictCreateRequestTokenRemote(req)
 			if tzNeeded {
 				setResolvedAgentTZ(req.ResolvedEnv, &req.EnvClassifications, d.resolveAgentTZ(ctx, agent, true))
 			}
@@ -2374,6 +2389,9 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 	}
 	// Classify the caller-provided env as plain config vars.
 	classifyEnvKeys(&req.EnvClassifications, env, api.EnvKindPlain)
+	// The caller's env may carry a GITHUB_TOKEN: decide the token remote
+	// again on the merged env.
+	d.restrictCreateRequestTokenRemote(req)
 	if answerTZ {
 		setResolvedAgentTZ(req.ResolvedEnv, &req.EnvClassifications, d.resolveAgentTZ(ctx, agent, true))
 	}
@@ -2419,6 +2437,7 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 			}
 			// as_needed env comes from storage — classify as secret-fetchable.
 			classifyEnvKeys(&req.EnvClassifications, asNeededEnv, api.EnvKindSecretFetchable)
+			d.restrictCreateRequestTokenRemote(req)
 			if tzNeeded {
 				setResolvedAgentTZ(req.ResolvedEnv, &req.EnvClassifications, d.resolveAgentTZ(ctx, agent, true))
 			}
@@ -3039,14 +3058,14 @@ func (d *HTTPAgentDispatcher) injectLifecycleGitHubToken(
 	resolvedEnv map[string]string,
 	envClassifications *map[string]api.EnvKind,
 	operation string,
-) {
+) (ownAppToken string) {
 	if d.githubAppMinter == nil || agent.ProjectID == "" {
-		return
+		return ""
 	}
 
 	project, err := d.store.GetProject(ctx, agent.ProjectID)
 	if err != nil {
-		return
+		return ""
 	}
 	mintProject := project
 	if project.GitHubInstallationID == nil {
@@ -3057,7 +3076,7 @@ func (d *HTTPAgentDispatcher) injectLifecycleGitHubToken(
 		}
 	}
 	if mintProject.GitHubInstallationID == nil {
-		return
+		return ""
 	}
 
 	if resolvedEnv["GITHUB_TOKEN"] != "" {
@@ -3067,7 +3086,7 @@ func (d *HTTPAgentDispatcher) injectLifecycleGitHubToken(
 		classifyEnv(envClassifications, "SCION_USER_GITHUB_TOKEN", api.EnvKindPlain)
 		resolvedEnv["SCION_GITHUB_APP_ENABLED"] = "true"
 		classifyEnv(envClassifications, "SCION_GITHUB_APP_ENABLED", api.EnvKindPlain)
-		return
+		return ""
 	}
 
 	token, expiry, err := d.githubAppMinter.MintGitHubAppTokenForProject(ctx, mintProject)
@@ -3075,10 +3094,10 @@ func (d *HTTPAgentDispatcher) injectLifecycleGitHubToken(
 		if d.debug {
 			d.log.Warn(operation+": GitHub App token minting failed", "error", err, "project_id", agent.ProjectID)
 		}
-		return
+		return ""
 	}
 	if token == "" {
-		return
+		return ""
 	}
 
 	resolvedEnv["GITHUB_TOKEN"] = token
@@ -3089,6 +3108,10 @@ func (d *HTTPAgentDispatcher) injectLifecycleGitHubToken(
 	classifyEnv(envClassifications, "SCION_GITHUB_TOKEN_EXPIRY", api.EnvKindPlain)
 	resolvedEnv["SCION_GITHUB_TOKEN_PATH"] = "/tmp/.github-token"
 	classifyEnv(envClassifications, "SCION_GITHUB_TOKEN_PATH", api.EnvKindPlain)
+	if mintProject.ID == project.ID {
+		return token
+	}
+	return ""
 }
 
 // startEnvResult bundles everything buildStartEnv assembles. DispatchAgentStart
@@ -3415,7 +3438,16 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 		}
 	}
 
-	d.injectLifecycleGitHubToken(ctx, agent, resolvedEnv, &envClassifications, caller)
+	appToken := d.injectLifecycleGitHubToken(ctx, agent, resolvedEnv, &envClassifications, caller)
+	// A personal git token goes only to a recorded remote on the GitHub
+	// host (personal_git_token.go).
+	d.restrictPersonalTokenRemote(gitTokenDispatch{
+		projectID: agent.ProjectID,
+		gitRemote: projectInfo.gitRemote,
+		env:       resolvedEnv,
+		secrets:   resolvedSecrets,
+		appToken:  appToken,
+	}, &wsSpec.GitClone, &wsSpec.SharedWorkspaceClone)
 	// Read once: DispatchAgentStart/Restart send the same set to the broker.
 	experiments := d.dispatchExperiments()
 	applyAgentExperiments(resolvedEnv, &envClassifications, experiments)
