@@ -1972,6 +1972,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if err != nil {
 		return "", "", nil, err
 	}
+	logTemplateUnlimitedCounts(ctx, rt.Chain)
 	// Claim the agent dir and home by creating them: os.Mkdir succeeds only
 	// for the caller that actually creates the directory, so of two
 	// concurrent first provisions only one treats it as its own, and a

@@ -794,7 +794,8 @@ key with its own chain. It is **not** the ladder in System A.
 ### B1. Harness configuration, model, thinking level, and scalar limits
 
 For `harness_config`, `model`, `thinking_level`, `max_turns`, `max_model_calls` and `max_duration`, higher tiers win and lower tiers fill in
-only what is still unset:
+only what is still unset. An explicit "no limit" (`max_turns: 0`, `max_model_calls: 0`, `max_duration: "0"`) is set, not unset: it wins
+over every lower tier, and no default fills it.
 
 | Priority | Source |
 | --- | --- |

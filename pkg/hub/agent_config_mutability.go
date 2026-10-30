@@ -307,11 +307,15 @@ type FieldEditState struct {
 	// agent's broker re-renders at start: clearing or zeroing it takes
 	// effect only at the next reincarnation. It is not set on a field
 	// whose clear the agent's broker applies at the next start
-	// (brokerStartSupport.clearAppliesAtStart). The count limits keep it
-	// with every broker: their 0 (Unlimited) is never applied at a start
-	// (ptone/scion#5605), although a null clear is; the flag cannot tell
-	// the two apart, so it errs toward the note.
+	// (brokerStartSupport.clearAppliesAtStart). A count limit's clear is
+	// its null; its 0 (Unlimited) is a value, see UnlimitedUnsupported.
 	ClearNeedsReincarnate bool `json:"clearNeedsReincarnate,omitempty"`
+	// UnlimitedUnsupported is set on max_turns and max_model_calls when
+	// the agent's broker does not advertise unlimitedCountLimits (or the
+	// agent has none): no start would apply Unlimited (0) over an
+	// inherited limit, so a PATCH that changes the field to 0 is refused
+	// (ptone/scion#5605). The Edit page disables its Unlimited control.
+	UnlimitedUnsupported bool `json:"unlimitedUnsupported,omitempty"`
 	// Reason explains a locked field.
 	Reason string `json:"reason,omitempty"`
 }
@@ -398,6 +402,9 @@ func buildAgentEditability(agent *store.Agent, access agentEditAccess) *AgentEdi
 		}
 		if d == EditLocked {
 			st.Reason = reason
+		}
+		if unlimitedCountFieldKeys[f.Key] && !access.Broker.UnlimitedCountLimits {
+			st.UnlimitedUnsupported = true
 		}
 		// A resume continues the harness's conversation: whether a changed
 		// model, or a re-rendered prompt, instructions file, skill or

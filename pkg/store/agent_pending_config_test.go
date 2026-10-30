@@ -172,3 +172,48 @@ func TestAgentPendingConfig_RedactsMCPServerAndServiceEnv(t *testing.T) {
 	assert.NotContains(t, string(b), "mcp_servers", "a malformed value is dropped (fails closed)")
 	assert.NotContains(t, string(b), "services")
 }
+
+// TestAgentPendingConfig_LimitsFormat: a row stored before the count limits
+// were typed (no limitsFormat) held a clear as 0, so loading it reads a
+// count-limit 0 as null, in any key case; a typed row keeps 0 (Unlimited)
+// and null apart. Every stored row is written as typed, a fresh in-memory
+// row included, and the API view never shows the format (ptone/scion#5605).
+func TestAgentPendingConfig_LimitsFormat(t *testing.T) {
+	legacy := `{"config":{"max_turns":0,"Max_Model_Calls":0,"model":"m","max_duration":"0"},"savedAt":"2026-10-01T00:00:00Z","baseGeneration":1,"baseStateVersion":3}`
+	got, err := UnmarshalPendingConfigFromStorage(legacy)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, PendingLimitsFormatTyped, got.LimitsFormat)
+	assert.Equal(t, "null", string(got.Config["max_turns"]))
+	assert.Equal(t, "null", string(got.Config["Max_Model_Calls"]))
+	assert.Equal(t, `"m"`, string(got.Config["model"]))
+	assert.Equal(t, `"0"`, string(got.Config["max_duration"]), "only the count limits are normalized")
+
+	typed := `{"config":{"max_turns":0,"max_model_calls":null},"limitsFormat":2,"savedAt":"2026-10-01T00:00:00Z","baseGeneration":1,"baseStateVersion":3}`
+	got, err = UnmarshalPendingConfigFromStorage(typed)
+	require.NoError(t, err)
+	assert.Equal(t, "0", string(got.Config["max_turns"]), "a typed 0 is Unlimited and is kept")
+	assert.Equal(t, "null", string(got.Config["max_model_calls"]))
+
+	// A fresh row built in memory carries no format; storage stamps it, so
+	// a reload keeps its 0 as Unlimited.
+	fresh := &AgentPendingConfig{Config: map[string]json.RawMessage{"max_turns": json.RawMessage("0")}}
+	raw, err := MarshalPendingConfigForStorage(fresh)
+	require.NoError(t, err)
+	assert.Contains(t, raw, `"limitsFormat":2`)
+	assert.Zero(t, fresh.LimitsFormat, "storage does not edit the caller's value")
+	got, err = UnmarshalPendingConfigFromStorage(raw)
+	require.NoError(t, err)
+	assert.Equal(t, "0", string(got.Config["max_turns"]))
+
+	// A normalized legacy row, written again, is stored with null.
+	got, err = UnmarshalPendingConfigFromStorage(legacy)
+	require.NoError(t, err)
+	raw, err = MarshalPendingConfigForStorage(got)
+	require.NoError(t, err)
+	assert.Contains(t, raw, `"max_turns":null`)
+
+	view, err := json.Marshal(got.ResponseView(true))
+	require.NoError(t, err)
+	assert.NotContains(t, string(view), "limitsFormat")
+}

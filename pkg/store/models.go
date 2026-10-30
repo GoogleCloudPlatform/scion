@@ -1428,6 +1428,12 @@ type BrokerCapabilities struct {
 	// applies (api.ClearableConfigPath, and env key removals) as applied
 	// at the next start rather than held for a reincarnation.
 	ClearedFields bool `json:"clearedFields,omitempty"`
+	// UnlimitedCountLimits indicates the broker honours an explicit
+	// max_turns or max_model_calls of 0 as "no limit" over an inherited one
+	// (ptone/scion#5605): its merge, default fill and launch keep it. Only
+	// for such a broker does the hub accept a change of a count limit to
+	// Unlimited; an older broker would keep the inherited limit.
+	UnlimitedCountLimits bool `json:"unlimitedCountLimits,omitempty"`
 	// StartsInFlight indicates the broker reports the agent starts still
 	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
 	// then does the hub read a start's absence from that list as "no start
