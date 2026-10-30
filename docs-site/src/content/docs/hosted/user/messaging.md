@@ -101,7 +101,7 @@ With the `hub.attachment_artifacts` experiment on, agents send and receive attac
 The native web chat includes a complete suite of collaboration and developer productivity tools (Phases 0–5):
 
 #### 1. Message Context Menu
-Clicking the **More actions** (`⋯`) button in a message's header, right-clicking a message (on desktop), or tapping it (on touch devices without hover) opens a contextual **context menu** providing several per-message actions. On touch devices, taps on links, buttons, mentions, and reply previews keep their normal behavior:
+Clicking the **More actions** (`⋯`) button in a message's header, right-clicking a message (on desktop), or tapping it (on touch devices without hover) opens a **context menu** providing several per-message actions. On touch devices, taps on links, buttons, mentions, and reply previews keep their normal behavior:
 - **Reply / Quote**: Quote a previous message with full backend support for reply-threading, maintaining clear context in fast-moving development discussions. Choosing **Reply** moves focus to the composer so you can start typing immediately.
 - **Edit / Delete**: Edit or delete your own messages.
 - **Copy Permalink**: Generate a direct link to any message in the thread.
