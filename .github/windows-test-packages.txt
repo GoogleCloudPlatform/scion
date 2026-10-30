@@ -31,6 +31,9 @@
 # ./pkg/runtime: anchored to the git-metadata bind refusal (the rest is
 # broker-side container runtime code).
 ./pkg/runtime -run=^(TestWindowsGitBindSource_Unsupported|TestWindowsGitBindCallers_RegisterNoMount)$
+# ./pkg/brokercontrol: anchored to its Windows tests (the rest needs POSIX
+# permissions, symlinks and hard links; the Runtime Broker is gated).
+./pkg/brokercontrol -run=^(TestCheck_WindowsVolumeRoot|TestCheck_WindowsCaseVariant|TestCheck_WindowsRelativeDriveForm|TestVolumeAllowed_WindowsCaseVariant|TestVolumeAllowed_CaseVariantRefused)$
 # ./cmd: anchored to the Windows-relevant tests (the full suite is
 # POSIX-bound). Never the attachment-writing
 # message tests.
