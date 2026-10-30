@@ -4682,8 +4682,8 @@ chart's appVersion, so the operator has to set one. */}}
 {{- $minVersion := trim (toString ($min.version | default "")) }}
 {{- /* $orRelease reads inside a remedy ("nightly-X or later or a release at or
 after Y"); $orReleaseParen inside a parenthesis ("(nightly-X or later, or a
-release at or after Y)"). Both are empty while the version floor is a
-placeholder. */}}
+release at or after Y)"). Both are empty when the version floor is empty.
+*/}}
 {{- $orRelease := "" }}
 {{- $orReleaseParen := "" }}
 {{- if $minVersion }}{{- $orRelease = printf " or a release at or after %s" $minVersion }}{{- $orReleaseParen = printf ", or a release at or after %s" $minVersion }}{{- end }}
@@ -4712,7 +4712,7 @@ real image tag is affected.
 {{- if $root.Values.image.digest }}
 {{- print "unverified" }}
 {{- else if and (regexMatch $semverRe $tag) (not $minVersion) }}
-{{- /* No versioned release carries the change yet: every version tag fails, and the message names the nightly, never a version floor. */}}
+{{- /* With an empty version floor, every version tag fails, and the message names the nightly, never a version floor. */}}
 {{- if $defaultTag }}
 {{- fail (printf "image.tag is not set, so the tag is the chart's appVersion (%s), a version tag, and no versioned hub release serves the relay hop with the internal_tls_* settings yet, so a version tag cannot pass: set image.tag to nightly-%s or later, or set image.digest, or %s." $root.Chart.AppVersion $min.nightly $off) }}
 {{- end }}

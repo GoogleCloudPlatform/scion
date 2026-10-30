@@ -1179,7 +1179,7 @@ else
   rt_empty_floor "an empty version floor refuses a malformed version tag, naming the nightly and no version floor" \
     "is not a valid semantic version, and no versioned hub release serves the relay hop" --set-string image.tag=1.2.0-01
   unset -f rt_empty_floor
-  case "$_rt_ph" in /tmp/*) rm -rf "$_rt_ph" ;; esac
+  [ -n "$_rt_ph" ] && [ -d "$_rt_ph" ] && rm -rf "$_rt_ph"
   unset _rt_ph _rt_ph_ok
   # The semver refusal names the version floor.
   executed=$((executed + 1))
@@ -1312,7 +1312,7 @@ else
       echo "FAIL  relay image gate: the NOTES remedy on the config.extra path ($_rt_label) is wrong, or the probe rendered nothing"; failed=$((failed + 1))
     fi
   done
-  case "$_rt_tmp" in /tmp/*) rm -rf "$_rt_tmp" ;; esac
+  [ -n "$_rt_tmp" ] && [ -d "$_rt_tmp" ] && rm -rf "$_rt_tmp"
   unset -f _rt_notes _rt_notes_extra; unset _rt_n_latest _rt_n_ok _rt_n_extra _rt_n_extra_digest _rt_warn _rt_case _rt_label _rt_out
 fi
 unset _rt_min _rt_min_n _rt_mv _rt_major _rt_latest _rt_ok _rt_tmp RT_TAG _rt_vlines _rt_ok_tag _rt_semver_refusal
