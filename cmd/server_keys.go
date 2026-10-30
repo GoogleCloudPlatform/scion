@@ -74,7 +74,10 @@ var serverKeysCmd = &cobra.Command{
 	Long: `Operator commands for the Hub server keyring (server.keyring_file).
 
 They read the server configuration and keyring file on this host and never
-start services or print key material.
+start services or print key material. They are available in human mode
+only. The read-only commands (status, check) do not require the
+server.secret_rotation experiment: it is a hub database setting, and they
+change nothing.
 
 Exit codes: 0 success; 1 the check ran and found a failure; 2 invalid
 configuration or an unmet precondition.`,

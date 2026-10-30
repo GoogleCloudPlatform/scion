@@ -171,14 +171,27 @@ type KeyStatusMigration struct {
 	TargetKID string `json:"target_kid"`
 }
 
+// KeyStatus audit scopes: which audit the report's counts come from.
+const (
+	// KeyStatusAuditStartup: the endpoint's startup audit, run in New
+	// before any backup write; rows written later are not in it.
+	KeyStatusAuditStartup = "startup"
+	// KeyStatusAuditFresh: an audit the CLI ran for this report.
+	KeyStatusAuditFresh = "fresh"
+)
+
 // KeyStatusAudit is the encryption audit aggregate: counts only.
 type KeyStatusAudit struct {
 	// Ran is false when no audit ran (no store).
-	Ran           bool `json:"ran"`
-	Scanned       int  `json:"scanned"`
-	ReferenceOnly int  `json:"reference_only"`
-	Readable      int  `json:"readable"`
-	Unreadable    int  `json:"unreadable"`
+	Ran bool `json:"ran"`
+	// Scope is KeyStatusAuditStartup or KeyStatusAuditFresh.
+	Scope string `json:"scope"`
+	// CompletedAt is when the audit finished; null when none ran.
+	CompletedAt   *time.Time `json:"completed_at"`
+	Scanned       int        `json:"scanned"`
+	ReferenceOnly int        `json:"reference_only"`
+	Readable      int        `json:"readable"`
+	Unreadable    int        `json:"unreadable"`
 	// ByFormat counts payloads by envelope format (plaintext, v1, v2,
 	// invalid); ByKID counts v2 payloads by envelope key ID.
 	ByFormat map[string]int `json:"by_format"`
@@ -210,7 +223,9 @@ type keyStatusInputs struct {
 	// store is nil when no store is available.
 	store store.Store
 	audit EncryptionAudit
-	now   time.Time
+	// auditScope is KeyStatusAuditStartup or KeyStatusAuditFresh.
+	auditScope string
+	now        time.Time
 }
 
 // buildKeyStatus builds the report. It returns an error only when the
@@ -229,7 +244,7 @@ func buildKeyStatus(ctx context.Context, in keyStatusInputs) (KeyStatusReport, e
 		Signing:                     keyStatusSigning(k.Signing()),
 		Encryption:                  keyStatusEncryption(k.Encryption()),
 		ReaderFormats:               KeyStatusReaderFormats{Signing: slices.Clone(keyStatusSigningReaderFormats), Encryption: slices.Clone(keyStatusEncryptionReaderFormats)},
-		Audit:                       keyStatusAudit(in.audit),
+		Audit:                       keyStatusAudit(in.audit, in.auditScope),
 		MaterialDigest:              nil,
 		MaterialDigestOmittedReason: MaterialDigestOmittedPendingLegacyIndependence,
 	}
@@ -307,9 +322,10 @@ func keyStatusEncryption(r *keyring.EncryptionRing) KeyStatusEncryption {
 	return out
 }
 
-func keyStatusAudit(a EncryptionAudit) KeyStatusAudit {
+func keyStatusAudit(a EncryptionAudit, scope string) KeyStatusAudit {
 	out := KeyStatusAudit{
 		Ran:              a.Done,
+		Scope:            scope,
 		Scanned:          a.Scanned,
 		ReferenceOnly:    a.ReferenceOnly,
 		Readable:         a.Readable,
@@ -318,6 +334,10 @@ func keyStatusAudit(a EncryptionAudit) KeyStatusAudit {
 		ByKID:            map[string]int{},
 		UnreadableByKind: map[string]int{},
 		BackupUnreadable: len(a.BackupUnreadable),
+	}
+	if a.Done && !a.At.IsZero() {
+		at := a.At.UTC()
+		out.CompletedAt = &at
 	}
 	for f, n := range a.ByFormat {
 		out.ByFormat[f] = n
@@ -389,12 +409,13 @@ func nonNil(s []string) []string {
 func (s *Server) KeyStatus(ctx context.Context) (KeyStatusReport, error) {
 	host, _ := os.Hostname()
 	return buildKeyStatus(ctx, keyStatusInputs{
-		instance: KeyStatusInstance{ID: s.InstanceID(), Hostname: host, Source: KeyStatusSourceEndpoint},
-		keyring:  s.config.Keyring,
-		cipher:   s.cipher,
-		store:    s.store,
-		audit:    s.EncryptionAudit(),
-		now:      s.keyringNow(),
+		instance:   KeyStatusInstance{ID: s.InstanceID(), Hostname: host, Source: KeyStatusSourceEndpoint},
+		keyring:    s.config.Keyring,
+		cipher:     s.cipher,
+		store:      s.store,
+		audit:      s.EncryptionAudit(),
+		auditScope: KeyStatusAuditStartup,
+		now:        s.keyringNow(),
 	})
 }
 
@@ -416,12 +437,13 @@ func LocalKeyStatus(ctx context.Context, k *keyring.Keyring, c *secret.ValueCiph
 	}
 	host, _ := os.Hostname()
 	return buildKeyStatus(ctx, keyStatusInputs{
-		instance: KeyStatusInstance{Hostname: host, Source: KeyStatusSourceLocal},
-		keyring:  k,
-		cipher:   c,
-		store:    st,
-		audit:    audit,
-		now:      now,
+		instance:   KeyStatusInstance{Hostname: host, Source: KeyStatusSourceLocal},
+		keyring:    k,
+		cipher:     c,
+		store:      st,
+		audit:      audit,
+		auditScope: KeyStatusAuditFresh,
+		now:        now,
 	})
 }
 

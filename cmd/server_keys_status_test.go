@@ -93,6 +93,8 @@ func TestServerKeysStatus_JSONMatchesBuilder(t *testing.T) {
 	assert.Equal(t, 2, got.Audit.Scanned)
 	assert.Equal(t, 1, got.Audit.Unreadable)
 	assert.Nil(t, got.MaterialDigest)
+	assert.Equal(t, hub.KeyStatusAuditFresh, got.Audit.Scope)
+	require.NotNil(t, got.Audit.CompletedAt)
 
 	k, err := keyring.LoadFile(path)
 	require.NoError(t, err)
@@ -100,6 +102,8 @@ func TestServerKeysStatus_JSONMatchesBuilder(t *testing.T) {
 	require.NoError(t, err)
 	want, err := hub.LocalKeyStatus(context.Background(), k, c, st, keysStatusTestNow)
 	require.NoError(t, err)
+	// Each run's audit has its own completion time.
+	want.Audit.CompletedAt, got.Audit.CompletedAt = nil, nil
 	wantJSON, err := json.Marshal(want)
 	require.NoError(t, err)
 	gotJSON, err := json.Marshal(got)

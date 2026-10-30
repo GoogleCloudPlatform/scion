@@ -45,8 +45,10 @@ the key-related readiness reasons.
 
 It builds the same report as GET /api/v1/admin/keys/status, from the
 keyring file and database configured on this host instead of a running
-Hub. The database is opened read only. The report never contains key
-material, ciphertext, payloads or record identifiers.
+Hub. The database is opened read only. The endpoint reports the audit the
+Hub ran at startup (audit.scope "startup"); this command runs a fresh audit
+(audit.scope "fresh"), so it also covers rows written since. The report
+never contains key material, ciphertext, payloads or record identifiers.
 
 Use --format json for the versioned JSON report.
 
@@ -144,8 +146,8 @@ func printKeyStatus(w io.Writer, r hub.KeyStatusReport) {
 	if !r.Audit.Ran {
 		p("Audit: not run (no database)")
 	} else {
-		p("Audit: %d scanned, %d reference-only, %d readable, %d unreadable (%d infrastructure backups)",
-			r.Audit.Scanned, r.Audit.ReferenceOnly, r.Audit.Readable, r.Audit.Unreadable, r.Audit.BackupUnreadable)
+		p("Audit (%s, completed %s): %d scanned, %d reference-only, %d readable, %d unreadable (%d infrastructure backups)",
+			r.Audit.Scope, keysDeadline(r.Audit.CompletedAt), r.Audit.Scanned, r.Audit.ReferenceOnly, r.Audit.Readable, r.Audit.Unreadable, r.Audit.BackupUnreadable)
 		p("  by format: %s; by key ID: %s; unreadable by kind: %s",
 			keysCounts(r.Audit.ByFormat), keysCounts(r.Audit.ByKID), keysCounts(r.Audit.UnreadableByKind))
 	}

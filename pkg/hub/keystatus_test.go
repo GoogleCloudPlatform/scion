@@ -162,10 +162,13 @@ func ksGet(t *testing.T, srv *Server) (KeyStatusReport, string) {
 	return r, rec.Body.String()
 }
 
-// withoutInstance clears the instance identity, the one part of the report
-// that legitimately differs between the endpoint and the CLI.
+// withoutInstance clears what legitimately differs between the endpoint
+// and the CLI for the same file and store: the instance identity and which
+// audit ran when (the endpoint's startup audit, the CLI's fresh one).
 func withoutInstance(r KeyStatusReport) KeyStatusReport {
 	r.Instance = KeyStatusInstance{}
+	r.Audit.Scope = ""
+	r.Audit.CompletedAt = nil
 	return r
 }
 
@@ -197,8 +200,9 @@ func localFor(t *testing.T, st store.Store, k *keyring.Keyring, now time.Time) K
 // with no store, pinned byte for byte as JSON.
 func TestKeyStatus_GoldenLegacyReport(t *testing.T) {
 	r, err := buildKeyStatus(context.Background(), keyStatusInputs{
-		instance: KeyStatusInstance{ID: "inst-a", Hostname: "host-a", Source: KeyStatusSourceEndpoint},
-		now:      krT0,
+		instance:   KeyStatusInstance{ID: "inst-a", Hostname: "host-a", Source: KeyStatusSourceEndpoint},
+		auditScope: KeyStatusAuditStartup,
+		now:        krT0,
 	})
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
@@ -218,7 +222,7 @@ func TestKeyStatus_GoldenLegacyReport(t *testing.T) {
 	  "policy": null,
 	  "migration": null,
 	  "audit": {
-	    "ran": false, "scanned": 0, "reference_only": 0, "readable": 0, "unreadable": 0,
+	    "ran": false, "scope": "startup", "completed_at": null, "scanned": 0, "reference_only": 0, "readable": 0, "unreadable": 0,
 	    "by_format": {}, "by_kid": {}, "unreadable_by_kind": {}, "backup_unreadable": 0
 	  },
 	  "readiness": {"reasons": []},
@@ -273,8 +277,8 @@ func TestKeyStatus_GoldenFieldSet(t *testing.T) {
 	}
 	sort.Strings(paths)
 	assert.Equal(t, []string{
-		"audit", "audit.backup_unreadable", "audit.by_format", "audit.by_kid", "audit.ran",
-		"audit.readable", "audit.reference_only", "audit.scanned", "audit.unreadable", "audit.unreadable_by_kind",
+		"audit", "audit.backup_unreadable", "audit.by_format", "audit.by_kid", "audit.completed_at", "audit.ran",
+		"audit.readable", "audit.reference_only", "audit.scanned", "audit.scope", "audit.unreadable", "audit.unreadable_by_kind",
 		"encryption", "encryption.accepted_ids", "encryption.active_id", "encryption.legacy_v1_read_ids", "encryption.write_format",
 		"instance", "instance.hostname", "instance.id", "instance.source",
 		"keyring", "keyring.revision", "keyring.source",
@@ -373,6 +377,8 @@ func TestKeyStatus_LegacyModeEndpoint(t *testing.T) {
 	assert.Equal(t, []string{"legacy"}, r.Signing.LegacyReadIDs)
 	assert.Equal(t, "v1", r.Encryption.WriteFormat)
 	assert.True(t, r.Audit.Ran)
+	assert.Equal(t, KeyStatusAuditStartup, r.Audit.Scope)
+	require.NotNil(t, r.Audit.CompletedAt)
 	assert.Positive(t, r.Audit.Scanned, "the startup audit saw the signing backups")
 	assert.Nil(t, r.MaterialDigest)
 	assert.Equal(t, MaterialDigestOmittedPendingLegacyIndependence, r.MaterialDigestOmittedReason)
@@ -421,6 +427,9 @@ func TestKeyStatus_TwoInstancesReportTheirOwnFiles(t *testing.T) {
 	local := localFor(t, st, ka, krT0)
 	assert.Equal(t, KeyStatusSourceLocal, local.Instance.Source)
 	assert.Empty(t, local.Instance.ID)
+	assert.Equal(t, KeyStatusAuditFresh, local.Audit.Scope)
+	require.NotNil(t, local.Audit.CompletedAt)
+	assert.Equal(t, KeyStatusAuditStartup, ra.Audit.Scope)
 }
 
 // The readiness reasons match /readyz: past the active generation's
