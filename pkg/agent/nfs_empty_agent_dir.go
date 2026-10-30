@@ -29,10 +29,11 @@ var errEmptyPerAgentNFSRuntime = errors.New("workspace_storage nfs: empty-per-ag
 	"need the Kubernetes runtime; use a broker with local workspace storage for other runtimes")
 
 // errEmptyPerAgentNFSNoClaim is returned for an empty-per-agent agent on NFS
-// workspace storage when the share has no PV claim (pv_name), so the pod
-// could not mount the agent's own directory.
-var errEmptyPerAgentNFSNoClaim = errors.New("workspace_storage nfs: empty-per-agent workspaces need the NFS share's pv_name " +
-	"so the pod can mount the agent's own directory")
+// workspace storage when the share has neither a PV claim (pv_name) nor a
+// server and export for inline volumes, so the pod could not mount the
+// agent's own directory.
+var errEmptyPerAgentNFSNoClaim = errors.New("workspace_storage nfs: empty-per-agent workspaces need the NFS share's pv_name, " +
+	"or its server and export, so the pod can mount the agent's own directory")
 
 // nfsEmptyAgentDirSelection returns the name of the agent directory an
 // empty-per-agent agent gets on the NFS workspace export

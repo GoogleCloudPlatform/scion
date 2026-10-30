@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectfs"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
@@ -122,11 +123,12 @@ func (s *Server) shareMountCheckText() string {
 }
 
 // projectShareNotMountedText is the client text for a start refused with
-// agent.ErrProjectShareNotMounted. That refusal comes only from the
+// agent.ErrProjectShareNotMounted (err). That refusal comes only from the
 // Kubernetes workspace leaves, a runtime that never mounts the share on
-// the broker, so the remedy is the broker's own container.
-func projectShareNotMountedText() string {
-	return scionrt.ProjectShareUnavailableText(scionrt.ProjectShareMountPathField, true)
+// the broker, so the remedy is the broker's own container; a share without
+// a claim gets the inline variant (agent.ProjectShareClientText).
+func projectShareNotMountedText(err error) string {
+	return agent.ProjectShareClientText(err)
 }
 
 // shareAdvisoryDetail is the reconciler's last status message for the

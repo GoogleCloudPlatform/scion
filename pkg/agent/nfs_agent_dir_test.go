@@ -356,12 +356,12 @@ func TestEnsureNFSAgentWorkspaceLeaf(t *testing.T) {
 	resolved := resolveTestNFSWorkspace(t, mountRoot)
 	ws := filepath.Join(nfsTestAgentDir(mountRoot, "agent-1"), provision.AgentWorkspaceDir)
 
-	ok, err := ensureNFSAgentWorkspaceLeaf("docker", testNFSWorkspaceProjectID, resolved, "ws-pv", nil, "agent-1")
+	ok, err := ensureNFSAgentWorkspaceLeaf("docker", testNFSWorkspaceProjectID, resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil, "agent-1")
 	require.NoError(t, err)
 	assert.False(t, ok)
 
 	require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
-	ok, err = ensureNFSAgentWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, resolved, "ws-pv", nil, "agent-1")
+	ok, err = ensureNFSAgentWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil, "agent-1")
 	require.NoError(t, err)
 	assert.True(t, ok)
 	assert.DirExists(t, ws)
@@ -375,13 +375,13 @@ func TestEnsureNFSAgentWorkspaceLeaf(t *testing.T) {
 
 	marker := filepath.Join(ws, "work.txt")
 	require.NoError(t, os.WriteFile(marker, []byte("x"), 0o644))
-	ok, err = ensureNFSAgentWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, resolved, "ws-pv", nil, "agent-1")
+	ok, err = ensureNFSAgentWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil, "agent-1")
 	require.NoError(t, err)
 	assert.True(t, ok)
 	assert.FileExists(t, marker)
 
 	for _, bad := range []string{"../x", "a/b", "Agent-1", "", ".."} {
-		_, err = ensureNFSAgentWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, resolved, "ws-pv", nil, bad)
+		_, err = ensureNFSAgentWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil, bad)
 		assert.Error(t, err, "name %q", bad)
 	}
 }
@@ -397,7 +397,7 @@ func TestEnsureNFSAgentWorkspaceLeaf_ExistingAgentDirWithoutGroupWrite(t *testin
 	require.NoError(t, os.MkdirAll(agentDir, 0o755))
 	require.NoError(t, os.Chmod(agentDir, os.ModeSetgid|0o755))
 
-	ok, err := ensureNFSAgentWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, resolved, "ws-pv", nil, "agent-1")
+	ok, err := ensureNFSAgentWorkspaceLeaf("kubernetes", testNFSWorkspaceProjectID, resolved, runtime.NFSPodShare{ClaimName: "ws-pv"}, nil, "agent-1")
 	require.NoError(t, err)
 	assert.False(t, ok)
 	ws := filepath.Join(agentDir, provision.AgentWorkspaceDir)

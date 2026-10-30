@@ -351,7 +351,7 @@ run "relative_nfs_export_rejected" {
   expect_failures = [var.nfs]
 }
 
-run "empty_nfs_pv_name_rejected" {
+run "empty_nfs_pv_name_accepted" {
   command = plan
 
   variables {
@@ -359,6 +359,23 @@ run "empty_nfs_pv_name_rejected" {
       server  = "192.0.2.10"
       export  = "/scion/tfha-gke-h3"
       pv_name = ""
+    }
+  }
+
+  assert {
+    condition     = output.chart_values.workspaceStorage.nfs.pvName == ""
+    error_message = "An empty nfs.pv_name must be accepted and render an empty workspaceStorage.nfs.pvName (agent pods mount the share inline)."
+  }
+}
+
+run "invalid_nfs_pv_name_rejected" {
+  command = plan
+
+  variables {
+    nfs = {
+      server  = "192.0.2.10"
+      export  = "/scion/tfha-gke-h3"
+      pv_name = "Bad_Name"
     }
   }
 

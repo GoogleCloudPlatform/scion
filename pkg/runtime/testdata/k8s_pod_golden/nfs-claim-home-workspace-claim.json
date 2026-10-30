@@ -1,0 +1,327 @@
+{
+  "metadata": {
+    "name": "test-agent",
+    "namespace": "default",
+    "labels": {
+      "scion.project": "myproject",
+      "scion.start_id": "start-1"
+    },
+    "annotations": {
+      "scion.home_storage": "nfs"
+    }
+  },
+  "spec": {
+    "volumes": [
+      {
+        "name": "workspace",
+        "persistentVolumeClaim": {
+          "claimName": "scion-workspaces"
+        }
+      },
+      {
+        "name": "scion-mem",
+        "emptyDir": {
+          "medium": "Memory"
+        }
+      },
+      {
+        "name": "shared-dir-0",
+        "persistentVolumeClaim": {
+          "claimName": "scion-workspaces"
+        }
+      },
+      {
+        "name": "shared-dir-1",
+        "persistentVolumeClaim": {
+          "claimName": "scion-workspaces",
+          "readOnly": true
+        }
+      }
+    ],
+    "initContainers": [
+      {
+        "name": "home-leaf",
+        "image": "test:latest",
+        "command": [
+          "sh",
+          "-c",
+          "if sciontool version --features 2\u003e/dev/null | grep -qx 'home-v1'; then exec 'sciontool' 'home' 'leaf' '--agent-dir' '/scion-agent-dir'; fi\necho \"home_prepare_failed: image sciontool lacks NFS-home support (needs home-v1)\" \u003e\u00262\nexit 3"
+        ],
+        "env": [
+          {
+            "name": "SCION_HOME_AGENT_ID",
+            "value": "0b9f6a52-3c1e-4f43-9d8e-2a6f1c7b5e10"
+          },
+          {
+            "name": "SCION_HOME_GID",
+            "value": "1000"
+          }
+        ],
+        "resources": {},
+        "volumeMounts": [
+          {
+            "name": "workspace",
+            "mountPath": "/scion-agent-dir",
+            "subPath": "projects/proj-123/agents/a"
+          }
+        ],
+        "terminationMessagePolicy": "FallbackToLogsOnError",
+        "securityContext": {
+          "capabilities": {
+            "add": [
+              "CHOWN",
+              "FOWNER",
+              "DAC_OVERRIDE"
+            ],
+            "drop": [
+              "ALL"
+            ]
+          },
+          "runAsUser": 0,
+          "runAsGroup": 0,
+          "runAsNonRoot": false,
+          "allowPrivilegeEscalation": false
+        }
+      },
+      {
+        "name": "home-prepare",
+        "image": "test:latest",
+        "command": [
+          "sh",
+          "-c",
+          "if sciontool version --features 2\u003e/dev/null | grep -qx 'home-v1'; then exec 'sciontool' 'home' 'prepare' '--home' '/scion-home' '--mem-dir' '/run/scion/mem'; fi\necho \"home_prepare_failed: image sciontool lacks NFS-home support (needs home-v1)\" \u003e\u00262\nexit 3"
+        ],
+        "env": [
+          {
+            "name": "SCION_HOME_AGENT_ID",
+            "value": "0b9f6a52-3c1e-4f43-9d8e-2a6f1c7b5e10"
+          },
+          {
+            "name": "SCION_HOME_START_ID",
+            "value": "start-1"
+          },
+          {
+            "name": "SCION_HOME_LINKS",
+            "value": "[]"
+          },
+          {
+            "name": "SCION_HOME_SKELETON_SOURCE",
+            "value": "/home/scion"
+          },
+          {
+            "name": "SCION_HOME_SKELETON_MAX_BYTES",
+            "value": "1024"
+          }
+        ],
+        "resources": {},
+        "volumeMounts": [
+          {
+            "name": "workspace",
+            "mountPath": "/scion-home",
+            "subPath": "projects/proj-123/agents/a/home-0b9f6a52-3c1e-4f43-9d8e-2a6f1c7b5e10"
+          },
+          {
+            "name": "scion-mem",
+            "mountPath": "/run/scion/mem"
+          }
+        ],
+        "terminationMessagePolicy": "FallbackToLogsOnError",
+        "securityContext": {
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "runAsUser": 1000,
+          "runAsGroup": 1000,
+          "runAsNonRoot": true,
+          "allowPrivilegeEscalation": false
+        }
+      },
+      {
+        "name": "workspace-provision",
+        "image": "test:latest",
+        "command": [
+          "sciontool",
+          "provision",
+          "--uid",
+          "1000",
+          "--gid",
+          "1000"
+        ],
+        "env": [
+          {
+            "name": "SCION_PROVISION_STATE_DIR",
+            "value": "/scion-provision"
+          },
+          {
+            "name": "SCION_PROJECT_ID",
+            "value": "proj-123"
+          },
+          {
+            "name": "SCION_SHARED_DIR_PATHS",
+            "value": "notes=/scion-volumes/notes,cache=/workspace/.scion-volumes/cache"
+          },
+          {
+            "name": "SCION_PROVISION_CHOWN_BEST_EFFORT",
+            "value": "1"
+          }
+        ],
+        "resources": {},
+        "volumeMounts": [
+          {
+            "name": "workspace",
+            "mountPath": "/workspace",
+            "subPath": "projects/proj-123/workspace"
+          },
+          {
+            "name": "workspace",
+            "mountPath": "/scion-provision",
+            "subPath": "projects/proj-123/provision"
+          },
+          {
+            "name": "shared-dir-0",
+            "mountPath": "/scion-volumes/notes",
+            "subPath": "projects/proj-123/shared-dirs/notes"
+          },
+          {
+            "name": "shared-dir-1",
+            "mountPath": "/workspace/.scion-volumes/cache",
+            "subPath": "projects/proj-123/shared-dirs/cache"
+          }
+        ],
+        "terminationMessagePolicy": "FallbackToLogsOnError",
+        "securityContext": {
+          "capabilities": {
+            "add": [
+              "CHOWN",
+              "FOWNER",
+              "DAC_OVERRIDE"
+            ],
+            "drop": [
+              "ALL"
+            ]
+          },
+          "runAsUser": 0,
+          "runAsGroup": 0,
+          "runAsNonRoot": false,
+          "allowPrivilegeEscalation": false
+        }
+      }
+    ],
+    "containers": [
+      {
+        "name": "agent",
+        "image": "test:latest",
+        "command": [
+          "sh",
+          "-c",
+          "while [ ! -f /tmp/.scion-home-ready ]; do sleep 0.2; done; exec sciontool init -- sh -c \"$SCION_START_CMD\""
+        ],
+        "workingDir": "/workspace",
+        "env": [
+          {
+            "name": "SCION_START_CMD",
+            "value": "tmux new-session -d -s scion -n agent sh -c 'sleep infinity; echo $? \u003e /tmp/scion-harness-exit-code' \\; set-option -g window-size latest \\; new-window -t scion -n shell \\; select-window -t scion:agent \\; attach-session -t scion"
+          },
+          {
+            "name": "SCION_WORKSPACE_GIT",
+            "value": "false"
+          },
+          {
+            "name": "SCION_HARNESS_OUTPUTS_DIR",
+            "value": "/run/scion/mem/outputs"
+          },
+          {
+            "name": "SCION_HARNESS_SECRETS_DIR",
+            "value": "/run/scion/mem/harness-secrets"
+          },
+          {
+            "name": "SCION_HOST_UID",
+            "value": "HOST_UID"
+          },
+          {
+            "name": "SCION_HOST_GID",
+            "value": "HOST_GID"
+          },
+          {
+            "name": "HOME",
+            "value": "/home/scion"
+          },
+          {
+            "name": "USER",
+            "value": "scion"
+          },
+          {
+            "name": "LOGNAME",
+            "value": "scion"
+          }
+        ],
+        "resources": {
+          "requests": {
+            "cpu": "250m",
+            "ephemeral-storage": "10Gi",
+            "memory": "512Mi"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "workspace",
+            "mountPath": "/workspace",
+            "subPath": "projects/proj-123/workspace"
+          },
+          {
+            "name": "workspace",
+            "readOnly": true,
+            "mountPath": "/workspace/.scion",
+            "subPath": "projects/proj-123/workspace/.scion"
+          },
+          {
+            "name": "workspace",
+            "mountPath": "/home/scion",
+            "subPath": "projects/proj-123/agents/a/home-0b9f6a52-3c1e-4f43-9d8e-2a6f1c7b5e10"
+          },
+          {
+            "name": "scion-mem",
+            "mountPath": "/run/scion/mem"
+          },
+          {
+            "name": "shared-dir-0",
+            "mountPath": "/scion-volumes/notes",
+            "subPath": "projects/proj-123/shared-dirs/notes"
+          },
+          {
+            "name": "shared-dir-1",
+            "readOnly": true,
+            "mountPath": "/workspace/.scion-volumes/cache",
+            "subPath": "projects/proj-123/shared-dirs/cache"
+          }
+        ],
+        "imagePullPolicy": "IfNotPresent",
+        "securityContext": {
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "allowPrivilegeEscalation": false
+        },
+        "stdin": true,
+        "tty": true
+      }
+    ],
+    "restartPolicy": "Never",
+    "terminationGracePeriodSeconds": 30,
+    "securityContext": {
+      "runAsUser": 1000,
+      "runAsGroup": 1000,
+      "runAsNonRoot": true,
+      "fsGroup": 1000,
+      "fsGroupChangePolicy": "OnRootMismatch",
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      }
+    }
+  },
+  "status": {}
+}
