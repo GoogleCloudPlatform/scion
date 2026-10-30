@@ -79,6 +79,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 
 VALID_AUTH_TYPES = ("api-key", "auth-file")
 _TIER_NAMES = frozenset({"small", "medium", "large", "extra-large", "s", "m", "l", "xl"})
+# pi's thinking levels, as accepted in a ":<level>" model suffix (pi 1.3.0,
+# the version the Dockerfile pins: VALID_THINKING_LEVELS in its cli/args).
+# Update with the pin if pi adds levels.
+_THINKING_LEVELS = frozenset({"off", "minimal", "low", "medium", "high", "xhigh", "max"})
 _PROVIDER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _CREDENTIAL_KEY_RE = re.compile(
     r"(api[_-]?key|secret|passw|credential|authoriz|bearer|token$|^(key|pat)$|[_-]key$)",
@@ -266,6 +270,18 @@ def _is_concrete_model(raw: str) -> bool:
     return bool(raw) and raw.lower() not in _TIER_NAMES
 
 
+def _strip_thinking(model_id: str) -> str:
+    """model_id without a trailing pi thinking-level suffix (":high").
+
+    Mirrors pi's own split: only the text after the last colon is checked,
+    case-sensitively, against the thinking levels. Any other colon is part
+    of the ID (ollama qwen3:8b, a Bedrock -v2:0 version, an OpenRouter :free
+    variant) and is kept.
+    """
+    base, sep, suffix = model_id.rpartition(":")
+    return base if sep and suffix in _THINKING_LEVELS else model_id
+
+
 def _model_settings(ctx: sh.ProvisionContext) -> dict[str, str]:
     """defaultProvider/defaultModel from SCION_PI_PROVIDER and a concrete SCION_MODEL.
 
@@ -275,7 +291,9 @@ def _model_settings(ctx: sh.ProvisionContext) -> dict[str, str]:
     arrives here as SCION_MODEL=anthropic/sonnet and that is written as
     defaultProvider=anthropic, defaultModel=sonnet, even though the alias
     value is a pi --model pattern rather than an exact model ID. Only an
-    unresolved tier name that reaches this point is skipped.
+    unresolved tier name that reaches this point is skipped. A trailing pi
+    thinking-level suffix (":high") is not written, since defaultModel is a
+    model ID; every other colon in the ID is kept (see _strip_thinking).
 
     Scion prepends --model <resolved value> to pi's command whenever the
     agent has an effective model: the Hub-resolved model, a SCION_MODEL in
@@ -301,9 +319,9 @@ def _model_settings(ctx: sh.ProvisionContext) -> dict[str, str]:
         prov, sep, model_id = model.partition("/")
         if sep and prov and model_id:
             out.setdefault("defaultProvider", prov)
-            out["defaultModel"] = model_id.split(":", 1)[0]
+            out["defaultModel"] = _strip_thinking(model_id)
         else:
-            out["defaultModel"] = model.split(":", 1)[0]
+            out["defaultModel"] = _strip_thinking(model)
     return out
 
 
