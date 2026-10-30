@@ -153,11 +153,13 @@ func TestLifecycleStore4223_FailedAfterRunningObservedAlreadyError(t *testing.T)
 	require.NoError(t, err)
 	assert.Equal(t, store.LaunchEndReasonFailed, got.LaunchEndReason)
 
-	// P1: no run transition at all (the report may still change
-	// non-lifecycle columns such as the message).
+	// P1: no phase-rule transition. The only phase-independent emitter is
+	// metadata_changed (a digest change), so any added event must be that;
+	// resynced, reincarnated, restored, stopped, launch_failed and the rest
+	// all fail.
 	added := f.events(a.ID)[len(before):]
-	for _, tr := range []string{tc.TransitionLaunchFailed, tc.TransitionStopped, tc.TransitionStarted, tc.TransitionHalted} {
-		requireNoTransition(t, added, tr)
+	for _, e := range added {
+		require.Equal(t, tc.TransitionMetadataChanged, e.Transition, lcFull(added))
 	}
 }
 
@@ -191,7 +193,7 @@ func TestLifecycleStore4223_FailedAfterRunningObservedStartKind(t *testing.T) {
 	added := f.events(a.ID)[len(before):]
 	require.Len(t, added, 1, lcFull(added))
 	assert.Equal(t, tc.TransitionStopped, added[0].Transition, lcFull(added))
-	assert.Equal(t, "stopped", added[0].StopKind, lcFull(added))
+	assert.Equal(t, tc.StopKindStopped, added[0].StopKind, lcFull(added))
 	assert.Equal(t, tc.CauseStartUnobserved, added[0].Cause, lcFull(added))
 	requireNoTransition(t, added, tc.TransitionLaunchFailed)
 }
