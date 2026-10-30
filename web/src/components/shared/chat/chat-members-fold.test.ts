@@ -112,6 +112,47 @@ describe('scion-chat-members section folding', () => {
     expect(names(second)).toEqual(['Coder', 'Reviewer']);
   });
 
+  for (const section of ['people', 'agents'] as const) {
+    it(`keeps the ${section} heading button and its focus across fold and unfold`, async () => {
+      const el = await mount();
+      const button = toggle(el, section);
+      button.focus();
+      button.click();
+      await el.updateComplete;
+      expect(toggle(el, section)).toBe(button);
+      expect(button.getAttribute('aria-expanded')).toBe('false');
+      expect(el.shadowRoot?.activeElement).toBe(button);
+      button.click();
+      await el.updateComplete;
+      expect(toggle(el, section)).toBe(button);
+      expect(button.getAttribute('aria-expanded')).toBe('true');
+      expect(el.shadowRoot?.activeElement).toBe(button);
+    });
+  }
+
+  it('restores the fold from the new user when currentUserId changes', async () => {
+    localStorage.setItem('scion-chat-members-collapse:other', JSON.stringify(['agents']));
+    const el = await mount();
+    expect(names(el)).toEqual(['Ada', 'Grace', 'Coder', 'Reviewer']);
+
+    el.currentUserId = 'other';
+    await el.updateComplete;
+    expect(toggle(el, 'agents').getAttribute('aria-expanded')).toBe('false');
+    expect(toggle(el, 'people').getAttribute('aria-expanded')).toBe('true');
+
+    toggle(el, 'people').click();
+    await el.updateComplete;
+    expect(JSON.parse(localStorage.getItem('scion-chat-members-collapse:other') ?? '[]')).toEqual([
+      'agents',
+      'people',
+    ]);
+    expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
+
+    el.currentUserId = 'me';
+    await el.updateComplete;
+    expect(names(el)).toEqual(['Ada', 'Grace', 'Coder', 'Reviewer']);
+  });
+
   it('ignores corrupt stored state', async () => {
     localStorage.setItem(STORAGE_KEY, '{not json');
     const el = await mount();
@@ -120,6 +161,8 @@ describe('scion-chat-members section folding', () => {
 
   it('shows an unread dot on a folded section only when one of its members has unread', async () => {
     const el = await mount({ unreadFromIds: ['a2'] });
+    expect(toggle(el, 'agents').querySelector('.section-unread-dot')).toBeNull();
+    expect(toggle(el, 'people').querySelector('.section-unread-dot')).toBeNull();
     toggle(el, 'people').click();
     toggle(el, 'agents').click();
     await el.updateComplete;
@@ -156,6 +199,25 @@ describe('scion-chat-members section folding', () => {
     toggle(el, 'people').click();
     await el.updateComplete;
     expect(toggle(el, 'people').querySelector('.section-unread-dot')).toBeNull();
+  });
+
+  it('counts every other person in the folded People heading, not the search matches', async () => {
+    const el = await mount();
+    el.humansTruncated = true;
+    await el.updateComplete;
+    const input = el.shadowRoot?.querySelector<HTMLInputElement>('.people-search input');
+    if (!input) throw new Error('no people search');
+    input.value = 'ada';
+    input.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+    expect(toggle(el, 'people').textContent).toContain('People — 1');
+    toggle(el, 'people').click();
+    await el.updateComplete;
+    expect(toggle(el, 'people').textContent).toContain('People — 2');
+    toggle(el, 'people').click();
+    await el.updateComplete;
+    expect(toggle(el, 'people').textContent).toContain('People — 1');
+    expect(names(el)).toEqual(['Ada', 'Coder', 'Reviewer']);
   });
 
   it('hides the People search while People is folded', async () => {

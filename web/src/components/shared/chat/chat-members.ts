@@ -979,28 +979,32 @@ export class ScionChatMembers extends LitElement {
     // Unread counts every other person, not just the search matches, so a
     // folded section still signals messages from someone filtered out.
     const unread = others.some((m) => this.unreadFromIds.includes(m.id));
-    const header = this.renderSectionHeader('people', `People — ${sorted.length}`, unread);
+    // A folded heading hides the search box, so it counts everyone rather
+    // than the matches of a search the user can no longer see.
+    const collapsed = this.collapsedSections.has('people');
+    const count = collapsed ? others.length : sorted.length;
+    const header = this.renderSectionHeader('people', `People — ${count}`, unread);
 
     // The wrapper only groups the people part (it carries no styles), so it
-    // can be told apart from the agents part.
-    if (this.collapsedSections.has('people')) {
-      return html`<div class="people-section">${header}</div>`;
-    }
+    // can be told apart from the agents part. One template for both fold
+    // states keeps the heading button, and so its focus, across a toggle.
     return html`<div class="people-section">
       ${header}
-      ${sorted.length === 0
-        ? html`<div class="empty-note" role="status">
-            ${query ? (this.searching ? 'Searching…' : 'No matches') : 'No members'}
-          </div>`
-        : sorted.map((m) => this.renderHuman(m))}
-      ${query && this.searching && sorted.length > 0
-        ? html`<div class="empty-note" role="status">Searching…</div>`
-        : nothing}
-      ${this.humansTruncated && !query
-        ? html`<div class="empty-note">
-            Showing up to ${RECENT_USERS_LIMIT} people. Search to find others.
-          </div>`
-        : nothing}
+      ${collapsed
+        ? nothing
+        : html`${sorted.length === 0
+            ? html`<div class="empty-note" role="status">
+                ${query ? (this.searching ? 'Searching…' : 'No matches') : 'No members'}
+              </div>`
+            : sorted.map((m) => this.renderHuman(m))}
+          ${query && this.searching && sorted.length > 0
+            ? html`<div class="empty-note" role="status">Searching…</div>`
+            : nothing}
+          ${this.humansTruncated && !query
+            ? html`<div class="empty-note">
+                Showing up to ${RECENT_USERS_LIMIT} people. Search to find others.
+              </div>`
+            : nothing}`}
     </div>`;
   }
 
@@ -1069,18 +1073,21 @@ export class ScionChatMembers extends LitElement {
 
     const unread = agents.some((a) => this.unreadFromIds.includes(a.id));
     const header = this.renderSectionHeader('agents', `Agents — ${agents.length}`, unread);
-    if (this.collapsedSections.has('agents')) return header;
 
+    // One template for both fold states keeps the heading button, and so its
+    // focus, across a toggle; only the body is conditional.
     return html`
       ${header}
-      ${agents.length === 0
-        ? html`<div class="empty-note">No agents</div>`
-        : html`
-            ${defaultAgent
-              ? this.renderDefaultAgentGroup(defaultAgent, sortedRest.length > 0)
-              : nothing}
-            ${sortedRest.map((a) => this.renderAgent(a))}
-          `}
+      ${this.collapsedSections.has('agents')
+        ? nothing
+        : agents.length === 0
+          ? html`<div class="empty-note">No agents</div>`
+          : html`
+              ${defaultAgent
+                ? this.renderDefaultAgentGroup(defaultAgent, sortedRest.length > 0)
+                : nothing}
+              ${sortedRest.map((a) => this.renderAgent(a))}
+            `}
     `;
   }
 
