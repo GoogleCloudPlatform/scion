@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -97,8 +98,10 @@ func TestLifecycleStore4223_FailedAfterRunningObservedOpenSegment(t *testing.T) 
 
 	added := f.events(a.ID)[len(before):]
 	require.Len(t, added, 1, lcFull(added))
-	assert.Equal(t, tc.TransitionStopped, added[0].Transition, lcFull(added))
-	assert.Equal(t, tc.StopKindError, added[0].StopKind, lcFull(added))
+	// P5 exactly: stopped(error) with NO cause. A P7a (cause
+	// start_unobserved) would mean the open segment was lost.
+	assert.Empty(t, added[0].Cause, lcFull(added))
+	require.Equal(t, fmt.Sprintf("stopped@%d(error)[R1/1]", before[len(before)-1].TransitionRevision+1), lcFull(added))
 	requireNoTransition(t, added, tc.TransitionLaunchFailed)
 }
 
@@ -127,7 +130,7 @@ func TestLifecycleStore4223_FailedAfterRunningObservedNoSegment(t *testing.T) {
 	added := f.events(a.ID)[len(before):]
 	require.Len(t, added, 1, lcFull(added))
 	assert.Equal(t, tc.TransitionStopped, added[0].Transition, lcFull(added))
-	assert.Equal(t, "error", added[0].StopKind, lcFull(added))
+	assert.Equal(t, tc.StopKindError, added[0].StopKind, lcFull(added))
 	assert.Equal(t, tc.CauseStartUnobserved, added[0].Cause, lcFull(added))
 	requireNoTransition(t, added, tc.TransitionLaunchFailed)
 }
@@ -150,7 +153,45 @@ func TestLifecycleStore4223_FailedAfterRunningObservedAlreadyError(t *testing.T)
 	require.NoError(t, err)
 	assert.Equal(t, store.LaunchEndReasonFailed, got.LaunchEndReason)
 
+	// P1: no run transition at all (the report may still change
+	// non-lifecycle columns such as the message).
 	added := f.events(a.ID)[len(before):]
+	for _, tr := range []string{tc.TransitionLaunchFailed, tc.TransitionStopped, tc.TransitionStarted, tc.TransitionHalted} {
+		requireNoTransition(t, added, tr)
+	}
+}
+
+// TestLifecycleStore4223_FailedAfterRunningObservedStartKind: a start-kind
+// launch's failed report after running_observed ends in its failure phase
+// (stopped, via withStartFailureEnd), not error. With no open segment,
+// running -> stopped with launch-report evidence derives P7a with the
+// after phase as stop kind: stopped(stopped, start_unobserved), and no
+// launch_failed.
+func TestLifecycleStore4223_FailedAfterRunningObservedStartKind(t *testing.T) {
+	f, a := newS2Fixture(t)
+	ctx := context.Background()
+	f.status(ctx, a.ID, store.AgentStatusUpdate{Phase: "starting"})
+	f.mint(a.ID, "R1")
+	launchID, err := f.cs.BeginStartLaunch(ctx, a.ID, store.LaunchKindStart, time.Hour, store.BeginLaunchOptions{PriorPhase: "stopped"})
+	require.NoError(t, err)
+	f.status(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"})
+	got, err := f.cs.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.LaunchEndReasonRunningObserved, got.LaunchEndReason)
+	before := f.events(a.ID)
+	requireNoTransition(t, before, tc.TransitionStarted)
+
+	answer, _, err := f.cs.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, failedAfterRunningObserved(launchID, "R1"))
+	require.NoError(t, err)
+	require.Equal(t, store.LaunchReportResultApplied, answer.Result)
+	got, err = f.cs.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.Equal(t, "stopped", got.Phase, "a start-kind launch ends in its failure phase")
+
+	added := f.events(a.ID)[len(before):]
+	require.Len(t, added, 1, lcFull(added))
+	assert.Equal(t, tc.TransitionStopped, added[0].Transition, lcFull(added))
+	assert.Equal(t, "stopped", added[0].StopKind, lcFull(added))
+	assert.Equal(t, tc.CauseStartUnobserved, added[0].Cause, lcFull(added))
 	requireNoTransition(t, added, tc.TransitionLaunchFailed)
-	requireNoTransition(t, added, tc.TransitionStopped)
 }
