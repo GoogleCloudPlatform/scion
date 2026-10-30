@@ -19,14 +19,17 @@ package hub
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -679,4 +682,143 @@ func TestCheckKeyringFile(t *testing.T) {
 	notReader := ksFile(t, ksPilotDoc("rev-r", "gen1",
 		[]any{ksEntry("legacy", krLegacySecret, nil, nil), ksEntry("gen1", krGen1Secret, nil, nil)}, []any{"legacy"}))
 	assert.ErrorContains(t, CheckKeyringFile(notReader), "legacy_read_ids")
+}
+
+// Review item 1: `scion server keys check` (CheckKeyringFile) and startup
+// (validateKeyringConfig) accept and refuse the same keyring files. The
+// shared refactor is deferred to T7 (pkg/hub/keyring.go is T6/T7's file);
+// until then this table pins the two together.
+func TestCheckKeyringFile_ParityWithValidateKeyringConfig(t *testing.T) {
+	for name, k := range map[string]*keyring.Keyring{
+		"pilot active legacy": ksKeyringA(t),
+		"pilot active gen1":   ksKeyringB(t),
+		"versioned refused":   ksVersionedKeyring(t, "k1"),
+		"no legacy entry": ksFile(t, ksPilotDoc("rev-n", "gen1",
+			[]any{ksEntry("gen1", krGen1Secret, nil, nil)}, []any{"gen1"})),
+		"active not a legacy reader": ksFile(t, ksPilotDoc("rev-r", "gen1",
+			[]any{ksEntry("legacy", krLegacySecret, nil, nil), ksEntry("gen1", krGen1Secret, nil, nil)}, []any{"legacy"})),
+		"legacy adapter":   keyring.Legacy(krLegacySecret),
+		"no keyring":       nil,
+		"zero keyring":     {},
+		"issuance closed":  ksFile(t, ksPilotDoc("rev-c", "legacy", []any{ksEntry("legacy", krLegacySecret, krTime(-2*time.Hour), krTime(-time.Hour))}, []any{"legacy"})),
+		"deadlines active": ksKeyringB(t),
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := DefaultServerConfig()
+			cfg.KeyringConfigured = true
+			cfg.Keyring = k
+			cfg.SharedSigningSecret = krLegacySecret
+			startupErr := validateKeyringConfig(cfg)
+			checkErr := CheckKeyringFile(k)
+			assert.Equal(t, startupErr == nil, checkErr == nil, "startup: %v; check: %v", startupErr, checkErr)
+		})
+	}
+}
+
+// Review item 2: the report's signing readiness reason equals /readyz's
+// (signingNotReadyReason) for every keyring state and clock. The shared
+// refactor is deferred to T7, like item 1.
+func TestKeyStatus_SigningReasonParityWithReadyz(t *testing.T) {
+	closing := ksFile(t, ksPilotDoc("rev-s", "legacy",
+		[]any{ksEntry("legacy", krLegacySecret, krTime(time.Hour), krTime(48*time.Hour))}, []any{"legacy"}))
+	for name, k := range map[string]*keyring.Keyring{
+		"no keyring":     nil,
+		"legacy adapter": keyring.Legacy(krLegacySecret),
+		"zero keyring":   {},
+		"no deadlines":   ksKeyringA(t),
+		"closing":        closing,
+	} {
+		for _, at := range []time.Duration{0, 2 * time.Hour} {
+			now := krT0.Add(at)
+			srv := &Server{config: ServerConfig{Keyring: k, KeyringNow: func() time.Time { return now }}}
+			want := srv.signingNotReadyReason()
+			r, err := buildKeyStatus(context.Background(), keyStatusInputs{keyring: k, now: now})
+			require.NoError(t, err, name)
+			var got string
+			for _, reason := range r.Readiness.Reasons {
+				if reason == readyReasonSigningIssuanceClosed || reason == readyReasonSigningNoActiveGeneration {
+					got = reason
+				}
+			}
+			assert.Equal(t, want, got, "%s at +%s", name, at)
+		}
+	}
+	// The table reaches both non-empty reasons.
+	srv := &Server{config: ServerConfig{Keyring: &keyring.Keyring{}}}
+	assert.Equal(t, readyReasonSigningNoActiveGeneration, srv.signingNotReadyReason())
+	srv = &Server{config: ServerConfig{Keyring: closing, KeyringNow: func() time.Time { return krT0.Add(2 * time.Hour) }}}
+	assert.Equal(t, readyReasonSigningIssuanceClosed, srv.signingNotReadyReason())
+}
+
+// Review item 6: a disabled cipher (legacy mode without a session secret)
+// authenticates nothing, so the local report runs no audit rather than
+// counting every row unreadable; the policy is still read.
+func TestLocalKeyStatus_DisabledCipherRunsNoAudit(t *testing.T) {
+	st := encStore(t)
+	sealed, err := secret.NewLegacyValueCipher(krLegacySecret).Encrypt("ks-synthetic-legacy-payload")
+	require.NoError(t, err)
+	_, err = st.UpsertSecret(context.Background(), &store.Secret{ID: ksRecordLegacy, Key: "KS_RECORD_KEY_LEGACY", EncryptedValue: sealed,
+		Scope: store.ScopeUser, ScopeID: "ks-user", SecretType: store.SecretTypeEnvironment})
+	require.NoError(t, err)
+
+	r, err := LocalKeyStatus(context.Background(), nil, secret.NewLegacyValueCipher(""), st, krT0)
+	require.NoError(t, err)
+	assert.False(t, r.Audit.Ran)
+	assert.Zero(t, r.Audit.Scanned)
+	assert.Zero(t, r.Audit.Unreadable)
+	assert.Nil(t, r.Audit.CompletedAt)
+
+	// With the secret, the same row is audited and readable.
+	r, err = LocalKeyStatus(context.Background(), nil, secret.NewLegacyValueCipher(krLegacySecret), st, krT0)
+	require.NoError(t, err)
+	assert.True(t, r.Audit.Ran)
+	assert.Equal(t, 1, r.Audit.Readable)
+}
+
+// ksFailingPolicyStore is the real store whose encryption policy read
+// fails while fail is set (after startup).
+type ksFailingPolicyStore struct {
+	store.Store
+	fail atomic.Bool
+}
+
+func (s *ksFailingPolicyStore) DB() *sql.DB {
+	if p, ok := s.Store.(interface{ DB() *sql.DB }); ok {
+		return p.DB()
+	}
+	return nil
+}
+
+func (s *ksFailingPolicyStore) Dialect() string {
+	if p, ok := s.Store.(interface{ Dialect() string }); ok {
+		return p.Dialect()
+	}
+	return ""
+}
+
+func (s *ksFailingPolicyStore) GetEncryptionPolicy(ctx context.Context) (*store.EncryptionPolicy, error) {
+	if s.fail.Load() {
+		return nil, errors.New("ks-synthetic-store-failure postgres://ks-user:ks-password@db/hub")
+	}
+	return s.Store.GetEncryptionPolicy(ctx)
+}
+
+// Review item 8: a store failure answers 503 with a generic message, and
+// the store error reaches only the server log.
+func TestKeyStatus_StoreFailureIs503(t *testing.T) {
+	logs := captureLogs(t)
+	fs := &ksFailingPolicyStore{Store: encStore(t)}
+	srv := ksServer(t, fs, ksKeyringA(t), &krClock{t: krT0})
+	fs.fail.Store(true)
+
+	rec := doRequest(t, srv, http.MethodGet, keyStatusPath, nil)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "key status unavailable")
+	assert.NotContains(t, rec.Body.String(), "ks-synthetic-store-failure")
+	assert.NotContains(t, rec.Body.String(), "ks-password")
+	assert.Contains(t, logs.String(), "Key status report failed")
+	assert.Contains(t, logs.String(), "ks-synthetic-store-failure")
+
+	fs.fail.Store(false)
+	assert.Equal(t, http.StatusOK, doRequest(t, srv, http.MethodGet, keyStatusPath, nil).Code)
 }

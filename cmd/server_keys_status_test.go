@@ -126,7 +126,7 @@ func TestServerKeysStatus_TextAndNoStore(t *testing.T) {
 	require.NoError(t, err, out)
 	assert.Equal(t, 0, code)
 	assert.Contains(t, out, "Keyring: source file, revision cmd-test-rev")
-	assert.Contains(t, out, "Audit: not run (no database)")
+	assert.Contains(t, out, "Audit: not run (no database")
 	assert.Contains(t, out, "Encryption policy: none")
 	assert.Contains(t, out, "Material digest: omitted (pending_legacy_independence)")
 	assertNoCmdKRSecret(t, out)
@@ -153,4 +153,51 @@ func TestServerKeysStatus_InvalidKeyringIsExit2(t *testing.T) {
 	_, err, code := runKeys(t, "status", "--keyring-file", path, "--no-store")
 	require.Error(t, err)
 	assert.Equal(t, keysExitInvalid, code)
+}
+
+// Review item 7 (EM ruling): status exits 0 whenever it produced a report,
+// a NOT READY one included; readiness is report content, not a failure.
+func TestServerKeysStatus_NotReadyReportIsExit0(t *testing.T) {
+	keysTestEnv(t)
+	past := func(d time.Duration) string { return keysStatusTestNow.Add(d).Format(time.RFC3339) }
+	path := writeCmdKeyring(t, func(doc map[string]any) {
+		doc["signing"].(map[string]any)["keys"].([]any)[1] = map[string]any{
+			"id": "gen1", "secret": cmdKRGen1Secret, "sign_until": past(-2 * time.Hour), "verify_until": past(-time.Hour),
+		}
+	})
+	old := keysStatusNow
+	keysStatusNow = func() time.Time { return keysStatusTestNow }
+	t.Cleanup(func() { keysStatusNow = old })
+	outputFormat = "json"
+
+	out, err, code := runKeys(t, "status", "--keyring-file", path, "--no-store")
+	require.NoError(t, err, out)
+	assert.Equal(t, 0, code)
+	var got hub.KeyStatusReport
+	require.NoError(t, json.Unmarshal([]byte(out), &got))
+	assert.Equal(t, []string{"signing_issuance_closed"}, got.Readiness.Reasons)
+}
+
+// Review item 6: in legacy mode status says which secret its audit uses.
+// Without a session secret in its environment it runs no audit, instead of
+// reporting every row unreadable.
+func TestServerKeysStatus_LegacyModeAuditNote(t *testing.T) {
+	home := keysTestEnv(t)
+	dbPath, _ := keysStatusDBFixture(t, home, writeCmdKeyring(t, nil))
+
+	out, err, code := runKeys(t, "status", "--db", dbPath)
+	require.NoError(t, err, out)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, out, "no session secret in this environment")
+	assert.Contains(t, out, "--session-secret")
+	assert.Contains(t, out, "Keyring: source legacy")
+	assert.Contains(t, out, "Audit: not run")
+
+	t.Setenv(sessionSecretEnv, "test-only-cmd-other-legacy-secret")
+	out, err, code = runKeys(t, "status", "--db", dbPath)
+	require.NoError(t, err, out)
+	assert.Equal(t, 0, code)
+	assert.Contains(t, out, "the audit uses the session secret from "+sessionSecretEnv)
+	assert.Contains(t, out, "Audit (fresh")
+	assert.NotContains(t, out, "test-only-cmd-other-legacy-secret")
 }

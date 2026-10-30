@@ -48,12 +48,20 @@ keyring file and database configured on this host instead of a running
 Hub. The database is opened read only. The endpoint reports the audit the
 Hub ran at startup (audit.scope "startup"); this command runs a fresh audit
 (audit.scope "fresh"), so it also covers rows written since. The report
-never contains key material, ciphertext, payloads or record identifiers.
+never contains key material, ciphertext, payloads or secret record
+identifiers.
+
+In legacy mode (no keyring file) the audit uses the session secret from
+SCION_SERVER_SESSION_SECRET (or SESSION_SECRET) in this command's
+environment. A Hub started with --session-secret, or with a different
+secret, audits with that secret instead, so the counts can differ; without
+a session secret here no audit runs.
 
 Use --format json for the versioned JSON report.
 
-Exit codes: 0 report produced; 1 the database could not be read;
-2 invalid configuration.`,
+Exit codes: 0 a report was produced, whatever it says (a NOT READY report
+is still exit 0); 1 the operation failed (the database could not be opened
+or read, or the audit failed); 2 invalid configuration.`,
 	Args: cobra.NoArgs,
 	RunE: runServerKeysStatus,
 }
@@ -84,6 +92,9 @@ func runServerKeysStatus(cmd *cobra.Command, _ []string) error {
 	c, err := keysValueCipher(k)
 	if err != nil {
 		return err
+	}
+	if k == nil {
+		printLegacyAuditNote(cmd.ErrOrStderr(), sessionSecretFromEnv() != "")
 	}
 	ctx := cmd.Context()
 	var st store.Store
@@ -117,6 +128,19 @@ func runServerKeysStatus(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// printLegacyAuditNote tells the operator which secret a legacy-mode audit
+// uses (stderr, so JSON output stays clean). The Hub may have been started
+// with --session-secret or another secret, which this command cannot see.
+func printLegacyAuditNote(w io.Writer, haveSecret bool) {
+	if haveSecret {
+		_, _ = fmt.Fprintf(w, "Note: legacy mode (no keyring file): the audit uses the session secret from %s/%s in this environment; "+
+			"a Hub started with --session-secret or another secret can report different counts.\n", sessionSecretEnv, legacySessionSecretEnv)
+		return
+	}
+	_, _ = fmt.Fprintf(w, "Note: legacy mode (no keyring file) and no session secret in this environment (%s/%s): the audit is skipped; "+
+		"a Hub started with --session-secret audits with that secret.\n", sessionSecretEnv, legacySessionSecretEnv)
+}
+
 // printKeyStatus renders the report for a terminal.
 func printKeyStatus(w io.Writer, r hub.KeyStatusReport) {
 	p := func(format string, a ...any) { _, _ = fmt.Fprintf(w, format+"\n", a...) }
@@ -144,7 +168,7 @@ func printKeyStatus(w io.Writer, r hub.KeyStatusReport) {
 		p("Migration: %s, state %s, target %s", r.Migration.ID, r.Migration.State, r.Migration.TargetKID)
 	}
 	if !r.Audit.Ran {
-		p("Audit: not run (no database)")
+		p("Audit: not run (no database, or no session secret in legacy mode)")
 	} else {
 		p("Audit (%s, completed %s): %d scanned, %d reference-only, %d readable, %d unreadable (%d infrastructure backups)",
 			r.Audit.Scope, keysDeadline(r.Audit.CompletedAt), r.Audit.Scanned, r.Audit.ReferenceOnly, r.Audit.Readable, r.Audit.Unreadable, r.Audit.BackupUnreadable)

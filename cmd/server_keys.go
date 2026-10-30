@@ -33,10 +33,11 @@ import (
 // services. Human mode only (not in agentAllowed: the whole server tree is
 // hidden in agent mode) and not on Windows (not in windowsAllowed).
 //
-// Exit codes, shared by every keys subcommand:
+// Exit codes, shared by every keys subcommand (EM ruling on T0 review item 7):
 //
-//	0  success
-//	1  the operation ran and found a failure (or a runtime error)
+//	0  the command did its job; for status, a report was produced, NOT
+//	   READY included (readiness is report content, not a failure)
+//	1  the operation failed (database open or read, decrypt or audit error)
 //	2  invalid configuration or an unmet precondition; nothing was done
 const (
 	keysExitFailure = 1
@@ -79,8 +80,10 @@ only. The read-only commands (status, check) do not require the
 server.secret_rotation experiment: it is a hub database setting, and they
 change nothing.
 
-Exit codes: 0 success; 1 the check ran and found a failure; 2 invalid
-configuration or an unmet precondition.`,
+Exit codes: 0 the command did its job (status: a report was produced,
+including a NOT READY one; check: the configuration is valid); 1 the
+operation failed (for example the database could not be opened or read);
+2 invalid configuration or an unmet precondition.`,
 }
 
 func init() {

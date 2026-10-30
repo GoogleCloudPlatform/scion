@@ -43,9 +43,10 @@ import (
 // report activate-signing consumes: each replica reports its own loaded
 // configuration, never an operator assertion.
 //
-// The report holds IDs, formats, deadlines, policy and migration state,
-// aggregate counts and readiness reasons. It never holds key bytes,
-// derived keys, ciphertext, payloads or stored-record identifiers.
+// The report holds IDs, formats, deadlines, policy and migration state
+// (the migration ID included), aggregate counts and readiness reasons. It
+// never holds key bytes, derived keys, ciphertext, payloads or secret
+// record identifiers.
 
 // KeyStatusReportVersion is the report_version of KeyStatusReport. A
 // consumer refuses a version it does not know.
@@ -422,13 +423,15 @@ func (s *Server) KeyStatus(ctx context.Context) (KeyStatusReport, error) {
 // LocalKeyStatus builds the key status report for a locally loaded keyring
 // (nil: legacy mode) and its cipher. With a store it reads the encryption
 // policy and runs the same authenticated audit a starting Hub runs; st may
-// be nil. It never writes to the store.
+// be nil. A disabled cipher (legacy mode without a session secret) can
+// authenticate nothing, so no audit runs and audit.ran is false. It never
+// writes to the store.
 func LocalKeyStatus(ctx context.Context, k *keyring.Keyring, c *secret.ValueCipher, st store.Store, now time.Time) (KeyStatusReport, error) {
 	if k != nil && k.Source() != keyring.SourceFile {
 		k = nil
 	}
 	audit := EncryptionAudit{}
-	if st != nil {
+	if st != nil && c.Enabled() {
 		a, err := runEncryptionAudit(ctx, st, c)
 		if err != nil {
 			return KeyStatusReport{}, err
@@ -492,16 +495,18 @@ func (s *Server) adminKeyStatusHandler() http.HandlerFunc {
 // Material digest (not wired into the report; see
 // MaterialDigestOmittedPendingLegacyIndependence).
 
-// materialDigestDomain separates the digest from every other hash of the
+// materialDigestDomain is the label the digest input starts with (P6 plan
+// r2 erratum E1); it separates the digest from every other hash of the
 // same bytes.
-const materialDigestDomain = "scion-keyring-material-digest-v1"
+const materialDigestDomain = "scion-keyring-material-v1\n"
 
 // materialDigestSecretPurpose hands each signing generation's secret to
 // keyringMaterialDigest, which hashes it at once.
 var materialDigestSecretPurpose = keyring.NewPurpose("material_digest", func(s []byte) []byte { return slices.Clone(s) })
 
-// keyringMaterialDigest is SHA-256 over a domain-separated, length-prefixed
-// canonical serialization of the whole parsed keyring: revision, both
+// keyringMaterialDigest is SHA-256 over the label materialDigestDomain
+// followed by a length-prefixed canonical serialization of the whole parsed
+// keyring (P6 plan r2 erratum E1): source, revision, both
 // rings' active ID, emit or write format, every entry's ID and material
 // (signing deadlines included) and the legacy reader lists. It is the
 // recommended construction for fleet material equality; it must not be
@@ -535,7 +540,7 @@ func materialDigestWithDomain(domain string, k *keyring.Keyring) string {
 		}
 		str(t.UTC().Format(time.RFC3339Nano))
 	}
-	str(domain)
+	_, _ = h.Write([]byte(domain))
 	str(string(k.Source()))
 	str(k.Revision())
 
