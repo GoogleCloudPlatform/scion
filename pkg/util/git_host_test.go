@@ -729,9 +729,102 @@ func TestHostGitEnv(t *testing.T) {
 		"GIT_CONFIG_PARAMETERS='a.b=c'", "GIT_EXEC_PATH=/e", "GIT_EDITOR=vi", "GIT_PAGER=less",
 		"GIT_CONFIG_GLOBAL=/g", "GIT_CONFIG_NOSYSTEM=1", "GIT_SSH_COMMAND=ssh", "GIT_TERMINAL_PROMPT=0",
 	}
-	want := []string{"HOME=/h", "PATH=/bin", "GIT_CONFIG_GLOBAL=/g", "GIT_CONFIG_NOSYSTEM=1", "GIT_SSH_COMMAND=ssh", "GIT_TERMINAL_PROMPT=0"}
+	want := []string{"HOME=/h", "PATH=/bin", "GIT_CONFIG_GLOBAL=/g", "GIT_CONFIG_NOSYSTEM=1", "GIT_SSH_COMMAND=ssh", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C"}
 	if got := HostGitEnv(in); !reflect.DeepEqual(got, want) {
 		t.Errorf("HostGitEnv = %q, want %q", got, want)
+	}
+}
+
+// envValues returns every value of key in env, in order.
+func envValues(env []string, key string) []string {
+	var vals []string
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
+			vals = append(vals, v)
+		}
+	}
+	return vals
+}
+
+// HostGitEnv drops an inherited LC_ALL and sets exactly one LC_ALL=C, which is
+// also the effective value under os/exec's last-wins dedupe; inherited LANG,
+// LANGUAGE and LC_MESSAGES stay (LC_ALL overrides them). An input without
+// LC_ALL gains it.
+// Mutants this catches: deleting the LC_ALL=C append (no LC_ALL, or the
+// inherited de_DE value survives); appending before the scrub (the append is
+// scrubbed, or the inherited value is the last one); keeping the inherited
+// LC_ALL (two entries).
+func TestHostGitEnv_LCAllC(t *testing.T) {
+	in := []string{"PATH=/bin", "LC_ALL=de_DE.UTF-8", "LANG=de_DE.UTF-8", "LANGUAGE=de", "LC_MESSAGES=de_DE.UTF-8"}
+	got := HostGitEnv(in)
+	if vals := envValues(got, "LC_ALL"); len(vals) != 1 || vals[0] != "C" {
+		t.Errorf("LC_ALL values = %q, want exactly [C]", vals)
+	}
+	if last := got[len(got)-1]; last != "LC_ALL=C" {
+		t.Errorf("last entry = %q, want LC_ALL=C (the effective value after a last-wins dedupe)", last)
+	}
+	for _, kv := range []string{"LANG=de_DE.UTF-8", "LANGUAGE=de", "LC_MESSAGES=de_DE.UTF-8"} {
+		k, v, _ := strings.Cut(kv, "=")
+		if vals := envValues(got, k); len(vals) != 1 || vals[0] != v {
+			t.Errorf("%s values = %q, want it kept as %q", k, vals, v)
+		}
+	}
+	if vals := envValues(HostGitEnv([]string{"PATH=/bin"}), "LC_ALL"); len(vals) != 1 || vals[0] != "C" {
+		t.Errorf("without an inherited LC_ALL: LC_ALL values = %q, want exactly [C]", vals)
+	}
+}
+
+// setGermanLocale sets the four locale variables a user's environment could
+// carry to German values for the test.
+func setGermanLocale(t *testing.T) {
+	t.Helper()
+	t.Setenv("LC_ALL", "de_DE.UTF-8")
+	t.Setenv("LANG", "de_DE.UTF-8")
+	t.Setenv("LANGUAGE", "de")
+	t.Setenv("LC_MESSAGES", "de_DE.UTF-8")
+}
+
+// With a German locale inherited, the door still makes real git report in
+// English. The negative control runs plain git in the same directory with
+// the same locale: if it is also English, this host's git has no German
+// translation and the leak cannot be shown, so the test skips.
+// Mutant this catches (on a host whose git translates): deleting the
+// LC_ALL=C append from HostGitEnv (the door's stderr is translated).
+func TestRunHostGit_LocaleIsC(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	hostGitTestEnv(t)
+	setGermanLocale(t)
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := RunHostGit(context.Background(), dir, HostGitOptions{}, "rev-parse", "--is-inside-work-tree")
+	if res.Err != nil {
+		t.Fatalf("Err = %v", res.Err)
+	}
+	if !strings.HasPrefix(string(res.Stderr), "fatal: not a git repository") {
+		t.Errorf("door stderr = %q, want the English \"fatal: not a git repository\"", res.Stderr)
+	}
+	control := exec.Command("git", "rev-parse", "--is-inside-work-tree")
+	control.Dir = dir
+	control.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + t.TempDir(),
+		"GIT_CONFIG_GLOBAL=" + os.DevNull,
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_CEILING_DIRECTORIES=" + filepath.Dir(dir),
+		"LC_ALL=de_DE.UTF-8",
+		"LANG=de_DE.UTF-8",
+		"LANGUAGE=de",
+		"LC_MESSAGES=de_DE.UTF-8",
+	}
+	var stderr bytes.Buffer
+	control.Stderr = &stderr
+	_ = control.Run()
+	if strings.HasPrefix(stderr.String(), "fatal: not a git repository") {
+		t.Skip("this host's git has no German translation (plain git under the German locale also reports in English), so a locale leak cannot be shown here")
 	}
 }
 
@@ -1873,7 +1966,7 @@ func fakeGitOnPath(t *testing.T) (log string) {
 	dir := t.TempDir()
 	log = filepath.Join(dir, "calls.log")
 	script := "#!/bin/sh\n" +
-		"{ printf 'ARGV\\t%s\\n' \"$*\"; env | grep '^GIT_' | sort | sed 's/^/ENV\\t/'; printf 'END\\n'; } >> '" + log + "'\n" +
+		"{ printf 'ARGV\\t%s\\n' \"$*\"; env | grep -E '^(GIT_[A-Za-z0-9_]*|LC_ALL|LANG|LANGUAGE|LC_MESSAGES)=' | sort | sed 's/^/ENV\\t/'; printf 'END\\n'; } >> '" + log + "'\n" +
 		"case \" $* \" in\n" +
 		"*' fake-stderr '*) printf '" + strings.ReplaceAll(fakeGitStderr, "\n", "\\n") + "' >&2; exit 3;;\n" +
 		"*' fake-mutate '*) printf '[core]\\n\\tsshCommand = fake-marker-m1\\n' >> .git/config; exit 0;;\n" +
@@ -1897,8 +1990,9 @@ const fakeGitStderr = " raw: fake-marker-e1\n\tsecond line \n"
 
 // fakeGitCall is one recorded call of the wrapper.
 type fakeGitCall struct {
-	argv string
-	env  map[string]string // GIT_* variables only
+	argv   string
+	env    map[string]string // GIT_* variables only
+	locale map[string]string // LC_ALL, LANG, LANGUAGE and LC_MESSAGES as git saw them
 }
 
 // fakeGitCalls parses the wrapper's log.
@@ -1913,11 +2007,15 @@ func fakeGitCalls(t *testing.T, log string) []fakeGitCall {
 	for _, line := range strings.Split(string(data), "\n") {
 		switch {
 		case strings.HasPrefix(line, "ARGV\t"):
-			calls = append(calls, fakeGitCall{argv: strings.TrimPrefix(line, "ARGV\t"), env: map[string]string{}})
+			calls = append(calls, fakeGitCall{argv: strings.TrimPrefix(line, "ARGV\t"), env: map[string]string{}, locale: map[string]string{}})
 			cur = &calls[len(calls)-1]
 		case strings.HasPrefix(line, "ENV\t") && cur != nil:
 			k, v, _ := strings.Cut(strings.TrimPrefix(line, "ENV\t"), "=")
-			cur.env[k] = v
+			if strings.HasPrefix(k, "GIT_") {
+				cur.env[k] = v
+			} else {
+				cur.locale[k] = v
+			}
 		}
 	}
 	return calls
@@ -2227,8 +2325,10 @@ func ceilingLeaf(t *testing.T, parent, rel string) string {
 	return leaf
 }
 
+// ceilingEnv is the door's environment; HostGitEnv sets LC_ALL=C, so git's
+// messages are untranslated.
 func ceilingEnv() []string {
-	return append(HostGitEnv(os.Environ()), "LC_ALL=C")
+	return HostGitEnv(os.Environ())
 }
 
 // Ceiling (a): by default git in a non-repository leaf inside a repository
@@ -2355,7 +2455,8 @@ func TestRunHostGit_CeilingLeafBecomesRepository(t *testing.T) {
 // The door's own listings (readFilterPins, and crossCheckAgainstGit through
 // the policy check) run with the door's environment and the HostGitArgs pins
 // first, and see no inherited variable that chooses a repository or adds
-// config. readFilterPins sees exactly the main command's environment,
+// config, and run with LC_ALL=C over an inherited German locale.
+// readFilterPins sees exactly the main command's environment,
 // GIT_CEILING_DIRECTORIES included when the door sets it. The global and
 // system config values are whatever HostGitEnv passes; an empty-config
 // assertion arrives with the change that sets those defaults in HostGitEnv.
@@ -2372,6 +2473,7 @@ func TestHostGitCheckers_DoorListingsUseDoorEnv(t *testing.T) {
 			}
 			log := fakeGitOnPath(t)
 			plantInheritedGitEnv(t)
+			setGermanLocale(t)
 			want := gitEnvMap(HostGitEnv(os.Environ()))
 			if mode == "discovery" {
 				resolved, err := filepath.EvalSymlinks(dir)
@@ -2396,6 +2498,12 @@ func TestHostGitCheckers_DoorListingsUseDoorEnv(t *testing.T) {
 				}
 				if d := diffEnvKeys(c.env, want); len(d) > 0 {
 					t.Errorf("call %q: environment differs from the door's in %v", c.argv, d)
+				}
+				// The effective LC_ALL git saw is C despite the inherited German
+				// locale. Mutant: deleting HostGitEnv's LC_ALL=C append (git sees
+				// de_DE.UTF-8).
+				if c.locale["LC_ALL"] != "C" {
+					t.Errorf("call %q ran with LC_ALL=%q, want C", c.argv, c.locale["LC_ALL"])
 				}
 				switch {
 				case strings.HasSuffix(c.argv, " rev-parse --is-inside-work-tree"):

@@ -145,11 +145,24 @@ var hostGitEnvKept = map[string]bool{
 // no inherited GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR, GIT_INDEX_FILE,
 // GIT_CONFIG_COUNT/KEY/VALUE, GIT_CONFIG_PARAMETERS, GIT_EXEC_PATH, editor or
 // pager variables. Callers append the GIT_* variables they set themselves.
+//
+// It also drops any inherited LC_ALL entry and appends LC_ALL=C, so git
+// reports in the C locale whatever the user's locale: callers match git's
+// message text (for example "not a git repository" or "is not a working
+// tree"). On Windows, where environment keys are case-insensitive, an entry
+// spelled another way (such as Lc_All) can remain, but the appended LC_ALL=C
+// overrides it: os/exec keeps the last of duplicate entries, matching keys
+// case-insensitively there. Inherited LANG, LANGUAGE, LC_MESSAGES and other
+// LC_* entries are left in place: LC_ALL overrides LANG and every LC_*
+// category, and under the C locale gettext ignores LANGUAGE.
 func HostGitEnv(env []string) []string {
-	out := make([]string, 0, len(env))
+	out := make([]string, 0, len(env)+1)
 	for _, kv := range env {
 		k, _, _ := strings.Cut(kv, "=")
 		if strings.HasPrefix(k, "GIT_") && !hostGitEnvKept[k] {
+			continue
+		}
+		if k == "LC_ALL" {
 			continue
 		}
 		// Drop any inherited scoped-credential variable so it never reaches a host
@@ -160,7 +173,7 @@ func HostGitEnv(env []string) []string {
 		}
 		out = append(out, kv)
 	}
-	return out
+	return append(out, "LC_ALL=C")
 }
 
 // HostGitCeiling selects whether git may discover a repository above the
