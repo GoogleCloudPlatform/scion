@@ -175,20 +175,22 @@ describe('scion-chat-members section folding', () => {
   });
 
   it('starts unfolded when reading storage throws', async () => {
-    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+    const getItem = vi.spyOn(localStorage, 'getItem').mockImplementation(() => {
       throw new Error('storage unavailable');
     });
     const el = await mount();
+    expect(getItem).toHaveBeenCalled();
     expect(names(el)).toEqual(['Ada', 'Grace', 'Coder', 'Reviewer']);
   });
 
   it('still folds for the session when writing storage throws', async () => {
-    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+    const setItem = vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
       throw new Error('quota exceeded');
     });
     const el = await mount();
     toggle(el, 'people').click();
     await el.updateComplete;
+    expect(setItem).toHaveBeenCalled();
     expect(toggle(el, 'people').getAttribute('aria-expanded')).toBe('false');
     expect(names(el)).toEqual(['Coder', 'Reviewer']);
   });
